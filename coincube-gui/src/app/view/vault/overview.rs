@@ -209,6 +209,7 @@ pub fn vault_overview_view<'a>(
     node_bitcoind_ibd: Option<bool>,
     _show_direction_badges: bool,
     display_mode: DisplayMode,
+    mask_amounts: bool,
 ) -> Element<'a, Message> {
     // Show external-unconfirmed coins as part of the headline balance
     // (matching the Cube → Overview Vault card). The per-transaction
@@ -233,7 +234,9 @@ pub fn vault_overview_view<'a>(
         ))
         .push(text("BTC").size(P1_SIZE).bold().width(Length::Fixed(60.0)))
         .push(amount_cell::<Message>(
-            if history_unknown {
+            if mask_amounts {
+                AmountCell::masked()
+            } else if history_unknown {
                 AmountCell::unknown("Vault history has not loaded")
             } else {
                 AmountCell::shown(
@@ -282,7 +285,7 @@ pub fn vault_overview_view<'a>(
                             .push(wallet_header::<Message>(WalletHeaderProps {
                                 sats: total_balance,
                                 fiat: fiat_balance,
-                                balance_masked: false,
+                                balance_masked: mask_amounts,
                                 bitcoin_unit,
                                 variant: HeaderVariant::Landing,
                                 sync,
@@ -418,6 +421,7 @@ pub fn vault_overview_view<'a>(
                                 cube_id,
                                 bitcoin_unit,
                                 fiat_converter,
+                                mask_amounts,
                             ))
                         } else {
                             col
@@ -476,6 +480,7 @@ fn event_list_view(
     cube_id: &str,
     bitcoin_unit: BitcoinDisplayUnit,
     fiat_converter: Option<FiatAmountConverter>,
+    mask_amounts: bool,
 ) -> Element<'static, Message> {
     let direction = match event.kind {
         PaymentKind::Incoming => ActivityDirection::Incoming,
@@ -497,24 +502,29 @@ fn event_list_view(
             ActivityDirection::Outgoing => "Sent".into(),
             ActivityDirection::SelfTransfer => "Self-transfer".into(),
         });
-    let amount = format!(
-        "{} {}",
-        event.amount.to_formatted_string_with_unit(bitcoin_unit),
-        bitcoin_unit.label()
-    );
-    let amount = match direction {
+    let amount = (!mask_amounts).then(|| {
+        format!(
+            "{} {}",
+            event.amount.to_formatted_string_with_unit(bitcoin_unit),
+            bitcoin_unit.label()
+        )
+    });
+    let amount = amount.map(|amount| match direction {
         ActivityDirection::Outgoing => format!("−{amount}"),
         ActivityDirection::Incoming => format!("+{amount}"),
         ActivityDirection::SelfTransfer => amount,
-    };
-    let fiat_amount = fiat_converter.map(|converter| {
-        let fiat = converter.convert(event.amount);
-        format!(
-            "{} {} · current rate",
-            fiat.to_formatted_string(),
-            fiat.currency()
-        )
     });
+    let fiat_amount = (!mask_amounts)
+        .then_some(fiat_converter)
+        .flatten()
+        .map(|converter| {
+            let fiat = converter.convert(event.amount);
+            format!(
+                "{} {} · current rate",
+                fiat.to_formatted_string(),
+                fiat.currency()
+            )
+        });
     activity_row(
         ActivityRow {
             identity: ActivityIdentity {
@@ -536,7 +546,9 @@ fn event_list_view(
             direction,
             label,
             wallet_caption: None,
-            amount: AmountCell::shown(amount, fiat_amount),
+            amount: amount.map_or_else(AmountCell::masked, |amount| {
+                AmountCell::shown(amount, fiat_amount)
+            }),
             status: if event.time.is_some() {
                 ActivityStatus::Complete
             } else {
@@ -594,10 +606,11 @@ pub fn payment_view<'a>(
             } else {
                 label::label_editable(vec![outpoint.clone()], tx.labels.get(&outpoint), H3_SIZE)
             })
-            .push(Container::new(amount_with_size(
-                &tx.tx.output[output_index].value,
-                H3_SIZE,
-            )))
+            .push(Container::new(if cache.balance_amounts_masked() {
+                Row::new().push(text("••••••").size(H3_SIZE))
+            } else {
+                amount_with_size(&tx.tx.output[output_index].value, H3_SIZE)
+            }))
             .push(Space::new().height(H3_SIZE))
             .push(Container::new(h3("Transaction")).width(Length::Fill))
             .push(if tx.is_batch() {
@@ -617,13 +630,21 @@ pub fn payment_view<'a>(
                 Row::new()
                     .align_y(Alignment::Center)
                     .push(h3("Miner fee: ").style(theme::text::secondary))
-                    .push(amount_with_size(&fee_amount, H3_SIZE))
+                    .push(if cache.balance_amounts_masked() {
+                        Row::new().push(text("••••••").size(H3_SIZE))
+                    } else {
+                        amount_with_size(&fee_amount, H3_SIZE)
+                    })
                     .push(text(" ").size(H3_SIZE))
                     .push(
-                        text(format!(
-                            "({} sats/vbyte)",
-                            fee_amount.to_sat() / tx.tx.vsize() as u64
-                        ))
+                        text(if cache.balance_amounts_masked() {
+                            "••••••".to_string()
+                        } else {
+                            format!(
+                                "({} sats/vbyte)",
+                                fee_amount.to_sat() / tx.tx.vsize() as u64
+                            )
+                        })
                         .size(H4_SIZE)
                         .style(theme::text::secondary),
                     )
@@ -840,6 +861,45 @@ mod capture_tests {
     }
 
     #[test]
+    fn hidden_overview_redacts_balance_and_recent_payment() {
+        let balance = bitcoin::Amount::from_sat(12_345_678);
+        let zero = bitcoin::Amount::ZERO;
+        let events = [event(true)];
+        let mounted = capture::inspect(
+            "vault-hidden-amounts",
+            vault_overview_view(
+                &balance,
+                &zero,
+                &None,
+                None,
+                &[],
+                &events,
+                "synthetic-cube",
+                true,
+                false,
+                false,
+                true,
+                None,
+                &SyncStatus::Synced,
+                false,
+                false,
+                BitcoinDisplayUnit::Sats,
+                None,
+                None,
+                true,
+                DisplayMode::BitcoinNative,
+                true,
+            ),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(mounted.contains("••••••"));
+        assert!(!mounted.contains("12,345,678"));
+        assert!(!mounted.contains("99,999,999,999"));
+    }
+
+    #[test]
     fn r06a_vault_headless_content_matrix() {
         let normal_events = vec![event(true), event(false)];
         let balance = bitcoin::Amount::from_sat(250_000);
@@ -878,6 +938,7 @@ mod capture_tests {
                             None,
                             true,
                             DisplayMode::BitcoinNative,
+                            false,
                         )
                     };
                 }

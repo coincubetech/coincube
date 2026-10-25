@@ -60,6 +60,7 @@ pub struct SparkSendView<'a> {
     /// `None` when no price is known — the fee then shows in the asset only.
     pub reference_btc_usd_price: Option<f64>,
     pub show_direction_badges: bool,
+    pub mask_amounts: bool,
     /// The "THEY RECEIVE" selection — drives the two-card selector and the
     /// destination placeholder.
     pub receive_target: SparkSendTarget,
@@ -114,6 +115,7 @@ impl<'a> SparkSendView<'a> {
             self.receive_target,
             self.balance_sats,
             self.bitcoin_unit,
+            self.mask_amounts,
         ));
 
         // ── Input card ────────────────────────────────────────────────
@@ -167,6 +169,7 @@ impl<'a> SparkSendView<'a> {
                 .push_maybe(
                     self.usdb_conversion_hint
                         .clone()
+                        .filter(|_| !self.mask_amounts)
                         .map(|hint| p2_regular(hint).style(theme::text::secondary)),
                 ),
         )
@@ -182,6 +185,7 @@ impl<'a> SparkSendView<'a> {
             self.recent_transactions,
             self.bitcoin_unit,
             self.show_direction_badges,
+            self.mask_amounts,
             |idx| Message::SparkSend(SparkSendMessage::SelectTransaction(idx)),
             Message::SparkSend(SparkSendMessage::History),
         ));
@@ -786,6 +790,7 @@ fn spark_send_cards<'a>(
     target: SparkSendTarget,
     balance_sats: u64,
     bitcoin_unit: BitcoinDisplayUnit,
+    mask_amounts: bool,
 ) -> Element<'a, Message> {
     let you_send = Container::new(
         Column::new()
@@ -804,15 +809,19 @@ fn spark_send_cards<'a>(
                     ),
             )
             .push(
-                text(format!(
-                    "{} {}",
-                    Amount::from_sat(balance_sats).to_formatted_string_with_unit(bitcoin_unit),
-                    if matches!(bitcoin_unit, BitcoinDisplayUnit::BTC) {
-                        "BTC"
-                    } else {
-                        "SATS"
-                    }
-                ))
+                text(if mask_amounts {
+                    "••••••".to_owned()
+                } else {
+                    format!(
+                        "{} {}",
+                        Amount::from_sat(balance_sats).to_formatted_string_with_unit(bitcoin_unit),
+                        if matches!(bitcoin_unit, BitcoinDisplayUnit::BTC) {
+                            "BTC"
+                        } else {
+                            "SATS"
+                        }
+                    )
+                })
                 .size(P2_SIZE)
                 .style(theme::text::secondary),
             )

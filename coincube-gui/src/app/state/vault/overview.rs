@@ -35,6 +35,8 @@ pub struct Payments {
     list: Vec<Payment>,
     is_last_page: bool,
     loaded_page_count: usize,
+    history_loaded: bool,
+    refresh_in_flight: bool,
     last_error: Option<String>,
 }
 
@@ -111,7 +113,7 @@ impl State for VaultOverview {
         if self.show_received_celebration {
             let celebration = view::vault::overview::received_celebration_page(
                 "bitcoin-receive",
-                &self.received_amount_display,
+                passive_received_amount(&self.received_amount_display, cache),
                 &self.received_quote,
                 &self.received_image_handle,
             );
@@ -147,9 +149,9 @@ impl State for VaultOverview {
                     // show, and no error reported. A background Tick reload
                     // keeps `list` populated, so it won't flash to loading.
                     self.payments.list.is_empty()
-                        && self.payments.loaded_page_count == 0
+                        && !self.payments.history_loaded
                         && self.payments.last_error.is_none(),
-                    self.payments.loaded_page_count > 0,
+                    self.payments.history_loaded,
                     self.payments.last_error.as_deref(),
                     &self.sync_status,
                     self.show_rescan_prompt,
@@ -159,6 +161,7 @@ impl State for VaultOverview {
                     cache.node_bitcoind_ibd,
                     cache.show_direction_badges,
                     cache.display_mode,
+                    cache.balance_amounts_masked(),
                 ),
             )
         }
@@ -180,7 +183,8 @@ impl State for VaultOverview {
                 // we reload the page only when the user is not exploring the history
                 // looking at a selected event
                 // or when the last reload was less than the defined TTL.
-                if self.payments.loaded_page_count == 1
+                if (self.payments.loaded_page_count == 1 || self.payments.last_error.is_some())
+                    && !self.payments.refresh_in_flight
                     && self.selected_event.is_none()
                     && Instant::now() > self.last_reload + HOME_RELOAD_MAX_TTL
                 {
@@ -209,12 +213,15 @@ impl State for VaultOverview {
             },
             Message::Payments(res) => match res {
                 Err(e) => {
+                    self.payments.refresh_in_flight = false;
                     let err_msg = crate::user_error::report(&e);
                     self.payments.last_error = Some(err_msg.clone());
                     self.warning = Some(e);
                     return Task::done(Message::View(view::Message::ShowError(err_msg)));
                 }
                 Ok(events) => {
+                    self.payments.refresh_in_flight = false;
+                    self.payments.history_loaded = true;
                     self.payments.last_error = None;
                     self.warning = None;
                     // Detect new incoming payment by comparing newest tx
@@ -443,6 +450,7 @@ impl State for VaultOverview {
         self.selected_event = None;
         self.wallet = wallet;
         self.payments.loaded_page_count = 0;
+        self.payments.refresh_in_flight = true;
         let daemon2 = daemon.clone();
         let now: u32 = now().as_secs().try_into().unwrap();
         self.last_reload = Instant::now();
@@ -484,6 +492,14 @@ impl State for VaultOverview {
     }
 }
 
+fn passive_received_amount<'a>(amount: &'a str, cache: &Cache) -> &'a str {
+    if cache.balance_amounts_masked() {
+        "••••••"
+    } else {
+        amount
+    }
+}
+
 impl From<VaultOverview> for Box<dyn State> {
     fn from(s: VaultOverview) -> Box<dyn State> {
         Box::new(s)
@@ -498,16 +514,9 @@ mod tests {
     use coincubed::commands::LCSpendInfo;
     use std::str::FromStr;
 
-    /// A Vault restored without a date, on a local node, is empty until it is
-    /// rescanned. Dismissing the prompt asking for that date must not turn its
-    /// unknown balance into a confident zero; only a rescan that runs to the end does.
-    #[test]
-    fn dismissing_the_rescan_prompt_keeps_an_unscanned_balance_unknown() {
-        use crate::app::{
-            view::vault::overview::balance_sync_state, view::wallet_header::SyncState,
-        };
+    fn test_overview() -> (VaultOverview, Arc<dyn Daemon + Sync + Send>, Cache) {
         const DESC: &str = "wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#d72le4dr";
-        let root = std::env::temp_dir().join(format!("rescan-prompt-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("overview-test-{}", uuid::Uuid::new_v4()));
         let descriptor = coincube_core::descriptors::CoincubeDescriptor::from_str(DESC).unwrap();
         let cfg: coincubed::config::Config = toml::from_str(&format!(
             "main_descriptor = '{}'\ndata_directory = '{}'\n[bitcoin_config]\nnetwork = 'bitcoin'\n[bitcoind_config]\naddr = '127.0.0.1:8332'\ncookie_path = '{}'\n",
@@ -520,8 +529,22 @@ mod tests {
             crate::daemon::embedded::EmbeddedDaemon::unstarted_for_test(cfg, None),
         );
         let wallet = Arc::new(Wallet::new(descriptor));
-        let mut overview = VaultOverview::new(wallet, &[], SyncStatus::Synced, 970_247, true);
-        let mut cache = Cache::default();
+        (
+            VaultOverview::new(wallet, &[], SyncStatus::Synced, 970_247, true),
+            daemon,
+            Cache::default(),
+        )
+    }
+
+    /// A Vault restored without a date, on a local node, is empty until it is
+    /// rescanned. Dismissing the prompt asking for that date must not turn its
+    /// unknown balance into a confident zero; only a rescan that runs to the end does.
+    #[test]
+    fn dismissing_the_rescan_prompt_keeps_an_unscanned_balance_unknown() {
+        use crate::app::{
+            view::vault::overview::balance_sync_state, view::wallet_header::SyncState,
+        };
+        let (mut overview, daemon, mut cache) = test_overview();
         let shown = |overview: &VaultOverview| {
             balance_sync_state(
                 &SyncStatus::Synced,
@@ -553,6 +576,92 @@ mod tests {
         cache.daemon_cache.rescan_progress = None;
         let _ = overview.update(Some(daemon), &cache, Message::UpdatePanelCache(false));
         assert!(matches!(shown(&overview), SyncState::Synced));
+    }
+
+    #[test]
+    fn refresh_failure_keeps_history_visible_and_tick_retries_once() {
+        use crate::daemon::model::PaymentKind;
+
+        let (mut overview, daemon, cache) = test_overview();
+        let payment = Payment {
+            label: None,
+            address: None,
+            address_label: None,
+            amount: Amount::from_sat(1),
+            outpoint: OutPoint::new(
+                bitcoin::Txid::from_str(
+                    "f7bd1b2a995b689d326e51eb742eb1088c4a8f110d9cb56128fd553acc9f88e5",
+                )
+                .unwrap(),
+                0,
+            ),
+            time: None,
+            kind: PaymentKind::Outgoing,
+        };
+        let _ = overview.update(
+            Some(daemon.clone()),
+            &cache,
+            Message::Payments(Ok(vec![payment])),
+        );
+        assert!(overview.payments.history_loaded);
+        assert_eq!(overview.payments.loaded_page_count, 1);
+
+        let wallet = overview.wallet.clone();
+        let _ = overview.reload(Some(daemon.clone()), Some(wallet));
+        assert!(overview.payments.refresh_in_flight);
+        assert!(overview.payments.history_loaded);
+        assert_eq!(overview.payments.list.len(), 1);
+        assert_eq!(overview.payments.loaded_page_count, 0);
+
+        overview.last_reload = Instant::now() - HOME_RELOAD_MAX_TTL - Duration::from_secs(1);
+        let old_reload = overview.last_reload;
+        let _ = overview.update(Some(daemon.clone()), &cache, Message::Tick);
+        assert_eq!(
+            overview.last_reload, old_reload,
+            "Tick must not duplicate an in-flight fetch"
+        );
+
+        let _ = overview.update(
+            Some(daemon.clone()),
+            &cache,
+            Message::Payments(Err(Error::Unexpected("refresh failed".into()))),
+        );
+        assert!(!overview.payments.refresh_in_flight);
+        assert!(overview.payments.history_loaded);
+        assert!(overview.payments.last_error.is_some());
+        assert_eq!(overview.payments.list.len(), 1);
+
+        let _ = overview.update(Some(daemon.clone()), &cache, Message::Tick);
+        assert!(overview.payments.refresh_in_flight);
+        assert!(overview.last_reload > old_reload);
+        overview.last_reload = Instant::now() - HOME_RELOAD_MAX_TTL - Duration::from_secs(1);
+        let retry_reload = overview.last_reload;
+        let _ = overview.update(Some(daemon), &cache, Message::Tick);
+        assert_eq!(
+            overview.last_reload, retry_reload,
+            "in-flight retry must remain throttled"
+        );
+    }
+
+    #[test]
+    fn loaded_empty_history_stays_known_during_refresh_and_error() {
+        let (mut overview, daemon, cache) = test_overview();
+        let _ = overview.update(Some(daemon.clone()), &cache, Message::Payments(Ok(vec![])));
+        assert!(overview.payments.history_loaded);
+        assert!(overview.payments.list.is_empty());
+
+        let wallet = overview.wallet.clone();
+        let _ = overview.reload(Some(daemon.clone()), Some(wallet));
+        assert!(overview.payments.history_loaded);
+        assert!(overview.payments.refresh_in_flight);
+        let _ = overview.update(
+            Some(daemon),
+            &cache,
+            Message::Payments(Err(Error::Unexpected("refresh failed".into()))),
+        );
+        assert!(overview.payments.history_loaded);
+        assert!(overview.payments.list.is_empty());
+        assert!(overview.payments.last_error.is_some());
     }
     #[tokio::test]
     async fn test_coins_summary() {
@@ -713,5 +822,52 @@ mod tests {
                 Some(500)
             )
         );
+    }
+}
+
+#[cfg(test)]
+mod received_privacy_tests {
+    use super::*;
+    use crate::app::state::preferences::{BalancePrivacy, BalancePrivacyChrome};
+    use crate::app::view::shared::landing::capture;
+    use coincube_ui::theme;
+
+    #[test]
+    fn mounted_celebration_follows_passive_privacy_authority() {
+        let mut cache = Cache::default();
+        let amount = "87,654,321 sats";
+        let quote = coincube_ui::component::quote_display::random_quote("bitcoin-receive");
+        let image =
+            coincube_ui::component::quote_display::image_handle_for_context("bitcoin-receive");
+        for privacy in [
+            None,
+            Some(BalancePrivacy::Unresolved),
+            Some(BalancePrivacy::Hidden),
+            Some(BalancePrivacy::Shown),
+        ] {
+            cache.balance_privacy = privacy.map(|privacy| BalancePrivacyChrome {
+                privacy,
+                busy: false,
+                interactive: false,
+            });
+            let mounted = capture::inspect(
+                "vault-received-celebration-privacy",
+                view::vault::overview::received_celebration_page(
+                    "bitcoin-receive",
+                    passive_received_amount(amount, &cache),
+                    &quote,
+                    &image,
+                ),
+                (1440, 900),
+                "dark",
+                theme::Theme::dark(),
+            );
+            if privacy == Some(BalancePrivacy::Shown) {
+                assert!(mounted.contains(amount));
+            } else {
+                assert!(mounted.contains("••••••"));
+                assert!(!mounted.contains(amount));
+            }
+        }
     }
 }

@@ -23,7 +23,8 @@ use crate::{
     app::{
         cache::{FiatPrice, FiatPriceRequest},
         message::{FiatMessage as AppFiatMessage, Message as AppMessage},
-        settings::global::{GlobalSettings, WindowConfig},
+        settings::global::{GlobalSettings, PreferencesReceipt, WindowConfig},
+        state::preferences::{BalancePrivacyChrome, Operation, PreferencesOwner, SaveRequest},
     },
     dir::CoincubeDirectory,
     gui::cache::GlobalCache,
@@ -34,6 +35,21 @@ use crate::{
         Currency, PriceClient, PriceSource,
     },
 };
+
+/// A Show receipt may have gone stale while the GUI was being constructed (or
+/// between later refreshes). Recheck the established choice at render time;
+/// any read failure is fail-closed until the ordered refresh accepts a receipt.
+fn privacy_render_needs_cover(
+    preferences: &PreferencesOwner,
+    settings_path: &std::path::Path,
+) -> bool {
+    use crate::app::state::preferences::BalancePrivacy;
+    preferences.privacy() == BalancePrivacy::Shown
+        && !matches!(
+            GlobalSettings::try_current_balances_hidden(settings_path),
+            Ok(Some(false))
+        )
+}
 
 use iced::window::Id;
 
@@ -57,6 +73,151 @@ fn refreshes_claim_pair(message: &AppMessage) -> bool {
     )
 }
 
+/// The eye's message must retain the generation emitted by the App view.
+/// A bare `Run` has no provenance and cannot change a device-wide setting.
+fn balance_privacy_eye_change(
+    tab: Option<&tab::Tab>,
+    message: &tab::Message,
+) -> Option<(crate::app::settings::preferences::PreferenceChange, bool)> {
+    let run_change = |message: &tab::Message| match message {
+        tab::Message::Run(AppMessage::View(crate::app::view::Message::ChangeDevicePreference(
+            change,
+        ))) => Some(*change),
+        _ => None,
+    };
+    match message {
+        tab::Message::AppAsync(generation, inner) => run_change(inner).map(|change| {
+            let current = tab.is_some_and(|tab| {
+                tab.accepts_app_generation(*generation)
+                    && matches!(&tab.state, tab::State::App(app) if !app.cube_settings().network.is_blake2b())
+            });
+            (change, current)
+        }),
+        tab::Message::ForkAsync(generation, inner) => run_change(inner).map(|change| {
+            let current = tab.is_some_and(|tab| {
+                tab.accepts_fork_generation(*generation)
+                    && matches!(&tab.state, tab::State::App(app) if app.cube_settings().network.is_blake2b())
+            });
+            (change, current)
+        }),
+        other => run_change(other).map(|change| (change, false)),
+    }
+}
+
+#[cfg(test)]
+mod balance_privacy_eye_origin_tests {
+    use super::*;
+    use crate::app::{self, settings::preferences::PreferenceChange, view};
+
+    #[test]
+    fn first_render_rechecks_a_show_receipt_after_another_writer_hides() {
+        let root =
+            std::env::temp_dir().join(format!("privacy-first-render-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join(crate::app::settings::global::DEFAULT_FILE_NAME);
+        let shown =
+            GlobalSettings::save_preference(&path, PreferenceChange::HideBalances(false)).unwrap();
+        let owner = PreferencesOwner::new(path.clone(), &Ok(shown));
+        let shown_bytes = std::fs::read(&path).unwrap();
+        assert!(!privacy_render_needs_cover(&owner, &path));
+        assert_eq!(std::fs::read(&path).unwrap(), shown_bytes);
+
+        let other_path = path.clone();
+        std::thread::spawn(move || {
+            GlobalSettings::save_preference(&other_path, PreferenceChange::HideBalances(true))
+                .unwrap();
+        })
+        .join()
+        .unwrap();
+        assert_eq!(
+            owner.privacy(),
+            crate::app::state::preferences::BalancePrivacy::Shown
+        );
+        assert!(privacy_render_needs_cover(&owner, &path));
+
+        std::fs::write(&path, br#"{"hide_balances":false}"#).unwrap();
+        assert!(privacy_render_needs_cover(&owner, &path));
+
+        std::fs::write(&path, b"{malformed").unwrap();
+        assert!(privacy_render_needs_cover(&owner, &path));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn render_covers_amounts_without_waiting_for_a_settings_writer() {
+        use fs4::fs_std::FileExt;
+        use std::sync::mpsc;
+
+        let root =
+            std::env::temp_dir().join(format!("privacy-render-lock-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join(crate::app::settings::global::DEFAULT_FILE_NAME);
+        let shown =
+            GlobalSettings::save_preference(&path, PreferenceChange::HideBalances(false)).unwrap();
+        let owner = PreferencesOwner::new(path.clone(), &Ok(shown));
+        let lock = std::fs::File::open(path.with_extension("lock")).unwrap();
+        FileExt::lock_exclusive(&lock).unwrap();
+
+        let (sender, receiver) = mpsc::channel();
+        let render = std::thread::spawn(move || {
+            sender
+                .send(privacy_render_needs_cover(&owner, &path))
+                .unwrap();
+        });
+        let covered_while_locked = receiver.recv_timeout(Duration::from_secs(2));
+        FileExt::unlock(&lock).unwrap();
+        render.join().unwrap();
+        assert!(covered_while_locked.unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn queued_eye_event_cannot_change_device_privacy_after_app_closes() {
+        let _guard = app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path =
+            std::env::temp_dir().join(format!("privacy-eye-origin-{}", uuid::Uuid::new_v4()));
+        let (app, _) = app::claim_step1_tests::bitcoin_app(&path);
+        let mut tab = tab::Tab::new(1, tab::State::App(app));
+        let generation = tab.app_generation_token().unwrap();
+        let change = PreferenceChange::HideBalances(false);
+        let eye = || {
+            tab::Message::AppAsync(
+                generation,
+                Box::new(tab::Message::Run(AppMessage::View(
+                    view::Message::ChangeDevicePreference(change),
+                ))),
+            )
+        };
+
+        assert_eq!(
+            balance_privacy_eye_change(Some(&tab), &eye()),
+            Some((change, true))
+        );
+        assert_eq!(
+            balance_privacy_eye_change(
+                Some(&tab),
+                &tab::Message::Run(AppMessage::View(view::Message::ChangeDevicePreference(
+                    change
+                )))
+            ),
+            Some((change, false)),
+            "a bare Run event has no App generation"
+        );
+        drop(tab.update(tab::Message::LockCubeToLauncher));
+        assert!(matches!(tab.state, tab::State::Home(_)));
+        assert_eq!(
+            balance_privacy_eye_change(Some(&tab), &eye()),
+            Some((change, false))
+        );
+        std::fs::remove_dir_all(path).ok();
+    }
+}
+
 /// Exact provider/account context to revalidate on the next local PIN attempt.
 /// Holding this candidate grants neither seed access nor daemon authority.
 #[derive(Clone)]
@@ -75,6 +236,7 @@ pub struct GUI {
     window_config: Option<WindowConfig>,
     global_cache: GlobalCache,
     theme_mode: coincube_ui::theme::palette::ThemeMode,
+    preferences: PreferencesOwner,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -100,6 +262,7 @@ pub enum Message {
 
     Fiat(FiatMessage),
     ToggleTheme,
+    Preferences(SaveRequest, Result<PreferencesReceipt, String>),
 }
 
 #[derive(Debug)]
@@ -204,6 +367,19 @@ fn route_guarded_tab_result(
     Message::Pane(pane_id, pane::Message::View(view))
 }
 
+#[cfg(test)]
+fn unresolved_test_preferences() -> PreferencesOwner {
+    PreferencesOwner::new(
+        std::path::PathBuf::from("unresolved-test-fixture")
+            .join(crate::app::settings::global::DEFAULT_FILE_NAME),
+        &Err(crate::app::settings::global::PrivacyInitError::Settings(
+            crate::app::settings::SettingsError::Unexpected(
+                "not loaded by this fixture".to_string(),
+            ),
+        )),
+    )
+}
+
 impl GUI {
     /// The process owns one secret session and idle clock. A new public Cube
     /// admission must retire every old secret-bearing surface before its
@@ -263,6 +439,11 @@ impl GUI {
     }
 
     pub fn new(config: Config, log_level: Option<LevelFilter>) -> (GUI, Task<Message>) {
+        // Establish the global privacy receipt before constructing the first pane.
+        // A failed or malformed read remains unresolved and masked.
+        let privacy = GlobalSettings::load_or_initialize_preferences(&config.coincube_directory);
+        let preferences =
+            PreferencesOwner::new(GlobalSettings::path(&config.coincube_directory), &privacy);
         let log_level = log_level.unwrap_or(LevelFilter::INFO);
         // Record the resolved (possibly `--datadir`-overridden) data directory
         // process-wide so helpers without a datadir in hand — e.g. the Connect
@@ -277,7 +458,8 @@ impl GUI {
             window::oldest().map(Message::Window),
             Task::perform(ctrl_c(), |_| Message::CtrlC),
         ];
-        let (pane, cmd) = pane::Pane::new(&config);
+        let (mut pane, cmd) = pane::Pane::new(&config);
+        pane.set_balance_privacy(Some(Self::privacy_chrome_for(&preferences)));
         let (mut panes, focused_pane) = pane_grid::State::new(pane);
         cmds.push(cmd.map(move |msg| Message::Pane(focused_pane, msg)));
         let global_settings_path = GlobalSettings::path(&config.coincube_directory);
@@ -301,12 +483,72 @@ impl GUI {
                 window_config,
                 global_cache: GlobalCache::default(),
                 theme_mode,
+                preferences,
             },
             Task::batch(cmds),
         )
     }
 
+    fn privacy_chrome_for(preferences: &PreferencesOwner) -> BalancePrivacyChrome {
+        BalancePrivacyChrome {
+            privacy: preferences.privacy(),
+            busy: preferences.is_busy(),
+            interactive: !preferences.is_busy(),
+        }
+    }
+
+    fn publish_balance_privacy(&mut self) {
+        let chrome = Some(Self::privacy_chrome_for(&self.preferences));
+        for (_, pane) in self.panes.iter_mut() {
+            pane.set_balance_privacy(chrome);
+        }
+    }
+
+    fn change_balance_privacy(
+        &mut self,
+        change: crate::app::settings::preferences::PreferenceChange,
+    ) -> Task<Message> {
+        let Ok(request) = self.preferences.begin_save(change) else {
+            return Task::none();
+        };
+        self.publish_balance_privacy();
+        self.run_preferences(request)
+    }
+
+    fn run_preferences(&self, request: SaveRequest) -> Task<Message> {
+        let root = self.config.coincube_directory.clone();
+        let work = request.clone();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || match work.operation {
+                    Operation::Initialize => GlobalSettings::load_or_initialize_preferences(&root)
+                        .map_err(|error| error.to_string()),
+                    Operation::Save(change) => GlobalSettings::save_preference(&work.root, change)
+                        .map_err(|error| error.to_string()),
+                })
+                .await
+                .unwrap_or_else(|_| Err("The preferences task did not finish.".to_string()))
+            },
+            move |result| Message::Preferences(request, result),
+        )
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        // Intercept before stripping AppAsync/ForkAsync so a queued eye press
+        // from a closed or replaced Cube cannot mutate device preferences.
+        if let Message::Pane(pane_id, pane::Message::Tab(tab_id, inner)) = &message {
+            let tab = self
+                .panes
+                .get(*pane_id)
+                .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == *tab_id));
+            if let Some((change, current)) = balance_privacy_eye_change(tab, inner) {
+                return if current {
+                    self.change_balance_privacy(change)
+                } else {
+                    Task::none()
+                };
+            }
+        }
         // Validate session-tagged App callbacks before inspecting global auth
         // actions. A queued event from an old App cannot affect a reopened one.
         let message = match message {
@@ -816,9 +1058,6 @@ impl GUI {
                 for (_, pane) in self.panes.iter_mut() {
                     pane.stop();
                 }
-                // Managed Tor is process-global; a Cube lock cannot own its
-                // teardown while another managed-node consumer may remain.
-                crate::node::tor::stop_managed_tor();
                 if let Some(window_config) = &self.window_config {
                     let path = GlobalSettings::path(&self.config.coincube_directory);
                     if let Err(e) = GlobalSettings::update_window_config(&path, window_config) {
@@ -1236,7 +1475,6 @@ impl GUI {
                     }
                 }
                 if !self.panes.iter().any(|(_, p)| !p.tabs.is_empty()) {
-                    crate::node::tor::stop_managed_tor();
                     return iced::window::latest().and_then(iced::window::close);
                 }
                 Task::none()
@@ -1863,6 +2101,11 @@ impl GUI {
                 Task::none()
             }
             Message::Resized(_) | Message::Dragged(_) => Task::none(),
+            Message::Preferences(request, result) => {
+                self.preferences.complete(&request, result);
+                self.publish_balance_privacy();
+                Task::none()
+            }
             Message::ToggleTheme => {
                 use coincube_ui::theme::palette::ThemeMode;
                 self.theme_mode = match self.theme_mode {
@@ -1881,7 +2124,17 @@ impl GUI {
                 Task::none()
             }
             Message::Tick => {
+                let privacy_refresh = self
+                    .preferences
+                    .begin_refresh_if_due()
+                    .map(|request| self.run_preferences(request));
+                if privacy_refresh.is_some() {
+                    self.publish_balance_privacy();
+                }
                 let mut tasks = vec![];
+                if let Some(refresh) = privacy_refresh {
+                    tasks.push(refresh);
+                }
 
                 // These are the required (source, currency) pairs for which the global price is stale.
                 let mut stale_pairs = HashSet::<(PriceSource, Currency)>::new();
@@ -2036,6 +2289,15 @@ impl GUI {
     }
 
     pub fn view(&self) -> Element<Message> {
+        if privacy_render_needs_cover(
+            &self.preferences,
+            &GlobalSettings::path(&self.config.coincube_directory),
+        ) {
+            return iced::widget::container(iced::widget::text("Updating balance privacy…"))
+                .width(iced::Length::Fill)
+                .height(iced::Length::Fill)
+                .into();
+        }
         let (&id, pane) = self
             .panes
             .iter()
@@ -2161,6 +2423,7 @@ mod fork_auth_dispatch_tests {
             window_config: None,
             global_cache: GlobalCache::default(),
             theme_mode: Default::default(),
+            preferences: unresolved_test_preferences(),
         };
         drop(gui.update(Message::Pane(
             pane_id,
@@ -2234,6 +2497,7 @@ mod fork_auth_dispatch_tests {
                     window_config: None,
                     global_cache: GlobalCache::default(),
                     theme_mode: Default::default(),
+                    preferences: unresolved_test_preferences(),
                 };
                 drop(gui.update(Message::Pane(
                     pane_id,
@@ -2573,6 +2837,7 @@ mod fork_auth_dispatch_tests {
                         window_config: None,
                         global_cache: GlobalCache::default(),
                         theme_mode: Default::default(),
+            preferences: unresolved_test_preferences(),
                     };
                     let mut cube = crate::app::settings::CubeSettings::new(
                         "Cold fork".into(),
@@ -2699,6 +2964,7 @@ mod fork_auth_dispatch_tests {
                     window_config: None,
                     global_cache: GlobalCache::default(),
                     theme_mode: Default::default(),
+                    preferences: unresolved_test_preferences(),
                 };
                 let account = |message| {
                     Message::Pane(
@@ -2871,6 +3137,7 @@ mod fork_auth_dispatch_tests {
                 window_config: None,
                 global_cache: GlobalCache::default(),
                 theme_mode: Default::default(),
+                preferences: unresolved_test_preferences(),
             };
             let task = gui.update(Message::Pane(
                 source,
@@ -3091,6 +3358,7 @@ mod fork_auth_revocation_tests {
                 window_config: None,
                 global_cache: GlobalCache::default(),
                 theme_mode: Default::default(),
+                preferences: unresolved_test_preferences(),
             };
             let (home, home_startup) =
                 home::Home::new_for_chain(gui.config.coincube_directory.clone(), None);
@@ -3263,6 +3531,7 @@ mod shared_adoption_generation_tests {
                 window_config: None,
                 global_cache: GlobalCache::default(),
                 theme_mode: Default::default(),
+                preferences: unresolved_test_preferences(),
             };
             let init = || {
                 Message::Pane(
@@ -3482,6 +3751,7 @@ mod shell_escape_dispatch_tests {
             window_config: None,
             global_cache: GlobalCache::default(),
             theme_mode: Default::default(),
+            preferences: unresolved_test_preferences(),
         };
         let route = |intent| {
             Message::Pane(
@@ -3552,6 +3822,53 @@ mod shell_escape_dispatch_tests {
 #[cfg(test)]
 mod lock_cube_dispatch_tests {
     use super::*;
+    use crate::app;
+
+    #[test]
+    fn locking_source_app_closes_owned_home_claim_but_keeps_unrelated_home() {
+        let _guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path =
+            std::env::temp_dir().join(format!("cube-lock-home-claim-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(path.clone());
+        let (source, _) = app::claim_step1_tests::bitcoin_app(&path);
+        let owner = source.cache().app_generation;
+        let source_id = source.cube_settings().id.clone();
+        let (unrelated, startup) = home::Home::new_for_chain(root.clone(), None);
+        drop(startup);
+        let (mut claim, startup) = home::Home::new_for_chain(root, None);
+        drop(startup);
+        claim.set_claim_owner(owner);
+        let mut gui = GUI::reviewer_app_home_gui(source, unrelated);
+        let pane_id = gui.focus.unwrap();
+        gui.panes
+            .get_mut(pane_id)
+            .unwrap()
+            .tabs
+            .push(tab::Tab::new(3, tab::State::Home(claim)));
+        app::session::open(source_id, zeroize::Zeroizing::new("2468".into()));
+
+        drop(gui.update(Message::Pane(
+            pane_id,
+            pane::Message::tab(1, tab::Message::LockCubeToLauncher),
+        )));
+        let pane = gui.panes.get(pane_id).unwrap();
+        assert!(pane.tabs.iter().any(|tab| tab.id == 2));
+        assert!(
+            pane.tabs.iter().all(|tab| tab.id != 3),
+            "owned Claim Home closed"
+        );
+        assert!(pane
+            .tabs
+            .iter()
+            .all(|tab| tab.claim_open_owner() != Some(owner)));
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
 
     #[test]
     fn admitted_destination_closes_orphaned_process_session() {
@@ -3577,6 +3894,7 @@ mod lock_cube_dispatch_tests {
             window_config: None,
             global_cache: GlobalCache::default(),
             theme_mode: Default::default(),
+            preferences: unresolved_test_preferences(),
         };
         crate::app::session::open("orphaned", zeroize::Zeroizing::new("2468".into()));
         let destination = crate::app::settings::CubeSettings::new_with_raw_id(
@@ -3706,6 +4024,7 @@ mod lock_cube_dispatch_tests {
             window_config: None,
             global_cache: GlobalCache::default(),
             theme_mode: Default::default(),
+            preferences: unresolved_test_preferences(),
         };
         let destination = crate::app::settings::CubeSettings::new_with_raw_id(
             "other".into(),
@@ -3807,6 +4126,7 @@ mod lock_cube_dispatch_tests {
             window_config: None,
             global_cache: GlobalCache::default(),
             theme_mode: Default::default(),
+            preferences: unresolved_test_preferences(),
         };
         crate::app::session::open(same_cube_id.clone(), zeroize::Zeroizing::new("2468".into()));
         assert_eq!(crate::app::session::current_cube_id(), Some(same_cube_id));
@@ -3887,6 +4207,7 @@ mod lock_cube_dispatch_tests {
             window_config: None,
             global_cache: GlobalCache::default(),
             theme_mode: Default::default(),
+            preferences: unresolved_test_preferences(),
         };
         let resources = tab::ClaimResources {
             intent,
@@ -4058,6 +4379,7 @@ impl GUI {
             window_config: None,
             global_cache: GlobalCache::default(),
             theme_mode: Default::default(),
+            preferences: unresolved_test_preferences(),
         }
     }
     /// An already-open Bitcoin Cube (tab 1) beside a Home tab (tab 2), in one pane.
@@ -4075,6 +4397,7 @@ impl GUI {
             window_config: None,
             global_cache: GlobalCache::default(),
             theme_mode: Default::default(),
+            preferences: unresolved_test_preferences(),
         }
     }
     /// As [`Self::reviewer_app_home_gui`], with the Cube moved to its own
@@ -4554,6 +4877,7 @@ mod claim_return_routing_tests {
                     window_config: None,
                     global_cache: GlobalCache::default(),
                     theme_mode: Default::default(),
+                    preferences: unresolved_test_preferences(),
                 };
                 let source_id = match &gui.panes.get(target).unwrap().tabs[index].state {
                     tab::State::App(app) => app.cube_settings().id.clone(),
@@ -5171,6 +5495,7 @@ mod single_open_lifecycle_tests {
                         window_config: None,
                         global_cache: GlobalCache::default(),
                         theme_mode: Default::default(),
+            preferences: unresolved_test_preferences(),
                     };
                     if connect {
                         // Return from an accepted ordinary Split prerequisite

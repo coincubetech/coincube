@@ -12,21 +12,26 @@ use coincube_ui::component::amount::{format_f64_as_string, format_u64_as_string}
 use coincube_ui::component::{button, card, text};
 use coincube_ui::{color, icon::*, theme};
 
-pub fn form<'a>(state: &'a MavapayState) -> iced::Element<'a, ViewMessage, theme::Theme> {
+pub fn form<'a>(
+    state: &'a MavapayState,
+    mask_amounts: bool,
+) -> iced::Element<'a, ViewMessage, theme::Theme> {
+    // The eye covers saved orders and completed checkout. Entry and an
+    // unfulfilled checkout show amounts for active payment review.
     let form = match state
         .steps
         .last()
         .expect("`MavapayState` must have at least one flow-step")
     {
-        MavapayFlowStep::BuyInputFrom { .. } => buy_input_form,
-        MavapayFlowStep::SellInputForm { .. } => sell_input_form,
-        MavapayFlowStep::Checkout { .. } => checkout_form,
-        MavapayFlowStep::History { .. } => history_view,
-        MavapayFlowStep::OrderDetail { .. } => order_detail_view,
+        MavapayFlowStep::BuyInputFrom { .. } => buy_input_form(state),
+        MavapayFlowStep::SellInputForm { .. } => sell_input_form(state),
+        MavapayFlowStep::Checkout { .. } => checkout_form(state, mask_amounts),
+        MavapayFlowStep::History { .. } => history_view(state, mask_amounts),
+        MavapayFlowStep::OrderDetail { .. } => order_detail_view(state, mask_amounts),
     };
 
     let element: iced::Element<'a, BuySellMessage, theme::Theme> = widget::column![
-        form(state),
+        form,
         widget::Space::new().height(Length::Fixed(5.0)),
         text::caption("Powered by Mavapay").style(theme::text::secondary)
     ]
@@ -627,6 +632,7 @@ fn order_success_view<'a>(
     sats: u64,
     buy_or_sell: &'a BuyOrSell,
     _country: &'static Country,
+    mask_amounts: bool,
 ) -> widget::Column<'a, BuySellMessage, theme::Theme> {
     let (title, subtitle) = match buy_or_sell {
         BuyOrSell::Sell => (
@@ -665,15 +671,17 @@ fn order_success_view<'a>(
                     widget::row![
                         widget::column![
                             text::p2_medium("Amount Paid").style(theme::text::secondary),
-                            text::p1_bold(format_amount(order.amount, &order.currency))
+                            text::p1_bold(passive_amount(mask_amounts, || {
+                                format_amount(order.amount, &order.currency)
+                            }))
                         ]
                         .width(Length::Fill),
                         widget::column![
                             text::p2_medium("Bitcoin Received").style(theme::text::secondary),
-                            text::p1_bold(format!(
+                            text::p1_bold(passive_amount(mask_amounts, || format!(
                                 "{} BTC",
                                 format_f64_as_string(sats as f64 / 100_000_000.0, ",", 8, false)
-                            ))
+                            )))
                         ]
                         .width(Length::Fill)
                     ],
@@ -716,7 +724,10 @@ fn order_success_view<'a>(
     ]
 }
 
-fn history_view<'a>(state: &'a MavapayState) -> widget::Column<'a, BuySellMessage, theme::Theme> {
+fn history_view<'a>(
+    state: &'a MavapayState,
+    mask_amounts: bool,
+) -> widget::Column<'a, BuySellMessage, theme::Theme> {
     let Some(MavapayFlowStep::History {
         transactions,
         loading,
@@ -757,7 +768,7 @@ fn history_view<'a>(state: &'a MavapayState) -> widget::Column<'a, BuySellMessag
             .iter()
             .enumerate()
             .fold(widget::column![].spacing(10), |col, (idx, transaction)| {
-                col.push(transaction_row(idx, transaction))
+                col.push(transaction_row(idx, transaction, mask_amounts))
             })
             .width(Length::Fill)
             .into(),
@@ -794,6 +805,7 @@ fn pretty_timestamp(ts: &str) -> String {
 fn transaction_row<'a>(
     idx: usize,
     transaction: &'a OrderTransaction,
+    mask_amounts: bool,
 ) -> widget::Container<'a, BuySellMessage, theme::Theme> {
     let (tx_status_text, tx_status_color) = transaction_status_info(transaction);
     let (order_type, order_type_color) =
@@ -816,7 +828,9 @@ fn transaction_row<'a>(
             widget::row![
                 widget::column![
                     text::p2_medium("Amount").style(theme::text::secondary),
-                    text::p2_bold(format_amount(transaction.amount, &transaction.currency))
+                    text::p2_bold(passive_amount(mask_amounts, || {
+                        format_amount(transaction.amount, &transaction.currency)
+                    }))
                 ]
                 .width(Length::Fill),
                 transaction
@@ -882,6 +896,7 @@ fn format_currency_amount(amount: u64, currency: &MavapayUnitCurrency) -> String
 
 fn order_detail_view<'a>(
     state: &'a MavapayState,
+    mask_amounts: bool,
 ) -> widget::Column<'a, BuySellMessage, theme::Theme> {
     let Some(MavapayFlowStep::OrderDetail {
         transaction,
@@ -917,28 +932,30 @@ fn order_detail_view<'a>(
     .align_y(Alignment::Center);
 
     // Get total fees from all quotes if available, otherwise use transaction fees
-    let fees_display = order
-        .as_ref()
-        .map(|o| {
-            let quotes = o.quotes();
-            if quotes.is_empty() {
-                return format_fees(transaction.fees, &transaction.currency);
-            }
+    let fees_display = passive_amount(mask_amounts, || {
+        order
+            .as_ref()
+            .map(|o| {
+                let quotes = o.quotes();
+                if quotes.is_empty() {
+                    return format_fees(transaction.fees, &transaction.currency);
+                }
 
-            // Sum up fees from all quotes (use target currency fees)
-            let total_fees: u64 = quotes
-                .iter()
-                .map(|q| q.transaction_fees_in_target_currency)
-                .sum();
+                // Sum up fees from all quotes (use target currency fees)
+                let total_fees: u64 = quotes
+                    .iter()
+                    .map(|q| q.transaction_fees_in_target_currency)
+                    .sum();
 
-            // Use the target currency from the first quote for formatting
-            if let Some(first_quote) = quotes.first() {
-                format_currency_amount(total_fees, &first_quote.target_currency)
-            } else {
-                format_fees(transaction.fees, &transaction.currency)
-            }
-        })
-        .unwrap_or_else(|| format_fees(transaction.fees, &transaction.currency));
+                // Use the target currency from the first quote for formatting
+                if let Some(first_quote) = quotes.first() {
+                    format_currency_amount(total_fees, &first_quote.target_currency)
+                } else {
+                    format_fees(transaction.fees, &transaction.currency)
+                }
+            })
+            .unwrap_or_else(|| format_fees(transaction.fees, &transaction.currency))
+    });
 
     // Transaction summary card (always shown)
     let transaction_card = card::simple(
@@ -952,7 +969,9 @@ fn order_detail_view<'a>(
             widget::row![
                 info_field(
                     "Amount",
-                    format_amount(transaction.amount, &transaction.currency)
+                    passive_amount(mask_amounts, || {
+                        format_amount(transaction.amount, &transaction.currency)
+                    })
                 ),
                 info_field("Fees", fees_display),
             ],
@@ -1002,7 +1021,12 @@ fn order_detail_view<'a>(
                         detail_row("Order ID", order.order_id.clone(), None),
                         widget::Space::new().height(8),
                         widget::row![
-                            info_field("Amount", format_amount(order.amount, &order.currency)),
+                            info_field(
+                                "Amount",
+                                passive_amount(mask_amounts, || {
+                                    format_amount(order.amount, &order.currency)
+                                })
+                            ),
                             info_field("Status", order_status_text(&order.status)),
                         ],
                         widget::Space::new().height(8),
@@ -1025,10 +1049,12 @@ fn order_detail_view<'a>(
             .iter()
             .enumerate()
             .map(|(idx, quote)| {
-                let (paid_amount, received_amount) = (
-                    format_currency_amount(quote.total_amount, &quote.source_currency),
-                    format_currency_amount(quote.equivalent_amount, &quote.target_currency),
-                );
+                let paid_amount = passive_amount(mask_amounts, || {
+                    format_currency_amount(quote.total_amount, &quote.source_currency)
+                });
+                let received_amount = passive_amount(mask_amounts, || {
+                    format_currency_amount(quote.equivalent_amount, &quote.target_currency)
+                });
 
                 let title = if quotes.len() > 1 {
                     format!("Quote #{}", idx + 1)
@@ -1048,24 +1074,24 @@ fn order_detail_view<'a>(
                         widget::row![
                             info_field(
                                 "Source Fee",
-                                format_currency_amount(
+                                passive_amount(mask_amounts, || format_currency_amount(
                                     quote.transaction_fees_in_source_currency,
                                     &quote.source_currency
-                                )
+                                ))
                             ),
                             info_field(
                                 "Target Fee",
-                                format_currency_amount(
+                                passive_amount(mask_amounts, || format_currency_amount(
                                     quote.transaction_fees_in_target_currency,
                                     &quote.target_currency
-                                )
+                                ))
                             ),
                             info_field(
                                 "Fee (USD)",
-                                format!(
+                                passive_amount(mask_amounts, || format!(
                                     "${}",
                                     format_fiat_cents(quote.transaction_fees_in_usd_cent)
-                                )
+                                ))
                             ),
                         ],
                         widget::Space::new().height(8),
@@ -1119,7 +1145,10 @@ fn order_detail_view<'a>(
 }
 
 // TODO: Use Breez SDK to satisfy lightning invoice, with user confirmation
-fn checkout_form<'a>(state: &'a MavapayState) -> widget::Column<'a, BuySellMessage, theme::Theme> {
+fn checkout_form<'a>(
+    state: &'a MavapayState,
+    mask_amounts: bool,
+) -> widget::Column<'a, BuySellMessage, theme::Theme> {
     let Some(MavapayFlowStep::Checkout {
         fulfilled_order,
         quote,
@@ -1182,9 +1211,13 @@ fn checkout_form<'a>(state: &'a MavapayState) -> widget::Column<'a, BuySellMessa
                 }),
             ]
         }
-        Some(order) => {
-            order_success_view(order, state.sat_amount, &state.buy_or_sell, state.country)
-        }
+        Some(order) => order_success_view(
+            order,
+            state.sat_amount,
+            &state.buy_or_sell,
+            state.country,
+            mask_amounts,
+        ),
     }
     .align_x(Alignment::Center)
     .width(600)
@@ -1322,6 +1355,14 @@ fn transaction_status_info(transaction: &OrderTransaction) -> (&'static str, ice
     }
 }
 
+fn passive_amount(mask_amounts: bool, format: impl FnOnce() -> String) -> String {
+    if mask_amounts {
+        "••••••".into()
+    } else {
+        format()
+    }
+}
+
 fn format_amount(amount: u64, currency: &MavapayCurrency) -> String {
     match currency {
         MavapayCurrency::Bitcoin => format!(
@@ -1377,7 +1418,7 @@ fn success_icon_badge() -> widget::Container<'static, BuySellMessage, theme::The
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::breez_liquid::BreezClient;
+    use crate::{app::breez_liquid::BreezClient, app::view::shared::landing::capture};
     use coincube_core::miniscript::bitcoin;
     use std::sync::Arc;
 
@@ -1622,7 +1663,7 @@ mod tests {
             },
             "NG",
         );
-        let _ = form(&buy);
+        let _ = form(&buy, false);
 
         let mut buy_without_price = state(
             BuyOrSell::Buy,
@@ -1634,7 +1675,7 @@ mod tests {
             "NG",
         );
         buy_without_price.btc_price = None;
-        let _ = form(&buy_without_price);
+        let _ = form(&buy_without_price, false);
 
         let ngn = state(
             BuyOrSell::Sell,
@@ -1654,7 +1695,7 @@ mod tests {
             },
             "NG",
         );
-        let _ = form(&ngn);
+        let _ = form(&ngn, false);
 
         let zar = state(
             BuyOrSell::Sell,
@@ -1673,7 +1714,7 @@ mod tests {
             },
             "ZA",
         );
-        let _ = form(&zar);
+        let _ = form(&zar, false);
 
         let kes = state(
             BuyOrSell::Sell,
@@ -1688,7 +1729,7 @@ mod tests {
             },
             "KE",
         );
-        let _ = form(&kes);
+        let _ = form(&kes, false);
 
         let invalid_ngn = state(
             BuyOrSell::Sell,
@@ -1705,7 +1746,7 @@ mod tests {
             },
             "NG",
         );
-        let _ = form(&invalid_ngn);
+        let _ = form(&invalid_ngn, false);
     }
 
     #[test]
@@ -1727,7 +1768,7 @@ mod tests {
             },
             "NG",
         );
-        let _ = form(&checkout);
+        let _ = form(&checkout, false);
 
         let fulfilled = state(
             BuyOrSell::Buy,
@@ -1746,7 +1787,7 @@ mod tests {
             },
             "NG",
         );
-        let _ = form(&fulfilled);
+        let _ = form(&fulfilled, false);
 
         for step in [
             MavapayFlowStep::History {
@@ -1771,7 +1812,7 @@ mod tests {
             },
         ] {
             let history = state(BuyOrSell::Buy, step, "NG");
-            let _ = form(&history);
+            let _ = form(&history, false);
         }
     }
 
@@ -1818,7 +1859,146 @@ mod tests {
             },
         ] {
             let detail = state(BuyOrSell::Buy, step, "NG");
-            let _ = form(&detail);
+            let _ = form(&detail, false);
         }
+    }
+
+    fn inspect(state: &MavapayState, mask_amounts: bool) -> capture::Inspection {
+        capture::inspect(
+            "mavapay-passive-order-privacy",
+            form(state, mask_amounts),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        )
+    }
+
+    #[test]
+    fn hidden_order_history_masks_saved_amount_but_preserves_status() {
+        let history = state(
+            BuyOrSell::Buy,
+            MavapayFlowStep::History {
+                transactions: Some(vec![transaction(
+                    TransactionStatus::Success,
+                    TransactionType::Withdrawal,
+                    Some(MavapayPaymentMethod::BankTransfer),
+                )]),
+                loading: false,
+            },
+            "NG",
+        );
+
+        let hidden = inspect(&history, true);
+        assert!(hidden.contains("••••••"));
+        assert!(!hidden.contains("123.45 NGN"));
+        assert!(hidden.contains("Order History"));
+        assert!(hidden.contains("Complete"));
+
+        let shown = inspect(&history, false);
+        assert!(shown.contains("123.45 NGN"));
+    }
+
+    #[test]
+    fn hidden_order_detail_masks_transaction_order_quote_and_fee_amounts() {
+        let transaction = transaction(
+            TransactionStatus::Paid,
+            TransactionType::Withdrawal,
+            Some(MavapayPaymentMethod::BankTransfer),
+        );
+        for quotes in [
+            Vec::new(),
+            vec![order_quote(
+                MavapayUnitCurrency::NigerianNairaKobo,
+                MavapayUnitCurrency::BitcoinSatoshi,
+            )],
+        ] {
+            let detail = state(
+                BuyOrSell::Buy,
+                MavapayFlowStep::OrderDetail {
+                    transaction: transaction.clone(),
+                    order: Some(order(TransactionStatus::Paid, quotes)),
+                    loading: false,
+                },
+                "NG",
+            );
+
+            let hidden = inspect(&detail, true);
+            for amount in [
+                "123.45 NGN",
+                "2.50 NGN",
+                "1.11 NGN",
+                "0.00006789 BTC",
+                "0.00000022 BTC",
+                "$0.33",
+            ] {
+                assert!(!hidden.contains(amount), "hidden order showed {}", amount);
+            }
+            assert!(hidden.contains("••••••"));
+            assert!(hidden.contains("Order Details"));
+            assert!(hidden.contains("Complete"));
+
+            let shown = inspect(&detail, false);
+            assert!(shown.contains("123.45 NGN"));
+            assert!(shown.contains("2.50 NGN") || shown.contains("0.00000022 BTC"));
+        }
+    }
+
+    #[test]
+    fn checkout_keeps_amount_visible_for_active_payment_review() {
+        let checkout = state(
+            BuyOrSell::Buy,
+            MavapayFlowStep::Checkout {
+                quote: quote(
+                    "quote-1",
+                    MavapayUnitCurrency::NigerianNairaKobo,
+                    MavapayUnitCurrency::BitcoinSatoshi,
+                    MavapayPaymentMethod::BankTransfer,
+                ),
+                fulfilled_order: None,
+                invoice_qr_code_data: None,
+                liquid_balance: None,
+                fulfilling_ln_invoice: false,
+                stream_order_id: None,
+            },
+            "NG",
+        );
+
+        let hidden = inspect(&checkout, true);
+        assert!(hidden.contains("125 Nigerian Naira (NGN)"));
+        assert!(hidden.contains("Amount to Send"));
+    }
+
+    #[test]
+    fn fulfilled_checkout_masks_confirmation_amounts_when_hidden() {
+        let fulfilled = state(
+            BuyOrSell::Buy,
+            MavapayFlowStep::Checkout {
+                quote: quote(
+                    "quote-2",
+                    MavapayUnitCurrency::NigerianNairaKobo,
+                    MavapayUnitCurrency::BitcoinSatoshi,
+                    MavapayPaymentMethod::BankTransfer,
+                ),
+                fulfilled_order: Some(order(TransactionStatus::Paid, Vec::new())),
+                invoice_qr_code_data: None,
+                liquid_balance: None,
+                fulfilling_ln_invoice: false,
+                stream_order_id: None,
+            },
+            "NG",
+        );
+
+        let hidden = inspect(&fulfilled, true);
+        assert!(hidden.contains("Order Confirmation"));
+        assert!(hidden.contains("Amount Paid"));
+        assert!(hidden.contains("Bitcoin Received"));
+        assert!(hidden.contains("Start New Transaction"));
+        assert!(hidden.contains("••••••"));
+        assert!(!hidden.contains("123.45 NGN"));
+        assert!(!hidden.contains("0.00123456 BTC"));
+
+        let shown = inspect(&fulfilled, false);
+        assert!(shown.contains("123.45 NGN"));
+        assert!(shown.contains("0.00123456 BTC"));
     }
 }

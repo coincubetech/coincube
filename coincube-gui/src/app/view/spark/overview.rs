@@ -113,6 +113,7 @@ pub struct SparkOverviewView<'a> {
     /// matches the Liquid panel's USDt behaviour.
     pub btc_usd_price: Option<f64>,
     pub display_mode: DisplayMode,
+    pub mask_amounts: bool,
 }
 
 impl<'a> SparkOverviewView<'a> {
@@ -147,6 +148,7 @@ impl<'a> SparkOverviewView<'a> {
                 self.show_direction_badges,
                 self.stable_balance_active,
                 self.display_mode,
+                self.mask_amounts,
                 self.cube_id,
                 self.last_error,
             ),
@@ -165,6 +167,7 @@ fn connected_view<'a>(
     _show_direction_badges: bool,
     stable_balance_active: Option<bool>,
     display_mode: DisplayMode,
+    mask_amounts: bool,
     cube_id: &str,
     last_error: Option<&str>,
 ) -> Element<'a, SparkOverviewMessage> {
@@ -207,7 +210,9 @@ fn connected_view<'a>(
                 .push(h4_bold("Balance"))
                 .push_maybe((stable_balance_active == Some(true)).then(stable_badge)),
         )
-        .push(if has_unvalued_usdb {
+        .push(if mask_amounts {
+            amount_cell::<SparkOverviewMessage>(AmountCell::masked(), AmountTier::Card)
+        } else if has_unvalued_usdb {
             amount_cell::<SparkOverviewMessage>(
                 AmountCell::unavailable("Combined BTC and USDB valuation needs a BTC/USD quote"),
                 AmountTier::Card,
@@ -216,7 +221,7 @@ fn connected_view<'a>(
             wallet_header::<SparkOverviewMessage>(WalletHeaderProps {
                 sats: total_balance,
                 fiat: total_fiat,
-                balance_masked: false,
+                balance_masked: mask_amounts,
                 bitcoin_unit,
                 variant: HeaderVariant::Landing,
                 sync: SyncState::Synced,
@@ -249,14 +254,18 @@ fn connected_view<'a>(
         .push(coincube_ui::image::asset_network_logo::<SparkOverviewMessage>("btc", "spark", 40.0))
         .push(text("BTC").size(P1_SIZE).bold().width(Length::Fixed(60.0)))
         .push(amount_cell::<SparkOverviewMessage>(
-            AmountCell::shown(
-                format!(
-                    "{} {}",
-                    btc_row_amount.to_formatted_string_with_unit(bitcoin_unit),
-                    bitcoin_unit.label()
-                ),
-                (!btc_fiat_str.is_empty()).then_some(btc_fiat_str),
-            ),
+            if mask_amounts {
+                AmountCell::masked()
+            } else {
+                AmountCell::shown(
+                    format!(
+                        "{} {}",
+                        btc_row_amount.to_formatted_string_with_unit(bitcoin_unit),
+                        bitcoin_unit.label()
+                    ),
+                    (!btc_fiat_str.is_empty()).then_some(btc_fiat_str),
+                )
+            },
             AmountTier::Row,
         ))
         .push(iced::widget::Space::new().width(Length::Fill))
@@ -290,10 +299,14 @@ fn connected_view<'a>(
             .align_y(Alignment::Center)
             .push(text("USDB").size(P1_SIZE).bold().width(Length::Fixed(60.0)))
             .push(amount_cell::<SparkOverviewMessage>(
-                AmountCell::shown(
-                    format!("{} USDB", format_token_display(sb.balance, sb.decimals)),
-                    None,
-                ),
+                if mask_amounts {
+                    AmountCell::masked()
+                } else {
+                    AmountCell::shown(
+                        format!("{} USDB", format_token_display(sb.balance, sb.decimals)),
+                        None,
+                    )
+                },
                 AmountTier::Row,
             ))
     });
@@ -339,29 +352,36 @@ fn connected_view<'a>(
             let open = (!tx.id.trim().is_empty()
                 && recent.iter().filter(|other| other.id == tx.id).count() == 1)
                 .then(|| SparkOverviewMessage::SelectTransaction(tx.id.clone()));
-            let amount = tx.token_display.clone().unwrap_or_else(|| {
-                format!(
-                    "{} {}",
-                    row_display_amount(tx).to_formatted_string_with_unit(bitcoin_unit),
-                    bitcoin_unit.label()
-                )
-            });
-            let amount = if tx.is_incoming {
-                format!("+{amount}")
-            } else {
-                format!("−{amount}")
-            };
-            let secondary = tx
-                .fiat_amount
-                .as_ref()
-                .filter(|_| tx.method != SparkPaymentMethod::StableBalance)
-                .map(|fiat| {
+            let amount = (!mask_amounts).then(|| {
+                tx.token_display.clone().unwrap_or_else(|| {
                     format!(
-                        "{} {} · current rate",
-                        fiat.to_formatted_string(),
-                        fiat.currency()
+                        "{} {}",
+                        row_display_amount(tx).to_formatted_string_with_unit(bitcoin_unit),
+                        bitcoin_unit.label()
                     )
-                });
+                })
+            });
+            let amount = amount.map(|amount| {
+                if tx.is_incoming {
+                    format!("+{amount}")
+                } else {
+                    format!("−{amount}")
+                }
+            });
+            let secondary = (!mask_amounts)
+                .then_some(
+                    tx.fiat_amount
+                        .as_ref()
+                        .filter(|_| tx.method != SparkPaymentMethod::StableBalance)
+                        .map(|fiat| {
+                            format!(
+                                "{} {} · current rate",
+                                fiat.to_formatted_string(),
+                                fiat.currency()
+                            )
+                        }),
+                )
+                .flatten();
             let rail = match tx.method {
                 SparkPaymentMethod::Lightning => "Lightning",
                 SparkPaymentMethod::OnChainBitcoin => "Bitcoin on-chain",
@@ -395,7 +415,9 @@ fn connected_view<'a>(
                     },
                     label: tx.description.clone(),
                     wallet_caption: None,
-                    amount: AmountCell::shown(amount, secondary),
+                    amount: amount.map_or_else(AmountCell::masked, |amount| {
+                        AmountCell::shown(amount, secondary)
+                    }),
                     status: tx.status.into(),
                 },
                 false,
@@ -650,8 +672,54 @@ mod tests {
             stable_balance_active: active,
             btc_usd_price: price,
             display_mode: DisplayMode::BitcoinNative,
+            mask_amounts: false,
         }
         .render()
+    }
+
+    #[test]
+    fn hidden_overview_redacts_btc_usdb_and_activity_amounts() {
+        let stable = coincube_spark_protocol::StableBalanceSnapshot {
+            balance: 2_500_000,
+            decimals: 6,
+            ticker: "USDB".into(),
+        };
+        let snapshot = SparkBalanceSnapshot {
+            balance_sats: 12_345_678,
+            stable_balance: Some(stable),
+        };
+        let rows = [tx(
+            "payment",
+            true,
+            DomainPaymentStatus::Complete,
+            98_765_432,
+            0,
+            None,
+        )];
+        let mounted = capture::inspect(
+            "spark-hidden-amounts",
+            SparkOverviewView {
+                status: SparkStatus::Connected(snapshot),
+                recent_transactions: &rows,
+                cube_id: "synthetic-cube",
+                last_error: None,
+                fiat_converter: None,
+                bitcoin_unit: BitcoinDisplayUnit::Sats,
+                show_direction_badges: true,
+                stable_balance_active: Some(true),
+                btc_usd_price: Some(50_000.0),
+                display_mode: DisplayMode::BitcoinNative,
+                mask_amounts: true,
+            }
+            .render(),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(mounted.contains("••••••"));
+        for amount in ["12,345,678", "98,765,432", "2.50 USDB"] {
+            assert!(!mounted.contains(amount), "hidden Spark amount {}", amount);
+        }
     }
 
     #[test]
