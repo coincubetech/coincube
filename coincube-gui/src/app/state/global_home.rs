@@ -625,7 +625,7 @@ impl State for GlobalHome {
                 imported_balance: self.imported_balance,
                 imported_installed: self.imported_installed,
                 fiat_converter,
-                balance_masked: self.balance_masked,
+                balance_masked: self.balance_masked || cache.balance_amounts_masked(),
                 total_balance_loading,
                 spark_balance_loaded: self.spark_balance_loaded,
                 liquid_balance_loaded: self.liquid_balance_loaded,

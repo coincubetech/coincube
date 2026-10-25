@@ -66,6 +66,7 @@ pub struct SparkTransactionsView<'a> {
     pub current_page: u32,
     pub is_last_page: bool,
     pub processing: bool,
+    pub mask_amounts: bool,
 }
 
 impl<'a> SparkTransactionsView<'a> {
@@ -164,6 +165,7 @@ impl<'a> SparkTransactionsView<'a> {
                     self.fiat_converter,
                     self.bitcoin_unit,
                     self.show_direction_badges,
+                    self.mask_amounts,
                 ))
             },
         );
@@ -194,6 +196,7 @@ fn transaction_row<'a>(
     fiat_converter: Option<FiatAmountConverter>,
     bitcoin_unit: BitcoinDisplayUnit,
     show_direction_badges: bool,
+    mask_amounts: bool,
 ) -> Element<'a, Message> {
     let direction = if tx.is_incoming {
         TransactionDirection::Incoming
@@ -221,8 +224,11 @@ fn transaction_row<'a>(
         .with_time_ago(tx.time_ago.clone())
         .with_custom_icon(combo_icon)
         .with_show_direction_badge(show_direction_badges);
+    if mask_amounts {
+        item = item.with_amount_override("••••••".to_owned());
+    }
 
-    if let Some(token_str) = tx.token_display.as_ref() {
+    if let Some(token_str) = tx.token_display.as_ref().filter(|_| !mask_amounts) {
         item = item.with_amount_override(token_str.clone());
     }
 
@@ -230,7 +236,9 @@ fn transaction_row<'a>(
     // dollar value (USDB is pegged 1:1 to USD); for sat rows we
     // derive fiat off the display_amount via the converter so it
     // matches what the user sees in the headline figure.
-    let fiat_label = if tx.token_display.is_some() {
+    let fiat_label = if mask_amounts {
+        None
+    } else if tx.token_display.is_some() {
         tx.fiat_amount
             .as_ref()
             .map(|f| format!("{} {}", f.to_formatted_string(), f.currency()))
@@ -262,6 +270,7 @@ pub fn transaction_detail_view<'a>(
     tx: &'a SparkRecentTransaction,
     fiat_converter: Option<FiatAmountConverter>,
     bitcoin_unit: BitcoinDisplayUnit,
+    mask_amounts: bool,
 ) -> Element<'a, Message> {
     let is_incoming = tx.is_incoming;
     let title = if is_incoming {
@@ -302,9 +311,12 @@ pub fn transaction_detail_view<'a>(
     let date_text = format_timestamp(tx.timestamp).unwrap_or_else(|| "Unknown".to_string());
     let fiat_str = total_fiat
         .as_ref()
+        .filter(|_| !mask_amounts)
         .map(|f| format!("{} {}", f.to_formatted_string(), f.currency()));
 
-    let amount_row = if let Some(token_str) = tx.token_display.as_ref() {
+    let amount_row = if mask_amounts {
+        Row::new().push(text("••••••").size(H1_SIZE))
+    } else if let Some(token_str) = tx.token_display.as_ref() {
         Row::new()
             .spacing(10)
             .align_y(Alignment::Center)
@@ -360,7 +372,11 @@ pub fn transaction_detail_view<'a>(
     if tx.fees_sat.to_sat() > 0 {
         info = info.push(kv(
             "Fees",
-            amount_with_size_and_unit::<Message>(&tx.fees_sat, P1_SIZE, bitcoin_unit).into(),
+            if mask_amounts {
+                text("••••••").into()
+            } else {
+                amount_with_size_and_unit::<Message>(&tx.fees_sat, P1_SIZE, bitcoin_unit).into()
+            },
         ));
     }
 

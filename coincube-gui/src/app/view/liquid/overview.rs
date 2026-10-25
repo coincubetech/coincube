@@ -37,6 +37,7 @@ pub fn liquid_overview_view<'a>(
     // Whether cross-asset swaps (SideSwap) are available on this network.
     // Drives the Swap button — hidden off-mainnet where SideSwap can't run.
     swap_supported: bool,
+    mask_amounts: bool,
 ) -> Element<'a, LiquidOverviewMessage> {
     let mut content = Column::new().spacing(20);
 
@@ -87,7 +88,7 @@ pub fn liquid_overview_view<'a>(
         .push(wallet_header::<LiquidOverviewMessage>(WalletHeaderProps {
             sats: total_balance,
             fiat: total_fiat,
-            balance_masked: false,
+            balance_masked: mask_amounts,
             bitcoin_unit,
             variant: HeaderVariant::Overview,
             sync: SyncState::Synced,
@@ -115,16 +116,20 @@ pub fn liquid_overview_view<'a>(
                 .bold()
                 .width(Length::Fixed(60.0)),
         )
-        .push(amount_with_size_and_unit(
-            &btc_balance,
-            P1_SIZE,
-            bitcoin_unit,
-        ))
+        .push(if mask_amounts {
+            Row::new().push(text("••••••").size(P1_SIZE))
+        } else {
+            amount_with_size_and_unit(&btc_balance, P1_SIZE, bitcoin_unit)
+        })
         .push(
-            text(lbtc_fiat_str)
-                .size(P2_SIZE)
-                .style(theme::text::secondary)
-                .width(Length::Fill),
+            text(if mask_amounts {
+                "••••••".to_string()
+            } else {
+                lbtc_fiat_str
+            })
+            .size(P2_SIZE)
+            .style(theme::text::secondary)
+            .width(Length::Fill),
         )
         .push(
             button::primary(None, "Send")
@@ -138,8 +143,16 @@ pub fn liquid_overview_view<'a>(
         );
 
     // USDt asset row
-    let usdt_display = format!("{} USDt", format_usdt_display(usdt_balance));
-    let usdt_fiat_str = format!("${:.2}", usdt_fiat_value);
+    let usdt_display = if mask_amounts {
+        "••••••".to_string()
+    } else {
+        format!("{} USDt", format_usdt_display(usdt_balance))
+    };
+    let usdt_fiat_str = if mask_amounts {
+        "••••••".to_string()
+    } else {
+        format!("${:.2}", usdt_fiat_value)
+    };
     let usdt_row = Row::new()
         .spacing(10)
         .align_y(Alignment::Center)
@@ -241,13 +254,20 @@ pub fn liquid_overview_view<'a>(
                 .with_time_ago(tx.time_ago.clone());
 
             if let Some(ref usdt_display) = tx.usdt_display {
-                item = item.with_amount_override(usdt_display.clone());
+                item = item.with_amount_override(if mask_amounts {
+                    "••••••".to_string()
+                } else {
+                    usdt_display.clone()
+                });
             } else {
+                if mask_amounts {
+                    item = item.with_amount_override("••••••".to_string());
+                }
                 let fiat_str = tx
                     .fiat_amount
                     .as_ref()
                     .map(|fiat| format!("{} {}", fiat.to_formatted_string(), fiat.currency()));
-                if let Some(fiat) = fiat_str {
+                if let Some(fiat) = fiat_str.filter(|_| !mask_amounts) {
                     item = item.with_fiat_amount(fiat);
                 }
             }

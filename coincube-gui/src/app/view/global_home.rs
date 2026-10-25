@@ -471,9 +471,12 @@ fn balance_summary_card<'a>(
     balance: &Amount,
     fiat_converter: Option<FiatAmountConverter>,
     bitcoin_unit: crate::app::settings::unit::BitcoinDisplayUnit,
+    balance_masked: bool,
     on_press: Message,
 ) -> Element<'a, Message> {
-    let fiat_balance = fiat_converter.as_ref().map(|c| c.convert(*balance));
+    let fiat_balance = (!balance_masked)
+        .then(|| fiat_converter.as_ref().map(|c| c.convert(*balance)))
+        .flatten();
     let name = kind.label();
 
     let content = Column::new()
@@ -489,7 +492,11 @@ fn balance_summary_card<'a>(
             Row::new().align_y(Alignment::Center).push(
                 Column::new()
                     .spacing(4)
-                    .push(amount_with_size_and_unit(balance, H2_SIZE, bitcoin_unit))
+                    .push(if balance_masked {
+                        Row::new().push(text("••••••").size(H2_SIZE))
+                    } else {
+                        amount_with_size_and_unit(balance, H2_SIZE, bitcoin_unit)
+                    })
                     .push_maybe(
                         fiat_balance
                             .map(|fiat| fiat.to_text().size(P1_SIZE).style(theme::text::secondary)),
@@ -542,6 +549,7 @@ fn wallet_selector_popup<'a>(
     spark_balance: Amount,
     vault_balance: Amount,
     bitcoin_unit: BitcoinDisplayUnit,
+    balance_masked: bool,
 ) -> Element<'a, Message> {
     let title_label = match editing {
         PickerSide::From => "FROM",
@@ -566,7 +574,11 @@ fn wallet_selector_popup<'a>(
 
     let row_for = |kind: WalletKind, balance: Amount| -> Element<'a, Message> {
         let is_selected = current == Some(kind);
-        let balance_str = balance.to_formatted_string_with_unit(bitcoin_unit);
+        let balance_str = if balance_masked {
+            "••••••".into()
+        } else {
+            balance.to_formatted_string_with_unit(bitcoin_unit)
+        };
         let icon_elem = wallet_kind_icon::<Message>(kind, 36.0);
         crate::app::view::shared::picker::picker_row(
             icon_elem,
@@ -703,6 +715,7 @@ fn enter_amount_view<'a>(
     bitcoin_unit: crate::app::settings::unit::BitcoinDisplayUnit,
     onchain_send_limit: Option<(u64, u64)>,
     onchain_receive_limit: Option<(u64, u64)>,
+    balance_masked: bool,
 ) -> Element<'a, Message> {
     let balance_for = |kind: WalletKind| -> &Amount {
         match kind {
@@ -722,6 +735,7 @@ fn enter_amount_view<'a>(
             balance_for(from_kind),
             fiat_converter,
             bitcoin_unit,
+            balance_masked,
             Message::Home(HomeMessage::OpenWalletPicker(PickerSide::From)),
         ))
         .push(balance_summary_card(
@@ -729,6 +743,7 @@ fn enter_amount_view<'a>(
             balance_for(to_kind),
             fiat_converter,
             bitcoin_unit,
+            balance_masked,
             Message::Home(HomeMessage::OpenWalletPicker(PickerSide::To)),
         ));
 
@@ -1654,6 +1669,7 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
                     bitcoin_unit,
                     onchain_send_limit,
                     onchain_receive_limit,
+                    balance_masked,
                 );
                 if let Some(editing) = wallet_picker {
                     let popup = wallet_selector_popup(
@@ -1667,6 +1683,7 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
                         spark_balance,
                         vault_balance,
                         bitcoin_unit,
+                        balance_masked,
                     );
                     return coincube_ui::widget::modal::Modal::new(amount_view, popup)
                         .on_blur(Some(Message::Home(HomeMessage::CloseWalletPicker)))

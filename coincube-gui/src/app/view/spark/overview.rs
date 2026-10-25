@@ -109,6 +109,7 @@ pub struct SparkOverviewView<'a> {
     /// matches the Liquid panel's USDt behaviour.
     pub btc_usd_price: Option<f64>,
     pub display_mode: DisplayMode,
+    pub mask_amounts: bool,
 }
 
 impl<'a> SparkOverviewView<'a> {
@@ -143,6 +144,7 @@ impl<'a> SparkOverviewView<'a> {
                 self.show_direction_badges,
                 self.stable_balance_active,
                 self.display_mode,
+                self.mask_amounts,
             ),
         }
     }
@@ -159,6 +161,7 @@ fn connected_view<'a>(
     show_direction_badges: bool,
     stable_balance_active: bool,
     display_mode: DisplayMode,
+    mask_amounts: bool,
 ) -> Element<'a, SparkOverviewMessage> {
     use crate::app::breez_spark::assets::stable_token_as_sats;
 
@@ -205,7 +208,7 @@ fn connected_view<'a>(
         .push(wallet_header::<SparkOverviewMessage>(WalletHeaderProps {
             sats: total_balance,
             fiat: total_fiat,
-            balance_masked: false,
+            balance_masked: mask_amounts,
             bitcoin_unit,
             variant: HeaderVariant::Overview,
             sync: SyncState::Synced,
@@ -234,16 +237,20 @@ fn connected_view<'a>(
         .align_y(Alignment::Center)
         .push(coincube_ui::image::asset_network_logo::<SparkOverviewMessage>("btc", "spark", 40.0))
         .push(text("BTC").size(P1_SIZE).bold().width(Length::Fixed(60.0)))
-        .push(amount_with_size_and_unit(
-            &btc_row_amount,
-            P1_SIZE,
-            bitcoin_unit,
-        ))
+        .push(if mask_amounts {
+            Row::new().push(text("••••••").size(P1_SIZE))
+        } else {
+            amount_with_size_and_unit(&btc_row_amount, P1_SIZE, bitcoin_unit)
+        })
         .push(
-            text(btc_fiat_str)
-                .size(P2_SIZE)
-                .style(theme::text::secondary)
-                .width(Length::Fill),
+            text(if mask_amounts {
+                "••••••".to_string()
+            } else {
+                btc_fiat_str
+            })
+            .size(P2_SIZE)
+            .style(theme::text::secondary)
+            .width(Length::Fill),
         )
         .push(
             button::primary(None, "Send")
@@ -309,9 +316,16 @@ fn connected_view<'a>(
                 // Token rows: replace the BTC headline with the token
                 // string. The fiat label still rides along underneath
                 // because USDB is pegged to USD.
-                item = item.with_amount_override(token_str.clone());
+                item = item.with_amount_override(if mask_amounts {
+                    "••••••".to_string()
+                } else {
+                    token_str.clone()
+                });
             }
-            if let Some(fiat) = tx.fiat_amount.as_ref() {
+            if mask_amounts && tx.token_display.is_none() {
+                item = item.with_amount_override("••••••".to_string());
+            }
+            if let Some(fiat) = tx.fiat_amount.as_ref().filter(|_| !mask_amounts) {
                 item = item.with_fiat_amount(format!(
                     "{} {}",
                     fiat.to_formatted_string(),

@@ -208,8 +208,12 @@ impl State for SparkReceive {
         let (sideshift_body, cross_network_selected) = match &self.sideshift_flow {
             Some(flow) => (
                 Some(
-                    crate::app::view::spark::spark_sideshift_receive_view(flow, cache.bitcoin_unit)
-                        .map(crate::app::view::Message::SparkSideshiftReceive),
+                    crate::app::view::spark::spark_sideshift_receive_view(
+                        flow,
+                        cache.bitcoin_unit,
+                        cache.balance_amounts_masked(),
+                    )
+                    .map(crate::app::view::Message::SparkSideshiftReceive),
                 ),
                 Some(flow.selected()),
             ),
@@ -238,6 +242,7 @@ impl State for SparkReceive {
                 balance_sats: self.balance_sats,
                 bitcoin_unit: cache.bitcoin_unit,
                 show_direction_badges: cache.show_direction_badges,
+                mask_amounts: cache.balance_amounts_masked(),
                 sideshift_body,
                 cross_network_selected,
             }

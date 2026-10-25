@@ -61,6 +61,7 @@ pub fn transactions_view<'a>(
                 cache.bitcoin_unit,
                 fiat_converter,
                 cache.show_direction_badges,
+                cache.balance_amounts_masked(),
             ))
         });
 
@@ -134,6 +135,7 @@ fn tx_list_view(
     bitcoin_unit: BitcoinDisplayUnit,
     fiat_converter: Option<FiatAmountConverter>,
     show_direction_badges: bool,
+    mask_amounts: bool,
 ) -> Element<'_, Message> {
     let direction = if tx.is_external() {
         TransactionDirection::Incoming
@@ -205,10 +207,14 @@ fn tx_list_view(
         Row::new()
             .spacing(3)
             .align_y(Alignment::Center)
-            .push(text(sign))
-            .push(amount_with_size_and_unit(amount, P2_SIZE, bitcoin_unit)),
+            .push(text(if mask_amounts { "" } else { sign }))
+            .push(if mask_amounts {
+                Row::new().push(text("••••••").size(P2_SIZE))
+            } else {
+                amount_with_size_and_unit(amount, P2_SIZE, bitcoin_unit)
+            }),
     );
-    if let Some(converter) = fiat_converter {
+    if let Some(converter) = fiat_converter.filter(|_| !mask_amounts) {
         let fiat = converter.convert(*amount);
         amount_column = amount_column.push(
             text(format!(
@@ -428,8 +434,12 @@ pub fn transaction_detail_view<'a>(
             .push(
                 Column::new().spacing(20).push(
                     Column::new()
-                        .push(Container::new(amount_with_size_and_unit(display_amount, H1_SIZE, bitcoin_unit)))
-                        .push(cache.fiat_price.as_ref().and_then(|price| price.try_into().ok()).map(|converter: FiatAmountConverter| {
+                        .push(Container::new(if cache.balance_amounts_masked() {
+                            Row::new().push(text("••••••").size(H1_SIZE))
+                        } else {
+                            amount_with_size_and_unit(display_amount, H1_SIZE, bitcoin_unit)
+                        }))
+                        .push(cache.fiat_price.as_ref().and_then(|price| price.try_into().ok()).filter(|_| !cache.balance_amounts_masked()).map(|converter: FiatAmountConverter| {
                             let fiat = converter.convert(*display_amount);
                             text(format!("≈ {} {} · current rate", fiat.to_formatted_string(), fiat.currency()))
                                 .size(P2_SIZE)
@@ -440,13 +450,18 @@ pub fn transaction_detail_view<'a>(
                             Row::new()
                                 .align_y(Alignment::Center)
                                 .push(h3("Miner fee: ").style(theme::text::secondary))
-                                .push(amount_with_size_and_unit(&fee_amount, H3_SIZE, bitcoin_unit))
+                                .push(if cache.balance_amounts_masked() {
+                                    Row::new().push(text("••••••").size(H3_SIZE))
+                                } else {
+                                    amount_with_size_and_unit(&fee_amount, H3_SIZE, bitcoin_unit)
+                                })
                                 .push(text(" ").size(H3_SIZE))
                                 .push(
-                                    text(format!(
-                                        "({} sats/vbyte)",
-                                        fee_amount.to_sat() / tx.tx.vsize() as u64
-                                    ))
+                                    text(if cache.balance_amounts_masked() {
+                                        "••••••".to_string()
+                                    } else {
+                                        format!("({} sats/vbyte)", fee_amount.to_sat() / tx.tx.vsize() as u64)
+                                    })
                                     .size(H4_SIZE)
                                     .style(theme::text::secondary),
                                 )
@@ -512,15 +527,16 @@ pub fn transaction_detail_view<'a>(
                     .push(if tx.is_external() {
                         None
                     } else {
-                        Some(super::psbt::inputs_view(
+                        Some(super::psbt::history_inputs_view(
                             &tx.coins,
                             &tx.tx,
                             &tx.labels,
                             labels_editing,
                             bitcoin_unit,
+                            cache.balance_amounts_masked(),
                         ))
                     })
-                    .push(super::psbt::outputs_view(
+                    .push(super::psbt::history_outputs_view(
                         &tx.tx,
                         cache.network,
                         &tx.change_indexes,
@@ -529,6 +545,7 @@ pub fn transaction_detail_view<'a>(
                         bitcoin_unit,
                         tx.is_single_payment().is_some(),
                         tx.is_external(),
+                        cache.balance_amounts_masked(),
                     )),
             )
             .spacing(20),

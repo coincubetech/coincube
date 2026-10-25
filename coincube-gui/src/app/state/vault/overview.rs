@@ -110,7 +110,7 @@ impl State for VaultOverview {
         if self.show_received_celebration {
             let celebration = view::vault::overview::received_celebration_page(
                 "bitcoin-receive",
-                &self.received_amount_display,
+                passive_received_amount(&self.received_amount_display, cache),
                 &self.received_quote,
                 &self.received_image_handle,
             );
@@ -155,6 +155,7 @@ impl State for VaultOverview {
                     cache.node_bitcoind_ibd,
                     cache.show_direction_badges,
                     cache.display_mode,
+                    cache.balance_amounts_masked(),
                 ),
             )
         }
@@ -478,6 +479,14 @@ impl State for VaultOverview {
     }
 }
 
+fn passive_received_amount<'a>(amount: &'a str, cache: &Cache) -> &'a str {
+    if cache.balance_amounts_masked() {
+        "••••••"
+    } else {
+        amount
+    }
+}
+
 impl From<VaultOverview> for Box<dyn State> {
     fn from(s: VaultOverview) -> Box<dyn State> {
         Box::new(s)
@@ -707,5 +716,52 @@ mod tests {
                 Some(500)
             )
         );
+    }
+}
+
+#[cfg(test)]
+mod received_privacy_tests {
+    use super::*;
+    use crate::app::state::preferences::{BalancePrivacy, BalancePrivacyChrome};
+    use crate::app::view::shared::landing::capture;
+    use coincube_ui::theme;
+
+    #[test]
+    fn mounted_celebration_follows_passive_privacy_authority() {
+        let mut cache = Cache::default();
+        let amount = "87,654,321 sats";
+        let quote = coincube_ui::component::quote_display::random_quote("bitcoin-receive");
+        let image =
+            coincube_ui::component::quote_display::image_handle_for_context("bitcoin-receive");
+        for privacy in [
+            None,
+            Some(BalancePrivacy::Unresolved),
+            Some(BalancePrivacy::Hidden),
+            Some(BalancePrivacy::Shown),
+        ] {
+            cache.balance_privacy = privacy.map(|privacy| BalancePrivacyChrome {
+                privacy,
+                busy: false,
+                interactive: false,
+            });
+            let mounted = capture::inspect(
+                "vault-received-celebration-privacy",
+                view::vault::overview::received_celebration_page(
+                    "bitcoin-receive",
+                    passive_received_amount(amount, &cache),
+                    &quote,
+                    &image,
+                ),
+                (1440, 900),
+                "dark",
+                theme::Theme::dark(),
+            );
+            if privacy == Some(BalancePrivacy::Shown) {
+                assert!(mounted.contains(amount));
+            } else {
+                assert!(mounted.contains("••••••"));
+                assert!(!mounted.contains(amount));
+            }
+        }
     }
 }

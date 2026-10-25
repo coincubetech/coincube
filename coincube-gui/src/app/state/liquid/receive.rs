@@ -188,6 +188,14 @@ impl LiquidReceive {
     }
 }
 
+fn passive_received_amount<'a>(amount: &'a str, cache: &Cache) -> &'a str {
+    if cache.balance_amounts_masked() {
+        "••••••"
+    } else {
+        amount
+    }
+}
+
 impl State for LiquidReceive {
     fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
         // Delegate to SideShift flow when active
@@ -199,7 +207,7 @@ impl State for LiquidReceive {
         if self.show_received_celebration {
             let celebration = view::liquid::received_celebration_page(
                 &self.received_celebration_context,
-                &self.received_amount_display,
+                passive_received_amount(&self.received_amount_display, cache),
                 &self.received_quote,
                 &self.received_image_handle,
             )
@@ -225,6 +233,7 @@ impl State for LiquidReceive {
             self.btc_balance,
             self.usdt_balance,
             cache.show_direction_badges,
+            cache.balance_amounts_masked(),
         )
         .map(view::Message::LiquidReceive);
 
@@ -1162,6 +1171,52 @@ impl LiquidReceive {
             Task::none()
         } else {
             Task::batch(tasks)
+        }
+    }
+}
+
+#[cfg(test)]
+mod receive_privacy_tests {
+    use super::*;
+    use crate::app::state::preferences::{BalancePrivacy, BalancePrivacyChrome};
+    use crate::app::view::shared::landing::capture;
+    use coincube_ui::theme;
+
+    #[test]
+    fn mounted_celebration_follows_passive_privacy_authority() {
+        let mut cache = Cache::default();
+        let amount = "76,543,219 USDt";
+        let quote = coincube_ui::component::quote_display::random_quote("note-receive");
+        let image = coincube_ui::component::quote_display::image_handle_for_context("note-receive");
+        for privacy in [
+            None,
+            Some(BalancePrivacy::Unresolved),
+            Some(BalancePrivacy::Hidden),
+            Some(BalancePrivacy::Shown),
+        ] {
+            cache.balance_privacy = privacy.map(|privacy| BalancePrivacyChrome {
+                privacy,
+                busy: false,
+                interactive: false,
+            });
+            let mounted = capture::inspect(
+                "liquid-receive-celebration-privacy",
+                view::liquid::received_celebration_page(
+                    "note-receive",
+                    passive_received_amount(amount, &cache),
+                    &quote,
+                    &image,
+                ),
+                (1440, 900),
+                "dark",
+                theme::Theme::dark(),
+            );
+            if privacy == Some(BalancePrivacy::Shown) {
+                assert!(mounted.contains(amount));
+            } else {
+                assert!(mounted.contains("••••••"));
+                assert!(!mounted.contains(amount));
+            }
         }
     }
 }
