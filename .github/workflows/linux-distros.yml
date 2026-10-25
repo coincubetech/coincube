@@ -1,0 +1,170 @@
+name: Linux distros
+
+# Builds the Linux app exactly like the release does, then tries to start it
+# on a spread of Linux distributions, each in a throwaway container. Every
+# distro gets its own ✅/❌ and a screenshot of the first screen.
+#
+# Distros are picked per family: the oldest release still supported (where
+# the glibc floor bites) and the newest. Derivatives ride on their base —
+# Mint/Pop!_OS/Zorin/elementary on Ubuntu, MX on Debian, Rocky/RHEL/CentOS
+# Stream on AlmaLinux, Manjaro/EndeavourOS/CachyOS on Arch.
+#
+# Not covered here, by design: Alpine (musl, cannot run a glibc binary at all),
+# NixOS (no /lib paths; use the repo's flake.nix), Wayland-only sessions,
+# hardware wallets and the keyring prompt. Those need a real machine.
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [ci/linux-versions]
+  workflow_dispatch:
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_RELEASE_LTO: true
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 1
+  BREEZ_API_KEY: ${{ secrets.BREEZ_API_KEY }}
+  COINCUBE_API_URL: ${{ vars.COINCUBE_API_URL }}
+  COINCUBE_ENABLE_PASSKEY: ${{ vars.COINCUBE_ENABLE_PASSKEY }}
+  COINCUBE_PASSKEY_RP_ID: ${{ vars.COINCUBE_PASSKEY_RP_ID }}
+
+jobs:
+  build:
+    name: Build Linux app
+    # Same runner as releases.yml, so these results describe what users
+    # download. To lower the glibc floor, try ubuntu-22.04 here.
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    outputs:
+      glibc: ${{ steps.floor.outputs.glibc }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # Same reason as nightly.yml: the LTO build runs the runner out of disk.
+      - name: Free disk space
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/hostedtoolcache/CodeQL
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Same key as nightly.yml, so this branch reuses master's cache.
+      - uses: actions/cache@v5
+        with:
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'coincube-spark-bridge/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+          path: |
+            target
+            coincube-spark-bridge/target
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config protobuf-compiler libdbus-1-dev libwebkit2gtk-4.1-dev
+
+      - name: Build
+        run: |
+          cargo build --package coincube-gui --bin coincube --profile minimal --locked
+          cargo build --manifest-path coincube-spark-bridge/Cargo.toml --profile minimal --locked
+
+      - name: Package
+        run: |
+          mkdir -p tenshu
+          cp target/minimal/coincube coincube-spark-bridge/target/minimal/coincube-spark-bridge tenshu/
+          tar czf tenshu-linux.tar.gz tenshu
+
+      - name: Find the oldest glibc the app accepts
+        id: floor
+        run: |
+          glibc=$(objdump -T tenshu/coincube | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)
+          echo "glibc=$glibc" >> "$GITHUB_OUTPUT"
+          echo "### Built app needs glibc $glibc or newer" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: tenshu-linux
+          path: tenshu-linux.tar.gz
+          retention-days: 7
+
+  test:
+    name: ${{ matrix.name }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container: ${{ matrix.image }}
+    strategy:
+      # One distro failing must not hide the others' results.
+      fail-fast: false
+      matrix:
+        include:
+          - { name: "Ubuntu 22.04 (Mint 21, Pop!_OS 22.04, Zorin 17)", image: "ubuntu:22.04", family: apt }
+          - { name: "Ubuntu 24.04 (Mint 22, Pop!_OS 24.04, elementary 8)", image: "ubuntu:24.04", family: apt }
+          - { name: "Ubuntu newest", image: "ubuntu:rolling", family: apt }
+          - { name: "Debian 12 (MX 23)", image: "debian:12", family: apt }
+          - { name: "Debian 13", image: "debian:13", family: apt }
+          - { name: "Fedora newest", image: "fedora:latest", family: dnf }
+          - { name: "AlmaLinux 9 (RHEL 9, Rocky 9)", image: "almalinux:9", family: dnf }
+          - { name: "AlmaLinux 10 (RHEL 10, Rocky 10)", image: "almalinux:10", family: dnf }
+          - { name: "Arch (Manjaro, EndeavourOS, CachyOS)", image: "archlinux:latest", family: pacman }
+          - { name: "openSUSE Leap 16", image: "opensuse/leap:16.0", family: zypper }
+          - { name: "openSUSE Tumbleweed", image: "opensuse/tumbleweed", family: zypper }
+    steps:
+      # Most of these images have no git; checkout then downloads the source
+      # over the API instead, which is fine.
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: tenshu-linux
+
+      - name: Install system libraries
+        run: sh contrib/linux-distro-check.sh install ${{ matrix.family }}
+
+      - name: Check glibc version
+        run: sh contrib/linux-distro-check.sh glibc ${{ needs.build.outputs.glibc }}
+
+      - name: Check for missing libraries
+        run: sh contrib/linux-distro-check.sh libs
+
+      - name: Start the app
+        run: sh contrib/linux-distro-check.sh launch
+
+      - name: Upload screenshot and log
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: result-${{ strategy.job-index }}
+          path: |
+            result/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  screenshots:
+    name: Collect screenshots
+    needs: test
+    if: always() && needs.test.result != 'skipped'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: result-*
+          path: results
+      - name: Convert screenshots to PNG
+        run: |
+          sudo apt-get update && sudo apt-get install -y imagemagick
+          mkdir -p screenshots
+          for dir in results/*/; do
+            [ -f "$dir/distro.txt" ] || continue
+            name=$(tr -c 'A-Za-z0-9._-' '_' < "$dir/distro.txt")
+            [ -f "$dir/screen.xwd" ] && convert "xwd:$dir/screen.xwd" "screenshots/$name.png"
+            [ -f "$dir/app.log" ] && cp "$dir/app.log" "screenshots/$name.log"
+          done
+          ls -la screenshots
+      - uses: actions/upload-artifact@v6
+        with:
+          name: screenshots
+          path: screenshots/
+          retention-days: 7
