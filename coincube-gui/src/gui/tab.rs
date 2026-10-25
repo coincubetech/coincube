@@ -523,11 +523,19 @@ pub enum Message {
     /// Show the Launcher without discarding this App session. The pane owns
     /// the tab switch, so this is bubbled up rather than handled here.
     OpenLauncher,
-    OpenAppPreferences,
+    OpenAppPreferences(PreferencesSource),
     /// Explicitly lock the Cube and return to the Launcher in this tab.
     LockCubeToLauncher,
     /// Completion of an authenticated fork installer generation.
     ForkInstallCompleted(u64, installer::Message),
+}
+
+/// The screen that emitted a queued App Preferences request. App requests
+/// retain their generation so a later Cube session cannot reuse the intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreferencesSource {
+    Home,
+    App(u64),
 }
 
 /// A restricted fork-loader result. GUI transfers these resources to the
@@ -1255,6 +1263,14 @@ impl Tab {
         matches!(self.state, State::App(_)).then_some(self.app_generation)
     }
 
+    pub(crate) fn preferences_source(&self) -> Option<PreferencesSource> {
+        match &self.state {
+            State::Home(_) => Some(PreferencesSource::Home),
+            State::App(_) => Some(PreferencesSource::App(self.app_generation)),
+            _ => None,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn reviewer_fork_session_generation(&self) -> u64 {
         self.fork_session_generation
@@ -1859,7 +1875,7 @@ impl Tab {
                     Task::done(Message::ToggleTheme)
                 }
                 home::Message::View(home::ViewMessage::OpenAppPreferences) => {
-                    Task::done(Message::OpenAppPreferences)
+                    Task::done(Message::OpenAppPreferences(PreferencesSource::Home))
                 }
                 home::Message::GlobalSettingsChanged => Task::done(Message::GlobalSettingsChanged),
                 home::Message::ConnectSignedInBubble => Task::done(Message::ConnectSignedIn),
@@ -2972,9 +2988,9 @@ impl Tab {
                     app::Message::View(app::view::Message::OpenLauncher) => {
                         Task::done(Message::OpenLauncher)
                     }
-                    app::Message::View(app::view::Message::OpenAppPreferences) => {
-                        Task::done(Message::OpenAppPreferences)
-                    }
+                    app::Message::View(app::view::Message::OpenAppPreferences) => Task::done(
+                        Message::OpenAppPreferences(PreferencesSource::App(self.app_generation)),
+                    ),
                     app::Message::View(app::view::Message::LockCubeToLauncher) => {
                         Task::done(Message::LockCubeToLauncher)
                     }

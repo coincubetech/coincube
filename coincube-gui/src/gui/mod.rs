@@ -93,6 +93,35 @@ fn balance_privacy_eye_change(
     }
 }
 
+/// Home reload also reconciles fork and Split flow availability. Only feature
+/// edits may ask it to run that reconciliation.
+fn needs_global_settings_reload(
+    before: Option<crate::app::settings::preferences::DevicePreferences>,
+    after: Option<crate::app::settings::preferences::DevicePreferences>,
+) -> bool {
+    match (before, after) {
+        (Some(before), Some(after)) => {
+            before.developer_mode != after.developer_mode
+                || before.bitcoin_blake2b_beta != after.bitcoin_blake2b_beta
+        }
+        (None, Some(_)) => true,
+        _ => false,
+    }
+}
+
+fn launcher_presentation_changed(
+    before: Option<crate::app::settings::preferences::DevicePreferences>,
+    after: Option<crate::app::settings::preferences::DevicePreferences>,
+) -> bool {
+    match (before, after) {
+        (Some(before), Some(after)) => {
+            before.launcher_style != after.launcher_style || before.motion != after.motion
+        }
+        (None, Some(_)) => true,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod balance_privacy_eye_origin_tests {
     use super::*;
@@ -290,10 +319,10 @@ fn route_guarded_tab_result(
         tab::Message::OpenConnectSignIn => pane::ViewMessage::OpenConnectSignIn,
         tab::Message::OpenPlanBilling => pane::ViewMessage::OpenPlanBilling,
         tab::Message::ToggleTheme => pane::ViewMessage::ToggleTheme,
-        tab::Message::OpenAppPreferences => {
+        tab::Message::OpenAppPreferences(source) => {
             return Message::Pane(
                 pane_id,
-                pane::Message::tab(tab_id, tab::Message::OpenAppPreferences),
+                pane::Message::tab(tab_id, tab::Message::OpenAppPreferences(source)),
             );
         }
         tab::Message::GlobalSettingsChanged => pane::ViewMessage::GlobalSettingsChanged,
@@ -478,6 +507,16 @@ impl GUI {
             }
         }
         Task::batch(tasks)
+    }
+
+    fn refresh_all_launcher_modes(&mut self) {
+        for (_, pane) in self.panes.iter_mut() {
+            for tab in &mut pane.tabs {
+                if let tab::State::Home(home) = &mut tab.state {
+                    home.refresh_launcher_mode();
+                }
+            }
+        }
     }
 
     fn preferences_view_model(&self) -> preferences_view::ViewModel<'_> {
@@ -1414,22 +1453,30 @@ impl GUI {
                 self.update(Message::ToggleTheme)
             }
             Message::Pane(pane_id, pane::Message::Tab(tab_id, inner))
-                if matches!(inner.as_ref(), tab::Message::OpenAppPreferences) =>
+                if matches!(inner.as_ref(), tab::Message::OpenAppPreferences(_)) =>
             {
-                let focus = self.panes.get(pane_id).and_then(|pane| {
-                    pane.tabs.iter().find(|tab| tab.id == tab_id).map(|tab| {
-                        let id = if matches!(&tab.state, tab::State::App(_)) {
-                            crate::app::view::nav::shell::APP_PREFERENCES_ID
-                        } else {
-                            "tenshu.launcher.catalog:control:settings"
-                        };
-                        iced::advanced::widget::Id::new(id)
-                    })
+                let tab::Message::OpenAppPreferences(source) = *inner else {
+                    unreachable!();
+                };
+                let current_source = self.panes.get(pane_id).and_then(|pane| {
+                    pane.tabs
+                        .iter()
+                        .find(|tab| tab.id == tab_id)
+                        .and_then(tab::Tab::preferences_source)
                 });
+                if current_source != Some(source) {
+                    return Task::none();
+                }
+                let focus = Some(iced::advanced::widget::Id::new(match source {
+                    tab::PreferencesSource::Home => "tenshu.launcher.catalog:control:settings",
+                    tab::PreferencesSource::App(_) => {
+                        crate::app::view::nav::shell::APP_PREFERENCES_ID
+                    }
+                }));
                 let Some(origin) = self.overlay_origin(focus) else {
                     return Task::none();
                 };
-                if origin.pane != pane_id || origin.tab_id != tab_id {
+                if origin.pane != pane_id || origin.tab_id != tab_id || origin.source != source {
                     return Task::none();
                 }
                 self.preferences_sheet = Some(PreferencesSheet {
@@ -2224,14 +2271,29 @@ impl GUI {
             }
             Message::Resized(_) | Message::Dragged(_) => Task::none(),
             Message::Preferences(request, result) => {
+                let before = self
+                    .preferences
+                    .accepted()
+                    .map(|accepted| accepted.preferences);
                 let applied = matches!(
                     self.preferences.complete(&request, result),
                     SaveOutcome::Applied(_)
                 );
                 self.publish_balance_privacy();
                 if applied {
-                    self.publish_appearance();
-                    return self.reload_all_global_settings();
+                    let after = self
+                        .preferences
+                        .accepted()
+                        .map(|accepted| accepted.preferences);
+                    if before.map(|prefs| prefs.theme) != after.map(|prefs| prefs.theme) {
+                        self.publish_appearance();
+                    }
+                    if launcher_presentation_changed(before, after) {
+                        self.refresh_all_launcher_modes();
+                    }
+                    if needs_global_settings_reload(before, after) {
+                        return self.reload_all_global_settings();
+                    }
                 }
                 Task::none()
             }
@@ -2483,7 +2545,7 @@ impl Config {
 pub struct OverlayOrigin {
     pub pane: pane_grid::Pane,
     pub tab_id: usize,
-    pub app_generation: Option<u64>,
+    pub source: tab::PreferencesSource,
     pub focus: Option<iced::advanced::widget::Id>,
 }
 
@@ -2512,7 +2574,7 @@ impl GUI {
         Some(OverlayOrigin {
             pane,
             tab_id: tab.id,
-            app_generation: tab.app_generation_token(),
+            source: tab.preferences_source()?,
             focus,
         })
     }
@@ -2525,7 +2587,7 @@ impl GUI {
             .filter(|(pane, _)| *pane == origin.pane)
             .and_then(|(_, state)| state.tabs.get(state.focused_tab))
             .is_some_and(|tab| {
-                tab.id == origin.tab_id && tab.app_generation_token() == origin.app_generation
+                tab.id == origin.tab_id && tab.preferences_source() == Some(origin.source)
             })
     }
 }
@@ -2619,7 +2681,50 @@ pub fn compose_overlay<'a, M: 'a>(
 #[cfg(test)]
 mod app_preferences_sheet_tests {
     use super::*;
-    use crate::app::settings::preferences::{LauncherStyle, PreferenceChange};
+    use crate::app::settings::preferences::{LauncherStyle, MotionPreference, PreferenceChange};
+
+    fn launcher_gui(root: &CoincubeDirectory) -> GUI {
+        let (home, startup) = home::Home::new_for_chain(root.clone(), None);
+        drop(startup);
+        let pane = pane::Pane::new_with_tab(tab::State::Home(home));
+        let (panes, focus) = pane_grid::State::new(pane);
+        let receipt = GlobalSettings::load_or_initialize_preferences(root);
+        GUI {
+            panes,
+            focus: Some(focus),
+            config: Config::new(root.clone(), None),
+            window_id: None,
+            window_init: None,
+            window_config: None,
+            global_cache: GlobalCache::default(),
+            theme_mode: Default::default(),
+            system_theme: None,
+            system_reduces_motion: None,
+            preferences_sheet: None,
+            preferences: PreferencesOwner::new(GlobalSettings::path(root), &receipt),
+        }
+    }
+
+    fn pin_entry(root: &CoincubeDirectory) -> tab::State {
+        let pin = crate::pin_entry::PinEntry::new(
+            crate::app::settings::CubeSettings::new(
+                "Locked Cube".into(),
+                crate::chain::ChainId::Bitcoin,
+            ),
+            root.path().to_path_buf(),
+            crate::pin_entry::PinEntrySuccess::LoadApp {
+                datadir: root.clone(),
+                config: crate::app::Config::new(false),
+                network: bitcoin::Network::Bitcoin,
+                internal_bitcoind: None,
+                backup: None,
+                wallet_settings: None,
+                connect_client: None,
+            },
+            None,
+        );
+        tab::State::PinEntry(pin)
+    }
 
     #[test]
     fn launcher_sheet_keeps_its_tab_and_routes_a_device_change() {
@@ -2634,14 +2739,16 @@ mod app_preferences_sheet_tests {
         ));
         std::fs::create_dir_all(&path).unwrap();
         let root = CoincubeDirectory::new(path.clone());
-        let (mut gui, startup) = GUI::new(Config::new(root, None), None);
-        drop(startup);
+        let mut gui = launcher_gui(&root);
         let pane_id = gui.focus.unwrap();
         let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
 
         drop(gui.update(Message::Pane(
             pane_id,
-            pane::Message::tab(tab_id, tab::Message::OpenAppPreferences),
+            pane::Message::tab(
+                tab_id,
+                tab::Message::OpenAppPreferences(tab::PreferencesSource::Home),
+            ),
         )));
         assert!(gui.preferences_sheet.is_some());
         assert!(gui.overlay_origin_is_current(&gui.preferences_sheet.as_ref().unwrap().origin));
@@ -2655,6 +2762,96 @@ mod app_preferences_sheet_tests {
         drop(gui.update(Message::KeyPressed(Key::Escape)));
         assert!(gui.preferences_sheet.is_none());
         assert_eq!(gui.panes.get(pane_id).unwrap().tabs[0].id, tab_id);
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn home_overlay_and_queued_intent_expire_when_unlock_replaces_home() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path = std::env::temp_dir().join(format!(
+            "tenshu-preferences-stale-home-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        let root = CoincubeDirectory::new(path.clone());
+        let mut gui = launcher_gui(&root);
+        let pane_id = gui.focus.unwrap();
+        let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
+        let open = || {
+            Message::Pane(
+                pane_id,
+                pane::Message::tab(
+                    tab_id,
+                    tab::Message::OpenAppPreferences(tab::PreferencesSource::Home),
+                ),
+            )
+        };
+
+        drop(gui.update(open()));
+        let origin = gui.preferences_sheet.as_ref().unwrap().origin.clone();
+        gui.panes.get_mut(pane_id).unwrap().tabs[0].state = pin_entry(&root);
+        assert!(!gui.overlay_origin_is_current(&origin));
+        assert_eq!(
+            gui.update(Message::PreferencesSheet(
+                preferences_view::Message::Action(preferences_view::Action::Close,)
+            ))
+            .units(),
+            0,
+            "a stale close must not focus the Launcher behind PIN entry"
+        );
+        assert!(gui.preferences_sheet.is_none());
+        assert_eq!(gui.update(open()).units(), 0);
+        assert!(gui.preferences_sheet.is_none());
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn ordinary_refresh_and_display_edits_preserve_home_split_flow() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path = std::env::temp_dir().join(format!(
+            "tenshu-preferences-refresh-split-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        let root = CoincubeDirectory::new(path.clone());
+        let mut gui = launcher_gui(&root);
+        let pane_id = gui.focus.unwrap();
+        let tab = &mut gui.panes.get_mut(pane_id).unwrap().tabs[0];
+        let tab::State::Home(home) = &mut tab.state else {
+            panic!("the launcher starts as Home");
+        };
+        home.active_section = home::HomeSection::SplitWallet;
+
+        let request = gui.preferences.begin_initialize().unwrap();
+        let receipt = GlobalSettings::load_or_initialize_preferences(&root).unwrap();
+        drop(gui.update(Message::Preferences(request, Ok(receipt))));
+        let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[0].state else {
+            panic!("refresh replaced Home");
+        };
+        assert_eq!(home.active_section, home::HomeSection::SplitWallet);
+
+        for change in [
+            PreferenceChange::LauncherStyle(LauncherStyle::List),
+            PreferenceChange::Motion(MotionPreference::Reduced),
+        ] {
+            let request = gui.preferences.begin_save(change).unwrap();
+            let receipt = GlobalSettings::save_preference(&request.root, change).unwrap();
+            drop(gui.update(Message::Preferences(request, Ok(receipt))));
+            let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[0].state else {
+                panic!("display edit replaced Home");
+            };
+            assert_eq!(home.active_section, home::HomeSection::SplitWallet);
+        }
         drop(gui);
         std::fs::remove_dir_all(path).ok();
     }
