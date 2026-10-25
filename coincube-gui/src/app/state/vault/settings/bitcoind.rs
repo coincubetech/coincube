@@ -870,9 +870,12 @@ impl State for BitcoindSettingsState {
                         if let Some(ref mut setup) = self.pending_node_setup {
                             match result {
                                 Ok((bitcoind_cfg, bitcoind)) => {
-                                    *self.managed_owner.lock().unwrap_or_else(|e| e.into_inner()) =
-                                        bitcoind.owner_lock_path().map(PathBuf::from);
                                     if let Some(cfg) = daemon.config() {
+                                        *self
+                                            .managed_owner
+                                            .lock()
+                                            .unwrap_or_else(|e| e.into_inner()) =
+                                            bitcoind.owner_lock_path().map(PathBuf::from);
                                         let mut new_cfg = cfg.clone();
                                         new_cfg.pending_bitcoind = Some(bitcoind_cfg);
                                         // This node supersedes a failed background
@@ -2929,6 +2932,80 @@ mod tests {
 
     fn daemon(config: Option<Config>) -> Arc<dyn Daemon + Sync + Send> {
         Arc::new(TestDaemon { config })
+    }
+
+    #[test]
+    fn late_setup_result_does_not_replace_settings_owner_after_panel_closed() {
+        let root =
+            std::env::temp_dir().join(format!("late-node-setup-owner-{}", uuid::Uuid::new_v4()));
+        let datadir = CoincubeDirectory::new(root.clone());
+        let cache = Cache {
+            datadir_path: datadir.clone(),
+            ..Cache::default()
+        };
+        let descriptor = crate::app::state::vault::test_support::unified::fixture().descriptor;
+        let wallet = Arc::new(crate::app::wallet::Wallet::new(descriptor));
+        let previous = PathBuf::from("existing-owner.lock");
+        let mut settings = crate::app::state::vault::settings::SettingsState::new(
+            datadir.clone(),
+            wallet,
+            DaemonBackend::EmbeddedCoincubed(None),
+            true,
+            Arc::new(crate::app::Config::new(false)),
+        )
+        .with_managed_owner(Some(previous.clone()));
+        let cfg = bitcoind_config(BitcoindRpcAuth::CookieFile(root.join(".cookie")));
+        let node = Bitcoind::for_test(cfg.clone(), &datadir, Network::Bitcoin);
+
+        let task = settings.update(
+            Some(daemon(Some(config_with_backend(Some(
+                BitcoinBackend::Bitcoind(cfg.clone()),
+            ))))),
+            &cache,
+            node_message(view::NodeSettingsMessage::SetupLocalNodeStartResult(Ok((
+                cfg, node,
+            )))),
+        );
+        assert_eq!(task.units(), 0);
+        assert_eq!(settings.managed_owner_path(), Some(previous));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn setup_result_without_daemon_config_does_not_replace_owner() {
+        let root = std::env::temp_dir().join(format!(
+            "missing-config-setup-owner-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let datadir = CoincubeDirectory::new(root.clone());
+        let cache = Cache {
+            datadir_path: datadir.clone(),
+            ..Cache::default()
+        };
+        let previous = Some(PathBuf::from("existing-owner.lock"));
+        let owner = Arc::new(Mutex::new(previous.clone()));
+        let mut state =
+            BitcoindSettingsState::new(None, &cache, false, true).with_managed_owner(owner);
+        let unavailable = daemon(None);
+        let _ = state.update(
+            Some(unavailable.clone()),
+            &cache,
+            node_message(view::NodeSettingsMessage::SetupLocalNode),
+        );
+        assert!(state.pending_node_setup.is_some());
+        let cfg = bitcoind_config(BitcoindRpcAuth::CookieFile(root.join(".cookie")));
+        let node = Bitcoind::for_test(cfg.clone(), &datadir, Network::Bitcoin);
+
+        let task = state.update(
+            Some(unavailable),
+            &cache,
+            node_message(view::NodeSettingsMessage::SetupLocalNodeStartResult(Ok((
+                cfg, node,
+            )))),
+        );
+        assert_eq!(task.units(), 0);
+        assert_eq!(state.managed_owner_path(), previous);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn bitcoin_config(network: Network) -> BitcoinConfig {

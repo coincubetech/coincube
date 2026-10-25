@@ -102,12 +102,6 @@ impl State for SettingsState {
                 "Remote daemon backends are unavailable for Bitcoin Blake2b.".into(),
             )));
         }
-        if let Message::View(view::Message::Settings(view::SettingsMessage::NodeSettings(
-            view::NodeSettingsMessage::SetupLocalNodeStartResult(Ok((_, node))),
-        ))) = &message
-        {
-            self.set_managed_owner(node.owner_lock_path().map(PathBuf::from));
-        }
         match &message {
             Message::View(view::Message::Settings(view::SettingsMessage::EditBitcoindSettings)) => {
                 self.setting = Some(

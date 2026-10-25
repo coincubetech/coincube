@@ -488,7 +488,15 @@ impl Context {
         let mut finish_lifecycle = if status.policy.as_ref().is_some_and(|p| p.temporary)
             && retention::unfinished(&directory)?.is_empty()
         {
-            Some(self.exclusive_lifecycle().await?)
+            // Another Cube may currently own the node. Keep this poll's status
+            // and retry the finish after that owner releases it.
+            match self.exclusive_lifecycle().await {
+                Ok(lifecycle) => Some(lifecycle),
+                Err(error) => {
+                    tracing::debug!(%error, "Deferring temporary retention finish");
+                    None
+                }
+            }
         } else {
             None
         };
