@@ -1889,15 +1889,25 @@ fn owner_cleanup() -> &'static (Mutex<usize>, Condvar) {
     OWNER_CLEANUP.get_or_init(|| (Mutex::new(0), Condvar::new()))
 }
 
-/// Finish outstanding final-owner releases after the UI has closed. The OS
-/// releases owner locks on an abrupt process exit; a normal exit also waits for
-/// the managed node and Tor shutdown to complete.
-pub fn wait_for_managed_node_cleanup() {
+/// Wait for final-owner releases after the UI has closed, up to `timeout`.
+/// A lifecycle lock may be held by another process indefinitely. If the wait
+/// expires, process exit releases our OS locks and the next attach reconciles
+/// our stale owner files before deciding whether the node may be stopped.
+pub fn wait_for_managed_node_cleanup(timeout: time::Duration) -> bool {
     let (count, changed) = owner_cleanup();
     let mut pending = count.lock().unwrap_or_else(|e| e.into_inner());
+    let deadline = time::Instant::now() + timeout;
     while *pending != 0 {
-        pending = changed.wait(pending).unwrap_or_else(|e| e.into_inner());
+        let remaining = deadline.saturating_duration_since(time::Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        pending = changed
+            .wait_timeout(pending, remaining)
+            .unwrap_or_else(|e| e.into_inner())
+            .0;
     }
+    true
 }
 
 /// Serializes the whole managed-node handoff, including Tor preparation and
@@ -3015,7 +3025,9 @@ mod tests {
             .join("locks/bitcoin")
             .exists());
         drop(node);
-        wait_for_managed_node_cleanup();
+        assert!(wait_for_managed_node_cleanup(time::Duration::from_secs(
+            120
+        )));
         assert!(!root.bitcoind_directory().path().join("locks").exists());
         std::fs::remove_dir_all(root.path()).unwrap();
     }
@@ -3037,7 +3049,9 @@ mod tests {
         clone.stop();
         assert_eq!(std::fs::read_dir(&locks).unwrap().count(), 1);
         owner.stop();
-        wait_for_managed_node_cleanup();
+        assert!(wait_for_managed_node_cleanup(time::Duration::from_secs(
+            120
+        )));
         assert!(!locks.exists());
         std::fs::remove_dir_all(root.path()).unwrap();
     }
@@ -3077,7 +3091,9 @@ mod tests {
         barrier.wait();
         t1.join().unwrap();
         t2.join().unwrap();
-        wait_for_managed_node_cleanup();
+        assert!(wait_for_managed_node_cleanup(time::Duration::from_secs(
+            120
+        )));
         assert!(!locks.exists(), "the last Arc drop must release the owner");
         std::fs::remove_dir_all(root.path()).unwrap();
     }
@@ -3106,13 +3122,18 @@ mod tests {
             owner_path.exists(),
             "owner must survive until cleanup acquires the lock"
         );
+        assert!(!wait_for_managed_node_cleanup(time::Duration::from_millis(
+            10
+        )));
         drop(lifecycle);
         dropping.join().unwrap();
         assert!(
             dropped_without_waiting.is_ok(),
             "last owner drop blocked on lifecycle cleanup"
         );
-        wait_for_managed_node_cleanup();
+        assert!(wait_for_managed_node_cleanup(time::Duration::from_secs(
+            120
+        )));
         assert!(!owner_path.exists());
         std::fs::remove_dir_all(root.path()).unwrap();
     }

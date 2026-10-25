@@ -174,7 +174,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     .run();
     // Final-owner release runs off the UI thread. Keep a normal process exit
     // from abandoning that work after the last window closes.
-    wait_for_managed_node_cleanup();
+    if !wait_for_managed_node_cleanup(std::time::Duration::from_secs(120)) {
+        tracing::warn!(
+            "Timed out waiting for managed-node cleanup; remaining owner locks will be reconciled on the next start"
+        );
+    }
     if let Err(e) = result {
         log::error!("{}", e);
         Err(format!("Failed to launch UI: {}", e).into())
