@@ -4223,6 +4223,9 @@ mod lock_cube_dispatch_tests {
             pane_id,
             pane::Message::tab(999, tab::Message::ClaimResourcesLoaded(Box::new(resources))),
         )));
+        assert!(crate::node::bitcoind::wait_for_managed_node_cleanup(
+            std::time::Duration::from_secs(120)
+        ));
         assert!(!lock_dir.exists(), "the detached node lock was released");
         let surviving = &gui.panes.get(pane_id).unwrap().tabs[0];
         assert!(matches!(&surviving.state, tab::State::App(app)
@@ -4258,6 +4261,9 @@ mod lock_cube_dispatch_tests {
                 )))),
             ),
         )));
+        assert!(crate::node::bitcoind::wait_for_managed_node_cleanup(
+            std::time::Duration::from_secs(120)
+        ));
         assert!(!lock_dir.exists());
 
         let (closed_home, startup) = home::Home::new_for_chain(root.clone(), None);
@@ -4306,6 +4312,9 @@ mod lock_cube_dispatch_tests {
             closed_pane,
             pane::Message::tab(1, tab::Message::ClaimResourcesLoaded(Box::new(stale))),
         )));
+        assert!(crate::node::bitcoind::wait_for_managed_node_cleanup(
+            std::time::Duration::from_secs(120)
+        ));
         assert!(
             !lock_dir.exists(),
             "missing-pane delivery released its node"
@@ -4350,6 +4359,9 @@ mod lock_cube_dispatch_tests {
                 ),
             ),
         )));
+        assert!(crate::node::bitcoind::wait_for_managed_node_cleanup(
+            std::time::Duration::from_secs(120)
+        ));
         assert!(
             !lock_dir.exists(),
             "stale-generation delivery released its node"

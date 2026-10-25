@@ -2,7 +2,8 @@ pub(crate) mod bitcoind;
 mod wallet;
 
 use std::convert::From;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use iced::Task;
 
@@ -37,6 +38,7 @@ pub struct SettingsState {
     setting: Option<Box<dyn State>>,
     daemon_backend: DaemonBackend,
     internal_bitcoind: bool,
+    managed_owner: Arc<Mutex<Option<PathBuf>>>,
     config: Arc<Config>,
 }
 
@@ -54,8 +56,26 @@ impl SettingsState {
             setting: None,
             daemon_backend,
             internal_bitcoind,
+            managed_owner: Arc::new(Mutex::new(None)),
             config,
         }
+    }
+
+    pub(crate) fn with_managed_owner(mut self, owner: Option<PathBuf>) -> Self {
+        self.set_managed_owner(owner);
+        self
+    }
+
+    pub(crate) fn set_managed_owner(&mut self, owner: Option<PathBuf>) {
+        *self.managed_owner.lock().unwrap_or_else(|e| e.into_inner()) = owner;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn managed_owner_path(&self) -> Option<PathBuf> {
+        self.managed_owner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
@@ -91,6 +111,7 @@ impl State for SettingsState {
                         !daemon.backend().is_embedded(),
                         self.internal_bitcoind,
                     )
+                    .with_managed_owner(self.managed_owner.clone())
                     .into(),
                 );
                 let wallet = self.wallet.clone();
@@ -591,6 +612,34 @@ mod chain_tests {
         ))
         .is_none());
         assert!(ineligible.modal.is_none());
+    }
+
+    #[test]
+    fn open_node_settings_reads_replaced_owner_token() {
+        let path = std::env::temp_dir().join(format!("settings-owner-{}", uuid::Uuid::new_v4()));
+        let datadir = CoincubeDirectory::new(path.clone());
+        let cache = Cache {
+            datadir_path: datadir.clone(),
+            ..Cache::default()
+        };
+        let descriptor = crate::app::state::vault::test_support::unified::fixture().descriptor;
+        let wallet = Arc::new(Wallet::new(descriptor));
+        let mut settings = SettingsState::new(
+            datadir,
+            wallet,
+            DaemonBackend::EmbeddedCoincubed(None),
+            true,
+            Arc::new(Config::new(false)),
+        )
+        .with_managed_owner(Some(PathBuf::from("old-owner.lock")));
+        let open = BitcoindSettingsState::new(None, &cache, false, true)
+            .with_managed_owner(settings.managed_owner.clone());
+        settings.set_managed_owner(Some(PathBuf::from("replacement-owner.lock")));
+        assert_eq!(
+            open.managed_owner_path(),
+            Some(PathBuf::from("replacement-owner.lock"))
+        );
+        let _ = std::fs::remove_dir_all(path);
     }
 
     #[test]
