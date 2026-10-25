@@ -2012,6 +2012,16 @@ pub mod global {
             Self::read_settings(path).map(|settings| settings.preferences())
         }
 
+        /// Read the current privacy choice under the global settings lock.
+        /// A cached Show receipt is insufficient at render time: another
+        /// process may have committed Hide since that receipt was issued.
+        pub fn current_balances_hidden(path: &Path) -> Result<Option<bool>, super::SettingsError> {
+            let settings = Self::read_settings(path)?;
+            Ok(settings
+                .balance_privacy_initialized
+                .then_some(settings.hide_balances))
+        }
+
         /// Edit one choice in the shared transaction and return the new
         /// snapshot once the replacement is visible. A committed save whose
         /// post-rename steps could not be confirmed is logged and still

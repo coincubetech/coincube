@@ -36,6 +36,21 @@ use crate::{
     },
 };
 
+/// A Show receipt may have gone stale while the GUI was being constructed (or
+/// between later refreshes). Recheck the established choice at render time;
+/// any read failure is fail-closed until the ordered refresh accepts a receipt.
+fn privacy_render_needs_cover(
+    preferences: &PreferencesOwner,
+    settings_path: &std::path::Path,
+) -> bool {
+    use crate::app::state::preferences::BalancePrivacy;
+    preferences.privacy() == BalancePrivacy::Shown
+        && !matches!(
+            GlobalSettings::current_balances_hidden(settings_path),
+            Ok(Some(false))
+        )
+}
+
 use iced::window::Id;
 
 /// Both automatic polling and explicit signing actions need the current
@@ -93,6 +108,40 @@ fn balance_privacy_eye_change(
 mod balance_privacy_eye_origin_tests {
     use super::*;
     use crate::app::{self, settings::preferences::PreferenceChange, view};
+
+    #[test]
+    fn first_render_rechecks_a_show_receipt_after_another_writer_hides() {
+        let root =
+            std::env::temp_dir().join(format!("privacy-first-render-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join(crate::app::settings::global::DEFAULT_FILE_NAME);
+        let shown =
+            GlobalSettings::save_preference(&path, PreferenceChange::HideBalances(false)).unwrap();
+        let owner = PreferencesOwner::new(path.clone(), &Ok(shown));
+        let shown_bytes = std::fs::read(&path).unwrap();
+        assert!(!privacy_render_needs_cover(&owner, &path));
+        assert_eq!(std::fs::read(&path).unwrap(), shown_bytes);
+
+        let other_path = path.clone();
+        std::thread::spawn(move || {
+            GlobalSettings::save_preference(&other_path, PreferenceChange::HideBalances(true))
+                .unwrap();
+        })
+        .join()
+        .unwrap();
+        assert_eq!(
+            owner.privacy(),
+            crate::app::state::preferences::BalancePrivacy::Shown
+        );
+        assert!(privacy_render_needs_cover(&owner, &path));
+
+        std::fs::write(&path, br#"{"hide_balances":false}"#).unwrap();
+        assert!(privacy_render_needs_cover(&owner, &path));
+
+        std::fs::write(&path, b"{malformed").unwrap();
+        assert!(privacy_render_needs_cover(&owner, &path));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn queued_eye_event_cannot_change_device_privacy_after_app_closes() {
@@ -2216,6 +2265,15 @@ impl GUI {
     }
 
     pub fn view(&self) -> Element<Message> {
+        if privacy_render_needs_cover(
+            &self.preferences,
+            &GlobalSettings::path(&self.config.coincube_directory),
+        ) {
+            return iced::widget::container(iced::widget::text("Updating balance privacy…"))
+                .width(iced::Length::Fill)
+                .height(iced::Length::Fill)
+                .into();
+        }
         let (&id, pane) = self
             .panes
             .iter()
