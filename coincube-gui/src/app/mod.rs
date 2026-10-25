@@ -12240,6 +12240,30 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn paired_claim_stop_works_inside_and_outside_tokio() {
+        use std::sync::atomic::Ordering;
+
+        let _guard = crate::app::session::test_guard();
+        let (mut source, _handoff, path) =
+            crate::app::claim_step1_tests::returning_claim_fixture(false);
+        let calls = reviewer_attach_counted_claim_context(&mut source);
+        source.claim_pair_context.take().unwrap().stop();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let calls = reviewer_attach_counted_claim_context(&mut source);
+        runtime.block_on(async {
+            source.claim_pair_context.take().unwrap().stop();
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        drop(source);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
     fn imported_policy_loads_as_the_existing_vault_wallet() {
         use coincube_core::{chain::ChainId, wallet_descriptor::ImportedWalletDescriptor};
         use coincubed::config::{BitcoinBackend, BitcoinConfig, ElectrumConfig};

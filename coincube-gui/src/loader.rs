@@ -778,6 +778,7 @@ impl Loader {
         self.scoped_seed_password = None;
         self.claim_verified_account = None;
         self.restricted_claim = false;
+        self.fork_session_revoked = true;
         self.fork_task.take();
         self.internal_bitcoind.take();
         self.step = Step::Error(Box::new(Error::Unexpected(
@@ -3151,6 +3152,26 @@ mod bootstrap_backend_selection_tests {
         assert!(loader.fork_session_revoked);
         assert!(matches!(&loader.step, Step::Error(error)
             if error.to_string() == format!("Unexpected error: {disabled}")));
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[test]
+    fn transferred_claim_loader_cannot_retry_before_its_tab_closes() {
+        let root = temp_root("transferred-claim-retry");
+        let (mut loader, startup) = Loader::new_for_chain(
+            root.clone(),
+            GUIConfig::new(false),
+            wallet(),
+            cube(ChainId::BitcoinBlake2b),
+            authenticated_client(),
+            encryption_key(),
+        );
+        drop(startup);
+        loader.detach_claim_resources();
+        assert!(loader.fork_revoked());
+        loader.fork_retry_not_before = None;
+        assert_eq!(loader.update(Message::View(ViewMessage::Retry)).units(), 0);
+        assert!(matches!(loader.step, Step::Error(_)));
         std::fs::remove_dir_all(root.path()).unwrap();
     }
 
