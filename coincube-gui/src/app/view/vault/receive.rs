@@ -161,12 +161,30 @@ fn see_more_id() -> Id {
     control_id("more")
 }
 
-fn verify_close_id() -> Id {
+pub(crate) fn verify_close_id() -> Id {
     control_id("verify-close")
 }
 
-fn qr_close_id() -> Id {
+pub(crate) fn qr_close_id() -> Id {
     control_id("qr-close")
+}
+
+pub(crate) fn modal_origin_id(
+    index: usize,
+    generated_count: usize,
+    address: &Address,
+    verify: bool,
+) -> Id {
+    let scope = if index < generated_count {
+        Scope::Generated
+    } else {
+        Scope::Previous
+    };
+    address_control_id(
+        scope,
+        if verify { Control::Verify } else { Control::Qr },
+        &address.to_string(),
+    )
 }
 
 /// A keyboard-reachable control. A disabled action has no press message and
