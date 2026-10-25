@@ -97,7 +97,7 @@ a.chip:hover{background:var(--hover)}
 .intro{color:var(--muted);font-size:13px;margin:4px 0 0;max-width:62ch}
 .rows{margin-top:12px;border-bottom:1px solid var(--line)}
 .row{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:32px;align-items:center;min-height:56px;padding:12px 0;border-top:1px solid var(--line)}
-.row.top{align-items:start}
+.row.atop{align-items:start}
 .rl{min-width:0}
 .lb{font-weight:500;overflow-wrap:anywhere}
 .ds{color:var(--muted);font-size:13px;margin-top:2px;max-width:60ch;overflow-wrap:anywhere}
@@ -132,8 +132,7 @@ select.in{width:240px}
 .lead{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:24px;align-items:center;margin-top:24px;padding:18px 0;border-top:2px solid var(--warn);border-bottom:1px solid var(--line)}
 .lead.unk{border-top-color:var(--line)}
 .lead h2{font-size:20px;font-weight:600;margin-top:6px}
-.fbar{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:12px 0}
-.fbar .msg{margin-right:auto;font-size:13px;color:var(--muted)}
+.saved{min-height:18px;padding:8px 0 0;font-size:13px;color:var(--muted);text-align:right}
 .dsc{display:flex;align-items:center;gap:8px;width:100%;margin-top:32px;padding:12px 0;border:0;border-top:1px solid var(--line);border-bottom:1px solid var(--line);background:none;cursor:pointer;text-align:left;font-weight:600;font-size:15px;color:var(--ink)}
 .dsc:hover{background:var(--hover)}
 .dsc .ic{transition:transform .15s;color:var(--muted)}
@@ -272,7 +271,6 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
           <sc-for list="{{ scopes }}" as="s" hint-placeholder-count="4">
             <button type="button" class="sb" aria-pressed="{{ s.pressed }}" title="{{ s.label }}" onClick="{{ s.pick }}">
               <sc-if value="{{ s.cube }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg></sc-if>
-              <sc-if value="{{ s.device }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><rect x="2" y="3" width="14" height="9.5" rx="1.5"/><path d="M6 15.5h6M9 12.5v3"/></svg></sc-if>
               <sc-if value="{{ s.vault }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg></sc-if>
               <sc-if value="{{ s.spark }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg></sc-if>
               <span>{{ s.label }}</span>
@@ -302,7 +300,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
           <section class="grp" aria-labelledby="h-amt">
             <h3 id="h-amt">Amounts &amp; currency</h3>
             <sc-if value="{{ form.error }}" hint-placeholder-val="{{ false }}">
-              <div class="note bad" role="alert"><div><p><b>Couldn't save Currency and Exchange-rate source.</b></p><p>Your edits are kept below.</p></div><button type="button" class="btn" onClick="{{ form.save }}">Try again</button></div>
+              <div class="note bad" role="alert"><div><p><b>Couldn't save Currency and Exchange-rate source.</b></p><p>The rest of this page saved. Your choice is kept below.</p></div><button type="button" class="btn" onClick="{{ form.save }}">Try again</button></div>
             </sc-if>
             <div class="rows">
               <div class="row"><div class="rl"><p class="lb" id="u-l">Bitcoin unit</p></div><div class="rc"><div class="seg" role="group" aria-labelledby="u-l"><button type="button" aria-pressed="{{ form.btc }}" onClick="{{ form.setBtc }}">BTC</button><button type="button" aria-pressed="{{ form.sats }}" onClick="{{ form.setSats }}">Sats</button></div></div></div>
@@ -312,12 +310,12 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
               <div class="row"><div class="rl"><label class="lb" for="src">Exchange-rate source</label><p class="ds">Never changes a balance.</p></div><div class="rc"><select id="src" class="{{ form.errCls }}" value="{{ form.source }}" onChange="{{ form.setSource }}"><option value="A">[RATE SOURCE A]</option><option value="B">[RATE SOURCE B]</option></select></div></div>
               <div class="row"><div class="rl"><p class="lbl-line"><span class="lb" id="b-l">Direction badges</span><span class="sc">This device</span></p><p class="ds">In and Out badges in Activity.</p></div><div class="rc"><button type="button" class="tog" aria-labelledby="b-l" aria-pressed="{{ form.badges }}" onClick="{{ form.togBadges }}"><span class="kn"></span>{{ form.badgesText }}</button></div></div>
             </div>
-            <div class="fbar"><span class="msg" role="status">{{ form.msg }}</span><button type="button" class="btn" disabled="{{ form.clean }}" onClick="{{ form.discard }}">Discard</button><button type="button" class="btn pri" disabled="{{ form.clean }}" onClick="{{ form.save }}">{{ form.saveLabel }}</button></div>
+            <p class="saved" role="status">{{ form.msg }}</p>
           </section>
           <section class="grp" aria-labelledby="h-id">
             <h3 id="h-id">Cube identity</h3>
             <div class="rows">
-              <div class="row"><div class="rl"><label class="lb" for="cname">Cube name</label></div><div class="rc"><input id="cname" class="in" value="{{ form.name }}" onChange="{{ form.setName }}"></div></div>
+              <div class="row"><div class="rl"><label class="lb" for="cname">Cube name</label><p class="ds">Saved when you press Return or leave the field.</p></div><div class="rc"><input id="cname" class="in" value="{{ form.name }}" onChange="{{ form.setName }}"></div></div>
               <div class="row"><div class="rl" style="display:flex;gap:14px;align-items:center"><div class="ava" aria-hidden="true">[ava]</div><div><p class="lb">Avatar</p>
                 <sc-if value="{{ avatar.ready }}" hint-placeholder-val="{{ true }}"><p class="ds">Regenerations left: [N]</p></sc-if>
                 <sc-if value="{{ avatar.loading }}" hint-placeholder-val="{{ false }}"><p class="ds">Loading…</p></sc-if>
@@ -371,7 +369,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
               <sc-if value="{{ chk.asking }}" hint-placeholder-val="{{ false }}">
                 <div class="note" role="group" aria-labelledby="chk-q"><p id="chk-q"><b>Turn off recipient checks?</b> Sends will skip the identity check.</p><div class="acts" style="margin:0"><button type="button" class="btn pri" onClick="{{ chk.confirmOff }}">Turn off</button><button type="button" class="btn" onClick="{{ chk.cancel }}">Cancel</button></div></div>
               </sc-if>
-              <div class="row top"><div class="rl"><p class="lb" id="str-l">Strict mode</p><p class="ds">Strict mode does not share the plaintext destination or payment amount. Branta can still observe lookup timing and your network connection.</p><p class="ds"><a href="#branta-privacy">Branta privacy information</a></p></div><div class="rc"><button type="button" class="tog" aria-labelledby="str-l" aria-pressed="{{ strictP }}" onClick="{{ togStrict }}"><span class="kn"></span>{{ strictText }}</button></div></div>
+              <div class="row atop"><div class="rl"><p class="lb" id="str-l">Strict mode</p><p class="ds">Strict mode does not share the plaintext destination or payment amount. Branta can still observe lookup timing and your network connection.</p><p class="ds"><a href="#branta-privacy">Branta privacy information</a></p></div><div class="rc"><button type="button" class="tog" aria-labelledby="str-l" aria-pressed="{{ strictP }}" onClick="{{ togStrict }}"><span class="kn"></span>{{ strictText }}</button></div></div>
             </div>
             <p class="cap" style="margin-top:12px">A check never guarantees who the recipient is. Unverifiable recipients show as “Not verified”.</p>
           </section>
@@ -383,6 +381,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
             <p class="intro">Let the AI you already use operate this Cube through Tenshu's local connection. Tenshu stays the wallet engine; seeds, keys, PINs, passwords and passkeys never enter the conversation.</p>
             <div class="rows">
               <div class="row"><div class="rl"><p class="lb">Claude Desktop</p><p class="ds">Vault · Family savings, Spark · Daily spending · Read wallet information, Manage wallet setup · Available</p></div><div class="rc"><a class="btn" href="P-AI-Access.dc.html">Manage</a></div></div>
+              <div class="row"><div class="rl"><p class="lb">Codex · ChatGPT</p><p class="ds">Spark · Daily spending · Read wallet information, Prepare unsigned transactions · Available</p></div><div class="rc"><a class="btn" href="P-AI-Access.dc.html">Manage</a></div></div>
               <div class="row"><div class="rl"><p class="lb">Maple AI Desktop</p><p class="ds">Vault · Family savings · Read wallet information · Paused, Cube was locked</p></div><div class="rc"><a class="btn" href="P-AI-Access.dc.html">Manage</a></div></div>
               <div class="row"><div class="rl"><p class="lb">Pair a client</p><p class="ds">Pair once; access lasts until you revoke it. Each client gets only the Cubes, wallets and permissions you choose.</p></div><div class="rc"><a class="btn pri" href="P-AI-Access.dc.html">Open AI access</a></div></div>
             </div>
@@ -426,16 +425,6 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
           </section>
         </sc-if>
 
-        <!-- ======== THIS DEVICE ======== -->
-        <sc-if value="{{ sec.device }}" hint-placeholder-val="{{ false }}">
-          <section class="grp" aria-label="This device">
-            <div class="rows">
-              <div class="row"><div class="rl"><p class="lb">App preferences live in the Launcher</p></div><div class="rc"><a class="btn" href="P-AppPrefs.dc.html">Open App preferences</a></div></div>
-              <div class="row"><div class="rl"><p class="lbl-line"><span class="lb">Spark · Stable Balance</span><span class="st {{ dev.cls }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle class="gc" cx="9" cy="9" r="6.5"/><path class="g go" d="M6 9h6"/></svg>{{ dev.status }}</span></p><p class="ds">{{ dev.text }}</p></div><div class="rc"><sc-if value="{{ has.spark }}" hint-placeholder-val="{{ true }}"><button type="button" class="btn" onClick="{{ go.spark }}">Review in Spark</button></sc-if></div></div>
-            </div>
-          </section>
-        </sc-if>
-
         <!-- ======== VAULT: NONE ======== -->
         <sc-if value="{{ sec.vaultNone }}" hint-placeholder-val="{{ false }}">
           <div class="empty"><h2>No Vault in this Cube</h2><p>Seed protection for Spark and Liquid is in Backup &amp; protection.</p><div class="acts"><a class="btn" href="P-Overview.dc.html">See wallets</a><button type="button" class="btn" onClick="{{ go.backup }}">Open Backup &amp; protection</button></div></div>
@@ -454,12 +443,13 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
           </section>
           <section class="grp" aria-labelledby="h-sg">
             <h3 id="h-sg">Signers</h3>
+            <p class="intro">Names save when you press Return or leave the field.</p>
             <div class="rows">
               <sc-for list="{{ signers }}" as="g" hint-placeholder-count="3">
                 <div class="row"><div class="rl"><label class="lb" for="{{ g.id }}">{{ g.kind }}</label><p class="ds"><span class="mono">{{ g.fp }}</span> · {{ g.owner }}</p></div><div class="rc"><input id="{{ g.id }}" class="in" aria-label="Alias for {{ g.kind }}" value="{{ g.alias }}" onChange="{{ g.set }}"></div></div>
               </sc-for>
             </div>
-            <div class="fbar"><span class="msg" role="status">{{ aliasMsg }}</span><button type="button" class="btn" disabled="{{ aliasClean }}" onClick="{{ aliasDiscard }}">Discard</button><button type="button" class="btn pri" disabled="{{ aliasClean }}" onClick="{{ aliasSave }}">Save names</button></div>
+            <p class="saved" role="status">{{ aliasMsg }}</p>
           </section>
           <section class="grp" aria-labelledby="h-ph">
             <h3 id="h-ph">Phone signing and members</h3>
@@ -471,8 +461,8 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
           <button type="button" class="dsc" aria-expanded="{{ open.wx.exp }}" aria-controls="wx-body" onClick="{{ open.wx.tog }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="m7 4.5 4.5 4.5L7 13.5"/></svg>Advanced <span class="cap">· descriptor, keys, hardware</span></button>
           <sc-if value="{{ open.wx.on }}" hint-placeholder-val="{{ false }}">
             <div class="dbody" id="wx-body"><div class="rows">
-              <div class="row top"><div class="rl"><p class="lb">Descriptor <span class="cap">· synthetic, masked</span></p><p class="mono" style="overflow-wrap:anywhere;margin-top:4px">wsh(multi(2,[a1b2c3d4/…]••••,[e5f6a7b8/…]••••,[c9d0e1f2/…]••••))#••••••••</p></div><div class="rc"><button type="button" class="btn">Copy…</button><button type="button" class="btn">Export encrypted…</button></div></div>
-              <div class="row top" style="grid-template-columns:1fr"><div class="rl"><p class="lb">Key details</p>
+              <div class="row atop"><div class="rl"><p class="lb">Descriptor <span class="cap">· synthetic, masked</span></p><p class="mono" style="overflow-wrap:anywhere;margin-top:4px">wsh(multi(2,[a1b2c3d4/…]••••,[e5f6a7b8/…]••••,[c9d0e1f2/…]••••))#••••••••</p></div><div class="rc"><button type="button" class="btn">Copy…</button><button type="button" class="btn">Export encrypted…</button></div></div>
+              <div class="row atop" style="grid-template-columns:1fr"><div class="rl"><p class="lb">Key details</p>
                 <div class="tl" role="table" aria-label="Key details">
                   <div class="tr th" role="row"><span role="columnheader">Signer</span><span role="columnheader">Fingerprint</span><span role="columnheader">Path</span><span role="columnheader">Held by</span></div>
                   <sc-for list="{{ signers }}" as="g" hint-placeholder-count="3"><div class="tr" role="row"><span role="cell" style="overflow-wrap:anywhere">{{ g.alias }}</span><span role="cell" class="mono">{{ g.fp }}</span><span role="cell" class="mono">m/48'/0'/0'/2'</span><span role="cell">{{ g.held }}</span></div></sc-for>
@@ -664,7 +654,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
             <p class="intro" style="display:flex;gap:16px;flex-wrap:wrap"><span class="st {{ ln.acctCls }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle class="gc" cx="9" cy="9" r="6.5"/><path class="g gk" d="m6.25 9.25 1.9 1.9 3.6-3.9"/><path class="g gu" d="M7.2 7.2a1.9 1.9 0 1 1 2.6 1.75c-.5.25-.8.6-.8 1.15v.4M9 12.6v.01"/></svg>Account {{ ln.acct }}</span></p>
             <div class="rows">
               <sc-if value="{{ ln.existing }}" hint-placeholder-val="{{ true }}"><div class="row"><div class="rl"><p class="lb">Your address</p><p class="mono" style="font-size:14px;color:var(--ink)">alex@ln.example.test</p></div><div class="rc"><button type="button" class="btn">Copy</button><button type="button" class="btn">Change…</button></div></div></sc-if>
-              <sc-if value="{{ ln.claim }}" hint-placeholder-val="{{ false }}"><div class="row top"><div class="rl"><label class="lb" for="lnu">Claim an address</label><div style="display:flex;align-items:center;gap:6px;margin-top:6px"><input id="lnu" class="in" style="width:200px" value="alex" aria-describedby="lnu-h"><span class="mono">@ln.example.test</span></div><p class="ds" id="lnu-h">3–32 characters: lowercase letters, numbers, dots, dashes.</p></div><div class="rc"><button type="button" class="btn pri" onClick="{{ ln.check }}">Check availability</button></div></div></sc-if>
+              <sc-if value="{{ ln.claim }}" hint-placeholder-val="{{ false }}"><div class="row atop"><div class="rl"><label class="lb" for="lnu">Claim an address</label><div style="display:flex;align-items:center;gap:6px;margin-top:6px"><input id="lnu" class="in" style="width:200px" value="alex" aria-describedby="lnu-h"><span class="mono">@ln.example.test</span></div><p class="ds" id="lnu-h">3–32 characters: lowercase letters, numbers, dots, dashes.</p></div><div class="rc"><button type="button" class="btn pri" onClick="{{ ln.check }}">Check availability</button></div></div></sc-if>
               <sc-if value="{{ ln.checking }}" hint-placeholder-val="{{ false }}"><div class="row"><div class="rl"><p class="lb">Claim an address</p><p class="st s-busy" role="status"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle class="gc" cx="9" cy="9" r="6.5"/><path class="g gb" d="M6 9h.01M9 9h.01M12 9h.01"/></svg>Checking alex@ln.example.test…</p></div><div class="rc"><button type="button" class="btn" disabled="true">Claim</button></div></div></sc-if>
               <sc-if value="{{ ln.signedOut }}" hint-placeholder-val="{{ false }}"><div class="row"><div class="rl"><p class="lb">Your address</p><p class="ds">Sign in to claim or manage an address.</p></div><div class="rc"><a class="btn pri" href="P-Connect.dc.html">Sign in</a></div></div></sc-if>
               <sc-if value="{{ ln.disconnected }}" hint-placeholder-val="{{ false }}"><div class="row"><div class="rl"><p class="lb">Your address</p><p class="ds">Reconnect this Cube to check your address.</p></div><div class="rc"><button type="button" class="btn pri" onClick="{{ go.sparkConn }}">Open Connections</button></div></div></sc-if>
@@ -684,7 +674,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 </div>
 <p style="margin:12px 24px 0;font-size:12px;color:var(--muted)">More Settings screens: <a href="P-GapsAccount.dc.html" style="font-size:12px;color:var(--muted);text-decoration:underline;text-underline-offset:3px;margin-right:12px">Recovery Kit mode, alerts scope, Avatar</a><a href="P-GapsWallets.dc.html" style="font-size:12px;color:var(--muted);text-decoration:underline;text-underline-offset:3px;margin-right:12px">Node settings extras, RBF, feerate, Vault overview states</a><a href="P-GapsDetails.dc.html" style="font-size:12px;color:var(--muted);text-decoration:underline;text-underline-offset:3px;margin-right:12px">Banners, checkout, Add to Cubes, Spark guard, batch label, share wallet, split entry</a></p>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"scope":{"editor":"enum","options":["cube","device","vault","spark"],"default":"cube","section":"Review"},"section":{"editor":"enum","options":["display","backup","payments","ai","data","wallet","node","pair","connections","spark"],"default":"display","section":"Review"},"reviewState":{"editor":"enum","options":["normal","loading","signedOut","cubeDisconnected","offlineNode","noVault","importedVault","testnetSparkUnavailable","longNames","saveFailure"],"default":"normal","section":"Review"},"pairStep":{"editor":"enum","options":["idle","picker","waiting","error","paired"],"default":"idle","section":"Review"},"lnState":{"editor":"enum","options":["existing","claim","checking","signed-out","disconnected","error"],"default":"existing","section":"Review"},"alertsState":{"editor":"enum","options":["auto","verified","unknown","signedOut","denied"],"default":"auto","section":"Review"},"$preview":{"width":1440,"height":900}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"scope":{"editor":"enum","options":["cube","vault","spark"],"default":"cube","section":"Review"},"section":{"editor":"enum","options":["display","backup","payments","ai","data","wallet","node","pair","connections","spark"],"default":"display","section":"Review"},"reviewState":{"editor":"enum","options":["normal","loading","signedOut","cubeDisconnected","offlineNode","noVault","importedVault","testnetSparkUnavailable","longNames","saveFailure"],"default":"normal","section":"Review"},"pairStep":{"editor":"enum","options":["idle","picker","waiting","error","paired"],"default":"idle","section":"Review"},"lnState":{"editor":"enum","options":["existing","claim","checking","signed-out","disconnected","error"],"default":"existing","section":"Review"},"alertsState":{"editor":"enum","options":["auto","verified","unknown","signedOut","denied"],"default":"auto","section":"Review"},"$preview":{"width":1440,"height":900}}'>
 class Component extends DCLogic {
   constructor(p){
     super(p); try { const bump = () => { try { this.setState({ protoTick: Date.now() }); } catch (e) {} }; window.addEventListener('tenshu-proto', bump); window.addEventListener('storage', bump); } catch (e) {}
@@ -713,7 +703,6 @@ class Component extends DCLogic {
     // scope + section: levers seed it, in-page clicks override until a lever changes
     const SC={
       cube:{label:'Cube · '+cubeName,line:'Cube · '+cubeName+' · '+net,tabs:[['display','Display & appearance'],['backup','Backup & protection'],['payments','Payment checks'],['ai','AI access'],['data','Data & exports']]},
-      device:{label:'This device',line:'This device · every Cube on This Mac',tabs:[]},
       vault:{label:noVault?'Vault · none':'Vault · '+vaultAlias,line:(noVault?'Vault · none in this Cube':'Vault · '+vaultAlias)+' · '+net,tabs:[['wallet','Wallet & signers'],['node','Node'],['pair','Pair with Keychain'],['connections','Connections'],['data','Data & exports']]},
       spark:{label:hasSpark?'Spark · Daily spending':'Spark · unavailable',line:(hasSpark?'Spark · Daily spending':'Spark · unavailable')+' · '+net,tabs:[['spark','Spark'],['connections','Connections']]}
     };
@@ -723,7 +712,7 @@ class Component extends DCLogic {
     const sel=(S.sel&&S.sel.for===key)?S.sel:lever;
     const scope=sel.scope,tab=sel.tab,cs=SC[scope];
     const setTo=(sc,tb)=>()=>self.setState({sel:{for:key,scope:sc,tab:fit(sc,tb||'')}});
-    const scopes=['cube','device','vault','spark'].map(k=>({label:SC[k].label,pressed:k===scope?'true':'false',pick:setTo(k),cube:k==='cube',device:k==='device',vault:k==='vault',spark:k==='spark'}));
+    const scopes=['cube','vault','spark'].map(k=>({label:SC[k].label,pressed:k===scope?'true':'false',pick:setTo(k),cube:k==='cube',vault:k==='vault',spark:k==='spark'}));
     const emptyScope=(scope==='vault'&&noVault)||(scope==='spark'&&!hasSpark);
     const tabs=cs.tabs.map(t=>({label:t[1],cur:t[0]===tab?'page':'false',cls:t[0]===tab?'on':'',pick:setTo(scope,t[0])}));
     const goNode=setTo('vault','node');
@@ -732,7 +721,6 @@ class Component extends DCLogic {
     const on=(sc,tb)=>!loading&&scope===sc&&tab===tb;
     const sec={
       display:on('cube','display'),dataVault:on('vault','data')&&hasVault,backup:on('cube','backup'),payments:on('cube','payments'),ai:on('cube','ai'),dataCube:on('cube','data'),
-      device:!loading&&scope==='device',
       wallet:on('vault','wallet')&&hasVault,node:on('vault','node')&&hasVault,pair:on('vault','pair')&&hasVault,connVault:on('vault','connections')&&hasVault,
       vaultNone:!loading&&scope==='vault'&&noVault,
       spark:on('spark','spark')&&hasSpark,connSpark:on('spark','connections')&&hasSpark,sparkNone:!loading&&scope==='spark'&&!hasSpark
@@ -763,7 +751,8 @@ class Component extends DCLogic {
     const initial=saveFail?Object.assign({},base,{currency:'EUR',source:'B'}):base;
     const f=(S.form&&S.form.for===rs)?S.form.v:initial;
     const dirty=JSON.stringify(f)!==JSON.stringify(base);
-    const setF=(patch)=>self.setState({form:{for:rs,v:Object.assign({},f,patch)},saved:false});
+    // settings apply as they change (as in the app); the saveFailure lever shows a failed write
+    const setF=(patch)=>{const v=Object.assign({},f,patch);self.setState(saveFail?{form:{for:rs,v:v},saved:false}:{form:{for:rs,v:v},base:{for:rs,v:v},saved:true});};
     const pr=(b)=>b?'true':'false';
     const ev=(e)=>(e&&e.target)?e.target.value:'';
     const form={
@@ -774,9 +763,7 @@ class Component extends DCLogic {
       togFiat:()=>setF({fiat:!f.fiat}),togBadges:()=>setF({badges:!f.badges}),
       setCurrency:(e)=>setF({currency:ev(e)}),setSource:(e)=>setF({source:ev(e)}),setName:(e)=>setF({name:ev(e)}),
       error:saveFail&&dirty,errCls:(saveFail&&dirty)?'in err':'in',clean:!dirty,
-      saveLabel:saveFail&&dirty?'Try again':'Save changes',
-      msg:saveFail&&dirty?'Not saved':(dirty?'Unsaved changes':(S.saved?'Saved':'')),
-      discard:()=>self.setState({form:{for:rs,v:base}}),
+      msg:saveFail&&dirty?'':(S.saved?'Saved':''),
       save:()=>{if(saveFail)return;self.setState({base:{for:rs,v:f},form:{for:rs,v:f},saved:true});}
     };
     const avatar={ready:!signedOut&&!disc,loading:false,error:signedOut||disc,
@@ -818,9 +805,8 @@ class Component extends DCLogic {
     ];
     const savedA=(S.aliasSaved&&S.aliasSaved.for===rs)?S.aliasSaved.v:defSigners.map(s=>s.alias);
     const curA=(S.aliases&&S.aliases.for===rs)?S.aliases.v:savedA;
-    const aliasDirty=JSON.stringify(curA)!==JSON.stringify(savedA);
     const signers=defSigners.map((s,i)=>Object.assign({},s,{id:'sg'+i,alias:curA[i],
-      set:(e)=>{const a=curA.slice();a[i]=ev(e);self.setState({aliases:{for:rs,v:a}});}}));
+      set:(e)=>{const a=curA.slice();a[i]=ev(e);self.setState({aliases:{for:rs,v:a},aliasSaved:{for:rs,v:a}});}}));
 
     // pair with Keychain
     const pairProp=P.pairStep||'idle';
@@ -894,14 +880,12 @@ class Component extends DCLogic {
       lock:{idle:!S.lockAsk,asking:!!S.lockAsk,ask:()=>self.setState({lockAsk:true}),cancel:()=>self.setState({lockAsk:false})},
       chip:chip,hideP:pr(hide),shown:!hide,hidden:hide,toggleHide:()=>self.setState({hide:{for:hb,v:!hide}}),
       has:{spark:hasSpark,vault:hasVault,liquid:!testnet},attn:attn,go:go,
-      scopeLine:cs.line,scopeLabel:cs.label,scopeHasNet:scope!=='device',scopes:scopes,tabs:tabs,showTabs:cs.tabs.length>0&&!emptyScope,
+      scopeLine:cs.line,scopeLabel:cs.label,scopeHasNet:true,scopes:scopes,tabs:tabs,showTabs:cs.tabs.length>0&&!emptyScope,
       loading:loading,skel:[{a:'width:40%',b:'width:65%;margin-top:8px'},{a:'width:30%',b:'width:50%;margin-top:8px'},{a:'width:45%',b:'width:60%;margin-top:8px'},{a:'width:35%',b:'width:40%;margin-top:8px'}],
       sec:sec,form:form,avatar:avatar,bk:bk,alerts:alerts,noVault:noVault,offline:offline,imported:imported,
       chk:chk,strictP:pr(S.strict),strictText:S.strict?'On':'Off',togStrict:()=>self.setState({strict:!S.strict}),
       dataVaultText:noVault?'No Vault in this Cube.':'Exported per Vault.',
-      dev:hasSpark?{cls:'s-off',status:'Off',text:'Doesn’t travel with the seed.'}:{cls:'s-off',status:'Not available',text:'Spark isn’t available on Testnet4.'},
-      signers:signers,aliasClean:!aliasDirty,aliasMsg:aliasDirty?'Unsaved name changes':'',
-      aliasDiscard:()=>self.setState({aliases:{for:rs,v:savedA}}),aliasSave:()=>self.setState({aliasSaved:{for:rs,v:curA}}),
+      signers:signers,aliasMsg:(S.aliasSaved&&S.aliasSaved.for===rs)?'Saved':'',
       pair:pair,pairKeys:pairKeys,phones:phones,noop:()=>{},
       acctLine:acctLine,health:health,ln:ln,usdb:hide?'••••••':'25.00 USDB',
       open:{wx:tg('wx'),nx:tg('nx'),bx:tg('bx')},nd:nd
