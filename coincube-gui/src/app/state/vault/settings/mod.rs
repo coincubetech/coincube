@@ -488,6 +488,111 @@ impl From<BackendSettingsState> for Box<dyn State> {
 mod chain_tests {
     use super::*;
 
+    #[tokio::test]
+    async fn plaintext_export_requires_review_and_an_inheritance_descriptor() {
+        let descriptor = crate::app::state::vault::test_support::unified::fixture().descriptor;
+        let wallet = Arc::new(Wallet::new(descriptor).with_chain(crate::chain::ChainId::Bitcoin));
+        let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
+            crate::daemon::client::Coincubed::new(crate::utils::mock::Daemon::new(vec![]).run()),
+        );
+        let config = Arc::new(Config::new(false));
+        let cache = Cache::default();
+        let mut state = ImportExportSettingsState::new(wallet.clone(), config.clone());
+        let send = |state: &mut ImportExportSettingsState, intent| {
+            state.update(
+                Some(daemon.clone()),
+                &cache,
+                Message::View(view::Message::Settings(intent)),
+            )
+        };
+
+        assert!(iced_runtime::task::into_stream(send(
+            &mut state,
+            view::SettingsMessage::ExportPlaintextDescriptor,
+        ))
+        .is_none());
+        assert!(state.modal.is_none());
+        drop(send(
+            &mut state,
+            view::SettingsMessage::ReviewPlaintextDescriptorExport,
+        ));
+        drop(send(
+            &mut state,
+            view::SettingsMessage::CancelPlaintextDescriptorExport,
+        ));
+        assert!(iced_runtime::task::into_stream(send(
+            &mut state,
+            view::SettingsMessage::ExportPlaintextDescriptor,
+        ))
+        .is_none());
+        assert!(state.modal.is_none());
+        drop(send);
+
+        let mut reentered = ImportExportSettingsState::new(wallet, config.clone());
+        assert!(!reentered.plaintext_export_review);
+        let intent = |intent| Message::View(view::Message::Settings(intent));
+        drop(reentered.update(
+            Some(daemon.clone()),
+            &cache,
+            intent(view::SettingsMessage::ReviewPlaintextDescriptorExport),
+        ));
+        let launch = reentered.update(
+            Some(daemon.clone()),
+            &cache,
+            intent(view::SettingsMessage::ExportPlaintextDescriptor),
+        );
+        assert!(iced_runtime::task::into_stream(launch).is_some());
+        assert_eq!(
+            reentered.modal.as_ref().map(VaultExportModal::modal_title),
+            Some("Export Descriptor"),
+        );
+        assert!(!reentered.plaintext_export_review);
+        assert!(iced_runtime::task::into_stream(reentered.update(
+            Some(daemon.clone()),
+            &cache,
+            intent(view::SettingsMessage::ExportPlaintextDescriptor),
+        ))
+        .is_none());
+
+        let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::new();
+        let master = coincube_core::miniscript::bitcoin::bip32::Xpriv::new_master(
+            coincube_core::miniscript::bitcoin::Network::Bitcoin,
+            &[44; 32],
+        )
+        .unwrap();
+        let path = "m/84'/0'/0'".parse().unwrap();
+        let account = master.derive_priv(&secp, &path).unwrap();
+        let key = format!(
+            "[{}/84'/0'/0']{}",
+            master.fingerprint(&secp),
+            coincube_core::miniscript::bitcoin::bip32::Xpub::from_priv(&secp, &account)
+        );
+        let imported = coincube_core::wallet_descriptor::ImportedWalletDescriptor::parse(
+            &format!("wpkh({key}/0/*)"),
+            Some(&format!("wpkh({key}/1/*)")),
+            crate::chain::ChainId::Bitcoin,
+        )
+        .unwrap();
+        let imported_wallet = Arc::new(Wallet::new(
+            coincube_core::wallet_descriptor::WalletDescriptor::Imported(imported),
+        ));
+        assert!(!imported_wallet.supports_inheritance());
+        let mut ineligible = ImportExportSettingsState::new(imported_wallet, config);
+        drop(ineligible.update(
+            Some(daemon.clone()),
+            &cache,
+            intent(view::SettingsMessage::ReviewPlaintextDescriptorExport),
+        ));
+        assert!(!ineligible.plaintext_export_review);
+        assert!(iced_runtime::task::into_stream(ineligible.update(
+            Some(daemon.clone()),
+            &cache,
+            intent(view::SettingsMessage::ExportPlaintextDescriptor),
+        ))
+        .is_none());
+        assert!(ineligible.modal.is_none());
+    }
+
     #[test]
     fn fork_node_navigation_opens_the_guarded_page_and_remote_backend_stays_closed() {
         use crate::chain::ChainId;

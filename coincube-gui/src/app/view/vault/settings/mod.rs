@@ -83,14 +83,11 @@ pub fn list<'a>(
     cache: &'a Cache,
     _is_remote_backend: bool,
 ) -> Element<'a, Message> {
-    // Landing fallback — normally users enter via the tertiary rail and
-    // land on a specific sub-page directly (Node / Wallet / Import-Export /
-    // About), so this view shouldn't be hit in practice. Left here as a
-    // defensive fallback for Settings(None) + no inner `self.setting` state.
+    // Defensive fallback for Settings(None) + no inner section state.
     let header = Button::new(text("Settings").size(30).bold())
         .style(theme::button::transparent)
         .on_press(Message::Menu(Menu::Vault(VaultSubMenu::Settings(Some(
-            crate::app::menu::SettingsOption::Node,
+            crate::app::menu::SettingsOption::Wallet,
         )))));
 
     dashboard(
@@ -100,7 +97,9 @@ pub fn list<'a>(
             .spacing(20)
             .width(Length::Fill)
             .push(header)
-            .push(p1_regular("Pick a settings category from the left.")),
+            .push(p1_regular(
+                "Open Wallet & signers to review this wallet's settings.",
+            )),
     )
 }
 
@@ -147,18 +146,14 @@ pub fn import_export<'a>(
         "Backups, wallet files, and records serve different purposes. Records do not replace recovery material.",
     );
 
-    // Nudge to Cube → Settings → General, where the Recovery Kit card
-    // lives. Can't fire `Start(Create)` here: the wizard is only
-    // rendered inside `SettingsState::view` on the global settings
-    // panel, so starting the flow from Vault leaves it running on an
-    // unrendered panel and the state persists into the next General
-    // visit.
+    // Recovery Kit belongs to Cube → Backup & protection. Navigate to its
+    // rendered owner; never start its wizard from this Vault panel.
     let backup_to_connect = export_section(
         "Recovery Kit",
-        "Opens Cube settings. Find Recovery Kit under Backup & protection.",
+        "Open Backup & protection to review the Connect Recovery Kit.",
         icon::backup_icon(),
         Message::Menu(Menu::Cube(CubeSubMenu::Settings(
-            CubeSettingsOption::General,
+            CubeSettingsOption::Recovery,
         ))),
     );
 
@@ -1222,7 +1217,7 @@ pub fn wallet_settings<'a>(
             )))
             .push_maybe(vault.is_none().then(|| {
                 caption(
-                    "Imported wallet · local signing keys are not available from this wallet file.",
+                    "Imported wallet · Pair with Keychain is unavailable because this wallet has no Keychain-eligible key in Tenshu.",
                 )
             })),
     )
