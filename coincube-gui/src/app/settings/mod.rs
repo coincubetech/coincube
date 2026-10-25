@@ -4,6 +4,7 @@ pub mod bitcoin_import;
 pub use bitcoin_import::{BitcoinImport, BitcoinImportStage, ImportedWalletAttachment};
 pub mod display;
 pub mod fiat;
+pub mod preferences;
 pub mod unit;
 
 use std::collections::{HashMap, HashSet};
@@ -1686,10 +1687,13 @@ impl std::fmt::Display for SettingsError {
 /// global settings.
 #[allow(unstable_name_collisions)]
 pub mod global {
+    use super::preferences::{
+        DevicePreferences, LauncherStyle, MotionPreference, PreferenceChange, ThemePreference,
+    };
     use crate::dir::CoincubeDirectory;
     use async_hwi::bitbox::{ConfigError, NoiseConfig, NoiseConfigData};
     use fs4::fs_std::FileExt;
-    use serde::{Deserialize, Serialize};
+    use serde::{Deserialize, Deserializer, Serialize};
     use std::fs::{File, OpenOptions};
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::path::PathBuf;
@@ -1750,6 +1754,16 @@ pub mod global {
         pub account_tier: AccountTier,
         #[serde(default)]
         pub theme_mode: coincube_ui::theme::palette::ThemeMode,
+        /// `None` identifies legacy JSON. Fresh settings use `Some(System)`;
+        /// explicit legacy dark/light choices migrate on the next write.
+        #[serde(default, deserialize_with = "deserialize_present_theme_preference")]
+        pub theme_preference: Option<ThemePreference>,
+        #[serde(default)]
+        pub launcher_style: LauncherStyle,
+        #[serde(default)]
+        pub hide_balances: bool,
+        #[serde(default)]
+        pub motion_preference: MotionPreference,
         #[serde(default = "default_true")]
         pub show_direction_badges: bool,
         /// Local installation privacy preference; never part of a Cube/account record.
@@ -1771,6 +1785,15 @@ pub mod global {
         true
     }
 
+    fn deserialize_present_theme_preference<'de, D>(
+        deserializer: D,
+    ) -> Result<Option<ThemePreference>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        ThemePreference::deserialize(deserializer).map(Some)
+    }
+
     impl Default for GlobalSettings {
         fn default() -> Self {
             Self {
@@ -1780,6 +1803,10 @@ pub mod global {
                 bitcoin_blake2b_beta: false,
                 account_tier: AccountTier::default(),
                 theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
+                theme_preference: Some(ThemePreference::System),
+                launcher_style: LauncherStyle::default(),
+                hide_balances: false,
+                motion_preference: MotionPreference::default(),
                 // Preserve the pre-existing Rust Default for this unrelated field.
                 show_direction_badges: false,
                 recipient_identity_checks: true,
@@ -1790,6 +1817,60 @@ pub mod global {
     }
 
     impl GlobalSettings {
+        fn preferences(&self) -> DevicePreferences {
+            DevicePreferences {
+                theme: self.theme_preference.unwrap_or(self.theme_mode.into()),
+                launcher_style: self.launcher_style,
+                hide_balances: self.hide_balances,
+                motion: self.motion_preference,
+                developer_mode: self.developer_mode,
+                bitcoin_blake2b_beta: self.bitcoin_blake2b_beta,
+            }
+        }
+
+        fn apply_preference(&mut self, change: PreferenceChange) {
+            match change {
+                PreferenceChange::Theme(choice) => {
+                    self.theme_preference = Some(choice);
+                    // Legacy readers need a deterministic concrete value.
+                    self.theme_mode = choice.resolve(None);
+                }
+                PreferenceChange::LauncherStyle(style) => self.launcher_style = style,
+                PreferenceChange::HideBalances(hidden) => self.hide_balances = hidden,
+                PreferenceChange::Motion(motion) => self.motion_preference = motion,
+                PreferenceChange::DeveloperMode(enabled) => self.developer_mode = enabled,
+                PreferenceChange::BitcoinBlake2bBeta(enabled) => {
+                    self.bitcoin_blake2b_beta = enabled;
+                }
+            }
+        }
+
+        /// Load the authoritative device choices without writing migration
+        /// data. Only a genuinely absent file is a fresh installation.
+        pub fn load_preferences(path: &PathBuf) -> Result<DevicePreferences, super::SettingsError> {
+            let mut snapshot = None;
+            Self::update(path, |s| snapshot = Some(s.preferences()), false)?;
+            Ok(snapshot.expect("global settings read callback runs once"))
+        }
+
+        /// Edit one choice under the existing file lock. Return the new
+        /// snapshot only after serialization, write, truncate and unlock pass.
+        pub fn update_preference(
+            path: &PathBuf,
+            change: PreferenceChange,
+        ) -> Result<DevicePreferences, super::SettingsError> {
+            let mut snapshot = None;
+            Self::update(
+                path,
+                |s| {
+                    s.apply_preference(change);
+                    snapshot = Some(s.preferences());
+                },
+                true,
+            )?;
+            Ok(snapshot.expect("global settings write callback runs once"))
+        }
+
         pub fn path(global_datadir: &CoincubeDirectory) -> PathBuf {
             global_datadir.path().join(DEFAULT_FILE_NAME)
         }
@@ -1841,7 +1922,7 @@ pub mod global {
             path: &PathBuf,
             enabled: bool,
         ) -> Result<(), super::SettingsError> {
-            Self::update(path, |s| s.bitcoin_blake2b_beta = enabled, true)
+            Self::update_preference(path, PreferenceChange::BitcoinBlake2bBeta(enabled)).map(|_| ())
         }
 
         pub fn load_account_tier(path: &PathBuf) -> AccountTier {
@@ -1863,7 +1944,8 @@ pub mod global {
             path: &PathBuf,
             developer_mode: bool,
         ) -> Result<(), super::SettingsError> {
-            Self::update(path, |s| s.developer_mode = developer_mode, true)
+            Self::update_preference(path, PreferenceChange::DeveloperMode(developer_mode))
+                .map(|_| ())
         }
 
         pub fn load_show_direction_badges(path: &PathBuf) -> bool {
@@ -1898,7 +1980,7 @@ pub mod global {
 
         pub fn load_theme_mode(path: &PathBuf) -> coincube_ui::theme::palette::ThemeMode {
             let mut ret = coincube_ui::theme::palette::ThemeMode::default();
-            if let Err(e) = Self::update(path, |s| ret = s.theme_mode, false) {
+            if let Err(e) = Self::load_preferences(path).map(|s| ret = s.theme.resolve(None)) {
                 tracing::error!("Failed to load theme mode setting: {e}");
             }
             ret
@@ -1908,7 +1990,7 @@ pub mod global {
             path: &PathBuf,
             mode: coincube_ui::theme::palette::ThemeMode,
         ) -> Result<(), super::SettingsError> {
-            Self::update(path, |s| s.theme_mode = mode, true)
+            Self::update_preference(path, PreferenceChange::Theme(mode.into())).map(|_| ())
         }
 
         /// Advisory-badge dismissals, as `"<fingerprint>:<advisory id>"`.
@@ -1982,12 +2064,32 @@ pub mod global {
         pub fn update<F>(
             path: &PathBuf,
             mut update: F,
-            mut write: bool,
+            write: bool,
         ) -> Result<(), super::SettingsError>
         where
             F: FnMut(&mut GlobalSettings),
         {
-            let exists = path.is_file();
+            let exists = match std::fs::symlink_metadata(path) {
+                Ok(_) => match std::fs::metadata(path) {
+                    Ok(metadata) if metadata.is_file() => true,
+                    Ok(_) => {
+                        return Err(super::SettingsError::ReadingFile(
+                            "Global settings path is not a regular file".to_string(),
+                        ));
+                    }
+                    Err(error) => {
+                        return Err(super::SettingsError::ReadingFile(format!(
+                            "Inspecting global settings file: {error}"
+                        )));
+                    }
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => {
+                    return Err(super::SettingsError::ReadingFile(format!(
+                        "Inspecting global settings path: {error}"
+                    )));
+                }
+            };
 
             let (mut global_settings, file) = if exists {
                 let mut file = OpenOptions::new()
@@ -2020,21 +2122,12 @@ pub mod global {
                 (GlobalSettings::default(), None)
             };
 
-            update(&mut global_settings);
-
-            if !exists
-                && global_settings.bitbox.is_none()
-                && global_settings.window_config.is_none()
-                && !global_settings.developer_mode
-                && !global_settings.bitcoin_blake2b_beta
-                && global_settings.account_tier == AccountTier::Free
-                && global_settings.theme_mode == coincube_ui::theme::palette::ThemeMode::default()
-                && global_settings.dismissed_hw_advisories.is_empty()
-                && global_settings.seen_advisory_notices.is_empty()
-                && global_settings.recipient_identity_checks
-            {
-                write = false;
+            // Preserve the previous explicit/missing-theme behavior in legacy
+            // files, but never write migration data during a read.
+            if write && global_settings.theme_preference.is_none() {
+                global_settings.theme_preference = Some(global_settings.theme_mode.into());
             }
+            update(&mut global_settings);
 
             if write {
                 let mut file = if let Some(file) = file {
@@ -2132,6 +2225,10 @@ pub mod global {
 #[cfg(test)]
 mod test {
     use super::global::{GlobalSettings, WindowConfig};
+    use super::preferences::{
+        DevicePreferences, LauncherStyle, MotionPreference, PreferenceChange, ThemePreference,
+    };
+    use coincube_ui::theme::palette::ThemeMode;
     use std::env;
 
     use super::WalletSettings;
@@ -2288,6 +2385,191 @@ mod test {
         GlobalSettings::update_bitcoin_blake2b_beta(&path, false).unwrap();
         assert!(!GlobalSettings::load_bitcoin_blake2b_beta(&path));
         assert!(GlobalSettings::load_developer_mode(&path));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn fresh_preferences_are_system_and_each_first_edit_persists() {
+        let dir = env::temp_dir().join(format!("coincube-preferences-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (index, change) in [
+            PreferenceChange::Theme(ThemePreference::Dark),
+            PreferenceChange::LauncherStyle(LauncherStyle::List),
+            PreferenceChange::HideBalances(true),
+            PreferenceChange::Motion(MotionPreference::Reduced),
+            PreferenceChange::DeveloperMode(true),
+            PreferenceChange::BitcoinBlake2bBeta(true),
+        ]
+        .iter()
+        .copied()
+        .enumerate()
+        {
+            let path = dir.join(format!("global-{index}.json"));
+            assert_eq!(
+                GlobalSettings::load_preferences(&path).unwrap(),
+                DevicePreferences::default()
+            );
+            assert!(!path.exists(), "a read must not create the file");
+            let persisted = GlobalSettings::update_preference(&path, change).unwrap();
+            assert!(
+                path.is_file(),
+                "first edit {:?} must create settings",
+                change
+            );
+            assert_eq!(GlobalSettings::load_preferences(&path).unwrap(), persisted);
+        }
+        let dark = GlobalSettings::load_preferences(&dir.join("global-0.json")).unwrap();
+        assert_eq!(dark.theme, ThemePreference::Dark);
+        assert_eq!(
+            GlobalSettings::load_theme_mode(&dir.join("global-0.json")),
+            ThemeMode::Dark
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn legacy_theme_presence_migrates_without_writing_on_read() {
+        let dir =
+            env::temp_dir().join(format!("coincube-theme-migration-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, json, expected) in [
+            ("dark", r#"{"theme_mode":"dark"}"#, ThemePreference::Dark),
+            ("light", r#"{"theme_mode":"light"}"#, ThemePreference::Light),
+            ("missing", "{}", ThemePreference::Dark),
+            (
+                "new-wins",
+                r#"{"theme_mode":"light","theme_preference":"system"}"#,
+                ThemePreference::System,
+            ),
+        ] {
+            let path = dir.join(format!("{name}.json"));
+            std::fs::write(&path, json).unwrap();
+            assert_eq!(
+                GlobalSettings::load_preferences(&path).unwrap().theme,
+                expected
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), json);
+            GlobalSettings::update_preference(&path, PreferenceChange::HideBalances(true)).unwrap();
+            assert_eq!(
+                GlobalSettings::load_preferences(&path).unwrap().theme,
+                expected
+            );
+            let written: GlobalSettings =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(written.theme_preference, Some(expected));
+        }
+        let light = dir.join("light.json");
+        GlobalSettings::update_preference(&light, PreferenceChange::Theme(ThemePreference::System))
+            .unwrap();
+        assert_eq!(
+            GlobalSettings::load_preferences(&light).unwrap().theme,
+            ThemePreference::System
+        );
+        assert_eq!(GlobalSettings::load_theme_mode(&light), ThemeMode::Dark);
+        let stored: GlobalSettings =
+            serde_json::from_slice(&std::fs::read(&light).unwrap()).unwrap();
+        assert_eq!(stored.theme_mode, ThemeMode::Dark);
+        GlobalSettings::update_theme_mode(&light, ThemeMode::Light).unwrap();
+        assert_eq!(
+            GlobalSettings::load_preferences(&light).unwrap().theme,
+            ThemePreference::Light
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn preference_updates_preserve_unrelated_global_values() {
+        let dir = env::temp_dir().join(format!(
+            "coincube-preference-preserve-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("global_settings.json");
+        let mut old: serde_json::Value = serde_json::from_str(RAW_GLOBAL_SETTINGS).unwrap();
+        old["account_tier"] = "pro".into();
+        old["theme_mode"] = "light".into();
+        old["developer_mode"] = true.into();
+        old["bitcoin_blake2b_beta"] = true.into();
+        old["recipient_identity_checks"] = false.into();
+        old["dismissed_hw_advisories"] = serde_json::json!(["device:notice"]);
+        old["seen_advisory_notices"] = serde_json::json!(["incident"]);
+        std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+        for change in [
+            PreferenceChange::Theme(ThemePreference::System),
+            PreferenceChange::LauncherStyle(LauncherStyle::List),
+            PreferenceChange::Motion(MotionPreference::Reduced),
+            PreferenceChange::HideBalances(true),
+            PreferenceChange::DeveloperMode(false),
+            PreferenceChange::BitcoinBlake2bBeta(false),
+        ] {
+            GlobalSettings::update_preference(&path, change).unwrap();
+        }
+        let saved = GlobalSettings::load_preferences(&path).unwrap();
+        assert_eq!(saved.theme, ThemePreference::System);
+        assert_eq!(saved.launcher_style, LauncherStyle::List);
+        assert_eq!(saved.motion, MotionPreference::Reduced);
+        assert!(saved.hide_balances);
+        assert!(!saved.developer_mode);
+        assert!(!saved.bitcoin_blake2b_beta);
+        let saved: GlobalSettings = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(saved.bitbox.is_some());
+        assert_eq!(
+            saved.window_config.unwrap(),
+            WindowConfig {
+                width: 1248.0,
+                height: 688.0
+            }
+        );
+        assert_eq!(saved.account_tier, super::global::AccountTier::Pro);
+        assert!(!saved.recipient_identity_checks);
+        assert_eq!(saved.dismissed_hw_advisories, ["device:notice"]);
+        assert_eq!(saved.seen_advisory_notices, ["incident"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn malformed_unknown_and_nonfile_settings_return_errors_without_reset() {
+        let dir = env::temp_dir().join(format!(
+            "coincube-preference-errors-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("global_settings.json");
+        for raw in [
+            "{invalid",
+            r#"{"theme_preference":"unknown"}"#,
+            r#"{"theme_preference":null}"#,
+            r#"{"launcher_style":"unknown"}"#,
+            r#"{"motion_preference":"unknown"}"#,
+        ] {
+            std::fs::write(&path, raw).unwrap();
+            assert!(GlobalSettings::load_preferences(&path).is_err());
+            assert!(
+                GlobalSettings::update_preference(&path, PreferenceChange::HideBalances(true))
+                    .is_err()
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+        }
+        let directory_path = dir.join("directory-instead-of-file");
+        std::fs::create_dir(&directory_path).unwrap();
+        assert!(GlobalSettings::load_preferences(&directory_path).is_err());
+        assert!(GlobalSettings::update_preference(
+            &directory_path,
+            PreferenceChange::HideBalances(true)
+        )
+        .is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            std::fs::write(&path, "{}").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+            assert!(GlobalSettings::load_preferences(&path).is_err());
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let dangling = dir.join("dangling-link");
+            std::os::unix::fs::symlink(dir.join("missing-target"), &dangling).unwrap();
+            assert!(GlobalSettings::load_preferences(&dangling).is_err());
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
 

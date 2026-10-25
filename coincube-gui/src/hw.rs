@@ -885,14 +885,13 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                     let identity = Arc::new(identity);
                     let now = std::time::Instant::now();
                     let mut dials = Vec::new();
-                    // Vault scoping: a phone is a candidate signer only
-                    // for the vault it was paired against. `None` means
-                    // no vault is loaded, so nothing is in scope.
-                    let active_vault_id = state
-                        .wallet
-                        .as_ref()
-                        .filter(|wallet| wallet.supports_inheritance())
-                        .map(|wallet| wallet.id_fingerprint());
+                    // The transport descriptor is distinct from an imported
+                    // wallet's persisted, chain-bound storage identity.
+                    let lan_policy = state.wallet.as_ref().and_then(|wallet| {
+                        crate::phone_signer::policy::PhonePolicy::from_wallet(wallet).ok()
+                    });
+                    let active_transport_id =
+                        lan_policy.as_ref().map(|policy| policy.transport_id());
                     // What every LAN session gets sealed with. Loaded once per
                     // tick rather than per phone: `load_or_create` touches the
                     // sidecar, and a tick can dial several phones.
@@ -902,11 +901,6 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                     // session's `descriptor_id` from it, so the LAN rail and
                     // the Cubes list are the same digest of the same string by
                     // construction, not by coincidence.
-                    let lan_descriptor = state
-                        .wallet
-                        .as_ref()
-                        .and_then(|w| w.inheritance_descriptor().map(ToString::to_string))
-                        .unwrap_or_default();
                     // A phone can still be listed and dialled without this —
                     // it just can't be sent a session. `sign_tx` turns the
                     // absence into an actionable error rather than a silent
@@ -926,19 +920,18 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                             }
                         };
                     for paired in &store.phones {
-                        // Skip phones paired for a different vault (or all
-                        // phones when no vault is loaded). Without this a
-                        // phone paired for vault A would be dialed and
-                        // surfaced under vault B whenever the two share a
-                        // signer key — contradicting the settings copy
-                        // that pairing is scoped to "this vault". A
-                        // legacy row predating `vault_fingerprint` has the
-                        // all-zero default, which matches no real vault,
-                        // so it's skipped until re-paired.
-                        if active_vault_id != Some(paired.vault_fingerprint) {
+                        // Skip phones paired for a different transport policy
+                        // (or all phones when no wallet is loaded). Exact
+                        // imported account, origin, chain and storage identity
+                        // checks follow below; this short display ID never
+                        // grants signing authority on its own.
+                        if active_transport_id != Some(paired.vault_fingerprint) {
                             continue;
                         }
-                        if let Err(error) = paired.exact_signer(&lan_descriptor) {
+                        let Some(policy) = lan_policy.as_ref() else {
+                            continue;
+                        };
+                        if let Err(error) = store.unique_signer_for(paired, policy) {
                             debug!("{}: {}", paired.name, error);
                             continue;
                         }
@@ -962,6 +955,7 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                                         &state.datadir_path,
                                         &signer.paired_phone.cert_pin,
                                         signer.paired_phone.paired_at_unix,
+                                        signer.paired_phone.imported_pairing_revision(),
                                     )
                                 {
                                     warn!(
@@ -995,8 +989,21 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                         //       the consumer would keep a stale
                         //       handle and every sign attempt would
                         //       hit `Disconnected`.
-                        let prior_alive =
-                            state.phone_signers.get(&id).is_some_and(|s| s.is_alive());
+                        //   (c) for imported wallets, its captured policy and
+                        //       exact pairing revision still matching the
+                        //       current store. A live socket to a re-paired
+                        //       phone is not a current signing handle.
+                        let prior_alive = state.phone_signers.get(&id).is_some_and(|s| {
+                            s.is_alive()
+                                && (matches!(
+                                    policy.kind(),
+                                    crate::phone_signer::policy::PhonePolicyKind::Vault(_)
+                                ) || store.cached_imported_matches(
+                                    &s.paired_phone,
+                                    &s.policy,
+                                    policy,
+                                ))
+                        });
                         if state.connected_supported_hws.contains(&id)
                             && target.is_some()
                             && prior_alive
@@ -1057,20 +1064,20 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                         match res {
                             Ok(t) => {
                                 state.phone_cooldowns.remove(&fp8);
-                                let Ok(binding) = paired.exact_signer(&lan_descriptor) else {
+                                let Some(policy) = lan_policy.as_ref() else {
+                                    continue;
+                                };
+                                let Ok(binding) = store.unique_signer_for(&paired, policy) else {
                                     continue;
                                 };
                                 let fingerprint = binding.fingerprint;
-                                let Some(lan_chain) = lan_chain else {
-                                    continue;
-                                };
                                 let signer = Arc::new(crate::phone_signer::PhoneSigner::new(
                                     t,
                                     fingerprint,
                                     None,
                                     paired.clone(),
-                                    lan_descriptor.clone(),
-                                    lan_chain,
+                                    policy.clone(),
+                                    state.datadir_path.clone(),
                                     lan_transport_key.clone(),
                                 ));
                                 // Stash a clone so the next refresh

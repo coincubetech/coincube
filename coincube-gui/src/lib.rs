@@ -22,6 +22,7 @@ pub mod live_split;
 pub mod loader;
 pub mod loading;
 pub mod logger;
+pub mod network_visibility;
 pub mod node;
 pub mod passkey_unlock;
 pub mod phone_signer;

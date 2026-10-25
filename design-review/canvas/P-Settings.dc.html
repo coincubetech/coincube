@@ -208,7 +208,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
   <header class="top">
     <a class="brand" href="P-Launcher.dc.html" title="Back to the Launcher"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg>Tenshu</a>
     <div class="chips">
-      <a class="chip" href="P-Connect.dc.html" title="{{ chip.acctTitle }}">
+      <a class="chip" href="P-Connect-InCube.dc.html" title="{{ chip.acctTitle }}">
         <svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="6.5" r="3"/><path d="M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg>
         <span class="sr">{{ chip.acctSr }}</span>
         <span class="st {{ chip.acct.cls }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle class="gc" cx="9" cy="9" r="6.5"/><path class="g gk" d="m6.25 9.25 1.9 1.9 3.6-3.9"/><path class="g gw" d="M9 5.5v4M9 12.25v.01"/><path class="g gx" d="m6.75 6.75 4.5 4.5m0-4.5-4.5 4.5"/><path class="g gu" d="M7.2 7.2a1.9 1.9 0 1 1 2.6 1.75c-.5.25-.8.6-.8 1.15v.4M9 12.6v.01"/><path class="g go" d="M6 9h6"/><path class="g gb" d="M6 9h.01M9 9h.01M12 9h.01"/></svg>{{ chip.acct.text }}</span>
@@ -223,6 +223,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
         <sc-if value="{{ shown }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/></svg></sc-if>
         <sc-if value="{{ hidden }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/><path d="M3 3l12 12"/></svg></sc-if>
       </button>
+      <a class="chip" href="P-AppPrefs-InCube.dc.html" title="App preferences" aria-label="App preferences" style="padding:0 10px"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 5h12M3 9h12M3 13h12"/><circle cx="7" cy="5" r="1.6" fill="var(--panel)"/><circle cx="12" cy="9" r="1.6" fill="var(--panel)"/><circle cx="6" cy="13" r="1.6" fill="var(--panel)"/></svg></a>
     </div>
   </header>
 
@@ -373,6 +374,19 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
               <div class="row top"><div class="rl"><p class="lb" id="str-l">Strict mode</p><p class="ds">Strict mode does not share the plaintext destination or payment amount. Branta can still observe lookup timing and your network connection.</p><p class="ds"><a href="#branta-privacy">Branta privacy information</a></p></div><div class="rc"><button type="button" class="tog" aria-labelledby="str-l" aria-pressed="{{ strictP }}" onClick="{{ togStrict }}"><span class="kn"></span>{{ strictText }}</button></div></div>
             </div>
             <p class="cap" style="margin-top:12px">A check never guarantees who the recipient is. Unverifiable recipients show as “Not verified”.</p>
+          </section>
+        </sc-if>
+
+        <sc-if value="{{ sec.ai }}" hint-placeholder-val="{{ false }}">
+          <section class="grp" aria-labelledby="h-ai">
+            <h3 id="h-ai">AI access</h3>
+            <p class="intro">Let the AI you already use operate this Cube through Tenshu's local connection. Tenshu stays the wallet engine; seeds, keys, PINs, passwords and passkeys never enter the conversation.</p>
+            <div class="rows">
+              <div class="row"><div class="rl"><p class="lb">Claude Desktop</p><p class="ds">Vault · Family savings, Spark · Daily spending · Read wallet information, Manage wallet setup · Available</p></div><div class="rc"><a class="btn" href="P-AI-Access.dc.html">Manage</a></div></div>
+              <div class="row"><div class="rl"><p class="lb">Maple AI Desktop</p><p class="ds">Vault · Family savings · Read wallet information · Paused, Cube was locked</p></div><div class="rc"><a class="btn" href="P-AI-Access.dc.html">Manage</a></div></div>
+              <div class="row"><div class="rl"><p class="lb">Pair a client</p><p class="ds">Pair once; access lasts until you revoke it. Each client gets only the Cubes, wallets and permissions you choose.</p></div><div class="rc"><a class="btn pri" href="P-AI-Access.dc.html">Open AI access</a></div></div>
+            </div>
+            <p class="cap" style="margin-top:12px">A local connection is not a private one: anything a paired client reads can be sent to its AI provider. In progress with a client: <a href="P-AI-Setup.dc.html" style="color:var(--acc-ink)">wallet setup</a> · <a href="P-AI-Transaction.dc.html" style="color:var(--acc-ink)">prepared transaction</a>.</p>
           </section>
         </sc-if>
 
@@ -670,13 +684,15 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 </div>
 <p style="margin:12px 24px 0;font-size:12px;color:var(--muted)">More Settings screens: <a href="P-GapsAccount.dc.html" style="font-size:12px;color:var(--muted);text-decoration:underline;text-underline-offset:3px;margin-right:12px">Recovery Kit mode, alerts scope, Avatar</a><a href="P-GapsWallets.dc.html" style="font-size:12px;color:var(--muted);text-decoration:underline;text-underline-offset:3px;margin-right:12px">Node settings extras, RBF, feerate, Vault overview states</a><a href="P-GapsDetails.dc.html" style="font-size:12px;color:var(--muted);text-decoration:underline;text-underline-offset:3px;margin-right:12px">Banners, checkout, Add to Cubes, Spark guard, batch label, share wallet, split entry</a></p>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"scope":{"editor":"enum","options":["cube","device","vault","spark"],"default":"cube","section":"Review"},"section":{"editor":"enum","options":["display","backup","payments","data","wallet","node","pair","connections","spark"],"default":"display","section":"Review"},"reviewState":{"editor":"enum","options":["normal","loading","signedOut","cubeDisconnected","offlineNode","noVault","importedVault","testnetSparkUnavailable","longNames","saveFailure"],"default":"normal","section":"Review"},"pairStep":{"editor":"enum","options":["idle","picker","waiting","error","paired"],"default":"idle","section":"Review"},"lnState":{"editor":"enum","options":["existing","claim","checking","signed-out","disconnected","error"],"default":"existing","section":"Review"},"alertsState":{"editor":"enum","options":["auto","verified","unknown","signedOut","denied"],"default":"auto","section":"Review"},"$preview":{"width":1440,"height":900}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"scope":{"editor":"enum","options":["cube","device","vault","spark"],"default":"cube","section":"Review"},"section":{"editor":"enum","options":["display","backup","payments","ai","data","wallet","node","pair","connections","spark"],"default":"display","section":"Review"},"reviewState":{"editor":"enum","options":["normal","loading","signedOut","cubeDisconnected","offlineNode","noVault","importedVault","testnetSparkUnavailable","longNames","saveFailure"],"default":"normal","section":"Review"},"pairStep":{"editor":"enum","options":["idle","picker","waiting","error","paired"],"default":"idle","section":"Review"},"lnState":{"editor":"enum","options":["existing","claim","checking","signed-out","disconnected","error"],"default":"existing","section":"Review"},"alertsState":{"editor":"enum","options":["auto","verified","unknown","signedOut","denied"],"default":"auto","section":"Review"},"$preview":{"width":1440,"height":900}}'>
 class Component extends DCLogic {
   constructor(p){
-    super(p);
+    super(p); try { const bump = () => { try { this.setState({ protoTick: Date.now() }); } catch (e) {} }; window.addEventListener('tenshu-proto', bump); window.addEventListener('storage', bump); } catch (e) {}
     this.state={sel:null,hide:null,lockAsk:false,open:{},form:null,base:null,saved:false,aliases:null,aliasSaved:null,pair:null,ln:null,strict:true,checks:true,checkAsk:false,vaultAlias:null,node:null};
   }
   renderVals(){
+    // prototype-only: Appearance (App preferences) is a device setting shared across artboards: system follows the review lever
+    let THEME = 'system'; try { THEME = localStorage.getItem('tenshu.proto.theme') || 'system'; } catch (e) {}
     const P=this.props,S=this.state,self=this;
     const rs=P.reviewState||'normal';
     const loading=rs==='loading',signedOut=rs==='signedOut',disc=rs==='cubeDisconnected',offline=rs==='offlineNode';
@@ -696,7 +712,7 @@ class Component extends DCLogic {
 
     // scope + section: levers seed it, in-page clicks override until a lever changes
     const SC={
-      cube:{label:'Cube · '+cubeName,line:'Cube · '+cubeName+' · '+net,tabs:[['display','Display & appearance'],['backup','Backup & protection'],['payments','Payment checks'],['data','Data & exports']]},
+      cube:{label:'Cube · '+cubeName,line:'Cube · '+cubeName+' · '+net,tabs:[['display','Display & appearance'],['backup','Backup & protection'],['payments','Payment checks'],['ai','AI access'],['data','Data & exports']]},
       device:{label:'This device',line:'This device · every Cube on This Mac',tabs:[]},
       vault:{label:noVault?'Vault · none':'Vault · '+vaultAlias,line:(noVault?'Vault · none in this Cube':'Vault · '+vaultAlias)+' · '+net,tabs:[['wallet','Wallet & signers'],['node','Node'],['pair','Pair with Keychain'],['connections','Connections'],['data','Data & exports']]},
       spark:{label:hasSpark?'Spark · Daily spending':'Spark · unavailable',line:(hasSpark?'Spark · Daily spending':'Spark · unavailable')+' · '+net,tabs:[['spark','Spark'],['connections','Connections']]}
@@ -715,7 +731,7 @@ class Component extends DCLogic {
     // per-section flags
     const on=(sc,tb)=>!loading&&scope===sc&&tab===tb;
     const sec={
-      display:on('cube','display'),dataVault:on('vault','data')&&hasVault,backup:on('cube','backup'),payments:on('cube','payments'),dataCube:on('cube','data'),
+      display:on('cube','display'),dataVault:on('vault','data')&&hasVault,backup:on('cube','backup'),payments:on('cube','payments'),ai:on('cube','ai'),dataCube:on('cube','data'),
       device:!loading&&scope==='device',
       wallet:on('vault','wallet')&&hasVault,node:on('vault','node')&&hasVault,pair:on('vault','pair')&&hasVault,connVault:on('vault','connections')&&hasVault,
       vaultNone:!loading&&scope==='vault'&&noVault,
@@ -873,7 +889,7 @@ class Component extends DCLogic {
       menuOpen: !!this.state.menuOpen, toggleMenu: () => { this.setState({ menuOpen: !this.state.menuOpen }); },
       goNode:goNode,
       sb:sb,
-      themeClass:(P.theme||'dark')==='light'?'light':'',motionClass:P.reducedMotion?'reduced':'',
+      themeClass:this.props.forceTheme?(this.props.forceTheme==='light'?'light':''):((THEME==='light'||(THEME!=='dark'&&(P.theme||'dark')==='light'))?'light':''),motionClass:P.reducedMotion?'reduced':'',
       cube:cube,vaultAlias:vaultAlias,setVaultAlias:(e)=>self.setState({vaultAlias:{for:rs,v:ev(e)}}),
       lock:{idle:!S.lockAsk,asking:!!S.lockAsk,ask:()=>self.setState({lockAsk:true}),cancel:()=>self.setState({lockAsk:false})},
       chip:chip,hideP:pr(hide),shown:!hide,hidden:hide,toggleHide:()=>self.setState({hide:{for:hb,v:!hide}}),

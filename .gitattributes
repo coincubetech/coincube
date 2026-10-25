@@ -15,3 +15,10 @@ vendor/branta/** -text
 # with include_str! and asserts its byte length and SHA-256. The same autocrlf
 # rewrite turned 75340 bytes into 75509 on the Windows leg (one CR per line).
 coincube-core/tests/data/** -text
+
+# Imported-phone native replay fixtures are hashed as exact bytes. Keep LF on
+# Windows checkouts so the committed request/signature vectors stay identical.
+coincube-gui/src/phone_signer/fixtures/imported_signing.json -text
+coincube-gui/src/phone_signer/fixtures/imported_signing_signed.json -text
+coincube-gui/src/phone_signer/fixtures/imported_canonical_requests.json -text
+coincube-gui/src/phone_signer/fixtures/imported_canonical_signed.json -text
