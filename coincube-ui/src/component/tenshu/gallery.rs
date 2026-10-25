@@ -345,7 +345,7 @@ fn every_action_emits_its_intent_once_per_pointer_or_key_press() {
             .iter()
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>(),
-        names.iter().map(|name| Id::new(*name)).collect::<Vec<_>>(),
+        names.iter().map(|name| Id::new(name)).collect::<Vec<_>>(),
         "every enabled action is a focus stop, in visual order"
     );
 
