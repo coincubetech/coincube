@@ -397,6 +397,11 @@ impl LocalSigningState {
     pub(crate) fn apply_wallet_update(&mut self, wallet: &Wallet) -> bool {
         let vault_changed = self.wallet_fingerprint != Some(wallet.id_fingerprint())
             || self.wallet_chain != Some(wallet.chain);
+        if vault_changed {
+            // A removal review belongs to the vault that displayed the row.
+            // WalletUpdated can switch this active panel without `reload`.
+            self.pending_remove_phone = None;
+        }
         self.apply_wallet(wallet);
         if vault_changed && !matches!(self.flow, PairingFlow::Idle) {
             self.start_pairing_run();
@@ -904,6 +909,15 @@ impl State for LocalSigningState {
                     return Task::none();
                 }
                 self.pending_remove_phone = None;
+                if !self
+                    .phones
+                    .phones
+                    .iter()
+                    .find(|phone| crate::phone_signer::identity::pin_hex8(&phone.cert_pin) == fp8)
+                    .is_some_and(|phone| Some(phone.vault_fingerprint) == self.wallet_fingerprint)
+                {
+                    return Task::none();
+                }
                 self.apply_remove_phone(&cache.datadir_path, &fp8);
                 // Tell the phone now if it's reachable.
                 self.start_sync(&cache.datadir_path)
@@ -1123,6 +1137,80 @@ mod tests {
             &mut reentered,
             &cache,
             LocalSigningMessage::RemovePhone(fp),
+        ));
+        assert_eq!(pairing_store::load(&dir).unwrap().pending_unpairs.len(), 1);
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn wallet_switch_revokes_prior_vault_phone_removal_review() {
+        let dir = fresh_dir();
+        let wallet_a = Arc::new(Wallet::new(CoincubeDescriptor::from_str(DESC_A).unwrap()));
+        let wallet_b = Arc::new(Wallet::new(CoincubeDescriptor::from_str(DESC_B).unwrap()));
+        assert_ne!(wallet_a.id_fingerprint(), wallet_b.id_fingerprint());
+        let mut phone_a = paired(31, "Vault A phone", None);
+        phone_a.vault_fingerprint = wallet_a.id_fingerprint();
+        let mut phone_b = paired(32, "Vault B phone", None);
+        phone_b.vault_fingerprint = wallet_b.id_fingerprint();
+        seed_store(&dir, vec![phone_a.clone(), phone_b.clone()]);
+        let cache = Cache {
+            datadir_path: dir.clone(),
+            ..Cache::default()
+        };
+        let mut state = LocalSigningState::default();
+        state.apply_wallet(&wallet_a);
+        state.refresh_phones_from(&dir);
+        state.initialised = true;
+        let fp_a = fp8_of(&phone_a);
+        let fp_b = fp8_of(&phone_b);
+
+        drop(send(
+            &mut state,
+            &cache,
+            LocalSigningMessage::ReviewRemovePhone(fp_a.clone()),
+        ));
+        assert_eq!(state.pending_remove_phone.as_deref(), Some(fp_a.as_str()));
+
+        // This is the active-panel route, which bypasses `reload`.
+        drop(state.update(None, &cache, Message::WalletUpdated(Ok(wallet_b))));
+        assert!(state.pending_remove_phone.is_none());
+        drop(send(
+            &mut state,
+            &cache,
+            LocalSigningMessage::RemovePhone(fp_a.clone()),
+        ));
+        let stored = pairing_store::load(&dir).unwrap();
+        assert_eq!(stored.phones.len(), 2);
+        assert!(stored.pending_unpairs.is_empty());
+
+        // The old row cannot be reviewed in B. B's own row can be
+        // reviewed and removed exactly once with the existing payload.
+        drop(send(
+            &mut state,
+            &cache,
+            LocalSigningMessage::ReviewRemovePhone(fp_a),
+        ));
+        assert!(state.pending_remove_phone.is_none());
+        drop(send(
+            &mut state,
+            &cache,
+            LocalSigningMessage::ReviewRemovePhone(fp_b.clone()),
+        ));
+        assert_eq!(state.pending_remove_phone.as_deref(), Some(fp_b.as_str()));
+        drop(send(
+            &mut state,
+            &cache,
+            LocalSigningMessage::RemovePhone(fp_b.clone()),
+        ));
+        let stored = pairing_store::load(&dir).unwrap();
+        assert_eq!(stored.phones.len(), 1);
+        assert_eq!(stored.phones[0].cert_pin, phone_a.cert_pin);
+        assert_eq!(stored.pending_unpairs.len(), 1);
+        assert_eq!(stored.pending_unpairs[0].cert_pin, phone_b.cert_pin);
+        drop(send(
+            &mut state,
+            &cache,
+            LocalSigningMessage::RemovePhone(fp_b),
         ));
         assert_eq!(pairing_store::load(&dir).unwrap().pending_unpairs.len(), 1);
         std::fs::remove_dir_all(dir.path()).unwrap();
