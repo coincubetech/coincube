@@ -2008,7 +2008,7 @@ pub mod global {
         /// amounts. That takes a `PreferencesReceipt` whose `balances_hidden()`
         /// is `Some(false)`, from [`Self::load_or_initialize_preferences`] or
         /// from an explicit Show through [`Self::save_preference`].
-        pub fn load_preferences(path: &PathBuf) -> Result<DevicePreferences, super::SettingsError> {
+        pub fn load_preferences(path: &Path) -> Result<DevicePreferences, super::SettingsError> {
             Self::read_settings(path).map(|settings| settings.preferences())
         }
 
@@ -2017,7 +2017,7 @@ pub mod global {
         /// post-rename steps could not be confirmed is logged and still
         /// returned: the previous bytes are gone. See [`Self::save_preference`].
         pub fn update_preference(
-            path: &PathBuf,
+            path: &Path,
             change: PreferenceChange,
         ) -> Result<DevicePreferences, super::SettingsError> {
             let receipt = Self::save_preference(path, change)?;
@@ -2031,7 +2031,7 @@ pub mod global {
         /// post-rename step completed. An explicit Hide balances choice also
         /// establishes the installation's privacy choice in the same write.
         pub fn save_preference(
-            path: &PathBuf,
+            path: &Path,
             change: PreferenceChange,
         ) -> Result<PreferencesReceipt, super::SettingsError> {
             let force_privacy = matches!(change, PreferenceChange::HideBalances(_));
@@ -2096,7 +2096,7 @@ pub mod global {
             global_datadir.path().join(DEFAULT_FILE_NAME)
         }
 
-        pub fn load_window_config(path: &PathBuf) -> Option<WindowConfig> {
+        pub fn load_window_config(path: &Path) -> Option<WindowConfig> {
             let mut ret = None;
             if let Err(e) = Self::update(path, |s| ret = s.window_config.clone(), false) {
                 tracing::error!("Failed to load window config: {e}");
@@ -2105,7 +2105,7 @@ pub mod global {
         }
 
         pub fn update_window_config(
-            path: &PathBuf,
+            path: &Path,
             window_config: &WindowConfig,
         ) -> Result<(), super::SettingsError> {
             Self::update(
@@ -2116,14 +2116,14 @@ pub mod global {
         }
 
         pub fn load_bitbox_settings(
-            path: &PathBuf,
+            path: &Path,
         ) -> Result<Option<BitboxSettings>, super::SettingsError> {
             let mut ret = None;
             Self::update(path, |s| ret = s.bitbox.clone(), false)?;
             Ok(ret)
         }
 
-        pub fn load_developer_mode(path: &PathBuf) -> bool {
+        pub fn load_developer_mode(path: &Path) -> bool {
             let mut ret = false;
             if let Err(e) = Self::update(path, |s| ret = s.developer_mode, false) {
                 tracing::error!("Failed to load developer mode setting: {e}");
@@ -2131,7 +2131,7 @@ pub mod global {
             ret
         }
 
-        pub fn load_bitcoin_blake2b_beta(path: &PathBuf) -> bool {
+        pub fn load_bitcoin_blake2b_beta(path: &Path) -> bool {
             let mut enabled = false;
             if let Err(e) = Self::update(path, |s| enabled = s.bitcoin_blake2b_beta, false) {
                 tracing::error!("Failed to load Bitcoin Blake2b beta setting: {e}");
@@ -2140,13 +2140,13 @@ pub mod global {
         }
 
         pub fn update_bitcoin_blake2b_beta(
-            path: &PathBuf,
+            path: &Path,
             enabled: bool,
         ) -> Result<(), super::SettingsError> {
             Self::update_preference(path, PreferenceChange::BitcoinBlake2bBeta(enabled)).map(|_| ())
         }
 
-        pub fn load_account_tier(path: &PathBuf) -> AccountTier {
+        pub fn load_account_tier(path: &Path) -> AccountTier {
             let mut ret = AccountTier::default();
             if let Err(e) = Self::update(path, |s| ret = s.account_tier, false) {
                 tracing::error!("Failed to load account tier setting: {e}");
@@ -2155,21 +2155,21 @@ pub mod global {
         }
 
         pub fn update_account_tier(
-            path: &PathBuf,
+            path: &Path,
             tier: AccountTier,
         ) -> Result<(), super::SettingsError> {
             Self::update(path, |s| s.account_tier = tier, true)
         }
 
         pub fn update_developer_mode(
-            path: &PathBuf,
+            path: &Path,
             developer_mode: bool,
         ) -> Result<(), super::SettingsError> {
             Self::update_preference(path, PreferenceChange::DeveloperMode(developer_mode))
                 .map(|_| ())
         }
 
-        pub fn load_show_direction_badges(path: &PathBuf) -> bool {
+        pub fn load_show_direction_badges(path: &Path) -> bool {
             let mut ret = true;
             if let Err(e) = Self::update(path, |s| ret = s.show_direction_badges, false) {
                 tracing::error!("Failed to load show_direction_badges setting: {e}");
@@ -2178,7 +2178,7 @@ pub mod global {
         }
 
         pub fn update_show_direction_badges(
-            path: &PathBuf,
+            path: &Path,
             show: bool,
         ) -> Result<(), super::SettingsError> {
             Self::update(path, |s| s.show_direction_badges = show, true)
@@ -2186,20 +2186,20 @@ pub mod global {
 
         /// Missing files and older settings default to enabled. Reading does not
         /// initialise Branta or emit any preference/check telemetry.
-        pub fn load_recipient_identity_checks(path: &PathBuf) -> bool {
+        pub fn load_recipient_identity_checks(path: &Path) -> bool {
             let mut enabled = true;
             let _ = Self::update(path, |s| enabled = s.recipient_identity_checks, false);
             enabled
         }
 
         pub fn update_recipient_identity_checks(
-            path: &PathBuf,
+            path: &Path,
             enabled: bool,
         ) -> Result<(), super::SettingsError> {
             Self::update(path, |s| s.recipient_identity_checks = enabled, true)
         }
 
-        pub fn load_theme_mode(path: &PathBuf) -> coincube_ui::theme::palette::ThemeMode {
+        pub fn load_theme_mode(path: &Path) -> coincube_ui::theme::palette::ThemeMode {
             let mut ret = coincube_ui::theme::palette::ThemeMode::default();
             if let Err(e) = Self::load_preferences(path).map(|s| ret = s.theme.resolve(None)) {
                 tracing::error!("Failed to load theme mode setting: {e}");
@@ -2208,7 +2208,7 @@ pub mod global {
         }
 
         pub fn update_theme_mode(
-            path: &PathBuf,
+            path: &Path,
             mode: coincube_ui::theme::palette::ThemeMode,
         ) -> Result<(), super::SettingsError> {
             Self::update_preference(path, PreferenceChange::Theme(mode.into())).map(|_| ())
@@ -2217,7 +2217,7 @@ pub mod global {
         /// Advisory-badge dismissals, as `"<fingerprint>:<advisory id>"`.
         /// Read once at startup into the in-process mirror — see
         /// [`crate::hw_advisory::dismissals`].
-        pub fn load_dismissed_hw_advisories(path: &PathBuf) -> Vec<String> {
+        pub fn load_dismissed_hw_advisories(path: &Path) -> Vec<String> {
             let mut ret = Vec::new();
             if let Err(e) =
                 Self::update(path, |s| ret.clone_from(&s.dismissed_hw_advisories), false)
@@ -2229,10 +2229,7 @@ pub mod global {
 
         /// Record one dismissal. Idempotent, so a repeated dismiss of the same
         /// device/advisory pair doesn't grow the file.
-        pub fn dismiss_hw_advisory(
-            path: &PathBuf,
-            key: String,
-        ) -> Result<(), super::SettingsError> {
+        pub fn dismiss_hw_advisory(path: &Path, key: String) -> Result<(), super::SettingsError> {
             Self::update(
                 path,
                 |s| {
@@ -2246,7 +2243,7 @@ pub mod global {
 
         /// Whether the one-time incident notice for `advisory_id` has already
         /// been acknowledged on this install.
-        pub fn advisory_notice_seen(path: &PathBuf, advisory_id: &str) -> bool {
+        pub fn advisory_notice_seen(path: &Path, advisory_id: &str) -> bool {
             let mut ret = false;
             if let Err(e) = Self::update(
                 path,
@@ -2260,7 +2257,7 @@ pub mod global {
 
         /// Mark the one-time incident notice for `advisory_id` acknowledged.
         pub fn mark_advisory_notice_seen(
-            path: &PathBuf,
+            path: &Path,
             advisory_id: &str,
         ) -> Result<(), super::SettingsError> {
             let advisory_id = advisory_id.to_string();
@@ -2276,14 +2273,14 @@ pub mod global {
         }
 
         pub fn update_bitbox_settings(
-            path: &PathBuf,
+            path: &Path,
             bitbox: &BitboxSettings,
         ) -> Result<(), super::SettingsError> {
             Self::update(path, |s| s.bitbox = Some(bitbox.clone()), true)
         }
 
         pub fn update<F>(
-            path: &PathBuf,
+            path: &Path,
             mut update: F,
             write: bool,
         ) -> Result<(), super::SettingsError>
@@ -3977,7 +3974,7 @@ pub mod global {
                 entries.sort();
                 entries
             };
-            let refused = |path: &PathBuf| {
+            let refused = |path: &Path| {
                 assert!(GlobalSettings::load_preferences(path).is_err());
                 assert!(GlobalSettings::update_window_config(path, &window()).is_err());
                 assert!(GlobalSettings::save_preference(
@@ -4253,26 +4250,27 @@ pub mod global {
         fn automatic_initialization_never_shows_amounts_without_new_install_proof() {
             // Every unresolved root hides, including roots that look new or
             // freshly wiped.
-            let roots: [(&str, &dyn Fn(&TempRoot)); 5] = [
-                ("no-chains", &|_: &TempRoot| {}),
-                ("scaffolding-only", &|root: &TempRoot| {
+            type RootCase = (&'static str, fn(&TempRoot));
+            let roots: [RootCase; 5] = [
+                ("no-chains", |_: &TempRoot| {}),
+                ("scaffolding-only", |root: &TempRoot| {
                     for chain in ChainId::ALL {
                         let directory = root.chain(chain);
                         std::fs::create_dir_all(directory.join("data")).unwrap();
                         std::fs::write(directory.join("settings.lock"), b"").unwrap();
                     }
                 }),
-                ("empty-metadata", &|root: &TempRoot| {
+                ("empty-metadata", |root: &TempRoot| {
                     let directory = root.chain(ChainId::Bitcoin);
                     std::fs::create_dir_all(&directory).unwrap();
                     std::fs::write(directory.join(SETTINGS_FILE_NAME), br#"{"cubes":[]}"#).unwrap();
                 }),
-                ("unmasked-everywhere", &|root: &TempRoot| {
+                ("unmasked-everywhere", |root: &TempRoot| {
                     for chain in ChainId::ALL {
                         legacy(root, chain, &[("a", false), ("b", false)]);
                     }
                 }),
-                ("unrelated-global-writes", &|root: &TempRoot| {
+                ("unrelated-global-writes", |root: &TempRoot| {
                     GlobalSettings::update_window_config(&root.global(), &window()).unwrap();
                     GlobalSettings::save_preference(
                         &root.global(),
