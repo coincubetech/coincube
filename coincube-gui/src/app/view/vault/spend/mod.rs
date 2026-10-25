@@ -2626,6 +2626,73 @@ mod tests {
                                 && bounds.y + bounds.height / 2.0 <= viewport.y + viewport.height
                         })
                         .collect();
+                    // The second coin has a short identity even in the batch
+                    // fixture, which makes it the useful clipping regression.
+                    // Match its complete split numeric formatting and unit on
+                    // one line, then check those three actual text bounds.
+                    let formatted = fixture.coins[1]
+                        .amount
+                        .to_formatted_string_with_unit(scenario.unit);
+                    let split = formatted
+                        .char_indices()
+                        .find(|(_, character)| character.is_ascii_digit() && *character != '0')
+                        .map(|(index, _)| index)
+                        .expect("nonzero second coin");
+                    let (leading, significant) = formatted.split_at(split);
+                    let amount = visible_coin_text
+                        .iter()
+                        .find_map(|entry| {
+                            let (text, bounds) = *entry;
+                            (text == significant).then_some(*bounds)
+                        })
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "{appearance} {name} {outer:?}: missing formatted second coin {formatted:?} in {viewport:?}"
+                            )
+                        });
+                    let same_line =
+                        |a: Rectangle, b: Rectangle| a.y < b.y + b.height && b.y < a.y + a.height;
+                    let leading_bounds = (!leading.is_empty()).then(|| {
+                        visible_coin_text
+                            .iter()
+                            .find_map(|entry| {
+                                let (text, bounds) = *entry;
+                                (text == leading
+                                    && same_line(*bounds, amount)
+                                    && bounds.x + bounds.width <= amount.x + 1.0)
+                                    .then_some(*bounds)
+                            })
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "{appearance} {name} {outer:?}: missing leading amount {leading:?} on coin row"
+                                )
+                            })
+                    });
+                    let unit_bounds = visible_coin_text
+                        .iter()
+                        .find_map(|entry| {
+                            let (text, bounds) = *entry;
+                            (text == unit
+                                && same_line(*bounds, amount)
+                                && bounds.x >= amount.x + amount.width)
+                                .then_some(*bounds)
+                        })
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "{appearance} {name} {outer:?}: missing {unit} beside second coin {formatted:?}"
+                            )
+                        });
+                    let mut parts = vec![("amount", amount), ("unit", unit_bounds)];
+                    if let Some(bounds) = leading_bounds {
+                        parts.push(("leading amount", bounds));
+                    }
+                    for (part, bounds) in parts {
+                        assert!(
+                            bounds.x >= viewport.x
+                                && bounds.x + bounds.width <= viewport.x + viewport.width - 2.0,
+                            "{appearance} {name} {outer:?}: {part} of {formatted:?} at {bounds:?} exceeds inner {viewport:?}"
+                        );
+                    }
                     assert!(
                         visible_coin_text.iter().any(|(text, _)| text == unit),
                         "{appearance} {name} {outer:?}: no visible coin unit in {viewport:?}"
