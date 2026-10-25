@@ -806,6 +806,14 @@ impl Loader {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::View(ViewMessage::Retry) => {
+                // A Claim loader is admitted with a one-use scoped PIN and an
+                // account verified by the source Cube. The generic builder
+                // cannot restore either credential, so retry must return to
+                // the source Cube's unlock flow instead of starting a weaker
+                // loader from the remaining fields.
+                if self.restricted_claim {
+                    return Task::none();
+                }
                 if self.cube_settings.network.is_blake2b() {
                     // Reopening must establish a fresh session after revocation.
                     // Keep the specific refusal instead of rebuilding without auth.
@@ -2166,6 +2174,27 @@ mod tests {
             None,
         )
         .0
+    }
+
+    #[test]
+    fn restricted_claim_retry_keeps_scoped_admission_and_does_not_start() {
+        let mut loader = loader_without_wallet(false);
+        loader.set_scoped_seed_password(zeroize::Zeroizing::new("synthetic-pin".into()));
+        loader.claim_verified_account = Some(7);
+        let refusal = "Reopen Claim from the source Cube to retry";
+        loader.step = Step::Error(Box::new(Error::Unexpected(refusal.into())));
+
+        for _ in 0..2 {
+            assert_eq!(loader.update(Message::View(ViewMessage::Retry)).units(), 0);
+            assert!(loader.restricted_claim);
+            assert_eq!(
+                loader.scoped_seed_password.as_ref().unwrap().0.as_str(),
+                "synthetic-pin"
+            );
+            assert_eq!(loader.claim_verified_account, Some(7));
+            assert!(matches!(&loader.step, Step::Error(error)
+                if error.to_string().contains(refusal)));
+        }
     }
 
     #[test]
