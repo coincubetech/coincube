@@ -27,10 +27,23 @@ pub enum WalletKind {
 }
 
 /// Direction of a payment from the wallet's point of view.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub enum DomainPaymentDirection {
     Send,
     Receive,
+}
+
+/// Identity for a Liquid backend payment. Swap IDs remain stable when their
+/// funding transaction appears; a direct asset transfer has no swap ID.
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub enum DomainPaymentIdentity {
+    LightningSwap(String),
+    BitcoinSwap(String),
+    LiquidTransfer {
+        tx_id: String,
+        asset_id: String,
+        direction: DomainPaymentDirection,
+    },
 }
 
 /// Composite status of a payment, mirroring the states the UI distinguishes.
@@ -79,6 +92,7 @@ pub struct DomainLiquidAssetInfo {
 pub enum DomainPaymentDetails {
     /// A Lightning payment (BOLT11 / BOLT12 / LNURL).
     Lightning {
+        swap_id: Option<String>,
         description: String,
         payer_note: Option<String>,
     },
@@ -112,6 +126,7 @@ impl DomainPaymentDetails {
             Self::Lightning {
                 description,
                 payer_note,
+                ..
             }
             | Self::LiquidAsset {
                 description,
@@ -143,6 +158,45 @@ impl DomainPayment {
     pub fn is_incoming(&self) -> bool {
         matches!(self.direction, DomainPaymentDirection::Receive)
     }
+
+    /// Returns no identity if a required SDK identifier is absent or empty.
+    /// Never substitute a mutable row index, timestamp, label, or tx ID for a
+    /// swap, since tx IDs can arrive after the first snapshot.
+    pub fn stable_identity(&self) -> Option<DomainPaymentIdentity> {
+        fn present(value: &str) -> Option<String> {
+            (!value.trim().is_empty()).then(|| value.to_owned())
+        }
+        match &self.details {
+            DomainPaymentDetails::Lightning { swap_id, .. } => swap_id
+                .as_deref()
+                .and_then(present)
+                .map(DomainPaymentIdentity::LightningSwap),
+            DomainPaymentDetails::OnChainBitcoin { swap_id, .. } => swap_id
+                .as_deref()
+                .and_then(present)
+                .map(DomainPaymentIdentity::BitcoinSwap),
+            DomainPaymentDetails::LiquidAsset { asset_id, .. } => {
+                Some(DomainPaymentIdentity::LiquidTransfer {
+                    tx_id: present(self.tx_id.as_deref()?)?,
+                    asset_id: present(asset_id)?,
+                    direction: self.direction,
+                })
+            }
+        }
+    }
+}
+
+/// Resolve against the latest raw snapshot. Ambiguous or vanished identities
+/// deliberately do not open any payment.
+pub fn find_unique_payment<'a>(
+    payments: &'a [DomainPayment],
+    identity: &DomainPaymentIdentity,
+) -> Option<&'a DomainPayment> {
+    let mut matches = payments
+        .iter()
+        .filter(|payment| payment.stable_identity().as_ref() == Some(identity));
+    let selected = matches.next()?;
+    matches.next().is_none().then_some(selected)
 }
 
 /// A refundable swap surfaced by the backend's read API.
@@ -184,10 +238,12 @@ impl From<LiquidPaymentType> for DomainPaymentDirection {
 fn map_liquid_details(details: LiquidPaymentDetails) -> DomainPaymentDetails {
     match details {
         LiquidPaymentDetails::Lightning {
+            swap_id,
             description,
             payer_note,
             ..
         } => DomainPaymentDetails::Lightning {
+            swap_id: Some(swap_id),
             description,
             payer_note,
         },
@@ -363,6 +419,7 @@ mod tests {
     #[test]
     fn payment_details_description_prefers_non_empty_payer_note() {
         let lightning = DomainPaymentDetails::Lightning {
+            swap_id: Some("lightning-swap".to_string()),
             description: "invoice description".to_string(),
             payer_note: Some("payer note".to_string()),
         };
@@ -402,6 +459,7 @@ mod tests {
             direction: DomainPaymentDirection::Receive,
             status: DomainPaymentStatus::Complete,
             details: DomainPaymentDetails::Lightning {
+                swap_id: None,
                 description: String::new(),
                 payer_note: None,
             },
@@ -442,8 +500,13 @@ mod tests {
         assert_eq!(domain.direction, DomainPaymentDirection::Receive);
         assert_eq!(domain.status, DomainPaymentStatus::Pending);
         assert_eq!(
+            domain.stable_identity(),
+            Some(DomainPaymentIdentity::LightningSwap("swap".to_string()))
+        );
+        assert_eq!(
             domain.details,
             DomainPaymentDetails::Lightning {
+                swap_id: Some("swap".to_string()),
                 description: "invoice".to_string(),
                 payer_note: Some("thanks".to_string()),
             }
@@ -501,6 +564,14 @@ mod tests {
         let domain = DomainPayment::from(sdk_payment);
 
         assert_eq!(
+            domain.stable_identity(),
+            Some(DomainPaymentIdentity::BitcoinSwap("swap-id".to_string()))
+        );
+        let mut before_tx = domain.clone();
+        before_tx.tx_id = None;
+        assert_eq!(before_tx.stable_identity(), domain.stable_identity());
+
+        assert_eq!(
             domain.details,
             DomainPaymentDetails::OnChainBitcoin {
                 swap_id: Some("swap-id".to_string()),
@@ -534,5 +605,106 @@ mod tests {
                 amount_sat: 42_000,
             }
         );
+    }
+
+    #[test]
+    fn swap_identity_does_not_change_when_txid_arrives() {
+        let mut sdk_payment = liquid_payment_with(LiquidPaymentDetails::Lightning {
+            swap_id: "swap-before-confirmation".to_string(),
+            description: String::new(),
+            liquid_expiration_blockheight: 100,
+            preimage: None,
+            invoice: None,
+            bolt12_offer: None,
+            payment_hash: None,
+            destination_pubkey: None,
+            lnurl_info: None,
+            bip353_address: None,
+            payer_note: None,
+            claim_tx_id: None,
+            refund_tx_id: None,
+            refund_tx_amount_sat: None,
+            settled_at: None,
+        });
+        sdk_payment.tx_id = None;
+        let before = DomainPayment::from(sdk_payment.clone());
+        sdk_payment.tx_id = Some("funding-tx".to_string());
+        sdk_payment.status = LiquidPaymentState::Complete;
+        let after = DomainPayment::from(sdk_payment);
+        assert_eq!(before.stable_identity(), after.stable_identity());
+        assert_eq!(
+            after.stable_identity(),
+            Some(DomainPaymentIdentity::LightningSwap(
+                "swap-before-confirmation".to_string()
+            ))
+        );
+        let mut without_swap_id = after;
+        if let DomainPaymentDetails::Lightning { swap_id, .. } = &mut without_swap_id.details {
+            *swap_id = Some(String::new());
+        }
+        assert_eq!(without_swap_id.stable_identity(), None);
+    }
+
+    #[test]
+    fn direct_liquid_identity_requires_txid_and_asset_and_direction() {
+        let sdk_payment = liquid_payment_with(LiquidPaymentDetails::Liquid {
+            destination: "liquid-address".to_string(),
+            description: String::new(),
+            asset_id: "asset".to_string(),
+            asset_info: None,
+            lnurl_info: None,
+            bip353_address: None,
+            payer_note: None,
+        });
+        let mut payment = DomainPayment::from(sdk_payment);
+        let receive_id = payment.stable_identity().unwrap();
+        payment.direction = DomainPaymentDirection::Send;
+        assert_ne!(payment.stable_identity(), Some(receive_id));
+        payment.tx_id = None;
+        assert_eq!(payment.stable_identity(), None);
+        payment.tx_id = Some(" ".to_string());
+        assert_eq!(payment.stable_identity(), None);
+        payment.tx_id = Some("txid".to_string());
+        if let DomainPaymentDetails::LiquidAsset { asset_id, .. } = &mut payment.details {
+            asset_id.clear();
+        }
+        assert_eq!(payment.stable_identity(), None);
+    }
+
+    #[test]
+    fn selection_tracks_reordering_and_fails_closed_on_removal_or_duplicate() {
+        let mut first = DomainPayment::from(liquid_payment_with(LiquidPaymentDetails::Bitcoin {
+            swap_id: "first".to_string(),
+            bitcoin_address: "bc1qaddress".to_string(),
+            description: String::new(),
+            auto_accepted_fees: false,
+            liquid_expiration_blockheight: 0,
+            bitcoin_expiration_blockheight: 0,
+            lockup_tx_id: None,
+            claim_tx_id: None,
+            refund_tx_id: None,
+            refund_tx_amount_sat: None,
+        }));
+        let mut second = first.clone();
+        if let DomainPaymentDetails::OnChainBitcoin { swap_id, .. } = &mut second.details {
+            *swap_id = Some("second".to_string());
+        }
+        second.amount_sat = 80_000;
+        let id = first.stable_identity().unwrap();
+        let mut snapshot = vec![first.clone(), second.clone()];
+        assert_eq!(
+            find_unique_payment(&snapshot, &id).map(|p| p.amount_sat),
+            Some(25_000)
+        );
+        snapshot.swap(0, 1);
+        assert_eq!(
+            find_unique_payment(&snapshot, &id).map(|p| p.amount_sat),
+            Some(25_000)
+        );
+        snapshot.remove(1);
+        assert!(find_unique_payment(&snapshot, &id).is_none());
+        first.amount_sat = 40_000;
+        snapshot.extend([first.clone(), first]);
+        assert!(find_unique_payment(&snapshot, &id).is_none());
     }
 }
