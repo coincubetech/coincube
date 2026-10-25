@@ -441,8 +441,14 @@ pub enum SettingsMessage {
     EditRemoteBackendSettings,
     RemoteBackendSettings(RemoteBackendSettingsMessage),
     EditWalletSettings,
+    ToggleWalletExpert,
+    ReviewDescriptorCopy,
+    ConfirmDescriptorCopy,
+    CancelDescriptorCopy,
     ImportExportSection,
     ExportEncryptedDescriptor,
+    ReviewPlaintextDescriptorExport,
+    CancelPlaintextDescriptorExport,
     ExportPlaintextDescriptor,
     ExportTransactions,
     ExportLabels,
@@ -612,6 +618,8 @@ pub enum LocalSigningMessage {
     ),
     /// User asked to remove a paired phone (8-hex fingerprint of the
     /// phone's cert pin).
+    ReviewRemovePhone(String),
+    CancelRemovePhone,
     RemovePhone(String),
     /// Periodic tick while no pairing is in progress: tell phones about
     /// removals made here, and ask paired phones whether they removed this

@@ -1618,11 +1618,16 @@ pub(crate) fn opening_body<'a>(
     .height(Length::Fixed(64.0))
     .padding([0.0, 24.0])
     .style(opening_rail_style);
-    let stage = Container::new(loader::view(step, quote, image, restricted_claim))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill);
+    let stage = Container::new(loader::view_with_retry(
+        step,
+        quote,
+        image,
+        !restricted_claim,
+    ))
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .center_x(Length::Fill)
+    .center_y(Length::Fill);
     Column::new()
         .width(Length::Fill)
         .height(Length::Fill)

@@ -52,6 +52,8 @@ pub struct WalletSettingsState {
     modal: Modal,
     processing: bool,
     updated: bool,
+    expert_open: bool,
+    descriptor_copy_review: bool,
     _config: Arc<Config>,
 }
 
@@ -71,6 +73,8 @@ impl WalletSettingsState {
             modal: Modal::None,
             processing: false,
             updated: false,
+            expert_open: false,
+            descriptor_copy_review: false,
             _config: config,
         }
     }
@@ -126,8 +130,16 @@ impl State for WalletSettingsState {
             self.processing,
             self.updated,
             self.hardware_registration_allowed(),
+            self.expert_open,
         );
 
+        if self.descriptor_copy_review {
+            return modal::Modal::new(content, view::vault::settings::descriptor_copy_review())
+                .on_blur(Some(view::Message::Settings(
+                    view::SettingsMessage::CancelDescriptorCopy,
+                )))
+                .into();
+        }
         match &self.modal {
             Modal::None => content,
             Modal::RegisterWallet(m) => modal::Modal::new(content, m.view())
@@ -191,6 +203,7 @@ impl State for WalletSettingsState {
             ))) => {
                 self.wallet_alias.valid = alias.len() < WALLET_ALIAS_MAXIMUM_LENGTH;
                 self.wallet_alias.value = alias;
+                self.updated = false;
                 Task::none()
             }
             Message::View(view::Message::Settings(
@@ -202,6 +215,7 @@ impl State for WalletSettingsState {
                     .find(|(fingerprint, _)| fg == *fingerprint)
                 {
                     name.value = value;
+                    self.updated = false;
                 }
                 Task::none()
             }
@@ -237,6 +251,38 @@ impl State for WalletSettingsState {
                     ),
                     Message::WalletUpdated,
                 )
+            }
+            Message::View(view::Message::Settings(view::SettingsMessage::ToggleWalletExpert)) => {
+                self.expert_open = !self.expert_open;
+                self.descriptor_copy_review = false;
+                Task::none()
+            }
+            Message::View(view::Message::Settings(view::SettingsMessage::ReviewDescriptorCopy)) => {
+                if self.expert_open {
+                    self.descriptor_copy_review = true;
+                }
+                Task::none()
+            }
+            Message::View(view::Message::Settings(view::SettingsMessage::CancelDescriptorCopy)) => {
+                self.descriptor_copy_review = false;
+                Task::none()
+            }
+            Message::View(view::Message::Settings(
+                view::SettingsMessage::ConfirmDescriptorCopy,
+            )) => {
+                if !self.descriptor_copy_review || !self.expert_open {
+                    return Task::none();
+                }
+                self.descriptor_copy_review = false;
+                let descriptor_text = match &self.descriptor {
+                    WalletDescriptor::Vault(vault) => vault.to_string(),
+                    WalletDescriptor::Imported(_) => format!(
+                        "Receive: {}\nChange: {}",
+                        self.descriptor.receive_descriptor(),
+                        self.descriptor.change_descriptor()
+                    ),
+                };
+                Task::done(Message::View(view::Message::Clipboard(descriptor_text)))
             }
             Message::View(view::Message::Close) => {
                 self.modal = Modal::None;
@@ -328,6 +374,8 @@ impl State for WalletSettingsState {
         self.descriptor = wallet.main_descriptor.clone();
         self.keys_aliases = Self::keys_aliases(&wallet);
         self.wallet = wallet;
+        self.expert_open = false;
+        self.descriptor_copy_review = false;
         Task::perform(
             async move { daemon.get_info().await.map_err(|e| e.into()) },
             Message::Info,
@@ -601,6 +649,74 @@ pub async fn update_aliases(
 mod chain_tests {
     use super::*;
     use crate::chain::ChainId;
+    use iced::futures::StreamExt;
+
+    #[tokio::test]
+    async fn descriptor_copy_requires_expert_review_and_emits_once() {
+        let descriptor = crate::app::state::vault::test_support::unified::fixture().descriptor;
+        let wallet = Arc::new(Wallet::new(descriptor.clone()).with_chain(ChainId::Bitcoin));
+        let dir = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("coincube-descriptor-copy-{}", uuid::Uuid::new_v4())),
+        );
+        let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
+            crate::daemon::client::Coincubed::new(crate::utils::mock::Daemon::new(vec![]).run()),
+        );
+        let mut state = WalletSettingsState::new(dir, wallet.clone(), Arc::new(Config::new(false)));
+        let cache = Cache::default();
+        let mut send = |intent| {
+            state.update(
+                Some(daemon.clone()),
+                &cache,
+                Message::View(view::Message::Settings(intent)),
+            )
+        };
+
+        assert!(iced_runtime::task::into_stream(send(
+            view::SettingsMessage::ConfirmDescriptorCopy,
+        ))
+        .is_none());
+        drop(send(view::SettingsMessage::ReviewDescriptorCopy));
+        assert!(iced_runtime::task::into_stream(send(
+            view::SettingsMessage::ConfirmDescriptorCopy,
+        ))
+        .is_none());
+
+        drop(send(view::SettingsMessage::ToggleWalletExpert));
+        drop(send(view::SettingsMessage::ReviewDescriptorCopy));
+        drop(send(view::SettingsMessage::CancelDescriptorCopy));
+        assert!(iced_runtime::task::into_stream(send(
+            view::SettingsMessage::ConfirmDescriptorCopy,
+        ))
+        .is_none());
+
+        drop(send(view::SettingsMessage::ReviewDescriptorCopy));
+        let mut stream =
+            iced_runtime::task::into_stream(send(view::SettingsMessage::ConfirmDescriptorCopy))
+                .expect("confirmed copy emits clipboard payload");
+        match stream.next().await {
+            Some(iced_runtime::Action::Output(Message::View(view::Message::Clipboard(text)))) => {
+                assert_eq!(text, descriptor.to_string());
+            }
+            _ => panic!("confirmed copy did not emit the original Clipboard payload"),
+        }
+        assert!(stream.next().await.is_none(), "copy must emit once");
+        assert!(iced_runtime::task::into_stream(send(
+            view::SettingsMessage::ConfirmDescriptorCopy,
+        ))
+        .is_none());
+
+        drop(send(view::SettingsMessage::ReviewDescriptorCopy));
+        drop(state.reload(Some(daemon.clone()), Some(wallet.clone())));
+        assert!(!state.expert_open && !state.descriptor_copy_review);
+        assert!(iced_runtime::task::into_stream(state.update(
+            Some(daemon),
+            &cache,
+            Message::View(view::Message::Settings(
+                view::SettingsMessage::ConfirmDescriptorCopy,
+            )),
+        ))
+        .is_none());
+    }
 
     #[tokio::test]
     async fn alias_updates_touch_only_exact_chain_directory() {

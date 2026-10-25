@@ -1495,6 +1495,7 @@ impl Tab {
             }
             Message::Launch(home::Message::RunToRecovery(root, config, chain, cube)) => {
                 self.pending_recovery_route = Some((root.clone(), chain, cube.id.clone()));
+                self.claim_open = None;
                 Message::Launch(home::Message::Run(root, config, chain, cube))
             }
             Message::Launch(home::Message::RunClaim(root, config, chain, cube, intent)) => {
@@ -1504,6 +1505,7 @@ impl Tab {
             }
             Message::Launch(home::Message::Run(root, config, chain, cube)) => {
                 self.pending_recovery_route = None;
+                self.claim_open = None;
                 Message::Launch(home::Message::Run(root, config, chain, cube))
             }
             Message::ForkInstallCompleted(generation, msg) => {
@@ -1531,6 +1533,7 @@ impl Tab {
                     }
                     app::split_intent::clear();
                     self.pending_split_intent = None;
+                    self.claim_open = None;
                     return Task::none();
                 }
             }
@@ -5492,6 +5495,84 @@ mod migration_warning_tests {
         assert!(matches!(tab.state, State::Home(_)));
         assert!(tab.unlock_floor.is_none());
         assert!(tab.unlock_motion.is_none());
+    }
+
+    #[test]
+    fn refused_claim_then_ordinary_open_does_not_retain_claim_authority() {
+        use crate::chain::ChainId;
+
+        let mut tab = non_app_tab();
+        let root = match &tab.state {
+            State::Home(home) => home.datadir_path.clone(),
+            _ => unreachable!(),
+        };
+        let target = cube_on(ChainId::BitcoinBlake2b);
+        let handoff =
+            app::claim_intent::ForkHandoff::new(&root, "source-cube".into(), target.id.clone())
+                .unwrap();
+        let intent = home::ClaimOpenIntent::new(
+            app::cache::AppGeneration::next(),
+            &root,
+            "source-cube".into(),
+            target.id.clone(),
+            home::ClaimRoute::Begin(handoff),
+        );
+        drop(tab.update(Message::Launch(home::Message::RunClaim(
+            root.clone(),
+            app::config::Config::new(false),
+            ChainId::Bitcoin, // Wrong folder: refuse before PIN entry.
+            target,
+            intent,
+        ))));
+        assert!(matches!(tab.state, State::Home(_)));
+        assert!(tab.claim_open.is_none(), "refusal must discard the Claim");
+
+        let ordinary = cube_on(ChainId::Bitcoin);
+        drop(tab.update(Message::Launch(home::Message::Run(
+            root,
+            app::config::Config::new(false),
+            ChainId::Bitcoin,
+            ordinary,
+        ))));
+        assert!(matches!(tab.state, State::PinEntry(_)));
+        assert!(tab.claim_open.is_none());
+    }
+
+    #[test]
+    fn ordinary_open_clears_preexisting_claim_intent() {
+        use crate::chain::ChainId;
+
+        let mut tab = non_app_tab();
+        let root = match &tab.state {
+            State::Home(home) => home.datadir_path.clone(),
+            _ => unreachable!(),
+        };
+        let ordinary = cube_on(ChainId::Bitcoin);
+        tab.set_claim_open(home::ClaimOpenIntent::new(
+            app::cache::AppGeneration::next(),
+            &root,
+            "source-cube".into(),
+            ordinary.id.clone(),
+            home::ClaimRoute::Begin(
+                app::claim_intent::ForkHandoff::new(
+                    &root,
+                    "source-cube".into(),
+                    ordinary.id.clone(),
+                )
+                .unwrap(),
+            ),
+        ));
+        drop(tab.update(Message::Launch(home::Message::Run(
+            root,
+            app::config::Config::new(false),
+            ChainId::Bitcoin,
+            ordinary,
+        ))));
+        assert!(matches!(tab.state, State::PinEntry(_)));
+        assert!(
+            tab.claim_open.is_none(),
+            "ordinary open must discard stale Claim"
+        );
     }
 
     fn cube_on(chain: crate::chain::ChainId) -> app::settings::CubeSettings {
