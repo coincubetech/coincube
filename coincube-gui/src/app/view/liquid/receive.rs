@@ -1167,121 +1167,6 @@ fn receive_cards(
         .into()
 }
 
-#[cfg(test)]
-mod privacy_tests {
-    use super::*;
-    use crate::app::view::shared::landing::capture;
-
-    #[test]
-    fn receive_passive_balances_and_recent_rows_follow_global_mask() {
-        let input = form::Value::<String>::default();
-        let rows = vec![
-            RecentTransaction {
-                description: "Bitcoin payment".into(),
-                time_ago: "just now".into(),
-                amount: Amount::from_sat(98_765_432),
-                fees_sat: Amount::ZERO,
-                fiat_amount: Some(
-                    crate::app::view::vault::fiat::FiatAmount::new(
-                        3456.78,
-                        crate::services::fiat::Currency::USD,
-                    )
-                    .unwrap(),
-                ),
-                is_incoming: true,
-                status: DomainPaymentStatus::Complete,
-                details: DomainPaymentDetails::Lightning {
-                    description: "Bitcoin payment".into(),
-                    payer_note: None,
-                },
-                usdt_display: None,
-            },
-            RecentTransaction {
-                description: "Token payment".into(),
-                time_ago: "just now".into(),
-                amount: Amount::ZERO,
-                fees_sat: Amount::ZERO,
-                fiat_amount: None,
-                is_incoming: false,
-                status: DomainPaymentStatus::Complete,
-                details: DomainPaymentDetails::LiquidAsset {
-                    asset_id: "usdt".into(),
-                    asset_info: None,
-                    description: "Token payment".into(),
-                    payer_note: None,
-                },
-                usdt_display: Some("2468.13 USDt".into()),
-            },
-        ];
-        let method = ReceiveMethod::Liquid;
-        let render = |mask_amounts, receive_asset| {
-            liquid_receive_view(
-                &method,
-                None,
-                None,
-                false,
-                &input,
-                &input,
-                "",
-                BitcoinDisplayUnit::Sats,
-                None,
-                None,
-                None,
-                receive_asset,
-                SenderNetwork::Liquid,
-                &rows,
-                Amount::from_sat(12_345_678),
-                135_791_113,
-                true,
-                mask_amounts,
-            )
-        };
-        let hidden = capture::inspect(
-            "liquid-receive-hidden",
-            render(true, SendAsset::Lbtc),
-            (1440, 900),
-            "dark",
-            theme::Theme::dark(),
-        );
-        assert!(hidden.contains("••••••"));
-        for sentinel in ["12,345,678", "98,765,432", "2468.13", "3,456.78"] {
-            assert!(
-                !hidden.contains(sentinel),
-                "hidden Liquid receive amount {}",
-                sentinel
-            );
-        }
-        let shown = capture::inspect(
-            "liquid-receive-shown",
-            render(false, SendAsset::Lbtc),
-            (1440, 900),
-            "dark",
-            theme::Theme::dark(),
-        );
-        assert!(shown.contains("12,345,678"));
-        assert!(shown.contains("98,765,432"));
-        assert!(shown.contains("2468.13"));
-        assert!(shown.contains("3,456.78"));
-        let hidden_usdt = capture::inspect(
-            "liquid-receive-usdt-hidden",
-            render(true, SendAsset::Usdt),
-            (1440, 900),
-            "dark",
-            theme::Theme::dark(),
-        );
-        let usdt_balance = format!("{} USDt", format_usdt_display(135_791_113));
-        assert!(!hidden_usdt.contains(&usdt_balance));
-        let shown_usdt = capture::inspect(
-            "liquid-receive-usdt-shown",
-            render(false, SendAsset::Usdt),
-            (1440, 900),
-            "dark",
-            theme::Theme::dark(),
-        );
-        assert!(shown_usdt.contains(&usdt_balance));
-    }
-}
-
 // ── Picker modals ───────────────────────────────────────────────────────────
 
 /// Full-screen celebration view when a payment is received.
@@ -1478,5 +1363,120 @@ fn picker_row_selected(theme: &theme::Theme) -> iced::widget::container::Style {
             radius: 12.0.into(),
         },
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod privacy_tests {
+    use super::*;
+    use crate::app::view::shared::landing::capture;
+
+    #[test]
+    fn receive_passive_balances_and_recent_rows_follow_global_mask() {
+        let input = form::Value::<String>::default();
+        let rows = vec![
+            RecentTransaction {
+                description: "Bitcoin payment".into(),
+                time_ago: "just now".into(),
+                amount: Amount::from_sat(98_765_432),
+                fees_sat: Amount::ZERO,
+                fiat_amount: Some(
+                    crate::app::view::vault::fiat::FiatAmount::new(
+                        3456.78,
+                        crate::services::fiat::Currency::USD,
+                    )
+                    .unwrap(),
+                ),
+                is_incoming: true,
+                status: DomainPaymentStatus::Complete,
+                details: DomainPaymentDetails::Lightning {
+                    description: "Bitcoin payment".into(),
+                    payer_note: None,
+                },
+                usdt_display: None,
+            },
+            RecentTransaction {
+                description: "Token payment".into(),
+                time_ago: "just now".into(),
+                amount: Amount::ZERO,
+                fees_sat: Amount::ZERO,
+                fiat_amount: None,
+                is_incoming: false,
+                status: DomainPaymentStatus::Complete,
+                details: DomainPaymentDetails::LiquidAsset {
+                    asset_id: "usdt".into(),
+                    asset_info: None,
+                    description: "Token payment".into(),
+                    payer_note: None,
+                },
+                usdt_display: Some("2468.13 USDt".into()),
+            },
+        ];
+        let method = ReceiveMethod::Liquid;
+        let render = |mask_amounts, receive_asset| {
+            liquid_receive_view(
+                &method,
+                None,
+                None,
+                false,
+                &input,
+                &input,
+                "",
+                BitcoinDisplayUnit::Sats,
+                None,
+                None,
+                None,
+                receive_asset,
+                SenderNetwork::Liquid,
+                &rows,
+                Amount::from_sat(12_345_678),
+                135_791_113,
+                true,
+                mask_amounts,
+            )
+        };
+        let hidden = capture::inspect(
+            "liquid-receive-hidden",
+            render(true, SendAsset::Lbtc),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(hidden.contains("••••••"));
+        for sentinel in ["12,345,678", "98,765,432", "2468.13", "3,456.78"] {
+            assert!(
+                !hidden.contains(sentinel),
+                "hidden Liquid receive amount {}",
+                sentinel
+            );
+        }
+        let shown = capture::inspect(
+            "liquid-receive-shown",
+            render(false, SendAsset::Lbtc),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(shown.contains("12,345,678"));
+        assert!(shown.contains("98,765,432"));
+        assert!(shown.contains("2468.13"));
+        assert!(shown.contains("3,456.78"));
+        let hidden_usdt = capture::inspect(
+            "liquid-receive-usdt-hidden",
+            render(true, SendAsset::Usdt),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        let usdt_balance = format!("{} USDt", format_usdt_display(135_791_113));
+        assert!(!hidden_usdt.contains(&usdt_balance));
+        let shown_usdt = capture::inspect(
+            "liquid-receive-usdt-shown",
+            render(false, SendAsset::Usdt),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(shown_usdt.contains(&usdt_balance));
     }
 }

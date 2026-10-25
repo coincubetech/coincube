@@ -79,6 +79,7 @@ pub fn sideshift_send_view<'a>(
 // Address input with balance (initial screen)
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)] // Existing flow inputs plus shared privacy state.
 fn address_input_view<'a>(
     recipient_address: &'a str,
     selected_network: Option<&SideshiftNetwork>,
@@ -780,6 +781,49 @@ fn info_card(shift: &ShiftResponse, amount_input: &str) -> Element<'static, Side
         .into()
 }
 
+fn info_row(label: &str, value: &str) -> Element<'static, SideshiftSendMessage> {
+    Row::new()
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .push(
+            text(label.to_string())
+                .size(P2_SIZE)
+                .style(theme::text::secondary)
+                .width(Length::FillPortion(2)),
+        )
+        .push(
+            text(value.to_string())
+                .size(P2_SIZE)
+                .font(iced::Font::MONOSPACE)
+                .width(Length::FillPortion(3)),
+        )
+        .into()
+}
+
+fn error_view(error: Option<&str>) -> Element<SideshiftSendMessage> {
+    let msg = error.unwrap_or("An unknown error occurred.");
+
+    Container::new(
+        Column::new()
+            .spacing(16)
+            .push(
+                Container::new(text(msg).size(P1_SIZE).color(color::RED))
+                    .padding([12, 16])
+                    .style(theme::card::error)
+                    .width(Length::Fill),
+            )
+            .push(
+                button::primary(None, "Try Again")
+                    .on_press(SideshiftSendMessage::Reset)
+                    .width(Length::Fill),
+            )
+            .max_width(520)
+            .width(Length::Fill),
+    )
+    .center_x(Length::Fill)
+    .into()
+}
+
 #[cfg(test)]
 mod privacy_tests {
     use super::*;
@@ -872,47 +916,4 @@ mod privacy_tests {
         assert!(amount_hidden.contains("••••••"));
         assert!(!amount_hidden.contains("1.35 USDt"));
     }
-}
-
-fn info_row(label: &str, value: &str) -> Element<'static, SideshiftSendMessage> {
-    Row::new()
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .push(
-            text(label.to_string())
-                .size(P2_SIZE)
-                .style(theme::text::secondary)
-                .width(Length::FillPortion(2)),
-        )
-        .push(
-            text(value.to_string())
-                .size(P2_SIZE)
-                .font(iced::Font::MONOSPACE)
-                .width(Length::FillPortion(3)),
-        )
-        .into()
-}
-
-fn error_view(error: Option<&str>) -> Element<SideshiftSendMessage> {
-    let msg = error.unwrap_or("An unknown error occurred.");
-
-    Container::new(
-        Column::new()
-            .spacing(16)
-            .push(
-                Container::new(text(msg).size(P1_SIZE).color(color::RED))
-                    .padding([12, 16])
-                    .style(theme::card::error)
-                    .width(Length::Fill),
-            )
-            .push(
-                button::primary(None, "Try Again")
-                    .on_press(SideshiftSendMessage::Reset)
-                    .width(Length::Fill),
-            )
-            .max_width(520)
-            .width(Length::Fill),
-    )
-    .center_x(Length::Fill)
-    .into()
 }

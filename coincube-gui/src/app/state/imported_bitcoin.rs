@@ -2064,10 +2064,10 @@ impl ImportedBitcoinPanel {
                 if generation == self.generation =>
             {
                 self.busy = false;
-                if !self
+                if self
                     .draft
                     .as_ref()
-                    .is_some_and(|draft| draft.psbt.unsigned_tx.compute_txid() == draft_id)
+                    .is_none_or(|draft| draft.psbt.unsigned_tx.compute_txid() != draft_id)
                 {
                     return Task::none();
                 }
@@ -2136,10 +2136,10 @@ impl ImportedBitcoinPanel {
                 if generation == self.generation =>
             {
                 self.busy = false;
-                if !self
+                if self
                     .draft
                     .as_ref()
-                    .is_some_and(|draft| draft.psbt.unsigned_tx.compute_txid() == draft_id)
+                    .is_none_or(|draft| draft.psbt.unsigned_tx.compute_txid() != draft_id)
                 {
                     return Task::none();
                 }
