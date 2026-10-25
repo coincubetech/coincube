@@ -1560,6 +1560,106 @@ mod tests {
         }
     }
 
+    /// Capture the production QRCode widget without a modal or scrollable so
+    /// translations of its own geometry can be compared on the same backend.
+    /// The original PNGs and manifest are inputs to an external exact-payload
+    /// decoder; rendering alone does not establish that a QR is scannable.
+    #[test]
+    #[ignore = "requires R08A_QR_CAPTURE_DIR and external exact-payload decoding"]
+    fn qr_widget_tiny_skia_translation_captures() {
+        let directory = std::path::PathBuf::from(
+            std::env::var_os("R08A_QR_CAPTURE_DIR")
+                .expect("set R08A_QR_CAPTURE_DIR to a disposable capture directory"),
+        );
+        std::fs::create_dir_all(&directory).expect("create QR capture directory");
+
+        let payload = format!("bitcoin:{}?index={}", addr(3), 7);
+        let data = qr_code::Data::new(payload.as_bytes()).expect("encode synthetic receive URI");
+        let theme = theme::Theme::light();
+        let framebuffer = (640_u32, 640_u32);
+        let cell_size = 8_u32;
+        let positions = [(0_u32, 0_u32), (36, 0), (0, 89), (36, 89)];
+        let mut captures = Vec::new();
+
+        for (x, y) in positions {
+            let mut renderer = renderer();
+            // Use the same production widget and Data cache as qr_modal.
+            let mut element: Element<'_, Message> = QRCode::<coincube_ui::theme::Theme>::new(&data)
+                .cell_size(cell_size)
+                .into();
+            let mut tree = Tree::new(element.as_widget());
+            let mut node = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(
+                    Size::ZERO,
+                    Size::new(framebuffer.0 as f32, framebuffer.1 as f32),
+                ),
+            );
+            node.move_to_mut(iced::Point::new(x as f32, y as f32));
+            let bounds = Layout::new(&node).bounds();
+            assert_eq!(bounds.x, x as f32, "mounted QR x at ({}, {})", x, y);
+            assert_eq!(bounds.y, y as f32, "mounted QR y at ({}, {})", x, y);
+            assert_eq!(bounds.width, bounds.height, "square QR at ({}, {})", x, y);
+            assert!(bounds.width > 0.0, "nonempty QR at ({}, {})", x, y);
+            assert_eq!(bounds.width % cell_size as f32, 0.0);
+            assert!(bounds.x + bounds.width < framebuffer.0 as f32);
+            assert!(bounds.y + bounds.height < framebuffer.1 as f32);
+
+            let viewport =
+                Rectangle::with_size(Size::new(framebuffer.0 as f32, framebuffer.1 as f32));
+            element.as_widget().draw(
+                &tree,
+                &mut renderer,
+                &theme,
+                &iced::advanced::renderer::Style {
+                    text_color: theme.colors.text.primary,
+                },
+                Layout::new(&node),
+                mouse::Cursor::Unavailable,
+                &viewport,
+            );
+            let pixels = renderer.screenshot(
+                Size::new(framebuffer.0, framebuffer.1),
+                1.0,
+                iced::Color::WHITE,
+            );
+            let filename = format!("qr-widget-tiny-skia-x{}-y{}.png", x, y);
+            image::save_buffer(
+                directory.join(&filename),
+                &pixels,
+                framebuffer.0,
+                framebuffer.1,
+                image::ColorType::Rgba8,
+            )
+            .expect("save unmodified QR renderer pixels");
+            captures.push(serde_json::json!({
+                "position": {"x": x, "y": y},
+                "mounted_widget_bounds": {
+                    "x": bounds.x, "y": bounds.y,
+                    "width": bounds.width, "height": bounds.height
+                },
+                "data_cells_per_side": bounds.width as u32 / cell_size - 4,
+                "png": filename
+            }));
+        }
+
+        let manifest = serde_json::json!({
+            "payload": payload,
+            "widget": "iced_widget::qr_code::QRCode via iced::widget::qr_code",
+            "backend": "tiny-skia",
+            "cell_size_px": cell_size,
+            "framebuffer_px": {"width": framebuffer.0, "height": framebuffer.1},
+            "background": "#ffffff",
+            "captures": captures
+        });
+        std::fs::write(
+            directory.join("qr-widget-tiny-skia-manifest.json"),
+            serde_json::to_vec_pretty(&manifest).expect("serialize QR capture manifest"),
+        )
+        .expect("save QR capture manifest");
+    }
+
     /// sRGB relative luminance, as WCAG 2.x defines it.
     fn luminance(color: iced::Color) -> f32 {
         let linear = |v: f32| {
