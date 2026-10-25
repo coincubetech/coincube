@@ -1,6 +1,12 @@
-//! Segmented choice (`.seg`): one value out of a few, such as Bitcoin /
-//! Stablecoin in Send and Receive, BTC / Sats in Settings, or the theme in App
-//! preferences.
+//! One current value out of a few, drawn in the artboards' five forms:
+//!
+//! - [`segmented`] (`.seg`): Bitcoin / Stablecoin in Send and Receive, BTC /
+//!   Sats in Settings, the theme in App preferences.
+//! - [`choice_chips`] (`.sb`): the Settings scope selector.
+//! - [`tabs`] (`.tab`): Settings section tabs, an accent underline under the
+//!   current one.
+//! - [`nav_list`] (`.ni`): the App preferences section list.
+//! - [`radio_list`] (`.radio`): Settings radio rows with a description.
 //!
 //! Each segment is an [`Action`] with its own stable ID, so it keeps Action's
 //! keyboard contract: a Tab stop, one activation per Enter/Space press, the
@@ -18,14 +24,16 @@ use std::borrow::Cow;
 use iced::advanced::text::Shaping;
 use iced::advanced::widget::Id;
 use iced::keyboard::{self, key};
-use iced::{alignment, Alignment, Length};
+use iced::{alignment, Alignment, Color, Length};
 
 use super::scope::KeyScope;
 use crate::font;
+use crate::theme::palette::ShellPalette;
 use crate::theme::tenshu::control as style;
-use crate::theme::tenshu::{radius, size, type_size};
+use crate::theme::tenshu::{self as tokens, radius, size, text as text_style, type_size, Tone};
+use crate::theme::Theme;
 use crate::widget::action::Action;
-use crate::widget::{Container, Element, Row, Text};
+use crate::widget::{Column, Container, Element, Row, Text};
 
 /// Segment height and frame radius.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -77,16 +85,17 @@ impl SegmentSize {
     }
 }
 
-/// One option of a segmented choice.
+/// One option of a choice.
 pub struct Segment<'a, T> {
     id: Id,
     value: T,
     label: Cow<'a, str>,
     icon: Option<Text<'a>>,
+    description: Option<Cow<'a, str>>,
     enabled: bool,
 }
 
-/// A segment with a stable ID, the value it selects and its visible label.
+/// An option with a stable ID, the value it selects and its visible label.
 pub fn segment<'a, T>(
     id: impl Into<Id>,
     value: T,
@@ -97,14 +106,21 @@ pub fn segment<'a, T>(
         value,
         label: label.into(),
         icon: None,
+        description: None,
         enabled: true,
     }
 }
 
 impl<'a, T> Segment<'a, T> {
-    /// A leading 16px glyph, drawn in the label colour.
+    /// A leading glyph: 16px in segments and chips, 18px in the nav list.
     pub fn icon(mut self, icon: Text<'a>) -> Self {
         self.icon = Some(icon);
+        self
+    }
+
+    /// A muted line under the label, shown by [`radio_list`] only.
+    pub fn description(mut self, description: impl Into<Cow<'a, str>>) -> Self {
+        self.description = Some(description.into());
         self
     }
 
@@ -121,13 +137,38 @@ impl<'a, T> Segment<'a, T> {
     }
 }
 
-/// A segmented choice. Build it, then convert it into an [`Element`].
+/// Which artboard form a choice takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Look {
+    Segmented(SegmentSize),
+    Chips,
+    Tabs,
+    Nav,
+    Radio,
+}
+
+/// A choice. Build it, then convert it into an [`Element`].
 pub struct Segmented<'a, T, M> {
     segments: Vec<Segment<'a, T>>,
     selected: Option<T>,
-    size: SegmentSize,
+    look: Look,
     focus_intent: fn(Id) -> M,
     on_select: Option<Box<dyn Fn(T) -> M + 'a>>,
+}
+
+fn choice<'a, T, M>(
+    segments: impl IntoIterator<Item = Segment<'a, T>>,
+    selected: Option<T>,
+    focus_intent: fn(Id) -> M,
+    look: Look,
+) -> Segmented<'a, T, M> {
+    Segmented {
+        segments: segments.into_iter().collect(),
+        selected,
+        look,
+        focus_intent,
+        on_select: None,
+    }
 }
 
 /// A segmented choice over `segments`, showing `selected` (or nothing). The
@@ -142,13 +183,68 @@ where
     T: Copy + PartialEq + 'a,
     M: Clone + 'static,
 {
-    Segmented {
-        segments: segments.into_iter().collect(),
+    choice(
+        segments,
         selected,
-        size: SegmentSize::default(),
         focus_intent,
-        on_select: None,
-    }
+        Look::Segmented(SegmentSize::default()),
+    )
+}
+
+/// Wrapping 32px chips (`.sb`); the selected chip takes the selected fill, an
+/// accent outline and an accent-ink glyph.
+pub fn choice_chips<'a, T, M>(
+    segments: impl IntoIterator<Item = Segment<'a, T>>,
+    selected: Option<T>,
+    focus_intent: fn(Id) -> M,
+) -> Segmented<'a, T, M>
+where
+    T: Copy + PartialEq + 'a,
+    M: Clone + 'static,
+{
+    choice(segments, selected, focus_intent, Look::Chips)
+}
+
+/// Section tabs over a 1px rule (`.tabs`, `.tab`); the current tab is ink,
+/// semibold and underlined in the accent.
+pub fn tabs<'a, T, M>(
+    segments: impl IntoIterator<Item = Segment<'a, T>>,
+    selected: Option<T>,
+    focus_intent: fn(Id) -> M,
+) -> Segmented<'a, T, M>
+where
+    T: Copy + PartialEq + 'a,
+    M: Clone + 'static,
+{
+    choice(segments, selected, focus_intent, Look::Tabs)
+}
+
+/// A vertical section list (`.nav`, `.ni`): 40px rows; the current one takes
+/// the selected fill, semibold text and an accent glyph.
+pub fn nav_list<'a, T, M>(
+    segments: impl IntoIterator<Item = Segment<'a, T>>,
+    selected: Option<T>,
+    focus_intent: fn(Id) -> M,
+) -> Segmented<'a, T, M>
+where
+    T: Copy + PartialEq + 'a,
+    M: Clone + 'static,
+{
+    choice(segments, selected, focus_intent, Look::Nav)
+}
+
+/// Radio rows (`.radio`): a 16px radio, the label and its description, each
+/// row above a 1px rule.
+pub fn radio_list<'a, T, M>(
+    segments: impl IntoIterator<Item = Segment<'a, T>>,
+    selected: Option<T>,
+    focus_intent: fn(Id) -> M,
+) -> Segmented<'a, T, M>
+where
+    T: Copy + PartialEq + 'a,
+    M: Clone + 'static,
+{
+    choice(segments, selected, focus_intent, Look::Radio)
 }
 
 impl<'a, T, M> Segmented<'a, T, M>
@@ -156,8 +252,11 @@ where
     T: Copy + PartialEq + 'a,
     M: Clone + 'static,
 {
+    /// The segment size of a [`segmented`] choice; other forms ignore it.
     pub fn size(mut self, size: SegmentSize) -> Self {
-        self.size = size;
+        if let Look::Segmented(_) = self.look {
+            self.look = Look::Segmented(size);
+        }
         self
     }
 
@@ -166,10 +265,62 @@ where
         self
     }
 
-    /// `None` makes every segment inert.
+    /// `None` makes every option inert.
     pub fn on_select_maybe(mut self, on_select: Option<impl Fn(T) -> M + 'a>) -> Self {
         self.on_select = on_select.map(|f| Box::new(f) as Box<dyn Fn(T) -> M + 'a>);
         self
+    }
+}
+
+fn label_text<'a>(label: Cow<'a, str>, size: f32, selected: bool, rest: iced::Font) -> Text<'a> {
+    iced::widget::text(label)
+        .shaping(Shaping::Advanced)
+        .font(if selected { font::SEMIBOLD } else { rest })
+        .size(size)
+}
+
+/// A glyph in the colour `color` picks, faded with the control when disabled.
+fn glyph<'a>(
+    icon: Text<'a>,
+    glyph_size: f32,
+    color: fn(&ShellPalette) -> Color,
+    enabled: bool,
+) -> Text<'a> {
+    icon.size(glyph_size)
+        .width(Length::Fixed(glyph_size))
+        .style(move |theme: &Theme| {
+            let color = color(&theme.colors.shell);
+            iced::widget::text::Style {
+                color: Some(if enabled {
+                    color
+                } else {
+                    tokens::faded(color, tokens::DISABLED_ALPHA)
+                }),
+            }
+        })
+}
+
+fn muted(shell: &ShellPalette) -> Color {
+    shell.muted
+}
+
+fn accent_ink(shell: &ShellPalette) -> Color {
+    shell.accent_ink
+}
+
+fn accent(shell: &ShellPalette) -> Color {
+    shell.accent
+}
+
+fn with_icon<'a, M: 'a>(icon: Option<Text<'a>>, label: Text<'a>, gap: f32) -> Element<'a, M> {
+    match icon {
+        Some(icon) => Row::new()
+            .spacing(gap)
+            .align_y(Alignment::Center)
+            .push(icon)
+            .push(label)
+            .into(),
+        None => label.into(),
     }
 }
 
@@ -182,12 +333,12 @@ where
         let Segmented {
             segments,
             selected,
-            size,
+            look,
             focus_intent,
             on_select,
         } = group;
 
-        // (id, message) per enabled segment, in visual order, for arrow keys.
+        // (id, message) per enabled option, in visual order, for arrow keys.
         let targets: Vec<(Id, M)> = match on_select.as_ref() {
             Some(on_select) => segments
                 .iter()
@@ -197,63 +348,188 @@ where
             None => Vec::new(),
         };
 
-        let row = segments.into_iter().fold(
-            Row::new().spacing(2).align_y(Alignment::Center),
-            |row, segment| {
+        let items: Vec<Element<'a, M>> = segments
+            .into_iter()
+            .map(|segment| {
                 let Segment {
                     id,
                     value,
                     label,
                     icon,
+                    description,
                     enabled,
                 } = segment;
                 let is_selected = selected == Some(value);
-                let label = iced::widget::text(label)
-                    .shaping(Shaping::Advanced)
-                    .font(if is_selected {
-                        font::SEMIBOLD
-                    } else {
-                        font::MEDIUM
-                    })
-                    .size(size.text_size());
-                let content: Element<'a, M> = match icon {
-                    Some(icon) => Row::new()
-                        .spacing(6)
-                        .align_y(Alignment::Center)
-                        .push(icon.size(size::ICON_SMALL))
-                        .push(label)
-                        .into(),
-                    None => label.into(),
-                };
-                let content = Container::new(content)
-                    .height(Length::Fill)
-                    .align_x(alignment::Horizontal::Center)
-                    .align_y(alignment::Vertical::Center);
                 let on_press = on_select
                     .as_ref()
                     .filter(|_| enabled)
                     .map(|on_select| on_select(value));
-                let segment_radius = size.segment_radius();
-                row.push(
-                    Action::new(id, content, focus_intent)
-                        .style(move |theme, status| {
-                            style::segment(theme, status, is_selected, segment_radius)
-                        })
-                        .height(Length::Fixed(size.height()))
-                        .padding([0.0, size.padding_x()])
-                        .focus_radius(segment_radius)
-                        .on_press_maybe(on_press),
-                )
-            },
-        );
+                let action = match look {
+                    Look::Segmented(size) => {
+                        let label = label_text(label, size.text_size(), is_selected, font::MEDIUM);
+                        let icon = icon.map(|icon| icon.size(size::ICON_SMALL));
+                        let content = Container::new(with_icon(icon, label, 6.0))
+                            .height(Length::Fill)
+                            .align_x(alignment::Horizontal::Center)
+                            .align_y(alignment::Vertical::Center);
+                        let segment_radius = size.segment_radius();
+                        Action::new(id, content, focus_intent)
+                            .style(move |theme, status| {
+                                style::segment(theme, status, is_selected, segment_radius)
+                            })
+                            .height(Length::Fixed(size.height()))
+                            .padding([0.0, size.padding_x()])
+                            .focus_radius(segment_radius)
+                    }
+                    Look::Chips => {
+                        let label = label_text(label, type_size::CHIP, is_selected, font::REGULAR);
+                        let color = if is_selected { accent_ink } else { muted };
+                        let icon = icon.map(|icon| glyph(icon, size::ICON_SMALL, color, enabled));
+                        let content = Container::new(with_icon(icon, label, 6.0))
+                            .height(Length::Fill)
+                            .align_y(alignment::Vertical::Center);
+                        Action::new(id, content, focus_intent)
+                            .style(move |theme, status| {
+                                style::choice_chip(theme, status, is_selected)
+                            })
+                            .height(Length::Fixed(size::CHIP_HEIGHT))
+                            .padding([0.0, 12.0])
+                            .focus_radius(radius::CHIP)
+                    }
+                    Look::Tabs => {
+                        let label = label_text(label, type_size::BODY, is_selected, font::REGULAR)
+                            .line_height(iced::widget::text::LineHeight::Relative(
+                                type_size::LINE_HEIGHT,
+                            ));
+                        let underline = Container::new(iced::widget::Space::new())
+                            .width(Length::Fill)
+                            .height(Length::Fixed(2.0))
+                            .style(move |theme| style::tab_underline(theme, is_selected));
+                        // The underline fills the tab's width; the width is set
+                        // after the pushes because pushing a Fill child widens
+                        // a column to Fill.
+                        let content = Column::new()
+                            .spacing(8)
+                            .push(Container::new(label).padding([0.0, 12.0]))
+                            .push(underline)
+                            .width(Length::Shrink);
+                        Action::new(id, content, focus_intent)
+                            .style(move |theme, status| style::tab(theme, status, is_selected))
+                            .padding(iced::Padding::default().top(10.0))
+                            .focus_radius(radius::ROW)
+                    }
+                    Look::Nav => {
+                        let label = label_text(label, type_size::BODY, is_selected, font::REGULAR);
+                        let color = if is_selected { accent } else { muted };
+                        let icon = icon.map(|icon| glyph(icon, size::ICON, color, enabled));
+                        let content = Container::new(with_icon(icon, label, 10.0))
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                            .align_y(alignment::Vertical::Center);
+                        Action::new(id, content, focus_intent)
+                            .style(move |theme, status| style::nav_item(theme, status, is_selected))
+                            .width(Length::Fill)
+                            .height(Length::Fixed(size::NAV_ITEM_HEIGHT))
+                            .padding([0.0, 12.0])
+                            .focus_radius(radius::CONTROL)
+                    }
+                    Look::Radio => {
+                        let mark = Container::new(
+                            Container::new(iced::widget::Space::new())
+                                .width(Length::Fixed(size::RADIO_DOT))
+                                .height(Length::Fixed(size::RADIO_DOT))
+                                .style(move |theme| style::radio_dot(theme, is_selected, enabled)),
+                        )
+                        .width(Length::Fixed(size::RADIO))
+                        .height(Length::Fixed(size::RADIO))
+                        .align_x(alignment::Horizontal::Center)
+                        .align_y(alignment::Vertical::Center)
+                        .style(move |theme| style::radio_ring(theme, is_selected, enabled));
+                        let mut text = Column::new().spacing(2).width(Length::Fill).push(
+                            label_text(label, type_size::BODY, false, font::MEDIUM).line_height(
+                                iced::widget::text::LineHeight::Relative(type_size::LINE_HEIGHT),
+                            ),
+                        );
+                        if let Some(description) = description {
+                            text = text.push(
+                                iced::widget::text(description)
+                                    .shaping(Shaping::Advanced)
+                                    .size(type_size::CAPTION)
+                                    .line_height(iced::widget::text::LineHeight::Relative(
+                                        type_size::LINE_HEIGHT,
+                                    ))
+                                    .style(move |theme| text_style::tone(theme, Tone::Muted)),
+                            );
+                        }
+                        let content = Row::new()
+                            .spacing(10)
+                            .align_y(Alignment::Start)
+                            .width(Length::Fill)
+                            .push(
+                                Container::new(mark)
+                                    .width(Length::Fixed(20.0))
+                                    .padding(iced::Padding::default().top(3.0)),
+                            )
+                            .push(text);
+                        Action::new(id, content, focus_intent)
+                            .style(style::radio_row)
+                            .width(Length::Fill)
+                            .padding([10.0, 0.0])
+                            .focus_radius(radius::ROW)
+                    }
+                };
+                action.on_press_maybe(on_press).into()
+            })
+            .collect();
 
-        let frame_radius = size.frame_radius();
-        let frame = Container::new(row)
-            .padding(2)
-            .style(move |theme| style::segmented_frame(theme, frame_radius));
+        let content: Element<'a, M> = match look {
+            Look::Segmented(size) => {
+                let row = items.into_iter().fold(
+                    Row::new().spacing(2).align_y(Alignment::Center),
+                    |row, item| row.push(item),
+                );
+                let frame_radius = size.frame_radius();
+                Container::new(row)
+                    .padding(2)
+                    .style(move |theme| style::segmented_frame(theme, frame_radius))
+                    .into()
+            }
+            Look::Chips => items
+                .into_iter()
+                .fold(
+                    Row::new().spacing(6).align_y(Alignment::Center),
+                    |row, item| row.push(item),
+                )
+                .wrap()
+                .vertical_spacing(6)
+                .into(),
+            Look::Tabs => Column::new()
+                .width(Length::Fill)
+                .push(
+                    items
+                        .into_iter()
+                        .fold(Row::new().spacing(4), |row, item| row.push(item))
+                        .wrap(),
+                )
+                .push(rule())
+                .into(),
+            Look::Nav => items
+                .into_iter()
+                .fold(
+                    Column::new().spacing(6).width(Length::Fill),
+                    |column, item| column.push(item),
+                )
+                .into(),
+            Look::Radio => items
+                .into_iter()
+                .fold(Column::new().width(Length::Fill), |column, item| {
+                    column.push(rule()).push(item)
+                })
+                .into(),
+        };
 
         KeyScope::new(
-            frame,
+            content,
             Box::new(move |key, modifiers, focused| {
                 if modifiers.command() || modifiers.alt() || modifiers.shift() {
                     return None;
@@ -272,4 +548,12 @@ where
         )
         .into()
     }
+}
+
+fn rule<'a, M: 'a>() -> Element<'a, M> {
+    Container::new(iced::widget::Space::new())
+        .width(Length::Fill)
+        .height(Length::Fixed(1.0))
+        .style(style::divider)
+        .into()
 }

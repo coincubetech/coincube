@@ -173,6 +173,130 @@ pub fn segment(
     }
 }
 
+/// A scope chip (`.sb`): transparent with a 1px line; hover lays the hover
+/// overlay; the selected chip takes the selected fill and an accent outline.
+pub fn choice_chip(theme: &Theme, status: Status, selected: bool) -> button::Style {
+    let shell = &theme.colors.shell;
+    let disabled = status == Status::Disabled;
+    let base = selected.then_some(shell.selected);
+    button::Style {
+        background: pointer_fill(theme, status, base)
+            .map(|fill| Background::Color(fade_if(disabled, fill))),
+        text_color: fade_if(disabled, shell.ink),
+        border: Border {
+            color: fade_if(disabled, if selected { shell.accent } else { shell.line }),
+            width: 1.0,
+            radius: radius::CHIP.into(),
+        },
+        ..button::Style::default()
+    }
+}
+
+/// A section tab (`.tab`): muted text, ink under the pointer and when
+/// current. It has no fill; the underline is drawn by [`tab_underline`].
+pub fn tab(theme: &Theme, status: Status, selected: bool) -> button::Style {
+    let shell = &theme.colors.shell;
+    let disabled = status == Status::Disabled;
+    let ink = if selected || matches!(status, Status::Hovered | Status::Pressed) {
+        shell.ink
+    } else {
+        shell.muted
+    };
+    button::Style {
+        background: (status == Status::Pressed).then_some(Background::Color(shell.hover)),
+        text_color: fade_if(disabled, ink),
+        border: Border {
+            radius: radius::ROW.into(),
+            ..Border::default()
+        },
+        ..button::Style::default()
+    }
+}
+
+/// The current tab's 2px accent underline; other tabs keep the space clear.
+pub fn tab_underline(theme: &Theme, selected: bool) -> container::Style {
+    container::Style {
+        background: selected.then_some(Background::Color(theme.colors.shell.accent)),
+        ..container::Style::default()
+    }
+}
+
+/// A section-list row (`.ni`): no fill until hovered or current, both of
+/// which take the selected fill.
+pub fn nav_item(theme: &Theme, status: Status, selected: bool) -> button::Style {
+    let shell = &theme.colors.shell;
+    let disabled = status == Status::Disabled;
+    let fill = match status {
+        Status::Pressed => Some(over(shell.selected, shell.hover)),
+        Status::Hovered => Some(shell.selected),
+        Status::Active | Status::Disabled => selected.then_some(shell.selected),
+    };
+    button::Style {
+        background: fill.map(|fill| Background::Color(fade_if(disabled, fill))),
+        text_color: fade_if(disabled, shell.ink),
+        border: Border {
+            radius: radius::CONTROL.into(),
+            ..Border::default()
+        },
+        ..button::Style::default()
+    }
+}
+
+/// A radio row (`.radio`): no fill; the pointer lays the hover overlay;
+/// disabled rows (`.radio.off`) turn muted.
+pub fn radio_row(theme: &Theme, status: Status) -> button::Style {
+    let shell = &theme.colors.shell;
+    button::Style {
+        background: pointer_fill(theme, status, None).map(Background::Color),
+        text_color: if status == Status::Disabled {
+            shell.muted
+        } else {
+            shell.ink
+        },
+        border: Border {
+            radius: radius::ROW.into(),
+            ..Border::default()
+        },
+        ..button::Style::default()
+    }
+}
+
+/// The radio's 16px ring: muted, or the accent when selected.
+pub fn radio_ring(theme: &Theme, selected: bool, enabled: bool) -> container::Style {
+    let shell = &theme.colors.shell;
+    container::Style {
+        border: Border {
+            color: fade_if(!enabled, if selected { shell.accent } else { shell.muted }),
+            width: 1.5,
+            radius: (super::size::RADIO / 2.0).into(),
+        },
+        ..container::Style::default()
+    }
+}
+
+/// The selected radio's 8px accent dot.
+pub fn radio_dot(theme: &Theme, selected: bool, enabled: bool) -> container::Style {
+    container::Style {
+        background: selected
+            .then(|| Background::Color(fade_if(!enabled, theme.colors.shell.accent))),
+        border: Border {
+            radius: (super::size::RADIO_DOT / 2.0).into(),
+            ..Border::default()
+        },
+        ..container::Style::default()
+    }
+}
+
+/// A disclosure row (`.dsc`): no fill; the pointer lays the hover overlay.
+pub fn disclosure(theme: &Theme, status: Status) -> button::Style {
+    let shell = &theme.colors.shell;
+    button::Style {
+        background: pointer_fill(theme, status, None).map(Background::Color),
+        text_color: fade_if(status == Status::Disabled, shell.ink),
+        ..button::Style::default()
+    }
+}
+
 // ----- Text field ---------------------------------------------------------
 
 /// A text field (`.inp`, `.ctl`): window background, 1px line; the pointer
@@ -208,6 +332,22 @@ pub fn field(
         },
         value: if disabled { shell.muted } else { shell.ink },
         selection: faded(shell.focus, 0.35),
+    }
+}
+
+/// A read-only value in a field box (`.cpy .inp`): same fill, border and
+/// radius as a resting field.
+pub fn value_box(theme: &Theme, field_radius: f32) -> container::Style {
+    let shell = &theme.colors.shell;
+    container::Style {
+        text_color: Some(shell.ink),
+        background: Some(Background::Color(shell.background)),
+        border: Border {
+            color: shell.line,
+            width: 1.0,
+            radius: field_radius.into(),
+        },
+        ..container::Style::default()
     }
 }
 

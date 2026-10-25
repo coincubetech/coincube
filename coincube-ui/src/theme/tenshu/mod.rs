@@ -62,6 +62,13 @@ pub mod size {
     /// Text fields (`.inp` in Send and Receive, `.ctl` in Activity filters).
     pub const FIELD_HEIGHT: f32 = 44.0;
     pub const FIELD_COMPACT_HEIGHT: f32 = 36.0;
+    /// App preferences section list rows (`.ni`).
+    pub const NAV_ITEM_HEIGHT: f32 = 40.0;
+    /// Radio mark (`.radio input`) and its selected dot.
+    pub const RADIO: f32 = 16.0;
+    pub const RADIO_DOT: f32 = 8.0;
+    /// Disclosure chevron (`.dsc .ic`).
+    pub const CHEVRON: f32 = 18.0;
 }
 
 /// Spacing steps used by the Overview and wallet pages.
@@ -85,6 +92,8 @@ pub mod type_size {
     pub const FIELD: f32 = 15.0;
     /// Text inside a compact field (`.ctl`).
     pub const FIELD_COMPACT: f32 = 13.5;
+    /// Disclosure headings (`.dsc`).
+    pub const DISCLOSURE: f32 = 15.0;
     pub const SECTION: f32 = 18.0;
     pub const TITLE: f32 = 20.0;
     pub const AMOUNT_CARD: f32 = 26.0;
