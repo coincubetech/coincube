@@ -2735,7 +2735,7 @@ impl Bitcoind {
 }
 
 impl BitcoindOwner {
-    fn release(config: BitcoindConfig, lock: LockFile) {
+    fn release(config: BitcoindConfig, mut lock: LockFile) {
         let lifecycle = match ManagedNodeLifecycle::acquire_directory(lock.directory.clone()) {
             Ok(lifecycle) => lifecycle,
             Err(e) => {
@@ -2801,7 +2801,7 @@ struct LockFile {
     path: PathBuf,
     directory: BitcoindDirectory,
     network: Network,
-    _file: std::fs::File,
+    _file: Option<std::fs::File>,
     released: AtomicBool,
     provisional: AtomicBool,
 }
@@ -2836,7 +2836,7 @@ impl LockFile {
             path,
             directory,
             network,
-            _file: file,
+            _file: Some(file),
             released: AtomicBool::new(false),
             provisional: AtomicBool::new(true),
         })
@@ -2847,10 +2847,14 @@ impl LockFile {
     }
 
     // returns true if the lock directory is removed because empty.
-    fn delete(&self) -> Result<bool, Box<dyn std::error::Error>> {
+    fn delete(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
         if self.released.load(Ordering::Acquire) {
             return Ok(false);
         }
+        // On Windows, deleting an open locked file is deferred until its handle
+        // closes. Close it while the lifecycle guard still excludes new owners,
+        // before checking whether this was the final owner.
+        drop(self._file.take());
         std::fs::remove_file(&self.path)?;
         self.released.store(true, Ordering::Release);
         if std::fs::read_dir(
@@ -2978,8 +2982,8 @@ mod tests {
             std::env::temp_dir().join(format!("managed-owners-{}", uuid::Uuid::new_v4())),
         );
         let directory = root.bitcoind_directory();
-        let first = LockFile::create(directory.clone(), Network::Bitcoin).unwrap();
-        let second = LockFile::create(directory.clone(), Network::Bitcoin).unwrap();
+        let mut first = LockFile::create(directory.clone(), Network::Bitcoin).unwrap();
+        let mut second = LockFile::create(directory.clone(), Network::Bitcoin).unwrap();
         assert_ne!(
             first.path, second.path,
             "same-second starts need distinct owners"
@@ -2996,6 +3000,24 @@ mod tests {
         );
         assert!(second.delete().unwrap());
         assert!(!directory.path().join(LOCK_DIRECTORY_NAME).exists());
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[test]
+    fn final_owner_delete_removes_lock_directory_before_struct_drop() {
+        let root = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("final-owner-delete-{}", uuid::Uuid::new_v4())),
+        );
+        let directory = root.bitcoind_directory();
+        let mut owner = LockFile::create(directory.clone(), Network::Bitcoin).unwrap();
+        owner.activate();
+        let locks = directory.path().join("locks/bitcoin");
+        assert!(locks.exists());
+        assert!(owner.delete().unwrap());
+        assert!(!owner.path.exists());
+        assert!(!locks.exists(), "final owner removes its lock directory");
+        assert!(!owner.delete().unwrap(), "release only happens once");
+        drop(owner);
         std::fs::remove_dir_all(root.path()).unwrap();
     }
 
@@ -3170,7 +3192,7 @@ mod tests {
         let root = CoincubeDirectory::new(
             std::env::temp_dir().join(format!("live-v2-owner-{}", uuid::Uuid::new_v4())),
         );
-        let owner = LockFile::create(root.bitcoind_directory(), Network::Bitcoin).unwrap();
+        let mut owner = LockFile::create(root.bitcoind_directory(), Network::Bitcoin).unwrap();
         owner.activate();
         let path = owner.path.clone();
         let lifecycle = ManagedNodeLifecycle::acquire(&root, NodeChainFamily::Bitcoin).unwrap();
