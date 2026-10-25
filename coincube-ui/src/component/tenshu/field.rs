@@ -10,6 +10,8 @@
 //! A search field adds a leading magnifier and, once it has a value and an
 //! `on_clear` intent, a Clear action inside its right edge. Escape in a
 //! non-empty search field emits the same intent without leaving the field.
+//! Clearing by the Clear action, by pointer, Enter or Space, also requests
+//! focus for the input, since Clear itself disappears with the value.
 //!
 //! Fields hold no state beyond Iced's own cursor and selection; the caller owns
 //! the value and validation.
@@ -404,15 +406,29 @@ impl<'a, M: Clone + 'static> From<TextField<'a, M>> for Element<'a, M> {
         // focus and cursor state in the input.
         let overlay = overlay.unwrap_or_else(|| iced::widget::Space::new().into());
         let control = iced::widget::Stack::with_children([input, overlay]).width(Length::Fill);
-        let escape = clear.map(|(_, message)| message);
         let input_id = id.clone();
         let control = KeyScope::new(
             control,
-            Box::new(move |key, _modifiers, focused| {
-                let message = escape.as_ref()?;
-                (matches!(key, keyboard::Key::Named(key::Named::Escape))
-                    && focused == Some(&input_id))
-                .then(|| vec![message.clone()])
+            Box::new(move |key, modifiers, focused| {
+                let (clear_id, message) = clear.as_ref()?;
+                let keyboard::Key::Named(named) = key else {
+                    return None;
+                };
+                match named {
+                    // Escape in the input clears it and keeps focus there.
+                    key::Named::Escape if focused == Some(&input_id) => Some(vec![message.clone()]),
+                    // Enter or Space on Clear: the Clear action leaves with the
+                    // value, so hand focus back to the input first, as a
+                    // pointer press on Clear does.
+                    key::Named::Enter | key::Named::Space
+                        if focused == Some(clear_id)
+                            && !modifiers.command()
+                            && !modifiers.alt() =>
+                    {
+                        Some(vec![focus_intent(input_id.clone()), message.clone()])
+                    }
+                    _ => None,
+                }
             }),
         );
 

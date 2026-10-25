@@ -596,11 +596,33 @@ fn search_field_clears_by_action_or_escape_and_keeps_focus_in_the_input() {
         vec![Msg::Focus(Id::new("q")), Msg::Cleared("q")],
         "pressing Clear hands focus to the input and clears once"
     );
-    mounted.focus("q-clear");
-    assert_eq!(
-        mounted.key(key::Named::Enter, true, false),
-        vec![Msg::Cleared("q")]
-    );
+    // Keyboard activation of Clear must not strand focus on the Clear action,
+    // which leaves the tree with the value.
+    for named in [key::Named::Enter, key::Named::Space] {
+        mounted.rebuild(search("roof"));
+        mounted.focus("q-clear");
+        assert_eq!(mounted.focused(), Some(Id::new("q-clear")));
+        let messages = mounted.key(named, true, false);
+        assert_eq!(
+            messages,
+            vec![Msg::Focus(Id::new("q")), Msg::Cleared("q")],
+            "{named:?} on Clear hands focus to the input and clears once"
+        );
+        assert!(mounted.key(named, true, true).is_empty(), "{named:?} held");
+        assert!(mounted.key(named, false, false).is_empty());
+        apply(&mut mounted, &messages);
+        mounted.rebuild(search(""));
+        assert_eq!(
+            mounted.focused(),
+            Some(Id::new("q")),
+            "{named:?}: focus is in the emptied input"
+        );
+        assert_eq!(
+            mounted.event(typed("r"), mouse::Cursor::Unavailable),
+            vec![Msg::Input("q", "r".into())],
+            "{named:?}: typing continues in the input"
+        );
+    }
 }
 
 // ----- Geometry and contrast ------------------------------------------------
