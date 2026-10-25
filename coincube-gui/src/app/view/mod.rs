@@ -7,6 +7,7 @@ pub mod global_home;
 pub mod liquid;
 pub mod nav;
 pub mod p2p;
+pub mod preferences;
 pub mod settings;
 pub mod shared;
 pub mod spark;

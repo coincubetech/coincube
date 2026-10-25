@@ -43,6 +43,7 @@ pub const VAULT_TOOLS_ID: &str = "tenshu.vault.tools";
 pub const SETTINGS_ID: &str = "tenshu.shell.settings";
 pub const MIDDLE_SCROLL_ID: &str = "tenshu.shell.middle-scroll";
 pub const BALANCE_PRIVACY_ID: &str = "tenshu.balance-privacy.toggle";
+pub const APP_PREFERENCES_ID: &str = "tenshu.shell.app-preferences";
 
 /// Innermost shell dismissal. The GUI owns Escape dispatch; this helper only
 /// identifies the existing harmless intent for the currently open disclosure.
@@ -216,8 +217,23 @@ pub fn top_bar_with_privacy<'a>(
             iced::widget::tooltip::Position::Bottom,
         )
     });
+    let preferences = iced::widget::tooltip(
+        Action::new(
+            APP_PREFERENCES_ID,
+            settings_icon().size(16),
+            Message::FocusAction,
+        )
+        .padding([7, 9])
+        .style(theme::button::shell_nav)
+        .on_press(Message::OpenAppPreferences),
+        container(muted("App preferences", 12))
+            .padding([6, 10])
+            .style(theme::container::shell_menu),
+        iced::widget::tooltip::Position::Bottom,
+    );
     container(
         row![brand, Space::new().width(Length::Fill), account, connection]
+            .push(preferences)
             .push(eye)
             .spacing(8)
             .align_y(Alignment::Center)

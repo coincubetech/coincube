@@ -24,7 +24,11 @@ use crate::{
         cache::{FiatPrice, FiatPriceRequest},
         message::{FiatMessage as AppFiatMessage, Message as AppMessage},
         settings::global::{GlobalSettings, PreferencesReceipt, WindowConfig},
-        state::preferences::{BalancePrivacyChrome, Operation, PreferencesOwner, SaveRequest},
+        state::preferences::{
+            BalancePrivacyChrome, Operation, PreferencesNotice, PreferencesOwner,
+            PreferencesPageState, SaveOutcome, SaveRequest,
+        },
+        view::preferences as preferences_view,
     },
     dir::CoincubeDirectory,
     gui::cache::GlobalCache,
@@ -159,6 +163,9 @@ pub struct GUI {
     window_config: Option<WindowConfig>,
     global_cache: GlobalCache,
     theme_mode: coincube_ui::theme::palette::ThemeMode,
+    system_theme: Option<coincube_ui::theme::palette::ThemeMode>,
+    system_reduces_motion: Option<bool>,
+    preferences_sheet: Option<PreferencesSheet>,
     preferences: PreferencesOwner,
 }
 
@@ -185,6 +192,8 @@ pub enum Message {
 
     Fiat(FiatMessage),
     ToggleTheme,
+    SystemTheme(iced::theme::Mode),
+    PreferencesSheet(preferences_view::Message),
     Preferences(SaveRequest, Result<PreferencesReceipt, String>),
 }
 
@@ -281,6 +290,12 @@ fn route_guarded_tab_result(
         tab::Message::OpenConnectSignIn => pane::ViewMessage::OpenConnectSignIn,
         tab::Message::OpenPlanBilling => pane::ViewMessage::OpenPlanBilling,
         tab::Message::ToggleTheme => pane::ViewMessage::ToggleTheme,
+        tab::Message::OpenAppPreferences => {
+            return Message::Pane(
+                pane_id,
+                pane::Message::tab(tab_id, tab::Message::OpenAppPreferences),
+            );
+        }
         tab::Message::GlobalSettingsChanged => pane::ViewMessage::GlobalSettingsChanged,
         tab::Message::ConnectSignedIn => pane::ViewMessage::ConnectSignedIn,
         tab::Message::OpenBitcoinClaim(handoff) => pane::ViewMessage::OpenBitcoinClaim(handoff),
@@ -380,6 +395,7 @@ impl GUI {
         let mut cmds = vec![
             window::oldest().map(Message::Window),
             Task::perform(ctrl_c(), |_| Message::CtrlC),
+            iced::system::theme().map(Message::SystemTheme),
         ];
         let (mut pane, cmd) = pane::Pane::new(&config);
         pane.set_balance_privacy(Some(Self::privacy_chrome_for(&preferences)));
@@ -410,6 +426,9 @@ impl GUI {
                 window_config,
                 global_cache: GlobalCache::default(),
                 theme_mode,
+                system_theme: None,
+                system_reduces_motion,
+                preferences_sheet: None,
                 preferences,
             },
             Task::batch(cmds),
@@ -420,7 +439,7 @@ impl GUI {
         BalancePrivacyChrome {
             privacy: preferences.privacy(),
             busy: preferences.is_busy(),
-            interactive: !preferences.is_busy(),
+            interactive: preferences.accepted().is_some() && !preferences.is_busy(),
         }
     }
 
@@ -428,6 +447,144 @@ impl GUI {
         let chrome = Some(Self::privacy_chrome_for(&self.preferences));
         for (_, pane) in self.panes.iter_mut() {
             pane.set_balance_privacy(chrome);
+        }
+    }
+
+    /// A single resolved device theme drives the window and every retained tab.
+    /// A System choice follows the latest theme reported by iced; until that
+    /// arrives it uses the model's documented dark fallback.
+    fn publish_appearance(&mut self) {
+        let Some(accepted) = self.preferences.accepted() else {
+            return;
+        };
+        let resolved = accepted
+            .preferences
+            .resolve(self.system_theme, self.system_reduces_motion);
+        self.theme_mode = resolved.theme_mode;
+        for (_, pane) in self.panes.iter_mut() {
+            pane.set_theme_mode(self.theme_mode);
+        }
+    }
+
+    fn reload_all_global_settings(&mut self) -> Task<Message> {
+        let root = &self.config.coincube_directory;
+        let mut tasks = Vec::new();
+        for (&pane_id, pane) in self.panes.iter_mut() {
+            for tab in &mut pane.tabs {
+                let tab_id = tab.id;
+                tasks.push(tab.reload_global_settings(root).map(move |message| {
+                    Message::Pane(pane_id, pane::Message::tab(tab_id, message))
+                }));
+            }
+        }
+        Task::batch(tasks)
+    }
+
+    fn preferences_view_model(&self) -> preferences_view::ViewModel<'_> {
+        let accepted = self.preferences.accepted();
+        let notice = self.preferences.notice();
+        preferences_view::ViewModel {
+            saved: accepted.map(|value| value.preferences),
+            effective: accepted.map(|value| {
+                value
+                    .preferences
+                    .resolve(self.system_theme, self.system_reduces_motion)
+            }),
+            system_theme: self.system_theme,
+            system_reduces_motion: self.system_reduces_motion,
+            cubes_renderer_available: true,
+            saving: self.preferences.is_busy(),
+            balance_privacy: self.preferences.privacy(),
+            balance_privacy_interactive: !self.preferences.is_busy(),
+            durability_unconfirmed: matches!(notice, PreferencesNotice::SavedUnconfirmed),
+            loading: self.preferences.is_busy() && accepted.is_none(),
+            load_error: matches!(notice, PreferencesNotice::LoadFailed)
+                .then_some("The device settings could not be loaded."),
+            save_error: matches!(notice, PreferencesNotice::SaveFailed)
+                .then_some("Please try again."),
+            diagnostics: preferences_view::Diagnostics::default(),
+            about: preferences_view::About::default(),
+        }
+    }
+
+    fn close_preferences_sheet(&mut self) -> Task<Message> {
+        let Some(sheet) = self.preferences_sheet.take() else {
+            return Task::none();
+        };
+        if self.overlay_origin_is_current(&sheet.origin) {
+            if let Some(focus) = sheet.origin.focus {
+                return iced_runtime::task::widget(
+                    iced::advanced::widget::operation::focusable::focus(focus),
+                );
+            }
+        }
+        Task::none()
+    }
+
+    fn preferences_sheet_message(&mut self, message: preferences_view::Message) -> Task<Message> {
+        if !self
+            .preferences_sheet
+            .as_ref()
+            .is_some_and(|sheet| self.overlay_origin_is_current(&sheet.origin))
+        {
+            return Task::none();
+        }
+        use preferences_view::{Action, Message as ViewMessage};
+        match message {
+            ViewMessage::FocusAction(id) => {
+                iced_runtime::task::widget(iced::advanced::widget::operation::focusable::focus(id))
+            }
+            ViewMessage::SelectSection(section) => {
+                if let Some(sheet) = &mut self.preferences_sheet {
+                    sheet.page.select(section);
+                }
+                Task::none()
+            }
+            ViewMessage::Change(change) => self.change_preference(change),
+            ViewMessage::ToggleComponentVersions => {
+                if let Some(sheet) = &mut self.preferences_sheet {
+                    sheet.page.toggle_component_versions();
+                }
+                Task::none()
+            }
+            ViewMessage::ToggleRegistrationRepair => {
+                if let Some(sheet) = &mut self.preferences_sheet {
+                    sheet.page.toggle_registration_repair();
+                }
+                Task::none()
+            }
+            ViewMessage::Action(Action::Close) => self.close_preferences_sheet(),
+            ViewMessage::Action(Action::RetryLoad) => self.retry_preferences(),
+            // These remain disabled until their real diagnostic owners supply
+            // an explicit capability to the sheet's view model.
+            ViewMessage::Action(_) => Task::none(),
+        }
+    }
+
+    /// Retries `load_or_initialize_preferences` on the preferences lane.
+    /// While the lane is busy this is refused, not queued.
+    pub fn retry_preferences(&mut self) -> Task<Message> {
+        match self.preferences.begin_initialize() {
+            Ok(request) => {
+                self.publish_balance_privacy();
+                self.run_preferences(request)
+            }
+            Err(_) => Task::none(),
+        }
+    }
+
+    /// One explicit device-preference change on the same lane. An unresolved
+    /// or busy privacy authority cannot originate a GUI preference change.
+    pub fn change_preference(
+        &mut self,
+        change: crate::app::settings::preferences::PreferenceChange,
+    ) -> Task<Message> {
+        match self.preferences.begin_save(change) {
+            Ok(request) => {
+                self.publish_balance_privacy();
+                self.run_preferences(request)
+            }
+            Err(_) => Task::none(),
         }
     }
 
@@ -461,6 +618,13 @@ impl GUI {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        if self
+            .preferences_sheet
+            .as_ref()
+            .is_some_and(|sheet| !self.overlay_origin_is_current(&sheet.origin))
+        {
+            self.preferences_sheet = None;
+        }
         // Intercept before stripping AppAsync/ForkAsync so a queued eye press
         // from a closed or replaced Cube cannot mutate device preferences.
         if let Message::Pane(pane_id, pane::Message::Tab(tab_id, inner)) = &message {
@@ -997,6 +1161,13 @@ impl GUI {
                 iced::window::latest().and_then(iced::window::close)
             }
             Message::KeyPressed(Key::Tab(shift)) => {
+                if self.preferences_sheet.is_some() {
+                    return if shift {
+                        action::focus_previous_visible(preferences_view::CONTENT_SCROLL_ID)
+                    } else {
+                        action::focus_next_visible(preferences_view::CONTENT_SCROLL_ID)
+                    };
+                }
                 log::debug!("Tab pressed!");
                 if shift {
                     action::focus_previous_visible(crate::app::view::nav::shell::MIDDLE_SCROLL_ID)
@@ -1005,6 +1176,9 @@ impl GUI {
                 }
             }
             Message::KeyPressed(Key::Escape) => {
+                if self.preferences_sheet.is_some() {
+                    return self.close_preferences_sheet();
+                }
                 let Some((pane_id, tab_id, generation, intent)) = self.focus.and_then(|pane_id| {
                     let pane = self.panes.get(pane_id)?;
                     let tab = pane.tabs.get(pane.focused_tab)?;
@@ -1194,17 +1368,7 @@ impl GUI {
                 }
             }
             Message::Pane(_, pane::Message::View(pane::ViewMessage::GlobalSettingsChanged)) => {
-                let root = &self.config.coincube_directory;
-                let mut tasks = Vec::new();
-                for (&pane_id, pane) in self.panes.iter_mut() {
-                    for tab in &mut pane.tabs {
-                        let tab_id = tab.id;
-                        tasks.push(tab.reload_global_settings(root).map(move |message| {
-                            Message::Pane(pane_id, pane::Message::tab(tab_id, message))
-                        }));
-                    }
-                }
-                Task::batch(tasks)
+                self.reload_all_global_settings()
             }
             // A Home sign-in re-checks the Connect session of every open Cube,
             // in every pane: a split-off Cube is still an open Cube. Each Init
@@ -1248,6 +1412,33 @@ impl GUI {
             }
             Message::Pane(_, pane::Message::View(pane::ViewMessage::ToggleTheme)) => {
                 self.update(Message::ToggleTheme)
+            }
+            Message::Pane(pane_id, pane::Message::Tab(tab_id, inner))
+                if matches!(inner.as_ref(), tab::Message::OpenAppPreferences) =>
+            {
+                let focus = self.panes.get(pane_id).and_then(|pane| {
+                    pane.tabs.iter().find(|tab| tab.id == tab_id).map(|tab| {
+                        let id = if matches!(&tab.state, tab::State::App(_)) {
+                            crate::app::view::nav::shell::APP_PREFERENCES_ID
+                        } else {
+                            "tenshu.launcher.catalog:control:settings"
+                        };
+                        iced::advanced::widget::Id::new(id)
+                    })
+                });
+                let Some(origin) = self.overlay_origin(focus) else {
+                    return Task::none();
+                };
+                if origin.pane != pane_id || origin.tab_id != tab_id {
+                    return Task::none();
+                }
+                self.preferences_sheet = Some(PreferencesSheet {
+                    origin,
+                    page: PreferencesPageState::default(),
+                });
+                iced_runtime::task::widget(iced::advanced::widget::operation::focusable::focus(
+                    iced::advanced::widget::Id::new("tenshu.preferences.close"),
+                ))
             }
             Message::Pane(pane_id, pane::Message::Tab(tab_id, inner))
                 if matches!(
@@ -2033,30 +2224,40 @@ impl GUI {
             }
             Message::Resized(_) | Message::Dragged(_) => Task::none(),
             Message::Preferences(request, result) => {
-                self.preferences.complete(&request, result);
+                let applied = matches!(
+                    self.preferences.complete(&request, result),
+                    SaveOutcome::Applied(_)
+                );
                 self.publish_balance_privacy();
+                if applied {
+                    self.publish_appearance();
+                    return self.reload_all_global_settings();
+                }
                 Task::none()
             }
             Message::ToggleTheme => {
+                use crate::app::settings::preferences::{PreferenceChange, ThemePreference};
                 use coincube_ui::theme::palette::ThemeMode;
-                self.theme_mode = match self.theme_mode {
-                    ThemeMode::Dark => ThemeMode::Light,
-                    ThemeMode::Light => ThemeMode::Dark,
+                let next = match self.theme_mode {
+                    ThemeMode::Dark => ThemePreference::Light,
+                    ThemeMode::Light => ThemePreference::Dark,
                 };
-                // Propagate to all pane tabs' caches
-                for (_, pane) in self.panes.iter_mut() {
-                    pane.set_theme_mode(self.theme_mode);
-                }
-                // Persist preference
-                let path = GlobalSettings::path(&self.config.coincube_directory);
-                if let Err(e) = GlobalSettings::update_theme_mode(&path, self.theme_mode) {
-                    tracing::error!("Failed to persist theme mode: {e}");
-                }
+                self.change_preference(PreferenceChange::Theme(next))
+            }
+            Message::SystemTheme(mode) => {
+                self.system_theme = match mode {
+                    iced::theme::Mode::Light => Some(coincube_ui::theme::palette::ThemeMode::Light),
+                    iced::theme::Mode::Dark => Some(coincube_ui::theme::palette::ThemeMode::Dark),
+                    iced::theme::Mode::None => None,
+                };
+                self.publish_appearance();
                 Task::none()
             }
+            Message::PreferencesSheet(message) => self.preferences_sheet_message(message),
             Message::Tick => {
                 let system_reduces_motion =
                     crate::app::settings::system_accessibility::reduces_motion();
+                self.system_reduces_motion = system_reduces_motion;
                 for (_, pane) in self.panes.iter_mut() {
                     for tab in &mut pane.tabs {
                         tab.set_system_reduces_motion(system_reduces_motion);
@@ -2189,6 +2390,7 @@ impl GUI {
     pub fn subscription(&self) -> Subscription<Message> {
         let mut vec = vec![
             iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick),
+            iced::system::theme_changes().map(Message::SystemTheme),
             iced::event::listen_with(|event, status, _| {
                 // The idle auto-lock's only source of truth for "someone is at
                 // the machine". It must come from real input: message traffic
@@ -2239,7 +2441,15 @@ impl GUI {
             .find(|(id, _)| Some(**id) == self.focus)
             .or_else(|| self.panes.iter().next())
             .expect("GUI always owns its primary pane");
-        pane.view().map(move |message| Message::Pane(id, message))
+        let background = pane.view().map(move |message| Message::Pane(id, message));
+        if let Some(sheet) = &self.preferences_sheet {
+            if self.overlay_origin_is_current(&sheet.origin) {
+                let foreground = preferences_view::view(&sheet.page, self.preferences_view_model())
+                    .map(Message::PreferencesSheet);
+                return compose_overlay(background, foreground);
+            }
+        }
+        background
     }
 
     pub fn scale_factor(&self) -> f32 {
@@ -2263,6 +2473,190 @@ impl Config {
             coincube_directory,
             network,
         }
+    }
+}
+
+/// Where an overlay (App Preferences, Connect) was opened from: the exact
+/// retained pane and tab, the App generation when that tab is a Cube, and the
+/// control to refocus when the overlay closes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlayOrigin {
+    pub pane: pane_grid::Pane,
+    pub tab_id: usize,
+    pub app_generation: Option<u64>,
+    pub focus: Option<iced::advanced::widget::Id>,
+}
+
+struct PreferencesSheet {
+    origin: OverlayOrigin,
+    page: PreferencesPageState,
+}
+
+impl GUI {
+    /// The pane `view` renders: the focused one, else the first.
+    fn visible_pane(&self) -> Option<(pane_grid::Pane, &pane::Pane)> {
+        self.panes
+            .iter()
+            .find(|(id, _)| Some(**id) == self.focus)
+            .or_else(|| self.panes.iter().next())
+            .map(|(id, pane)| (*id, pane))
+    }
+
+    /// Records what is visible now as an overlay origin.
+    pub fn overlay_origin(
+        &self,
+        focus: Option<iced::advanced::widget::Id>,
+    ) -> Option<OverlayOrigin> {
+        let (pane, state) = self.visible_pane()?;
+        let tab = state.tabs.get(state.focused_tab)?;
+        Some(OverlayOrigin {
+            pane,
+            tab_id: tab.id,
+            app_generation: tab.app_generation_token(),
+            focus,
+        })
+    }
+
+    /// Whether `origin` still names the same visible state. Lock, sign-out,
+    /// deletion, duress or a replaced Cube change the visible tab or its App
+    /// generation, so closing the overlay must not restore into it.
+    pub fn overlay_origin_is_current(&self, origin: &OverlayOrigin) -> bool {
+        self.visible_pane()
+            .filter(|(pane, _)| *pane == origin.pane)
+            .and_then(|(_, state)| state.tabs.get(state.focused_tab))
+            .is_some_and(|tab| {
+                tab.id == origin.tab_id && tab.app_generation_token() == origin.app_generation
+            })
+    }
+}
+
+/// The real retained background, drawn but unreachable while an overlay owns
+/// input: it receives no pointer or keyboard event and no focus or other
+/// operation, so Tab cannot leave the sheet and background controls cannot
+/// activate. Its own overlays (tooltips, menus) are not shown and its
+/// animations pause. Nothing is cloned or screenshotted.
+struct InertBackground<'a, M> {
+    content: Element<'a, M>,
+}
+
+impl<'a, M> iced::advanced::Widget<M, coincube_ui::theme::Theme, iced::Renderer>
+    for InertBackground<'a, M>
+{
+    fn size(&self) -> Size<iced::Length> {
+        self.content.as_widget().size()
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        renderer: &iced::Renderer,
+        limits: &iced::advanced::layout::Limits,
+    ) -> iced::advanced::layout::Node {
+        self.content
+            .as_widget_mut()
+            .layout(&mut tree.children[0], renderer, limits)
+    }
+
+    fn draw(
+        &self,
+        tree: &iced::advanced::widget::Tree,
+        renderer: &mut iced::Renderer,
+        theme: &coincube_ui::theme::Theme,
+        style: &iced::advanced::renderer::Style,
+        layout: iced::advanced::Layout<'_>,
+        _cursor: iced::mouse::Cursor,
+        viewport: &iced::Rectangle,
+    ) {
+        self.content.as_widget().draw(
+            &tree.children[0],
+            renderer,
+            theme,
+            style,
+            layout,
+            iced::mouse::Cursor::Unavailable,
+            viewport,
+        );
+    }
+
+    fn children(&self) -> Vec<iced::advanced::widget::Tree> {
+        vec![iced::advanced::widget::Tree::new(&self.content)]
+    }
+
+    fn diff(&self, tree: &mut iced::advanced::widget::Tree) {
+        tree.diff_children(std::slice::from_ref(&self.content));
+    }
+}
+
+/// Pure overlay composition: `background` is the real view of the retained
+/// origin, rendered inert under a scrim; `sheet` owns all input and focus.
+pub fn compose_overlay<'a, M: 'a>(
+    background: Element<'a, M>,
+    sheet: Element<'a, M>,
+) -> Element<'a, M> {
+    iced::widget::stack![
+        Element::new(InertBackground {
+            content: background
+        }),
+        iced::widget::container(
+            iced::widget::container(sheet)
+                .max_width(1040)
+                .height(iced::Length::Fill),
+        )
+        .width(iced::Length::Fill)
+        .height(iced::Length::Fill)
+        .center_x(iced::Length::Fill)
+        .padding(24)
+        .style(|theme: &coincube_ui::theme::Theme| {
+            iced::widget::container::Style {
+                background: Some(iced::Background::Color(theme.colors.shell.shadow)),
+                ..Default::default()
+            }
+        }),
+    ]
+    .into()
+}
+
+#[cfg(test)]
+mod app_preferences_sheet_tests {
+    use super::*;
+    use crate::app::settings::preferences::{LauncherStyle, PreferenceChange};
+
+    #[test]
+    fn launcher_sheet_keeps_its_tab_and_routes_a_device_change() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path = std::env::temp_dir().join(format!(
+            "tenshu-app-preferences-sheet-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        let root = CoincubeDirectory::new(path.clone());
+        let (mut gui, startup) = GUI::new(Config::new(root, None), None);
+        drop(startup);
+        let pane_id = gui.focus.unwrap();
+        let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
+
+        drop(gui.update(Message::Pane(
+            pane_id,
+            pane::Message::tab(tab_id, tab::Message::OpenAppPreferences),
+        )));
+        assert!(gui.preferences_sheet.is_some());
+        assert!(gui.overlay_origin_is_current(&gui.preferences_sheet.as_ref().unwrap().origin));
+        assert_eq!(gui.panes.get(pane_id).unwrap().tabs[0].id, tab_id);
+
+        drop(gui.update(Message::PreferencesSheet(
+            preferences_view::Message::Change(PreferenceChange::LauncherStyle(LauncherStyle::List)),
+        )));
+        assert!(gui.preferences.is_busy());
+
+        drop(gui.update(Message::KeyPressed(Key::Escape)));
+        assert!(gui.preferences_sheet.is_none());
+        assert_eq!(gui.panes.get(pane_id).unwrap().tabs[0].id, tab_id);
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
     }
 }
 
@@ -2358,6 +2752,9 @@ mod fork_auth_dispatch_tests {
             window_config: None,
             global_cache: GlobalCache::default(),
             theme_mode: Default::default(),
+            system_theme: None,
+            system_reduces_motion: None,
+            preferences_sheet: None,
             preferences: unresolved_test_preferences(),
         };
         drop(gui.update(Message::Pane(
@@ -2432,6 +2829,9 @@ mod fork_auth_dispatch_tests {
                     window_config: None,
                     global_cache: GlobalCache::default(),
                     theme_mode: Default::default(),
+                    system_theme: None,
+                    system_reduces_motion: None,
+                    preferences_sheet: None,
                     preferences: unresolved_test_preferences(),
                 };
                 drop(gui.update(Message::Pane(
@@ -2772,6 +3172,9 @@ mod fork_auth_dispatch_tests {
                         window_config: None,
                         global_cache: GlobalCache::default(),
                         theme_mode: Default::default(),
+            system_theme: None,
+            system_reduces_motion: None,
+            preferences_sheet: None,
             preferences: unresolved_test_preferences(),
                     };
                     let mut cube = crate::app::settings::CubeSettings::new(
@@ -2899,6 +3302,9 @@ mod fork_auth_dispatch_tests {
                     window_config: None,
                     global_cache: GlobalCache::default(),
                     theme_mode: Default::default(),
+                    system_theme: None,
+                    system_reduces_motion: None,
+                    preferences_sheet: None,
                     preferences: unresolved_test_preferences(),
                 };
                 let account = |message| {
@@ -3072,6 +3478,9 @@ mod fork_auth_dispatch_tests {
                 window_config: None,
                 global_cache: GlobalCache::default(),
                 theme_mode: Default::default(),
+                system_theme: None,
+                system_reduces_motion: None,
+                preferences_sheet: None,
                 preferences: unresolved_test_preferences(),
             };
             let task = gui.update(Message::Pane(
@@ -3293,6 +3702,9 @@ mod fork_auth_revocation_tests {
                 window_config: None,
                 global_cache: GlobalCache::default(),
                 theme_mode: Default::default(),
+                system_theme: None,
+                system_reduces_motion: None,
+                preferences_sheet: None,
                 preferences: unresolved_test_preferences(),
             };
             let (home, home_startup) =
@@ -3466,6 +3878,9 @@ mod shared_adoption_generation_tests {
                 window_config: None,
                 global_cache: GlobalCache::default(),
                 theme_mode: Default::default(),
+                system_theme: None,
+                system_reduces_motion: None,
+                preferences_sheet: None,
                 preferences: unresolved_test_preferences(),
             };
             let init = || {
@@ -3686,6 +4101,9 @@ mod shell_escape_dispatch_tests {
             window_config: None,
             global_cache: GlobalCache::default(),
             theme_mode: Default::default(),
+            system_theme: None,
+            system_reduces_motion: None,
+            preferences_sheet: None,
             preferences: unresolved_test_preferences(),
         };
         let route = |intent| {
@@ -3829,6 +4247,9 @@ mod lock_cube_dispatch_tests {
             window_config: None,
             global_cache: GlobalCache::default(),
             theme_mode: Default::default(),
+            system_theme: None,
+            system_reduces_motion: None,
+            preferences_sheet: None,
             preferences: unresolved_test_preferences(),
         };
         crate::app::session::open("orphaned", zeroize::Zeroizing::new("2468".into()));
@@ -3959,6 +4380,9 @@ mod lock_cube_dispatch_tests {
             window_config: None,
             global_cache: GlobalCache::default(),
             theme_mode: Default::default(),
+            system_theme: None,
+            system_reduces_motion: None,
+            preferences_sheet: None,
             preferences: unresolved_test_preferences(),
         };
         let destination = crate::app::settings::CubeSettings::new_with_raw_id(
@@ -4061,6 +4485,9 @@ mod lock_cube_dispatch_tests {
             window_config: None,
             global_cache: GlobalCache::default(),
             theme_mode: Default::default(),
+            system_theme: None,
+            system_reduces_motion: None,
+            preferences_sheet: None,
             preferences: unresolved_test_preferences(),
         };
         crate::app::session::open(same_cube_id.clone(), zeroize::Zeroizing::new("2468".into()));
@@ -4142,6 +4569,9 @@ mod lock_cube_dispatch_tests {
             window_config: None,
             global_cache: GlobalCache::default(),
             theme_mode: Default::default(),
+            system_theme: None,
+            system_reduces_motion: None,
+            preferences_sheet: None,
             preferences: unresolved_test_preferences(),
         };
         let resources = tab::ClaimResources {
@@ -4314,6 +4744,9 @@ impl GUI {
             window_config: None,
             global_cache: GlobalCache::default(),
             theme_mode: Default::default(),
+            system_theme: None,
+            system_reduces_motion: None,
+            preferences_sheet: None,
             preferences: unresolved_test_preferences(),
         }
     }
@@ -4332,6 +4765,9 @@ impl GUI {
             window_config: None,
             global_cache: GlobalCache::default(),
             theme_mode: Default::default(),
+            system_theme: None,
+            system_reduces_motion: None,
+            preferences_sheet: None,
             preferences: unresolved_test_preferences(),
         }
     }
@@ -4812,6 +5248,9 @@ mod claim_return_routing_tests {
                     window_config: None,
                     global_cache: GlobalCache::default(),
                     theme_mode: Default::default(),
+                    system_theme: None,
+                    system_reduces_motion: None,
+                    preferences_sheet: None,
                     preferences: unresolved_test_preferences(),
                 };
                 let source_id = match &gui.panes.get(target).unwrap().tabs[index].state {
@@ -5430,6 +5869,9 @@ mod single_open_lifecycle_tests {
                         window_config: None,
                         global_cache: GlobalCache::default(),
                         theme_mode: Default::default(),
+            system_theme: None,
+            system_reduces_motion: None,
+            preferences_sheet: None,
             preferences: unresolved_test_preferences(),
                     };
                     if connect {

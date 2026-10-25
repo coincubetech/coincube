@@ -523,6 +523,7 @@ pub enum Message {
     /// Show the Launcher without discarding this App session. The pane owns
     /// the tab switch, so this is bubbled up rather than handled here.
     OpenLauncher,
+    OpenAppPreferences,
     /// Explicitly lock the Cube and return to the Launcher in this tab.
     LockCubeToLauncher,
     /// Completion of an authenticated fork installer generation.
@@ -1857,11 +1858,9 @@ impl Tab {
                 home::Message::View(home::ViewMessage::ToggleTheme) => {
                     Task::done(Message::ToggleTheme)
                 }
-                home::Message::View(home::ViewMessage::OpenAppPreferences) => l
-                    .update(home::Message::View(home::ViewMessage::GoToSection(
-                        home::HomeSection::Settings,
-                    )))
-                    .map(Message::Launch),
+                home::Message::View(home::ViewMessage::OpenAppPreferences) => {
+                    Task::done(Message::OpenAppPreferences)
+                }
                 home::Message::GlobalSettingsChanged => Task::done(Message::GlobalSettingsChanged),
                 home::Message::ConnectSignedInBubble => Task::done(Message::ConnectSignedIn),
                 _ => l.update(msg).map(Message::Launch),
@@ -2972,6 +2971,9 @@ impl Tab {
                     }
                     app::Message::View(app::view::Message::OpenLauncher) => {
                         Task::done(Message::OpenLauncher)
+                    }
+                    app::Message::View(app::view::Message::OpenAppPreferences) => {
+                        Task::done(Message::OpenAppPreferences)
                     }
                     app::Message::View(app::view::Message::LockCubeToLauncher) => {
                         Task::done(Message::LockCubeToLauncher)
