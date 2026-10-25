@@ -4927,6 +4927,14 @@ mod lock_cube_dispatch_tests {
 // originating-tab dispatch. Test-only.
 #[cfg(test)]
 impl GUI {
+    pub(crate) fn reviewer_load_preferences(&mut self) {
+        let root = &self.config.coincube_directory;
+        let receipt = GlobalSettings::load_or_initialize_preferences(root).unwrap();
+        self.preferences = PreferencesOwner::new(GlobalSettings::path(root), &Ok(receipt));
+        self.publish_balance_privacy();
+        self.publish_appearance();
+    }
+
     pub(crate) fn reviewer_claim_gui(first: crate::app::App, second: crate::app::App) -> Self {
         let root = first.datadir().clone();
         let mut pane = pane::Pane::new_with_tab(tab::State::App(first));

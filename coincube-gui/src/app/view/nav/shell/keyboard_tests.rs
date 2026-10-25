@@ -336,6 +336,7 @@ fn shell_actions_follow_visual_order_and_dispatch_keyboard_once() {
     for expected in [
         LAUNCHER_RETURN_ID,
         "tenshu.connect.sign-in",
+        APP_PREFERENCES_ID,
         CUBE_SWITCHER_ID,
     ] {
         operate(
@@ -387,6 +388,23 @@ fn shell_actions_follow_visual_order_and_dispatch_keyboard_once() {
         key(keyboard::key::Named::Enter, false, false),
         mouse::Cursor::Unavailable,
         size,
+    );
+    operate(
+        &mut element,
+        &mut tree,
+        &node,
+        &renderer,
+        focusable::focus_previous::<()>(),
+    );
+    assert_eq!(
+        operate(
+            &mut element,
+            &mut tree,
+            &node,
+            &renderer,
+            focusable::find_focused()
+        ),
+        Some(Id::new(APP_PREFERENCES_ID))
     );
     operate(
         &mut element,
