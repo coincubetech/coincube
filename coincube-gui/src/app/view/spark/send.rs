@@ -61,6 +61,7 @@ pub struct SparkSendView<'a> {
     /// `None` when no price is known — the fee then shows in the asset only.
     pub reference_btc_usd_price: Option<f64>,
     pub show_direction_badges: bool,
+    pub mask_amounts: bool,
     /// The "THEY RECEIVE" selection — drives the two-card selector and the
     /// destination placeholder.
     pub receive_target: SparkSendTarget,
@@ -251,6 +252,7 @@ impl<'a> SparkSendView<'a> {
             self.recent_transactions,
             self.bitcoin_unit,
             self.show_direction_badges,
+            self.mask_amounts,
             |idx| Message::SparkSend(SparkSendMessage::SelectTransaction(idx)),
             Message::SparkSend(SparkSendMessage::History),
         ));
@@ -1218,6 +1220,7 @@ mod tests {
         mode: ThemeMode,
         unit: BitcoinDisplayUnit,
         hint: Option<String>,
+        mask_amounts: bool,
         target: SparkSendTarget,
         network: Network,
         countdown: Option<cross_chain::QuoteCountdown>,
@@ -1237,6 +1240,7 @@ mod tests {
                 mode: ThemeMode::Dark,
                 unit: BitcoinDisplayUnit::Sats,
                 hint: None,
+                mask_amounts: false,
                 target: SparkSendTarget::Lightning,
                 network: Network::Bitcoin,
                 countdown: None,
@@ -1305,6 +1309,7 @@ mod tests {
                 bitcoin_unit: self.unit,
                 reference_btc_usd_price: None,
                 show_direction_badges: false,
+                mask_amounts: self.mask_amounts,
                 receive_target: self.target,
                 network: self.network,
                 cross_chain_ctx: None,
@@ -1825,6 +1830,23 @@ mod tests {
                 "SATS"
             }
         )
+    }
+
+    #[test]
+    fn masked_payment_card_hides_available_balance_and_conversion_hint() {
+        let mut fixture = Fixture::filled(SparkSendPhase::Idle);
+        fixture.mask_amounts = true;
+        let menu = spark_send_menu();
+        let cache = fixture.cache();
+        let mut harness = Harness::new(screen(&fixture, &menu, &cache, false), COMPACT);
+        let probe = harness.probe();
+        assert!(probe.contains("••••••"));
+        assert!(!probe.contains(&original_balance_text(
+            SYNTHETIC_BALANCE_SATS,
+            BitcoinDisplayUnit::Sats,
+        )));
+        assert!(!probe.contains(SYNTHETIC_HINT));
+        assert!(probe.bounds(RECEIVE_TARGET_ACTION_ID).is_some());
     }
 
     #[test]

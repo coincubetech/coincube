@@ -778,6 +778,7 @@ impl Loader {
         self.scoped_seed_password = None;
         self.claim_verified_account = None;
         self.restricted_claim = false;
+        self.fork_session_revoked = true;
         self.fork_task.take();
         self.internal_bitcoind.take();
         self.step = Step::Error(Box::new(Error::Unexpected(
@@ -796,6 +797,7 @@ impl Loader {
     pub(crate) fn fail(&mut self, error: Error) {
         if self.restricted_claim {
             self.stop();
+            self.fork_session_revoked = true;
         }
         self.scoped_seed_password = None;
         self.claim_verified_account = None;
@@ -901,7 +903,17 @@ impl Loader {
     }
 
     pub fn view(&self) -> Element<Message> {
-        view(&self.step, &self.current_quote, &self.current_image_handle).map(Message::View)
+        view_with_retry(
+            &self.step,
+            &self.current_quote,
+            &self.current_image_handle,
+            self.can_retry(),
+        )
+        .map(Message::View)
+    }
+
+    fn can_retry(&self) -> bool {
+        !self.restricted_claim && !self.fork_session_revoked
     }
 }
 
@@ -1124,6 +1136,7 @@ pub async fn load_application(
         spark_notice: None,
         has_p2p: false, // Set later by App::new based on mnemonic availability
         theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
+        balance_privacy: None,
         btc_usd_price: None,
         show_direction_badges: true,
         lightning_address: None,
@@ -1170,6 +1183,15 @@ pub fn view<'a>(
     step: &'a Step,
     quote: &'a Quote,
     image_handle: &'a image::Handle,
+) -> Element<'a, ViewMessage> {
+    view_with_retry(step, quote, image_handle, true)
+}
+
+fn view_with_retry<'a>(
+    step: &'a Step,
+    quote: &'a Quote,
+    image_handle: &'a image::Handle,
+    allow_retry: bool,
 ) -> Element<'a, ViewMessage> {
     match &step {
         Step::StartingDaemon { .. } => cover(
@@ -1272,20 +1294,22 @@ pub fn view<'a>(
                         image_handle,
                     )))
                     .push(text(headline))
-                    .push(
-                        Row::new()
-                            .spacing(10)
-                            .push(
-                                button::secondary(None, "Back")
-                                    .width(Length::Fixed(200.0))
-                                    .on_press(ViewMessage::SwitchNetwork),
-                            )
-                            .push(
+                    .push({
+                        let actions = Row::new().spacing(10).push(
+                            button::secondary(None, "Back")
+                                .width(Length::Fixed(200.0))
+                                .on_press(ViewMessage::SwitchNetwork),
+                        );
+                        if allow_retry {
+                            actions.push(
                                 button::secondary(None, "Retry")
                                     .width(Length::Fixed(200.0))
                                     .on_press(ViewMessage::Retry),
-                            ),
-                    ),
+                            )
+                        } else {
+                            actions
+                        }
+                    }),
             )
         }
     }
@@ -1447,12 +1471,21 @@ async fn start_fork_daemon(
         let root = root.clone();
         tokio::task::spawn_blocking(move || {
             Bitcoind::preflight_for_chain(chain, &root)?;
-            crate::node::tor::prepare_inbound_tor_for_chain(&root, chain).map_err(|e| {
-                crate::node::bitcoind::StartInternalBitcoindError::ConfigUnavailable(e.to_string())
-            })?;
-            Bitcoind::maybe_start_for_chain(chain, node, &root).map(|node| PendingForkNode {
-                node: Some(node),
-                cleanup: true,
+            let lifecycle = crate::node::bitcoind::ManagedNodeLifecycle::acquire(
+                &root,
+                crate::node::bitcoind::NodeChainFamily::from_chain(chain),
+            )?;
+            crate::node::tor::prepare_inbound_tor_for_chain_locked(&root, chain, &lifecycle)
+                .map_err(|e| {
+                    crate::node::bitcoind::StartInternalBitcoindError::ConfigUnavailable(
+                        e.to_string(),
+                    )
+                })?;
+            Bitcoind::maybe_start_for_chain_locked(chain, node, &root, &lifecycle).map(|node| {
+                PendingForkNode {
+                    node: Some(node),
+                    cleanup: true,
+                }
             })
         })
         .await
@@ -1653,15 +1686,23 @@ async fn start_bitcoind_and_daemon_with_import_auth(
             // replaced it may still name a Tor that is not running, so the
             // start is refused — retryably — rather than made from stale
             // privacy configuration.
-            let inbound_up =
-                crate::node::tor::prepare_inbound_tor_for_chain(&coincube_datadir_path, chain)
-                    .map_err(|e| {
-                        Error::Bitcoind(
-                            crate::node::bitcoind::StartInternalBitcoindError::ConfigUnavailable(
-                                e.to_string(),
-                            ),
-                        )
-                    })?;
+            let lifecycle = crate::node::bitcoind::ManagedNodeLifecycle::acquire(
+                &coincube_datadir_path,
+                crate::node::bitcoind::NodeChainFamily::from_chain(chain),
+            )
+            .map_err(Error::Bitcoind)?;
+            let inbound_up = crate::node::tor::prepare_inbound_tor_for_chain_locked(
+                &coincube_datadir_path,
+                chain,
+                &lifecycle,
+            )
+            .map_err(|e| {
+                Error::Bitcoind(
+                    crate::node::bitcoind::StartInternalBitcoindError::ConfigUnavailable(
+                        e.to_string(),
+                    ),
+                )
+            })?;
             // A fresh tor gets fresh control/SOCKS ports each run, which a
             // *reused* bitcoind (one that survived a previous session) wouldn't
             // pick up — `maybe_start` would just reattach to it. When inbound is
@@ -1674,10 +1715,11 @@ async fn start_bitcoind_and_daemon_with_import_auth(
                 crate::node::bitcoind::stop_and_wait_managed_bitcoind(bitcoind_config);
             }
             Some(
-                Bitcoind::maybe_start_for_chain(
+                Bitcoind::maybe_start_for_chain_locked(
                     chain,
                     bitcoind_config.clone(),
                     &coincube_datadir_path,
+                    &lifecycle,
                 )
                 .map_err(Error::Bitcoind)?,
             )
@@ -2206,6 +2248,7 @@ mod tests {
             0
         );
         assert!(matches!(loader.step, Step::Error(_)));
+        assert!(!loader.can_retry(), "Claim error must hide Retry");
 
         for _ in 0..2 {
             let task = loader.update(Message::View(ViewMessage::Retry));
@@ -2216,6 +2259,23 @@ mod tests {
             assert!(matches!(&loader.step, Step::Error(error)
                 if error.to_string().contains("Unlock the paired Cube again")));
         }
+    }
+
+    #[test]
+    fn transferred_or_refused_claim_cannot_offer_retry() {
+        let mut transferred = loader_without_wallet(false);
+        transferred.cube_settings.network = crate::chain::ChainId::BitcoinBlake2b;
+        transferred.set_scoped_seed_password(zeroize::Zeroizing::new("synthetic-pin".into()));
+        transferred.detach_claim_resources();
+        assert!(transferred.fork_session_revoked);
+        assert!(!transferred.can_retry());
+
+        let mut refused = loader_without_wallet(false);
+        refused.cube_settings.network = crate::chain::ChainId::BitcoinBlake2b;
+        refused.set_scoped_seed_password(zeroize::Zeroizing::new("synthetic-pin".into()));
+        refused.fail(Error::Unexpected("claim refused".into()));
+        assert!(refused.fork_session_revoked);
+        assert!(!refused.can_retry());
     }
 
     #[test]
