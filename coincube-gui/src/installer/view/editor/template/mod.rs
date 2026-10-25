@@ -107,6 +107,7 @@ pub fn choose_descriptor_template(
 
 /// Shared introduction composition. The selected policy is identified by its
 /// heading after the chooser's existing select-and-advance action.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn template_introduction(
     progress: (usize, usize),
     ui_instance: u64,
@@ -591,7 +592,7 @@ mod tests {
                     choose_descriptor_template((1, 12), 41),
                     window,
                     appearance,
-                    theme.clone(),
+                    theme,
                 );
                 for title in [
                     "Simple inheritance",
@@ -618,7 +619,7 @@ mod tests {
                         view((2, 12), 42, false),
                         window,
                         appearance,
-                        theme.clone(),
+                        theme,
                     );
                     for label in required {
                         assert!(

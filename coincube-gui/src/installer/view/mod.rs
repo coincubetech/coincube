@@ -3630,6 +3630,7 @@ mod node_management_chain_tests {
     }
 
     #[test]
+    #[allow(clippy::type_complexity)]
     fn node_choices_activate_with_enter_and_space() {
         use keyboard::key::Named;
         let cases: &[(ChainId, bool, bool, bool, &str, fn(&Message) -> bool)] = &[
