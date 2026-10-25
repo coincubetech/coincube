@@ -187,6 +187,9 @@ const FACES: [Face; 6] = [
     },
 ];
 
+// Camera position, chain colors and optional face text are independent inputs
+// to the authored projection. Keeping them explicit makes its motion auditable.
+#[allow(clippy::too_many_arguments)]
 fn paint_cube(
     svg: &mut String,
     cx: f32,
@@ -345,6 +348,9 @@ fn paint_unlock_text(svg: &mut String, p: [(f32, f32); 4], light: bool, text: Fa
     svg.push_str("</g>");
 }
 
+// The two concurrent Cube poses and scene dimensions mirror the prototype's
+// projection inputs; grouping them would obscure the handoff equations.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn source(
     width: f32,
     height: f32,
