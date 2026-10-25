@@ -510,7 +510,7 @@ async fn compact_mounted_wallet_policy_keeps_both_recovery_clauses_visible() {
     assert_eq!(
         policy_labels
             .iter()
-            .filter(|(text, _)| text == "can spend coins inliquid for")
+            .filter(|(text, _)| text == "can spend coins after a relative timelock of")
             .count(),
         2,
         "both recovery clauses must mount"
@@ -644,7 +644,7 @@ async fn actual_vault_settings_capture_matrix() {
         fs::create_dir_all(path).unwrap();
         fs::File::create(Path::new(path).join("manifest.jsonl")).unwrap();
     }
-    let sha = source_sha();
+    let sha = directory.as_ref().map(|_| source_sha());
     for scenario in [
         "wallet_default",
         "wallet_imported",
@@ -754,7 +754,7 @@ async fn actual_vault_settings_capture_matrix() {
                     ));
                     let record = serde_json::json!({
                         "fixture": "r11a-actual-iced",
-                        "source_sha": sha,
+                        "source_sha": sha.as_deref().expect("capture source SHA"),
                         "scenario": scenario,
                         "theme": theme_name,
                         "width": width,

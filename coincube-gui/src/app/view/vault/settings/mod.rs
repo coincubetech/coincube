@@ -1509,7 +1509,7 @@ fn display_policy<'a>(
                         .wrap()
                         .vertical_spacing(5),
                 )
-                .push(text("can spend coins inliquid for"))
+                .push(text("can spend coins after a relative timelock of"))
                 .push(
                     text(format!(
                         "{} blocks (~{})",

@@ -736,7 +736,7 @@ fn display_policy(
                         }
                     },
                 ))
-                .push(text("can spend coins inliquid for"))
+                .push(text("can spend coins after a relative timelock of"))
                 .push(
                     text(format!(
                         "{} blocks (~{})",
