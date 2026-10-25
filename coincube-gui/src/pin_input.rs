@@ -8,6 +8,11 @@ use iced::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+/// Focus target used when a Launcher Cube opens directly into PIN entry.
+pub(crate) fn first_digit_id() -> iced::advanced::widget::Id {
+    iced::advanced::widget::Id::new("tenshu.unlock.pin:first-digit")
+}
+
 /// Reusable 4-digit PIN input component.
 ///
 /// Handles digit entry with auto-advance/retreat and show/hide toggle.
@@ -171,6 +176,11 @@ impl PinInput {
                 .secure(self.hidden)
                 .on_input(move |v| Message::DigitChanged(i, v))
                 .on_submit(Message::Submit);
+            let input = if i == 0 {
+                input.id(first_digit_id())
+            } else {
+                input
+            };
 
             pin_inputs = pin_inputs.push(input);
         }

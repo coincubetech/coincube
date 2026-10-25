@@ -908,11 +908,16 @@ impl Loader {
     }
 
     pub fn view(&self) -> Element<Message> {
-        view_with_retry(
+        let scene = crate::home::launcher_presenter::project_opening(
+            &self.cube_settings.name,
+            self.cube_settings.network,
+        );
+        crate::home::launcher_presenter::opening_body(
+            scene,
             &self.step,
             &self.current_quote,
             &self.current_image_handle,
-            self.can_retry(),
+            !self.can_retry(),
         )
         .map(Message::View)
     }
@@ -1192,7 +1197,7 @@ pub fn view<'a>(
     view_with_retry(step, quote, image_handle, true)
 }
 
-fn view_with_retry<'a>(
+pub(crate) fn view_with_retry<'a>(
     step: &'a Step,
     quote: &'a Quote,
     image_handle: &'a image::Handle,

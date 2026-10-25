@@ -460,6 +460,10 @@ impl GUI {
         ];
         let (mut pane, cmd) = pane::Pane::new(&config);
         pane.set_balance_privacy(Some(Self::privacy_chrome_for(&preferences)));
+        let system_reduces_motion = crate::app::settings::system_accessibility::reduces_motion();
+        for tab in &mut pane.tabs {
+            tab.set_system_reduces_motion(system_reduces_motion);
+        }
         let (mut panes, focused_pane) = pane_grid::State::new(pane);
         cmds.push(cmd.map(move |msg| Message::Pane(focused_pane, msg)));
         let global_settings_path = GlobalSettings::path(&config.coincube_directory);
@@ -604,6 +608,7 @@ impl GUI {
             Message::Pane(pane_id, pane::Message::Tab(tab_id, inner)) => match inner.as_ref() {
                 tab::Message::Launch(
                     home::Message::Run(root, _, chain, _)
+                    | home::Message::RunFromFloor(root, _, chain, _, _)
                     | home::Message::RunToRecovery(root, _, chain, _)
                     | home::Message::RunClaim(root, _, chain, _, _),
                 ) if chain.is_blake2b() => {
@@ -1490,6 +1495,7 @@ impl GUI {
                 let public_exit = matches!(
                     msg,
                     home::Message::Run(..)
+                        | home::Message::RunFromFloor(..)
                         | home::Message::RunToRecovery(..)
                         | home::Message::RunClaim(..)
                         | home::Message::Install(..)
@@ -1520,6 +1526,7 @@ impl GUI {
                 let mut staged_split = None;
                 if let Some((root, chain, cube, intent)) = match &msg {
                     home::Message::Run(root, _, chain, cube)
+                    | home::Message::RunFromFloor(root, _, chain, cube, _)
                     | home::Message::RunToRecovery(root, _, chain, cube) => {
                         Some((root, chain, cube, None))
                     }
@@ -2124,6 +2131,13 @@ impl GUI {
                 Task::none()
             }
             Message::Tick => {
+                let system_reduces_motion =
+                    crate::app::settings::system_accessibility::reduces_motion();
+                for (_, pane) in self.panes.iter_mut() {
+                    for tab in &mut pane.tabs {
+                        tab.set_system_reduces_motion(system_reduces_motion);
+                    }
+                }
                 let privacy_refresh = self
                     .preferences
                     .begin_refresh_if_due()
@@ -2278,9 +2292,15 @@ impl GUI {
                 }
             }),
         ];
+        let visible_pane = self
+            .panes
+            .iter()
+            .find(|(id, _)| Some(**id) == self.focus)
+            .or_else(|| self.panes.iter().next())
+            .map(|(id, _)| *id);
         for (id, pane) in self.panes.iter() {
             vec.push(
-                pane.subscription()
+                pane.subscription(Some(*id) == visible_pane)
                     .with(*id)
                     .map(|(id, msg)| Message::Pane(id, msg)),
             );
@@ -3948,7 +3968,7 @@ mod lock_cube_dispatch_tests {
             pane::Message::tab(
                 2,
                 tab::Message::Launch(home::Message::Run(
-                    root,
+                    root.clone(),
                     crate::app::Config::new(false),
                     crate::chain::ChainId::Bitcoin,
                     mismatched,
@@ -3959,11 +3979,46 @@ mod lock_cube_dispatch_tests {
             &gui.panes.get(pane_id).unwrap().tabs[0].state,
             tab::State::App(app) if app.cube_settings().id == source_id
         ));
-        assert_eq!(crate::app::session::current_cube_id(), Some(source_id));
+        assert_eq!(
+            crate::app::session::current_cube_id(),
+            Some(source_id.clone())
+        );
         let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[1].state else {
             panic!("the Launcher must report the refusal");
         };
         assert!(home.error().is_some_and(|error| error.contains("folder")));
+        // A delayed floor result carries its original generation even after
+        // Home has cleared the floor selection. Admission must reject it
+        // before the public App and its process session are retired.
+        let stale_floor_cube = crate::app::settings::CubeSettings::new_with_raw_id(
+            "stale-floor".into(),
+            "Stale floor".into(),
+            crate::chain::ChainId::Bitcoin,
+        );
+        drop(gui.update(Message::Pane(
+            pane_id,
+            pane::Message::tab(
+                2,
+                tab::Message::Launch(home::Message::RunFromFloor(
+                    root,
+                    crate::app::Config::new(false),
+                    crate::chain::ChainId::Bitcoin,
+                    stale_floor_cube,
+                    1,
+                )),
+            ),
+        )));
+        assert!(matches!(
+            &gui.panes.get(pane_id).unwrap().tabs[0].state,
+            tab::State::App(app) if app.cube_settings().id == source_id
+        ));
+        assert_eq!(crate::app::session::current_cube_id(), Some(source_id));
+        let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[1].state else {
+            panic!("a stale floor result must remain in the Launcher");
+        };
+        assert!(home
+            .error()
+            .is_some_and(|error| error.contains("changed while opening")));
         drop(gui);
         crate::app::session::close();
         std::fs::remove_dir_all(path).ok();
