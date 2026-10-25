@@ -417,3 +417,11 @@ pub fn grid_icon<'a>() -> Text<'a> {
 pub fn shuffle_icon<'a>() -> Text<'a> {
     bootstrap_icon('\u{F544}')
 }
+
+pub fn search_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F52A}')
+}
+
+pub fn display_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F302}')
+}

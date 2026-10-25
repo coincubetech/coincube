@@ -8,6 +8,7 @@
 
 pub mod button;
 pub mod chip;
+pub mod control;
 pub mod surface;
 pub mod text;
 
@@ -45,6 +46,22 @@ pub mod size {
     pub const COIN: f32 = 32.0;
     pub const ASSET_ROW_HEIGHT: f32 = 56.0;
     pub const TICKER_WIDTH: f32 = 64.0;
+    /// Pill toggle (`.tog`): 32px tall, a 30×18 track and a 14px thumb.
+    pub const TOGGLE_HEIGHT: f32 = 32.0;
+    pub const TOGGLE_TRACK_WIDTH: f32 = 30.0;
+    pub const TOGGLE_TRACK_HEIGHT: f32 = 18.0;
+    pub const TOGGLE_THUMB: f32 = 14.0;
+    /// Switch (`.sw`): a 40×24 outline with a 16px thumb.
+    pub const SWITCH_WIDTH: f32 = 40.0;
+    pub const SWITCH_HEIGHT: f32 = 24.0;
+    pub const SWITCH_THUMB: f32 = 16.0;
+    /// Segments inside a segmented choice (`.seg button`, `.seg.sm button`).
+    pub const SEGMENT_HEIGHT: f32 = 32.0;
+    pub const SEGMENT_COMPACT_HEIGHT: f32 = 28.0;
+    pub const SEGMENT_SMALL_HEIGHT: f32 = 26.0;
+    /// Text fields (`.inp` in Send and Receive, `.ctl` in Activity filters).
+    pub const FIELD_HEIGHT: f32 = 44.0;
+    pub const FIELD_COMPACT_HEIGHT: f32 = 36.0;
 }
 
 /// Spacing steps used by the Overview and wallet pages.
@@ -64,6 +81,10 @@ pub mod type_size {
     pub const CHIP: f32 = 13.0;
     pub const MONO: f32 = 13.0;
     pub const BODY: f32 = 14.0;
+    /// Text inside a regular field (`.inp`).
+    pub const FIELD: f32 = 15.0;
+    /// Text inside a compact field (`.ctl`).
+    pub const FIELD_COMPACT: f32 = 13.5;
     pub const SECTION: f32 = 18.0;
     pub const TITLE: f32 = 20.0;
     pub const AMOUNT_CARD: f32 = 26.0;
