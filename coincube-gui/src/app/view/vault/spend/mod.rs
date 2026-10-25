@@ -1134,6 +1134,7 @@ mod tests {
     use iced::advanced::{
         layout,
         renderer::Headless,
+        text::paragraph::{Paragraph, Plain},
         widget::{
             operation::{self, focusable, Focusable, Scrollable, TextInput},
             Operation, Tree,
@@ -2602,6 +2603,32 @@ mod tests {
     /// truncated BTC unit at the right edge of the list.
     #[test]
     fn r07c_coin_amount_and_unit_fit_inner_scroll_viewport() {
+        // Operation::text reports the allocated layout rectangle, which can
+        // be narrower than the glyphs in a constrained amount row. Measure
+        // each actual Iced paragraph again with ample width, preserving its
+        // loaded font, size, line height, and shaping from the native Tree.
+        fn full_text_width(tree: &Tree, content: &str) -> f32 {
+            type NativeParagraph = <iced::Renderer as iced::advanced::text::Renderer>::Paragraph;
+
+            fn find(tree: &Tree, content: &str) -> Option<f32> {
+                if let iced::advanced::widget::tree::State::Some(state) = &tree.state {
+                    if let Some(paragraph) = state.downcast_ref::<Plain<NativeParagraph>>() {
+                        if paragraph.content() == content
+                            && (paragraph.raw().size().0 - P1_SIZE as f32).abs() < 0.5
+                        {
+                            let mut text = paragraph.as_text();
+                            text.bounds = Size::new(10_000.0, 100.0);
+                            return Some(NativeParagraph::with_text(text).min_bounds().width);
+                        }
+                    }
+                }
+                tree.children.iter().find_map(|child| find(child, content))
+            }
+
+            find(tree, content)
+                .unwrap_or_else(|| panic!("native P1 paragraph absent for {:?}", content))
+        }
+
         for (appearance, mode, _) in themes() {
             for name in ["single-sats", "batch-btc", "coin-mix"] {
                 let (fixture, scenario) = r07c_case(mode, name);
@@ -2647,7 +2674,8 @@ mod tests {
                         })
                         .unwrap_or_else(|| {
                             panic!(
-                                "{appearance} {name} {outer:?}: missing formatted second coin {formatted:?} in {viewport:?}"
+                                "{} {} {:?}: missing formatted second coin {:?} in {:?}",
+                                appearance, name, outer, formatted, viewport
                             )
                         });
                     let same_line =
@@ -2664,7 +2692,8 @@ mod tests {
                             })
                             .unwrap_or_else(|| {
                                 panic!(
-                                    "{appearance} {name} {outer:?}: missing leading amount {leading:?} on coin row"
+                                    "{} {} {:?}: missing leading amount {:?} on coin row",
+                                    appearance, name, outer, leading
                                 )
                             })
                     });
@@ -2679,28 +2708,61 @@ mod tests {
                         })
                         .unwrap_or_else(|| {
                             panic!(
-                                "{appearance} {name} {outer:?}: missing {unit} beside second coin {formatted:?}"
+                                "{} {} {:?}: missing {} beside second coin {:?}",
+                                appearance, name, outer, unit, formatted
                             )
                         });
-                    let mut parts = vec![("amount", amount), ("unit", unit_bounds)];
+                    let significant_width = full_text_width(&harness.tree, significant);
+                    let unit_width = full_text_width(&harness.tree, unit);
+                    assert!(
+                        amount.x + significant_width + 4.0 <= unit_bounds.x,
+                        "{} {} {:?}: full second-coin amount {:?} at {:?} overlaps unit at {:?}",
+                        appearance,
+                        name,
+                        outer,
+                        formatted,
+                        amount,
+                        unit_bounds
+                    );
+                    let mut parts = vec![
+                        ("amount", amount, significant_width),
+                        ("unit", unit_bounds, unit_width),
+                    ];
                     if let Some(bounds) = leading_bounds {
-                        parts.push(("leading amount", bounds));
+                        let leading_width = full_text_width(&harness.tree, leading);
+                        assert!(
+                            bounds.x + leading_width <= amount.x + 1.0,
+                            "{} {} {:?}: full leading amount {:?} at {:?} overlaps significant digits at {:?}",
+                            appearance, name, outer, leading, bounds, amount
+                        );
+                        parts.push(("leading amount", bounds, leading_width));
                     }
-                    for (part, bounds) in parts {
+                    for (part, bounds, full_width) in parts {
                         assert!(
                             bounds.x >= viewport.x
-                                && bounds.x + bounds.width <= viewport.x + viewport.width - 2.0,
-                            "{appearance} {name} {outer:?}: {part} of {formatted:?} at {bounds:?} exceeds inner {viewport:?}"
+                                && bounds.x + full_width <= viewport.x + viewport.width - 2.0,
+                            "{} {} {:?}: {} of {:?} starts at {:?}, needs {:.1}px of actual text, exceeds inner {:?}",
+                            appearance, name, outer, part, formatted, bounds, full_width, viewport
                         );
                     }
                     assert!(
                         visible_coin_text.iter().any(|(text, _)| text == unit),
-                        "{appearance} {name} {outer:?}: no visible coin unit in {viewport:?}"
+                        "{} {} {:?}: no visible coin unit in {:?}",
+                        appearance,
+                        name,
+                        outer,
+                        viewport
                     );
                     for (text, bounds) in visible_coin_text {
                         assert!(
                             bounds.x + bounds.width <= viewport.x + viewport.width - 2.0,
-                            "{appearance} {name} {outer:?}: coin text {text:?} at {bounds:?} exceeds inner {viewport:?}"
+                            "{} {} {:?}: coin text {:?} at {:?} exceeds inner {:?}",
+                            appearance,
+                            name,
+                            outer,
+                            text,
+                            bounds,
+                            viewport
                         );
                     }
                 }
