@@ -1454,12 +1454,21 @@ async fn start_fork_daemon(
         let root = root.clone();
         tokio::task::spawn_blocking(move || {
             Bitcoind::preflight_for_chain(chain, &root)?;
-            crate::node::tor::prepare_inbound_tor_for_chain(&root, chain).map_err(|e| {
-                crate::node::bitcoind::StartInternalBitcoindError::ConfigUnavailable(e.to_string())
-            })?;
-            Bitcoind::maybe_start_for_chain(chain, node, &root).map(|node| PendingForkNode {
-                node: Some(node),
-                cleanup: true,
+            let lifecycle = crate::node::bitcoind::ManagedNodeLifecycle::acquire(
+                &root,
+                crate::node::bitcoind::NodeChainFamily::from_chain(chain),
+            )?;
+            crate::node::tor::prepare_inbound_tor_for_chain_locked(&root, chain, &lifecycle)
+                .map_err(|e| {
+                    crate::node::bitcoind::StartInternalBitcoindError::ConfigUnavailable(
+                        e.to_string(),
+                    )
+                })?;
+            Bitcoind::maybe_start_for_chain_locked(chain, node, &root, &lifecycle).map(|node| {
+                PendingForkNode {
+                    node: Some(node),
+                    cleanup: true,
+                }
             })
         })
         .await
@@ -1660,15 +1669,23 @@ async fn start_bitcoind_and_daemon_with_import_auth(
             // replaced it may still name a Tor that is not running, so the
             // start is refused — retryably — rather than made from stale
             // privacy configuration.
-            let inbound_up =
-                crate::node::tor::prepare_inbound_tor_for_chain(&coincube_datadir_path, chain)
-                    .map_err(|e| {
-                        Error::Bitcoind(
-                            crate::node::bitcoind::StartInternalBitcoindError::ConfigUnavailable(
-                                e.to_string(),
-                            ),
-                        )
-                    })?;
+            let lifecycle = crate::node::bitcoind::ManagedNodeLifecycle::acquire(
+                &coincube_datadir_path,
+                crate::node::bitcoind::NodeChainFamily::from_chain(chain),
+            )
+            .map_err(Error::Bitcoind)?;
+            let inbound_up = crate::node::tor::prepare_inbound_tor_for_chain_locked(
+                &coincube_datadir_path,
+                chain,
+                &lifecycle,
+            )
+            .map_err(|e| {
+                Error::Bitcoind(
+                    crate::node::bitcoind::StartInternalBitcoindError::ConfigUnavailable(
+                        e.to_string(),
+                    ),
+                )
+            })?;
             // A fresh tor gets fresh control/SOCKS ports each run, which a
             // *reused* bitcoind (one that survived a previous session) wouldn't
             // pick up — `maybe_start` would just reattach to it. When inbound is
@@ -1681,10 +1698,11 @@ async fn start_bitcoind_and_daemon_with_import_auth(
                 crate::node::bitcoind::stop_and_wait_managed_bitcoind(bitcoind_config);
             }
             Some(
-                Bitcoind::maybe_start_for_chain(
+                Bitcoind::maybe_start_for_chain_locked(
                     chain,
                     bitcoind_config.clone(),
                     &coincube_datadir_path,
+                    &lifecycle,
                 )
                 .map_err(Error::Bitcoind)?,
             )

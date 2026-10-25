@@ -1673,10 +1673,21 @@ impl Step for InternalBitcoindStep {
                         .as_ref()
                         .expect("already added")
                         .clone();
+                    let lifecycle = match crate::node::bitcoind::ManagedNodeLifecycle::acquire(
+                        &self.coincube_datadir,
+                        crate::node::bitcoind::NodeChainFamily::from_chain(self.chain),
+                    ) {
+                        Ok(guard) => guard,
+                        Err(e) => {
+                            self.started = Some(Err(e));
+                            return Task::none();
+                        }
+                    };
                     if self.chain.is_blake2b() {
-                        if let Err(e) = crate::node::tor::prepare_inbound_tor_for_chain(
+                        if let Err(e) = crate::node::tor::prepare_inbound_tor_for_chain_locked(
                             &self.coincube_datadir,
                             self.chain,
+                            &lifecycle,
                         ) {
                             // Record it as the start's outcome, like the other
                             // refusals here: with `started` left unset, `load`
@@ -1688,10 +1699,11 @@ impl Step for InternalBitcoindStep {
                             return Task::none();
                         }
                     }
-                    match Bitcoind::maybe_start_for_chain(
+                    match Bitcoind::maybe_start_for_chain_locked(
                         self.chain,
                         bitcoind_config,
                         &self.coincube_datadir,
+                        &lifecycle,
                     ) {
                         Err(e) => {
                             self.started =
@@ -1912,6 +1924,17 @@ async fn start_background_managed_node(
     // deliberately restricted to the Bitcoin family.
     tokio::task::spawn_blocking(move || {
         flavor.check_chain(chain).map_err(|e| e.to_string())?;
+        let lifecycle = crate::node::bitcoind::ManagedNodeLifecycle::acquire(&root, family)
+            .map_err(|e| e.to_string())?;
+        lifecycle
+            .try_has_owners()
+            .map_err(|e| format!("Could not enumerate managed-node owners: {e}"))?;
+        if lifecycle
+            .try_has_foreign_owners()
+            .map_err(|e| format!("Could not enumerate managed-node owners: {e}"))?
+        {
+            return Err("Another app process owns the managed node. Close it before configuring this node here.".into());
+        }
         if let Some((bytes, manifest)) = install {
             let verification = DownloadVerification::for_flavor(flavor, manifest)
                 .ok_or_else(|| "Missing release manifest for node verification".to_string())?;
@@ -1950,8 +1973,9 @@ async fn start_background_managed_node(
         })
         .map_err(|e| e.to_string())?
         .logged("writing the background managed-node config");
-        crate::node::tor::prepare_inbound_tor_for_chain(&root, chain).map_err(|e| e.to_string())?;
-        let node = Bitcoind::maybe_start_for_chain(chain, config.clone(), &root)
+        crate::node::tor::prepare_inbound_tor_for_chain_locked(&root, chain, &lifecycle)
+            .map_err(|e| e.to_string())?;
+        let node = Bitcoind::maybe_start_for_chain_locked(chain, config.clone(), &root, &lifecycle)
             .map_err(|e| e.to_string())?;
         Ok((config, node))
     })

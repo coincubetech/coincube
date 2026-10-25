@@ -1058,9 +1058,6 @@ impl GUI {
                 for (_, pane) in self.panes.iter_mut() {
                     pane.stop();
                 }
-                // Managed Tor is process-global; a Cube lock cannot own its
-                // teardown while another managed-node consumer may remain.
-                crate::node::tor::stop_managed_tor();
                 if let Some(window_config) = &self.window_config {
                     let path = GlobalSettings::path(&self.config.coincube_directory);
                     if let Err(e) = GlobalSettings::update_window_config(&path, window_config) {
@@ -1478,7 +1475,6 @@ impl GUI {
                     }
                 }
                 if !self.panes.iter().any(|(_, p)| !p.tabs.is_empty()) {
-                    crate::node::tor::stop_managed_tor();
                     return iced::window::latest().and_then(iced::window::close);
                 }
                 Task::none()
