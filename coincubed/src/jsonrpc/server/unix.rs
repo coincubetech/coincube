@@ -159,9 +159,6 @@ fn rpcserver_loop_with_timeout(
 ) -> Result<(), io::Error> {
     // Each connection has a blocking handler, bounded in count and idle time.
 
-    #[cfg(test)]
-    rpc_diagnostic_stage("listener-nonblocking", listener.set_nonblocking(true))?;
-    #[cfg(not(test))]
     listener.set_nonblocking(true)?;
     while !shutdown.load(atomic::Ordering::Relaxed) {
         let (connection, _) = match listener.accept() {
@@ -178,17 +175,23 @@ fn rpcserver_loop_with_timeout(
         // `read_command` propagates and which closes the connection with the
         // request unread. Each connection is served by its own blocking thread;
         // only the accept loop needs to poll.
-        #[cfg(test)]
-        rpc_diagnostic_stage("connection-blocking", connection.set_nonblocking(false))?;
-        #[cfg(not(test))]
-        connection.set_nonblocking(false)?;
-        #[cfg(test)]
-        rpc_diagnostic_stage(
-            "connection-read-timeout",
-            connection.set_read_timeout(Some(idle_timeout)),
-        )?;
-        #[cfg(not(test))]
-        connection.set_read_timeout(Some(idle_timeout))?;
+        // A client can disconnect between accept and socket configuration.
+        // The socket belongs to that client, so its failure must not stop the
+        // listener or keep later clients from reaching the daemon.
+        if let Err(error) = connection.set_nonblocking(false) {
+            log::warn!(
+                "Discarding JSONRPC client: blocking setup failed: {}",
+                error
+            );
+            continue;
+        }
+        if let Err(error) = connection.set_read_timeout(Some(idle_timeout)) {
+            log::warn!(
+                "Discarding JSONRPC client: read timeout setup failed: {}",
+                error
+            );
+            continue;
+        }
         log::trace!("New JSONRPC connection");
 
         while connections_counter.load(atomic::Ordering::Relaxed) >= MAX_CONNECTIONS {
@@ -203,7 +206,7 @@ fn rpcserver_loop_with_timeout(
         connections_counter.fetch_add(1, atomic::Ordering::Relaxed);
 
         let handler_id = connections_counter.load(atomic::Ordering::Relaxed);
-        let handler = thread::Builder::new()
+        thread::Builder::new()
             .name(format!("coincube-jsonrpc-{}", handler_id))
             .spawn({
                 let control = daemon_control.clone();
@@ -218,22 +221,10 @@ fn rpcserver_loop_with_timeout(
                     }
                     counter.fetch_sub(1, atomic::Ordering::Relaxed);
                 }
-            });
-        #[cfg(test)]
-        rpc_diagnostic_stage("handler-spawn", handler)?;
-        #[cfg(not(test))]
-        handler?;
+            })?;
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-fn rpc_diagnostic_stage<T>(stage: &'static str, result: io::Result<T>) -> io::Result<T> {
-    result.map_err(|error| {
-        eprintln!("rpc_stage={stage} errno={:?}", error.raw_os_error());
-        error
-    })
 }
 
 // Tries to bind to the socket, if we are told it's already in use try to connect
