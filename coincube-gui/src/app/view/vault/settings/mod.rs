@@ -1,6 +1,6 @@
-pub mod general;
 #[cfg(test)]
 mod capture;
+pub mod general;
 
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
