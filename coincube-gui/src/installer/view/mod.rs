@@ -1715,9 +1715,14 @@ pub fn start_internal_bitcoind<'a>(
         };
         let mut col = Column::new()
             .spacing(25)
-            .push(node_flavor_selector(flavor, existing_flavor, |flavor| {
-                Message::InternalBitcoind(message::InternalBitcoindMsg::SelectFlavor(flavor))
-            }))
+            .push(node_flavor_selector(
+                progress.0 as u64,
+                flavor,
+                existing_flavor,
+                |flavor| {
+                    Message::InternalBitcoind(message::InternalBitcoindMsg::SelectFlavor(flavor))
+                },
+            ))
             .push(
                 button::transparent(None, adv_label).on_press(Message::InternalBitcoind(
                     message::InternalBitcoindMsg::ToggleAdvanced,
@@ -3575,7 +3580,8 @@ mod node_management_chain_tests {
             &renderer,
             &layout::Limits::new(Size::ZERO, size),
         );
-        let mut focus: Box<dyn Operation<()>> = Box::new(focusable::focus::<()>(Id::new(target)));
+        let mut focus: Box<dyn Operation<()>> =
+            Box::new(focusable::focus::<()>(Id::new(target.to_owned())));
         loop {
             element.as_widget_mut().operate(
                 &mut tree,
@@ -3625,7 +3631,6 @@ mod node_management_chain_tests {
 
     #[test]
     fn node_choices_activate_with_enter_and_space() {
-        use crate::chain::ChainIdExt;
         use keyboard::key::Named;
         let cases: &[(ChainId, bool, bool, bool, &str, fn(&Message) -> bool)] = &[
             (ChainId::Regtest, false, false, false, "existing", |m| {

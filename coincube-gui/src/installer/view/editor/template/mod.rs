@@ -3,7 +3,7 @@ pub mod diagram;
 pub mod inheritance;
 pub mod multisig_security_wallet;
 
-use iced::{Alignment, Length};
+use iced::{widget::Space, Alignment, Length};
 
 use coincube_ui::{
     component::text::{h3, p1_regular, p2_regular, Text},
