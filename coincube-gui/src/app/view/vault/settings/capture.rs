@@ -94,7 +94,7 @@ fn synthetic_aliases() -> Vec<(Fingerprint, form::Value<String>)> {
 }
 
 #[derive(Default)]
-struct Labels(Vec<(String, iced::Rectangle)>);
+struct Labels(Vec<(String, iced::Rectangle)>, Vec<iced::Rectangle>);
 
 impl Operation for Labels {
     fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
@@ -103,6 +103,17 @@ impl Operation for Labels {
 
     fn text(&mut self, _: Option<&Id>, bounds: iced::Rectangle, value: &str) {
         self.0.push((value.to_owned(), bounds));
+    }
+
+    fn scrollable(
+        &mut self,
+        _: Option<&Id>,
+        bounds: iced::Rectangle,
+        _: iced::Rectangle,
+        _: iced::Vector,
+        _: &mut dyn iced::advanced::widget::operation::Scrollable,
+    ) {
+        self.1.push(bounds);
     }
 }
 
@@ -428,31 +439,67 @@ async fn compact_mounted_wallet_policy_keeps_both_recovery_clauses_visible() {
     element
         .as_widget_mut()
         .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
-    let clauses: Vec<_> = labels
+    let heading = labels
         .0
         .iter()
-        .filter(|(text, _)| text == "can spend coins inliquid for")
-        .map(|(_, bounds)| bounds)
-        .collect();
-    let paths: Vec<_> = labels
+        .find(|(text, _)| text == "Policy")
+        .expect("mounted policy heading")
+        .1;
+    // The shell's vertical scrollable is the actual content viewport. The
+    // older nested horizontal strip starts below this heading, so it cannot
+    // be mistaken for the shell viewport.
+    let viewport = labels
+        .1
+        .iter()
+        .find(|bounds| {
+            heading.x >= bounds.x
+                && heading.x < bounds.x + bounds.width
+                && heading.y >= bounds.y
+                && heading.y < bounds.y + bounds.height
+        })
+        .expect("mounted settings content viewport");
+    let start = labels
         .0
         .iter()
-        .filter(|(text, _)| text.starts_with("(Recovery path #"))
-        .map(|(_, bounds)| bounds)
-        .collect();
-    assert_eq!(clauses.len(), 2, "both recovery clauses must mount");
-    assert_eq!(paths.len(), 2, "both recovery labels must mount");
-    for (clause, path) in clauses.iter().zip(paths) {
+        .position(|(text, _)| text == "Policy")
+        .unwrap();
+    let end = labels
+        .0
+        .iter()
+        .position(|(text, _)| text == "Names and signer aliases")
+        .unwrap();
+    let policy_labels = &labels.0[start..end];
+    for required in [
+        "The wallet policy:",
+        "can always spend this wallet's funds (Primary path)",
+        "(Recovery path #1)",
+        "(Recovery path #2)",
+        "Synthetic first recovery signer with a long display name",
+        "Synthetic second recovery signer with a long display name",
+        "Synthetic primary signer with a long display name",
+    ] {
         assert!(
-            path.y > clause.y,
-            "compact recovery clause must wrap before its path label: {:?} {:?}",
-            clause,
-            path
+            policy_labels.iter().any(|(text, _)| text == required),
+            "missing complete policy fragment: {}",
+            required
         );
+    }
+    assert_eq!(
+        policy_labels
+            .iter()
+            .filter(|(text, _)| text == "can spend coins inliquid for")
+            .count(),
+        2,
+        "both recovery clauses must mount"
+    );
+    for (text, bounds) in policy_labels {
         assert!(
-            path.x >= 0.0 && path.x + path.width <= 1024.0,
-            "recovery path label exceeds compact viewport: {:?}",
-            path
+            bounds.x >= viewport.x - 1.0
+                && bounds.x + bounds.width <= viewport.x + viewport.width + 1.0,
+            "policy fragment escapes mounted content viewport: {} {:?} {:?}",
+            text,
+            bounds,
+            viewport
         );
     }
 }
