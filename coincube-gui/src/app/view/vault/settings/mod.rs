@@ -1446,9 +1446,13 @@ fn display_policy<'a>(
                         } else {
                             row.push(content).push(text(","))
                         }
-                    }),
+                    })
+                    .wrap()
+                    .vertical_spacing(5),
             )
-            .push(text("can always spend this wallet's funds (Primary path)")),
+            .push(text("can always spend this wallet's funds (Primary path)"))
+            .wrap()
+            .vertical_spacing(5),
     );
     for (i, (sequence, recovery_path)) in recovery_paths.iter().enumerate() {
         let (threshold, recovery_keys) = recovery_path.thresh_origins();
@@ -1473,34 +1477,38 @@ fn display_policy<'a>(
                 } else {
                     text("by")
                 })
-                .push(recovery_keys.iter().enumerate().fold(
-                    Row::new().spacing(5),
-                    |row, (i, k)| {
-                        let content = if let Some(alias) = keys_aliases
-                            .iter()
-                            .find(|(fg, a)| fg == k && !a.value.is_empty())
-                            .map(|(_, f)| &f.value)
-                        {
-                            Container::new(
-                                iced_tooltip::Tooltip::new(
-                                    text(alias).bold(),
-                                    text(k.to_string()),
-                                    iced_tooltip::Position::Bottom,
+                .push(
+                    recovery_keys
+                        .iter()
+                        .enumerate()
+                        .fold(Row::new().spacing(5), |row, (i, k)| {
+                            let content = if let Some(alias) = keys_aliases
+                                .iter()
+                                .find(|(fg, a)| fg == k && !a.value.is_empty())
+                                .map(|(_, f)| &f.value)
+                            {
+                                Container::new(
+                                    iced_tooltip::Tooltip::new(
+                                        text(alias).bold(),
+                                        text(k.to_string()),
+                                        iced_tooltip::Position::Bottom,
+                                    )
+                                    .style(theme::card::simple),
                                 )
-                                .style(theme::card::simple),
-                            )
-                        } else {
-                            Container::new(text(format!("[{}]", k)).bold())
-                        };
-                        if recovery_keys.len() == 1 || i == recovery_keys.len() - 1 {
-                            row.push(content)
-                        } else if i <= recovery_keys.len() - 2 {
-                            row.push(content).push(text("and"))
-                        } else {
-                            row.push(content).push(text(","))
-                        }
-                    },
-                ))
+                            } else {
+                                Container::new(text(format!("[{}]", k)).bold())
+                            };
+                            if recovery_keys.len() == 1 || i == recovery_keys.len() - 1 {
+                                row.push(content)
+                            } else if i <= recovery_keys.len() - 2 {
+                                row.push(content).push(text("and"))
+                            } else {
+                                row.push(content).push(text(","))
+                            }
+                        })
+                        .wrap()
+                        .vertical_spacing(5),
+                )
                 .push(text("can spend coins inliquid for"))
                 .push(
                     text(format!(
@@ -1521,15 +1529,16 @@ fn display_policy<'a>(
                     } else {
                         format!("(Recovery path #{})", i + 1)
                     },
-                )),
+                ))
+                .wrap()
+                .vertical_spacing(5),
         );
     }
     Column::new()
         .spacing(10)
         .push(text("The wallet policy:").bold())
-        .push(scrollable(col).direction(scrollable::Direction::Horizontal(
-            scrollable::Scrollbar::new().width(5).scroller_width(5),
-        )))
+        .push(col.width(Length::Fill))
+        .width(Length::Fill)
         .into()
 }
 
