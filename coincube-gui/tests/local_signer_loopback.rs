@@ -335,7 +335,10 @@ async fn fake_phone(
                 "revoked cached signer emitted {n} plaintext byte(s), starting with {:02x}",
                 first_byte[0]
             ),
-            Err(error) => panic!("expected transport close before PresentSession, got {error:?}"),
+            Err(error) => panic!(
+                "expected transport close before PresentSession, got {error:?}",
+                error = error
+            ),
         }
         return Ok(());
     }
@@ -986,7 +989,10 @@ async fn imported_cached_signer_refuses_before_present_session_after_revocation(
         };
         match error {
             async_hwi::Error::Device(message) => assert_eq!(message, expected),
-            other => panic!("expected exact-pairing refusal, got {other:?}"),
+            other => panic!(
+                "expected exact-pairing refusal, got {other:?}",
+                other = other
+            ),
         }
         assert_eq!(psbt.serialize(), before);
         drop(signer);
