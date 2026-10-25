@@ -2808,8 +2808,7 @@ mod tests {
                 .probe()
                 .focus
                 .iter()
-                .filter(|entry| entry.input.as_deref() == Some(existing))
-                .last()
+                .rfind(|entry| entry.input.as_deref() == Some(existing))
                 .map(|entry| entry.bounds)
                 .expect("second recipient input exists");
             harness.click_at(bounds);
@@ -2855,8 +2854,7 @@ mod tests {
             .probe()
             .focus
             .iter()
-            .filter(|entry| entry.input.as_deref() == Some("2.50"))
-            .last()
+            .rfind(|entry| entry.input.as_deref() == Some("2.50"))
             .map(|entry| entry.bounds)
             .unwrap();
         fiat_harness.click_at(bounds);
@@ -3011,8 +3009,7 @@ mod tests {
             .probe()
             .text
             .iter()
-            .filter(|(text, _)| text == "Remove")
-            .last()
+            .rfind(|(text, _)| text == "Remove")
             .map(|(_, bounds)| *bounds)
             .unwrap();
         let removed = harness.click_at(remove);
