@@ -3,6 +3,79 @@ use crate::chain::ChainId;
 use coincubed::datadir::DataDirectory;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::{fs, io};
+
+use fs4::fs_std::FileExt;
+
+/// A linear, root-bound capability. Only the exact successful final-root
+/// `create_dir` below can construct it; the settings transaction consumes it.
+pub(crate) struct CreatedRoot(CoincubeDirectory);
+
+impl CreatedRoot {
+    pub(crate) fn root(&self) -> &CoincubeDirectory {
+        &self.0
+    }
+}
+
+fn unsafe_bootstrap(reason: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, reason)
+}
+
+/// The neutral parent lock is never unlinked. Validate its endpoint before
+/// opening and after opening so a stale or redirected lock cannot grant proof.
+fn bootstrap_lock(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            fs::OpenOptions::new().read(true).write(true).open(path)?
+        }
+        Err(error) => return Err(error),
+    };
+    let endpoint = fs::symlink_metadata(path)?;
+    let opened = file.metadata()?;
+    if !endpoint.is_file() || !opened.is_file() || endpoint.file_type().is_symlink() {
+        return Err(unsafe_bootstrap("bootstrap lock is not a regular file"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if (endpoint.dev(), endpoint.ino()) != (opened.dev(), opened.ino())
+            || endpoint.uid() != unsafe { libc::geteuid() }
+            || endpoint.mode() & 0o077 != 0
+        {
+            return Err(unsafe_bootstrap(
+                "bootstrap lock ownership or identity is unsafe",
+            ));
+        }
+    }
+    Ok(file)
+}
+
+fn valid_root(path: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(unsafe_bootstrap("data root is not a directory"));
+    }
+    Ok(())
+}
+
+fn create_exact_root(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = fs::DirBuilder::new();
+        builder.mode(0o700).create(path)
+    }
+    #[cfg(not(unix))]
+    fs::create_dir(path)
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CoincubeDirectory(PathBuf);
@@ -19,6 +92,68 @@ impl CoincubeDirectory {
     }
     pub fn new_default() -> Result<Self, Box<dyn std::error::Error>> {
         default_datadir().map(CoincubeDirectory::new)
+    }
+
+    /// Run before logger, GUI, or any Cube publication. Every updated startup
+    /// enters B, including existing roots. Only a successful exact final-root
+    /// mkdir can authorize an initial shown choice. A settings failure leaves
+    /// the root in place; GUI's strict load then presents a masked retry state.
+    pub fn bootstrap_privacy(
+        &self,
+    ) -> io::Result<
+        Result<
+            crate::app::settings::global::PreferencesReceipt,
+            crate::app::settings::global::PrivacyInitError,
+        >,
+    > {
+        use crate::app::settings::global::GlobalSettings;
+
+        let parent = self
+            .path()
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let name = self
+            .path()
+            .file_name()
+            .ok_or_else(|| unsafe_bootstrap("data root has no final component"))?;
+        create_directory(parent).map_err(|error| io::Error::other(error.to_string()))?;
+        let parent = fs::canonicalize(parent)?;
+        let root = parent.join(name);
+        let lock = bootstrap_lock(&parent.join(".coincube-bootstrap.lock"))?;
+        FileExt::lock_exclusive(&lock)?;
+        let result = match fs::symlink_metadata(&root) {
+            Ok(_) => {
+                valid_root(&root)?;
+                GlobalSettings::load_or_initialize_preferences(&CoincubeDirectory::new(root))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                match create_exact_root(&root) {
+                    Ok(()) => {
+                        valid_root(&root)?;
+                        #[cfg(unix)]
+                        {
+                            // Best effort directory durability. This does not
+                            // prove a power-loss-safe mkdir on every filesystem.
+                            let _ = fs::File::open(&parent).and_then(|dir| dir.sync_all());
+                        }
+                        GlobalSettings::initialize_created_preferences(CreatedRoot(
+                            CoincubeDirectory::new(root),
+                        ))
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                        valid_root(&root)?;
+                        GlobalSettings::load_or_initialize_preferences(&CoincubeDirectory::new(
+                            root,
+                        ))
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(error) => return Err(error),
+        };
+        FileExt::unlock(&lock)?;
+        Ok(result)
     }
 
     /// Records the active data directory for the process (idempotent — only the
@@ -197,6 +332,196 @@ pub(crate) fn create_directory(
 
 #[cfg(test)]
 mod tests {
+    struct TestParent(PathBuf);
+
+    impl TestParent {
+        fn new() -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("coincube-bootstrap-test-{}", uuid::Uuid::new_v4()));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+
+        fn root(&self, name: &str) -> CoincubeDirectory {
+            CoincubeDirectory::new(self.0.join(name))
+        }
+    }
+
+    impl Drop for TestParent {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn first_creator_starts_shown_and_restarts_keep_the_established_choice() {
+        let parent = TestParent::new();
+        let root = parent.root("custom-root");
+        let first = root.bootstrap_privacy().unwrap().unwrap();
+        assert_eq!(first.balances_hidden(), Some(false));
+        let second = root.bootstrap_privacy().unwrap().unwrap();
+        assert_eq!(second.balances_hidden(), Some(false));
+        assert!(
+            std::fs::read_to_string(crate::app::settings::global::GlobalSettings::path(&root))
+                .unwrap()
+                .contains("\"balance_privacy_initialized\": true")
+        );
+    }
+
+    #[test]
+    fn existing_empty_and_post_creation_crash_roots_initialize_hidden() {
+        let parent = TestParent::new();
+        let root = parent.root("existing");
+        fs::create_dir(root.path()).unwrap();
+        assert_eq!(
+            root.bootstrap_privacy().unwrap().unwrap().balances_hidden(),
+            Some(true)
+        );
+
+        let lost_global = parent.root("lost-global");
+        fs::create_dir(lost_global.path()).unwrap();
+        // This is also the state after mkdir succeeded but the first global
+        // transaction failed before its rename or the process crashed.
+        assert_eq!(
+            lost_global
+                .bootstrap_privacy()
+                .unwrap()
+                .unwrap()
+                .balances_hidden(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn malformed_global_is_preserved_and_unsafe_final_root_is_refused() {
+        let parent = TestParent::new();
+        let root = parent.root("malformed");
+        fs::create_dir(root.path()).unwrap();
+        let global = crate::app::settings::global::GlobalSettings::path(&root);
+        fs::write(&global, b"{invalid").unwrap();
+        assert!(root.bootstrap_privacy().unwrap().is_err());
+        assert_eq!(fs::read(&global).unwrap(), b"{invalid");
+
+        let file_root = parent.root("file-root");
+        fs::write(file_root.path(), b"unsafe").unwrap();
+        assert!(file_root.bootstrap_privacy().is_err());
+    }
+
+    #[test]
+    fn two_startups_serialize_on_parent_lock_and_keep_first_choice() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let parent = TestParent::new();
+        let root = parent.root("shared");
+        let lock = bootstrap_lock(&parent.0.join(".coincube-bootstrap.lock")).unwrap();
+        FileExt::lock_exclusive(&lock).unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let workers: Vec<_> = (0..2)
+            .map(|_| {
+                let root = root.clone();
+                let sender = sender.clone();
+                std::thread::spawn(move || {
+                    sender
+                        .send(root.bootstrap_privacy().unwrap().unwrap().balances_hidden())
+                        .unwrap();
+                })
+            })
+            .collect();
+        assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
+        FileExt::unlock(&lock).unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
+                Some(false)
+            );
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn explicit_choice_committed_while_startup_waits_wins_recheck() {
+        use crate::app::settings::preferences::PreferenceChange;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let parent = TestParent::new();
+        let root = parent.root("existing");
+        fs::create_dir(root.path()).unwrap();
+        let lock = bootstrap_lock(&parent.0.join(".coincube-bootstrap.lock")).unwrap();
+        FileExt::lock_exclusive(&lock).unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let worker_root = root.clone();
+        let worker = std::thread::spawn(move || {
+            sender
+                .send(
+                    worker_root
+                        .bootstrap_privacy()
+                        .unwrap()
+                        .unwrap()
+                        .balances_hidden(),
+                )
+                .unwrap();
+        });
+        assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
+        let saved = crate::app::settings::global::GlobalSettings::save_preference(
+            &crate::app::settings::global::GlobalSettings::path(&root),
+            PreferenceChange::HideBalances(false),
+        )
+        .unwrap();
+        assert_eq!(saved.balances_hidden(), Some(false));
+        FileExt::unlock(&lock).unwrap();
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Some(false)
+        );
+        worker.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parent_alias_shares_lock_and_final_root_symlink_is_refused() {
+        use std::os::unix::fs::symlink;
+        let parent = TestParent::new();
+        let alias = parent.0.with_extension("alias");
+        symlink(&parent.0, &alias).unwrap();
+        let alias_root = CoincubeDirectory::new(alias.join("same"));
+        assert_eq!(
+            alias_root
+                .bootstrap_privacy()
+                .unwrap()
+                .unwrap()
+                .balances_hidden(),
+            Some(false)
+        );
+        assert_eq!(
+            parent
+                .root("same")
+                .bootstrap_privacy()
+                .unwrap()
+                .unwrap()
+                .balances_hidden(),
+            Some(false)
+        );
+        assert!(parent.0.join(".coincube-bootstrap.lock").is_file());
+        assert!(!alias.join(".coincube-bootstrap.lock").is_symlink());
+
+        symlink(parent.root("same").path(), parent.0.join("linked-root")).unwrap();
+        assert!(parent.root("linked-root").bootstrap_privacy().is_err());
+
+        let other_parent = TestParent::new();
+        symlink(
+            parent.0.join(".coincube-bootstrap.lock"),
+            other_parent.0.join(".coincube-bootstrap.lock"),
+        )
+        .unwrap();
+        assert!(other_parent.root("new").bootstrap_privacy().is_err());
+        assert!(!other_parent.root("new").path().exists());
+        fs::remove_file(alias).unwrap();
+    }
+
     #[test]
     fn unrecorded_active_datadir_is_never_the_os_default_in_tests() {
         // Whatever an earlier test recorded, `active()` is a temp path: the
