@@ -4019,18 +4019,28 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("another setup is updating"), "{}", err);
         drop(held);
-        // The lock file itself is the only thing under the datadir.
+        // Lifecycle acquisition also leaves its lock file. A busy conf lock
+        // must not write the managed config, ledger, or Tor preference.
         assert!(!crate::node::revalidate::ManagedNodeState::path(&datadir).exists());
         assert!(!internal_bitcoind_config_path(&internal_bitcoind_datadir(&datadir)).exists());
         assert!(!crate::node::tor::InboundTorPreference::path(&datadir).exists());
-        let entries: Vec<_> = std::fs::read_dir(datadir.path())
+        let mut entries: Vec<_> = std::fs::read_dir(datadir.path())
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
+        entries.sort();
         assert_eq!(
             entries,
-            vec![crate::node::managed_conf::MANAGED_CONF_LOCK_FILE]
+            vec![
+                "bitcoind",
+                crate::node::managed_conf::MANAGED_CONF_LOCK_FILE
+            ]
         );
+        let node_entries: Vec<_> = std::fs::read_dir(datadir.bitcoind_directory().path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(node_entries, vec!["lifecycle.lock"]);
         let _ = std::fs::remove_dir_all(&base);
     }
 

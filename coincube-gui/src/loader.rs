@@ -2943,7 +2943,8 @@ mod chain_identity_tests {
         use crate::node::bitcoind::{
             internal_bitcoind_config_path, internal_bitcoind_cookie_path,
             internal_bitcoind_datadir, InternalBitcoindConfig, InternalBitcoindNetworkConfig,
-            NodeFlavor, StartInternalBitcoindError, PRUNE_DEFAULT,
+            ManagedNodeLifecycle, NodeChainFamily, NodeFlavor, StartInternalBitcoindError,
+            PRUNE_DEFAULT,
         };
         use crate::node::managed_conf::ManagedConfLock;
         use crate::node::revalidate::ManagedNodeState;
@@ -3002,7 +3003,10 @@ mod chain_identity_tests {
             ),
         )
         .unwrap();
-        // The lock file is created by the holder below, so snapshot after it.
+        // Prime the stable lifecycle lock before the byte-for-byte snapshot;
+        // acquiring it is allowed even when the later conf lock is busy.
+        drop(ManagedNodeLifecycle::acquire(&root, NodeChainFamily::Bitcoin).unwrap());
+        // The conf lock file is created by the holder below, so snapshot after it.
         let held = ManagedConfLock::acquire(&root).unwrap();
         let before = tree(root.path());
         // The start is polled on this thread (current-thread runtime), so the
