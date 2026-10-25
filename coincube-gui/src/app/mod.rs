@@ -6342,6 +6342,9 @@ impl App {
                     menu::CubeSettingsOption::PaymentChecks => {
                         Some(view::SettingsMessage::PaymentChecksSection)
                     }
+                    menu::CubeSettingsOption::DataExports => {
+                        Some(view::SettingsMessage::DataExportsSection)
+                    }
                     menu::CubeSettingsOption::About => Some(view::SettingsMessage::AboutSection),
                     menu::CubeSettingsOption::Stats => {
                         Some(view::SettingsMessage::InstallStatsSection)

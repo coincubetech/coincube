@@ -34,6 +34,8 @@ pub enum CubeSettingsOption {
     Recovery,
     /// Recipient verification controls, separate from display preferences.
     PaymentChecks,
+    /// Cube-wide entry points for recovery and Vault-specific files.
+    DataExports,
     About,
     Stats,
     /// Avatar questionnaire / generation / reveal / management. Renders

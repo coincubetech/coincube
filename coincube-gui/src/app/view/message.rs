@@ -433,6 +433,7 @@ impl std::fmt::Debug for BorderWalletReconMessage {
 
 #[derive(Debug, Clone)]
 pub enum SettingsMessage {
+    DataExportsSection,
     EditBitcoindSettings,
     BitcoindSettings(SettingsEditMessage),
     ElectrumSettings(SettingsEditMessage),

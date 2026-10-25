@@ -107,6 +107,7 @@ fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
                 (CubeSettingsOption::General, "Display & appearance", "display"),
                 (CubeSettingsOption::Recovery, "Backup & protection", "backup"),
                 (CubeSettingsOption::PaymentChecks, "Payment checks", "payment-checks"),
+                (CubeSettingsOption::DataExports, "Data & exports", "data"),
             ];
             if crate::feature_flags::CUBE_MEMBERS_UI_ENABLED {
                 sections.push((CubeSettingsOption::Members, "Members", "members"));
@@ -118,6 +119,7 @@ fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
                         "display" => "tenshu.settings.route.cube.display",
                         "backup" => "tenshu.settings.route.cube.backup",
                         "payment-checks" => "tenshu.settings.route.cube.payment-checks",
+                        "data" => "tenshu.settings.route.cube.data",
                         _ => "tenshu.settings.route.cube.members",
                     },
                     label,
@@ -298,5 +300,26 @@ mod tests {
         assert!(sections
             .iter()
             .any(|choice| choice.label == "Display & appearance" && !choice.selected));
+    }
+
+    #[test]
+    fn cube_data_exports_is_selected_only_on_its_own_route() {
+        let data = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::DataExports));
+        let sections = section_routes(&data, &Cache::default());
+        assert!(sections.iter().any(|choice| {
+            choice.label == "Data & exports"
+                && choice.selected
+                && choice.enabled
+                && matches!(
+                    choice.intent,
+                    Message::Menu(Menu::Cube(CubeSubMenu::Settings(
+                        CubeSettingsOption::DataExports
+                    )))
+                )
+        }));
+        let backup = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Recovery));
+        assert!(section_routes(&backup, &Cache::default())
+            .iter()
+            .any(|choice| choice.label == "Data & exports" && !choice.selected));
     }
 }
