@@ -38,7 +38,7 @@ fn public_xpub(chain_byte: u8) -> Xpub {
         network: NetworkKind::Test,
         depth: 3,
         parent_fingerprint: [1, 2, 3, 4].into(),
-        child_number: 0.into(),
+        child_number: coincube_core::miniscript::bitcoin::bip32::ChildNumber::Hardened { index: 0 },
         public_key: PublicKey::from_str(
             "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
         )
