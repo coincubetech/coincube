@@ -798,6 +798,10 @@ impl Loader {
         if self.restricted_claim {
             self.stop();
             self.fork_session_revoked = true;
+            // stop() clears the scoped credentials and owner handles, but this
+            // loader must remain a restricted Claim even after the refusal.
+            // Otherwise Retry would rebuild it through the generic admission path.
+            self.restricted_claim = true;
         }
         self.scoped_seed_password = None;
         self.claim_verified_account = None;
@@ -812,6 +816,7 @@ impl Loader {
                     // would fall back to the ordinary seed-file password path.
                     self.stop();
                     self.fork_session_revoked = true;
+                    self.restricted_claim = true;
                     self.step = Step::Error(Box::new(Error::Unexpected(
                         "Unlock the paired Cube again to retry this Claim".into(),
                     )));
@@ -2219,6 +2224,77 @@ mod tests {
     }
 
     #[test]
+    fn restricted_claim_retry_clears_credentials_without_starting() {
+        let mut loader = loader_without_wallet(false);
+        loader.set_scoped_seed_password(zeroize::Zeroizing::new("synthetic-pin".into()));
+        loader.claim_verified_account = Some(7);
+        let refusal = "Reopen Claim from the source Cube to retry";
+        loader.step = Step::Error(Box::new(Error::Unexpected(refusal.into())));
+
+        for _ in 0..2 {
+            assert_eq!(loader.update(Message::View(ViewMessage::Retry)).units(), 0);
+            assert!(loader.restricted_claim);
+            assert!(loader.scoped_seed_password.is_none());
+            assert!(loader.claim_verified_account.is_none());
+            assert!(loader.fork_session_revoked);
+            assert!(matches!(&loader.step, Step::Error(error)
+                if error.to_string().contains("Unlock the paired Cube again")));
+        }
+    }
+
+    #[test]
+    fn restricted_claim_error_does_not_offer_an_inert_retry() {
+        use crate::app::view::shared::landing::capture;
+
+        let mut quote_provider = QuoteProvider::new();
+        let quote = quote_provider.select("loading");
+        let image_handle = quote_display::image_handle_for_context("loading");
+        let error = Step::Error(Box::new(Error::Unexpected(
+            "Reopen Claim from the source Cube to retry".into(),
+        )));
+        let mounted = capture::inspect(
+            "restricted-claim-error",
+            view_with_retry(&error, &quote, &image_handle, false),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(mounted.contains("Back"));
+        assert!(!mounted.contains("Retry"));
+    }
+
+    #[test]
+    fn failed_restricted_claim_cleans_up_without_admitting_generic_retry() {
+        use crate::app::view::shared::landing::capture;
+
+        let mut loader = loader_without_wallet(false);
+        loader.set_scoped_seed_password(zeroize::Zeroizing::new("synthetic-pin".into()));
+        loader.claim_verified_account = Some(7);
+        let refusal = "Reopen Claim from the source Cube to retry";
+        loader.fail(Error::Unexpected(refusal.into()));
+
+        assert!(loader.restricted_claim);
+        assert!(loader.fork_session_revoked);
+        assert!(loader.scoped_seed_password.is_none());
+        assert!(loader.claim_verified_account.is_none());
+        assert_eq!(loader.update(Message::View(ViewMessage::Retry)).units(), 0);
+        assert!(!loader.daemon_started);
+        assert!(matches!(&loader.step, Step::Error(error)
+            if error.to_string().contains("Unlock the paired Cube again")));
+        assert!(loader.restricted_claim);
+
+        let mounted = capture::inspect(
+            "failed-restricted-claim",
+            loader.view(),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(mounted.contains("Back"));
+        assert!(!mounted.contains("Retry"));
+    }
+
+    #[test]
     fn fork_retry_is_user_triggered_and_rate_bounded() {
         let mut loader = loader_without_wallet(false);
         loader.cube_settings.network = crate::chain::ChainId::BitcoinBlake2b;
@@ -2924,7 +3000,8 @@ mod chain_identity_tests {
         use crate::node::bitcoind::{
             internal_bitcoind_config_path, internal_bitcoind_cookie_path,
             internal_bitcoind_datadir, InternalBitcoindConfig, InternalBitcoindNetworkConfig,
-            NodeFlavor, StartInternalBitcoindError, PRUNE_DEFAULT,
+            ManagedNodeLifecycle, NodeChainFamily, NodeFlavor, StartInternalBitcoindError,
+            PRUNE_DEFAULT,
         };
         use crate::node::managed_conf::ManagedConfLock;
         use crate::node::revalidate::ManagedNodeState;
@@ -2983,7 +3060,10 @@ mod chain_identity_tests {
             ),
         )
         .unwrap();
-        // The lock file is created by the holder below, so snapshot after it.
+        // Prime the stable lifecycle lock before the byte-for-byte snapshot;
+        // acquiring it is allowed even when the later conf lock is busy.
+        drop(ManagedNodeLifecycle::acquire(&root, NodeChainFamily::Bitcoin).unwrap());
+        // The conf lock file is created by the holder below, so snapshot after it.
         let held = ManagedConfLock::acquire(&root).unwrap();
         let before = tree(root.path());
         // The start is polled on this thread (current-thread runtime), so the
@@ -3102,8 +3182,9 @@ mod bootstrap_backend_selection_tests {
     }
 
     /// Every directory and file under `root`, including exact file bytes.
-    /// Refusal tests use this as a mutation oracle, so traversal and reads must
-    /// fail the test rather than silently weakening the snapshot.
+    /// The active managed-node owner lock is empty but cannot be read while
+    /// locked on Windows; its path and length are checked instead. All other
+    /// files retain byte-for-byte comparison, including config and ledger data.
     fn tree(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
         fn walk(p: &Path, out: &mut Vec<(PathBuf, Option<Vec<u8>>)>) {
             for entry in std::fs::read_dir(p).unwrap() {
@@ -3114,7 +3195,22 @@ mod bootstrap_backend_selection_tests {
                     out.push((path.clone(), None));
                     walk(&path, out);
                 } else if kind.is_file() {
-                    out.push((path.clone(), Some(std::fs::read(path).unwrap())));
+                    #[cfg(windows)]
+                    let bytes = if path.extension() == Some(std::ffi::OsStr::new("lock"))
+                        && path
+                            .parent()
+                            .and_then(Path::parent)
+                            .and_then(Path::file_name)
+                            == Some(std::ffi::OsStr::new("locks"))
+                    {
+                        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0, "{:?}", path);
+                        Vec::new()
+                    } else {
+                        std::fs::read(&path).unwrap()
+                    };
+                    #[cfg(not(windows))]
+                    let bytes = std::fs::read(&path).unwrap();
+                    out.push((path.clone(), Some(bytes)));
                 } else {
                     panic!("unsupported filesystem entry in test snapshot: {:?}", path);
                 }
@@ -3857,6 +3953,9 @@ mod local_start_cancel_tests {
             info,
         )));
         drop(completed);
+        assert!(crate::node::bitcoind::wait_for_managed_node_cleanup(
+            std::time::Duration::from_secs(120)
+        ));
         assert_eq!(std::fs::read_dir(&locks).unwrap().count(), 1);
         assert!(other.exists());
         std::fs::remove_dir_all(path).unwrap();
@@ -3892,6 +3991,9 @@ mod local_start_cancel_tests {
         received.await.unwrap();
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
+        assert!(crate::node::bitcoind::wait_for_managed_node_cleanup(
+            std::time::Duration::from_secs(120)
+        ));
         assert_eq!(std::fs::read_dir(&locks).unwrap().count(), 1);
         assert!(other.exists());
         std::fs::remove_dir_all(path).unwrap();

@@ -945,6 +945,9 @@ mod tests {
         first.stop();
         assert!(process.lock().unwrap().try_wait().unwrap().is_none());
         second.stop();
+        assert!(crate::node::bitcoind::wait_for_managed_node_cleanup(
+            Duration::from_secs(120)
+        ));
         assert!(process.lock().unwrap().try_wait().unwrap().is_some());
         std::fs::remove_dir_all(root.path()).unwrap();
     }
@@ -1529,20 +1532,24 @@ mod tests {
         // A disposable process standing in for a running managed Tor, and a
         // handle on it that outlives the registry entry so its fate can be
         // observed either way.
-        let register_fake = |ports: TorPorts| -> Arc<Mutex<std::process::Child>> {
-            let child = std::process::Command::new("sleep")
-                .arg("60")
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .expect("spawn a disposable child");
-            let process = Arc::new(Mutex::new(child));
-            register_managed_tor(Tor {
-                ports,
-                process: process.clone(),
-            });
-            process
-        };
+        let register_fake =
+            |root: &CoincubeDirectory, ports: TorPorts| -> Arc<Mutex<std::process::Child>> {
+                let child = std::process::Command::new("sleep")
+                    .arg("60")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .expect("spawn a disposable child");
+                let process = Arc::new(Mutex::new(child));
+                register_managed_tor_for(
+                    root,
+                    Tor {
+                        ports,
+                        process: process.clone(),
+                    },
+                );
+                process
+            };
         let alive = |process: &Arc<Mutex<std::process::Child>>| -> bool {
             process.lock().unwrap().try_wait().unwrap().is_none()
         };
@@ -1550,7 +1557,7 @@ mod tests {
             control: 9051,
             socks: 9050,
         };
-        let process = register_fake(ports);
+        let process = register_fake(&datadir, ports);
         assert_eq!(managed_tor_ports(), Some(ports));
         assert!(alive(&process));
         // Preparing a Blake2b companion must also leave this registered
@@ -1618,9 +1625,9 @@ mod tests {
         assert!(reloaded.tor_control_port.is_none());
 
         // "No conf" path: also stops the previous Tor, as before.
-        let process = register_fake(ports);
         let bare = temp_datadir("tor-no-conf");
         std::fs::create_dir_all(bare.path()).unwrap();
+        let process = register_fake(&bare, ports);
         assert!(!prepare_inbound_tor(&bare, Network::Bitcoin).unwrap());
         assert_eq!(managed_tor_ports(), None);
         assert!(!alive(&process));
