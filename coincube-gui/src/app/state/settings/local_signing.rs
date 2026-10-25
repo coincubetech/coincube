@@ -1278,6 +1278,52 @@ mod tests {
     }
 
     #[test]
+    fn removal_refuses_duplicate_full_pin_from_other_vault() {
+        let dir = fresh_dir();
+        let vault_a = paired(45, "Vault A", None);
+        let mut vault_b = vault_a.clone();
+        vault_b.name = "Vault B".into();
+        vault_b.vault_fingerprint = Fingerprint::from([1, 2, 3, 4]);
+        // The other Vault's duplicate pin comes first on disk.
+        seed_store(&dir, vec![vault_b.clone(), vault_a.clone()]);
+        let cache = Cache {
+            datadir_path: dir.clone(),
+            ..Cache::default()
+        };
+        let mut state = LocalSigningState::default();
+        state.wallet_fingerprint = Some(vault_a.vault_fingerprint);
+        state.refresh_phones_from(&dir);
+        state.initialised = true;
+        let fp8 = fp8_of(&vault_a);
+
+        drop(send(
+            &mut state,
+            &cache,
+            LocalSigningMessage::ReviewRemovePhone(fp8.clone()),
+        ));
+        assert_eq!(state.pending_remove_phone.as_deref(), Some(fp8.as_str()));
+        drop(send(
+            &mut state,
+            &cache,
+            LocalSigningMessage::RemovePhone(fp8),
+        ));
+
+        let stored = pairing_store::load(&dir).unwrap();
+        assert_eq!(stored.phones.len(), 2);
+        assert_eq!(
+            stored.phones[0].vault_fingerprint,
+            vault_b.vault_fingerprint
+        );
+        assert_eq!(
+            stored.phones[1].vault_fingerprint,
+            vault_a.vault_fingerprint
+        );
+        assert!(stored.pending_unpairs.is_empty());
+        assert!(state.tombstones.lock().unwrap().is_empty());
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    #[test]
     fn removal_refuses_ambiguous_fp8_within_active_vault() {
         let dir = fresh_dir();
         let mut first = paired(42, "First", None);

@@ -562,6 +562,25 @@ pub fn unpair(dir: &CoincubeDirectory, cert_pin: &[u8; 32]) -> std::io::Result<P
     load_visible(dir)
 }
 
+/// A persisted store may contain duplicate full pins. Neither ordering can
+/// authorize a Vault-scoped removal.
+fn unique_phone_index_for_vault(
+    file: &PairingStoreFile,
+    cert_pin: &[u8; 32],
+    expected_vault: Fingerprint,
+) -> Option<usize> {
+    let mut matches = file
+        .phones
+        .iter()
+        .enumerate()
+        .filter(|(_, phone)| &phone.cert_pin == cert_pin);
+    let (index, phone) = matches.next()?;
+    if matches.next().is_some() || phone.vault_fingerprint != expected_vault {
+        return None;
+    }
+    Some(index)
+}
+
 /// Remove a phone only while its durable binding still belongs to the Vault
 /// that requested removal. The check and removal share the writer lock with
 /// `upsert`, so a re-pair cannot move this cert pin between them.
@@ -571,21 +590,19 @@ pub fn unpair_if_vault(
     expected_vault: Fingerprint,
 ) -> std::io::Result<bool> {
     let _guard = super::pairing_transaction::WRITER.lock().unwrap();
-    if !load_visible(dir)?
-        .phones
-        .iter()
-        .any(|phone| &phone.cert_pin == cert_pin && phone.vault_fingerprint == expected_vault)
+    // Refuse duplicate full pins, including one belonging to another Vault.
+    // Check both the visible binding and raw disk rows before revoking any
+    // provisional transaction for this pin.
+    if unique_phone_index_for_vault(&load_visible(dir)?, cert_pin, expected_vault).is_none()
+        || unique_phone_index_for_vault(&load_raw(dir)?, cert_pin, expected_vault).is_none()
     {
         return Ok(false);
     }
 
     super::pairing_transaction::revoke(dir, cert_pin)?;
     let mut file = load_raw(dir)?;
-    let index = file
-        .phones
-        .iter()
-        .position(|phone| &phone.cert_pin == cert_pin)
-        .ok_or_else(|| std::io::Error::other("paired phone disappeared during removal"))?;
+    let index = unique_phone_index_for_vault(&file, cert_pin, expected_vault)
+        .ok_or_else(|| std::io::Error::other("paired phone changed during removal"))?;
     let removed = file.phones.remove(index);
     file.pending_unpairs.retain(|p| &p.cert_pin != cert_pin);
     file.pending_unpairs.push(PendingUnpair {
@@ -852,6 +869,39 @@ mod tests {
             candidate.vault_fingerprint
         );
         assert!(stored.pending_unpairs.is_empty());
+    }
+
+    #[test]
+    fn vault_unpair_refuses_duplicate_full_pins_in_either_order() {
+        let dir = fresh_dir();
+        let vault_a = sample_phone(45);
+        let mut vault_b = vault_a.clone();
+        vault_b.vault_fingerprint = Fingerprint::from([1, 2, 3, 4]);
+        for phones in [
+            vec![vault_b.clone(), vault_a.clone()],
+            vec![vault_a.clone(), vault_b.clone()],
+        ] {
+            save(
+                &dir,
+                &PairingStoreFile {
+                    phones: phones.clone(),
+                    ..PairingStoreFile::default()
+                },
+            )
+            .unwrap();
+            assert!(!unpair_if_vault(&dir, &vault_a.cert_pin, vault_a.vault_fingerprint).unwrap());
+            let stored = load(&dir).unwrap();
+            assert_eq!(stored.phones.len(), 2);
+            assert_eq!(
+                stored.phones[0].vault_fingerprint,
+                phones[0].vault_fingerprint
+            );
+            assert_eq!(
+                stored.phones[1].vault_fingerprint,
+                phones[1].vault_fingerprint
+            );
+            assert!(stored.pending_unpairs.is_empty());
+        }
     }
 
     #[test]
