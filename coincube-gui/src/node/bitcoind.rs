@@ -1911,7 +1911,63 @@ impl ManagedNodeLifecycle {
             .map_err(|e| StartInternalBitcoindError::Lock(e.to_string()))?;
         file.lock_exclusive()
             .map_err(|e| StartInternalBitcoindError::Lock(e.to_string()))?;
-        Ok(Self { file, directory })
+        let lifecycle = Self { file, directory };
+        lifecycle.reconcile_stale_owners().map_err(|e| {
+            StartInternalBitcoindError::Lock(format!(
+                "Could not reconcile managed-node owners: {e}"
+            ))
+        })?;
+        Ok(lifecycle)
+    }
+
+    /// Remove only owner files proved stale while the datadir lifecycle lock
+    /// excludes every new-version attach/stop. Unknown files and uncertain
+    /// liveness remain owners, so a read failure cannot stop a live node.
+    fn reconcile_stale_owners(&self) -> std::io::Result<()> {
+        use fs4::fs_std::FileExt;
+        let locks = self.directory.path().join(LOCK_DIRECTORY_NAME);
+        let networks = match std::fs::read_dir(&locks) {
+            Ok(networks) => networks,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        for network in networks {
+            let network = network?;
+            for owner in std::fs::read_dir(network.path())? {
+                let owner = owner?;
+                let name = owner.file_name();
+                let Some(name) = name.to_str() else { continue };
+                let Some((pid, suffix)) = parse_owner_name(name) else {
+                    continue;
+                };
+                let stale = if let Some(uuid) = suffix.strip_prefix("v2-") {
+                    if uuid::Uuid::parse_str(uuid).is_err() {
+                        continue;
+                    }
+                    let file = std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(owner.path())?;
+                    let stale = file.try_lock_exclusive()?;
+                    drop(file);
+                    stale
+                } else if suffix.parse::<u64>().is_ok() || uuid::Uuid::parse_str(suffix).is_ok() {
+                    !legacy_process_alive(pid)?
+                } else {
+                    false
+                };
+                if stale {
+                    std::fs::remove_file(owner.path())?;
+                }
+            }
+            if std::fs::read_dir(network.path())?.next().is_none() {
+                std::fs::remove_dir(network.path())?;
+            }
+        }
+        if std::fs::read_dir(&locks)?.next().is_none() {
+            std::fs::remove_dir(locks)?;
+        }
+        Ok(())
     }
 
     /// Includes other processes' owners. Called only while the lifecycle lock
@@ -2005,6 +2061,53 @@ impl Drop for ManagedNodeLifecycle {
             }
         }
         let _ = self.file.unlock();
+    }
+}
+
+fn parse_owner_name(name: &str) -> Option<(i32, &str)> {
+    let name = name.strip_suffix(".lock")?;
+    let (pid, suffix) = name.split_once('-')?;
+    let pid: i32 = pid.parse().ok()?;
+    (pid > 0 && !suffix.is_empty()).then_some((pid, suffix))
+}
+
+#[cfg(unix)]
+fn legacy_process_alive(pid: i32) -> std::io::Result<bool> {
+    // kill(pid, 0) sends no signal. EPERM proves the process exists; only
+    // ESRCH proves absence. All other failures preserve its owner file.
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(false),
+        Some(libc::EPERM) => Ok(true),
+        _ => Err(error),
+    }
+}
+
+#[cfg(windows)]
+fn legacy_process_alive(pid: i32) -> std::io::Result<bool> {
+    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows::Win32::System::Threading::{
+        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+    };
+    let handle = match unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid as u32) } {
+        Ok(handle) => handle,
+        Err(error) if error.code().0 as u32 == 0x8007_0057 => return Ok(false),
+        Err(error) if error.code().0 as u32 == 0x8007_0005 => return Ok(true),
+        Err(error) => return Err(std::io::Error::other(error)),
+    };
+    let status = unsafe { WaitForSingleObject(handle, 0) };
+    let _ = unsafe { CloseHandle(handle) };
+    if status == WAIT_OBJECT_0 {
+        Ok(false)
+    } else if status == WAIT_TIMEOUT {
+        Ok(true)
+    } else {
+        Err(std::io::Error::other(
+            "Could not check legacy owner process",
+        ))
     }
 }
 
@@ -2645,6 +2748,7 @@ struct LockFile {
     path: PathBuf,
     directory: BitcoindDirectory,
     network: Network,
+    _file: std::fs::File,
     released: AtomicBool,
     provisional: AtomicBool,
 }
@@ -2654,25 +2758,32 @@ impl LockFile {
         directory: BitcoindDirectory,
         network: Network,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        use fs4::fs_std::FileExt;
         let mut path = directory.clone().path().to_path_buf();
         path.push(LOCK_DIRECTORY_NAME);
         path.push(network.to_string());
         std::fs::create_dir_all(&path)?;
 
         path.push(format!(
-            "{}-{}.lock",
+            "{}-v2-{}.lock",
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
 
-        std::fs::OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&path)?;
+        if let Err(e) = file.lock_exclusive() {
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+            return Err(Box::new(e));
+        }
         Ok(Self {
             path,
             directory,
             network,
+            _file: file,
             released: AtomicBool::new(false),
             provisional: AtomicBool::new(true),
         })
@@ -2927,6 +3038,70 @@ mod tests {
         t1.join().unwrap();
         t2.join().unwrap();
         assert!(!locks.exists(), "the last Arc drop must release the owner");
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[test]
+    fn crashed_v2_owner_is_reconciled_before_attach() {
+        let root = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("stale-v2-owner-{}", uuid::Uuid::new_v4())),
+        );
+        let owners = root.bitcoind_directory().path().join("locks/bitcoin");
+        std::fs::create_dir_all(&owners).unwrap();
+        std::fs::write(
+            owners.join(format!(
+                "{}-v2-{}.lock",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            )),
+            b"",
+        )
+        .unwrap();
+        let lifecycle = ManagedNodeLifecycle::acquire(&root, NodeChainFamily::Bitcoin).unwrap();
+        assert!(!lifecycle.has_owners());
+        drop(lifecycle);
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[test]
+    fn live_locked_v2_owner_survives_reconciliation() {
+        let root = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("live-v2-owner-{}", uuid::Uuid::new_v4())),
+        );
+        let owner = LockFile::create(root.bitcoind_directory(), Network::Bitcoin).unwrap();
+        owner.activate();
+        let path = owner.path.clone();
+        let lifecycle = ManagedNodeLifecycle::acquire(&root, NodeChainFamily::Bitcoin).unwrap();
+        assert!(lifecycle.has_owners());
+        assert!(path.exists(), "a live locked owner must never be deleted");
+        drop(lifecycle);
+        owner.delete().unwrap();
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_dead_pid_is_pruned_but_live_pid_is_preserved() {
+        let root = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("legacy-owners-{}", uuid::Uuid::new_v4())),
+        );
+        let owners = root.bitcoind_directory().path().join("locks/bitcoin");
+        std::fs::create_dir_all(&owners).unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let path = owners.join(format!("{}-123.lock", child.id()));
+        std::fs::write(&path, b"").unwrap();
+        let lifecycle = ManagedNodeLifecycle::acquire(&root, NodeChainFamily::Bitcoin).unwrap();
+        assert!(path.exists());
+        drop(lifecycle);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let lifecycle = ManagedNodeLifecycle::acquire(&root, NodeChainFamily::Bitcoin).unwrap();
+        assert!(!path.exists());
+        assert!(!lifecycle.has_owners());
+        drop(lifecycle);
         std::fs::remove_dir_all(root.path()).unwrap();
     }
 
