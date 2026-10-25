@@ -170,8 +170,24 @@ impl ClaimPairContext {
     pub(crate) fn stop(mut self) {
         self.revoke();
         if self.daemon.backend().is_embedded() {
-            if let Err(error) = Handle::current().block_on(self.daemon.stop()) {
-                tracing::error!("Claim fork daemon stop failed: {error}");
+            let daemon = self.daemon.clone();
+            let runtime = Handle::try_current().ok();
+            let result = std::thread::spawn(move || match runtime {
+                Some(handle) => handle
+                    .block_on(async { daemon.stop().await })
+                    .map_err(|error| error.to_string()),
+                None => tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| error.to_string())?
+                    .block_on(async { daemon.stop().await })
+                    .map_err(|error| error.to_string()),
+            })
+            .join();
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::error!("Claim fork daemon stop failed: {error}"),
+                Err(_) => tracing::error!("Claim fork daemon stop panicked"),
             }
         }
         if let Some(bitcoind) = self.bitcoind.take() {

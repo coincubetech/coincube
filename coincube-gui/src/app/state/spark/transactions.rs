@@ -167,6 +167,7 @@ impl State for SparkTransactions {
                     payment,
                     fiat_converter,
                     cache.bitcoin_unit,
+                    cache.balance_amounts_masked(),
                 ),
             );
         }
@@ -195,6 +196,7 @@ impl State for SparkTransactions {
                 current_page: self.current_page,
                 is_last_page: self.is_last_page,
                 processing: self.processing,
+                mask_amounts: cache.balance_amounts_masked(),
             }
             .render(),
         );

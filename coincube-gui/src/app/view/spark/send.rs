@@ -159,6 +159,7 @@ impl<'a> SparkSendView<'a> {
             .push_maybe(
                 self.usdb_conversion_hint
                     .clone()
+                    .filter(|_| !self.mask_amounts)
                     .map(|hint| p2_regular(hint).style(theme::text::secondary)),
             );
 
@@ -168,16 +169,20 @@ impl<'a> SparkSendView<'a> {
             .push(Space::new().width(Length::Fill))
             .push(p2_regular("Available").style(theme::text::secondary))
             .push(
-                text(format!(
-                    "{} {}",
-                    Amount::from_sat(self.balance_sats)
-                        .to_formatted_string_with_unit(self.bitcoin_unit),
-                    if matches!(self.bitcoin_unit, BitcoinDisplayUnit::BTC) {
-                        "BTC"
-                    } else {
-                        "SATS"
-                    }
-                ))
+                text(if self.mask_amounts {
+                    "••••••".to_owned()
+                } else {
+                    format!(
+                        "{} {}",
+                        Amount::from_sat(self.balance_sats)
+                            .to_formatted_string_with_unit(self.bitcoin_unit),
+                        if matches!(self.bitcoin_unit, BitcoinDisplayUnit::BTC) {
+                            "BTC"
+                        } else {
+                            "SATS"
+                        }
+                    )
+                })
                 .size(P2_SIZE)
                 .style(theme::text::secondary),
             );

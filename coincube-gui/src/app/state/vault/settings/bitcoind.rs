@@ -1880,6 +1880,20 @@ fn configure_and_start_internal_bitcoind(
     // be one of this chain's. `write_internal_bitcoind_config` and
     // `maybe_start` check again on their own boundaries.
     provider_serves_network(flavor, network)?;
+    let lifecycle = crate::node::bitcoind::ManagedNodeLifecycle::acquire(
+        &coincube_datadir,
+        crate::node::bitcoind::NodeChainFamily::Bitcoin,
+    )
+    .map_err(|e| e.to_string())?;
+    lifecycle
+        .try_has_owners()
+        .map_err(|e| format!("Could not enumerate managed-node owners: {e}"))?;
+    if lifecycle
+        .try_has_foreign_owners()
+        .map_err(|e| format!("Could not enumerate managed-node owners: {e}"))?
+    {
+        return Err("Another app process owns the managed node. Close it before changing node settings here.".into());
+    }
     if let Some((bytes, manifest)) = install {
         let verification = DownloadVerification::for_flavor(flavor, manifest)
             .ok_or_else(|| "Missing release SHA256SUMS manifest for verification.".to_string())?;
@@ -1921,13 +1935,27 @@ fn configure_and_start_internal_bitcoind(
     // apply" picks the inbound config up, matching the app-launch path in
     // `loader`. A conf that could not be read, locked or replaced is a
     // refusal, not a start from stale privacy configuration.
-    crate::node::tor::prepare_inbound_tor(&coincube_datadir, network).map_err(|e| {
+    (if force_restart {
+        crate::node::tor::prepare_inbound_tor(&coincube_datadir, network)
+    } else {
+        crate::node::tor::prepare_inbound_tor_for_chain_locked(
+            &coincube_datadir,
+            network.into(),
+            &lifecycle,
+        )
+    })
+    .map_err(|e| {
         crate::node::bitcoind::StartInternalBitcoindError::ConfigUnavailable(e.to_string())
             .to_string()
     })?;
 
-    let bitcoind = Bitcoind::maybe_start(network, bitcoind_config.clone(), &coincube_datadir)
-        .map_err(|e| e.to_string())?;
+    let bitcoind = Bitcoind::maybe_start_locked(
+        network,
+        bitcoind_config.clone(),
+        &coincube_datadir,
+        &lifecycle,
+    )
+    .map_err(|e| e.to_string())?;
 
     Ok((bitcoind_config, bitcoind))
 }

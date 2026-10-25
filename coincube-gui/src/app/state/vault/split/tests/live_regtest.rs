@@ -103,7 +103,8 @@ async fn rendered_labels(panel: &SplitPanel) -> Vec<String> {
     )
     .await
     .expect("software renderer for the paired Split wizard");
-    let mut element = crate::app::view::vault::split::split_panel(panel);
+    // This test inspects explicit transaction values in the Shown state.
+    let mut element = crate::app::view::vault::split::split_panel_with_privacy(panel, false);
     let mut tree = Tree::new(element.as_widget());
     let node = element.as_widget_mut().layout(
         &mut tree,

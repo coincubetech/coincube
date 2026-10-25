@@ -556,6 +556,20 @@ fn step2_body<'a>(
 pub const CLOSED_COPY: &str = "This split was closed on this device. Its record, with any signed transaction, is kept, and a new split of this wallet is refused until that record is reset.";
 
 pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
+    split_panel_with_privacy(panel, true)
+}
+
+fn passive_pair_amount(sats: u64, balance_masked: bool) -> String {
+    if balance_masked {
+        "••••••".to_owned()
+    } else {
+        format!("{sats} sats")
+    }
+}
+
+/// Recorded status and the read-only funding preview follow device privacy.
+/// Explicit signing and broadcast reviews show exact authorization values.
+pub fn split_panel_with_privacy(panel: &SplitPanel, balance_masked: bool) -> Element<'_, Message> {
     let single = matches!(panel.stage(), Stage::Unified(_) | Stage::ChooseRoute)
         || panel.unified().record().is_some();
     let mut body = Column::new().spacing(10).max_width(640);
@@ -592,8 +606,8 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
                     .push_maybe(recovery.bitcoin_txid.map(|id| caption(id.to_string())))
                     .push_maybe(recovery.bitcoin_output.as_ref().map(|output| {
                         caption(format!(
-                            "Recorded Bitcoin output: {} sats",
-                            output.amount_sats
+                            "Recorded Bitcoin output: {}",
+                            passive_pair_amount(output.amount_sats, balance_masked)
                         ))
                     }))
                     .push_maybe(
@@ -607,8 +621,8 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
                     .push_maybe(recovery.fork_txid.map(|id| caption(id.to_string())))
                     .push_maybe(recovery.fork_output.as_ref().map(|output| {
                         caption(format!(
-                            "Recorded BTCB2 output: {} sats",
-                            output.amount_sats
+                            "Recorded BTCB2 output: {}",
+                            passive_pair_amount(output.amount_sats, balance_masked)
                         ))
                     }))
                     .push_maybe(
@@ -766,9 +780,9 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
                                         ))
                                         .width(Length::Fill),
                                     )
-                                    .push(p1_bold(format!(
-                                        "{} sats",
-                                        review.bitcoin.shared_total.to_sat()
+                                    .push(p1_bold(passive_pair_amount(
+                                        review.bitcoin.shared_total.to_sat(),
+                                        balance_masked,
                                     ))),
                             );
                         if let Some(threshold) = panel.funding_signing_threshold() {
@@ -778,18 +792,22 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
                             )));
                         }
                         for row in &review.bitcoin.shared {
-                            body =
-                                body.push(coin_input_row(row, "Before fork · both chains", None));
+                            body = body.push(coin_input_row(
+                                row,
+                                "Before fork · both chains",
+                                None,
+                                balance_masked,
+                            ));
                         }
                         body = body
                             .push(p1_bold("Bitcoin transaction"))
-                            .push(coin_input_row(&review.bitcoin.funding, "Bitcoin-only", Some(review.bitcoin_confirmations)))
-                            .push(caption(format!("Return to this source wallet: {} · {} sats", address(&review.bitcoin.destination), review.bitcoin.destination.value.to_sat())))
-                            .push(caption(format!("Fee: {} sats", review.bitcoin.fee.to_sat())))
+                            .push(coin_input_row(&review.bitcoin.funding, "Bitcoin-only", Some(review.bitcoin_confirmations), balance_masked))
+                            .push(caption(format!("Return to this source wallet: {} · {}", address(&review.bitcoin.destination), passive_pair_amount(review.bitcoin.destination.value.to_sat(), balance_masked))))
+                            .push(caption(format!("Fee: {}", passive_pair_amount(review.bitcoin.fee.to_sat(), balance_masked))))
                             .push(p1_bold("Bitcoin Blake2b transaction"))
-                            .push(coin_input_row(&review.fork.funding, "BTCB2-only", Some(review.fork_confirmations)))
-                            .push(caption(format!("Send to your paired BTCB2 Cube: {} · {} sats", address(&review.fork.destination), review.fork.destination.value.to_sat())))
-                            .push(caption(format!("Fee: {} sats", review.fork.fee.to_sat())))
+                            .push(coin_input_row(&review.fork.funding, "BTCB2-only", Some(review.fork_confirmations), balance_masked))
+                            .push(caption(format!("Send to your paired BTCB2 Cube: {} · {}", address(&review.fork.destination), passive_pair_amount(review.fork.destination.value.to_sat(), balance_masked))))
+                            .push(caption(format!("Fee: {}", passive_pair_amount(review.fork.fee.to_sat(), balance_masked))))
                             .push(p1_regular("Each transaction spends every shared coin together with its own verified chain-specific funding coin. This preview is not a signing or broadcast request; both proofs, wallet state and fees must be checked again before either transaction can be signed."));
                     } else if progress.bitcoin_candidate && progress.btcb2_candidate {
                         body = body.push(p1_regular("Both deposits are visible, but their paired chain-specific ancestry has not been established. No transaction can be signed."));
@@ -1173,4 +1191,51 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
         0.0, 0.0, 0.0, 0.6,
     )))
     .into()
+}
+
+#[cfg(test)]
+mod privacy_tests {
+    use super::*;
+    use crate::app::view::shared::landing::capture;
+    use crate::app::view::vault::ancestry_coins::CoinRow;
+    use coincube_core::miniscript::bitcoin::{Amount, OutPoint, ScriptBuf, TxOut};
+
+    #[test]
+    fn passive_pair_fields_mount_masked_but_active_review_value_is_exact() {
+        let coin = CoinRow {
+            outpoint: OutPoint::null(),
+            amount: Amount::from_sat(123_456_789),
+            output: TxOut {
+                value: Amount::from_sat(123_456_789),
+                script_pubkey: ScriptBuf::new(),
+            },
+        };
+        for masked in [true, false] {
+            let preview = capture::inspect(
+                "split-passive-pair",
+                Column::new()
+                    .push(caption(format!(
+                        "Recorded Bitcoin output: {}",
+                        passive_pair_amount(987_654_321, masked)
+                    )))
+                    .push(p1_bold(passive_pair_amount(123_456_789, masked)))
+                    .push(coin_input_row(&coin, "Before fork", Some(6), masked))
+                    .into(),
+                (1024, 768),
+                "dark",
+                theme::Theme::dark(),
+            );
+            assert_eq!(preview.contains("987654321 sats"), !masked);
+            assert_eq!(preview.contains("123456789 sats"), !masked);
+            assert_eq!(preview.contains("••••••"), masked);
+        }
+        let active = capture::inspect(
+            "split-active-review",
+            coin_input_row(&coin, "Before fork", Some(6), false),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(active.contains("123456789 sats"));
+    }
 }

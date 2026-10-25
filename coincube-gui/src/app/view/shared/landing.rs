@@ -286,14 +286,37 @@ pub(crate) mod capture {
         appearance: &str,
         theme: theme::Theme,
     ) -> Inspection {
+        let sidebar = if outer.0 <= 1100 { 208.0 } else { 248.0 };
+        let width = (((outer.0 as f32 - sidebar) * 0.8).floor() as u32).max(1);
+        inspect_at_width(scenario, content, outer, appearance, theme, width)
+    }
+
+    /// The Launcher fills the window rather than the dashboard's 8/10 pane.
+    /// Its content-only fixture uses the actual 1024px minimum width.
+    pub fn inspect_full_window<M: 'static>(
+        scenario: &str,
+        content: Element<'_, M>,
+        outer: (u32, u32),
+        appearance: &str,
+        theme: theme::Theme,
+    ) -> Inspection {
+        inspect_at_width(scenario, content, outer, appearance, theme, outer.0)
+    }
+
+    fn inspect_at_width<M: 'static>(
+        scenario: &str,
+        content: Element<'_, M>,
+        outer: (u32, u32),
+        appearance: &str,
+        theme: theme::Theme,
+        width: u32,
+    ) -> Inspection {
         for bytes in font::load() {
             iced::advanced::graphics::text::font_system()
                 .write()
                 .unwrap()
                 .load_font(bytes);
         }
-        let sidebar = if outer.0 <= 1100 { 208.0 } else { 248.0 };
-        let width = (((outer.0 as f32 - sidebar) * 0.8).floor() as u32).max(1);
         let height = outer.1.saturating_sub(100).max(1);
         let size = Size::new(width as f32, height as f32);
         let mut renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(

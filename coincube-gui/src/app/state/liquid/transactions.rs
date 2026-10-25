@@ -308,6 +308,7 @@ impl State for LiquidTransactions {
                     cache.bitcoin_unit,
                     usdt_asset_id(self.breez_client.network()).unwrap_or(""),
                     &refundable_swap_addresses,
+                    cache.balance_amounts_masked(),
                 ),
             )
         } else if let Some(refundable) = &self.selected_refundable {
@@ -324,6 +325,7 @@ impl State for LiquidTransactions {
                     self.pending_fee_priority,
                     self.in_flight_refunds.get(&refundable.swap_address),
                     cache.has_vault,
+                    cache.balance_amounts_masked(),
                 ),
             )
         } else {
@@ -347,6 +349,7 @@ impl State for LiquidTransactions {
                     self.is_last_page,
                     self.processing,
                     &self.swap_tx_ids,
+                    cache.balance_amounts_masked(),
                 ),
             )
         };
