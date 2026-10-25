@@ -3567,17 +3567,23 @@ mod policy_layout_tests {
                     .find(|(text, _)| text == "The wallet policy:")
                     .expect("mounted policy heading")
                     .1;
+                let primary_clause = mounted
+                    .labels
+                    .iter()
+                    .find(|(text, _)| text == "can always spend this wallet's funds (Primary path)")
+                    .expect("mounted primary policy clause")
+                    .1;
                 let (viewport, content) = mounted
                     .scrolls
                     .iter()
-                    .rev()
-                    .find(|(_, content)| {
-                        heading.x >= content.x
-                            && heading.x < content.x + content.width
-                            && heading.y >= content.y
-                            && heading.y < content.y + content.height
+                    .filter(|(_, content)| {
+                        primary_clause.x >= content.x
+                            && primary_clause.x < content.x + content.width
+                            && primary_clause.y >= content.y
+                            && primary_clause.y < content.y + content.height
                     })
-                    .expect("mounted policy scroll viewport");
+                    .min_by(|(left, _), (right, _)| left.width.total_cmp(&right.width))
+                    .expect("mounted horizontal policy scroll viewport");
                 assert!(
                     viewport.x >= -1.0 && viewport.x + viewport.width <= width as f32 + 1.0,
                     "{}px {}: policy viewport escapes window: {:?}",
@@ -3593,21 +3599,36 @@ mod policy_layout_tests {
                     theme_name,
                     viewport
                 );
-                assert!(
-                    mounted.containers.iter().any(|card| {
-                        viewport.x >= card.x - 1.0
+                let card = mounted
+                    .containers
+                    .iter()
+                    .filter(|card| {
+                        heading.x >= card.x - 1.0
+                            && heading.x + heading.width <= card.x + card.width + 1.0
+                            && heading.y >= card.y - 1.0
+                            && heading.y + heading.height <= card.y + card.height + 1.0
+                            && viewport.x >= card.x - 1.0
                             && viewport.x + viewport.width <= card.x + card.width + 1.0
                             && viewport.y >= card.y - 1.0
                             && viewport.y + viewport.height <= card.y + card.height + 1.0
-                    }),
-                    "{}px {}: policy viewport escapes its card",
+                    })
+                    .min_by(|left, right| {
+                        (left.width * left.height).total_cmp(&(right.width * right.height))
+                    })
+                    .expect("smallest card containing policy heading and scroll viewport");
+                assert!(
+                    card.width <= width as f32 * 0.8,
+                    "{}px {}: policy card escapes installer content column: {:?}",
                     width,
-                    theme_name
+                    theme_name,
+                    card
                 );
                 let start = mounted
                     .labels
                     .iter()
-                    .position(|(text, _)| text == "The wallet policy:")
+                    .position(|(text, _)| {
+                        text == "can always spend this wallet's funds (Primary path)"
+                    })
                     .unwrap();
                 let end = mounted
                     .labels
