@@ -706,7 +706,6 @@ mod chain_tests {
         .is_none());
 
         drop(send(view::SettingsMessage::ReviewDescriptorCopy));
-        drop(send);
         drop(state.reload(Some(daemon.clone()), Some(wallet.clone())));
         assert!(!state.expert_open && !state.descriptor_copy_review);
         assert!(iced_runtime::task::into_stream(state.update(
