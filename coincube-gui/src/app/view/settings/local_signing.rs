@@ -28,6 +28,9 @@ pub fn section<'a>(
             "Pair with Keychain",
             SettingsMessage::LocalSigningSection,
         ))
+        .push(text(
+            "Select a Keychain key held by the phone, then pair over the same Wi-Fi. Local phone signing does not require a Connect account.",
+        ))
         .push(pairing_card(state))
         .push(paired_phones_card(state))
         .width(Length::Fill);
@@ -77,16 +80,11 @@ fn pairing_card<'a>(state: &'a LocalSigningState) -> Element<'a, Message> {
 }
 
 fn idle_body<'a>(state: &'a LocalSigningState) -> Element<'a, Message> {
-    let intro = text(
-        "Pair a Keychain phone over your local network so it can \
-         sign PSBTs directly, without going through the Connect \
-         API. The phone must be on the same Wi-Fi.",
-    );
+    let intro = text("Choose the key the phone will hold:");
     if state.keychain_keys_recorded && state.vault_keys.is_empty() {
         return Column::new()
             .padding(10)
             .spacing(8)
-            .push(intro)
             .push(no_keychain_keys())
             .into();
     }
@@ -127,8 +125,11 @@ fn idle_body<'a>(state: &'a LocalSigningState) -> Element<'a, Message> {
         .push(intro)
         .push(keys)
         .push(details)
+        .push(text(
+            "How pairing works · The desktop and phone exchange a short-lived offer on the same Wi-Fi. Pairing does not move a key to the phone.",
+        ).style(theme::text::secondary))
         .push(
-            text("Key names can be changed in Vault → Settings → Wallet.")
+            text("Key names can be changed in Vault → Settings → Wallet & signers.")
                 .style(theme::text::secondary),
         )
         .push(pair_btn)
@@ -434,15 +435,25 @@ fn paired_phones_card<'a>(state: &'a LocalSigningState) -> Element<'a, Message> 
             // "Exact vault key paired" for a phone whose binding fails on
             // key id, vault id, or key membership — a healthy row the user
             // then can't sign with.
+            let has_full_binding = p
+                .signer_binding
+                .as_ref()
+                .is_some_and(|binding| binding.descriptor_sha256.len() == 32);
+            let removable = p.signer_binding.as_ref().is_some_and(|binding| {
+                binding.descriptor_sha256.len() == 32
+                    && hex::encode(&binding.descriptor_sha256) == state.descriptor_sha256
+            });
             let identity_status = if p
                 .exact_signer_against(&state.descriptor_sha256, &state.vault_key_fingerprints)
                 .is_ok()
             {
                 "Exact vault key paired"
+            } else if has_full_binding && !removable {
+                "This pairing belongs to a different Vault descriptor."
             } else {
                 "Pair again and select the exact vault key held by this phone."
             };
-            let row = Column::new()
+            let mut row = Column::new()
                 .push(text(identity_status))
                 .padding([6, 0])
                 .spacing(6)
@@ -494,13 +505,51 @@ fn paired_phones_card<'a>(state: &'a LocalSigningState) -> Element<'a, Message> 
                                 .width(Length::Shrink),
                         )
                         .push(
-                            button::secondary(None, "Remove")
-                                .on_press(Message::Settings(SettingsMessage::LocalSigning(
-                                    LocalSigningMessage::RemovePhone(fp8.clone()),
-                                )))
+                            button::secondary(None, "Review removal…")
+                                .on_press_maybe(removable.then(|| {
+                                    Message::Settings(SettingsMessage::LocalSigning(
+                                        LocalSigningMessage::ReviewRemovePhone(fp8.clone()),
+                                    ))
+                                }))
                                 .width(Length::Shrink),
                         ),
                 );
+            if !removable {
+                let removal_copy = if has_full_binding {
+                    "Open the Vault this phone was paired with to remove it. If that Vault is unavailable, a separate recovery flow is needed."
+                } else {
+                    "This older pairing has no verified Vault identity. Re-pair the phone before removing it. If the phone is lost, a separate recovery flow is needed."
+                };
+                row = row.push(text(removal_copy).style(theme::text::secondary));
+            }
+            if state.pending_remove_phone.as_deref() == Some(fp8.as_str()) {
+                row = row.push(
+                    Column::new()
+                        .spacing(8)
+                        .push(text("Remove this local pairing?").bold())
+                        .push(text(
+                            "This removes the phone from this desktop's paired list and tries to notify it if reachable. It does not delete the key held on the phone or prove remote removal.",
+                        ))
+                        .push(
+                            Row::new()
+                                .spacing(8)
+                                .push(
+                                    button::secondary(None, "Keep phone").on_press(
+                                        Message::Settings(SettingsMessage::LocalSigning(
+                                            LocalSigningMessage::CancelRemovePhone,
+                                        )),
+                                    ),
+                                )
+                                .push(
+                                    button::primary(None, "Remove local pairing").on_press(
+                                        Message::Settings(SettingsMessage::LocalSigning(
+                                            LocalSigningMessage::RemovePhone(fp8.clone()),
+                                        )),
+                                    ),
+                                ),
+                        ),
+                );
+            }
             rows = rows.push(row);
             rows = rows.push(separation().width(Length::Fill));
         }
