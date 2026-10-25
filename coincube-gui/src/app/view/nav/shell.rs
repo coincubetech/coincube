@@ -12,6 +12,7 @@ use crate::{
             CubeSettingsOption, CubeSubMenu, LiquidSubMenu, Menu, SettingsOption,
             SparkSettingsOption, SparkSubMenu, TopLevel, VaultSubMenu,
         },
+        state::preferences::{BalancePrivacy, BalancePrivacyChrome},
         view::Message,
         ConnectionStatus,
     },
@@ -19,8 +20,9 @@ use crate::{
 };
 use coincube_ui::{
     icon::{
-        arrow_down, chevron_right, coins_outline_icon, cube_icon, home_icon,
-        lightning_outline_icon, receipt_icon, recovery_icon, settings_icon, shop_icon, vault_icon,
+        arrow_down, chevron_right, coins_outline_icon, cube_icon, eye_icon, eye_slash_icon,
+        home_icon, lightning_outline_icon, receipt_icon, recovery_icon, settings_icon, shop_icon,
+        vault_icon,
     },
     theme,
     widget::{action::Action, Column, ColumnExt, Element, Row, Text},
@@ -40,6 +42,7 @@ pub const CUBE_LOCK_CANCEL_ID: &str = "tenshu.cube.lock.cancel";
 pub const VAULT_TOOLS_ID: &str = "tenshu.vault.tools";
 pub const SETTINGS_ID: &str = "tenshu.shell.settings";
 pub const MIDDLE_SCROLL_ID: &str = "tenshu.shell.middle-scroll";
+pub const BALANCE_PRIVACY_ID: &str = "tenshu.balance-privacy.toggle";
 
 /// Innermost shell dismissal. The GUI owns Escape dispatch; this helper only
 /// identifies the existing harmless intent for the currently open disclosure.
@@ -109,8 +112,30 @@ fn status<'a>(label: impl Into<String>, good: bool) -> Text<'a> {
         })
 }
 
-/// The 56px bar contains only the Tenshu return action and status chips.
+/// Legacy entry point for callers without the GUI privacy owner. Cube routes
+/// mount `top_bar_with_privacy` from the shared dashboard shell.
 pub fn top_bar<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
+    top_bar_with_privacy(ctx, None)
+}
+
+pub fn balance_privacy_label(chrome: BalancePrivacyChrome) -> &'static str {
+    match (chrome.busy, chrome.privacy, chrome.intent().is_some()) {
+        (true, _, _) => "Saving balance privacy…",
+        (false, BalancePrivacy::Unresolved, true) => "Balances hidden for now. Show balances",
+        (false, BalancePrivacy::Unresolved, false) => "Balances hidden until your choice loads",
+        (false, BalancePrivacy::Hidden, true) => "Show balances",
+        (false, BalancePrivacy::Hidden, false) => "Balances hidden",
+        (false, BalancePrivacy::HiddenLocally, true) => "Balances hidden now. Retry Hide",
+        (false, BalancePrivacy::HiddenLocally, false) => "Balances hidden now",
+        (false, BalancePrivacy::Shown, true) => "Hide balances",
+        (false, BalancePrivacy::Shown, false) => "Balances shown",
+    }
+}
+
+pub fn top_bar_with_privacy<'a>(
+    ctx: &NavContext<'a>,
+    privacy: Option<BalancePrivacyChrome>,
+) -> Element<'a, Message> {
     let brand = Action::new(
         LAUNCHER_RETURN_ID,
         row![cube_icon().size(17), text("Tenshu").size(15)]
@@ -173,8 +198,27 @@ pub fn top_bar<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
         iced::widget::tooltip::Position::Bottom,
     );
 
+    let eye = privacy.map(|chrome| {
+        let glyph = if chrome.privacy.masks_amounts() {
+            eye_slash_icon()
+        } else {
+            eye_icon()
+        };
+        let action = Action::new(BALANCE_PRIVACY_ID, glyph.size(16), Message::FocusAction)
+            .padding([7, 9])
+            .style(theme::button::shell_nav)
+            .on_press_maybe(chrome.intent().map(Message::ChangeDevicePreference));
+        iced::widget::tooltip(
+            action,
+            container(muted(balance_privacy_label(chrome), 12))
+                .padding([6, 10])
+                .style(theme::container::shell_menu),
+            iced::widget::tooltip::Position::Bottom,
+        )
+    });
     container(
         row![brand, Space::new().width(Length::Fill), account, connection]
+            .push(eye)
             .spacing(8)
             .align_y(Alignment::Center)
             .padding([0, 16]),
@@ -335,7 +379,10 @@ fn identity<'a>(ctx: &NavContext<'a>, state: ShellState) -> Element<'a, Message>
     .on_press(Message::ToggleCubeSwitcher);
     iced::widget::tooltip(
         container(control).padding([4, 8]),
-        container(muted(ctx.cube_name, 12))
+        container(muted(ctx.cube_name, 12).wrapping(iced::widget::text::Wrapping::WordOrGlyph))
+            .max_width(240)
+            .max_height(120)
+            .clip(true)
             .padding([6, 10])
             .style(theme::container::shell_menu),
         iced::widget::tooltip::Position::Right,
@@ -747,3 +794,41 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
 
 #[cfg(test)]
 mod keyboard_tests;
+
+#[cfg(test)]
+mod privacy_eye_tests {
+    use super::*;
+    use crate::app::settings::preferences::PreferenceChange;
+
+    #[test]
+    fn eye_copy_matches_persisted_intent_and_failed_hide_latch() {
+        let chrome = |privacy| BalancePrivacyChrome {
+            privacy,
+            busy: false,
+            interactive: true,
+        };
+        let shown = chrome(BalancePrivacy::Shown);
+        assert_eq!(balance_privacy_label(shown), "Hide balances");
+        assert_eq!(shown.intent(), Some(PreferenceChange::HideBalances(true)));
+
+        let hidden = chrome(BalancePrivacy::Hidden);
+        assert_eq!(balance_privacy_label(hidden), "Show balances");
+        assert_eq!(hidden.intent(), Some(PreferenceChange::HideBalances(false)));
+
+        let failed_hide = chrome(BalancePrivacy::HiddenLocally);
+        assert_eq!(
+            balance_privacy_label(failed_hide),
+            "Balances hidden now. Retry Hide"
+        );
+        assert_eq!(
+            failed_hide.intent(),
+            Some(PreferenceChange::HideBalances(true))
+        );
+
+        let busy = BalancePrivacyChrome {
+            busy: true,
+            ..shown
+        };
+        assert_eq!(busy.intent(), None);
+    }
+}

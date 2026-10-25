@@ -4451,9 +4451,11 @@ impl State for P2PPanel {
                                 )
                             } else {
                                 Element::from(
-                                    column(filtered.iter().map(|trade| trade_card(trade).into()))
-                                        .spacing(16)
-                                        .width(Length::Fill),
+                                    column(filtered.iter().map(|trade| {
+                                        trade_card(trade, cache.balance_amounts_masked()).into()
+                                    }))
+                                    .spacing(16)
+                                    .width(Length::Fill),
                                 )
                             },
                             Space::new().height(Length::Fixed(40.0)),

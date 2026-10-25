@@ -122,7 +122,7 @@ impl P2PTrade {
     }
 }
 
-pub fn trade_card<'a>(trade: &'a P2PTrade) -> Button<'a, view::Message> {
+pub fn trade_card<'a>(trade: &'a P2PTrade, mask_amounts: bool) -> Button<'a, view::Message> {
     let type_badge_style = match trade.order_type {
         OrderType::Buy => theme::pill::success as fn(&_) -> _,
         OrderType::Sell => theme::pill::warning as fn(&_) -> _,
@@ -159,7 +159,14 @@ pub fn trade_card<'a>(trade: &'a P2PTrade) -> Button<'a, view::Message> {
             .spacing(10)
             .align_y(iced::alignment::Vertical::Center),
             // Amount and currency
-            if trade.is_range_order() {
+            if mask_amounts {
+                row!(
+                    h2("••••••").style(theme::text::primary),
+                    p1_bold(format!(" {}", trade.fiat_currency)).style(theme::text::secondary)
+                )
+                .spacing(8)
+                .align_y(iced::alignment::Vertical::Center)
+            } else if trade.is_range_order() {
                 row!(
                     h2(format!(
                         "{} - {}",
@@ -184,10 +191,14 @@ pub fn trade_card<'a>(trade: &'a P2PTrade) -> Button<'a, view::Message> {
             if trade.is_fixed_price() {
                 row![
                     p2_regular("for").style(theme::text::secondary),
-                    p2_bold(format!(
-                        "{} sats",
-                        format_with_separators(trade.sats_amount.unwrap_or(0))
-                    ))
+                    p2_bold(if mask_amounts {
+                        "•••••• sats".to_string()
+                    } else {
+                        format!(
+                            "{} sats",
+                            format_with_separators(trade.sats_amount.unwrap_or(0))
+                        )
+                    })
                 ]
                 .spacing(8)
             } else {
@@ -227,4 +238,75 @@ pub fn trade_card<'a>(trade: &'a P2PTrade) -> Button<'a, view::Message> {
             trade.id.clone(),
         )))
         .width(Length::Fill)
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+    use crate::app::view::shared::landing::capture;
+
+    fn trade() -> P2PTrade {
+        P2PTrade {
+            id: "synthetic-trade".into(),
+            order_type: OrderType::Buy,
+            status: TradeStatus::Active,
+            role: TradeRole::Taker,
+            fiat_amount: 12_345.67,
+            min_amount: None,
+            max_amount: None,
+            fiat_currency: "USD".into(),
+            sats_amount: Some(98_765),
+            premium_percent: None,
+            payment_method: "Synthetic bank transfer".into(),
+            counterparty_rating: None,
+            created_at_ts: 0,
+            created_at: "synthetic".into(),
+            time_ago: "Just now".into(),
+            last_dm_action: None,
+            countdown_start_ts: None,
+            counterparty_pubkey: None,
+            admin_pubkey: None,
+            hold_invoice: None,
+        }
+    }
+
+    fn inspect(trade: &P2PTrade, mask_amounts: bool) -> capture::Inspection {
+        capture::inspect(
+            "p2p-my-trades-card",
+            trade_card(trade, mask_amounts).into(),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        )
+    }
+
+    #[test]
+    fn my_trades_card_masks_fixed_fiat_and_sats_only_when_hidden() {
+        let trade = trade();
+        let hidden = inspect(&trade, true);
+        assert!(hidden.contains("••••••"));
+        assert!(!hidden.contains("12,345.67"));
+        assert!(!hidden.contains("98,765"));
+        assert!(hidden.contains("Synthetic bank transfer"));
+
+        let shown = inspect(&trade, false);
+        assert!(shown.contains("12,345.67"));
+        assert!(shown.contains("98,765 sats"));
+    }
+
+    #[test]
+    fn my_trades_card_masks_both_range_endpoints() {
+        let mut trade = trade();
+        trade.min_amount = Some(23_456.0);
+        trade.max_amount = Some(34_567.0);
+
+        let hidden = inspect(&trade, true);
+        assert!(!hidden.contains("23,456"));
+        assert!(!hidden.contains("34,567"));
+        assert!(!hidden.contains("98,765"));
+
+        let shown = inspect(&trade, false);
+        assert!(shown.contains("23,456 - 34,567"));
+        assert!(shown.contains("98,765 sats"));
+    }
 }
