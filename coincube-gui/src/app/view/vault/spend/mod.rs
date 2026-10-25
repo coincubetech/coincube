@@ -1105,7 +1105,10 @@ fn coin_list_view<'a>(
         })
         .push(
             Container::new(amount_with_unit(&coin.amount, bitcoin_unit))
-                .width(Length::Fixed(120.0))
+                // BTC uses grouped decimal text plus a separate unit. Let the
+                // amount take its measured width before the identity fills the
+                // remainder, so the coin scroll does not clip the unit.
+                .width(Length::Shrink)
                 .align_x(iced::alignment::Horizontal::Right),
         );
     Container::new(row)
@@ -1354,6 +1357,7 @@ mod tests {
         text_inputs: Vec<(Option<Id>, Rectangle, String)>,
         /// (viewport height, content height) of every scrollable.
         scrollables: Vec<(f32, f32)>,
+        scrollable_bounds: Vec<Rectangle>,
     }
 
     impl Operation for Probe {
@@ -1389,6 +1393,7 @@ mod tests {
         ) {
             self.scrollables
                 .push((bounds.height, content_bounds.height));
+            self.scrollable_bounds.push(bounds);
         }
     }
 
@@ -2588,6 +2593,50 @@ mod tests {
                 let mut harness = Harness::new(compose(&fixture, &scenario), TALL);
                 assert!(harness.probe().contains("Coin selection"));
                 harness.capture_r07c(name, appearance, &theme);
+            }
+        }
+    }
+
+    /// Coin text must fit the native coin scroll's viewport. The dashboard
+    /// window is wider than this inner clip, so window bounds alone miss a
+    /// truncated BTC unit at the right edge of the list.
+    #[test]
+    fn r07c_coin_amount_and_unit_fit_inner_scroll_viewport() {
+        for (appearance, mode, _) in themes() {
+            for name in ["single-sats", "batch-btc", "coin-mix"] {
+                let (fixture, scenario) = r07c_case(mode, name);
+                let unit = match scenario.unit {
+                    BitcoinDisplayUnit::BTC => "BTC",
+                    BitcoinDisplayUnit::Sats => "SATS",
+                };
+                for outer in [COMPACT, WIDE, TALL] {
+                    let mut harness = Harness::new(compose(&fixture, &scenario), outer);
+                    let probe = harness.probe();
+                    let viewport = *probe
+                        .scrollable_bounds
+                        .iter()
+                        .find(|bounds| bounds.height <= 300.5)
+                        .expect("native coin-list viewport");
+                    let visible_coin_text: Vec<_> = probe
+                        .text
+                        .iter()
+                        .filter(|(_, bounds)| {
+                            bounds.x >= viewport.x
+                                && bounds.y + bounds.height / 2.0 >= viewport.y
+                                && bounds.y + bounds.height / 2.0 <= viewport.y + viewport.height
+                        })
+                        .collect();
+                    assert!(
+                        visible_coin_text.iter().any(|(text, _)| text == unit),
+                        "{appearance} {name} {outer:?}: no visible coin unit in {viewport:?}"
+                    );
+                    for (text, bounds) in visible_coin_text {
+                        assert!(
+                            bounds.x + bounds.width <= viewport.x + viewport.width - 2.0,
+                            "{appearance} {name} {outer:?}: coin text {text:?} at {bounds:?} exceeds inner {viewport:?}"
+                        );
+                    }
+                }
             }
         }
     }
