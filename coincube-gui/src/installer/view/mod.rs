@@ -1425,6 +1425,25 @@ fn node_flavor_selector<'a>(
     col.into()
 }
 
+fn node_option_card<'a>(
+    title: &'static str,
+    description: impl Into<String>,
+    action: message::SelectBitcoindTypeMsg,
+) -> Element<'a, Message> {
+    Container::new(
+        Column::new()
+            .spacing(12)
+            .width(Length::Fill)
+            .push(p1_bold(title))
+            .push(p2_regular(description.into()).style(theme::text::secondary))
+            .push(button::secondary(None, "Select").on_press(Message::SelectBitcoindType(action))),
+    )
+    .padding(20)
+    .width(Length::Fill)
+    .style(theme::container::border_grey)
+    .into()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn select_bitcoind_type<'a>(
     progress: (usize, usize),
@@ -1469,362 +1488,124 @@ pub fn select_bitcoind_type<'a>(
         );
     }
     let network = chain.bitcoin_network();
-    let content: Column<'a, Message> =
-        if network == bitcoin::Network::Regtest {
-            // Regtest: offer only the two node-based options inline.
-            let header_row = Row::new()
-                .spacing(20)
-                .align_y(Alignment::Start)
-                .push(
-                    Container::new(
-                        Column::new()
-                            .spacing(10)
-                            .width(Length::Fixed(300.0))
-                            .push(text("I already have a node").bold()),
-                    )
-                    .padding(20),
-                )
-                .push(
-                    Container::new(
-                        Column::new()
-                            .spacing(10)
-                            .width(Length::Fixed(300.0))
-                            .push(text("Install a node locally").bold()),
-                    )
-                    .padding(20),
-                );
-            let description_row = Row::new()
-                .spacing(20)
-                .align_y(Alignment::Start)
-                .push(
-                    Container::new(Column::new().spacing(10).width(Length::Fixed(300.0)).push(
-                        text(
-                            "Select this option if you already have a Bitcoin node \
-                            running locally or remotely. Tenshu will connect to it.",
-                        ),
-                    ))
-                    .padding(20),
-                )
-                .push(
-                    Container::new(Column::new().spacing(10).width(Length::Fixed(300.0)).push(
-                        text(
-                            "Tenshu will install a pruned node on your computer. \
-                            No local node required beforehand.",
-                        ),
-                    ))
-                    .padding(20),
-                );
-            let button_row = Row::new()
-                .spacing(20)
-                .align_y(Alignment::End)
-                .push(
-                    Container::new(
-                        Column::new()
-                            .width(Length::Fixed(300.0))
-                            .align_x(Alignment::Center)
-                            .push(
-                                button::secondary(None, "Select")
-                                    .width(Length::Fixed(250.0))
-                                    .on_press(Message::SelectBitcoindType(
-                                        message::SelectBitcoindTypeMsg::UseExternal(true),
-                                    )),
-                            ),
-                    )
-                    .padding(20),
-                )
-                .push(
-                    Container::new(
-                        Column::new()
-                            .width(Length::Fixed(300.0))
-                            .align_x(Alignment::Center)
-                            .push(
-                                button::secondary(None, "Select")
-                                    .width(Length::Fixed(250.0))
-                                    .on_press(Message::SelectBitcoindType(
-                                        message::SelectBitcoindTypeMsg::UseExternal(false),
-                                    )),
-                            ),
-                    )
-                    .padding(20),
-                );
-            Column::new()
-                .spacing(10)
-                .push(header_row)
-                .push(description_row)
-                .push(button_row)
-        } else if !connect_authenticated {
-            // User skipped Connect: show only node-based options.
-            let disk_gb = (prune_default_mb as f64 / 1024.0).round() as u32;
-            let header_row = Row::new()
-                .spacing(20)
-                .align_y(Alignment::Start)
-                .push(
-                    Container::new(
-                        Column::new()
-                            .spacing(10)
-                            .width(Length::Fixed(300.0))
-                            .push(text("I already have a node").bold()),
-                    )
-                    .padding(20),
-                )
-                .push(
-                    Container::new(
-                        Column::new()
-                            .spacing(10)
-                            .width(Length::Fixed(300.0))
-                            .push(text("Install a local pruned node").bold()),
-                    )
-                    .padding(20),
-                );
-            let description_row = Row::new()
-                .spacing(20)
-                .align_y(Alignment::Start)
-                .push(
-                    Container::new(Column::new().spacing(10).width(Length::Fixed(300.0)).push(
-                        text(
-                            "Select this option if you already have a Bitcoin node \
-                        running locally or remotely. Tenshu will connect to it.",
-                        ),
-                    ))
-                    .padding(20),
-                )
-                .push(
-                    Container::new(Column::new().spacing(10).width(Length::Fixed(300.0)).push(
-                        text(format!(
-                            "Tenshu will download and configure a pruned Bitcoin node \
-                        on your computer (~{} GB of disk space required).",
-                            disk_gb
-                        )),
-                    ))
-                    .padding(20),
-                );
-            let button_row = Row::new()
-                .spacing(20)
-                .align_y(Alignment::End)
-                .push(
-                    Container::new(
-                        Column::new()
-                            .width(Length::Fixed(300.0))
-                            .align_x(Alignment::Center)
-                            .push(
-                                button::secondary(None, "Select")
-                                    .width(Length::Fixed(250.0))
-                                    .on_press(Message::SelectBitcoindType(
-                                        message::SelectBitcoindTypeMsg::UseExternal(true),
-                                    )),
-                            ),
-                    )
-                    .padding(20),
-                )
-                .push(
-                    Container::new(
-                        Column::new()
-                            .width(Length::Fixed(300.0))
-                            .align_x(Alignment::Center)
-                            .push(
-                                button::secondary(None, "Select")
-                                    .width(Length::Fixed(250.0))
-                                    .on_press(Message::SelectBitcoindType(
-                                        message::SelectBitcoindTypeMsg::UseExternal(false),
-                                    )),
-                            ),
-                    )
-                    .padding(20),
-                );
-            Column::new()
-                .spacing(10)
-                .push(header_row)
-                .push(description_row)
-                .push(button_row)
+    let content: Column<'a, Message> = if network == bitcoin::Network::Regtest
+        || !connect_authenticated
+    {
+        // A vertical choice list fits the compact installer viewport and
+        // keeps each description next to the action it explains.
+        let local_description = if network == bitcoin::Network::Regtest {
+            "Tenshu will install a pruned node on your computer. No local node required beforehand."
+                .to_owned()
         } else {
-            // Connect authenticated: opinionated default card (Connect + optional node)
-            // plus a collapsible Advanced section for power users.
-            let node_description = if install_node {
-                let disk_gb = (prune_default_mb as f64 / 1024.0).round() as u32;
-                format!(
-                    "Tenshu will download and configure a pruned {} node \
-                (~{} GB of disk space required). \
-                Once synced, your Vault will automatically switch to your local node.",
-                    node_flavor.display_name(),
+            let disk_gb = (prune_default_mb as f64 / 1024.0).round() as u32;
+            format!(
+                    "Tenshu will download and configure a pruned Bitcoin node on your computer (~{} GB of disk space required).",
                     disk_gb
                 )
-            } else {
-                "Your Vault will use COINCUBE | Connect as its only Bitcoin backend.".to_string()
-            };
-
-            let default_col = Column::new()
-                .spacing(20)
-                .max_width(620)
-                .push(text("Start with COINCUBE | Connect").bold())
-                .push(text(
-                    "Your Vault will use our hosted Esplora server immediately \
-                    (backed by Bitcoin Knots). No setup required.",
-                ))
-                .push(
-                    checkbox(install_node)
-                        .label("Also install a pruned Bitcoin node on my device")
-                        .on_toggle(|_| {
-                            Message::SelectBitcoindType(
-                                message::SelectBitcoindTypeMsg::ToggleInstallNode,
-                            )
-                        }),
-                );
-
-            let default_col = if install_node {
-                default_col.push(node_flavor_selector(
-                    node_flavor,
-                    existing_flavor,
-                    |flavor| {
-                        Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::SelectFlavor(
-                            flavor,
-                        ))
-                    },
-                ))
-            } else {
-                default_col
-            };
-
-            let default_card = Container::new(default_col.push(text(node_description)).push(
-                button::primary(None, "Continue").on_press(Message::SelectBitcoindType(
-                    message::SelectBitcoindTypeMsg::ContinueWithConnect,
-                )),
+        };
+        Column::new()
+            .spacing(12)
+            .max_width(620)
+            .push(node_option_card(
+                "I already have a node",
+                "Connect Tenshu to a Bitcoin node already running locally or remotely.",
+                message::SelectBitcoindTypeMsg::UseExternal(true),
             ))
-            .padding(30);
+            .push(node_option_card(
+                "Install a local pruned node",
+                local_description,
+                message::SelectBitcoindTypeMsg::UseExternal(false),
+            ))
+    } else {
+        // Connect authenticated: opinionated default card (Connect + optional node)
+        // plus a collapsible Advanced section for power users.
+        let node_description = if install_node {
+            let disk_gb = (prune_default_mb as f64 / 1024.0).round() as u32;
+            format!(
+                "Tenshu will download and configure a pruned {} node \
+                (~{} GB of disk space required). \
+                Once synced, your Vault will automatically switch to your local node.",
+                node_flavor.display_name(),
+                disk_gb
+            )
+        } else {
+            "Your Vault will use COINCUBE | Connect as its only Bitcoin backend.".to_string()
+        };
 
-            let toggle_label = if show_advanced {
-                "▾  Advanced options"
-            } else {
-                "▸  Advanced options"
-            };
-            let advanced_toggle = button::transparent(None, toggle_label).on_press(
-                Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::ToggleAdvanced),
+        let default_col = Column::new()
+            .spacing(20)
+            .max_width(620)
+            .push(text("Start with COINCUBE | Connect").bold())
+            .push(text(
+                "Your Vault will use our hosted Esplora server immediately \
+                    (backed by Bitcoin Knots). No setup required.",
+            ))
+            .push(
+                checkbox(install_node)
+                    .label("Also install a pruned Bitcoin node on my device")
+                    .on_toggle(|_| {
+                        Message::SelectBitcoindType(
+                            message::SelectBitcoindTypeMsg::ToggleInstallNode,
+                        )
+                    }),
             );
 
-            let mut col = Column::new()
-                .spacing(30)
-                .push(default_card)
-                .push(advanced_toggle);
-
-            if show_advanced {
-                let adv_header_row = Row::new()
-                    .spacing(20)
-                    .align_y(Alignment::Start)
-                    .push(
-                        Container::new(
-                            Column::new()
-                                .spacing(10)
-                                .width(Length::Fixed(220.0))
-                                .push(text("I already have a node").bold()),
-                        )
-                        .padding(20),
-                    )
-                    .push(
-                        Container::new(
-                            Column::new()
-                                .spacing(10)
-                                .width(Length::Fixed(220.0))
-                                .push(text("Install a node only").bold()),
-                        )
-                        .padding(20),
-                    )
-                    .push(
-                        Container::new(
-                            Column::new()
-                                .spacing(10)
-                                .width(Length::Fixed(220.0))
-                                .push(text("COINCUBE | Connect only").bold()),
-                        )
-                        .padding(20),
-                    );
-
-                let adv_desc_row = Row::new()
-                    .spacing(20)
-                    .align_y(Alignment::Start)
-                    .push(
-                        Container::new(Column::new().spacing(10).width(Length::Fixed(220.0)).push(
-                            text(
-                                "Select this option if you already have a Bitcoin node \
-                                running locally or remotely. Tenshu will connect to it.",
-                            ),
-                        ))
-                        .padding(20),
-                    )
-                    .push(
-                        Container::new(Column::new().spacing(10).width(Length::Fixed(220.0)).push(
-                            text(
-                                "Tenshu installs a pruned node on your computer \
-                                without COINCUBE | Connect as a fallback.",
-                            ),
-                        ))
-                        .padding(20),
-                    )
-                    .push(
-                        Container::new(Column::new().spacing(10).width(Length::Fixed(220.0)).push(
-                            text(
-                                "Use COINCUBE | Connect to access our Esplora. \
-                                No local node required.",
-                            ),
-                        ))
-                        .padding(20),
-                    );
-
-                let adv_button_row = Row::new()
-                    .spacing(20)
-                    .align_y(Alignment::End)
-                    .push(
-                        Container::new(
-                            Column::new()
-                                .width(Length::Fixed(220.0))
-                                .align_x(Alignment::Center)
-                                .push(
-                                    button::secondary(None, "Select")
-                                        .width(Length::Fixed(200.0))
-                                        .on_press(Message::SelectBitcoindType(
-                                            message::SelectBitcoindTypeMsg::UseExternal(true),
-                                        )),
-                                ),
-                        )
-                        .padding(20),
-                    )
-                    .push(
-                        Container::new(
-                            Column::new()
-                                .width(Length::Fixed(220.0))
-                                .align_x(Alignment::Center)
-                                .push(
-                                    button::secondary(None, "Select")
-                                        .width(Length::Fixed(200.0))
-                                        .on_press(Message::SelectBitcoindType(
-                                            message::SelectBitcoindTypeMsg::UseExternal(false),
-                                        )),
-                                ),
-                        )
-                        .padding(20),
-                    )
-                    .push(
-                        Container::new(
-                            Column::new()
-                                .width(Length::Fixed(220.0))
-                                .align_x(Alignment::Center)
-                                .push(
-                                    button::secondary(None, "Select")
-                                        .width(Length::Fixed(200.0))
-                                        .on_press(Message::SelectBitcoindType(
-                                            message::SelectBitcoindTypeMsg::UseConnect,
-                                        )),
-                                ),
-                        )
-                        .padding(20),
-                    );
-
-                col = col
-                    .push(adv_header_row)
-                    .push(adv_desc_row)
-                    .push(adv_button_row);
-            }
-
-            col
+        let default_col = if install_node {
+            default_col.push(node_flavor_selector(
+                node_flavor,
+                existing_flavor,
+                |flavor| {
+                    Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::SelectFlavor(
+                        flavor,
+                    ))
+                },
+            ))
+        } else {
+            default_col
         };
+
+        let default_card = Container::new(default_col.push(text(node_description)).push(
+            button::primary(None, "Continue").on_press(Message::SelectBitcoindType(
+                message::SelectBitcoindTypeMsg::ContinueWithConnect,
+            )),
+        ))
+        .padding(30);
+
+        let toggle_label = if show_advanced {
+            "▾  Advanced options"
+        } else {
+            "▸  Advanced options"
+        };
+        let advanced_toggle = button::transparent(None, toggle_label).on_press(
+            Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::ToggleAdvanced),
+        );
+
+        let mut col = Column::new()
+            .spacing(30)
+            .push(default_card)
+            .push(advanced_toggle);
+
+        if show_advanced {
+            col = col
+                    .push(node_option_card(
+                        "I already have a node",
+                        "Connect Tenshu to a Bitcoin node already running locally or remotely.",
+                        message::SelectBitcoindTypeMsg::UseExternal(true),
+                    ))
+                    .push(node_option_card(
+                        "Install a node only",
+                        "Tenshu installs a pruned node on your computer without COINCUBE | Connect as a fallback.",
+                        message::SelectBitcoindTypeMsg::UseExternal(false),
+                    ))
+                    .push(node_option_card(
+                        "COINCUBE | Connect only",
+                        "Use COINCUBE | Connect to access our Esplora. No local node required.",
+                        message::SelectBitcoindTypeMsg::UseConnect,
+                    ));
+        }
+
+        col
+    };
 
     layout(
         progress,
