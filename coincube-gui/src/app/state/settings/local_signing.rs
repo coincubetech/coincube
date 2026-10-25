@@ -157,6 +157,8 @@ pub struct LocalSigningState {
     /// Says which phones removed this desktop since the panel opened, so a
     /// row that vanishes on its own is explained.
     pub unpaired_notice: Option<String>,
+    /// Fingerprint of the phone whose local pairing is awaiting review.
+    pub pending_remove_phone: Option<String>,
 }
 
 impl Default for LocalSigningState {
@@ -182,6 +184,7 @@ impl Default for LocalSigningState {
             wallet_chain: None,
             sync_in_flight: false,
             unpaired_notice: None,
+            pending_remove_phone: None,
         }
     }
 }
@@ -880,7 +883,27 @@ impl State for LocalSigningState {
                 self.apply_pairing_completed(id, res, &cache.datadir_path);
                 Task::none()
             }
+            LocalSigningMessage::ReviewRemovePhone(fp8) => {
+                self.pending_remove_phone = self
+                    .phones
+                    .phones
+                    .iter()
+                    .find(|phone| {
+                        crate::phone_signer::identity::pin_hex8(&phone.cert_pin) == fp8
+                            && Some(phone.vault_fingerprint) == self.wallet_fingerprint
+                    })
+                    .map(|_| fp8);
+                Task::none()
+            }
+            LocalSigningMessage::CancelRemovePhone => {
+                self.pending_remove_phone = None;
+                Task::none()
+            }
             LocalSigningMessage::RemovePhone(fp8) => {
+                if self.pending_remove_phone.as_deref() != Some(fp8.as_str()) {
+                    return Task::none();
+                }
+                self.pending_remove_phone = None;
                 self.apply_remove_phone(&cache.datadir_path, &fp8);
                 // Tell the phone now if it's reachable.
                 self.start_sync(&cache.datadir_path)
@@ -933,6 +956,7 @@ impl State for LocalSigningState {
         _daemon: Option<Arc<dyn Daemon + Sync + Send>>,
         wallet: Option<Arc<Wallet>>,
     ) -> Task<Message> {
+        self.pending_remove_phone = None;
         if let Some(w) = wallet.as_ref() {
             self.wallet = Some(w.clone());
             self.apply_wallet_update(w);

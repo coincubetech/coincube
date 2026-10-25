@@ -194,6 +194,7 @@ pub struct ImportExportSettingsState {
     #[allow(dead_code)] // Reserved for future error handling
     warning: Option<Error>,
     modal: Option<VaultExportModal>,
+    plaintext_export_review: bool,
     wallet: Arc<Wallet>,
     config: Arc<Config>,
 }
@@ -203,6 +204,7 @@ impl ImportExportSettingsState {
         Self {
             warning: None,
             modal: None,
+            plaintext_export_review: false,
             wallet,
             config,
         }
@@ -221,6 +223,16 @@ impl State for ImportExportSettingsState {
     fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
         let content =
             view::vault::settings::import_export(menu, cache, self.wallet.supports_inheritance());
+        if self.plaintext_export_review {
+            return coincube_ui::widget::modal::Modal::new(
+                content,
+                view::vault::settings::plaintext_export_review(),
+            )
+            .on_blur(Some(view::Message::Settings(
+                view::SettingsMessage::CancelPlaintextDescriptorExport,
+            )))
+            .into();
+        }
         if let Some(modal) = &self.modal {
             modal.view(content)
         } else {
@@ -252,6 +264,19 @@ impl State for ImportExportSettingsState {
             return Task::none();
         };
         match message {
+            Message::View(view::Message::Settings(
+                view::SettingsMessage::ReviewPlaintextDescriptorExport,
+            )) => {
+                self.plaintext_export_review =
+                    self.modal.is_none() && self.wallet.inheritance_descriptor().is_some();
+                Task::none()
+            }
+            Message::View(view::Message::Settings(
+                view::SettingsMessage::CancelPlaintextDescriptorExport,
+            )) => {
+                self.plaintext_export_review = false;
+                Task::none()
+            }
             Message::View(view::Message::ImportExport(ImportExportMessage::Close)) => {
                 self.modal = None;
             }
@@ -293,7 +318,8 @@ impl State for ImportExportSettingsState {
             Message::View(view::Message::Settings(
                 view::SettingsMessage::ExportPlaintextDescriptor,
             )) => {
-                if self.modal.is_none() {
+                if self.plaintext_export_review && self.modal.is_none() {
+                    self.plaintext_export_review = false;
                     let Some(descriptor) = self.wallet.inheritance_descriptor().cloned() else {
                         return Task::none();
                     };

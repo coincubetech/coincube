@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::{container, pick_list, rule, Column, Toggler};
+use iced::widget::{container, pick_list, Column, Toggler};
 use iced::{
     alignment,
     widget::{radio, scrollable, tooltip as iced_tooltip, Space},
@@ -129,6 +129,9 @@ pub fn bitcoind_settings<'a>(
         Column::new()
             .spacing(20)
             .push(header)
+            .push(p1_regular(
+                "Review the active Bitcoin backend and sync status before changing node settings. Backend switches and rescans require an explicit action.",
+            ))
             .push(Column::with_children(settings).spacing(20)),
     )
 }
@@ -138,14 +141,11 @@ pub fn import_export<'a>(
     cache: &'a Cache,
     supports_inheritance: bool,
 ) -> Element<'a, Message> {
-    let header = header("Import/Export", SettingsMessage::ImportExportSection);
+    let header = header("Data & exports", SettingsMessage::ImportExportSection);
 
-    let description = Row::new()
-        .push(Space::new().width(30))
-        .push(text(
-            "A collection of the export and import functions present in Tenshu.",
-        ))
-        .push(Space::new().width(Length::Fill));
+    let description = p1_regular(
+        "Backups, wallet files, and records serve different purposes. Records do not replace recovery material.",
+    );
 
     // Nudge to Cube → Settings → General, where the Recovery Kit card
     // lives. Can't fire `Start(Create)` here: the wizard is only
@@ -154,9 +154,8 @@ pub fn import_export<'a>(
     // unrendered panel and the state persists into the next General
     // visit.
     let backup_to_connect = export_section(
-        "Connect Recovery Kit",
-        "Back up your Wallet Descriptor (and Master Seed Phrase) to your Connect account. \
-         Encrypted on-device with a password you choose.",
+        "Recovery Kit",
+        "Opens Cube settings. Find Recovery Kit under Backup & protection.",
         icon::backup_icon(),
         Message::Menu(Menu::Cube(CubeSubMenu::Settings(
             CubeSettingsOption::General,
@@ -171,15 +170,15 @@ pub fn import_export<'a>(
     );
 
     let export_descriptor = export_section(
-        "Descriptor only - plain-text",
-        "Plain-text (not encrypted) descriptor file only, to use with other wallets.",
+        "Plaintext descriptor",
+        "Unencrypted wallet descriptor for use with other wallets. Anyone with this file can see your wallet policy and public keys.",
         icon::backup_icon(),
-        Message::Settings(SettingsMessage::ExportPlaintextDescriptor),
+        Message::Settings(SettingsMessage::ReviewPlaintextDescriptorExport),
     );
 
     let export_transactions = export_section(
-        "Transactions table",
-        ".CSV file of past transactions, for accounting purposes.",
+        "Transaction table",
+        "CSV file of past transactions for your records.",
         icon::backup_icon(),
         Message::Settings(SettingsMessage::ExportTransactions),
     );
@@ -193,25 +192,24 @@ pub fn import_export<'a>(
 
     let export_wallet = export_section(
         "Export wallet",
-        "File (not encrypted) with wallet info useful to sync labels and data on other devices.",
+        "Unencrypted wallet file for transferring wallet information to another device.",
         icon::backup_icon(),
         Message::Settings(SettingsMessage::ExportWallet),
     );
 
     let import_wallet = export_section(
         "Import wallet",
-        "Upload a backup file to update wallet info.",
+        "Choose a wallet file to update wallet information on this device.",
         icon::restore_icon(),
         Message::Settings(SettingsMessage::ImportWallet),
     );
 
-    let separator = Row::new()
-        .push(Space::new().width(30))
-        .push(text("Other formats"))
-        .push(Space::new().width(15))
-        .push(rule::horizontal(2))
-        .push(Space::new().width(30))
-        .align_y(Vertical::Center);
+    let group = |title: &'static str, note: &'static str| {
+        Column::new()
+            .spacing(5)
+            .push(h4_bold(title))
+            .push(caption(note))
+    };
 
     dashboard(
         menu,
@@ -220,16 +218,50 @@ pub fn import_export<'a>(
             .spacing(20)
             .push(header)
             .push(description)
+            .push(group(
+                "Protection material",
+                "Store recovery material securely. Encrypted export still needs a signing device or xpub to decrypt.",
+            ))
             .push(backup_to_connect)
             .push_maybe(supports_inheritance.then_some(export_encrypted_descriptor))
+            .push(group(
+                "Wallet portability",
+                "Move wallet information between devices; inspect unencrypted files before sharing.",
+            ))
             .push_maybe(supports_inheritance.then_some(export_wallet))
             .push_maybe(supports_inheritance.then_some(import_wallet))
-            .push(separator)
+            .push_maybe(supports_inheritance.then_some(export_descriptor))
+            .push(group("Records", "Labels and transactions are records, not backups."))
             .push(export_labels)
             .push(export_transactions)
-            .push_maybe(supports_inheritance.then_some(export_descriptor))
             .width(Length::Fill),
     )
+}
+
+pub fn plaintext_export_review<'a>() -> Element<'a, Message> {
+    card::modal(
+        Column::new()
+            .spacing(15)
+            .push(h4_bold("Export a plaintext descriptor?"))
+            .push(text(
+                "This file is not encrypted. It reveals your wallet policy and public keys. Choose a private location in the file picker and share it only with an app you trust.",
+            ))
+            .push(
+                Row::new()
+                    .spacing(10)
+                    .push(
+                        button::secondary(None, "Cancel").on_press(Message::Settings(
+                            SettingsMessage::CancelPlaintextDescriptorExport,
+                        )),
+                    )
+                    .push(
+                        button::primary(None, "Choose export location…").on_press(
+                            Message::Settings(SettingsMessage::ExportPlaintextDescriptor),
+                        ),
+                    ),
+            ),
+    )
+    .into()
 }
 
 pub fn remote_backend_section<'a>(
@@ -1031,6 +1063,8 @@ pub fn rescan<'a>(
 ) -> Element<'a, SettingsEditMessage> {
     card::simple(Container::new(
         Column::new()
+            .push(h4_bold("Maintenance"))
+            .push(caption("A rescan rebuilds wallet history. It does not repair Connect sign-in or node connectivity."))
             .push(
                 Row::new()
                     .push(badge::badge(icon::block_icon()))
@@ -1163,17 +1197,36 @@ pub fn wallet_settings<'a>(
     processing: bool,
     updated: bool,
     hardware_registration_allowed: bool,
+    expert_open: bool,
 ) -> Element<'a, Message> {
     let vault = descriptor.as_vault();
-    let descriptor_text = match descriptor {
-        WalletDescriptor::Vault(vault) => vault.to_string(),
-        WalletDescriptor::Imported(_) => format!(
-            "Receive: {}\nChange: {}",
-            descriptor.receive_descriptor(),
-            descriptor.change_descriptor()
-        ),
-    };
-    let header = header("Wallet", SettingsMessage::EditWalletSettings);
+    let header = header("Wallet & signers", SettingsMessage::EditWalletSettings);
+    let identity = card::simple(
+        Column::new()
+            .spacing(8)
+            .push(h4_bold("Identity"))
+            .push(text(if vault.is_some() {
+                "Vault"
+            } else {
+                "Imported wallet"
+            }))
+            .push(text(format!("Network: {}", cache.network)))
+            .push(text(format!(
+                "{}: {}",
+                if vault.is_some() {
+                    "Vault ID"
+                } else {
+                    "Wallet ID"
+                },
+                vault_id
+            )))
+            .push_maybe(vault.is_none().then(|| {
+                caption(
+                    "Imported wallet · local signing keys are not available from this wallet file.",
+                )
+            })),
+    )
+    .width(Length::Fill);
     let r = Row::new().spacing(10).align_y(Vertical::Center)
         .push(icon::backup_icon())
         .push(text("Back up encrypted descriptor"))
@@ -1197,46 +1250,18 @@ pub fn wallet_settings<'a>(
 
     let descr = card::simple(
         Column::new()
-            .push(text("Wallet descriptor:").bold())
-            .push(
-                scrollable(
-                    Column::new()
-                        .push(text(descriptor_text.clone()).small())
-                        .push(Space::new().height(Length::Fixed(5.0))),
-                )
-                .direction(scrollable::Direction::Horizontal(
-                    scrollable::Scrollbar::new().width(5).scroller_width(5),
-                )),
-            )
-            .push(
-                Row::new()
-                    .spacing(8)
-                    .align_y(Alignment::Center)
-                    .push(text(if vault.is_some() { "Vault ID:" } else { "Wallet ID:" }).bold())
-                    .push(text(vault_id.to_string()))
-                    .push(iced_tooltip::Tooltip::new(
-                        icon::tooltip_icon(),
-                        Container::new(text(
-                            if vault.is_some() {
-                                "A stable 4-byte identifier derived from this Vault's descriptor. Used to scope paired local signers."
-                            } else {
-                                "A short display identifier for this imported wallet. Its full chain-bound receive/change identity is used for storage."
-                            },
-                        ))
-                        .padding(8)
-                        .max_width(320.0)
-                        .style(theme::card::simple),
-                        iced_tooltip::Position::Bottom,
-                    )),
-            )
+            .push(h4_bold("Expert · descriptor and hardware"))
+            .push(text(
+                "Descriptor hidden · copying exposes wallet policy and public keys to other apps.",
+            ))
             .push(
                 Row::new()
                     .spacing(10)
                     .width(Length::Fill)
                     .push_maybe(vault.map(|_| back_up_encrypted_descriptor))
                     .push(
-                        button::secondary(Some(icon::clipboard_icon()), "Copy")
-                            .on_press(Message::Clipboard(descriptor_text)),
+                        button::secondary(Some(icon::clipboard_icon()), "Review copy…")
+                            .on_press(Message::Settings(SettingsMessage::ReviewDescriptorCopy)),
                     )
                     .push_maybe(hardware_registration_allowed.then(|| {
                         button::secondary(Some(icon::chip_icon()), "Register on hardware device")
@@ -1252,6 +1277,7 @@ pub fn wallet_settings<'a>(
 
     let aliases = card::simple(
         Column::new()
+            .push(h4_bold("Names and signer aliases"))
             .push(text("Wallet alias:").bold())
             .push(
                 form::Form::new("Alias", wallet_alias, move |msg| {
@@ -1293,16 +1319,18 @@ pub fn wallet_settings<'a>(
                             Row::new()
                                 .align_y(Alignment::Center)
                                 .push(icon::square_check_icon().style(theme::text::success))
-                                .push(text("Updated").style(theme::text::success)),
+                                .push(text("Names saved").style(theme::text::success)),
                         )
                     } else {
                         None
                     })
-                    .push(if !processing && wallet_alias.valid {
-                        button::secondary(None, "Update")
+                    .push(if processing {
+                        button::secondary(None, "Saving names…")
+                    } else if wallet_alias.valid {
+                        button::secondary(None, "Save names")
                             .on_press(Message::Settings(SettingsMessage::Save))
                     } else {
-                        button::secondary(None, "Updating")
+                        button::secondary(None, "Save names")
                     }),
             )
             .spacing(10),
@@ -1315,13 +1343,54 @@ pub fn wallet_settings<'a>(
         Column::new()
             .spacing(20)
             .push(header)
-            .push(descr)
+            .push(identity)
             .push_maybe(vault.map(|vault| {
-                card::simple(display_policy(vault.policy(), keys_aliases, provider_keys))
-                    .width(Length::Fill)
+                card::simple(
+                    Column::new()
+                        .spacing(10)
+                        .push(h4_bold("Policy"))
+                        .push(display_policy(vault.policy(), keys_aliases, provider_keys)),
+                )
+                .width(Length::Fill)
             }))
-            .push(aliases),
+            .push(aliases)
+            .push(
+                button::secondary(
+                    None,
+                    if expert_open {
+                        "Hide Expert · descriptor and hardware"
+                    } else {
+                        "Show Expert · descriptor and hardware"
+                    },
+                )
+                .on_press(Message::Settings(SettingsMessage::ToggleWalletExpert)),
+            )
+            .push_maybe(expert_open.then_some(descr)),
     )
+}
+
+pub fn descriptor_copy_review<'a>() -> Element<'a, Message> {
+    card::modal(
+        Column::new()
+            .spacing(15)
+            .push(h4_bold("Copy wallet descriptor?"))
+            .push(text(
+                "The descriptor reveals this wallet's policy and public keys. Other apps may read the clipboard. Copy only if you trust where you will paste it.",
+            ))
+            .push(
+                Row::new()
+                    .spacing(10)
+                    .push(
+                        button::secondary(None, "Cancel")
+                            .on_press(Message::Settings(SettingsMessage::CancelDescriptorCopy)),
+                    )
+                    .push(
+                        button::primary(None, "Copy descriptor")
+                            .on_press(Message::Settings(SettingsMessage::ConfirmDescriptorCopy)),
+                    ),
+            ),
+    )
+    .into()
 }
 
 fn display_policy<'a>(
@@ -1538,7 +1607,7 @@ pub fn node_backend_status<'a>(
     let catching_up =
         !initial_syncing && local_heights.is_some_and(|(blocks, headers)| blocks < headers);
     let still_syncing = initial_syncing || catching_up;
-    let mut col = Column::new().spacing(15);
+    let mut col = Column::new().spacing(15).push(h4_bold("Backend & sync"));
 
     col = col.push(
         card::simple(Container::new(
