@@ -247,16 +247,30 @@ fn waiting_body<'a>(
         "Pairing offer expired.".to_string()
     };
 
+    let countdown_label = if remaining > 0 {
+        text(countdown).style(theme::text::secondary)
+    } else {
+        text(countdown).style(theme::text::error)
+    };
+    let scan_guidance = if remaining > 0 {
+        format!(
+            "Scan this QR with the Keychain app on phone {} ({}).",
+            phone.cert_fp8, phone.addr
+        )
+    } else {
+        "This offer can no longer be scanned. Go Back and start a fresh pairing offer.".to_string()
+    };
     let mut offer_col = Column::new()
         .spacing(10)
         .align_x(Alignment::Center)
-        .push(text(countdown))
-        .push(text(format!(
-            "Scan this QR with the Keychain app on \
-             phone {} ({}).",
-            phone.cert_fp8, phone.addr,
-        )));
-    if let Some(qr) = qr {
+        .push(text("Confirm the same phone on both screens").bold())
+        .push(countdown_label)
+        .push(text(scan_guidance))
+        .push(
+            text("The offer is short-lived. Pairing does not transfer a key from this computer.")
+                .style(theme::text::secondary),
+        );
+    if let Some(qr) = qr.filter(|_| remaining > 0) {
         offer_col = offer_col.push(
             Container::new(QRCode::<coincube_ui::theme::Theme>::new(qr).cell_size(4)).padding(10),
         );

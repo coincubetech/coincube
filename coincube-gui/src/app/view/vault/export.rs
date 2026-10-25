@@ -46,20 +46,18 @@ pub fn export_modal<'a, Message: From<ImportExportMessage> + Clone + 'static>(
     } else {
         match state {
             ImportExportState::Init => "".to_string(),
-            ImportExportState::ChoosePath => {
-                "Select the path you want to export in the popup window...".into()
-            }
+            ImportExportState::ChoosePath => "Choose a location in the system file dialog…".into(),
             ImportExportState::Path(_) => "".into(),
-            ImportExportState::Started => "Starting export...".into(),
+            ImportExportState::Started => "Preparing the wallet file…".into(),
             ImportExportState::Progress(p) => format!("Progress: {}%", p.round()),
-            ImportExportState::TimedOut => "Export failed: timeout".into(),
-            ImportExportState::Aborted => "Export canceled".into(),
+            ImportExportState::TimedOut => "The operation timed out. No completion was recorded; review the destination before trying again.".into(),
+            ImportExportState::Aborted => "Operation canceled. Check the destination before trying again.".into(),
             ImportExportState::Ended => import_export_type.end_message().into(),
             ImportExportState::Closed => "".into(),
         }
     };
     let labels_btn = (
-        "Labels conflict, what do you want to do?".to_string(),
+        "Imported labels conflict with labels on this device. Overwrite replaces local labels; Ignore keeps them.".to_string(),
         Some(Container::new(
             Row::new()
                 .push(
@@ -73,7 +71,7 @@ pub fn export_modal<'a, Message: From<ImportExportMessage> + Clone + 'static>(
         )),
     );
     let aliases_btn = (
-        "Aliases conflict, what do you want to do?".to_string(),
+        "Imported signer aliases conflict with names on this device. Overwrite replaces local names; Ignore keeps them.".to_string(),
         Some(Container::new(
             Row::new()
                 .push(
@@ -105,25 +103,17 @@ pub fn export_modal<'a, Message: From<ImportExportMessage> + Clone + 'static>(
             .width(Length::Fill)
     });
 
-    let mut p = match state {
-        ImportExportState::Init => 0.0,
-        ImportExportState::ChoosePath | ImportExportState::Path(_) | ImportExportState::Started => {
-            5.0
-        }
-        ImportExportState::Progress(p) => *p,
-        ImportExportState::TimedOut
-        | ImportExportState::Aborted
-        | ImportExportState::Ended
-        | ImportExportState::Closed => 100.0,
+    // Only measured progress is shown as a percentage. A canceled or timed-out
+    // operation must never look complete merely because its dialog has ended.
+    let progress_bar_row = match state {
+        ImportExportState::Progress(p) => Some(
+            Row::new()
+                .push(Space::new().width(30))
+                .push(progress_bar(0.0..=100.0, *p))
+                .push(Space::new().width(30)),
+        ),
+        _ => None,
     };
-    // keep progress bar visible
-    if p == 0.0 {
-        p += 2.5;
-    }
-    let progress_bar_row = Row::new()
-        .push(Space::new().width(30))
-        .push(progress_bar(0.0..=100.0, p))
-        .push(Space::new().width(30));
 
     // Firmware advisory for the signer this file came from. Informational
     // only: the import has already succeeded by the time it appears.

@@ -509,7 +509,7 @@ fn assert_mounted_wallet_policy(labels: &Labels, width: u32) {
     let end = labels
         .0
         .iter()
-        .position(|(text, _)| text == "Names and signer aliases")
+        .position(|(text, _)| text == "Signers")
         .unwrap();
     let policy_labels = &labels.0[start..end];
     for required in [

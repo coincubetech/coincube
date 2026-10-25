@@ -1207,6 +1207,15 @@ pub fn wallet_settings<'a>(
             } else {
                 "Imported wallet"
             }))
+            .push(text("Wallet name").bold())
+            .push(
+                form::Form::new("Name", wallet_alias, move |msg| {
+                    Message::Settings(SettingsMessage::WalletAliasEdited(msg))
+                })
+                .warning("Please enter a shorter name")
+                .size(P1_SIZE)
+                .padding(10),
+            )
             .push(text(format!("Network: {}", cache.network)))
             .push(text(format!(
                 "{}: {}",
@@ -1274,17 +1283,8 @@ pub fn wallet_settings<'a>(
 
     let aliases = card::simple(
         Column::new()
-            .push(h4_bold("Names and signer aliases"))
-            .push(text("Wallet alias:").bold())
-            .push(
-                form::Form::new("Alias", wallet_alias, move |msg| {
-                    Message::Settings(SettingsMessage::WalletAliasEdited(msg))
-                })
-                .warning("Please enter alias that is not too long")
-                .size(P1_SIZE)
-                .padding(10),
-            )
-            .push(text("Fingerprint aliases:").bold())
+            .push(h4_bold("Signers"))
+            .push(caption("Name each signer so you can recognize it during review. Fingerprints identify the keys."))
             .push(keys_aliases.iter().fold(
                 Column::new().spacing(10),
                 |col, (fingerprint, name)| {
@@ -1346,11 +1346,38 @@ pub fn wallet_settings<'a>(
                     Column::new()
                         .spacing(10)
                         .push(h4_bold("Policy"))
-                        .push(display_policy(vault.policy(), keys_aliases, provider_keys)),
+                        .push(display_policy(vault.policy(), keys_aliases, provider_keys))
+                        .push(
+                            button::link(None, "Open recovery tools")
+                                .on_press(Message::Menu(Menu::Vault(VaultSubMenu::Recovery))),
+                        ),
                 )
                 .width(Length::Fill)
             }))
             .push(aliases)
+            .push(
+                card::simple(
+                    Column::new()
+                        .spacing(8)
+                        .push(h4_bold("Phone signing and members"))
+                        .push(text(
+                            "Pair with Keychain · Same Wi-Fi. No Connect account needed.",
+                        ))
+                        .push(if vault.is_some() {
+                            button::secondary(None, "Open Pair with Keychain").on_press(
+                                Message::Menu(Menu::Vault(VaultSubMenu::Settings(Some(
+                                    crate::app::menu::SettingsOption::LocalSigning,
+                                )))),
+                            )
+                        } else {
+                            button::secondary(None, "Pair with Keychain unavailable")
+                        })
+                        .push(caption(
+                            "Members · Available for eligible Connect Vaults when enabled.",
+                        )),
+                )
+                .width(Length::Fill),
+            )
             .push(
                 button::secondary(
                     None,
