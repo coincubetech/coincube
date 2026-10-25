@@ -18,7 +18,6 @@ use crate::app::view::message::Message;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RouteScope {
     Cube,
-    Device,
     Vault,
     Spark,
     Liquid,
@@ -26,9 +25,6 @@ enum RouteScope {
 
 fn route_scope(menu: &Menu) -> Option<RouteScope> {
     match menu {
-        Menu::Cube(CubeSubMenu::Settings(
-            CubeSettingsOption::Stats | CubeSettingsOption::About,
-        )) => Some(RouteScope::Device),
         Menu::Cube(CubeSubMenu::Settings(_)) => Some(RouteScope::Cube),
         Menu::Vault(VaultSubMenu::Settings(_)) => Some(RouteScope::Vault),
         Menu::Spark(SparkSubMenu::Settings(_)) => Some(RouteScope::Spark),
@@ -59,13 +55,6 @@ fn route_choices(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
         selected: scope == RouteScope::Cube,
         enabled: true,
     }];
-    choices.push(RouteChoice {
-        id: "tenshu.settings.route.scope.device",
-        label: "This device",
-        intent: Message::Menu(Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::About))),
-        selected: scope == RouteScope::Device,
-        enabled: true,
-    });
     if cache.has_vault || cache.has_imported_bitcoin {
         choices.push(RouteChoice {
             id: "tenshu.settings.route.scope.vault",
@@ -108,6 +97,8 @@ fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
                 (CubeSettingsOption::Recovery, "Backup & protection", "backup"),
                 (CubeSettingsOption::PaymentChecks, "Payment checks", "payment-checks"),
                 (CubeSettingsOption::DataExports, "Data & exports", "data"),
+                (CubeSettingsOption::Stats, "Download stats", "stats"),
+                (CubeSettingsOption::About, "About", "about"),
             ];
             if crate::feature_flags::CUBE_MEMBERS_UI_ENABLED {
                 sections.push((CubeSettingsOption::Members, "Members", "members"));
@@ -120,6 +111,8 @@ fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
                         "backup" => "tenshu.settings.route.cube.backup",
                         "payment-checks" => "tenshu.settings.route.cube.payment-checks",
                         "data" => "tenshu.settings.route.cube.data",
+                        "stats" => "tenshu.settings.route.cube.stats",
+                        "about" => "tenshu.settings.route.cube.about",
                         _ => "tenshu.settings.route.cube.members",
                     },
                     label,
@@ -196,24 +189,6 @@ fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
             selected: false,
             enabled: true,
         }],
-        // This base still renders device information through the existing
-        // About and Download Stats routes.
-        Some(RouteScope::Device) => vec![
-            RouteChoice {
-                id: "tenshu.settings.route.device.about",
-                label: "About",
-                intent: Message::Menu(Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::About))),
-                selected: matches!(menu, Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::About))),
-                enabled: true,
-            },
-            RouteChoice {
-                id: "tenshu.settings.route.device.stats",
-                label: "Download stats",
-                intent: Message::Menu(Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Stats))),
-                selected: matches!(menu, Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Stats))),
-                enabled: true,
-            },
-        ],
         None => Vec::new(),
     }
 }
@@ -321,5 +296,34 @@ mod tests {
         assert!(section_routes(&backup, &Cache::default())
             .iter()
             .any(|choice| choice.label == "Data & exports" && !choice.selected));
+    }
+
+    #[test]
+    fn cube_settings_has_no_device_scope_and_keeps_about_and_stats_reachable() {
+        let cache = Cache::default();
+        for (current, label) in [
+            (CubeSettingsOption::About, "About"),
+            (CubeSettingsOption::Stats, "Download stats"),
+        ] {
+            let menu = Menu::Cube(CubeSubMenu::Settings(current));
+            let scopes = route_choices(&menu, &cache);
+            assert!(!scopes
+                .iter()
+                .any(|choice| choice.label == "This device" || choice.label == "App preferences"));
+            assert!(scopes
+                .iter()
+                .any(|choice| choice.label == "Cube" && choice.selected));
+
+            let sections = section_routes(&menu, &cache);
+            assert!(sections.iter().any(|choice| {
+                choice.label == label
+                    && choice.selected
+                    && choice.enabled
+                    && matches!(choice.intent, Message::Menu(Menu::Cube(CubeSubMenu::Settings(route))) if route == current)
+            }));
+            assert!(sections
+                .iter()
+                .any(|choice| choice.label == "Data & exports"));
+        }
     }
 }
