@@ -3738,7 +3738,13 @@ mod node_management_chain_tests {
                 let target = format!("tenshu.installer.node.42.{}", suffix);
                 let messages = activate_node_action(element, &target, keyboard::Key::Named(key));
                 assert_eq!(messages.len(), 1, "{target} {key:?}: {messages:?}");
-                assert!(expected(&messages[0]), "{target} {key:?}: {messages:?}");
+                assert!(
+                    expected(&messages[0]),
+                    "{} {:?}: {:?}",
+                    target,
+                    key,
+                    messages
+                );
             }
         }
     }
