@@ -1178,7 +1178,7 @@ mod tests {
         addresses: Vec<form::Value<String>>,
         amounts: Vec<form::Value<String>>,
         labels: Vec<form::Value<String>>,
-        fiat_amount: form::Value<String>,
+        fiat_amounts: Vec<form::Value<String>>,
         converter: FiatAmountConverter,
         dust_warning: Option<String>,
         fee: Amount,
@@ -1205,7 +1205,7 @@ mod tests {
                 addresses: vec![value(ADDRESS_A, true), value(ADDRESS_B, true)],
                 amounts: vec![value("40000", true), value("20000", true)],
                 labels: vec![value("", true), value("", true)],
-                fiat_amount: value("2.50", true),
+                fiat_amounts: vec![value("20.00", true), value("10.00", true)],
                 converter: FiatAmountConverter::new(
                     50_000.0,
                     None,
@@ -1241,6 +1241,7 @@ mod tests {
         fiat: bool,
         fiat_editing: bool,
         max_selected: bool,
+        max_estimated: Option<u64>,
         insufficient: bool,
     }
 
@@ -1265,6 +1266,7 @@ mod tests {
                 fiat: false,
                 fiat_editing: false,
                 max_selected: false,
+                max_estimated: None,
                 insufficient: false,
             }
         }
@@ -1288,13 +1290,13 @@ mod tests {
                     i,
                     &fixture.addresses[address],
                     &fixture.amounts[i],
-                    s.fiat_editing.then_some(&fixture.fiat_amount),
+                    s.fiat_editing.then_some(&fixture.fiat_amounts[i]),
                     s.fiat.then_some(&fixture.converter),
                     &fixture.labels[i],
                     s.max_selected,
                     s.recovery,
                     &fixture.dust_warning,
-                    s.max_selected.then_some(Amount::from_sat(400)),
+                    s.max_estimated.map(Amount::from_sat),
                     s.unit,
                     s.insufficient,
                 )
@@ -1627,6 +1629,30 @@ mod tests {
                 .find(|(text, _)| text == label)
                 .map(|(_, bounds)| *bounds)
                 .unwrap_or_else(|| panic!("{:?} is not rendered", label))
+        }
+
+        /// Find the native unlabeled checkbox beside a coin identity in the
+        /// actual dashboard layout. Iced's checkbox has a 16px mark child and
+        /// a zero-size label child, but does not report a focus/text operation.
+        fn coin_checkbox_bounds(&self, identity: Rectangle) -> Rectangle {
+            fn find(layout: Layout<'_>, identity: Rectangle) -> Option<Rectangle> {
+                let bounds = layout.bounds();
+                let children: Vec<_> = layout.children().collect();
+                let is_coin_checkbox = children.len() == 2
+                    && (bounds.width - 16.0).abs() < 1.0
+                    && (children[0].bounds().width - 16.0).abs() < 1.0
+                    && children[1].bounds().width == 0.0
+                    && bounds.x < identity.x
+                    && identity.x - bounds.x < 40.0
+                    && bounds.y < identity.y + identity.height
+                    && bounds.y + bounds.height > identity.y;
+                if is_coin_checkbox {
+                    Some(bounds)
+                } else {
+                    children.into_iter().find_map(|child| find(child, identity))
+                }
+            }
+            find(Layout::new(&self.node), identity).expect("native coin checkbox beside identity")
         }
 
         fn click(&mut self, id: &Id) -> Vec<Message> {
@@ -2415,7 +2441,8 @@ mod tests {
                 fixture.labels = vec![value("Rent", true), value("Savings", true)];
                 fixture.coins_labels.insert(
                     fixture.coins[0].outpoint.to_string(),
-                    "Household reserve".into(),
+                    "Long-term savings for the extended household and future school expenses"
+                        .into(),
                 );
                 fixture.coins[1].block_height = None;
                 fixture.coins[2].spend_info = Some(coincubed::commands::LCSpendInfo {
@@ -2426,10 +2453,13 @@ mod tests {
             "fiat-editing" => {
                 scenario.fiat = true;
                 scenario.fiat_editing = true;
+                fixture.amounts[0] = value("5000", true);
+                fixture.fiat_amounts[0] = value("2.50", true);
             }
             "max-under-dust" => {
                 scenario.max_selected = true;
                 scenario.max_under_dust = true;
+                scenario.max_estimated = Some(400);
                 scenario.is_valid = false;
                 scenario.amount_left = None;
                 fixture.dust_warning = Some("Amount is below the dust limit".into());
@@ -2458,7 +2488,7 @@ mod tests {
             "generating" => {
                 scenario.generating = true;
             }
-            _ => panic!("unknown R07c scenario: {name}"),
+            _ => panic!("unknown R07c scenario: {}", name),
         }
         (fixture, scenario)
     }
@@ -2480,18 +2510,67 @@ mod tests {
                 for outer in [COMPACT, WIDE] {
                     let mut harness = Harness::new(compose(&fixture, &scenario), outer);
                     let probe = harness.probe();
-                    assert!(probe.contains("Recipient 1"), "{name} {appearance}");
+                    assert!(probe.contains("Recipient 1"), "{} {}", name, appearance);
                     assert!(probe.contains("Address") && probe.contains("Description"));
                     assert_eq!(probe.contains("Remove"), name != "recovery");
                     assert_eq!(probe.contains("Recipient 2"), name == "batch-btc");
                     assert_eq!(probe.contains("Amount BTC"), name == "batch-btc");
                     assert_eq!(probe.contains("Amount (sats)"), name != "batch-btc");
                     assert_eq!(probe.contains("USD"), name == "fiat-editing");
+                    if name == "fiat-editing" {
+                        assert!(
+                            probe
+                                .inputs()
+                                .windows(2)
+                                .any(|pair| pair == ["5000", "2.50"]),
+                            "fiat preview must pair 5,000 sats with USD 2.50"
+                        );
+                    }
+                    if name == "recovery" {
+                        assert!(!probe.contains("MAX"));
+                    }
+                    if outer == COMPACT && (name == "coin-mix" || name == "batch-btc") {
+                        let label = probe.text.iter().find(|(text, _)| text ==
+                            "Long-term savings for the extended household and future school expenses")
+                            .map(|(_, bounds)| *bounds).expect("long coin label");
+                        let amount = probe
+                            .text
+                            .iter()
+                            .find(|(text, bounds)| {
+                                text == "50 000"
+                                    && bounds.y < label.y + label.height
+                                    && bounds.y + bounds.height > label.y
+                            })
+                            .map(|(_, bounds)| *bounds)
+                            .expect("same-row amount");
+                        let checkbox = harness.coin_checkbox_bounds(label);
+                        assert!(
+                            checkbox.x >= 0.0
+                                && checkbox.x + checkbox.width < label.x
+                                && checkbox.y < label.y + label.height
+                                && checkbox.y + checkbox.height > label.y,
+                            "actual compact coin checkbox {:?} left of {:?}",
+                            checkbox,
+                            label
+                        );
+                        assert!(
+                            label.width > 0.0
+                                && label.height > 0.0
+                                && label.x + label.width <= amount.x
+                                && amount.x + amount.width <= outer.0 as f32,
+                            "{} compact {:?} label {:?}, amount {:?}",
+                            name,
+                            scenario.unit,
+                            label,
+                            amount
+                        );
+                    }
                     assert!(
                         probe.scrollables.iter().any(|(height, content)| {
                             *height <= 300.5 && (name != "coin-mix" || content > height)
                         }),
-                        "{name}: expected the native coin scroll"
+                        "{}: expected the native coin scroll",
+                        name
                     );
                     harness.capture_r07c(name, appearance, &theme);
                 }
@@ -2509,7 +2588,8 @@ mod tests {
     fn r07c_native_second_recipient_fields_keep_existing_edit_payloads() {
         use keyboard::key::Named;
         let mut fixture = Fixture::new(ThemeMode::Dark, 3);
-        fixture.amounts[1] = value("0.0002", true);
+        fixture.amounts = vec![value("0.0004", true), value("0.00005", true)];
+        fixture.fiat_amounts[1] = value("2.50", true);
         let base = Scenario {
             recipients: 2,
             unit: BitcoinDisplayUnit::BTC,
@@ -2519,7 +2599,7 @@ mod tests {
         let fields = [
             (ADDRESS_B, ' ', "address", ADDRESS_B.to_string()),
             ("Payment label", 'x', "label", "x".to_string()),
-            ("0.0002", '5', "amount", "0.00025".to_string()),
+            ("0.00005", '5', "amount", "0.000055".to_string()),
         ];
         for (existing, typed, field, expected) in fields {
             let bounds = harness
@@ -2536,7 +2616,9 @@ mod tests {
             assert!(
                 matches!(messages.as_slice(), [Message::CreateSpend(CreateSpendMessage::RecipientEdited(1, key, value))]
                 if *key == field && value == &expected),
-                "{field}: {messages:?}"
+                "{}: {:?}",
+                field,
+                messages
             );
         }
         let sats_fixture = Fixture::new(ThemeMode::Dark, 3);
@@ -2558,7 +2640,8 @@ mod tests {
         assert!(
             matches!(messages.as_slice(), [Message::CreateSpend(CreateSpendMessage::RecipientEdited(1, "amount", value))]
             if value == "20000"),
-            "{messages:?}"
+            "{:?}",
+            messages
         );
         let fiat = Scenario {
             fiat: true,
@@ -2580,7 +2663,8 @@ mod tests {
         assert!(
             matches!(messages.as_slice(), [Message::CreateSpend(CreateSpendMessage::RecipientFiatAmountEdited(1, value, _))]
             if value == "2.50"),
-            "{messages:?}"
+            "{:?}",
+            messages
         );
     }
 
@@ -2676,18 +2760,16 @@ mod tests {
             .find(|(text, _)| text == &fallback)
             .map(|(_, bounds)| *bounds)
             .unwrap();
-        let checkbox = iced::Point::new(
-            fallback_bounds.x - 23.0,
-            fallback_bounds.y + fallback_bounds.height / 2.0,
-        );
-        let mut messages = harness.press_at(checkbox);
-        messages.extend(harness.release_at(checkbox));
+        let checkbox = harness.coin_checkbox_bounds(fallback_bounds);
+        let mut messages = harness.press_at(checkbox.center());
+        messages.extend(harness.release_at(checkbox.center()));
         assert!(
             matches!(
                 messages.as_slice(),
                 [Message::CreateSpend(CreateSpendMessage::SelectCoin(0))]
             ),
-            "first reordered row checkbox: {messages:?}"
+            "first reordered row checkbox: {:?}",
+            messages
         );
         let remove = harness
             .probe()
@@ -2703,7 +2785,118 @@ mod tests {
                 removed.as_slice(),
                 [Message::CreateSpend(CreateSpendMessage::DeleteRecipient(1))]
             ),
-            "second recipient Remove: {removed:?}"
+            "second recipient Remove: {:?}",
+            removed
+        );
+    }
+
+    #[test]
+    fn r07c_max_recovery_and_generating_keep_native_control_truth() {
+        use keyboard::key::Named;
+        let mut fixture = Fixture::new(ThemeMode::Light, 3);
+        fixture.dust_warning = Some("Amount is below the dust limit".into());
+        fixture.amounts[0] = value("", true);
+        fixture.fiat_amounts[0] = value("2.50", true);
+        let max = Scenario {
+            max_selected: true,
+            max_estimated: Some(400),
+            ..Scenario::valid_send()
+        };
+        let mut harness = Harness::new(compose(&fixture, &max), TALL);
+        let probe = harness.probe();
+        assert!(probe.contains("MAX") && probe.contains("400"));
+        assert_eq!(probe.inputs().len(), 3, "MAX amount is read-only");
+        let max_bounds = harness.label_bounds("MAX");
+        let clicked = harness.click_at(max_bounds);
+        assert!(
+            matches!(
+                clicked.as_slice(),
+                [Message::CreateSpend(
+                    CreateSpendMessage::SendMaxToRecipient(0)
+                )]
+            ),
+            "MAX pointer: {:?}",
+            clicked
+        );
+
+        let unknown = Scenario {
+            fiat: true,
+            max_estimated: None,
+            ..max.clone()
+        };
+        let mut harness = Harness::new(compose(&fixture, &unknown), TALL);
+        let probe = harness.probe();
+        assert!(probe.contains("MAX"));
+        assert_eq!(
+            probe.inputs().len(),
+            3,
+            "unknown MAX has no editable amount or fiat input"
+        );
+        assert!(
+            !probe.contains("2.50"),
+            "unknown MAX has no derived fiat value"
+        );
+
+        let recovery = Scenario {
+            recovery: true,
+            ..Scenario::valid_send()
+        };
+        let mut harness = Harness::new(compose(&fixture, &recovery), TALL);
+        let probe = harness.probe();
+        assert!(!probe.contains("MAX") && !probe.contains("Remove"));
+        assert_eq!(
+            probe.inputs().len(),
+            4,
+            "recovery retains native amount input"
+        );
+
+        let generating = Scenario {
+            generating: true,
+            ..Scenario::valid_send()
+        };
+        let mut harness = Harness::new(compose(&fixture, &generating), TALL);
+        assert!(!harness.probe().has_focus(&Id::new(PREPARE_ID)));
+        let address = harness
+            .probe()
+            .focus
+            .iter()
+            .find(|entry| entry.input.as_deref() == Some(ADDRESS_A))
+            .map(|entry| entry.bounds)
+            .unwrap();
+        harness.click_at(address);
+        harness.key(Named::End, false, true);
+        let edited = harness.type_character(' ');
+        assert!(
+            matches!(edited.as_slice(), [Message::CreateSpend(CreateSpendMessage::RecipientEdited(0, "address", value))]
+            if value == ADDRESS_A),
+            "generating address edit: {:?}",
+            edited
+        );
+        let max_bounds = harness.label_bounds("MAX");
+        let max_clicked = harness.click_at(max_bounds);
+        assert!(
+            matches!(
+                max_clicked.as_slice(),
+                [Message::CreateSpend(
+                    CreateSpendMessage::SendMaxToRecipient(0)
+                )]
+            ),
+            "generating MAX: {:?}",
+            max_clicked
+        );
+        let outpoint = fixture.coins[0].outpoint.txid.to_string();
+        let fallback = format!("{}…{}:0", &outpoint[..8], &outpoint[56..]);
+        let bounds = harness.label_bounds(&fallback);
+        let checkbox = harness.coin_checkbox_bounds(bounds);
+        let mut selected = harness.press_at(checkbox.center());
+        selected.extend(harness.release_at(checkbox.center()));
+        assert!(
+            matches!(
+                selected.as_slice(),
+                [Message::CreateSpend(CreateSpendMessage::SelectCoin(0))]
+            ),
+            "generating coin checkbox: {:?}",
+            selected
         );
     }
 
