@@ -284,11 +284,23 @@ fn paint_face_marks(
     if !matches!(index, 0 | 2 | 3 | 4) {
         return;
     }
+    // A projected face becomes almost edge-on during the turn. A fixed-size
+    // badge placed at its center would then float outside the geometry.
+    // Skip subpixel faces and clip every remaining mark to its own polygon.
+    let area = (0..4)
+        .map(|i| p[i].0 * p[(i + 1) % 4].1 - p[(i + 1) % 4].0 * p[i].1)
+        .sum::<f32>()
+        .abs()
+        * 0.5;
+    if area < 16.0 {
+        return;
+    }
     let center = (
         p.iter().map(|point| point.0).sum::<f32>() / 4.0,
         p.iter().map(|point| point.1).sum::<f32>() / 4.0,
     );
     let ink = if light { "#30302d" } else { "#ecebe6" };
+    let mut marks = String::new();
     match index {
         4 => {
             let edge = if network.is_blake2b() {
@@ -299,29 +311,46 @@ fn paint_face_marks(
                 "#b9bbb5"
             };
             let _ = write!(
-                svg,
+                marks,
                 "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"13\" fill=\"{edge}\"/>",
                 center.0, center.1
             );
             // This is an orientation mark during the turn; the resting glyph
             // retains the branded vector path and network-specific edge.
             let mark = if network.is_blake2b() { "B2" } else { "₿" };
-            let _ = write!(svg, "<text x=\"{:.2}\" y=\"{:.2}\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"sans-serif\" font-size=\"14\" font-weight=\"bold\" fill=\"#201407\">{mark}</text>", center.0, center.1);
+            let _ = write!(marks, "<text x=\"{:.2}\" y=\"{:.2}\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"sans-serif\" font-size=\"14\" font-weight=\"bold\" fill=\"#201407\">{mark}</text>", center.0, center.1);
         }
         2 if text.vault || text.imported_bitcoin => {
-            let _ = write!(svg, "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"11\" fill=\"none\" stroke=\"{ink}\" stroke-width=\"2\"/>", center.0, center.1);
+            let _ = write!(marks, "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"11\" fill=\"none\" stroke=\"{ink}\" stroke-width=\"2\"/>", center.0, center.1);
             let mark = if text.vault { "V" } else { "B" };
-            let _ = write!(svg, "<text x=\"{:.2}\" y=\"{:.2}\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"sans-serif\" font-size=\"13\" fill=\"{ink}\">{mark}</text>", center.0, center.1);
+            let _ = write!(marks, "<text x=\"{:.2}\" y=\"{:.2}\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"sans-serif\" font-size=\"13\" fill=\"{ink}\">{mark}</text>", center.0, center.1);
         }
         0 | 3 => {
             let mark = if text.passkey { "⌁" } else { "●" };
-            let _ = write!(svg, "<text x=\"{:.2}\" y=\"{:.2}\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"sans-serif\" font-size=\"17\" fill=\"{ink}\">{mark}</text>", center.0, center.1);
+            let _ = write!(marks, "<text x=\"{:.2}\" y=\"{:.2}\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"sans-serif\" font-size=\"17\" fill=\"{ink}\">{mark}</text>", center.0, center.1);
             if text.backup_confirmed {
-                let _ = write!(svg, "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"7\" fill=\"none\" stroke=\"{ink}\"/><path d=\"m {:.2} {:.2} 2 2 4 -5\" fill=\"none\" stroke=\"{ink}\"/>", center.0 + 14.0, center.1 - 12.0, center.0 + 11.0, center.1 - 12.0);
+                let _ = write!(marks, "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"7\" fill=\"none\" stroke=\"{ink}\"/><path d=\"m {:.2} {:.2} 2 2 4 -5\" fill=\"none\" stroke=\"{ink}\"/>", center.0 + 14.0, center.1 - 12.0, center.0 + 11.0, center.1 - 12.0);
             }
         }
         _ => {}
     }
+    if marks.is_empty() {
+        return;
+    }
+    // `svg.len()` grows after every face, including an outgoing Cube. It
+    // gives each clip a distinct ID without global state or unstable output.
+    let clip = format!("launcher-face-{index}-{}", svg.len());
+    let _ = write!(
+        svg,
+        "<defs><clipPath id=\"{clip}\" clipPathUnits=\"userSpaceOnUse\"><polygon points=\""
+    );
+    for (x, y) in p {
+        let _ = write!(svg, "{x:.2},{y:.2} ");
+    }
+    let _ = write!(
+        svg,
+        "\"/></clipPath></defs><g clip-path=\"url(#{clip})\">{marks}</g>"
+    );
 }
 
 fn xml_text(value: &str) -> String {
@@ -585,5 +614,49 @@ mod tests {
         let turned = second_turn_source(ChainId::Bitcoin, false, face, 1.0);
         assert!(turned.contains("Open Alice &amp; &lt;Bob&gt;"));
         assert!(turned.contains(">PIN</text>"));
+    }
+
+    #[test]
+    fn face_marks_clip_to_the_projected_face_near_edge_on() {
+        let face = FaceText {
+            name: "Alice",
+            backup: "Confirmed",
+            connect: "Signed in",
+            wallets: "Vault",
+            passkey: false,
+            vault: true,
+            imported_bitcoin: false,
+            backup_confirmed: true,
+        };
+        // A face collapsing to a subpixel sliver emits no freestanding mark.
+        let mut sliver = String::new();
+        paint_face_marks(
+            &mut sliver,
+            2,
+            [(100.0, 0.0), (100.01, 0.0), (100.01, 200.0), (100.0, 200.0)],
+            ChainId::Bitcoin,
+            false,
+            face,
+        );
+        assert!(sliver.is_empty());
+
+        // Just before the 180° details pose, the visible wallet face is
+        // narrow. Its mark must be inside that face's unique SVG clip.
+        let near_edge = source(
+            1000.0,
+            740.0,
+            (250.0, 265.0),
+            340.0,
+            ChainId::Bitcoin,
+            face,
+            false,
+            (179.0 - 45.0) / 135.0,
+            None,
+        );
+        let mark_at = near_edge.find(">V</text>").expect("wallet mark at 179°");
+        let group_at = near_edge[..mark_at].rfind("<g clip-path=").unwrap();
+        assert!(near_edge[group_at..mark_at].contains("url(#launcher-face-2-"));
+        assert!(near_edge[mark_at..].contains("</g>"));
+        assert!(near_edge.contains("clipPathUnits=\"userSpaceOnUse\""));
     }
 }
