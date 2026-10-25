@@ -470,7 +470,7 @@ fn coin() -> Element<'static, Msg> {
 fn send_receive(prefix: &'static str) -> Vec<Element<'static, Msg>> {
     vec![
         ActionButton::new(
-            Id::new(format!("{prefix}-send")),
+            Id::from(format!("{prefix}-send")),
             "Send",
             ActionKind::Primary,
             Msg::Focus,
@@ -478,7 +478,7 @@ fn send_receive(prefix: &'static str) -> Vec<Element<'static, Msg>> {
         .on_press(Msg::Pressed("send"))
         .into(),
         ActionButton::new(
-            Id::new(format!("{prefix}-receive")),
+            Id::from(format!("{prefix}-receive")),
             "Receive",
             ActionKind::Secondary,
             Msg::Focus,
