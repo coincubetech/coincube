@@ -1965,6 +1965,116 @@ fn split_entry_point_guard_reads_a_crlf_checkout() {
     assert_split_start_is_gated(crate::utils::source_text::as_crlf);
 }
 
+/// The guard must reject narrow regressions in the actual start/refusal call
+/// chain, regardless of the checkout's line endings.
+#[test]
+fn split_entry_point_guard_rejects_gate_regressions() {
+    fn replace_once(text: &str, from: &str, to: &str) -> String {
+        assert_eq!(text.matches(from).count(), 1, "mutation fixture: {from}");
+        text.replacen(from, to, 1)
+    }
+    fn replace_once_in_start(text: &str, from: &str, to: &str) -> String {
+        let at = text.find("    fn start_split_from_review(").unwrap();
+        let end = at + text[at..].find("\n    }\n").unwrap();
+        format!(
+            "{}{}{}",
+            &text[..at],
+            replace_once(&text[at..end], from, to),
+            &text[end..]
+        )
+    }
+    fn wrong_split_from(text: &str) -> String {
+        replace_once(
+            text,
+            "&target_settings.split_from,",
+            "&self.cube_settings.split_from,",
+        )
+    }
+    fn no_refusal_revoke(text: &str) -> String {
+        replace_once(
+            text,
+            "        self.revoke_split_handoff();\n        if owns_context {",
+            "        if owns_context {",
+        )
+    }
+    fn no_grant(text: &str) -> String {
+        replace_once_in_start(
+            text,
+            "if !self.panels.connect.account.bitcoin_blake2b_enabled()\n            || !self.split_context_valid(intent)",
+            "if !self.split_context_valid(intent)",
+        )
+    }
+    fn no_context(text: &str) -> String {
+        replace_once_in_start(
+            text,
+            "if !self.panels.connect.account.bitcoin_blake2b_enabled()\n            || !self.split_context_valid(intent)",
+            "if !self.panels.connect.account.bitcoin_blake2b_enabled()",
+        )
+    }
+    fn late_refusal(text: &str) -> String {
+        let refusal = "        if let Some(reason) = refusal {\n            self.refuse_current_split_handoff(&target_cube);\n            return Task::done(Message::View(view::Message::ShowError(reason)));\n        }\n";
+        let without = replace_once(text, refusal, "");
+        replace_once(
+            &without,
+            "        ));\n        panel.bind_funding_target(binding);",
+            &format!("        ));\n{refusal}        panel.bind_funding_target(binding);"),
+        )
+    }
+    type GuardMutation = (&'static str, fn(&str) -> String, &'static str);
+    let mutations: [GuardMutation; 5] = [
+        (
+            "target split_from",
+            wrong_split_from,
+            "lacks step1::second_split_refusal(",
+        ),
+        (
+            "refusal revoke",
+            no_refusal_revoke,
+            "refusal lacks unconditional revoke",
+        ),
+        (
+            "feature grant",
+            no_grant,
+            "lacks if !self.panels.connect.account.bitcoin_blake2b_enabled()",
+        ),
+        (
+            "context gate",
+            no_context,
+            "lacks if !self.panels.connect.account.bitcoin_blake2b_enabled()",
+        ),
+        ("late refusal", late_refusal, "comes after the start"),
+    ];
+    fn as_lf(text: &str) -> String {
+        text.to_string()
+    }
+    for (checkout_name, checkout) in [
+        ("LF", as_lf as fn(&str) -> String),
+        (
+            "CRLF",
+            crate::utils::source_text::as_crlf as fn(&str) -> String,
+        ),
+    ] {
+        for (name, mutation, expected) in mutations {
+            let failure = std::panic::catch_unwind(|| {
+                assert_split_start_is_gated_with_app(checkout, mutation)
+            })
+            .unwrap_err();
+            let message = failure
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| failure.downcast_ref::<&str>().copied())
+                .unwrap_or("non-string panic");
+            assert!(
+                message.contains(expected),
+                "{} {} failed for the wrong reason: {}",
+                checkout_name,
+                name,
+                message
+            );
+        }
+    }
+}
+
 /// #657 N1: a CRLF twin really reads CRLF text: `checkout` turns a source
 /// file it guards into text with CR line endings.
 fn assert_reads_crlf(checkout: fn(&str) -> String) {
@@ -1980,6 +2090,13 @@ fn assert_reads_crlf(checkout: fn(&str) -> String) {
 
 /// `checkout` is the text a checkout of each source file reads as.
 fn assert_split_start_is_gated(checkout: fn(&str) -> String) {
+    assert_split_start_is_gated_with_app(checkout, |text| text.to_string());
+}
+
+fn assert_split_start_is_gated_with_app(
+    checkout: fn(&str) -> String,
+    mutate_app: impl Fn(&str) -> String,
+) {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     fn walk(dir: &Path, files: &mut Vec<(String, String)>, root: &Path) {
         for entry in std::fs::read_dir(dir).unwrap() {
@@ -2001,7 +2118,15 @@ fn assert_split_start_is_gated(checkout: fn(&str) -> String) {
     walk(&root, &mut files, &root);
     let files: Vec<(String, String)> = files
         .into_iter()
-        .map(|(file, text)| (file, crate::utils::source_text::lf_only(&checkout(&text))))
+        .map(|(file, text)| {
+            let text = crate::utils::source_text::lf_only(&checkout(&text));
+            let text = if file == "app/mod.rs" {
+                mutate_app(&text)
+            } else {
+                text
+            };
+            (file, text)
+        })
         .collect();
     for (file, text) in &files {
         let starts = text.matches("SplitPanel::start(").count();
@@ -2063,13 +2188,17 @@ fn assert_split_start_is_gated(checkout: fn(&str) -> String) {
     let constructed = at("SplitPanel::start(");
     let checks = [
         "let Some(SplitHandoff::Review { intent, .. }) = self.split_handoff.as_ref() else {\n            return Task::none();\n        };",
+        "let (target_settings, target_wallet) = if let Some(context) = &self.claim_pair_context {\n            (context.settings.clone(), Some(context.wallet.clone()))\n        } else {\n            (self.cube_settings.clone(), self.wallet.clone())\n        };",
         "if !self.panels.connect.account.bitcoin_blake2b_enabled()\n            || !self.split_context_valid(intent)\n        {\n            Some(SPLIT_START_CANCELLED.to_string())",
         "} else if self.split_panel.is_some() {\n            Some(SPLIT_START_PANEL_OPEN.to_string())",
+        "let root = target_wallet.as_ref().map(|wallet| {\n                state::vault::split::step1::journal_root(&self.datadir, &wallet.id())\n            });",
         "step1::source_digest(intent)",
-        "step1::second_split_refusal(",
-        "&self.cube_settings.split_from,",
-        "if let Some(reason) = refusal {\n            self.revoke_split_handoff();\n            return Task::done(",
+        "step1::second_split_refusal(\n                    &root,\n                    &target_settings.split_from,\n                    digest,",
+        "if let Some(reason) = refusal {\n            self.refuse_current_split_handoff(&target_cube);\n            return Task::done(",
         "self.split_handoff.take()",
+        "if target.cube_id() != target_settings.id || target.vault_id() != &wallet.id() {",
+        "SplitTargetBinding::from_evidence(",
+        "Err(_) => {\n                self.refuse_current_split_handoff(intent.target_cube_id());\n                return Task::done(",
         "self.revoke_split_handoff();\n        let mut panel",
     ];
     let mut last = 0;
@@ -2079,6 +2208,43 @@ fn assert_split_start_is_gated(checkout: fn(&str) -> String) {
         assert!(found < constructed, "{} comes after the start", check);
         last = found;
     }
+    let refusal = &production[production
+        .find("    fn refuse_current_split_handoff(")
+        .unwrap()..];
+    let refusal = &refusal[..refusal.find("\n    }\n").unwrap()];
+    let owns = refusal
+        .find("let owns_context = self.claim_pair_context.as_ref().is_some_and(|context| {")
+        .unwrap();
+    for binding in [
+        "context.owner == self.cache.app_generation",
+        "context.root == self.datadir",
+        "context.source_cube == self.cube_settings.id",
+        "context.fork_cube == target_cube",
+    ] {
+        assert!(
+            refusal[owns..].contains(binding),
+            "refusal lacks owned-context binding: {}",
+            binding
+        );
+    }
+    let revoke = refusal
+        .find("        });\n        self.revoke_split_handoff();\n        if owns_context {")
+        .expect("refusal lacks unconditional revoke");
+    let stop = refusal
+        .find("if owns_context {\n            self.stop_claim_pair_context();")
+        .expect("refusal lacks owned-context stop");
+    assert!(
+        owns < revoke && revoke < stop,
+        "refusal must revoke before owned-context stop"
+    );
+    let revoke_body = &production[production.find("    fn revoke_split_handoff(").unwrap()..];
+    let revoke_body = &revoke_body[..revoke_body.find("\n    }\n").unwrap()];
+    let increment = revoke_body
+        .find("self.split_handoff_generation = self.split_handoff_generation.wrapping_add(1);")
+        .unwrap();
+    let clear_handoff = revoke_body.find("self.split_handoff = None;").unwrap();
+    let clear_intent = revoke_body.find("split_intent::clear();").unwrap();
+    assert!(increment < clear_handoff && clear_handoff < clear_intent);
     assert!(start[constructed..].contains("self.split_panel = Some(panel);"));
     assert!(start[constructed..].contains("self.refresh_split_session()"));
     // It is reached only from the `StartSplit` intent's arm.
