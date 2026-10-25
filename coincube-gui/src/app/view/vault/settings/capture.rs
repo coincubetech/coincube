@@ -236,7 +236,9 @@ fn assert_labels(scenario: &str, labels: &Labels, width: u32) {
     };
     assert!(
         labels.0.iter().any(|(label, _)| label == expected),
-        "{scenario}: missing {expected}"
+        "{}: missing {}",
+        scenario,
+        expected
     );
     if scenario == "wallet_imported" {
         assert!(
@@ -250,10 +252,19 @@ fn assert_labels(scenario: &str, labels: &Labels, width: u32) {
     for (label, bounds) in &labels.0 {
         assert!(
             bounds.x >= -1.0 && bounds.x + bounds.width <= width as f32 + 1.0,
-            "{scenario}: {label} exceeds {width}px: {bounds:?}"
+            "{}: {} exceeds {}px: {:?}",
+            scenario,
+            label,
+            width,
+            bounds
         );
         for forbidden in ["tpub", "xpub6", "wsh(", ".cookie", ".onion"] {
-            assert!(!label.contains(forbidden), "{scenario}: sensitive label");
+            assert!(
+                !label.contains(forbidden),
+                "{}: sensitive label matching {}",
+                scenario,
+                forbidden
+            );
         }
     }
 }
@@ -369,6 +380,7 @@ async fn actual_vault_settings_capture_matrix() {
                 assert_labels(scenario, &labels, width);
                 if let Some(directory) = &directory {
                     let viewport = iced::Rectangle::with_size(size);
+                    let mut redraw_messages = Vec::new();
                     element.as_widget_mut().update(
                         &mut tree,
                         &iced::Event::Window(iced::window::Event::RedrawRequested(
@@ -378,8 +390,15 @@ async fn actual_vault_settings_capture_matrix() {
                         iced::mouse::Cursor::Unavailable,
                         &renderer,
                         &mut iced::advanced::clipboard::Null,
-                        &mut iced::advanced::Shell::new(&mut Vec::new()),
+                        &mut iced::advanced::Shell::new(&mut redraw_messages),
                         &viewport,
+                    );
+                    assert!(
+                        redraw_messages
+                            .iter()
+                            .all(|message| matches!(message, Message::Scroll(_))),
+                        "{}: redraw emitted an action intent",
+                        scenario
                     );
                     element.as_widget().draw(
                         &tree,
@@ -438,7 +457,7 @@ async fn actual_vault_settings_capture_matrix() {
                         .0
                         .iter()
                         .find(|(label, _)| label == target)
-                        .unwrap_or_else(|| panic!("{scenario}: missing {target}"))
+                        .unwrap_or_else(|| panic!("{}: missing {}", scenario, target))
                         .1;
                     let mut messages = Vec::new();
                     let viewport = iced::Rectangle::with_size(size);
