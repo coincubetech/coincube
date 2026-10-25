@@ -5,6 +5,7 @@ pub use bitcoin_import::{BitcoinImport, BitcoinImportStage, ImportedWalletAttach
 pub mod display;
 pub mod fiat;
 pub mod preferences;
+pub mod system_accessibility;
 pub mod unit;
 
 use std::collections::{HashMap, HashSet};

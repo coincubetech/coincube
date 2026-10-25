@@ -383,6 +383,10 @@ impl GUI {
         ];
         let (mut pane, cmd) = pane::Pane::new(&config);
         pane.set_balance_privacy(Some(Self::privacy_chrome_for(&preferences)));
+        let system_reduces_motion = crate::app::settings::system_accessibility::reduces_motion();
+        for tab in &mut pane.tabs {
+            tab.set_system_reduces_motion(system_reduces_motion);
+        }
         let (mut panes, focused_pane) = pane_grid::State::new(pane);
         cmds.push(cmd.map(move |msg| Message::Pane(focused_pane, msg)));
         let global_settings_path = GlobalSettings::path(&config.coincube_directory);
@@ -2051,6 +2055,13 @@ impl GUI {
                 Task::none()
             }
             Message::Tick => {
+                let system_reduces_motion =
+                    crate::app::settings::system_accessibility::reduces_motion();
+                for (_, pane) in self.panes.iter_mut() {
+                    for tab in &mut pane.tabs {
+                        tab.set_system_reduces_motion(system_reduces_motion);
+                    }
+                }
                 let privacy_refresh = self
                     .preferences
                     .begin_refresh_if_due()
@@ -2205,9 +2216,15 @@ impl GUI {
                 }
             }),
         ];
+        let visible_pane = self
+            .panes
+            .iter()
+            .find(|(id, _)| Some(**id) == self.focus)
+            .or_else(|| self.panes.iter().next())
+            .map(|(id, _)| *id);
         for (id, pane) in self.panes.iter() {
             vec.push(
-                pane.subscription()
+                pane.subscription(Some(*id) == visible_pane)
                     .with(*id)
                     .map(|(id, msg)| Message::Pane(id, msg)),
             );

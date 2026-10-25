@@ -21,7 +21,7 @@ use coincube_ui::{
         text::{p2_regular, text},
     },
     theme,
-    widget::{Column, Container, Element, Row},
+    widget::{Column, Container, Element, Row, RowExt},
 };
 use coincubed::{
     config::{BitcoinBackend, BitcoindConfig, BitcoindRpcAuth, Config, ConfigError},
@@ -892,7 +892,18 @@ impl Loader {
     }
 
     pub fn view(&self) -> Element<Message> {
-        view(&self.step, &self.current_quote, &self.current_image_handle).map(Message::View)
+        let scene = crate::home::launcher_presenter::project_opening(
+            &self.cube_settings.name,
+            self.cube_settings.network,
+        );
+        crate::home::launcher_presenter::opening_body(
+            scene,
+            &self.step,
+            &self.current_quote,
+            &self.current_image_handle,
+            self.restricted_claim || self.fork_session_revoked,
+        )
+        .map(Message::View)
     }
 }
 
@@ -1162,6 +1173,7 @@ pub fn view<'a>(
     step: &'a Step,
     quote: &'a Quote,
     image_handle: &'a image::Handle,
+    restricted_claim: bool,
 ) -> Element<'a, ViewMessage> {
     match &step {
         Step::StartingDaemon { .. } => cover(
@@ -1272,11 +1284,11 @@ pub fn view<'a>(
                                     .width(Length::Fixed(200.0))
                                     .on_press(ViewMessage::SwitchNetwork),
                             )
-                            .push(
+                            .push_maybe((!restricted_claim).then(|| {
                                 button::secondary(None, "Retry")
                                     .width(Length::Fixed(200.0))
-                                    .on_press(ViewMessage::Retry),
-                            ),
+                                    .on_press(ViewMessage::Retry)
+                            })),
                     ),
             )
         }
@@ -2246,22 +2258,30 @@ mod tests {
         let quote = quote_provider.select("loading");
         let image_handle = quote_display::image_handle_for_context("loading");
 
-        let _ = view(&Step::Connecting, &quote, &image_handle);
+        let _ = view(&Step::Connecting, &quote, &image_handle, false);
         let _ = view(
             &Step::StartingDaemon { progress: 0.5 },
             &quote,
             &image_handle,
+            false,
         );
-        let _ = view(&Step::FullScan { progress: 0.5 }, &quote, &image_handle);
+        let _ = view(
+            &Step::FullScan { progress: 0.5 },
+            &quote,
+            &image_handle,
+            false,
+        );
         let _ = view(
             &Step::Error(Box::new(Error::Config(ConfigError::FileNotFound))),
             &quote,
             &image_handle,
+            false,
         );
         let _ = view(
             &Step::Error(Box::new(Error::Daemon(DaemonError::NoAnswer))),
             &quote,
             &image_handle,
+            false,
         );
         let _ = cover::<ViewMessage, _>(
             Some(("warn", &Error::Unexpected("details".to_string()))),

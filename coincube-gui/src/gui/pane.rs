@@ -771,12 +771,13 @@ impl Pane {
         Task::none()
     }
 
-    pub fn subscription(&self) -> Subscription<Message> {
+    pub fn subscription(&self, foreground: bool) -> Subscription<Message> {
         let subs: Vec<Subscription<Message>> = self
             .tabs
             .iter()
-            .map(|t| {
-                t.subscription()
+            .enumerate()
+            .map(|(index, t)| {
+                t.subscription(foreground && index == self.focused_tab)
                     .with(t.id)
                     .map(|(id, msg)| Message::tab(id, msg))
             })

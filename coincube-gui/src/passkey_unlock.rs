@@ -75,9 +75,8 @@ const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
 pub struct PasskeyUnlock {
     cube: CubeSettings,
-    /// Data root. Unused by the assertion itself — carried so this screen has
-    /// the same shape as `PinEntry` and so the caller has it in hand on success.
-    #[allow(dead_code)]
+    /// Data root. Also supplies the saved appearance if the GUI shell has not
+    /// passed its live resolved theme into this view.
     datadir_root: std::path::PathBuf,
     phase: Phase,
     /// What to do after a successful unlock. Shared with `PinEntry` so both
@@ -404,6 +403,15 @@ impl PasskeyUnlock {
     }
 
     pub fn view(&self) -> Element<Message> {
+        self.view_with_theme(crate::home::launcher_presenter::saved_unlock_theme(
+            &self.datadir_root,
+        ))
+    }
+
+    pub fn view_with_theme(
+        &self,
+        mode: coincube_ui::theme::palette::ThemeMode,
+    ) -> Element<Message> {
         if matches!(self.phase, Phase::Opening) {
             // Same full-screen loading treatment the PIN path uses once its
             // seed is in hand, so the two unlock paths look identical from the
@@ -483,18 +491,19 @@ impl PasskeyUnlock {
             Phase::Opening => unreachable!("handled above"),
         }
 
-        Container::new(
+        crate::home::launcher_presenter::unlock_face(
+            &self.cube,
+            mode,
             Column::new()
-                .width(Length::Fill)
-                .push(Space::new().height(Length::Fixed(100.0)))
+                .spacing(24)
                 .push(header)
-                .push(Space::new().height(Length::Fixed(100.0)))
-                .push(Container::new(content).center_x(Length::Fill)),
+                .push(content)
+                .push(
+                    p1_regular("Network checks run after your passkey is accepted.")
+                        .style(theme::text::secondary),
+                )
+                .into(),
         )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .padding(20)
-        .into()
     }
 }
 

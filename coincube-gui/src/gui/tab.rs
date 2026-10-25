@@ -421,6 +421,9 @@ pub enum Message {
     Login(login::Message),
     PinEntry(crate::pin_entry::Message),
     PasskeyUnlock(crate::passkey_unlock::Message),
+    /// Frame clock only while a selected Launcher details face turns toward
+    /// the existing PIN/passkey screen. It never changes unlock authority.
+    UnlockMotionTick(Instant),
     /// Messages from the cryptic "Duress Mode Activated" screen.
     Duress(crate::app::view::duress::active_screen::Message),
     /// The background activation-queue drainer finished (queue emptied). No-op
@@ -811,6 +814,7 @@ pub struct Tab {
     /// caches inherit the correct mode immediately.
     pub theme_mode: coincube_ui::theme::palette::ThemeMode,
     pub balance_privacy: Option<crate::app::state::preferences::BalancePrivacyChrome>,
+    unlock_motion: Option<Instant>,
     /// A seed-migration warning waiting for a surface to show it on.
     ///
     /// Held rather than dispatched because only `State::App` handles
@@ -876,6 +880,7 @@ impl Tab {
             state,
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
             balance_privacy: None,
+            unlock_motion: None,
             pending_unlock_warnings: Vec::new(),
             app_generation: 0,
             claim_open: None,
@@ -921,8 +926,14 @@ impl Tab {
         }
     }
 
-    /// Apply the tab's stored theme_mode to the current state.
-    /// Call after any state transition to State::App or State::Home.
+    /// Feed the current native motion observation to a retained Launcher.
+    pub fn set_system_reduces_motion(&mut self, observed: Option<bool>) {
+        if let State::Home(home) = &mut self.state {
+            home.set_system_reduces_motion(observed);
+        }
+    }
+
+    /// Apply the tab's stored privacy display to the current state.
     pub fn set_balance_privacy(
         &mut self,
         chrome: Option<crate::app::state::preferences::BalancePrivacyChrome>,
@@ -933,6 +944,8 @@ impl Tab {
         }
     }
 
+    /// Apply the tab's stored theme_mode (and balance-privacy display) to the
+    /// current state. Call after any state transition to State::App or State::Home.
     fn sync_theme_mode(&mut self) {
         let mode = self.theme_mode;
         match &mut self.state {
@@ -1350,6 +1363,14 @@ impl Tab {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let message = match message {
+            Message::UnlockMotionTick(now) => {
+                if self.unlock_motion.is_some_and(|started| {
+                    home::launcher_presenter::unlock_turn_progress(started, now) >= 1.0
+                }) {
+                    self.unlock_motion = None;
+                }
+                return Task::none();
+            }
             Message::AppAsync(generation, message) => {
                 if !self.accepts_app_generation(generation) {
                     discard_closed_loader_result(*message);
@@ -1382,6 +1403,9 @@ impl Tab {
         let was_fork_app =
             matches!(&self.state, State::App(app) if app.cube_settings().network.is_blake2b());
         let mut result = self.update_inner(message);
+        if !matches!(self.state, State::PinEntry(_) | State::PasskeyUnlock(_)) {
+            self.unlock_motion = None;
+        }
         let is_app = matches!(&self.state, State::App(_));
         if matches!(self.state, State::Home(_) | State::DuressActive(_)) {
             self.pending_recovery_route = None;
@@ -1647,6 +1671,7 @@ impl Tab {
                     command.map(Message::Install)
                 }
                 home::Message::Run(datadir_path, cfg, chain, cube) => {
+                    let spin_from_details = l.take_launcher_details_face(&cube);
                     // Every refusal below abandons this open: drop an armed Split
                     // handoff with it rather than let a later open inherit it.
                     // Chain gate — first, before anything below can touch a
@@ -1818,11 +1843,17 @@ impl Tab {
                         }
                     }
                     self.state = state;
+                    self.unlock_motion = spin_from_details.then(Instant::now);
                     Task::none()
                 }
                 home::Message::View(home::ViewMessage::ToggleTheme) => {
                     Task::done(Message::ToggleTheme)
                 }
+                home::Message::View(home::ViewMessage::OpenAppPreferences) => l
+                    .update(home::Message::View(home::ViewMessage::GoToSection(
+                        home::HomeSection::Settings,
+                    )))
+                    .map(Message::Launch),
                 home::Message::GlobalSettingsChanged => Task::done(Message::GlobalSettingsChanged),
                 home::Message::ConnectSignedInBubble => Task::done(Message::ConnectSignedIn),
                 _ => l.update(msg).map(Message::Launch),
@@ -4149,8 +4180,8 @@ impl Tab {
         Task::batch([result, self.flush_migration_warning()])
     }
 
-    pub fn subscription(&self) -> Subscription<Message> {
-        match &self.state {
+    pub fn subscription(&self, foreground: bool) -> Subscription<Message> {
+        let base = match &self.state {
             State::Installer(v) => v.subscription().map(Message::Install),
             State::Loader(v) => v.subscription().map(Message::Load),
             // `Subscription::map` requires a non-capturing closure, so the
@@ -4173,7 +4204,7 @@ impl Tab {
                         Message::AppAsync(generation, Box::new(Message::Run(message)))
                     })
             }
-            State::Home(v) => v.subscription().map(Message::Launch),
+            State::Home(v) => v.subscription(foreground).map(Message::Launch),
             State::Login(_) => Subscription::none(),
             State::PinEntry(_) => Subscription::none(),
             // Unlike `PinEntry`, this one needs a subscription: the macOS
@@ -4181,6 +4212,18 @@ impl Tab {
             // hook, so the ceremony has to be polled.
             State::PasskeyUnlock(v) => v.subscription().map(Message::PasskeyUnlock),
             State::DuressActive(_) => Subscription::none(),
+        };
+        if foreground
+            && self.unlock_motion.is_some()
+            && matches!(self.state, State::PinEntry(_) | State::PasskeyUnlock(_))
+        {
+            Subscription::batch([
+                base,
+                iced::time::every(std::time::Duration::from_millis(16))
+                    .map(Message::UnlockMotionTick),
+            ])
+        } else {
+            base
         }
     }
 
@@ -4202,8 +4245,38 @@ impl Tab {
             State::Home(v) => v.view().map(Message::Launch),
             State::Loader(v) => v.view().map(Message::Load),
             State::Login(v) => v.view().map(Message::Login),
-            State::PinEntry(v) => v.view().map(Message::PinEntry),
-            State::PasskeyUnlock(v) => v.view().map(Message::PasskeyUnlock),
+            State::PinEntry(v)
+                if self.unlock_motion.is_some_and(|started| {
+                    home::launcher_presenter::unlock_turn_progress(started, Instant::now()) < 1.0
+                }) =>
+            {
+                home::launcher_presenter::unlock_turn(
+                    v.cube(),
+                    self.theme_mode,
+                    home::launcher_presenter::unlock_turn_progress(
+                        self.unlock_motion.unwrap(),
+                        Instant::now(),
+                    ),
+                )
+            }
+            State::PasskeyUnlock(v)
+                if self.unlock_motion.is_some_and(|started| {
+                    home::launcher_presenter::unlock_turn_progress(started, Instant::now()) < 1.0
+                }) =>
+            {
+                home::launcher_presenter::unlock_turn(
+                    v.cube(),
+                    self.theme_mode,
+                    home::launcher_presenter::unlock_turn_progress(
+                        self.unlock_motion.unwrap(),
+                        Instant::now(),
+                    ),
+                )
+            }
+            State::PinEntry(v) => v.view_with_theme(self.theme_mode).map(Message::PinEntry),
+            State::PasskeyUnlock(v) => v
+                .view_with_theme(self.theme_mode)
+                .map(Message::PasskeyUnlock),
             State::DuressActive(v) => v.view().map(Message::Duress),
         }
     }

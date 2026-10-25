@@ -425,6 +425,15 @@ impl PinEntry {
     }
 
     pub fn view(&self) -> Element<Message> {
+        self.view_with_theme(crate::home::launcher_presenter::saved_unlock_theme(
+            &self.datadir_root,
+        ))
+    }
+
+    pub fn view_with_theme(
+        &self,
+        mode: coincube_ui::theme::palette::ThemeMode,
+    ) -> Element<Message> {
         if self.loading {
             // Full-screen loading with Kage quote while BreezClient loads
             return Container::new(
@@ -486,18 +495,19 @@ impl PinEntry {
 
         content = content.push(submit_button);
 
-        Container::new(
+        crate::home::launcher_presenter::unlock_face(
+            &self.cube,
+            mode,
             Column::new()
-                .width(Length::Fill)
-                .push(Space::new().height(Length::Fixed(100.0)))
+                .spacing(24)
                 .push(header)
-                .push(Space::new().height(Length::Fixed(100.0)))
-                .push(Container::new(content).center_x(Length::Fill)),
+                .push(content)
+                .push(
+                    p1_regular("Network checks run after your PIN is accepted.")
+                        .style(theme::text::secondary),
+                )
+                .into(),
         )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .padding(20)
-        .into()
     }
 }
 
