@@ -308,7 +308,8 @@ pub struct GlobalHome {
     usdt_balance_error: bool,
     usdt_balance_loaded: bool,
     wallet: Option<Arc<Wallet>>,
-    balance_masked: bool,
+    /// Retained only for the legacy Cube settings constructor; device privacy owns display.
+    _legacy_balance_masked: bool,
     /// Cached derivation of `(transfer_from, transfer_to)` via
     /// `TransferDirection::try_from_pair`. `None` when either side is unset or
     /// both sides point at the same wallet.
@@ -431,7 +432,7 @@ impl GlobalHome {
             usdt_balance_loaded: false,
             breez_client: breez_client.into(),
             spark_backend,
-            balance_masked,
+            _legacy_balance_masked: balance_masked,
             transfer_direction: None,
             transfer_from: None,
             transfer_to: None,
@@ -501,7 +502,7 @@ impl GlobalHome {
             usdt_balance_loaded: false,
             breez_client: breez_client.into(),
             spark_backend,
-            balance_masked,
+            _legacy_balance_masked: balance_masked,
             transfer_direction: None,
             transfer_from: None,
             transfer_to: None,
@@ -625,7 +626,7 @@ impl State for GlobalHome {
                 imported_balance: self.imported_balance,
                 imported_installed: self.imported_installed,
                 fiat_converter,
-                balance_masked: self.balance_masked,
+                balance_masked: cache.balance_amounts_masked(),
                 total_balance_loading,
                 spark_balance_loaded: self.spark_balance_loaded,
                 liquid_balance_loaded: self.liquid_balance_loaded,
@@ -805,10 +806,6 @@ impl State for GlobalHome {
                             self.spark_balance_loaded = true;
                         }
                         Task::none()
-                    }
-                    HomeMessage::ToggleBalanceMask => {
-                        self.balance_masked = !self.balance_masked;
-                        self.persist_balance_masked(self.balance_masked)
                     }
                     HomeMessage::NextStep => {
                         // Step 0 → 1 (overview → amount entry): this is the
@@ -3165,28 +3162,6 @@ impl GlobalHome {
                     tracing::error!("USDt balance fetch failed: {:?}", e);
                     Message::View(view::Message::Home(HomeMessage::UsdtBalanceFetchFailed))
                 }
-            },
-        )
-    }
-
-    fn persist_balance_masked(&self, masked: bool) -> Task<Message> {
-        let network_dir = self.datadir_path.network_directory(self.network);
-        let cube_id = self.cube_id.clone();
-        Task::perform(
-            async move {
-                settings::update_settings_file(&network_dir, move |mut current| {
-                    if let Some(cube) = current.cubes.iter_mut().find(|c| c.id == cube_id) {
-                        cube.balance_masked = masked;
-                    }
-                    Some(current)
-                })
-                .await
-            },
-            |res| {
-                if let Err(e) = res {
-                    log::warn!("Failed to persist balance_masked: {}", e);
-                }
-                Message::Tick
             },
         )
     }

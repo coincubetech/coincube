@@ -203,6 +203,13 @@ pub fn create_spend_tx<'a>(
     let is_self_send = recipients.is_empty();
     let fiat_balance = fiat_converter.as_ref().map(|c| c.convert(*balance));
     let fiat_unconfirmed = fiat_converter.map(|c| c.convert(*unconfirmed_balance));
+    // Keep actual balances for draft validation; mask only passive context.
+    let mask_amounts = cache.balance_amounts_masked();
+    let unconfirmed_display: Element<'a, Message> = if mask_amounts {
+        text("••••••").size(H3_SIZE).into()
+    } else {
+        unconfirmed_amount_with_size_and_unit(unconfirmed_balance, H3_SIZE, bitcoin_unit).into()
+    };
 
     let can_proceed = is_valid
         && !duplicate
@@ -246,7 +253,9 @@ pub fn create_spend_tx<'a>(
                     .spacing(8)
                     .push(h4_bold("Balance"))
                     .push(
-                        if sync_status.is_synced() {
+                        if mask_amounts {
+                            Column::new().push(text("••••••").size(H2_SIZE))
+                        } else if sync_status.is_synced() {
                             Column::new()
                                 .spacing(5)
                                 .push(amount_with_size_and_unit(balance, H2_SIZE, bitcoin_unit))
@@ -327,17 +336,13 @@ pub fn create_spend_tx<'a>(
                                     .spacing(10)
                                     .align_y(Alignment::Center)
                                     .push(text("+").size(H3_SIZE).style(theme::text::secondary))
-                                    .push(unconfirmed_amount_with_size_and_unit(
-                                        unconfirmed_balance,
-                                        H3_SIZE,
-                                        bitcoin_unit,
-                                    ))
+                                    .push(unconfirmed_display)
                                     .push(
                                         text("unconfirmed")
                                             .size(H3_SIZE)
                                             .style(theme::text::secondary),
                                     )
-                                    .push_maybe(fiat_unconfirmed.map(|fiat| {
+                                    .push_maybe(fiat_unconfirmed.filter(|_| !mask_amounts).map(|fiat| {
                                         Row::new()
                                             .align_y(Alignment::Center)
                                             .push(Space::new().width(10)) // total spacing = 20 including row spacing

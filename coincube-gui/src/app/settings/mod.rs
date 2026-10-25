@@ -2092,6 +2092,29 @@ pub mod global {
             .map_err(PrivacyInitError::Settings)
         }
 
+        /// Startup's one-use creator proof is the only path that can initialize
+        /// a missing privacy choice to shown. The caller still holds the stable
+        /// parent bootstrap lock while this transaction takes the global lock.
+        /// A concurrent explicit choice wins the locked recheck.
+        pub(crate) fn initialize_created_preferences(
+            creator: crate::dir::CreatedRoot,
+        ) -> Result<PreferencesReceipt, PrivacyInitError> {
+            let path = Self::path(creator.root());
+            Self::transact(&path, |settings| {
+                if settings.balance_privacy_initialized {
+                    return Ok(Plan::Keep(settings.snapshot()));
+                }
+                settings.hide_balances = false;
+                settings.balance_privacy_initialized = true;
+                Ok(Plan::Write {
+                    value: settings.snapshot(),
+                    force_privacy: true,
+                })
+            })
+            .map(receipt)
+            .map_err(PrivacyInitError::Settings)
+        }
+
         pub fn path(global_datadir: &CoincubeDirectory) -> PathBuf {
             global_datadir.path().join(DEFAULT_FILE_NAME)
         }

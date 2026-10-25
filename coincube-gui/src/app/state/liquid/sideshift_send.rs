@@ -282,6 +282,7 @@ impl SideshiftSendFlow {
             self.loading,
             self.error.as_deref(),
             usdt_asset_id_str,
+            cache.balance_amounts_masked(),
         );
 
         view::dashboard(

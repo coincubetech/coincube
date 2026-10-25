@@ -33,6 +33,7 @@ pub fn coin_input_row(
     coin: &CoinRow,
     label: &'static str,
     verified_depth: Option<u64>,
+    balance_masked: bool,
 ) -> Element<'static, Message> {
     let title = Row::new()
         .spacing(10)
@@ -64,7 +65,11 @@ pub fn coin_input_row(
                 )
                 .width(Length::Fill),
         )
-        .push(p1_bold(format!("{} sats", coin.amount.to_sat())))
+        .push(p1_bold(if balance_masked {
+            "********".to_string()
+        } else {
+            format!("{} sats", coin.amount.to_sat())
+        }))
         .into()
 }
 
@@ -226,6 +231,7 @@ impl CoinPairReview {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::view::shared::landing::capture;
     use coincube_core::miniscript::bitcoin::{
         absolute::LockTime, hashes::Hash, transaction::Version, ScriptBuf, Sequence, Transaction,
         TxIn,
@@ -235,6 +241,34 @@ mod tests {
         OutPoint {
             txid: coincube_core::miniscript::bitcoin::Txid::from_byte_array([byte; 32]),
             vout: 0,
+        }
+    }
+
+    #[test]
+    fn mounted_coin_input_obeys_privacy_without_losing_identity_or_depth() {
+        let coin = CoinRow {
+            outpoint: outpoint(7),
+            amount: Amount::from_sat(123_456_789),
+            output: TxOut {
+                value: Amount::from_sat(123_456_789),
+                script_pubkey: ScriptBuf::new(),
+            },
+        };
+        for masked in [false, true] {
+            let mounted = capture::inspect(
+                "vault-ancestry-input",
+                coin_input_row(&coin, "Bitcoin-only deposit", Some(6), masked),
+                (1024, 768),
+                "dark",
+                coincube_ui::theme::Theme::dark(),
+            );
+            assert!(mounted.contains("Bitcoin-only deposit"));
+            assert!(mounted.contains("Verified · 6 confirmations"));
+            assert!(mounted.contains(&coin.outpoint.to_string()));
+            assert_eq!(mounted.contains("123456789 sats"), !masked);
+            if masked {
+                assert!(mounted.contains("********"));
+            }
         }
     }
 

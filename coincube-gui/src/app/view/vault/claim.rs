@@ -69,7 +69,7 @@ pub fn view<'a>(
             ),
         ),
         StageView::FundingDeposits(addresses) => {
-            dashboard(menu, cache, funding_view(panel, addresses))
+            dashboard(menu, cache, funding_view(cache, panel, addresses))
         }
         StageView::PairedRecovery(recovery, checking, error) => dashboard(
             menu,
@@ -352,6 +352,7 @@ fn workflow_page<'a>(active: usize, body: impl Into<Element<'a, Message>>) -> El
 /// paired review selects completed-verification rows and the signing review;
 /// search diagnostics alone never do. Controls emit intents the panel rechecks.
 fn funding_view<'a>(
+    cache: &Cache,
     panel: &'a ClaimStep1Panel,
     addresses: &'a crate::services::claim_workflow::CheckedClaimFundingAddresses,
 ) -> Element<'a, Message> {
@@ -366,7 +367,7 @@ fn funding_view<'a>(
         .push(address_row(addresses.btcb2_deposit.clone(), "Copied BTCB2 deposit address to clipboard"))
         .push(p1_regular(format!("Minimums cover estimated fees at {} sat/vB on Bitcoin and {} sat/vB on BTCB2. Fees may change. Each deposit must be confirmed and verified as chain-specific.", addresses.bitcoin_rate_sat_vb, addresses.btcb2_rate_sat_vb)).style(theme::text::secondary));
     let deposits = Column::new().spacing(12)
-        .push(deposit_status_view(panel, addresses.bitcoin_minimum_sats, addresses.btcb2_minimum_sats))
+        .push(deposit_status_view(panel, addresses.bitcoin_minimum_sats, addresses.btcb2_minimum_sats, cache.balance_amounts_masked()))
         .push(button::secondary_compact(Some(if expanded { icon::collapsed_icon() } else { icon::collapse_icon() }),
             if expanded { "Hide deposit addresses" } else { "Deposit addresses" })
             .on_press(Message::Claim(ClaimMessage::ToggleDepositDetails)))
@@ -386,6 +387,8 @@ fn funding_view<'a>(
             .push(p1_regular("Review the coins, return addresses and fees. Both transfers return funds to your Vaults, minus network fees."));
         if let (Some(review), Some(descriptor)) = (panel.funding_review(), panel.wallet().inheritance_descriptor()) {
             let (threshold, _) = descriptor.policy().primary_path().thresh_origins();
+            // This screen immediately offers Review and sign. Show exact
+            // inputs, destinations and fees for transaction authorization.
             body = body.push(funding_review_view(review, threshold));
         }
         body
@@ -431,13 +434,14 @@ fn funding_review_view(
             if threshold == 1 { "" } else { "s" }
         )));
     for coin in &review.bitcoin.shared {
-        rows = rows.push(coin_input_row(coin, "Before fork", None));
+        rows = rows.push(coin_input_row(coin, "Before fork", None, false));
     }
     rows.push(p1_bold("Bitcoin transaction"))
         .push(coin_input_row(
             &review.bitcoin.funding,
             "Bitcoin-only deposit — replay protected",
             Some(review.bitcoin_confirmations),
+            false,
         ))
         .push(p2_regular(format!(
             "Back to this Vault: {} · {} sats",
@@ -450,6 +454,7 @@ fn funding_review_view(
             &review.fork.funding,
             "BTCB2-only deposit — replay protected",
             Some(review.fork_confirmations),
+            false,
         ))
         .push(p2_regular(format!(
             "Back to the paired BTCB2 Vault: {} · {} sats",
@@ -544,6 +549,7 @@ fn deposit_status_view<'a>(
     panel: &ClaimStep1Panel,
     bitcoin_minimum: u64,
     btcb2_minimum: u64,
+    balance_masked: bool,
 ) -> Element<'a, Message> {
     let status = panel.deposit_status();
     let review = panel.funding_review();
@@ -556,6 +562,7 @@ fn deposit_status_view<'a>(
                     &review.bitcoin.funding,
                     "Bitcoin-only deposit — replay protected",
                     Some(review.bitcoin_confirmations),
+                    balance_masked,
                 ),
                 None => deposit_row(
                     "Bitcoin",
@@ -563,6 +570,7 @@ fn deposit_status_view<'a>(
                     bitcoin_minimum,
                     panel.funding_proof_status(ChainId::Bitcoin),
                     panel.funding_checking(),
+                    balance_masked,
                 ),
             })
             .push(match review {
@@ -570,6 +578,7 @@ fn deposit_status_view<'a>(
                     &review.fork.funding,
                     "BTCB2-only deposit — replay protected",
                     Some(review.fork_confirmations),
+                    balance_masked,
                 ),
                 None => deposit_row(
                     "Bitcoin Blake2b",
@@ -577,6 +586,7 @@ fn deposit_status_view<'a>(
                     btcb2_minimum,
                     panel.funding_proof_status(ChainId::BitcoinBlake2b),
                     panel.funding_checking(),
+                    balance_masked,
                 ),
             })
             .push_maybe(
@@ -604,7 +614,15 @@ fn deposit_row<'a>(
     minimum: u64,
     proof: crate::services::claim_observation::http::FundingProofStatus,
     checking: bool,
+    balance_masked: bool,
 ) -> Element<'a, Message> {
+    let display_sats = |sats: u64| {
+        if balance_masked {
+            "********".to_string()
+        } else {
+            format_u64_as_string(sats, ",")
+        }
+    };
     let (mark, detail) = match observed {
         None => (None, "Checking the reserved address…".to_string()),
         Some(Err(crate::services::foreign_scan::ScanError::RateLimited(delay))) => (
@@ -622,14 +640,14 @@ fn deposit_row<'a>(
             None,
             format!(
                 "{} sats · {MIN_CONFIRMATIONS}+ confirmations",
-                format_u64_as_string(funds.mature_sats, ",")
+                display_sats(funds.mature_sats)
             ),
         ),
         Some(Ok(funds)) if funds.largest_confirmed_sats >= minimum => (
             None,
             format!(
                 "{} sats · {} of {MIN_CONFIRMATIONS} confirmations",
-                format_u64_as_string(funds.confirmed_sats, ","),
+                display_sats(funds.confirmed_sats),
                 funds.min_confirmations
             ),
         ),
@@ -637,14 +655,14 @@ fn deposit_row<'a>(
             None,
             format!(
                 "{} sats · awaiting confirmation",
-                format_u64_as_string(funds.pending_sats, ",")
+                display_sats(funds.pending_sats)
             ),
         ),
         Some(Ok(funds)) if funds.confirmed_sats > 0 => (
             Some(false),
             format!(
                 "{} sats confirmed, but no single deposit reaches the {minimum}-sat minimum.",
-                format_u64_as_string(funds.confirmed_sats, ",")
+                display_sats(funds.confirmed_sats)
             ),
         ),
         Some(Ok(_)) => (None, "Waiting for a deposit at this address.".to_string()),
@@ -797,7 +815,7 @@ fn preconditions_view<'a>(
                 "{} shared coin{} · {}",
                 coins.pre_fork.len(),
                 if coins.pre_fork.len() == 1 { "" } else { "s" },
-                format_amount(total, cache)
+                passive_amount(total, cache)
             )
         });
         return workflow_page(
@@ -905,7 +923,7 @@ fn coins_detail(coins: &CoinSet, cache: &Cache) -> String {
         "{} coin{} from before the fork, {}.",
         coins.pre_fork.len(),
         if coins.pre_fork.len() == 1 { "" } else { "s" },
-        format_amount(total, cache),
+        passive_amount(total, cache),
     );
     if coins.post_fork > 0 {
         // A coin confirmed after the fork is not split by this step; a
@@ -925,6 +943,16 @@ fn format_amount(amount: Amount, cache: &Cache) -> String {
     match cache.bitcoin_unit {
         BitcoinDisplayUnit::Sats => format!("{} sats", format_u64_as_string(amount.to_sat(), " ")),
         _ => format!("{} BTC", format_btc_string(amount.to_btc())),
+    }
+}
+
+/// Wallet inventory shown before transaction composition obeys the shared
+/// device privacy receipt. Transaction output and fee review uses format_amount.
+fn passive_amount(amount: Amount, cache: &Cache) -> String {
+    if cache.balance_amounts_masked() {
+        "********".to_string()
+    } else {
+        format_amount(amount, cache)
     }
 }
 
@@ -1456,6 +1484,150 @@ fn track_view<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::state::preferences::{BalancePrivacy, BalancePrivacyChrome};
+    use crate::app::view::shared::landing::capture;
+    use crate::app::view::vault::ancestry_coins::{CoinPairReview, CoinRow};
+
+    #[test]
+    fn active_funding_review_shows_exact_inputs_while_passive_deposit_stays_hidden() {
+        use crate::services::{
+            claim_observation::http::FundingProofStatus, foreign_scan::AddressFunds,
+        };
+        use coincube_core::miniscript::bitcoin::{OutPoint, ScriptBuf, Txid};
+        use std::str::FromStr;
+
+        let row = |id: u8, sats| {
+            let output = TxOut {
+                value: Amount::from_sat(sats),
+                script_pubkey: ScriptBuf::new(),
+            };
+            CoinRow {
+                outpoint: OutPoint::new(Txid::from_str(&format!("{id:064x}")).unwrap(), 0),
+                amount: output.value,
+                output,
+            }
+        };
+        let shared = row(1, 123_456_789);
+        let bitcoin_funding = row(2, 22_222_222);
+        let fork_funding = row(3, 33_333_333);
+        let review = VerifiedCoinPairReview {
+            coins: CoinPairReview {
+                bitcoin: CoinReview {
+                    shared: vec![shared.clone()],
+                    funding: bitcoin_funding,
+                    shared_total: shared.amount,
+                    input_total: Amount::from_sat(145_679_011),
+                    fee: Amount::from_sat(1_000),
+                    destination: TxOut {
+                        value: Amount::from_sat(145_678_011),
+                        script_pubkey: ScriptBuf::new(),
+                    },
+                },
+                fork: CoinReview {
+                    shared: vec![shared],
+                    funding: fork_funding,
+                    shared_total: Amount::from_sat(123_456_789),
+                    input_total: Amount::from_sat(156_790_122),
+                    fee: Amount::from_sat(2_000),
+                    destination: TxOut {
+                        value: Amount::from_sat(156_788_122),
+                        script_pubkey: ScriptBuf::new(),
+                    },
+                },
+            },
+            bitcoin_confirmations: 6,
+            fork_confirmations: 6,
+        };
+        let active = capture::inspect(
+            "claim-active-funding-review",
+            funding_review_view(&review, 2),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        for sats in ["123456789 sats", "22222222 sats", "33333333 sats"] {
+            assert!(
+                active.contains(sats),
+                "missing authorization amount {}",
+                sats
+            );
+        }
+        assert!(!active.contains("********"));
+
+        let passive = capture::inspect(
+            "claim-passive-deposit",
+            deposit_row(
+                "Bitcoin",
+                Some(&Ok(AddressFunds {
+                    confirmed_sats: 987_654_321,
+                    largest_confirmed_sats: 987_654_321,
+                    min_confirmations: 3,
+                    ..AddressFunds::default()
+                })),
+                100_000,
+                FundingProofStatus::Pending,
+                false,
+                true,
+            ),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(passive.contains("********"));
+        assert!(!passive.contains("987,654,321"));
+    }
+
+    #[test]
+    fn mounted_deposit_observation_masks_only_owned_amounts() {
+        use crate::services::{
+            claim_observation::http::FundingProofStatus, foreign_scan::AddressFunds,
+        };
+        let funds = Ok(AddressFunds {
+            confirmed_sats: 987_654_321,
+            largest_confirmed_sats: 987_654_321,
+            min_confirmations: 3,
+            ..AddressFunds::default()
+        });
+        let mut cache = Cache::default();
+        for (privacy, visible) in [
+            (BalancePrivacy::Unresolved, false),
+            (BalancePrivacy::Hidden, false),
+            (BalancePrivacy::Shown, true),
+        ] {
+            cache.balance_privacy = Some(BalancePrivacyChrome {
+                privacy,
+                busy: false,
+                interactive: true,
+            });
+            let mounted = capture::inspect(
+                "claim-deposit-observation",
+                deposit_row(
+                    "Bitcoin",
+                    Some(&funds),
+                    100_000,
+                    FundingProofStatus::Pending,
+                    false,
+                    cache.balance_amounts_masked(),
+                ),
+                (1024, 768),
+                "dark",
+                coincube_ui::theme::Theme::dark(),
+            );
+            assert!(mounted.contains("3 of 6 confirmations"));
+            assert!(mounted.contains("Replay protection not verified yet"));
+            assert_eq!(mounted.contains("987,654,321"), visible);
+            assert_eq!(mounted.contains("********"), !visible);
+            assert_eq!(
+                passive_amount(Amount::from_sat(98_765_432), &cache).contains("98 765 432"),
+                visible
+            );
+        }
+        cache.balance_privacy = None;
+        assert_eq!(
+            passive_amount(Amount::from_sat(98_765_432), &cache),
+            "********"
+        );
+    }
 
     #[test]
     fn deposit_heading_distinguishes_arrival_verification_and_failed_reads() {

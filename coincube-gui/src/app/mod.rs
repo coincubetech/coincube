@@ -71,6 +71,31 @@ use crate::{
 use self::state::settings::SettingsState as GeneralSettingsState;
 use self::state::vault::settings::SettingsState as VaultSettingsState;
 
+enum ToastContent {
+    Text(String),
+    IncomingLiquidWaiting { amount_sat: u64 },
+}
+
+impl ToastContent {
+    fn display(&self, unit: settings::unit::BitcoinDisplayUnit, masked: bool) -> String {
+        match self {
+            Self::Text(message) => message.clone(),
+            Self::IncomingLiquidWaiting { amount_sat } => {
+                let amount = if masked {
+                    "••••••".to_owned()
+                } else {
+                    use coincube_ui::component::amount::DisplayAmount;
+                    bitcoin::Amount::from_sat(*amount_sat).to_formatted_string_with_unit(unit)
+                };
+                format!(
+                    "Incoming payment of {} — swapping to L-BTC, awaiting confirmation",
+                    amount
+                )
+            }
+        }
+    }
+}
+
 struct Panels {
     current: Menu,
     imported_bitcoin: Option<Box<state::imported_bitcoin::ImportedBitcoinPanel>>,
@@ -1066,7 +1091,7 @@ pub struct App {
     /// unoptimised builds give every temporary its own stack slot, so the
     /// function's frame alone approached the 2 MiB test-thread stack.
     panels: Box<Panels>,
-    errors: Vec<(usize, std::time::Instant, log::Level, String)>,
+    errors: Vec<(usize, std::time::Instant, log::Level, ToastContent)>,
     current_error_id: usize,
     /// True while a check_bitcoind_sync_progress probe is in flight; prevents
     /// multiple concurrent RPC calls from piling up across subscription ticks.
@@ -7649,8 +7674,27 @@ impl App {
             }
             Message::View(view::Message::ShowToast(level, msg)) => {
                 // Show toast with specified level
-                self.errors
-                    .push((self.current_error_id, std::time::Instant::now(), level, msg));
+                self.errors.push((
+                    self.current_error_id,
+                    std::time::Instant::now(),
+                    level,
+                    ToastContent::Text(msg),
+                ));
+                self.current_error_id += 1;
+
+                let id = self.current_error_id - 1;
+                return Task::perform(
+                    async move { tokio::time::sleep(Duration::from_secs(8)).await },
+                    move |_| Message::View(view::Message::DismissToast(id)),
+                );
+            }
+            Message::View(view::Message::ShowIncomingLiquidWaitingToast(amount_sat)) => {
+                self.errors.push((
+                    self.current_error_id,
+                    std::time::Instant::now(),
+                    log::Level::Info,
+                    ToastContent::IncomingLiquidWaiting { amount_sat },
+                ));
                 self.current_error_id += 1;
 
                 let id = self.current_error_id - 1;
@@ -10417,16 +10461,9 @@ impl App {
                                 self.toasted_incoming_waiting_tx_ids.pop_front();
                             }
                             self.toasted_incoming_waiting_tx_ids.push_back(tx_id);
-                            use coincube_ui::component::amount::DisplayAmount;
-                            let amount = bitcoin::Amount::from_sat(details.amount_sat)
-                                .to_formatted_string_with_unit(self.cache.bitcoin_unit);
-                            tasks.push(Task::done(Message::View(view::Message::ShowToast(
-                                log::Level::Info,
-                                format!(
-                                    "Incoming payment of {} — swapping to L-BTC, awaiting confirmation",
-                                    amount
-                                ),
-                            ))));
+                            tasks.push(Task::done(Message::View(
+                                view::Message::ShowIncomingLiquidWaitingToast(details.amount_sat),
+                            )));
                         }
 
                         return Task::batch(tasks);
@@ -10936,18 +10973,41 @@ impl App {
         }
     }
 
+    fn received_celebration_view(&self) -> Element<'_, view::Message> {
+        // The underlying amount remains available for a later explicit Show,
+        // but an arrival must never reveal it while privacy is hidden or
+        // unresolved (including the first launch after migration).
+        let displayed_amount = if self.cache.balance_amounts_masked() {
+            "••••••"
+        } else {
+            &self.received_celebration_amount
+        };
+        coincube_ui::component::received_celebration_page(
+            &self.received_celebration_context,
+            displayed_amount,
+            &self.received_celebration_quote,
+            &self.received_celebration_image,
+            "has arrived.",
+            view::Message::DismissReceivedCelebration,
+        )
+    }
+
+    fn displayed_toasts(&self) -> impl Iterator<Item = (usize, log::Level, String)> + '_ {
+        let masked = self.cache.balance_amounts_masked();
+        let unit = self.cache.bitcoin_unit;
+        self.errors
+            .iter()
+            .map(move |(id, _, level, content)| (*id, *level, content.display(unit, masked)))
+    }
+
     pub fn view(&self) -> Element<'_, Message> {
         let view = if self.show_received_celebration {
-            // Global celebration overlay takes precedence over the normal panel view
-            let celebration = coincube_ui::component::received_celebration_page(
-                &self.received_celebration_context,
-                &self.received_celebration_amount,
-                &self.received_celebration_quote,
-                &self.received_celebration_image,
-                "has arrived.",
-                view::Message::DismissReceivedCelebration,
-            );
-            view::dashboard(&self.panels.current, &self.cache, celebration)
+            // Global celebration overlay takes precedence over the normal panel view.
+            view::dashboard(
+                &self.panels.current,
+                &self.cache,
+                self.received_celebration_view(),
+            )
         } else if let (Menu::Vault(menu::VaultSubMenu::Claim), Some(panel)) = (
             &self.panels.current,
             self.claim_pair_context
@@ -11005,21 +11065,10 @@ impl App {
         let content: Element<'_, Message> = match self.errors.is_empty() {
             true => content,
             false => {
-                // Errors are already in chronological order (Vec is append-only)
-                let error_snapshot: Vec<_> = self.errors.iter().collect();
-
                 let theme = ui_theme::Theme::default();
                 iced::widget::Stack::new()
                     .push(content)
-                    .push(
-                        view::toast_overlay(
-                            error_snapshot
-                                .iter()
-                                .map(|(id, _, level, msg)| (*id, *level, msg.as_str())),
-                            &theme,
-                        )
-                        .map(Message::View),
-                    )
+                    .push(view::toast_overlay(self.displayed_toasts(), &theme).map(Message::View))
                     .into()
             }
         };
@@ -11046,7 +11095,11 @@ impl App {
             Some(panel) if !panel.is_hidden() => iced::widget::Stack::new()
                 .push(content)
                 .push(iced::widget::opaque(
-                    view::vault::split::split_panel(panel).map(Message::View),
+                    view::vault::split::split_panel_with_privacy(
+                        panel,
+                        self.cache.balance_amounts_masked(),
+                    )
+                    .map(Message::View),
                 ))
                 .into(),
             _ => content,
@@ -17796,6 +17849,130 @@ pub(crate) mod claim_step1_tests {
         );
         assert_eq!(*generation.borrow(), before, "the refusal revokes nothing");
         assert!(!app.daemon_switch_in_progress);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod received_celebration_privacy_tests {
+    use crate::app::state::preferences::{BalancePrivacy, BalancePrivacyChrome};
+    use crate::app::view::shared::landing::capture;
+
+    #[test]
+    fn mounted_app_arrival_masks_hidden_and_unresolved_amounts() {
+        let _guard = crate::app::session::test_guard();
+        let root =
+            std::env::temp_dir().join(format!("celebration-privacy-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+        app.show_received_celebration = true;
+        app.received_celebration_amount = "12,345 SATS".into();
+
+        for privacy in [BalancePrivacy::Hidden, BalancePrivacy::Unresolved] {
+            app.cache.balance_privacy = Some(BalancePrivacyChrome {
+                privacy,
+                busy: false,
+                interactive: false,
+            });
+            let mounted = capture::inspect(
+                "received-celebration",
+                app.received_celebration_view(),
+                (1024, 768),
+                "dark",
+                coincube_ui::theme::Theme::dark(),
+            );
+            assert!(mounted.contains("••••••"));
+            assert!(!mounted.contains("12,345"));
+        }
+
+        app.cache.balance_privacy = Some(BalancePrivacyChrome {
+            privacy: BalancePrivacy::Shown,
+            busy: false,
+            interactive: true,
+        });
+        let shown = capture::inspect(
+            "received-celebration",
+            app.received_celebration_view(),
+            (1024, 768),
+            "dark",
+            coincube_ui::theme::Theme::dark(),
+        );
+        assert!(shown.contains("12,345 SATS"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod incoming_liquid_toast_privacy_tests {
+    use crate::app::state::preferences::{BalancePrivacy, BalancePrivacyChrome};
+    use crate::app::view::shared::landing::capture;
+
+    #[test]
+    fn visible_waiting_toast_tracks_hide_and_accepted_show() {
+        let _guard = crate::app::session::test_guard();
+        let root =
+            std::env::temp_dir().join(format!("incoming-toast-privacy-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+        assert_eq!(
+            super::ToastContent::Text("Split review: 12,345 sats".into())
+                .display(app.cache.bitcoin_unit, true),
+            "Split review: 12,345 sats",
+            "ordinary toast text must not be subject to broad string redaction"
+        );
+        drop(app.update(super::Message::View(
+            super::view::Message::ShowIncomingLiquidWaitingToast(12_345),
+        )));
+        assert_eq!(app.errors.len(), 1);
+
+        let mounted = |app: &super::App| {
+            capture::inspect(
+                "incoming-liquid-waiting-toast",
+                super::view::toast_overlay(
+                    app.displayed_toasts(),
+                    &coincube_ui::theme::Theme::dark(),
+                ),
+                (1024, 768),
+                "dark",
+                coincube_ui::theme::Theme::dark(),
+            )
+        };
+        let set_privacy = |app: &mut super::App, privacy| {
+            app.cache.balance_privacy = Some(BalancePrivacyChrome {
+                privacy,
+                busy: false,
+                interactive: privacy == BalancePrivacy::Shown,
+            });
+        };
+
+        // The same toast stays mounted throughout. Hide masks immediately,
+        // including before its persistence completes; a failed or pending Show
+        // still has no accepted Show receipt and cannot reveal the amount.
+        set_privacy(&mut app, BalancePrivacy::Shown);
+        let shown = mounted(&app);
+        assert!(shown.contains("12,345"));
+        set_privacy(&mut app, BalancePrivacy::HiddenLocally);
+        let hidden = mounted(&app);
+        assert!(hidden.contains("••••••"));
+        assert!(!hidden.contains("12,345"));
+        assert!(hidden.contains("swapping to L-BTC, awaiting confirmation"));
+        set_privacy(&mut app, BalancePrivacy::Hidden);
+        assert!(!mounted(&app).contains("12,345"));
+        set_privacy(&mut app, BalancePrivacy::Unresolved);
+        assert!(!mounted(&app).contains("12,345"));
+        app.cache.balance_privacy = None;
+        assert!(!mounted(&app).contains("12,345"));
+        // The user has requested Show, but the write has not produced its
+        // accepted receipt. The GUI still publishes Hidden while busy.
+        app.cache.balance_privacy = Some(BalancePrivacyChrome {
+            privacy: BalancePrivacy::Hidden,
+            busy: true,
+            interactive: false,
+        });
+        assert!(!mounted(&app).contains("12,345"));
+        // The GUI publishes Shown only after accepting the explicit Show
+        // receipt; the existing toast then reveals the original amount.
+        set_privacy(&mut app, BalancePrivacy::Shown);
+        assert!(mounted(&app).contains("12,345"));
+        assert_eq!(app.errors.len(), 1);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

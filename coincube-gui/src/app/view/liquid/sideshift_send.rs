@@ -37,6 +37,7 @@ pub fn sideshift_send_view<'a>(
     loading: bool,
     error: Option<&'a str>,
     usdt_asset_id: &str,
+    mask_amounts: bool,
 ) -> Element<'a, SideshiftSendMessage> {
     match phase {
         SendPhase::AddressInput => address_input_view(
@@ -47,6 +48,7 @@ pub fn sideshift_send_view<'a>(
             recent_transactions,
             error,
             usdt_asset_id,
+            mask_amounts,
         ),
         SendPhase::NetworkDisambiguation => disambiguation_view(
             recipient_address,
@@ -61,6 +63,7 @@ pub fn sideshift_send_view<'a>(
             usdt_balance,
             loading,
             error,
+            mask_amounts,
         ),
         SendPhase::FetchingAffiliate
         | SendPhase::FetchingQuote
@@ -76,6 +79,7 @@ pub fn sideshift_send_view<'a>(
 // Address input with balance (initial screen)
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)] // Existing flow inputs plus shared privacy state.
 fn address_input_view<'a>(
     recipient_address: &'a str,
     selected_network: Option<&SideshiftNetwork>,
@@ -84,6 +88,7 @@ fn address_input_view<'a>(
     recent_transactions: &'a [RecentTransaction],
     error: Option<&'a str>,
     usdt_asset_id: &str,
+    mask_amounts: bool,
 ) -> Element<'a, SideshiftSendMessage> {
     let mut content = Column::new().spacing(20).align_x(Alignment::Center);
 
@@ -94,7 +99,15 @@ fn address_input_view<'a>(
             Row::new()
                 .spacing(10)
                 .align_y(Alignment::Center)
-                .push(text(format_usdt_display(usdt_balance)).size(H2_SIZE).bold())
+                .push(
+                    text(if mask_amounts {
+                        "••••••".into()
+                    } else {
+                        format_usdt_display(usdt_balance)
+                    })
+                    .size(H2_SIZE)
+                    .bold(),
+                )
                 .push(text("USDt").size(H2_SIZE).color(color::GREY_3)),
         )
         .push(
@@ -238,21 +251,20 @@ fn address_input_view<'a>(
         tx_list = tx_list.push(h4_bold("Last transactions"));
 
         for tx in recent_transactions.iter().take(5) {
-            let usdt_amount =
-                if let DomainPaymentDetails::LiquidAsset { asset_id, .. } = &tx.details {
-                    if !usdt_asset_id.is_empty() && asset_id == usdt_asset_id {
-                        Some(format_usdt_display(tx.amount.to_sat()))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-
-            let amount_text = if let Some(ref usdt) = usdt_amount {
-                format!("{}{} USDt", if tx.is_incoming { "+ " } else { "- " }, usdt)
-            } else {
+            let is_usdt = matches!(&tx.details,
+                DomainPaymentDetails::LiquidAsset { asset_id, .. }
+                    if !usdt_asset_id.is_empty() && asset_id == usdt_asset_id);
+            if !is_usdt {
                 continue;
+            }
+            let amount_text = if mask_amounts {
+                "••••••".into()
+            } else {
+                format!(
+                    "{}{} USDt",
+                    if tx.is_incoming { "+ " } else { "- " },
+                    format_usdt_display(tx.amount.to_sat())
+                )
             };
 
             let amount_color = if tx.is_incoming {
@@ -407,6 +419,7 @@ fn amount_input_view<'a>(
     usdt_balance: u64,
     loading: bool,
     error: Option<&'a str>,
+    mask_amounts: bool,
 ) -> Element<'a, SideshiftSendMessage> {
     let network = selected_network
         .copied()
@@ -450,9 +463,13 @@ fn amount_input_view<'a>(
                 .style(theme::text::secondary),
         )
         .push(
-            text(format!("{} USDt", format_usdt_display(usdt_balance)))
-                .size(P2_SIZE)
-                .bold(),
+            text(if mask_amounts {
+                "••••••".into()
+            } else {
+                format!("{} USDt", format_usdt_display(usdt_balance))
+            })
+            .size(P2_SIZE)
+            .bold(),
         );
 
     let amount_section = Column::new()
@@ -805,4 +822,98 @@ fn error_view(error: Option<&str>) -> Element<SideshiftSendMessage> {
     )
     .center_x(Length::Fill)
     .into()
+}
+
+#[cfg(test)]
+mod privacy_tests {
+    use super::*;
+    use crate::app::view::shared::landing::capture;
+    use crate::app::wallets::DomainPaymentStatus;
+    use coincube_core::miniscript::bitcoin::Amount;
+
+    #[test]
+    fn sideshift_passive_balance_and_last_transactions_follow_global_mask() {
+        let recent = [RecentTransaction {
+            description: "USDt payment".into(),
+            time_ago: "just now".into(),
+            amount: Amount::from_sat(246_813_000_000),
+            fees_sat: Amount::ZERO,
+            fiat_amount: None,
+            is_incoming: true,
+            status: DomainPaymentStatus::Complete,
+            details: DomainPaymentDetails::LiquidAsset {
+                asset_id: "usdt".into(),
+                asset_info: None,
+                description: "USDt payment".into(),
+                payer_note: None,
+            },
+            usdt_display: Some("2468.13 USDt".into()),
+        }];
+        let phase = SendPhase::AddressInput;
+        let render = |mask_amounts| {
+            sideshift_send_view(
+                &phase,
+                None,
+                &[],
+                &SideshiftShiftType::Fixed,
+                "",
+                "77.77",
+                135_791_113,
+                &recent,
+                None,
+                None,
+                false,
+                None,
+                "usdt",
+                mask_amounts,
+            )
+        };
+        let hidden = capture::inspect(
+            "sideshift-hidden",
+            render(true),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(hidden.contains("••••••"));
+        let usdt_balance = format_usdt_display(135_791_113);
+        assert!(!hidden.contains(&usdt_balance));
+        let usdt_recent = format_usdt_display(246_813_000_000);
+        assert!(!hidden.contains(&usdt_recent));
+        let shown = capture::inspect(
+            "sideshift-shown",
+            render(false),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(shown.contains(&usdt_balance));
+        assert!(shown.contains(&usdt_recent));
+
+        let amount_phase = SendPhase::AmountInput;
+        let amount_hidden = capture::inspect(
+            "sideshift-amount-hidden",
+            sideshift_send_view(
+                &amount_phase,
+                None,
+                &[],
+                &SideshiftShiftType::Fixed,
+                "",
+                "77.77",
+                135_791_113,
+                &recent,
+                None,
+                None,
+                false,
+                None,
+                "usdt",
+                true,
+            ),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(amount_hidden.contains("••••••"));
+        assert!(!amount_hidden.contains("1.35 USDt"));
+    }
 }

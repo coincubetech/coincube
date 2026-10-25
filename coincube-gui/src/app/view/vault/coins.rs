@@ -73,6 +73,7 @@ pub fn coins_view<'a>(
                             labels,
                             labels_editing,
                             bitcoin_unit,
+                            cache.balance_amounts_masked(),
                             blake2b.then(|| cache.entanglement_of(&coin.outpoint.txid)),
                             cache.split_deposit.is_some_and(|(outpoint, expires)| {
                                 outpoint == coin.outpoint && std::time::Instant::now() < expires
@@ -97,12 +98,18 @@ fn coin_list_view<'a>(
     labels: &'a HashMap<String, String>,
     labels_editing: &'a HashMap<String, form::Value<String>>,
     bitcoin_unit: BitcoinDisplayUnit,
+    mask_amounts: bool,
     entangled: Option<Entanglement>,
     verified_deposit: bool,
 ) -> Container<'a, Message> {
     let outpoint = coin.outpoint.to_string();
     let address = coin.address.to_string();
     let txid = coin.outpoint.txid.to_string();
+    let amount: Element<'a, Message> = if mask_amounts {
+        text("••••••").into()
+    } else {
+        amount_with_unit(&coin.amount, bitcoin_unit).into()
+    };
     Container::new(
         Column::new()
             .push(
@@ -177,7 +184,7 @@ fn coin_list_view<'a>(
                                 .align_y(Alignment::Center)
                                 .width(Length::Fill),
                         )
-                        .push(amount_with_unit(&coin.amount, bitcoin_unit))
+                        .push(amount)
                         .align_y(Alignment::Center)
                         .spacing(20),
                 )
@@ -459,6 +466,65 @@ pub fn expire_message_units(sequence: u32) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::state::preferences::{BalancePrivacy, BalancePrivacyChrome};
+    use crate::app::view::shared::landing::capture;
+    use coincube_core::miniscript::bitcoin::{bip32::ChildNumber, Address, Amount, OutPoint, Txid};
+    use std::str::FromStr;
+
+    #[test]
+    fn hidden_coins_list_masks_amount_without_removing_coin() {
+        let coin = Coin {
+            amount: Amount::from_sat(98_765_432),
+            outpoint: OutPoint::new(Txid::from_str(&format!("{:064x}", 1)).unwrap(), 0),
+            address: Address::from_str("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")
+                .unwrap()
+                .assume_checked(),
+            block_height: Some(100),
+            derivation_index: ChildNumber::from_normal_idx(0).unwrap(),
+            spend_info: None,
+            is_immature: false,
+            is_change: false,
+            is_from_self: false,
+        };
+        let coins = [coin];
+        let labels = HashMap::new();
+        let selected = [];
+        for privacy in [BalancePrivacy::Hidden, BalancePrivacy::Shown] {
+            let cache = Cache {
+                balance_privacy: Some(BalancePrivacyChrome {
+                    privacy,
+                    busy: false,
+                    interactive: false,
+                }),
+                ..Default::default()
+            };
+            let mounted = capture::inspect(
+                "vault-coins-privacy",
+                coins_view(
+                    &cache,
+                    &coins,
+                    None,
+                    &selected,
+                    &labels,
+                    &HashMap::new(),
+                    BitcoinDisplayUnit::Sats,
+                    false,
+                ),
+                (1024, 768),
+                "dark",
+                theme::Theme::dark(),
+            );
+            assert!(mounted.contains("Coins"));
+            assert_eq!(
+                mounted.contains("98,765,432"),
+                privacy == BalancePrivacy::Shown
+            );
+            assert_eq!(
+                mounted.contains("••••••"),
+                privacy == BalancePrivacy::Hidden
+            );
+        }
+    }
 
     #[test]
     fn presence_badges_never_treat_a_missing_transaction_as_replay_protection() {

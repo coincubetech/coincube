@@ -199,6 +199,7 @@ pub fn vault_overview_view<'a>(
     node_bitcoind_ibd: Option<bool>,
     show_direction_badges: bool,
     display_mode: DisplayMode,
+    mask_amounts: bool,
 ) -> Element<'a, Message> {
     // Show external-unconfirmed coins as part of the headline balance
     // (matching the Cube → Overview Vault card). The per-transaction
@@ -222,7 +223,9 @@ pub fn vault_overview_view<'a>(
             "btc", "bitcoin", 40.0,
         ))
         .push(text("BTC").size(P1_SIZE).bold().width(Length::Fixed(60.0)))
-        .push(if history_unknown {
+        .push(if mask_amounts {
+            Row::new().push(text("••••••").size(P1_SIZE))
+        } else if history_unknown {
             Row::new().push(text("—").size(P1_SIZE).style(theme::text::secondary))
         } else {
             Row::new().push(amount_with_size_and_unit(
@@ -232,7 +235,9 @@ pub fn vault_overview_view<'a>(
             ))
         })
         .push(
-            text(if history_unknown {
+            text(if mask_amounts {
+                "••••••".to_string()
+            } else if history_unknown {
                 String::new()
             } else {
                 btc_fiat_str
@@ -260,7 +265,7 @@ pub fn vault_overview_view<'a>(
                         wallet_header::<Message>(WalletHeaderProps {
                             sats: total_balance,
                             fiat: fiat_balance,
-                            balance_masked: false,
+                            balance_masked: mask_amounts,
                             bitcoin_unit,
                             variant: HeaderVariant::Overview,
                             sync,
@@ -378,6 +383,7 @@ pub fn vault_overview_view<'a>(
                             bitcoin_unit,
                             fiat_converter,
                             show_direction_badges,
+                            mask_amounts,
                         ))
                     } else {
                         col
@@ -473,6 +479,7 @@ fn event_list_view(
     bitcoin_unit: BitcoinDisplayUnit,
     fiat_converter: Option<FiatAmountConverter>,
     show_direction_badges: bool,
+    mask_amounts: bool,
 ) -> Element<'_, Message> {
     let direction = match event.kind {
         PaymentKind::Incoming => TransactionDirection::Incoming,
@@ -494,6 +501,9 @@ fn event_list_view(
             "btc", "bitcoin", 40.0,
         ))
         .with_show_direction_badge(show_direction_badges);
+    if mask_amounts {
+        item = item.with_amount_override("••••••".to_string());
+    }
 
     if let Some(label) = label {
         item = item.with_label(label);
@@ -505,7 +515,7 @@ fn event_list_view(
         item = item.with_badge(TransactionBadge::Unconfirmed);
     }
 
-    if let Some(fiat_amount) = fiat_converter.map(|converter| {
+    if let Some(fiat_amount) = fiat_converter.filter(|_| !mask_amounts).map(|converter| {
         let fiat = converter.convert(event.amount);
         format!("{} {}", fiat.to_formatted_string(), fiat.currency())
     }) {
@@ -563,10 +573,11 @@ pub fn payment_view<'a>(
             } else {
                 label::label_editable(vec![outpoint.clone()], tx.labels.get(&outpoint), H3_SIZE)
             })
-            .push(Container::new(amount_with_size(
-                &tx.tx.output[output_index].value,
-                H3_SIZE,
-            )))
+            .push(Container::new(if cache.balance_amounts_masked() {
+                Row::new().push(text("••••••").size(H3_SIZE))
+            } else {
+                amount_with_size(&tx.tx.output[output_index].value, H3_SIZE)
+            }))
             .push(Space::new().height(H3_SIZE))
             .push(Container::new(h3("Transaction")).width(Length::Fill))
             .push(if tx.is_batch() {
@@ -586,13 +597,21 @@ pub fn payment_view<'a>(
                 Row::new()
                     .align_y(Alignment::Center)
                     .push(h3("Miner fee: ").style(theme::text::secondary))
-                    .push(amount_with_size(&fee_amount, H3_SIZE))
+                    .push(if cache.balance_amounts_masked() {
+                        Row::new().push(text("••••••").size(H3_SIZE))
+                    } else {
+                        amount_with_size(&fee_amount, H3_SIZE)
+                    })
                     .push(text(" ").size(H3_SIZE))
                     .push(
-                        text(format!(
-                            "({} sats/vbyte)",
-                            fee_amount.to_sat() / tx.tx.vsize() as u64
-                        ))
+                        text(if cache.balance_amounts_masked() {
+                            "••••••".to_string()
+                        } else {
+                            format!(
+                                "({} sats/vbyte)",
+                                fee_amount.to_sat() / tx.tx.vsize() as u64
+                            )
+                        })
                         .size(H4_SIZE)
                         .style(theme::text::secondary),
                     )

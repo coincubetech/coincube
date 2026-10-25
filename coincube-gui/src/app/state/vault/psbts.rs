@@ -46,7 +46,11 @@ impl State for PsbtsPanel {
             let list_view = view::dashboard(
                 menu,
                 cache,
-                view::vault::psbts::psbts_view(&self.spend_txs, cache.bitcoin_unit),
+                view::vault::psbts::psbts_view(
+                    &self.spend_txs,
+                    cache.bitcoin_unit,
+                    cache.balance_amounts_masked(),
+                ),
             );
             if let Some(modal) = &self.modal {
                 modal.view(list_view)
@@ -207,11 +211,14 @@ impl From<PsbtsPanel> for Box<dyn State> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::view::shared::landing::capture;
     use crate::{daemon::client::Coincubed, utils::mock::Daemon as MockDaemon};
     use coincube_core::{
         descriptors::CoincubeDescriptor,
-        miniscript::bitcoin::{secp256k1::Secp256k1, Network, Psbt},
+        miniscript::bitcoin::{secp256k1::Secp256k1, Amount, Network, Psbt},
     };
+    use coincube_ui::component::amount::{BitcoinDisplayUnit, DisplayAmount};
+    use coincube_ui::theme;
     use std::str::FromStr;
 
     const DESC: &str = "wsh(or_d(multi(2,[f714c228/48'/1'/0'/2']tpubDEwJnTwfKoMvu8AXXBPydBVWDpzNP5tatjjZ56q4TQioGL7iL9xzTbMoCCQ3tfGihtff7vtR4xsjcRuhZ7HWARVAkGZ1HZcpBhVdou76k7j/<0;1>/*,[2522f23c/48'/1'/0'/2']tpubDEoTU4bDW1EXN1rnLXnRfue1a7DeqjJcs39PkEeLcVXhVKzCnFo9yQX2EeeXJ6kh4hgbz5o9v7YAc1EE97AEJpJbKNmDxE3ZQo4msGPSp2J/<0;1>/*),and_v(v:thresh(1,pkh([f714c228/48'/1'/0'/2']tpubDEwJnTwfKoMvu8AXXBPydBVWDpzNP5tatjjZ56q4TQioGL7iL9xzTbMoCCQ3tfGihtff7vtR4xsjcRuhZ7HWARVAkGZ1HZcpBhVdou76k7j/<2;3>/*),a:pkh([2522f23c/48'/1'/0'/2']tpubDEoTU4bDW1EXN1rnLXnRfue1a7DeqjJcs39PkEeLcVXhVKzCnFo9yQX2EeeXJ6kh4hgbz5o9v7YAc1EE97AEJpJbKNmDxE3ZQo4msGPSp2J/<2;3>/*)),older(65535))))#9s8ekrce";
@@ -225,6 +232,35 @@ mod tests {
         let psbt = Psbt::from_str(UNSIGNED_PSBT).unwrap();
         let secp = Secp256k1::verification_only();
         SpendTx::new(None, psbt, vec![], &desc, &secp, Network::Signet)
+    }
+
+    #[test]
+    fn hidden_psbt_list_masks_spend_and_fee_without_removing_entry() {
+        let mut tx = spend_tx();
+        tx.fee_amount = Some(Amount::from_sat(12_345));
+        assert!(tx.spend_amount.to_sat() > 0);
+        let raw_spend = tx
+            .spend_amount
+            .to_formatted_string_with_unit(BitcoinDisplayUnit::Sats);
+        let fee = tx
+            .fee_amount
+            .map(|amount| amount.to_formatted_string_with_unit(BitcoinDisplayUnit::Sats));
+        let rows = [tx];
+        for masked in [true, false] {
+            let mounted = capture::inspect(
+                "vault-psbts-privacy",
+                view::vault::psbts::psbts_view(&rows, BitcoinDisplayUnit::Sats, masked),
+                (1024, 768),
+                "dark",
+                theme::Theme::dark(),
+            );
+            assert!(mounted.contains("PSBTs"));
+            assert_eq!(mounted.contains(&raw_spend), !masked);
+            if let Some(fee) = &fee {
+                assert_eq!(mounted.contains(fee), !masked);
+            }
+            assert_eq!(mounted.contains("••••••"), masked);
+        }
     }
 
     // Regression: a background `SpendTxs` refresh must NOT rebuild the open

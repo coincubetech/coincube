@@ -813,7 +813,14 @@ async fn claim_gui_regtest_driver() {
             drive(&mut panel, &dyn_daemon, &cache, task).await;
         }
         assert!(panel.deposit_details_expanded());
-        let preview_labels = rendered_labels(&panel, &cache).await;
+        // This assertion inspects exact transaction inputs in the Shown state.
+        let mut shown_cache = cache.clone();
+        shown_cache.balance_privacy = Some(crate::app::state::preferences::BalancePrivacyChrome {
+            privacy: crate::app::state::preferences::BalancePrivacy::Shown,
+            busy: false,
+            interactive: true,
+        });
+        let preview_labels = rendered_labels(&panel, &shown_cache).await;
         assert!(has_label(&preview_labels, &addresses.bitcoin_deposit));
         assert!(has_label(&preview_labels, &addresses.btcb2_deposit));
         assert!(has_label(&preview_labels, "Transaction details"));

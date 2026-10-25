@@ -74,6 +74,7 @@ pub struct LiquidSwapConfig<'a> {
     pub recent_swaps: &'a [DomainPayment],
     pub usdt_id: &'a str,
     pub fiat_converter: Option<FiatAmountConverter>,
+    pub mask_amounts: bool,
 }
 
 fn ticker(asset: SendAsset) -> &'static str {
@@ -187,14 +188,19 @@ fn balance_row<'a>(
     asset: SendAsset,
     base: u64,
     unit: BitcoinDisplayUnit,
+    mask_amounts: bool,
 ) -> Element<'a, LiquidSwapMessage> {
     Row::new()
         .spacing(6)
         .push(text("Balance:").size(P2_SIZE).style(theme::text::secondary))
         .push(
-            text(fmt_amount(asset, base, unit))
-                .size(P2_SIZE)
-                .style(theme::text::secondary),
+            text(if mask_amounts {
+                "••••••".into()
+            } else {
+                fmt_amount(asset, base, unit)
+            })
+            .size(P2_SIZE)
+            .style(theme::text::secondary),
         )
         .into()
 }
@@ -231,6 +237,7 @@ fn asset_card<'a>(
     asset: SendAsset,
     balance_base_units: u64,
     unit: BitcoinDisplayUnit,
+    mask_amounts: bool,
 ) -> Element<'a, LiquidSwapMessage> {
     let mut header_row = Row::new()
         .align_y(Alignment::Center)
@@ -248,7 +255,7 @@ fn asset_card<'a>(
 
     let balance_row = Row::new()
         .align_y(Alignment::Center)
-        .push(balance_row(asset, balance_base_units, unit))
+        .push(balance_row(asset, balance_base_units, unit, mask_amounts))
         .push(Space::new().width(Length::Fill))
         .push(liquid_pill());
 
@@ -347,7 +354,9 @@ fn swap_leg_row<'a>(
         .with_label("Swap".to_owned())
         .with_time_ago(format_time_ago(payment.timestamp.into()));
 
-    if is_usdt {
+    if config.mask_amounts {
+        item = item.with_amount_override("••••••".into());
+    } else if is_usdt {
         item = item.with_amount_override(format!("{} USDt", format_usdt_display(amount.to_sat())));
     } else if let Some(fiat) = config.fiat_converter.as_ref().map(|c| c.convert(amount)) {
         item = item.with_fiat_amount(format!(
@@ -421,6 +430,7 @@ fn input_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMess
         config.from_asset,
         from_balance,
         config.bitcoin_unit,
+        config.mask_amounts,
     );
 
     // ── Rate chip + flip control (Aqua middle row) ───────────────────────
@@ -462,6 +472,7 @@ fn input_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMess
         config.to_asset,
         to_balance,
         config.bitcoin_unit,
+        config.mask_amounts,
     );
 
     // ── Fee / status line ────────────────────────────────────────────────
@@ -712,5 +723,118 @@ pub fn liquid_swap_view<'a>(config: LiquidSwapConfig<'a>) -> Element<'a, LiquidS
             "is on its way.",
             LiquidSwapMessage::Done,
         ),
+    }
+}
+
+#[cfg(test)]
+mod privacy_tests {
+    use super::*;
+    use crate::app::view::shared::landing::capture;
+    use crate::app::wallets::{DomainLiquidAssetInfo, DomainPaymentDirection};
+    use coincube_ui::component::quote_display;
+
+    #[test]
+    fn swap_passive_balances_and_recent_legs_follow_global_mask() {
+        let input = form::Value::<String>::default();
+        let quote = quote_display::random_quote("empty-wallet");
+        let image = quote_display::image_handle_for_context("empty-wallet");
+        let payments = vec![
+            DomainPayment {
+                tx_id: Some("privacy-btc".into()),
+                destination: None,
+                timestamp: 1_700_000_000,
+                amount_sat: 98_765_432,
+                fees_sat: 0,
+                direction: DomainPaymentDirection::Receive,
+                status: DomainPaymentStatus::Complete,
+                details: DomainPaymentDetails::LiquidAsset {
+                    asset_id: "lbtc".into(),
+                    asset_info: None,
+                    description: "Swap".into(),
+                    payer_note: None,
+                },
+            },
+            DomainPayment {
+                tx_id: Some("privacy-usdt".into()),
+                destination: None,
+                timestamp: 1_700_000_000,
+                amount_sat: 246_813_000_000,
+                fees_sat: 0,
+                direction: DomainPaymentDirection::Receive,
+                status: DomainPaymentStatus::Complete,
+                details: DomainPaymentDetails::LiquidAsset {
+                    asset_id: "usdt".into(),
+                    asset_info: Some(DomainLiquidAssetInfo {
+                        amount_minor: 246_813_000_000,
+                        precision: 8,
+                    }),
+                    description: "Swap".into(),
+                    payer_note: None,
+                },
+            },
+        ];
+        let render = |mask_amounts| {
+            liquid_swap_view(LiquidSwapConfig {
+                phase: SwapPhase::Input,
+                from_asset: SendAsset::Lbtc,
+                to_asset: SendAsset::Usdt,
+                btc_balance: Amount::from_sat(12_345_678),
+                usdt_balance: 135_791_113,
+                pay_input: &input,
+                receive_input: &input,
+                quote: None,
+                rate: None,
+                quoting: false,
+                quote_remaining: 0,
+                quote_actionable: false,
+                confirm_enabled: false,
+                is_sending: false,
+                syncing: false,
+                sync_failed: false,
+                needs_lbtc_for_fees: false,
+                bitcoin_unit: BitcoinDisplayUnit::Sats,
+                error: None,
+                sent_amount_display: "",
+                sent_quote: &quote,
+                sent_image_handle: &image,
+                recent_swaps: &payments,
+                usdt_id: "usdt",
+                fiat_converter: None,
+                mask_amounts,
+            })
+        };
+        let hidden = capture::inspect(
+            "liquid-swap-hidden",
+            render(true),
+            (1440, 1800),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(hidden.contains("••••••"));
+        let usdt_balance = format!("{} USDt", format_usdt_display(135_791_113));
+        let usdt_recent = format_usdt_display(246_813_000_000);
+        for sentinel in [
+            "12,345,678",
+            "98,765,432",
+            usdt_recent.as_str(),
+            usdt_balance.as_str(),
+        ] {
+            assert!(
+                !hidden.contains(sentinel),
+                "hidden Liquid swap amount {}",
+                sentinel
+            );
+        }
+        let shown = capture::inspect(
+            "liquid-swap-shown",
+            render(false),
+            (1440, 1800),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(shown.contains("12,345,678"));
+        assert!(shown.contains("98,765,432"));
+        assert!(shown.contains(&usdt_recent));
+        assert!(shown.contains(&usdt_balance));
     }
 }

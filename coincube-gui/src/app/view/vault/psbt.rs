@@ -1018,6 +1018,19 @@ pub fn inputs_view<'a>(
     labels_editing: &'a HashMap<String, form::Value<String>>,
     bitcoin_unit: BitcoinDisplayUnit,
 ) -> Element<'a, Message> {
+    history_inputs_view(coins, tx, labels, labels_editing, bitcoin_unit, false)
+}
+
+/// History detail can hide passive coin values without changing the PSBT
+/// signing/review presentation, which always shows exact authorization values.
+pub fn history_inputs_view<'a>(
+    coins: &'a HashMap<OutPoint, Coin>,
+    tx: &'a Transaction,
+    labels: &'a HashMap<String, String>,
+    labels_editing: &'a HashMap<String, form::Value<String>>,
+    bitcoin_unit: BitcoinDisplayUnit,
+    mask_amounts: bool,
+) -> Element<'a, Message> {
     Container::new(
         Column::new()
             .push(
@@ -1038,12 +1051,17 @@ pub fn inputs_view<'a>(
                         labels,
                         labels_editing,
                         bitcoin_unit,
+                        mask_amounts,
                     ))
                 },
             )),
     )
     .style(theme::card::simple)
     .into()
+}
+
+fn history_amount_redaction(mask_amounts: bool) -> Option<&'static str> {
+    mask_amounts.then_some("••••")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1057,7 +1075,32 @@ pub fn outputs_view<'a>(
     is_single_payment: bool,
     is_external: bool,
 ) -> Element<'a, Message> {
-    outputs_view_with_identities(
+    history_outputs_view(
+        tx,
+        network,
+        change_indexes,
+        labels,
+        labels_editing,
+        bitcoin_unit,
+        is_single_payment,
+        is_external,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn history_outputs_view<'a>(
+    tx: &'a Transaction,
+    network: Network,
+    change_indexes: &'a [usize],
+    labels: &'a HashMap<String, String>,
+    labels_editing: &'a HashMap<String, form::Value<String>>,
+    bitcoin_unit: BitcoinDisplayUnit,
+    is_single_payment: bool,
+    is_external: bool,
+    mask_amounts: bool,
+) -> Element<'a, Message> {
+    outputs_view_with_identities_masked(
         tx,
         network,
         change_indexes,
@@ -1068,6 +1111,7 @@ pub fn outputs_view<'a>(
         is_external,
         &[],
         coincube_ui::theme::palette::ThemeMode::default(),
+        mask_amounts,
     )
 }
 
@@ -1083,6 +1127,35 @@ pub fn outputs_view_with_identities<'a>(
     is_external: bool,
     identities: &'a [(usize, crate::services::branta::LookupResult)],
     theme_mode: coincube_ui::theme::palette::ThemeMode,
+) -> Element<'a, Message> {
+    outputs_view_with_identities_masked(
+        tx,
+        network,
+        change_indexes,
+        labels,
+        labels_editing,
+        bitcoin_unit,
+        is_single_payment,
+        is_external,
+        identities,
+        theme_mode,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn outputs_view_with_identities_masked<'a>(
+    tx: &'a Transaction,
+    network: Network,
+    change_indexes: &'a [usize],
+    labels: &'a HashMap<String, String>,
+    labels_editing: &'a HashMap<String, form::Value<String>>,
+    bitcoin_unit: BitcoinDisplayUnit,
+    is_single_payment: bool,
+    is_external: bool,
+    identities: &'a [(usize, crate::services::branta::LookupResult)],
+    theme_mode: coincube_ui::theme::palette::ThemeMode,
+    mask_amounts: bool,
 ) -> Element<'a, Message> {
     Column::new()
         .spacing(20)
@@ -1139,6 +1212,7 @@ pub fn outputs_view_with_identities<'a>(
                                             bitcoin_unit,
                                             is_single_payment,
                                             is_editable,
+                                            mask_amounts,
                                         ));
                                         if let Some((_, crate::services::branta::LookupResult::Identified(matches))) = identities.iter().find(|(vout, _)| *vout == i) {
                                             matches.iter().enumerate().fold(col, |col, (identity_index, identity)| {
@@ -1206,7 +1280,7 @@ pub fn outputs_view_with_identities<'a>(
                                 Column::new().padding(20),
                                 |col: Column<'a, Message>, (_, output)| {
                                     col.spacing(10)
-                                        .push(change_view(output, network, bitcoin_unit))
+                                        .push(change_view(output, network, bitcoin_unit, mask_amounts))
                                 },
                             )
                             .into()
@@ -1226,6 +1300,7 @@ fn input_view<'a>(
     labels: &'a HashMap<String, String>,
     labels_editing: &'a HashMap<String, form::Value<String>>,
     bitcoin_unit: BitcoinDisplayUnit,
+    mask_amounts: bool,
 ) -> Element<'a, Message> {
     let outpoint = outpoint.to_string();
     Column::new()
@@ -1246,7 +1321,15 @@ fn input_view<'a>(
                     })
                     .width(Length::Fill),
                 )
-                .push_maybe(coin.map(|c| amount_with_unit(&c.amount, bitcoin_unit))),
+                .push_maybe(coin.map(|c| {
+                    let value: Element<'a, Message> =
+                        if let Some(redaction) = history_amount_redaction(mask_amounts) {
+                            text(redaction).into()
+                        } else {
+                            amount_with_unit(&c.amount, bitcoin_unit).into()
+                        };
+                    value
+                })),
         )
         .push(
             Column::new()
@@ -1314,6 +1397,7 @@ fn payment_view<'a>(
     bitcoin_unit: BitcoinDisplayUnit,
     is_single_payment: bool,
     is_editable: bool,
+    mask_amounts: bool,
 ) -> Element<'a, Message> {
     let addr = Address::from_script(&output.script_pubkey, network)
         .ok()
@@ -1343,6 +1427,12 @@ fn payment_view<'a>(
     } else {
         label::label_non_editable(labelled, labels.get(&outpoint), text::P1_SIZE)
     };
+    let amount_value: Element<'a, Message> =
+        if let Some(redaction) = history_amount_redaction(mask_amounts) {
+            text(redaction).into()
+        } else {
+            amount_with_unit(&output.value, bitcoin_unit).into()
+        };
     Column::new()
         .width(Length::Fill)
         .spacing(5)
@@ -1351,7 +1441,7 @@ fn payment_view<'a>(
                 .spacing(5)
                 .align_y(Alignment::Center)
                 .push(Container::new(label_widget).width(Length::Fill))
-                .push(amount_with_unit(&output.value, bitcoin_unit)),
+                .push(amount_value),
         )
         .push(addr.map(|addr| {
             Column::new()
@@ -1396,17 +1486,24 @@ fn change_view(
     output: &TxOut,
     network: Network,
     bitcoin_unit: BitcoinDisplayUnit,
+    mask_amounts: bool,
 ) -> Element<Message> {
     let addr = Address::from_script(&output.script_pubkey, network)
         .unwrap()
         .to_string();
+    let amount_value: Element<'_, Message> =
+        if let Some(redaction) = history_amount_redaction(mask_amounts) {
+            text(redaction).into()
+        } else {
+            amount_with_unit(&output.value, bitcoin_unit).into()
+        };
     Column::new()
         .width(Length::Fill)
         .spacing(5)
         .push(
             Row::new()
                 .push(Space::new().width(Length::Fill))
-                .push(amount_with_unit(&output.value, bitcoin_unit)),
+                .push(amount_value),
         )
         .push(
             Row::new()
@@ -2371,6 +2468,28 @@ mod tests {
             &labels,
             &labels_editing,
             BitcoinDisplayUnit::Sats,
+            false,
+            true,
+        );
+
+        assert_eq!(history_amount_redaction(true), Some("••••"));
+        assert_eq!(history_amount_redaction(false), None);
+        let _ = history_inputs_view(
+            &coins,
+            &tx,
+            &labels,
+            &labels_editing,
+            BitcoinDisplayUnit::Sats,
+            true,
+        );
+        let _ = history_outputs_view(
+            &tx,
+            Network::Bitcoin,
+            &[1],
+            &labels,
+            &labels_editing,
+            BitcoinDisplayUnit::Sats,
+            true,
             false,
             true,
         );
