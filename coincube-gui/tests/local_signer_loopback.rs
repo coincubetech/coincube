@@ -317,15 +317,26 @@ async fn fake_phone(
     let mut tls = acceptor.accept(tcp).await?;
 
     // Read one length-prefixed PresentSession. For a pre-send refusal the
-    // signer is dropped after sign_tx returns, making EOF a deterministic
-    // assertion that no frame was ever emitted.
+    // signer is dropped after sign_tx returns; even one received byte means
+    // it began emitting a frame.
     let mut len_buf = [0u8; 4];
     if matches!(&response, FakeResponse::NoPresentSession) {
-        let read = tls.read_exact(&mut len_buf).await;
-        assert!(
-            matches!(read, Err(ref error) if error.kind() == std::io::ErrorKind::UnexpectedEof),
-            "revoked cached signer emitted a PresentSession"
-        );
+        let mut first_byte = [0u8; 1];
+        match tls.read(&mut first_byte).await {
+            Ok(0) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                ) => {}
+            Ok(n) => panic!(
+                "revoked cached signer emitted {n} plaintext byte(s), starting with {:02x}",
+                first_byte[0]
+            ),
+            Err(error) => panic!("expected transport close before PresentSession, got {error:?}"),
+        }
         return Ok(());
     }
     tls.read_exact(&mut len_buf).await?;
@@ -965,9 +976,18 @@ async fn imported_cached_signer_refuses_before_present_session_after_revocation(
         } else {
             pairing_store::unpair(&dir, &paired.cert_pin).unwrap();
         }
-        async_hwi::HWI::sign_tx(&signer, &mut psbt)
+        let error = async_hwi::HWI::sign_tx(&signer, &mut psbt)
             .await
             .expect_err("cached imported handle lost its authority");
+        let expected = if replace {
+            "This Keychain pairing is ambiguous; pair it again."
+        } else {
+            "This Keychain is no longer paired; pair it again."
+        };
+        match error {
+            async_hwi::Error::Device(message) => assert_eq!(message, expected),
+            other => panic!("expected exact-pairing refusal, got {other:?}"),
+        }
         assert_eq!(psbt.serialize(), before);
         drop(signer);
         tokio::time::timeout(std::time::Duration::from_secs(10), phone_handle)
