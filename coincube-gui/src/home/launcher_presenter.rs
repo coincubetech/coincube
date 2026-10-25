@@ -1257,6 +1257,22 @@ pub(crate) fn unlock_turn<'a, M: 'a>(
         .into()
 }
 
+/// Keep the real unlock widgets mounted behind the noninteractive turn art.
+/// They can take focus and input as soon as Open changes the tab state.
+pub(crate) fn unlock_turn_with_controls<'a, M: 'a>(
+    cube: &crate::app::settings::CubeSettings,
+    mode: coincube_ui::theme::palette::ThemeMode,
+    progress: f32,
+    controls: Element<'a, M>,
+) -> Element<'a, M> {
+    Stack::new()
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .push(controls)
+        .push(unlock_turn(cube, mode, progress))
+        .into()
+}
+
 /// The resting unlock face shared by the real PIN and passkey screens. Their
 /// existing widgets and messages stay inside `controls`; this only supplies
 /// the Launcher stage around them.
@@ -1365,7 +1381,78 @@ mod tests {
     use crate::app::view::shared::landing::capture;
     use crate::dir::CoincubeDirectory;
     use coincube_core::miniscript::bitcoin::Network;
+    use coincube_ui::font;
+    use iced::advanced::{
+        layout as widget_layout,
+        renderer::Headless,
+        widget::{operation::Focusable, Operation, Tree},
+        Layout,
+    };
+    use iced::Rectangle;
     use std::path::PathBuf;
+
+    #[test]
+    fn unlock_turn_keeps_first_pin_field_mounted_during_motion() {
+        #[derive(Default)]
+        struct FocusTargets(Vec<iced::advanced::widget::Id>);
+        impl Operation for FocusTargets {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn focusable(
+                &mut self,
+                id: Option<&iced::advanced::widget::Id>,
+                _: Rectangle,
+                _: &mut dyn Focusable,
+            ) {
+                if let Some(id) = id {
+                    self.0.push(id.clone());
+                }
+            }
+        }
+
+        let cube = crate::app::settings::CubeSettings::new_with_raw_id(
+            "unlock-turn".into(),
+            "Everyday".into(),
+            ChainId::Bitcoin,
+        );
+        let pin = String::new();
+        let controls: Element<'_, String> = iced::widget::text_input("", &pin)
+            .id(crate::pin_input::first_digit_id())
+            .on_input(|value| value)
+            .into();
+        let mut element = unlock_turn_with_controls(
+            &cube,
+            coincube_ui::theme::palette::ThemeMode::Dark,
+            0.25,
+            controls,
+        );
+        for bytes in font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(bytes);
+        }
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &widget_layout::Limits::new(Size::ZERO, Size::new(1000.0, 900.0)),
+        );
+        let mut targets = FocusTargets::default();
+        element
+            .as_widget_mut()
+            .operate(&mut tree, Layout::new(&node), &renderer, &mut targets);
+        assert!(targets.0.contains(&iced::advanced::widget::Id::new(
+            "tenshu.unlock.pin:first-digit"
+        )));
+    }
 
     fn home_with_cubes() -> Home {
         let mut home = Home::new(

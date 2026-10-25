@@ -1844,7 +1844,15 @@ impl Tab {
                     }
                     self.state = state;
                     self.unlock_motion = spin_from_details.then(Instant::now);
-                    Task::none()
+                    match &self.state {
+                        State::PinEntry(_) => {
+                            iced::widget::operation::focus(crate::pin_input::first_digit_id())
+                        }
+                        State::PasskeyUnlock(_) => {
+                            iced::widget::operation::focus(crate::passkey_unlock::begin_button_id())
+                        }
+                        _ => Task::none(),
+                    }
                 }
                 home::Message::View(home::ViewMessage::ToggleTheme) => {
                     Task::done(Message::ToggleTheme)
@@ -4250,13 +4258,14 @@ impl Tab {
                     home::launcher_presenter::unlock_turn_progress(started, Instant::now()) < 1.0
                 }) =>
             {
-                home::launcher_presenter::unlock_turn(
+                home::launcher_presenter::unlock_turn_with_controls(
                     v.cube(),
                     self.theme_mode,
                     home::launcher_presenter::unlock_turn_progress(
                         self.unlock_motion.unwrap(),
                         Instant::now(),
                     ),
+                    v.view_with_theme(self.theme_mode).map(Message::PinEntry),
                 )
             }
             State::PasskeyUnlock(v)
@@ -4264,13 +4273,15 @@ impl Tab {
                     home::launcher_presenter::unlock_turn_progress(started, Instant::now()) < 1.0
                 }) =>
             {
-                home::launcher_presenter::unlock_turn(
+                home::launcher_presenter::unlock_turn_with_controls(
                     v.cube(),
                     self.theme_mode,
                     home::launcher_presenter::unlock_turn_progress(
                         self.unlock_motion.unwrap(),
                         Instant::now(),
                     ),
+                    v.view_with_theme(self.theme_mode)
+                        .map(Message::PasskeyUnlock),
                 )
             }
             State::PinEntry(v) => v.view_with_theme(self.theme_mode).map(Message::PinEntry),

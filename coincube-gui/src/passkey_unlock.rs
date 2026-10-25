@@ -73,6 +73,10 @@ use crate::services::passkey::PasskeyError;
 #[cfg(target_os = "macos")]
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
+pub(crate) fn begin_button_id() -> iced::advanced::widget::Id {
+    iced::advanced::widget::Id::new("tenshu.unlock.passkey:begin")
+}
+
 pub struct PasskeyUnlock {
     cube: CubeSettings,
     /// Data root. Also supplies the saved appearance if the GUI shell has not
@@ -484,6 +488,7 @@ impl PasskeyUnlock {
                 }
                 content = content.push(
                     button::primary(None, "Unlock with passkey")
+                        .id(begin_button_id())
                         .width(Length::Fixed(280.0))
                         .on_press(Message::Begin),
                 );
