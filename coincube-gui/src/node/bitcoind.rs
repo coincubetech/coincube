@@ -2018,6 +2018,35 @@ impl ManagedNodeLifecycle {
         Ok(false)
     }
 
+    /// A settings change may proceed with its own Cube's owner, but never with
+    /// another live Cube attached. The caller's path is only an identity hint:
+    /// it must match an owner file observed under this lifecycle lock.
+    pub fn ensure_exclusive_settings_owner(
+        &self,
+        initiating_owner: Option<&Path>,
+    ) -> Result<(), String> {
+        let locks = self.directory.path().join(LOCK_DIRECTORY_NAME);
+        let networks = match std::fs::read_dir(locks) {
+            Ok(networks) => networks,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(format!("Could not enumerate managed-node owners: {e}")),
+        };
+        for network in networks {
+            let network =
+                network.map_err(|e| format!("Could not enumerate managed-node owners: {e}"))?;
+            for owner in std::fs::read_dir(network.path())
+                .map_err(|e| format!("Could not enumerate managed-node owners: {e}"))?
+            {
+                let owner =
+                    owner.map_err(|e| format!("Could not enumerate managed-node owners: {e}"))?;
+                if initiating_owner != Some(owner.path().as_path()) {
+                    return Err("Another Cube owns the managed node. Close it before changing node settings here.".into());
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// A failed enumeration is treated as an active owner for cleanup.
     pub fn has_owners(&self) -> bool {
         self.try_has_owners().unwrap_or(true)
@@ -2251,6 +2280,10 @@ pub fn stop_and_wait_managed_bitcoind(config: &BitcoindConfig) {
 }
 
 impl Bitcoind {
+    pub fn owner_lock_path(&self) -> Option<&Path> {
+        self._owner.lock.as_ref().map(|lock| lock.path.as_path())
+    }
+
     fn owned(config: BitcoindConfig, lock: LockFile) -> Self {
         Self {
             config: config.clone(),

@@ -460,6 +460,10 @@ impl Panels {
                     internal_bitcoind.is_some(),
                     config.clone(),
                 )
+                .with_managed_owner(
+                    internal_bitcoind
+                        .and_then(|node| node.owner_lock_path().map(std::path::PathBuf::from)),
+                )
             }),
             claim,
             fork_claim: None,
@@ -605,6 +609,10 @@ impl Panels {
                 daemon_backend,
                 internal_bitcoind.is_some(),
                 config.clone(),
+            )
+            .with_managed_owner(
+                internal_bitcoind
+                    .and_then(|node| node.owner_lock_path().map(std::path::PathBuf::from)),
             )
         });
         self.fork_claim = None; // replacing the Vault drops and revokes its old session

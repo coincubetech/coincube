@@ -2,6 +2,7 @@ pub(crate) mod bitcoind;
 mod wallet;
 
 use std::convert::From;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use iced::Task;
@@ -37,6 +38,7 @@ pub struct SettingsState {
     setting: Option<Box<dyn State>>,
     daemon_backend: DaemonBackend,
     internal_bitcoind: bool,
+    managed_owner: Option<PathBuf>,
     config: Arc<Config>,
 }
 
@@ -54,8 +56,14 @@ impl SettingsState {
             setting: None,
             daemon_backend,
             internal_bitcoind,
+            managed_owner: None,
             config,
         }
+    }
+
+    pub(crate) fn with_managed_owner(mut self, owner: Option<PathBuf>) -> Self {
+        self.managed_owner = owner;
+        self
     }
 }
 
@@ -82,6 +90,12 @@ impl State for SettingsState {
                 "Remote daemon backends are unavailable for Bitcoin Blake2b.".into(),
             )));
         }
+        if let Message::View(view::Message::Settings(view::SettingsMessage::NodeSettings(
+            view::NodeSettingsMessage::SetupLocalNodeStartResult(Ok((_, node))),
+        ))) = &message
+        {
+            self.managed_owner = node.owner_lock_path().map(PathBuf::from);
+        }
         match &message {
             Message::View(view::Message::Settings(view::SettingsMessage::EditBitcoindSettings)) => {
                 self.setting = Some(
@@ -91,6 +105,7 @@ impl State for SettingsState {
                         !daemon.backend().is_embedded(),
                         self.internal_bitcoind,
                     )
+                    .with_managed_owner(self.managed_owner.clone())
                     .into(),
                 );
                 let wallet = self.wallet.clone();

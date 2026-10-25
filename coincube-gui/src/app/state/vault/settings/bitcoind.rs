@@ -127,6 +127,7 @@ async fn probe_esplora_tip(base_url: String) -> Result<u32, String> {
 #[derive(Debug)]
 pub struct BitcoindSettingsState {
     warning: Option<Error>,
+    managed_owner: Option<PathBuf>,
     config_updated: bool,
     full_config: Option<Config>,
     node_switch_processing: bool,
@@ -215,6 +216,7 @@ impl BitcoindSettingsState {
         };
         BitcoindSettingsState {
             warning: None,
+            managed_owner: None,
             config_updated: false,
             full_config: config.clone(),
             node_switch_processing: false,
@@ -282,6 +284,11 @@ impl BitcoindSettingsState {
             custom_esplora_status: None,
             pending_scan_discard: None,
         }
+    }
+
+    pub(crate) fn with_managed_owner(mut self, owner: Option<PathBuf>) -> Self {
+        self.managed_owner = owner;
+        self
     }
 
     /// Make the pending local node the Vault's backend, keeping the current
@@ -443,7 +450,15 @@ impl BitcoindSettingsState {
         if exe_exists {
             setup.internal_stage = InternalSetupStage::Installing;
             Task::perform(
-                ensure_tor_and_start_managed(coincube_datadir, network, flavor, None, false, None),
+                ensure_tor_and_start_managed_for_owner(
+                    coincube_datadir,
+                    network,
+                    flavor,
+                    None,
+                    false,
+                    None,
+                    self.managed_owner.clone(),
+                ),
                 |r| {
                     Message::View(view::Message::Settings(
                         view::SettingsMessage::NodeSettings(
@@ -806,6 +821,7 @@ impl State for BitcoindSettingsState {
                                     setup.download_progress = 100.0;
                                     let coincube_datadir = cache.datadir_path.clone();
                                     let network = cache.network;
+                                    let managed_owner = self.managed_owner.clone();
                                     return Task::perform(
                                         async move {
                                             // Fetch the release SHA256SUMS(+.asc)
@@ -814,13 +830,14 @@ impl State for BitcoindSettingsState {
                                             let manifest = download::fetch_release_manifest(flavor)
                                                 .await
                                                 .map_err(|e| e.to_string())?;
-                                            ensure_tor_and_start_managed(
+                                            ensure_tor_and_start_managed_for_owner(
                                                 coincube_datadir,
                                                 network,
                                                 flavor,
                                                 Some((bytes, manifest)),
                                                 false,
                                                 None,
+                                                managed_owner,
                                             )
                                             .await
                                         },
@@ -846,6 +863,8 @@ impl State for BitcoindSettingsState {
                         if let Some(ref mut setup) = self.pending_node_setup {
                             match result {
                                 Ok((bitcoind_cfg, bitcoind)) => {
+                                    self.managed_owner =
+                                        bitcoind.owner_lock_path().map(PathBuf::from);
                                     if let Some(cfg) = daemon.config() {
                                         let mut new_cfg = cfg.clone();
                                         new_cfg.pending_bitcoind = Some(bitcoind_cfg);
@@ -1095,13 +1114,14 @@ impl State for BitcoindSettingsState {
                         let coincube_datadir = cache.datadir_path.clone();
                         let network = cache.network;
                         return Task::perform(
-                            ensure_tor_and_start_managed(
+                            ensure_tor_and_start_managed_for_owner(
                                 coincube_datadir,
                                 network,
                                 flavor,
                                 None,
                                 true,
                                 None,
+                                self.managed_owner.clone(),
                             ),
                             |r| {
                                 Message::View(view::Message::Settings(
@@ -1255,13 +1275,14 @@ impl State for BitcoindSettingsState {
                         let coincube_datadir = cache.datadir_path.clone();
                         let network = cache.network;
                         return Task::perform(
-                            ensure_tor_and_start_managed(
+                            ensure_tor_and_start_managed_for_owner(
                                 coincube_datadir,
                                 network,
                                 flavor,
                                 None,
                                 true,
                                 Some(resources),
+                                self.managed_owner.clone(),
                             ),
                             |r| {
                                 Message::View(view::Message::Settings(
@@ -1861,6 +1882,7 @@ fn write_internal_bitcoind_config(
 /// installed from those bytes. Returns the `BitcoindConfig` and the live
 /// `Bitcoind` handle (which keeps the lock file alive) to be stored by the
 /// caller.
+#[cfg(test)]
 fn configure_and_start_internal_bitcoind(
     coincube_datadir: CoincubeDirectory,
     network: Network,
@@ -1875,25 +1897,41 @@ fn configure_and_start_internal_bitcoind(
     // mempool cap; `None` preserves whatever is already on disk untouched.
     resources: Option<NodeResources>,
 ) -> Result<(BitcoindConfig, Bitcoind), String> {
-    // Before the archive is unpacked into the Bitcoin root, the conf/ledger
-    // rewritten, the running node stopped or Tor prepared: the provider must
-    // be one of this chain's. `write_internal_bitcoind_config` and
-    // `maybe_start` check again on their own boundaries.
     provider_serves_network(flavor, network)?;
     let lifecycle = crate::node::bitcoind::ManagedNodeLifecycle::acquire(
         &coincube_datadir,
         crate::node::bitcoind::NodeChainFamily::Bitcoin,
     )
     .map_err(|e| e.to_string())?;
-    lifecycle
-        .try_has_owners()
-        .map_err(|e| format!("Could not enumerate managed-node owners: {e}"))?;
-    if lifecycle
-        .try_has_foreign_owners()
-        .map_err(|e| format!("Could not enumerate managed-node owners: {e}"))?
-    {
-        return Err("Another app process owns the managed node. Close it before changing node settings here.".into());
-    }
+    configure_and_start_internal_bitcoind_locked(
+        coincube_datadir,
+        network,
+        flavor,
+        install,
+        force_restart,
+        resources,
+        None,
+        &lifecycle,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn configure_and_start_internal_bitcoind_locked(
+    coincube_datadir: CoincubeDirectory,
+    network: Network,
+    flavor: NodeFlavor,
+    install: Option<ManagedNodeInstall>,
+    force_restart: bool,
+    resources: Option<NodeResources>,
+    initiating_owner: Option<&std::path::Path>,
+    lifecycle: &crate::node::bitcoind::ManagedNodeLifecycle,
+) -> Result<(BitcoindConfig, Bitcoind), String> {
+    // Before the archive is unpacked into the Bitcoin root, the conf/ledger
+    // rewritten, the running node stopped or Tor prepared: the provider must
+    // be one of this chain's. `write_internal_bitcoind_config` and
+    // `maybe_start` check again on their own boundaries.
+    provider_serves_network(flavor, network)?;
+    lifecycle.ensure_exclusive_settings_owner(initiating_owner)?;
     if let Some((bytes, manifest)) = install {
         let verification = DownloadVerification::for_flavor(flavor, manifest)
             .ok_or_else(|| "Missing release SHA256SUMS manifest for verification.".to_string())?;
@@ -1941,7 +1979,7 @@ fn configure_and_start_internal_bitcoind(
         crate::node::tor::prepare_inbound_tor_for_chain_locked(
             &coincube_datadir,
             network.into(),
-            &lifecycle,
+            lifecycle,
         )
     })
     .map_err(|e| {
@@ -1953,7 +1991,7 @@ fn configure_and_start_internal_bitcoind(
         network,
         bitcoind_config.clone(),
         &coincube_datadir,
-        &lifecycle,
+        lifecycle,
     )
     .map_err(|e| e.to_string())?;
 
@@ -1972,6 +2010,28 @@ pub(crate) async fn ensure_tor_and_start_managed(
     install: Option<ManagedNodeInstall>,
     force_restart: bool,
     resources: Option<NodeResources>,
+) -> Result<(BitcoindConfig, Bitcoind), String> {
+    ensure_tor_and_start_managed_for_owner(
+        coincube_datadir,
+        network,
+        flavor,
+        install,
+        force_restart,
+        resources,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn ensure_tor_and_start_managed_for_owner(
+    coincube_datadir: CoincubeDirectory,
+    network: Network,
+    flavor: NodeFlavor,
+    install: Option<ManagedNodeInstall>,
+    force_restart: bool,
+    resources: Option<NodeResources>,
+    initiating_owner: Option<PathBuf>,
 ) -> Result<(BitcoindConfig, Bitcoind), String> {
     // Tor is provisioned for the Bitcoin node; not for a provider that cannot
     // serve this chain.
@@ -2016,15 +2076,32 @@ pub(crate) async fn ensure_tor_and_start_managed(
     } else {
         vec![]
     };
+    // Hold the lifecycle lock across Tor installation and the subsequent
+    // config/restart. Otherwise another Cube could attach after the check.
+    let root = coincube_datadir.clone();
+    let preflight_owner = initiating_owner.clone();
+    let lifecycle = tokio::task::spawn_blocking(move || {
+        let lifecycle = crate::node::bitcoind::ManagedNodeLifecycle::acquire(
+            &root,
+            crate::node::bitcoind::NodeChainFamily::Bitcoin,
+        )
+        .map_err(|e| e.to_string())?;
+        lifecycle.ensure_exclusive_settings_owner(preflight_owner.as_deref())?;
+        Ok::<_, String>(lifecycle)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
     crate::node::tor::ensure_tor_installed_if_wanted(&coincube_datadir).await;
     let started = tokio::task::spawn_blocking(move || {
-        configure_and_start_internal_bitcoind(
+        configure_and_start_internal_bitcoind_locked(
             coincube_datadir,
             network,
             flavor,
             install,
             force_restart,
             resources,
+            initiating_owner.as_deref(),
+            &lifecycle,
         )
     })
     .await
@@ -3587,6 +3664,58 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert!(entries.is_empty(), "datadir gained entries: {:?}", entries);
+    }
+
+    #[tokio::test]
+    async fn settings_restart_refuses_another_same_process_owner_before_mutation() {
+        let (base, datadir) = a_temp_datadir("same-process-owner");
+        let config = BitcoindConfig {
+            addr: "127.0.0.1:1".parse().unwrap(),
+            rpc_auth: BitcoindRpcAuth::CookieFile(base.join("bitcoind/.cookie")),
+        };
+        let initiating = Bitcoind::for_test(config.clone(), &datadir, Network::Bitcoin);
+        let other = Bitcoind::for_test(config, &datadir, Network::Bitcoin);
+        let owner_path = initiating.owner_lock_path().unwrap().to_path_buf();
+
+        let err = ensure_tor_and_start_managed_for_owner(
+            datadir.clone(),
+            Network::Bitcoin,
+            NodeFlavor::Knots,
+            Some((vec![0u8; 16], None)),
+            true,
+            Some(NodeResources::small_computer()),
+            Some(owner_path.clone()),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("Another Cube owns"), "{}", err);
+        assert!(!internal_bitcoind_config_path(&internal_bitcoind_datadir(&datadir)).exists());
+        assert!(!crate::node::revalidate::ManagedNodeState::path(&datadir).exists());
+        assert!(!crate::node::tor::InboundTorPreference::path(&datadir).exists());
+        assert!(initiating.owner_lock_path().unwrap().exists());
+        assert!(other.owner_lock_path().unwrap().exists());
+
+        drop(other);
+        // The same Cube's sole owner passes the ownership gate. Verification
+        // then rejects the deliberately incomplete archive before any write.
+        let err = configure_and_start_internal_bitcoind_locked(
+            datadir.clone(),
+            Network::Bitcoin,
+            NodeFlavor::Knots,
+            Some((vec![0u8; 16], None)),
+            true,
+            None,
+            Some(&owner_path),
+            &crate::node::bitcoind::ManagedNodeLifecycle::acquire(
+                &datadir,
+                crate::node::bitcoind::NodeChainFamily::Bitcoin,
+            )
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.contains("Missing release SHA256SUMS"), "{}", err);
+        drop(initiating);
+        let _ = std::fs::remove_dir_all(base);
     }
 
     const BLAKE2B_ON_BITCOIN: &str = "Bitcoin Knots (Bitcoin Blake2b) cannot serve Bitcoin: \
