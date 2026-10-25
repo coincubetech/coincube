@@ -115,7 +115,7 @@ pub(super) fn cube_glyph_source(cube: &crate::app::settings::CubeSettings, light
     } else {
         "#f3821d"
     };
-    let mark = launcher_coin::fragment(chain, 64.0, 20.0, 52.0, 1.5);
+    let mark = launcher_coin::fragment(chain, 64.0, 20.0, 52.0, 1.5, 126.0 * 0.018);
     let dash = if matches!(chain, ChainId::Bitcoin | ChainId::BitcoinBlake2b) {
         "none"
     } else {
@@ -1569,20 +1569,23 @@ pub(crate) fn unlock_turn_with_floor_controls<'a, M: 'a + 'static>(
     progress: Option<f32>,
     controls: Element<'a, M>,
 ) -> Element<'a, M> {
-    let Some(progress) = progress else {
-        return controls;
+    // Keep the same root and child shape after the turn. Iced diffs widget
+    // state by position, so replacing this Stack with bare controls drops the
+    // focused PIN field or passkey action at the animation boundary.
+    let visual: Element<'a, M> = match progress {
+        Some(progress) => responsive(move |size: Size| {
+            unlock_floor_stage(context, cube, mode, size.width, None, Some(progress))
+        })
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into(),
+        None => Space::new().width(Length::Fill).height(Length::Fill).into(),
     };
     Stack::new()
         .width(Length::Fill)
         .height(Length::Fill)
         .push(controls)
-        .push(
-            responsive(move |size: Size| {
-                unlock_floor_stage(context, cube, mode, size.width, None, Some(progress))
-            })
-            .width(Length::Fill)
-            .height(Length::Fill),
-        )
+        .push(visual)
         .into()
 }
 
@@ -1874,6 +1877,7 @@ mod tests {
             "input focus must survive turn completion"
         );
 
+        let mode = coincube_ui::theme::palette::ThemeMode::Dark;
         let context = floor_context(&cube);
         let floor_controls = unlock_face_on_floor(
             &cube,
@@ -1913,6 +1917,30 @@ mod tests {
             &mut floor_targets,
         );
         assert!(floor_targets.first_focused, "PIN focuses at turn start");
+
+        drop(floor_turn);
+        let settled_floor_controls = unlock_face_on_floor(&cube, mode, &context, || {
+            iced::widget::text_input("", &pin)
+                .id(crate::pin_input::first_digit_id())
+                .on_input(|value| value)
+                .into()
+        });
+        let mut settled_floor =
+            unlock_turn_with_floor_controls(&cube, mode, &context, None, settled_floor_controls);
+        floor_tree.diff(settled_floor.as_widget());
+        let settled_floor_node = settled_floor.as_widget_mut().layout(
+            &mut floor_tree,
+            &renderer,
+            &widget_layout::Limits::new(Size::ZERO, Size::new(1024.0, 768.0)),
+        );
+        let mut floor_targets = FocusTargets::default();
+        settled_floor.as_widget_mut().operate(
+            &mut floor_tree,
+            Layout::new(&settled_floor_node),
+            &renderer,
+            &mut floor_targets,
+        );
+        assert!(floor_targets.first_focused, "PIN focus survives floor turn");
     }
 
     #[test]
@@ -2043,6 +2071,29 @@ mod tests {
             &mut focused,
         );
         assert!(focused.0, "passkey action focuses at turn start");
+
+        drop(on_floor);
+        let mut settled_floor = unlock_turn_with_floor_controls(
+            &cube,
+            mode,
+            &context,
+            None,
+            unlock.view_with_theme_and_floor(mode, Some(&context)),
+        );
+        floor_tree.diff(settled_floor.as_widget());
+        let settled_floor_node = settled_floor.as_widget_mut().layout(
+            &mut floor_tree,
+            &renderer,
+            &widget_layout::Limits::new(Size::ZERO, Size::new(1024.0, 768.0)),
+        );
+        let mut focused = PasskeyFocused::default();
+        settled_floor.as_widget_mut().operate(
+            &mut floor_tree,
+            Layout::new(&settled_floor_node),
+            &renderer,
+            &mut focused,
+        );
+        assert!(focused.0, "passkey focus survives floor turn");
     }
 
     fn home_with_cubes() -> Home {

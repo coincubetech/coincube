@@ -263,9 +263,9 @@ impl Home {
         let Some(first) = self.catalog.page.checked_mul(FLOOR_PAGE_SIZE) else {
             return false;
         };
-        if !index
+        if index
             .checked_sub(first)
-            .is_some_and(|slot| slot < FLOOR_PAGE_SIZE)
+            .is_none_or(|slot| slot >= FLOOR_PAGE_SIZE)
         {
             return false;
         }

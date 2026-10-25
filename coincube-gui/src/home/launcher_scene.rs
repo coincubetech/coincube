@@ -319,7 +319,14 @@ fn paint_face_marks(
                 "<g transform=\"matrix({a:.5} {b:.5} {c:.5} {d:.5} {:.2} {:.2})\" color=\"{ink}\">{}</g>",
                 tl.0,
                 tl.1,
-                launcher_coin::fragment(network, size * 0.33, size * 0.33, size * 0.34, 1.5)
+                launcher_coin::fragment(
+                    network,
+                    size * 0.33,
+                    size * 0.33,
+                    size * 0.34,
+                    1.5,
+                    size * 0.018,
+                )
             );
         }
         2 if text.vault || text.imported_bitcoin => {
@@ -391,7 +398,7 @@ fn paint_face_text(
     let _ = write!(
         svg,
         "<g color=\"{ink}\">{}</g><text x=\"52\" y=\"79\" font-size=\"14\" fill=\"{muted}\">{}</text>",
-        launcher_coin::fragment(network, 28.0, 64.0, 18.0, 1.0),
+        launcher_coin::fragment(network, 28.0, 64.0, 18.0, 1.0, 1.5),
         xml_text(network.label())
     );
     let _ = write!(

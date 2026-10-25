@@ -34,7 +34,14 @@ pub(super) fn is_test_network(chain: ChainId) -> bool {
 /// A mark at the caller's own coordinates. `currentColor` takes the face or
 /// widget ink supplied by its enclosing SVG. Test networks retain their name
 /// label beside the mark in the native layouts.
-pub(super) fn fragment(chain: ChainId, x: f32, y: f32, size: f32, test_border: f32) -> String {
+pub(super) fn fragment(
+    chain: ChainId,
+    x: f32,
+    y: f32,
+    size: f32,
+    test_border: f32,
+    ring_padding: f32,
+) -> String {
     let mut mark = String::new();
     let (inset, opacity) = if is_test_network(chain) {
         let _ = write!(
@@ -44,7 +51,7 @@ pub(super) fn fragment(chain: ChainId, x: f32, y: f32, size: f32, test_border: f
             y + size / 2.0,
             (size - test_border) / 2.0
         );
-        (test_border + size * 0.018, " opacity=\"0.6\"")
+        (test_border + ring_padding, " opacity=\"0.6\"")
     } else {
         (0.0, "")
     };
@@ -63,7 +70,7 @@ pub(super) fn widget_source(chain: ChainId, size: f32, test_border: f32, light: 
     let ink = if light { "#30302d" } else { "#ecebe6" };
     format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {size:.2} {size:.2}\" color=\"{ink}\">{}</svg>",
-        fragment(chain, 0.0, 0.0, size, test_border)
+        fragment(chain, 0.0, 0.0, size, test_border, size * 0.018)
     )
 }
 
@@ -101,6 +108,12 @@ mod tests {
             widget_source(ChainId::BitcoinBlake2bTestnet4, 18.0, 1.0, true)
                 .contains("stroke-width=\"1.00\"")
         );
+        // On a Cube face the padding is measured against the face, while
+        // compact detail marks use their own fixed padding.
+        let floor = fragment(ChainId::Testnet4, 64.0, 20.0, 52.0, 1.5, 126.0 * 0.018);
+        assert!(floor.contains("<image x=\"67.77\" y=\"23.77\""));
+        let details = fragment(ChainId::Testnet4, 28.0, 64.0, 18.0, 1.0, 1.5);
+        assert!(details.contains("<image x=\"30.50\" y=\"66.50\""));
         assert!(BITCOIN.starts_with(b"\x89PNG\r\n\x1a\n"));
         assert!(BLAKE2B.starts_with(b"\x89PNG\r\n\x1a\n"));
     }
