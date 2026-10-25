@@ -1310,11 +1310,12 @@ mod tests {
         }
 
         fn cache(&self) -> Cache {
-            let mut cache = Cache::default();
-            cache.network = self.network;
-            cache.theme_mode = self.mode;
-            cache.bitcoin_unit = self.unit;
-            cache
+            Cache {
+                network: self.network,
+                theme_mode: self.mode,
+                bitcoin_unit: self.unit,
+                ..Default::default()
+            }
         }
 
         fn theme(&self) -> theme::Theme {
