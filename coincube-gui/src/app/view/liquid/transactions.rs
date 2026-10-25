@@ -46,6 +46,14 @@ fn payment_status_text(
     payment: &DomainPayment,
     refundable_swap_addresses: &[String],
 ) -> Element<'static, Message> {
+    let (label, style) = payment_detail_status(payment, refundable_swap_addresses);
+    text(label).style(style).into()
+}
+
+fn payment_detail_status(
+    payment: &DomainPayment,
+    refundable_swap_addresses: &[String],
+) -> (&'static str, StatusTextStyle) {
     if matches!(payment.details, DomainPaymentDetails::OnChainBitcoin { .. }) {
         let status = classify_payment(payment, refundable_swap_addresses);
         let style = match status {
@@ -57,24 +65,25 @@ fn payment_status_text(
             }
             _ => theme::text::secondary,
         };
-        return text(status.label()).style(style).into();
+        let label = if status == BtcSwapReceiveStatus::Completed {
+            "Confirmed"
+        } else {
+            status.label()
+        };
+        return (label, style);
     }
 
     match payment.status {
-        DomainPaymentStatus::Complete => text("Complete").style(theme::text::success).into(),
-        DomainPaymentStatus::Pending => text("Pending").style(theme::text::secondary).into(),
-        DomainPaymentStatus::Created => text("Created").style(theme::text::secondary).into(),
-        DomainPaymentStatus::Failed => text("Failed").style(theme::text::destructive).into(),
-        DomainPaymentStatus::TimedOut => text("Timed Out").style(theme::text::destructive).into(),
-        DomainPaymentStatus::Refundable => {
-            text("Refundable").style(theme::text::destructive).into()
+        DomainPaymentStatus::Complete => ("Confirmed", theme::text::success),
+        DomainPaymentStatus::Pending => ("Pending", theme::text::secondary),
+        DomainPaymentStatus::Created => ("Created", theme::text::secondary),
+        DomainPaymentStatus::Failed => ("Failed", theme::text::destructive),
+        DomainPaymentStatus::TimedOut => ("Timed Out", theme::text::destructive),
+        DomainPaymentStatus::Refundable => ("Refundable", theme::text::destructive),
+        DomainPaymentStatus::RefundPending => ("Refund Pending", theme::text::secondary),
+        DomainPaymentStatus::WaitingFeeAcceptance => {
+            ("Waiting Fee Acceptance", theme::text::secondary)
         }
-        DomainPaymentStatus::RefundPending => {
-            text("Refund Pending").style(theme::text::secondary).into()
-        }
-        DomainPaymentStatus::WaitingFeeAcceptance => text("Waiting Fee Acceptance")
-            .style(theme::text::secondary)
-            .into(),
     }
 }
 
@@ -1057,6 +1066,9 @@ mod tests {
                 payment_list_status(&row, &[]).map(|(label, _)| label),
                 expected
             );
+            if state == DomainPaymentStatus::Complete {
+                assert_eq!(payment_detail_status(&row, &[]).0, "Confirmed");
+            }
         }
     }
 
@@ -1082,6 +1094,7 @@ mod tests {
             payment_list_status(&row, &[address]).map(|(label, _)| label),
             Some("Refundable")
         );
+        assert_eq!(payment_detail_status(&row, &[address]).0, "Refundable");
     }
 
     #[test]
@@ -1105,6 +1118,7 @@ mod tests {
             payment_list_status(&row, &[]).map(|(label, _)| label),
             Some("Confirmed")
         );
+        assert_eq!(payment_detail_status(&row, &[]).0, "Confirmed");
     }
 
     #[test]
@@ -1122,6 +1136,7 @@ mod tests {
             payment_list_status(&row, &[]).map(|(label, _)| label),
             Some("Confirmed")
         );
+        assert_eq!(payment_detail_status(&row, &[]).0, "Confirmed");
     }
 
     #[test]
