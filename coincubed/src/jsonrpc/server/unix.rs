@@ -444,7 +444,9 @@ mod tests {
             fs::remove_file(&socket_path).unwrap();
             assert!(
                 server_result.is_ok(),
-                "RPC server exited after closed_peer_first={closed_peer_first}: {server_result:?}"
+                "RPC server exited after closed_peer_first={}: {:?}",
+                closed_peer_first,
+                server_result
             );
             if let Err(panic) = response {
                 std::panic::resume_unwind(panic);
