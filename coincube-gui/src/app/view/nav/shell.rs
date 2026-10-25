@@ -335,7 +335,10 @@ fn identity<'a>(ctx: &NavContext<'a>, state: ShellState) -> Element<'a, Message>
     .on_press(Message::ToggleCubeSwitcher);
     iced::widget::tooltip(
         container(control).padding([4, 8]),
-        container(muted(ctx.cube_name, 12))
+        container(muted(ctx.cube_name, 12).wrapping(iced::widget::text::Wrapping::WordOrGlyph))
+            .max_width(240)
+            .max_height(120)
+            .clip(true)
             .padding([6, 10])
             .style(theme::container::shell_menu),
         iced::widget::tooltip::Position::Right,
