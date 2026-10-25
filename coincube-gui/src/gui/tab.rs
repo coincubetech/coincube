@@ -810,7 +810,6 @@ pub struct Tab {
     /// Persisted theme mode — carried across state transitions so new App
     /// caches inherit the correct mode immediately.
     pub theme_mode: coincube_ui::theme::palette::ThemeMode,
-    pub balance_privacy: Option<crate::app::state::preferences::BalancePrivacyChrome>,
     /// A seed-migration warning waiting for a surface to show it on.
     ///
     /// Held rather than dispatched because only `State::App` handles
@@ -875,7 +874,6 @@ impl Tab {
             id,
             state,
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
-            balance_privacy: None,
             pending_unlock_warnings: Vec::new(),
             app_generation: 0,
             claim_open: None,
@@ -923,23 +921,10 @@ impl Tab {
 
     /// Apply the tab's stored theme_mode to the current state.
     /// Call after any state transition to State::App or State::Home.
-    pub fn set_balance_privacy(
-        &mut self,
-        chrome: Option<crate::app::state::preferences::BalancePrivacyChrome>,
-    ) {
-        self.balance_privacy = chrome;
-        if let State::App(app) = &mut self.state {
-            app.cache_mut().balance_privacy = chrome;
-        }
-    }
-
     fn sync_theme_mode(&mut self) {
         let mode = self.theme_mode;
         match &mut self.state {
-            State::App(app) => {
-                app.cache_mut().theme_mode = mode;
-                app.cache_mut().balance_privacy = self.balance_privacy;
-            }
+            State::App(app) => app.cache_mut().theme_mode = mode,
             State::Home(home) => home.theme_mode = mode,
             _ => {}
         }
@@ -5021,7 +5006,6 @@ pub fn create_app_with_remote_backend(
             spark_notice: None,
             has_p2p: false, // Set later by App::new based on mnemonic availability
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
-            balance_privacy: None,
             btc_usd_price: None,
             show_direction_badges: true,
             lightning_address: None,

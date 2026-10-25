@@ -275,9 +275,6 @@ pub struct Cache {
     >,
     /// Current theme mode (dark/light) — used for theme-aware widget rendering
     pub theme_mode: coincube_ui::theme::palette::ThemeMode,
-    /// Presentation input for the shared top-bar balance eye. `None` until the
-    /// GUI preferences owner publishes a resolved or unresolved privacy state.
-    pub balance_privacy: Option<crate::app::state::preferences::BalancePrivacyChrome>,
     /// Transient shell disclosures. These belong to this open Cube and are
     /// deliberately not persisted with wallet or device settings.
     pub cube_switcher_open: bool,
@@ -437,7 +434,6 @@ impl std::default::Default for Cache {
             entangled: std::collections::HashMap::new(),
             split_deposit: None,
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
-            balance_privacy: None,
             cube_switcher_open: false,
             cube_lock_confirmation: false,
             vault_tools_open: false,
@@ -461,14 +457,6 @@ impl std::default::Default for Cache {
 }
 
 impl Cache {
-    /// Passive amounts are visible only after the GUI has published an
-    /// accepted installation-wide Show receipt. Missing or unresolved state
-    /// always masks, including the first frame of a newly opened Cube.
-    pub fn balance_amounts_masked(&self) -> bool {
-        self.balance_privacy
-            .is_none_or(|chrome| chrome.privacy.masks_amounts())
-    }
-
     /// Retain the Cube identity across storage and recovery boundaries.
     pub fn chain(&self) -> crate::chain::ChainId {
         self.fiat_chain
@@ -608,32 +596,6 @@ impl Cache {
 
     pub fn history_sync(&self) -> &coincubed::commands::HistorySync {
         &self.daemon_cache.history_sync
-    }
-}
-
-#[cfg(test)]
-mod balance_privacy_tests {
-    use super::Cache;
-    use crate::app::state::preferences::{BalancePrivacy, BalancePrivacyChrome};
-
-    #[test]
-    fn passive_amounts_fail_closed_until_an_accepted_show_is_published() {
-        let mut cache = Cache::default();
-        assert!(cache.balance_amounts_masked());
-        for privacy in [BalancePrivacy::Unresolved, BalancePrivacy::Hidden] {
-            cache.balance_privacy = Some(BalancePrivacyChrome {
-                privacy,
-                busy: false,
-                interactive: false,
-            });
-            assert!(cache.balance_amounts_masked());
-        }
-        cache.balance_privacy = Some(BalancePrivacyChrome {
-            privacy: BalancePrivacy::Shown,
-            busy: false,
-            interactive: false,
-        });
-        assert!(!cache.balance_amounts_masked());
     }
 }
 

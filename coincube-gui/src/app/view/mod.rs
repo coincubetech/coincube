@@ -215,27 +215,6 @@ fn dashboard_shell_with_info<'a>(
     avatar_handle: Option<&'a iced::widget::image::Handle>,
     lightning_address: Option<&'a str>,
 ) -> Element<'a, Message> {
-    // Until every passive presenter consumes the shared privacy state, keep
-    // the entire content surface out of the tree while amounts are hidden.
-    // This first slice is intentionally conservative: the top-bar eye remains
-    // available to make an explicit, persisted Show choice.
-    let content_column = if cache.balance_amounts_masked() {
-        container(
-            column![
-                text("Balances hidden").size(24),
-                text("Use the eye in the top bar to show wallet details.").size(14),
-            ]
-            .spacing(12),
-        )
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(theme::container::background)
-        .into()
-    } else {
-        content_column
-    };
     // Passkey Cubes used to be exempt from this banner, because there was no
     // way for one to back its seed up. There is now (**I11**), so an
     // un-backed-up passkey Cube gets the same nudge as any other — it is the
@@ -270,10 +249,7 @@ fn dashboard_shell_with_info<'a>(
         backup_attention: show_backup_warning,
     };
     Column::new()
-        .push(nav::shell::top_bar_with_privacy(
-            &nav_ctx,
-            cache.balance_privacy,
-        ))
+        .push(nav::shell::top_bar(&nav_ctx))
         .push(nav::split::ShellSplit::new(
             nav::shell::sidebar(menu, &nav_ctx, shell_state),
             content_column,

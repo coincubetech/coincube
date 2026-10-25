@@ -182,7 +182,6 @@ pub struct Pane {
 
     // current theme mode — applied to new tabs on creation
     theme_mode: coincube_ui::theme::palette::ThemeMode,
-    balance_privacy: Option<crate::app::state::preferences::BalancePrivacyChrome>,
 }
 
 impl Pane {
@@ -292,7 +291,6 @@ impl Pane {
         let mut tab = tab::Tab::new(id, tab::State::Installer(Box::new(installer)));
         tab.set_claim_open(intent);
         tab.set_theme_mode(self.theme_mode);
-        tab.set_balance_privacy(self.balance_privacy);
         self.tabs.push(tab);
         self.focused_tab = self.tabs.len() - 1;
         task.map(move |message| Message::tab(id, tab::Message::Install(message)))
@@ -306,7 +304,6 @@ impl Pane {
                 focused_tab: 0,
                 tabs_created: 1,
                 theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
-                balance_privacy: None,
             },
             task.map(|msg| Message::tab(1, msg)),
         )
@@ -318,7 +315,6 @@ impl Pane {
             focused_tab: 0,
             tabs_created: 1,
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
-            balance_privacy: None,
         }
     }
 
@@ -328,7 +324,6 @@ impl Pane {
         let id = self.tabs_created;
         let mut tab = tab::Tab::new(id, state);
         tab.set_theme_mode(self.theme_mode);
-        tab.set_balance_privacy(self.balance_privacy);
         self.tabs.push(tab);
         self.focused_tab = self.tabs.len() - 1;
         task.map(move |msg| Message::tab(id, msg))
@@ -453,7 +448,6 @@ impl Pane {
             let id = self.tabs_created;
             let mut new_tab = tab::Tab::new(id, tab.state);
             new_tab.set_theme_mode(self.theme_mode);
-            new_tab.set_balance_privacy(self.balance_privacy);
             self.tabs.push(new_tab);
         }
         if self.focused_tab + focused_tab + 1 < self.tabs.len() {
@@ -465,16 +459,6 @@ impl Pane {
         self.theme_mode = mode;
         for tab in &mut self.tabs {
             tab.set_theme_mode(mode);
-        }
-    }
-
-    pub fn set_balance_privacy(
-        &mut self,
-        chrome: Option<crate::app::state::preferences::BalancePrivacyChrome>,
-    ) {
-        self.balance_privacy = chrome;
-        for tab in &mut self.tabs {
-            tab.set_balance_privacy(chrome);
         }
     }
 
@@ -617,7 +601,6 @@ impl Pane {
                 let id = self.tabs_created;
                 let mut tab = tab::Tab::new(id, tab::State::Home(home));
                 tab.set_theme_mode(self.theme_mode);
-                tab.set_balance_privacy(self.balance_privacy);
                 self.tabs.push(tab);
                 self.focused_tab = self.tabs.len() - 1;
                 return task.map(move |message| Message::tab(id, tab::Message::Launch(message)));

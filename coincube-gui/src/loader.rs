@@ -1115,7 +1115,6 @@ pub async fn load_application(
         spark_notice: None,
         has_p2p: false, // Set later by App::new based on mnemonic availability
         theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
-        balance_privacy: None,
         btc_usd_price: None,
         show_direction_badges: true,
         lightning_address: None,

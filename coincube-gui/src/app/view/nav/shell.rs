@@ -112,7 +112,8 @@ fn status<'a>(label: impl Into<String>, good: bool) -> Text<'a> {
         })
 }
 
-/// The 56px bar contains only the Tenshu return action and status chips.
+/// The 56px bar contains the existing actions. The privacy eye stays out of
+/// production until every passive presenter and overlay honors the same state.
 pub fn top_bar<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
     top_bar_with_privacy(ctx, None)
 }
@@ -793,3 +794,41 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
 
 #[cfg(test)]
 mod keyboard_tests;
+
+#[cfg(test)]
+mod privacy_eye_tests {
+    use super::*;
+    use crate::app::settings::preferences::PreferenceChange;
+
+    #[test]
+    fn eye_copy_matches_persisted_intent_and_failed_hide_latch() {
+        let chrome = |privacy| BalancePrivacyChrome {
+            privacy,
+            busy: false,
+            interactive: true,
+        };
+        let shown = chrome(BalancePrivacy::Shown);
+        assert_eq!(balance_privacy_label(shown), "Hide balances");
+        assert_eq!(shown.intent(), Some(PreferenceChange::HideBalances(true)));
+
+        let hidden = chrome(BalancePrivacy::Hidden);
+        assert_eq!(balance_privacy_label(hidden), "Show balances");
+        assert_eq!(hidden.intent(), Some(PreferenceChange::HideBalances(false)));
+
+        let failed_hide = chrome(BalancePrivacy::HiddenLocally);
+        assert_eq!(
+            balance_privacy_label(failed_hide),
+            "Balances hidden now. Retry Hide"
+        );
+        assert_eq!(
+            failed_hide.intent(),
+            Some(PreferenceChange::HideBalances(true))
+        );
+
+        let busy = BalancePrivacyChrome {
+            busy: true,
+            ..shown
+        };
+        assert_eq!(busy.intent(), None);
+    }
+}
