@@ -425,3 +425,7 @@ pub fn search_icon<'a>() -> Text<'a> {
 pub fn display_icon<'a>() -> Text<'a> {
     bootstrap_icon('\u{F302}')
 }
+
+pub fn exclamation_circle_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F333}')
+}

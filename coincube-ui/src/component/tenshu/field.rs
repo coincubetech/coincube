@@ -1,14 +1,17 @@
 //! Labelled text fields (`.inp` in Send and Receive, `.ctl` in the Activity
 //! filters) and the search field built on them.
 //!
-//! A field is a visible label, the input and optional lines under it: an error
-//! in the bad tone, then a hint. Pressing the label emits the owner's focus
+//! A field is a label, the input and optional lines under it: an error in the
+//! bad tone and a notice (each with its glyph on a regular field), then the
+//! `.sub` line with a hint on the left and a trailing hint on the right, such
+//! as Send's "≈ $0.00 · Available 25,053 SATS". Pressing the label emits the owner's focus
 //! intent for the input, so the label is as good a target as the input. A
 //! field without `on_input` is disabled: drawn muted, read-only, and skipped by
 //! Tab and whole-tree focus like a disabled action.
 //!
-//! A search field adds a leading magnifier and, once it has a value and an
-//! `on_clear` intent, a Clear action inside its right edge. Escape in a
+//! A search field is compact and, once it has a value and an `on_clear`
+//! intent, shows a Clear action inside its right edge (no artboard search
+//! draws a magnifier; [`TextField::magnifier`] adds one). Escape in a
 //! non-empty search field emits the same intent without leaving the field.
 //! Clearing by the Clear action, by pointer, Enter or Space, also requests
 //! focus for the input, since Clear itself disappears with the value.
@@ -23,7 +26,7 @@ use iced::advanced::widget::Id;
 use iced::keyboard::{self, key};
 use iced::widget::text::LineHeight;
 use iced::widget::text_input::{Icon, Side};
-use iced::{alignment, Font, Length, Padding};
+use iced::{alignment, Alignment, Font, Length, Padding};
 
 use super::scope::{Inert, KeyScope};
 use crate::font;
@@ -33,7 +36,7 @@ use crate::theme::tenshu::control as style;
 use crate::theme::tenshu::{radius, size, text as text_style, type_size, Tone};
 use crate::theme::Theme;
 use crate::widget::action::Action;
-use crate::widget::{Column, Container, Element, Renderer};
+use crate::widget::{Column, Container, Element, Renderer, Row, RowExt};
 
 /// Field height, radius and text size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -99,11 +102,14 @@ pub struct TextField<'a, M> {
     on_paste: Option<Box<dyn Fn(String) -> M + 'a>>,
     suffix: Option<Cow<'a, str>>,
     hint: Option<Cow<'a, str>>,
+    trailing_hint: Option<Cow<'a, str>>,
+    notice: Option<Cow<'a, str>>,
     error: Option<Cow<'a, str>>,
+    label_hidden: bool,
+    magnifier: bool,
     mono: bool,
     secure: bool,
     width: Length,
-    search: bool,
     clear: Option<(Id, M)>,
     accessory: Option<Element<'a, M>>,
 }
@@ -129,18 +135,21 @@ pub fn text_field<'a, M: Clone + 'static>(
         on_paste: None,
         suffix: None,
         hint: None,
+        trailing_hint: None,
+        notice: None,
         error: None,
+        label_hidden: false,
+        magnifier: false,
         mono: false,
         secure: false,
         width: Length::Fill,
-        search: false,
         clear: None,
         accessory: None,
     }
 }
 
-/// A compact search field with a magnifier. Add [`TextField::on_clear`] for
-/// the Clear action and Escape.
+/// A compact search field. Add [`TextField::on_clear`] for the Clear action
+/// and Escape.
 pub fn search_field<'a, M: Clone + 'static>(
     id: impl Into<Id>,
     label: impl Into<Cow<'a, str>>,
@@ -149,7 +158,6 @@ pub fn search_field<'a, M: Clone + 'static>(
 ) -> TextField<'a, M> {
     TextField {
         size: FieldSize::Compact,
-        search: true,
         ..text_field(id, label, value, focus_intent)
     }
 }
@@ -196,6 +204,34 @@ impl<'a, M: Clone + 'static> TextField<'a, M> {
     /// A muted line under the field.
     pub fn hint(mut self, hint: impl Into<Cow<'a, str>>) -> Self {
         self.hint = Some(hint.into());
+        self
+    }
+
+    /// A muted line at the right of the hint line (`.sub`), such as
+    /// "Available 25,053 SATS".
+    pub fn trailing_hint(mut self, hint: impl Into<Cow<'a, str>>) -> Self {
+        self.trailing_hint = Some(hint.into());
+        self
+    }
+
+    /// A muted message with an info glyph, such as "This invoice sets its own
+    /// amount." (`.msg.muted`).
+    pub fn notice(mut self, notice: impl Into<Cow<'a, str>>) -> Self {
+        self.notice = Some(notice.into());
+        self
+    }
+
+    /// Keep the label for the field's API but do not draw it, as Buy/Sell and
+    /// P2P do (`.srl`) where a heading directly above names the search. Use
+    /// only with such a heading.
+    pub fn hide_label(mut self) -> Self {
+        self.label_hidden = true;
+        self
+    }
+
+    /// A leading magnifier inside the field.
+    pub fn magnifier(mut self) -> Self {
+        self.magnifier = true;
         self
     }
 
@@ -250,7 +286,7 @@ fn label_text<'a>(
     enabled: bool,
 ) -> crate::widget::Text<'a> {
     let (text_size, weight) = match size {
-        FieldSize::Regular => (type_size::CHIP, font::SEMIBOLD),
+        FieldSize::Regular => (type_size::BODY, font::SEMIBOLD),
         FieldSize::Compact => (type_size::CAPTION, font::MEDIUM),
     };
     let tone = match (size, enabled) {
@@ -265,13 +301,43 @@ fn label_text<'a>(
         .style(move |theme| text_style::tone(theme, tone))
 }
 
-fn note<'a>(content: Cow<'a, str>, tone: Tone) -> crate::widget::Text<'a> {
+/// A line under the field: 13px on a regular field (`.msg`, `.sub`), 12px on a
+/// compact one (`.ferr`).
+fn note<'a>(content: Cow<'a, str>, tone: Tone, size: FieldSize) -> crate::widget::Text<'a> {
+    let text_size = match size {
+        FieldSize::Regular => type_size::CHIP,
+        FieldSize::Compact => type_size::CAPTION,
+    };
     iced::widget::text(content)
         .shaping(Shaping::Advanced)
         .font(font::REGULAR)
-        .size(type_size::CAPTION)
+        .size(text_size)
         .line_height(LineHeight::Relative(type_size::LINE_HEIGHT))
         .style(move |theme| text_style::tone(theme, tone))
+}
+
+/// A message (`.msg`): on a regular field its 16px glyph leads the text.
+fn message<'a, M: 'a>(
+    content: Cow<'a, str>,
+    tone: Tone,
+    glyph: crate::widget::Text<'a>,
+    size: FieldSize,
+) -> Element<'a, M> {
+    let text = note(content, tone, size);
+    match size {
+        FieldSize::Regular => Row::new()
+            .spacing(6)
+            .align_y(Alignment::Start)
+            .push(
+                glyph
+                    .size(size::ICON_SMALL)
+                    .width(Length::Fixed(size::ICON_SMALL))
+                    .style(move |theme| text_style::tone(theme, tone)),
+            )
+            .push(text)
+            .into(),
+        FieldSize::Compact => text.into(),
+    }
 }
 
 impl<'a, M: Clone + 'static> From<TextField<'a, M>> for Element<'a, M> {
@@ -288,11 +354,14 @@ impl<'a, M: Clone + 'static> From<TextField<'a, M>> for Element<'a, M> {
             on_paste,
             suffix,
             hint,
+            trailing_hint,
+            notice,
             error,
+            label_hidden,
+            magnifier,
             mono,
             secure,
             width,
-            search,
             clear,
             accessory,
         } = field;
@@ -325,7 +394,7 @@ impl<'a, M: Clone + 'static> From<TextField<'a, M>> for Element<'a, M> {
             })
             .width(Length::Fill)
             .style(move |theme, status| style::field(theme, status, field_radius, invalid));
-        if search {
+        if magnifier {
             input = input.icon(Icon {
                 font: BOOTSTRAP_ICONS,
                 code_point: SEARCH_CODE_POINT,
@@ -449,21 +518,43 @@ impl<'a, M: Clone + 'static> From<TextField<'a, M>> for Element<'a, M> {
                 .into(),
             None => label,
         };
-        let mut column = Column::new()
-            .spacing(6)
-            .width(width)
-            .push(label)
-            .push(control);
-        let notes = [
-            error.map(|error| note(error, Tone::Bad)),
-            hint.map(|hint| note(hint, Tone::Muted)),
-        ];
-        let notes: Vec<_> = notes.into_iter().flatten().collect();
-        if !notes.is_empty() {
+        let mut column = Column::new().spacing(6).width(width);
+        if !label_hidden {
+            column = column.push(label);
+        }
+        column = column.push(control);
+        let mut lines: Vec<Element<'a, M>> = Vec::new();
+        if let Some(error) = error {
+            lines.push(message(
+                error,
+                Tone::Bad,
+                icon::exclamation_circle_icon(),
+                size,
+            ));
+        }
+        if let Some(notice) = notice {
+            lines.push(message(notice, Tone::Muted, icon::tooltip_icon(), size));
+        }
+        if hint.is_some() || trailing_hint.is_some() {
+            lines.push(
+                Row::new()
+                    .spacing(12)
+                    .push(
+                        Container::new(
+                            hint.map(|hint| note(hint, Tone::Muted, size))
+                                .unwrap_or_else(|| note(Cow::Borrowed(""), Tone::Muted, size)),
+                        )
+                        .width(Length::Fill),
+                    )
+                    .push_maybe(trailing_hint.map(|hint| note(hint, Tone::Muted, size)))
+                    .into(),
+            );
+        }
+        if !lines.is_empty() {
             column = column.push(
-                notes
+                lines
                     .into_iter()
-                    .fold(Column::new().spacing(2), |column, note| column.push(note)),
+                    .fold(Column::new().spacing(4), |column, line| column.push(line)),
             );
         }
         column.into()
