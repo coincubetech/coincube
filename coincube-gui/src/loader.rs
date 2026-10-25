@@ -3125,8 +3125,9 @@ mod bootstrap_backend_selection_tests {
     }
 
     /// Every directory and file under `root`, including exact file bytes.
-    /// Refusal tests use this as a mutation oracle, so traversal and reads must
-    /// fail the test rather than silently weakening the snapshot.
+    /// The active managed-node owner lock is empty but cannot be read while
+    /// locked on Windows; its path and length are checked instead. All other
+    /// files retain byte-for-byte comparison, including config and ledger data.
     fn tree(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
         fn walk(p: &Path, out: &mut Vec<(PathBuf, Option<Vec<u8>>)>) {
             for entry in std::fs::read_dir(p).unwrap() {
@@ -3137,7 +3138,22 @@ mod bootstrap_backend_selection_tests {
                     out.push((path.clone(), None));
                     walk(&path, out);
                 } else if kind.is_file() {
-                    out.push((path.clone(), Some(std::fs::read(path).unwrap())));
+                    #[cfg(windows)]
+                    let bytes = if path.extension() == Some(std::ffi::OsStr::new("lock"))
+                        && path
+                            .parent()
+                            .and_then(Path::parent)
+                            .and_then(Path::file_name)
+                            == Some(std::ffi::OsStr::new("locks"))
+                    {
+                        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0, "{:?}", path);
+                        Vec::new()
+                    } else {
+                        std::fs::read(&path).unwrap()
+                    };
+                    #[cfg(not(windows))]
+                    let bytes = std::fs::read(&path).unwrap();
+                    out.push((path.clone(), Some(bytes)));
                 } else {
                     panic!("unsupported filesystem entry in test snapshot: {:?}", path);
                 }
