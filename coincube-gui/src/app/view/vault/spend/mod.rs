@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use iced::{
     advanced::widget::Id,
-    alignment,
     widget::{
         button::{Status as ButtonStatus, Style as ButtonStyle},
         checkbox, scrollable, tooltip, Column, Container, Row, Space,
@@ -532,6 +531,16 @@ pub fn create_spend_tx<'a>(
     // Every slot below is always present, so a warning or batch label
     // appearing does not shift the widget state (focus, text cursor) of the
     // controls that follow it.
+    let recipient_groups = recipients.into_iter().enumerate().fold(
+        Column::new().spacing(16),
+        |column, (index, recipient)| {
+            if index == 0 {
+                column.push(recipient)
+            } else {
+                column.push(compose_divider()).push(recipient)
+            }
+        },
+    );
     let recipients_block: Element<'a, Message> = if is_self_send {
         Space::new().height(Length::Fixed(0.0)).into()
     } else {
@@ -557,7 +566,7 @@ pub fn create_spend_tx<'a>(
                     } else {
                         Space::new().height(Length::Fixed(0.0)).into()
                     })
-                    .push(Column::with_children(recipients).spacing(10))
+                    .push(recipient_groups)
                     .push(
                         Row::new()
                             .spacing(12)
@@ -710,8 +719,13 @@ pub fn create_spend_tx<'a>(
         )
         .push(
             Container::new(scrollable(coins.iter().enumerate().fold(
-                Column::new().spacing(10),
+                Column::new().spacing(0),
                 |col, (i, (coin, selected))| {
+                    let col = if i == 0 {
+                        col
+                    } else {
+                        col.push(compose_divider())
+                    };
                     col.push(coin_list_view(
                         i,
                         coin,
@@ -863,28 +877,29 @@ pub fn recipient_view<'a>(
 
     Container::new(
         Column::new()
-            .spacing(10)
+            .spacing(14)
             .push(
                 // Recipient for recovery cannot be deleted.
-                (!is_recovery).then_some(
-                    Row::new().push(Space::new().width(Length::Fill)).push(
-                        Button::new(icon::cross_icon())
+                Row::new()
+                    .align_y(Alignment::Center)
+                    .push(
+                        text(format!("Recipient {}", index + 1))
+                            .size(P2_SIZE)
+                            .font(font::SEMIBOLD)
+                            .style(theme::text::secondary),
+                    )
+                    .push(Space::new().width(Length::Fill))
+                    .push_maybe((!is_recovery).then(|| {
+                        Button::new(text("Remove").size(P2_SIZE))
                             .style(theme::button::transparent)
                             .on_press(CreateSpendMessage::DeleteRecipient(index))
-                            .width(Length::Shrink),
-                    ),
-                ),
+                            .width(Length::Shrink)
+                    })),
             )
             .push(
-                Row::new()
-                    .align_y(Alignment::Start)
-                    .spacing(10)
-                    .push(
-                        Container::new(p1_bold("Address"))
-                            .align_x(alignment::Horizontal::Right)
-                            .padding(10)
-                            .width(Length::Fixed(130.0)),
-                    )
+                Column::new()
+                    .spacing(6)
+                    .push(p1_bold("Address"))
                     .push(
                         form::Form::new_trimmed("Address", address, move |msg| {
                             CreateSpendMessage::RecipientEdited(index, "address", msg)
@@ -895,15 +910,9 @@ pub fn recipient_view<'a>(
                     ),
             )
             .push(
-                Row::new()
-                    .align_y(Alignment::Start)
-                    .spacing(10)
-                    .push(
-                        Container::new(p1_bold("Description"))
-                            .align_x(alignment::Horizontal::Right)
-                            .padding(10)
-                            .width(Length::Fixed(130.0)),
-                    )
+                Column::new()
+                    .spacing(6)
+                    .push(p1_bold("Description"))
                     .push(
                         form::Form::new("Payment label", label, move |msg| {
                             CreateSpendMessage::RecipientEdited(index, "label", msg)
@@ -914,19 +923,15 @@ pub fn recipient_view<'a>(
                     ),
             )
             .push(
-                Column::new().push(
+                Column::new().spacing(6)
+                    .push(p1_bold(match bitcoin_unit {
+                        BitcoinDisplayUnit::BTC => "Amount BTC",
+                        BitcoinDisplayUnit::Sats => "Amount (sats)",
+                    }))
+                    .push(
                 Row::new()
                     .align_y(Alignment::Center)
                     .spacing(10)
-                    .push(
-                        Container::new(p1_bold(match bitcoin_unit {
-                            BitcoinDisplayUnit::BTC => "Amount BTC",
-                            BitcoinDisplayUnit::Sats => "Amount (sats)"
-                        }))
-                            .padding(10)
-                            .align_x(alignment::Horizontal::Right)
-                            .width(Length::Fixed(130.0)),
-                    )
                     .push(
                         Row::new()
                             .align_y(Alignment::Center)
@@ -1038,8 +1043,7 @@ pub fn recipient_view<'a>(
                 .push(amount_warning_row),
             ),
     )
-    .padding(20)
-    .style(theme::card::simple)
+    .width(Length::Fill)
     .into()
 }
 
@@ -1052,49 +1056,61 @@ fn coin_list_view<'a>(
     selected: bool,
     bitcoin_unit: BitcoinDisplayUnit,
 ) -> Element<'a, Message> {
-    Row::new()
-        .push(
-            Row::new()
-                .push(
-                    checkbox(selected).on_toggle(move |_| {
-                        Message::CreateSpend(CreateSpendMessage::SelectCoin(i))
-                    }),
-                )
-                .push(
-                    if let Some(label) = coins_labels.get(&coin.outpoint.to_string()) {
-                        Container::new(p1_regular(label)).width(Length::Fill)
-                    } else if let Some(label) = coins_labels.get(&coin.outpoint.txid.to_string()) {
-                        Container::new(
-                            Row::new()
-                                .spacing(5)
-                                .push(
-                                    // It is not possible to know if a coin is a
-                                    // change coin or not so for now, From is
-                                    // enough
-                                    p1_regular("From").style(theme::text::secondary),
-                                )
-                                .push(p1_regular(label)),
-                        )
-                        .width(Length::Fill)
-                    } else {
-                        Container::new(p1_regular("")).width(Length::Fill)
-                    },
-                )
-                .push(if coin.spend_info.is_some() {
-                    badge::spent()
-                } else if coin.block_height.is_none() {
-                    badge::unconfirmed()
-                } else {
-                    let seq = remaining_sequence(coin, blockheight, timelock);
-                    coins::coin_sequence_label(seq, timelock as u32)
-                })
-                .spacing(10)
-                .align_y(Alignment::Center)
-                .width(Length::Fill),
-        )
-        .push(amount_with_unit(&coin.amount, bitcoin_unit))
+    let outpoint = coin.outpoint.to_string();
+    let identity: Element<'a, Message> = if let Some(label) = coins_labels.get(&outpoint) {
+        p1_regular(label)
+            .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+            .into()
+    } else if let Some(label) = coins_labels.get(&coin.outpoint.txid.to_string()) {
+        Row::new()
+            .spacing(5)
+            .push(
+                // It is not possible to know if a coin is a
+                // change coin or not so for now, From is
+                // enough
+                p1_regular("From").style(theme::text::secondary),
+            )
+            .push(p1_regular(label).wrapping(iced::widget::text::Wrapping::WordOrGlyph))
+            .into()
+    } else {
+        let txid = coin.outpoint.txid.to_string();
+        p1_regular(format!(
+            "{}…{}:{}",
+            &txid[..8],
+            &txid[txid.len() - 8..],
+            coin.outpoint.vout
+        ))
+        .style(theme::text::secondary)
+        .into()
+    };
+    let row = Row::new()
+        .spacing(12)
         .align_y(Alignment::Center)
-        .spacing(20)
+        .push(
+            checkbox(selected)
+                .on_toggle(move |_| Message::CreateSpend(CreateSpendMessage::SelectCoin(i))),
+        )
+        .push(Container::new(identity).width(Length::Fill))
+        .push(if coin.spend_info.is_some() {
+            badge::spent()
+        } else if coin.block_height.is_none() {
+            badge::unconfirmed()
+        } else {
+            let seq = remaining_sequence(coin, blockheight, timelock);
+            coins::coin_sequence_label(seq, timelock as u32)
+        })
+        .push(
+            Container::new(amount_with_unit(&coin.amount, bitcoin_unit))
+                .width(Length::Fixed(120.0))
+                .align_x(iced::alignment::Horizontal::Right),
+        );
+    Container::new(row)
+        .padding([10, 8])
+        .width(Length::Fill)
+        .style(move |theme: &theme::Theme| iced::widget::container::Style {
+            background: selected.then_some(Background::Color(theme.colors.shell.hover)),
+            ..Default::default()
+        })
         .into()
 }
 
@@ -1102,6 +1118,10 @@ fn coin_list_view<'a>(
 mod tests {
     use super::*;
     use crate::app::menu::VaultSubMenu;
+    use crate::{
+        app::cache::FiatPriceRequest,
+        services::fiat::{Currency, PriceSource},
+    };
     use coincube_core::miniscript::bitcoin::{bip32::ChildNumber, Address, OutPoint, Txid};
     use coincube_ui::theme::palette::ThemeMode;
     use iced::advanced::{
@@ -1158,6 +1178,8 @@ mod tests {
         addresses: Vec<form::Value<String>>,
         amounts: Vec<form::Value<String>>,
         labels: Vec<form::Value<String>>,
+        fiat_amount: form::Value<String>,
+        converter: FiatAmountConverter,
         dust_warning: Option<String>,
         fee: Amount,
         sync_status: SyncStatus,
@@ -1183,6 +1205,13 @@ mod tests {
                 addresses: vec![value(ADDRESS_A, true), value(ADDRESS_B, true)],
                 amounts: vec![value("40000", true), value("20000", true)],
                 labels: vec![value("", true), value("", true)],
+                fiat_amount: value("2.50", true),
+                converter: FiatAmountConverter::new(
+                    50_000.0,
+                    None,
+                    FiatPriceRequest::new(PriceSource::Coincube, Currency::USD),
+                )
+                .unwrap(),
                 dust_warning: None,
                 fee: Amount::from_sat(1_234),
                 sync_status: SyncStatus::Synced,
@@ -1208,6 +1237,11 @@ mod tests {
         generating: bool,
         max_under_dust: bool,
         coins_selected: bool,
+        unit: BitcoinDisplayUnit,
+        fiat: bool,
+        fiat_editing: bool,
+        max_selected: bool,
+        insufficient: bool,
     }
 
     impl Scenario {
@@ -1227,6 +1261,11 @@ mod tests {
                 generating: false,
                 max_under_dust: false,
                 coins_selected: true,
+                unit: BitcoinDisplayUnit::Sats,
+                fiat: false,
+                fiat_editing: false,
+                max_selected: false,
+                insufficient: false,
             }
         }
     }
@@ -1249,15 +1288,15 @@ mod tests {
                     i,
                     &fixture.addresses[address],
                     &fixture.amounts[i],
-                    None,
-                    None,
+                    s.fiat_editing.then_some(&fixture.fiat_amount),
+                    s.fiat.then_some(&fixture.converter),
                     &fixture.labels[i],
-                    false,
+                    s.max_selected,
                     s.recovery,
                     &fixture.dust_warning,
-                    None,
-                    BitcoinDisplayUnit::Sats,
-                    false,
+                    s.max_selected.then_some(Amount::from_sat(400)),
+                    s.unit,
+                    s.insufficient,
                 )
                 .map(Message::CreateSpend)
             })
@@ -1267,7 +1306,7 @@ mod tests {
             &fixture.unconfirmed,
             &fixture.menu,
             &fixture.cache,
-            None,
+            s.fiat.then_some(&fixture.converter),
             recipients,
             s.is_valid,
             s.duplicate,
@@ -1285,7 +1324,7 @@ mod tests {
             s.loading,
             s.selected,
             s.generating,
-            BitcoinDisplayUnit::Sats,
+            s.unit,
             s.max_under_dust,
         )
     }
@@ -1542,6 +1581,24 @@ mod tests {
             self.send(Event::Keyboard(event), mouse::Cursor::Unavailable)
         }
 
+        fn type_character(&mut self, character: char) -> Vec<Message> {
+            let key = keyboard::Key::Character(character.to_string().into());
+            self.send(
+                Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: key.clone(),
+                    modified_key: key,
+                    physical_key: keyboard::key::Physical::Unidentified(
+                        keyboard::key::NativeCode::Unidentified,
+                    ),
+                    location: keyboard::Location::Standard,
+                    modifiers: keyboard::Modifiers::empty(),
+                    text: Some(character.to_string().into()),
+                    repeat: false,
+                }),
+                mouse::Cursor::Unavailable,
+            )
+        }
+
         fn press_at(&mut self, point: iced::Point) -> Vec<Message> {
             self.send(
                 Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
@@ -1635,6 +1692,25 @@ mod tests {
                 image::ColorType::Rgba8,
             )
             .expect("save synthetic R07a capture");
+        }
+
+        fn capture_r07c(&mut self, scenario: &str, appearance: &str, theme: &theme::Theme) {
+            let Ok(directory) = std::env::var("R07C_CAPTURE_DIR") else {
+                return;
+            };
+            let pixels = self.render(theme);
+            let (width, height) = (self.size.width as u32, self.size.height as u32);
+            std::fs::create_dir_all(&directory).expect("create R07c capture directory");
+            image::save_buffer(
+                std::path::Path::new(&directory).join(format!(
+                    "r07c-vault-{scenario}-{appearance}-{width}x{height}-dashboard.png"
+                )),
+                &pixels,
+                width,
+                height,
+                image::ColorType::Rgba8,
+            )
+            .expect("save R07c dashboard capture");
         }
     }
 
@@ -2317,6 +2393,317 @@ mod tests {
         assert_eq!(
             harness.probe().inputs(),
             vec!["iced value", "Form placeholder"]
+        );
+    }
+
+    fn r07c_case(mode: ThemeMode, name: &str) -> (Fixture, Scenario) {
+        let mut fixture = Fixture::new(
+            mode,
+            if name == "coin-mix" || name == "batch-btc" {
+                18
+            } else {
+                3
+            },
+        );
+        let mut scenario = Scenario::valid_send();
+        match name {
+            "single-sats" => {}
+            "batch-btc" => {
+                scenario.recipients = 2;
+                scenario.unit = BitcoinDisplayUnit::BTC;
+                fixture.amounts = vec![value("0.0004", true), value("0.0002", true)];
+                fixture.labels = vec![value("Rent", true), value("Savings", true)];
+                fixture.coins_labels.insert(
+                    fixture.coins[0].outpoint.to_string(),
+                    "Household reserve".into(),
+                );
+                fixture.coins[1].block_height = None;
+                fixture.coins[2].spend_info = Some(coincubed::commands::LCSpendInfo {
+                    txid: Txid::from_str(&format!("{:064x}", 99)).unwrap(),
+                    height: None,
+                });
+            }
+            "fiat-editing" => {
+                scenario.fiat = true;
+                scenario.fiat_editing = true;
+            }
+            "max-under-dust" => {
+                scenario.max_selected = true;
+                scenario.max_under_dust = true;
+                scenario.is_valid = false;
+                scenario.amount_left = None;
+                fixture.dust_warning = Some("Amount is below the dust limit".into());
+                fixture.amounts[0] = value("", true);
+            }
+            "coin-mix" => {
+                fixture.coins_labels.insert(
+                    fixture.coins[0].outpoint.to_string(),
+                    "Long-term savings for the extended household and future school expenses"
+                        .into(),
+                );
+                fixture.coins_labels.insert(
+                    fixture.coins[1].outpoint.txid.to_string(),
+                    "Transfer from another wallet".into(),
+                );
+                fixture.coins[1].block_height = None;
+                fixture.coins[2].spend_info = Some(coincubed::commands::LCSpendInfo {
+                    txid: Txid::from_str(&format!("{:064x}", 99)).unwrap(),
+                    height: None,
+                });
+                fixture.coins[3].block_height = Some(95);
+            }
+            "recovery" => {
+                scenario.recovery = true;
+            }
+            "generating" => {
+                scenario.generating = true;
+            }
+            _ => panic!("unknown R07c scenario: {name}"),
+        }
+        (fixture, scenario)
+    }
+
+    #[test]
+    fn r07c_actual_dashboard_capture_matrix_keeps_visible_compose_truth() {
+        let core = [
+            "single-sats",
+            "batch-btc",
+            "fiat-editing",
+            "max-under-dust",
+            "coin-mix",
+            "recovery",
+        ];
+        let tall = ["single-sats", "batch-btc", "max-under-dust", "generating"];
+        for (appearance, mode, theme) in themes() {
+            for name in core {
+                let (fixture, scenario) = r07c_case(mode, name);
+                for outer in [COMPACT, WIDE] {
+                    let mut harness = Harness::new(compose(&fixture, &scenario), outer);
+                    let probe = harness.probe();
+                    assert!(probe.contains("Recipient 1"), "{name} {appearance}");
+                    assert!(probe.contains("Address") && probe.contains("Description"));
+                    assert_eq!(probe.contains("Remove"), name != "recovery");
+                    assert_eq!(probe.contains("Recipient 2"), name == "batch-btc");
+                    assert_eq!(probe.contains("Amount BTC"), name == "batch-btc");
+                    assert_eq!(probe.contains("Amount (sats)"), name != "batch-btc");
+                    assert_eq!(probe.contains("USD"), name == "fiat-editing");
+                    assert!(
+                        probe.scrollables.iter().any(|(height, content)| {
+                            *height <= 300.5 && (name != "coin-mix" || content > height)
+                        }),
+                        "{name}: expected the native coin scroll"
+                    );
+                    harness.capture_r07c(name, appearance, &theme);
+                }
+            }
+            for name in tall {
+                let (fixture, scenario) = r07c_case(mode, name);
+                let mut harness = Harness::new(compose(&fixture, &scenario), TALL);
+                assert!(harness.probe().contains("Coin selection"));
+                harness.capture_r07c(name, appearance, &theme);
+            }
+        }
+    }
+
+    #[test]
+    fn r07c_native_second_recipient_fields_keep_existing_edit_payloads() {
+        use keyboard::key::Named;
+        let mut fixture = Fixture::new(ThemeMode::Dark, 3);
+        fixture.amounts[1] = value("0.0002", true);
+        let base = Scenario {
+            recipients: 2,
+            unit: BitcoinDisplayUnit::BTC,
+            ..Scenario::valid_send()
+        };
+        let mut harness = Harness::new(compose(&fixture, &base), TALL);
+        let fields = [
+            (ADDRESS_B, ' ', "address", ADDRESS_B.to_string()),
+            ("Payment label", 'x', "label", "x".to_string()),
+            ("0.0002", '5', "amount", "0.00025".to_string()),
+        ];
+        for (existing, typed, field, expected) in fields {
+            let bounds = harness
+                .probe()
+                .focus
+                .iter()
+                .filter(|entry| entry.input.as_deref() == Some(existing))
+                .last()
+                .map(|entry| entry.bounds)
+                .expect("second recipient input exists");
+            harness.click_at(bounds);
+            harness.key(Named::End, false, true);
+            let messages = harness.type_character(typed);
+            assert!(
+                matches!(messages.as_slice(), [Message::CreateSpend(CreateSpendMessage::RecipientEdited(1, key, value))]
+                if *key == field && value == &expected),
+                "{field}: {messages:?}"
+            );
+        }
+        let sats_fixture = Fixture::new(ThemeMode::Dark, 3);
+        let sats = Scenario {
+            unit: BitcoinDisplayUnit::Sats,
+            ..base.clone()
+        };
+        let mut sats_harness = Harness::new(compose(&sats_fixture, &sats), TALL);
+        let bounds = sats_harness
+            .probe()
+            .focus
+            .iter()
+            .find(|entry| entry.input.as_deref() == Some("20000"))
+            .map(|entry| entry.bounds)
+            .unwrap();
+        sats_harness.click_at(bounds);
+        sats_harness.key(Named::End, false, true);
+        let messages = sats_harness.type_character('x');
+        assert!(
+            matches!(messages.as_slice(), [Message::CreateSpend(CreateSpendMessage::RecipientEdited(1, "amount", value))]
+            if value == "20000"),
+            "{messages:?}"
+        );
+        let fiat = Scenario {
+            fiat: true,
+            fiat_editing: true,
+            ..base
+        };
+        let mut fiat_harness = Harness::new(compose(&fixture, &fiat), TALL);
+        let bounds = fiat_harness
+            .probe()
+            .focus
+            .iter()
+            .filter(|entry| entry.input.as_deref() == Some("2.50"))
+            .last()
+            .map(|entry| entry.bounds)
+            .unwrap();
+        fiat_harness.click_at(bounds);
+        fiat_harness.key(Named::End, false, true);
+        let messages = fiat_harness.type_character(' ');
+        assert!(
+            matches!(messages.as_slice(), [Message::CreateSpend(CreateSpendMessage::RecipientFiatAmountEdited(1, value, _))]
+            if value == "2.50"),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn r07c_native_field_focus_survives_warning_max_fiat_and_batch_rebuilds() {
+        let fixture = Fixture::new(ThemeMode::Light, 3);
+        let base = Scenario::valid_send();
+        let mut harness = Harness::new(compose(&fixture, &base), TALL);
+        let address = harness
+            .probe()
+            .focus
+            .iter()
+            .find(|entry| entry.input.as_deref() == Some(ADDRESS_A))
+            .map(|entry| entry.bounds)
+            .unwrap();
+        harness.click_at(address);
+        assert_eq!(
+            harness
+                .probe()
+                .focused()
+                .and_then(|entry| entry.input.as_deref()),
+            Some(ADDRESS_A)
+        );
+        assert_eq!(harness.tab().input.as_deref(), Some("Payment label"));
+        assert_eq!(harness.tab().input.as_deref(), Some("40000"));
+        assert_eq!(harness.shift_tab().input.as_deref(), Some("Payment label"));
+        assert_eq!(harness.shift_tab().input.as_deref(), Some(ADDRESS_A));
+        for changed in [
+            Scenario {
+                insufficient: true,
+                ..base.clone()
+            },
+            Scenario {
+                max_selected: true,
+                ..base.clone()
+            },
+            Scenario {
+                fiat: true,
+                fiat_editing: true,
+                ..base.clone()
+            },
+            Scenario {
+                recipients: 2,
+                ..base.clone()
+            },
+        ] {
+            harness.rebuild(compose(&fixture, &changed));
+            assert_eq!(
+                harness
+                    .probe()
+                    .focused()
+                    .and_then(|entry| entry.input.as_deref()),
+                Some(ADDRESS_A),
+                "focus moved during compose rebuild"
+            );
+        }
+    }
+
+    #[test]
+    fn r07c_coin_labels_and_positional_pointer_intents_follow_current_rows() {
+        let mut fixture = Fixture::new(ThemeMode::Dark, 3);
+        let first = fixture.coins[0].outpoint.to_string();
+        fixture.coins_labels.insert(first, "Outpoint label".into());
+        fixture.coins_labels.insert(
+            fixture.coins[0].outpoint.txid.to_string(),
+            "Ignored txid label".into(),
+        );
+        fixture.coins_labels.insert(
+            fixture.coins[1].outpoint.txid.to_string(),
+            "Earlier wallet".into(),
+        );
+        fixture.coins[1].block_height = None;
+        fixture.coins[2].spend_info = Some(coincubed::commands::LCSpendInfo {
+            txid: Txid::from_str(&format!("{:064x}", 99)).unwrap(),
+            height: None,
+        });
+        fixture.coins.swap(0, 2);
+        let fallback_txid = fixture.coins[0].outpoint.txid.to_string();
+        let fallback = format!("{}…{}:0", &fallback_txid[..8], &fallback_txid[56..]);
+        let scenario = Scenario {
+            recipients: 2,
+            ..Scenario::valid_send()
+        };
+        let mut harness = Harness::new(compose(&fixture, &scenario), TALL);
+        let probe = harness.probe();
+        assert!(probe.contains("Outpoint label") && !probe.contains("Ignored txid label"));
+        assert!(probe.contains("From") && probe.contains("Earlier wallet"));
+        assert!(probe.contains(&fallback));
+        assert!(probe.contains("  Spent  ") && probe.contains("  Unconfirmed  "));
+        let fallback_bounds = probe
+            .text
+            .iter()
+            .find(|(text, _)| text == &fallback)
+            .map(|(_, bounds)| *bounds)
+            .unwrap();
+        let checkbox = iced::Point::new(
+            fallback_bounds.x - 23.0,
+            fallback_bounds.y + fallback_bounds.height / 2.0,
+        );
+        let mut messages = harness.press_at(checkbox);
+        messages.extend(harness.release_at(checkbox));
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [Message::CreateSpend(CreateSpendMessage::SelectCoin(0))]
+            ),
+            "first reordered row checkbox: {messages:?}"
+        );
+        let remove = harness
+            .probe()
+            .text
+            .iter()
+            .filter(|(text, _)| text == "Remove")
+            .last()
+            .map(|(_, bounds)| *bounds)
+            .unwrap();
+        let removed = harness.click_at(remove);
+        assert!(
+            matches!(
+                removed.as_slice(),
+                [Message::CreateSpend(CreateSpendMessage::DeleteRecipient(1))]
+            ),
+            "second recipient Remove: {removed:?}"
         );
     }
 
