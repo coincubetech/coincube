@@ -721,25 +721,30 @@ pub fn create_spend_tx<'a>(
                 }),
         )
         .push(
-            Container::new(scrollable(coins.iter().enumerate().fold(
-                Column::new().spacing(0),
-                |col, (i, (coin, selected))| {
-                    let col = if i == 0 {
-                        col
-                    } else {
-                        col.push(compose_divider())
-                    };
-                    col.push(coin_list_view(
-                        i,
-                        coin,
-                        coins_labels,
-                        timelock,
-                        cache.blockheight() as u32,
-                        *selected,
-                        bitcoin_unit,
-                    ))
-                },
-            )))
+            Container::new(
+                scrollable(coins.iter().enumerate().fold(
+                    Column::new().spacing(0),
+                    |col, (i, (coin, selected))| {
+                        let col = if i == 0 {
+                            col
+                        } else {
+                            col.push(compose_divider())
+                        };
+                        col.push(coin_list_view(
+                            i,
+                            coin,
+                            coins_labels,
+                            timelock,
+                            cache.blockheight() as u32,
+                            *selected,
+                            bitcoin_unit,
+                        ))
+                    },
+                ))
+                // Iced's default 10px scrollbar floats over its content.
+                // Embed it with a 2px gap so the coin unit remains legible.
+                .spacing(2.0),
+            )
             .max_height(300),
         );
 
@@ -2740,7 +2745,7 @@ mod tests {
                     for (part, bounds, full_width) in parts {
                         assert!(
                             bounds.x >= viewport.x
-                                && bounds.x + full_width <= viewport.x + viewport.width - 2.0,
+                                && bounds.x + full_width <= viewport.x + viewport.width - 12.0,
                             "{} {} {:?}: {} of {:?} starts at {:?}, needs {:.1}px of actual text, exceeds inner {:?}",
                             appearance, name, outer, part, formatted, bounds, full_width, viewport
                         );
@@ -2755,7 +2760,7 @@ mod tests {
                     );
                     for (text, bounds) in visible_coin_text {
                         assert!(
-                            bounds.x + bounds.width <= viewport.x + viewport.width - 2.0,
+                            bounds.x + bounds.width <= viewport.x + viewport.width - 12.0,
                             "{} {} {:?}: coin text {:?} at {:?} exceeds inner {:?}",
                             appearance,
                             name,
