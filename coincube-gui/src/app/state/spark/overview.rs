@@ -95,6 +95,7 @@ impl State for SparkOverview {
             stable_balance_active: self.stable_balance_active.unwrap_or(false),
             btc_usd_price: cache.btc_usd_price,
             display_mode: cache.display_mode,
+            mask_amounts: cache.balance_amounts_masked(),
         }
         .render()
         .map(view::Message::SparkOverview);

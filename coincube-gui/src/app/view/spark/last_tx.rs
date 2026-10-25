@@ -30,6 +30,7 @@ pub fn last_transactions_section<'a, M: 'a + Clone + 'static>(
     recent: &'a [SparkRecentTransaction],
     bitcoin_unit: BitcoinDisplayUnit,
     show_direction_badges: bool,
+    mask_amounts: bool,
     on_select: impl Fn(usize) -> M + 'a,
     on_history: M,
 ) -> Element<'a, M> {
@@ -65,11 +66,14 @@ pub fn last_transactions_section<'a, M: 'a + Clone + 'static>(
             .with_show_direction_badge(show_direction_badges)
             .with_label(tx.description.clone())
             .with_time_ago(tx.time_ago.clone());
+        if mask_amounts {
+            item = item.with_amount_override("••••••".into());
+        }
 
-        if let Some(token_str) = tx.token_display.as_ref() {
+        if let Some(token_str) = tx.token_display.as_ref().filter(|_| !mask_amounts) {
             item = item.with_amount_override(token_str.clone());
         }
-        if let Some(fiat) = tx.fiat_amount.as_ref() {
+        if let Some(fiat) = tx.fiat_amount.as_ref().filter(|_| !mask_amounts) {
             item = item.with_fiat_amount(format!(
                 "{} {}",
                 fiat.to_formatted_string(),
@@ -175,6 +179,7 @@ fn row_display_amount(tx: &SparkRecentTransaction) -> Amount {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::view::shared::landing::capture;
 
     fn tx(is_incoming: bool, amount_sat: u64, fees_sat: u64) -> SparkRecentTransaction {
         SparkRecentTransaction {
@@ -200,5 +205,28 @@ mod tests {
     #[test]
     fn row_display_amount_adds_outgoing_fees() {
         assert_eq!(row_display_amount(&tx(false, 5_000, 21)).to_sat(), 5_021);
+    }
+
+    #[test]
+    fn hidden_last_transaction_never_mounts_btc_token_or_fiat_amount() {
+        let mut payment = tx(true, 98_765_432, 0);
+        payment.token_display = Some("123456.78 USDB".into());
+        let mounted = capture::inspect(
+            "spark-hidden-last-transaction",
+            last_transactions_section(
+                &[payment],
+                BitcoinDisplayUnit::Sats,
+                true,
+                true,
+                |_| 1_u8,
+                2_u8,
+            ),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(mounted.contains("••••••"));
+        assert!(!mounted.contains("98,765,432"));
+        assert!(!mounted.contains("123456.78"));
     }
 }

@@ -31,7 +31,11 @@ pub fn import_psbt_success_view<'a>() -> Element<'a, Message> {
         .into()
 }
 
-pub fn psbts_view(spend_txs: &[SpendTx], bitcoin_unit: BitcoinDisplayUnit) -> Element<'_, Message> {
+pub fn psbts_view(
+    spend_txs: &[SpendTx],
+    bitcoin_unit: BitcoinDisplayUnit,
+    mask_amounts: bool,
+) -> Element<'_, Message> {
     Column::new()
         .push(
             Row::new()
@@ -60,7 +64,7 @@ pub fn psbts_view(spend_txs: &[SpendTx], bitcoin_unit: BitcoinDisplayUnit) -> El
                     .iter()
                     .enumerate()
                     .fold(Column::new().spacing(10), |col, (i, tx)| {
-                        col.push(spend_tx_list_view(i, tx, bitcoin_unit))
+                        col.push(spend_tx_list_view(i, tx, bitcoin_unit, mask_amounts))
                     }),
             ),
         )
@@ -73,7 +77,20 @@ fn spend_tx_list_view(
     i: usize,
     tx: &SpendTx,
     bitcoin_unit: BitcoinDisplayUnit,
+    mask_amounts: bool,
 ) -> Element<'_, Message> {
+    let spend_amount: Element<'_, Message> = if mask_amounts {
+        text("••••••").into()
+    } else {
+        amount_with_unit(&tx.spend_amount, bitcoin_unit).into()
+    };
+    let fee_amount: Option<Element<'_, Message>> = tx.fee_amount.as_ref().map(|fee| {
+        if mask_amounts {
+            text("••••••").size(P2_SIZE).into()
+        } else {
+            amount_with_size_and_unit(fee, P2_SIZE, bitcoin_unit).into()
+        }
+    });
     Container::new(
         Button::new(
             Row::new()
@@ -131,14 +148,11 @@ fn spend_tx_list_view(
                     Column::new()
                         .align_x(Alignment::End)
                         .push(if !tx.is_send_to_self() {
-                            Container::new(amount_with_unit(&tx.spend_amount, bitcoin_unit))
+                            Container::new(spend_amount)
                         } else {
                             Container::new(p1_regular("Self-transfer"))
                         })
-                        .push_maybe(
-                            tx.fee_amount
-                                .map(|fee| amount_with_size_and_unit(&fee, P2_SIZE, bitcoin_unit)),
-                        )
+                        .push_maybe(fee_amount)
                         .width(Length::Fixed(140.0)),
                 )
                 .align_y(Alignment::Center)

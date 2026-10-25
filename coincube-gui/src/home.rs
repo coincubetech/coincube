@@ -35,7 +35,13 @@ use crate::{
             global::{AccountTier, GlobalSettings},
             AuthConfig, BitcoinImport, CubeConnectState, CubeSettings, WalletSettings,
         },
-        state::{connect::ConnectAccountPanel, settings::general},
+        state::{
+            connect::{
+                account::{RecoveryServiceTarget, RecoveryServicesState},
+                ConnectAccountPanel,
+            },
+            settings::general,
+        },
         view::{BackupWalletMessage, ConnectAccountMessage, RecoveryKitMessage},
     },
     delete::{delete_wallet, DeleteError},
@@ -65,6 +71,18 @@ fn pending_advisory_notice(
 
 const NETWORKS: [ChainId; 5] = ChainId::LAUNCHER;
 
+/// A pre-unlock catalog action names the persisted Cube, never its position
+/// in a list that a background refresh may have reordered.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CubeCatalogKey {
+    pub chain: ChainId,
+    pub cube_id: String,
+}
+
+fn catalog_display_name(name: &str) -> String {
+    crate::cube_display::name(name)
+}
+
 /// Connect registration and remote-Cube matching must inspect every chain's
 /// settings directory, including BTCB2. `NETWORKS` is only the baseline
 /// launcher selector and intentionally excludes the two fork identities.
@@ -77,6 +95,68 @@ fn locally_stored_cubes(datadir: &CoincubeDirectory) -> Vec<CubeSettings> {
                 .unwrap_or_default()
         })
         .collect()
+}
+
+#[derive(Debug, Clone)]
+pub enum RecoveryServiceDestination {
+    Local(ChainId, CubeSettings, app::Config),
+    Remote(ChainId),
+}
+
+/// The Account row is only a selector. Resolve its server ID and network
+/// against a fresh authenticated response, then match the resulting UUID in
+/// that chain's local settings before admitting the ordinary unlock path.
+fn resolve_recovery_service_destination(
+    datadir: &CoincubeDirectory,
+    target: &RecoveryServiceTarget,
+    cubes: &[CubeResponse],
+) -> Result<RecoveryServiceDestination, String> {
+    let chain = ChainId::from_api_str(&target.network)
+        .ok_or_else(|| "Unsupported Connect Cube network".to_string())?;
+    let mut matches = cubes
+        .iter()
+        .filter(|cube| cube.id == target.cube_id && cube.network == target.network);
+    let server_cube = matches
+        .next()
+        .ok_or_else(|| "Connect Cube no longer belongs to this account".to_string())?;
+    if matches.next().is_some() || server_cube.uuid.trim().is_empty() {
+        return Err("Connect returned an ambiguous Cube identity".to_string());
+    }
+
+    let network_dir = datadir.network_directory(chain);
+    let local_cubes = match settings::Settings::from_file(&network_dir) {
+        Ok(settings) => settings.cubes,
+        Err(settings::SettingsError::NotFound) => {
+            return Ok(RecoveryServiceDestination::Remote(chain))
+        }
+        Err(error) => return Err(format!("Could not read local Cube settings: {error}")),
+    };
+    let mut local_matches = local_cubes
+        .iter()
+        .filter(|cube| cube.id == server_cube.uuid);
+    let Some(local_cube) = local_matches.next() else {
+        return Ok(RecoveryServiceDestination::Remote(chain));
+    };
+    if local_matches.next().is_some() || local_cube.network != chain {
+        return Err("Local Cube identity does not match its chain".to_string());
+    }
+    let config_path = network_dir.path().join(app::config::DEFAULT_FILE_NAME);
+    let config = match app::Config::from_file(&config_path) {
+        Ok(config) => config,
+        Err(app::config::ConfigError::NotFound) => {
+            let config = app::Config::new(false);
+            config.to_file(&config_path).map_err(|error| {
+                format!("Could not initialize local GUI configuration: {error}")
+            })?;
+            config
+        }
+        Err(error) => return Err(format!("Could not read local GUI configuration: {error}")),
+    };
+    Ok(RecoveryServiceDestination::Local(
+        chain,
+        local_cube.clone(),
+        config,
+    ))
 }
 
 #[derive(Debug, Clone)]
@@ -262,6 +342,96 @@ pub enum HomeSection {
     SplitWallet,
 }
 
+/// A Claim navigation request names the exact source App and counterpart.
+/// It carries no unlock authority; admission rechecks the live App and saved
+/// Cube metadata before any resources are opened.
+#[derive(Debug, Clone)]
+pub(crate) enum ClaimRoute {
+    Begin(app::claim_intent::ForkHandoff),
+    Continue(app::claim_intent::ForkHandoff),
+    Return(app::claim_intent::ForkHandoff),
+    Imported(crate::imported_claim::ImportedClaimRequest),
+}
+
+#[derive(Debug, Clone)]
+pub struct ClaimOpenIntent {
+    pub(crate) operation: app::cache::AppGeneration,
+    pub(crate) owner: app::cache::AppGeneration,
+    pub(crate) root: std::path::PathBuf,
+    pub(crate) source_cube: String,
+    pub(crate) fork_cube: String,
+    pub(crate) route: ClaimRoute,
+}
+
+impl ClaimOpenIntent {
+    pub(crate) fn new(
+        owner: app::cache::AppGeneration,
+        root: &CoincubeDirectory,
+        source_cube: String,
+        fork_cube: String,
+        route: ClaimRoute,
+    ) -> Self {
+        Self {
+            operation: app::cache::AppGeneration::next(),
+            owner,
+            root: root.path().to_path_buf(),
+            source_cube,
+            fork_cube,
+            route,
+        }
+    }
+
+    pub(crate) fn validates(
+        &self,
+        owner: &app::App,
+        root: &CoincubeDirectory,
+        chain: ChainId,
+        cube: &CubeSettings,
+    ) -> bool {
+        if self.operation == self.owner
+            || self.root != root.path()
+            || owner.cache().app_generation != self.owner
+            || owner.datadir() != root
+            || owner.cube_settings().network != ChainId::Bitcoin
+            || owner.cube_settings().id != self.source_cube
+            || self.source_cube == self.fork_cube
+        {
+            return false;
+        }
+        match &self.route {
+            ClaimRoute::Begin(handoff) | ClaimRoute::Continue(handoff) => {
+                chain == ChainId::BitcoinBlake2b
+                    && cube.id == self.fork_cube
+                    && handoff.bitcoin_cube() == self.source_cube
+                    && handoff.fork_cube() == self.fork_cube
+                    && handoff
+                        .resolve_target(root)
+                        .is_ok_and(|saved| saved.id == cube.id)
+            }
+            ClaimRoute::Return(handoff) => {
+                chain == ChainId::Bitcoin
+                    && cube.id == self.source_cube
+                    && handoff.bitcoin_cube() == self.source_cube
+                    && handoff.fork_cube() == self.fork_cube
+                    && handoff
+                        .resolve_source(root)
+                        .is_ok_and(|saved| saved.id == cube.id)
+            }
+            ClaimRoute::Imported(request) => {
+                chain == ChainId::BitcoinBlake2b
+                    && cube.id == self.fork_cube
+                    && request.source.cube_id == self.source_cube
+                    && owner
+                        .prepare_imported_claim()
+                        .is_ok_and(|(current, client)| {
+                            current.source == request.source
+                                && request.validate(root, &client).is_ok()
+                        })
+            }
+        }
+    }
+}
+
 /// Context stashed for firing a remote cube update after local rename succeeds.
 struct PendingRemoteRename {
     cube_id: String,
@@ -273,6 +443,8 @@ pub struct Home {
     global_blake2b_enabled: bool,
     global_feature_request: u64,
     pending_fork_claim: Option<app::claim_intent::ForkHandoff>,
+    pending_begin_claim: bool,
+    claim_owner: Option<app::cache::AppGeneration>,
     state: State,
     displayed_networks: Vec<ChainId>,
     /// Descriptor checksums that already have a Bitcoin Blake2b claim target
@@ -314,6 +486,8 @@ pub struct Home {
     account_tier: AccountTier,
     /// Account-level Connect panel (login, plan, security, etc.)
     pub connect_account: ConnectAccountPanel,
+    /// Reject older Account-row lookups after a newer selection.
+    recovery_open_request: u64,
     /// Heir "Recover a Vault" discovery surface state (COIN-377 / PR 1).
     pub recover_vault: RecoverVaultPanel,
     pub split_wallet: SplitWalletPanel,
@@ -374,8 +548,9 @@ pub struct Home {
     /// both outcomes, so an entry means "the last attempt failed, for this
     /// reason" and its absence means "no attempt has failed".
     cube_sync_errors: std::collections::HashMap<String, String>,
-    /// Rename cube modal: (cube index, new name input)
-    rename_cube_modal: Option<(usize, String)>,
+    /// Rename cube modal: stable chain and Cube ID, plus the name input.
+    /// A background catalog refresh may reorder the list while it is open.
+    rename_cube_modal: Option<(CubeCatalogKey, String)>,
     /// Pending remote rename: stashed after local rename succeeds so the
     /// `CubeRenamed` handler can fire the API update.
     pending_remote_rename: Option<PendingRemoteRename>,
@@ -445,6 +620,8 @@ impl Home {
                 global_blake2b_enabled: false,
                 global_feature_request: 0,
                 pending_fork_claim: None,
+                pending_begin_claim: false,
+                claim_owner: None,
                 // Resolved on the first `refresh_displayed_networks`.
                 btcb2_claim_targets: std::collections::HashSet::new(),
                 state: State::Unchecked,
@@ -473,6 +650,7 @@ impl Home {
                     &datadir_path,
                 )),
                 connect_account,
+                recovery_open_request: 0,
                 settings_error: None,
                 recover_vault: RecoverVaultPanel::new(),
                 split_wallet: SplitWalletPanel::new(),
@@ -541,6 +719,24 @@ impl Home {
         &self,
     ) -> Option<crate::imported_claim::ImportedClaimRequest> {
         self.imported_claim.clone()
+    }
+
+    /// Claim pairs temporarily retain their source Cube while opening the
+    /// counterpart. Ordinary Launcher switches close the previous Cube first.
+    pub(crate) fn is_claim_route(&self) -> bool {
+        self.imported_claim.is_some()
+            || self.pending_fork_claim.is_some()
+            || self.claim_owner.is_some()
+    }
+
+    pub(crate) fn set_claim_owner(&mut self, owner: app::cache::AppGeneration) {
+        self.claim_owner = Some(owner);
+    }
+
+    /// Source App for any Claim route, including fork/return routes that do
+    /// not carry an imported-claim request.
+    pub(crate) fn claim_owner(&self) -> Option<app::cache::AppGeneration> {
+        self.claim_owner
     }
 
     #[cfg(test)]
@@ -614,6 +810,21 @@ impl Home {
             self.network,
             self.datadir_path.network_directory(self.network),
         )
+    }
+
+    fn catalog_index(&self, key: &CubeCatalogKey) -> Option<usize> {
+        let State::Cubes { cubes, source, .. } = &self.state else {
+            return None;
+        };
+        if *source != key.chain || self.network != key.chain {
+            return None;
+        }
+        let mut matches = cubes
+            .iter()
+            .enumerate()
+            .filter(|(_, cube)| cube.id == key.cube_id && cube.network == key.chain);
+        let (index, _) = matches.next()?;
+        matches.next().is_none().then_some(index)
     }
 
     /// Fetch the full server cube list and keep the ones with no local
@@ -849,9 +1060,26 @@ impl Home {
         self.error = Some(msg.into());
     }
 
+    /// A Recovery Services selection belongs to the Overview visit that
+    /// started it. Leaving that route invalidates even a result delivered
+    /// after the user returns to Overview.
+    fn leave_recovery_services(&mut self) {
+        if matches!(
+            self.active_section,
+            HomeSection::Connect(app::menu::ConnectSubMenu::Overview)
+        ) {
+            self.recovery_open_request = self.recovery_open_request.wrapping_add(1);
+        }
+    }
+
     /// The top-level error currently shown on the home screen, if any.
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
+    }
+
+    pub(crate) fn imported_claim_owner(&self) -> Option<app::cache::AppGeneration> {
+        self.imported_claim.as_ref()?;
+        self.claim_owner
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -968,6 +1196,16 @@ impl Home {
     /// rather than bypassing the account feature gate.
     pub(crate) fn request_split_resume(&mut self) {
         self.resume_split_after_install = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reviewer_split_wallet_active(&self) -> bool {
+        matches!(self.active_section, HomeSection::SplitWallet)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reviewer_split_resume_pending(&self) -> bool {
+        self.resume_split_after_install
     }
 
     /// Enter Split only once every server-controlled prerequisite has been
@@ -1106,13 +1344,21 @@ impl Home {
         self.connect_account.bitcoin_blake2b_opt_in =
             GlobalSettings::load_bitcoin_blake2b_beta(&path);
         self.refresh_displayed_networks();
+        let awaiting_connect_features = self.resume_split_after_install
+            && self.connect_account.bitcoin_blake2b_opt_in
+            && self.connect_account.features.is_none();
         if !self
             .connect_chain_availability(ChainId::BitcoinBlake2b)
             .is_available()
         {
-            self.pending_fork_claim = None;
-            self.imported_claim = None;
-            self.resume_split_after_install = false;
+            // A fresh post-install Home receives the global feature result
+            // independently of Connect's session and feature responses. The
+            // missing account result is not a refusal of the pending Split.
+            if !awaiting_connect_features {
+                self.pending_fork_claim = None;
+                self.imported_claim = None;
+                self.resume_split_after_install = false;
+            }
             self.split_wallet.cancel();
             if matches!(self.active_section, HomeSection::SplitWallet) {
                 self.active_section = HomeSection::Cubes;
@@ -1175,7 +1421,11 @@ impl Home {
 
     /// Route a paired Claim through the ordinary launcher. This does not
     /// unlock a Cube or admit a wallet by itself.
-    fn continue_fork_claim(&mut self, handoff: app::claim_intent::ForkHandoff) -> Task<Message> {
+    fn continue_fork_claim(
+        &mut self,
+        handoff: app::claim_intent::ForkHandoff,
+        begin: bool,
+    ) -> Task<Message> {
         app::claim_intent::clear();
         let chain = ChainId::BitcoinBlake2b;
         if let Some(reason) = self.connect_chain_availability(chain).reason() {
@@ -1203,13 +1453,25 @@ impl Home {
                 return Task::none();
             }
         };
-        app::claim_intent::arm_fork(handoff);
-        Task::done(Message::Run(
-            self.datadir_path.clone(),
-            config,
-            chain,
-            target,
-        ))
+        let root = self.datadir_path.clone();
+        if let Some(owner) = self.claim_owner.take() {
+            let intent = ClaimOpenIntent::new(
+                owner,
+                &root,
+                handoff.bitcoin_cube().to_owned(),
+                handoff.fork_cube().to_owned(),
+                if begin {
+                    ClaimRoute::Begin(handoff)
+                } else {
+                    ClaimRoute::Continue(handoff)
+                },
+            );
+            Task::done(Message::RunClaim(root, config, chain, target, intent))
+        } else {
+            app::claim_intent::clear();
+            self.set_error("The source Cube closed. Reopen Claim from its Bitcoin Vault.");
+            Task::none()
+        }
     }
 
     fn return_bitcoin_claim(&mut self, handoff: app::claim_intent::ForkHandoff) -> Task<Message> {
@@ -1235,16 +1497,44 @@ impl Home {
                 return Task::none();
             }
         };
-        app::claim_intent::arm_return(handoff);
-        Task::done(Message::Run(
-            self.datadir_path.clone(),
-            config,
-            chain,
-            source,
-        ))
+        let root = self.datadir_path.clone();
+        if let Some(owner) = self.claim_owner.take() {
+            let intent = ClaimOpenIntent::new(
+                owner,
+                &root,
+                handoff.bitcoin_cube().to_owned(),
+                handoff.fork_cube().to_owned(),
+                ClaimRoute::Return(handoff),
+            );
+            Task::done(Message::RunClaim(root, config, chain, source, intent))
+        } else {
+            app::claim_intent::arm_return(handoff);
+            Task::done(Message::Run(root, config, chain, source))
+        }
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let message = match message {
+            Message::View(ViewMessage::RunCatalog(key)) => {
+                let Some(index) = self.catalog_index(&key) else {
+                    return Task::none();
+                };
+                Message::View(ViewMessage::Run(index))
+            }
+            Message::View(ViewMessage::RenameCatalog(key)) => {
+                let Some(index) = self.catalog_index(&key) else {
+                    return Task::none();
+                };
+                Message::View(ViewMessage::RenameCube(index))
+            }
+            Message::View(ViewMessage::DeleteCatalog(key)) => {
+                let Some(index) = self.catalog_index(&key) else {
+                    return Task::none();
+                };
+                Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::ShowModal(index)))
+            }
+            message => message,
+        };
         let message = match message {
             Message::FocusedCubes { for_chain, res } => {
                 if !matches!(self.active_section, HomeSection::Cubes)
@@ -1264,7 +1554,26 @@ impl Home {
         };
         let task = match message {
             Message::ReturnBitcoinClaim(handoff) => self.return_bitcoin_claim(handoff),
+            Message::BeginClaimPair(handoff) => {
+                self.pending_begin_claim = true;
+                app::claim_intent::clear();
+                if !handoff.matches_root(&self.datadir_path) {
+                    self.pending_fork_claim = None;
+                    self.set_error("This Claim belongs to a different data directory.");
+                    return Task::none();
+                }
+                self.pending_fork_claim = Some(handoff);
+                self.refresh_displayed_networks();
+                if let Some(reason) = self
+                    .connect_chain_availability(ChainId::BitcoinBlake2b)
+                    .reason()
+                {
+                    self.set_error(reason.to_string());
+                }
+                Task::none()
+            }
             Message::ContinueForkClaim(handoff) => {
+                self.pending_begin_claim = false;
                 app::claim_intent::clear();
                 if !handoff.matches_root(&self.datadir_path) {
                     self.pending_fork_claim = None;
@@ -1293,6 +1602,8 @@ impl Home {
                             | ViewMessage::ConnectAccount(app::view::ConnectAccountMessage::LogOut)
                     )
                 ) {
+                    self.claim_owner = None;
+                    self.pending_begin_claim = false;
                     if self.imported_claim.take().is_some() {
                         self.resume_split_after_install = false;
                         self.split_wallet.cancel();
@@ -1317,7 +1628,10 @@ impl Home {
         {
             self.pending_fork_claim
                 .take()
-                .map_or_else(Task::none, |handoff| self.continue_fork_claim(handoff))
+                .map_or_else(Task::none, |handoff| {
+                    let begin = std::mem::take(&mut self.pending_begin_claim);
+                    self.continue_fork_claim(handoff, begin)
+                })
         } else {
             Task::none()
         };
@@ -2879,6 +3193,12 @@ impl Home {
                 } else {
                     section
                 };
+                if !matches!(
+                    section,
+                    HomeSection::Connect(app::menu::ConnectSubMenu::Overview)
+                ) {
+                    self.leave_recovery_services();
+                }
                 if matches!(section, HomeSection::SplitWallet) {
                     self.imported_claim = None;
                     self.resume_split_after_install = false;
@@ -3158,10 +3478,29 @@ impl Home {
                     };
                     app::split_intent::arm(intent);
                     let datadir = self.datadir_path.clone();
-                    return Task::perform(
-                        async move { (datadir, cfg, source, cube) },
-                        |(datadir, cfg, source, cube)| Message::Run(datadir, cfg, source, cube),
-                    );
+                    if self.imported_claim.is_some() && self.claim_owner.is_some() {
+                        let request = self.imported_claim.take().expect("checked above");
+                        let owner = self.claim_owner.take().expect("checked above");
+                        let intent = ClaimOpenIntent::new(
+                            owner,
+                            &datadir,
+                            request.source.cube_id.clone(),
+                            cube.id.clone(),
+                            ClaimRoute::Imported(request),
+                        );
+                        return Task::done(Message::RunClaim(datadir, cfg, source, cube, intent));
+                    }
+                    if self.imported_claim.is_some() {
+                        app::split_intent::clear();
+                        self.set_error(
+                            "The imported source Cube closed. Open Claim from that wallet again.",
+                        );
+                        return Task::none();
+                    }
+                    // An ordinary foreign-wallet Split has no retained source
+                    // App. GUI stages this exact one-use scan on the admitted
+                    // destination tab before it closes the prior session.
+                    return Task::done(Message::Run(datadir, cfg, source, cube));
                 }
                 let client = self.connect_account.authenticated_client();
                 let generation = self.connect_account.session_generation();
@@ -3198,7 +3537,13 @@ impl Home {
             Message::View(ViewMessage::RenameCube(index)) => {
                 if let State::Cubes { cubes, .. } = &self.state {
                     if let Some(cube) = cubes.get(index) {
-                        self.rename_cube_modal = Some((index, cube.name.clone()));
+                        self.rename_cube_modal = Some((
+                            CubeCatalogKey {
+                                chain: cube.network,
+                                cube_id: cube.id.clone(),
+                            },
+                            cube.name.clone(),
+                        ));
                     }
                 }
                 Task::none()
@@ -3210,13 +3555,18 @@ impl Home {
                 Task::none()
             }
             Message::View(ViewMessage::RenameCubeConfirm) => {
-                let Some((index, ref new_name)) = self.rename_cube_modal else {
+                let Some((ref key, ref new_name)) = self.rename_cube_modal else {
                     return Task::none();
                 };
                 let new_name = new_name.trim().to_string();
                 if new_name.is_empty() {
                     return Task::none();
                 }
+                let Some(index) = self.catalog_index(key) else {
+                    self.rename_cube_modal = None;
+                    self.error = Some("This Cube is no longer in the current catalog. Review the list and try again.".into());
+                    return Task::none();
+                };
                 let Some(cube) = (if let State::Cubes { cubes, .. } = &self.state {
                     cubes.get(index).cloned()
                 } else {
@@ -3319,6 +3669,143 @@ impl Home {
                     }
                 })
             }
+            Message::View(ViewMessage::ConnectAccount(
+                ConnectAccountMessage::OpenRecoveryService(target),
+            )) => {
+                if !matches!(
+                    self.active_section,
+                    HomeSection::Connect(app::menu::ConnectSubMenu::Overview)
+                ) || !self.connect_account.is_authenticated()
+                    || !matches!(
+                        &self.connect_account.recovery_services,
+                        RecoveryServicesState::Ready(rows)
+                            if rows.iter().filter(|row| row.target == target).count() == 1
+                    )
+                {
+                    return Task::none();
+                }
+                let (Some(client), Some(user)) = (
+                    self.connect_account.authenticated_client(),
+                    self.connect_account.user.as_ref(),
+                ) else {
+                    return Task::none();
+                };
+                let user_id = user.id;
+                let session_generation = self.connect_account.session_generation();
+                self.recovery_open_request = self.recovery_open_request.wrapping_add(1);
+                let request = self.recovery_open_request;
+                self.connect_account.error = None;
+                let datadir = self.datadir_path.clone();
+                let resolve_target = target.clone();
+                Task::perform(
+                    async move {
+                        let cubes = client
+                            .list_cubes()
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        resolve_recovery_service_destination(&datadir, &resolve_target, &cubes)
+                    },
+                    move |result| Message::RecoveryServiceResolved {
+                        target: target.clone(),
+                        session_generation,
+                        user_id,
+                        request,
+                        result,
+                    },
+                )
+            }
+            Message::RecoveryServiceResolved {
+                target,
+                session_generation,
+                user_id,
+                request,
+                result,
+            } => {
+                if request != self.recovery_open_request
+                    || session_generation != self.connect_account.session_generation()
+                    || !self.connect_account.is_authenticated()
+                    || self.connect_account.user.as_ref().map(|user| user.id) != Some(user_id)
+                    || !matches!(
+                        self.active_section,
+                        HomeSection::Connect(app::menu::ConnectSubMenu::Overview)
+                    )
+                    || !matches!(
+                        &self.connect_account.recovery_services,
+                        RecoveryServicesState::Ready(rows)
+                            if rows.iter().filter(|row| row.target == target).count() == 1
+                    )
+                {
+                    return Task::none();
+                }
+                let destination = match result {
+                    Ok(destination) => destination,
+                    Err(detail) => {
+                        self.connect_account.error =
+                            Some(crate::app::state::connect::account::PanelError::settled(
+                                crate::user_error::UserError::logged(
+                                    "Couldn't open this Cube",
+                                    "Refresh Recovery services, then try again.",
+                                    crate::user_error::CC_API_BADRESP,
+                                    false,
+                                    detail,
+                                ),
+                            ));
+                        return Task::none();
+                    }
+                };
+                let chain = match &destination {
+                    RecoveryServiceDestination::Local(chain, ..)
+                    | RecoveryServiceDestination::Remote(chain) => *chain,
+                };
+                if !(self.developer_mode
+                    || chain == ChainId::Bitcoin
+                    || chain == ChainId::BitcoinBlake2b
+                        && self.chain_availability(chain).is_available())
+                    || !self.chain_availability(chain).is_available()
+                {
+                    self.connect_account.error =
+                        Some(crate::app::state::connect::account::PanelError::settled(
+                            crate::user_error::UserError::new(
+                                "This Cube network is unavailable",
+                                "Enable its network in Global Settings before opening this Cube.",
+                                crate::user_error::CC_API_BADRESP,
+                                false,
+                            ),
+                        ));
+                    return Task::none();
+                }
+                self.connect_account.error = None;
+                match destination {
+                    RecoveryServiceDestination::Local(chain, cube, config) => Task::done(
+                        Message::RunToRecovery(self.datadir_path.clone(), config, chain, cube),
+                    ),
+                    RecoveryServiceDestination::Remote(chain) => {
+                        if chain.is_blake2b() {
+                            self.connect_account.error = Some(
+                                crate::app::state::connect::account::PanelError::settled(
+                                    crate::user_error::UserError::new(
+                                        "This Cube cannot be opened here",
+                                        "This remote Bitcoin Blake2b Cube is not available in the local Cube catalog. Recover it on its original device.",
+                                        crate::user_error::CC_API_BADRESP,
+                                        false,
+                                    ),
+                                ),
+                            );
+                            return Task::none();
+                        }
+                        // A Connect record is not an unlock credential. Show
+                        // the existing remote-only restore card in the Cube
+                        // catalog; the user chooses its normal recovery flow.
+                        // Refresh the catalog as its earlier account-scoped
+                        // fetch may predate this newly selected server row.
+                        self.active_section = HomeSection::Cubes;
+                        Task::batch([
+                            self.update(Message::View(ViewMessage::SelectNetwork(chain))),
+                            self.fetch_remote_cubes(),
+                        ])
+                    }
+                }
+            }
             Message::View(ViewMessage::ConnectAccount(msg)) => {
                 // The banner CTAs navigate the panel to Plan & Billing by
                 // setting its `active_sub`, but the sidebar highlight follows
@@ -3331,6 +3818,7 @@ impl Home {
                     ConnectAccountMessage::OpenPlanBilling
                         | ConnectAccountMessage::RenewCurrentPlan
                 ) {
+                    self.leave_recovery_services();
                     self.active_section =
                         HomeSection::Connect(app::menu::ConnectSubMenu::PlanBilling);
                 }
@@ -4645,12 +5133,12 @@ impl Home {
                                         let signed_in =
                                             self.connect_account.authenticated_client().is_some();
                                         let mut col =
-                                            cubes.iter().enumerate().fold(
+                                            cubes.iter().fold(
                                                 Column::new().spacing(20),
-                                                |col, (i, cube)| {
+                                                |col, cube| {
                                                     col.push(cubes_list_item(
                                                         cube,
-                                                        i,
+                                                        self.network,
                                                         signed_in,
                                                         self.cube_sync_hint(cube),
                                                     ))
@@ -5592,10 +6080,15 @@ fn vault_subtitle(cube: &CubeSettings) -> String {
 
 fn cubes_list_item<'a>(
     cube: &'a CubeSettings,
-    i: usize,
+    chain: ChainId,
     signed_in: bool,
     sync_error: Option<String>,
 ) -> Element<'a, ViewMessage> {
+    let key = CubeCatalogKey {
+        chain,
+        cube_id: cube.id.clone(),
+    };
+    let display_name = catalog_display_name(&cube.name);
     // Single tri-state cube icon (Phase 1, duress mode): the Cube's
     // relationship to Connect — Sovereign (outline) → Registered (filled,
     // half-tone) → Backed up (filled, full colour) — so users can tell at a
@@ -5657,12 +6150,12 @@ fn cubes_list_item<'a>(
                                 Row::new()
                                     .spacing(8)
                                     .align_y(Alignment::Center)
-                                    .push(p1_bold(&cube.name))
+                                    .push(p1_bold(display_name))
                                     .push(sync_indicator),
                             )
                             .push(p1_regular(vault_subtitle(cube)).style(theme::text::secondary)),
                     )
-                    .on_press(ViewMessage::Run(i))
+                    .on_press(ViewMessage::RunCatalog(key.clone()))
                     .padding(15)
                     .style(theme::button::container_border)
                     .width(Length::Fixed(500.0)),
@@ -5673,13 +6166,13 @@ fn cubes_list_item<'a>(
                 Button::new(icon::pencil_icon())
                     .style(theme::button::secondary)
                     .padding(10)
-                    .on_press(ViewMessage::RenameCube(i)),
+                    .on_press(ViewMessage::RenameCatalog(key.clone())),
             )
             .push_maybe((!cube.network.is_blake2b()).then(|| {
                 Button::new(icon::trash_icon())
                     .style(theme::button::secondary)
                     .padding(10)
-                    .on_press(ViewMessage::DeleteCube(DeleteCubeMessage::ShowModal(i)))
+                    .on_press(ViewMessage::DeleteCatalog(key))
             })),
     )
     .into()
@@ -5745,7 +6238,7 @@ fn remote_cube_list_item<'a>(cube: &'a RemoteCube) -> Element<'a, ViewMessage> {
     let card = Container::new(
         Column::new()
             .spacing(4)
-            .push(p1_bold(&cube.name).style(theme::text::secondary))
+            .push(p1_bold(catalog_display_name(&cube.name)).style(theme::text::secondary))
             .push(p1_regular(status_line).style(theme::text::secondary)),
     )
     .padding(15)
@@ -6293,7 +6786,15 @@ pub enum Message {
     /// Bubble successful preference writes to the GUI for every open tab.
     GlobalSettingsChanged,
     GlobalFeatureLoaded(u64, bool),
+    RecoveryServiceResolved {
+        target: RecoveryServiceTarget,
+        session_generation: u64,
+        user_id: u32,
+        request: u64,
+        result: Result<RecoveryServiceDestination, String>,
+    },
     View(ViewMessage),
+    BeginClaimPair(app::claim_intent::ForkHandoff),
     ContinueForkClaim(app::claim_intent::ForkHandoff),
     ReturnBitcoinClaim(app::claim_intent::ForkHandoff),
     /// A focus refresh must not replace a form opened while the read ran.
@@ -6332,6 +6833,21 @@ pub enum Message {
         app::config::Config,
         crate::chain::ChainId,
         CubeSettings,
+    ),
+    /// Open the selected local Cube through its normal unlock path, then show
+    /// its existing Cube → Settings → Recovery management screen.
+    RunToRecovery(
+        CoincubeDirectory,
+        app::config::Config,
+        crate::chain::ChainId,
+        CubeSettings,
+    ),
+    RunClaim(
+        CoincubeDirectory,
+        app::config::Config,
+        crate::chain::ChainId,
+        CubeSettings,
+        ClaimOpenIntent,
     ),
     StartRecovery,
     CubeCreated(Result<CubeSettings, String>),
@@ -6462,6 +6978,9 @@ pub enum ViewMessage {
     StartInstall(ChainId),
     Check,
     Run(usize),
+    RunCatalog(CubeCatalogKey),
+    RenameCatalog(CubeCatalogKey),
+    DeleteCatalog(CubeCatalogKey),
     DeleteCube(DeleteCubeMessage),
     ToggleRecoveryCheckBox,
     ToggleDeveloperMode(bool),
@@ -6556,10 +7075,11 @@ struct DeleteRemoteCubeModal {
 
 impl DeleteRemoteCubeModal {
     fn view(&self) -> Element<Message> {
+        let display_name = catalog_display_name(&self.cube.name);
         let mut col = Column::new()
             .spacing(10)
             .push(Container::new(
-                h4_bold(format!("Delete Remote Cube \"{}\"", self.cube.name))
+                h4_bold(format!("Delete Remote Cube \"{}\"", display_name))
                     .style(theme::text::destructive)
                     .width(Length::Fill),
             ))
@@ -6626,11 +7146,12 @@ struct RecoveryMethodModal {
 
 impl RecoveryMethodModal {
     fn view(&self) -> Element<Message> {
+        let display_name = catalog_display_name(&self.cube.name);
         let col = Column::new()
             .spacing(15)
             .padding(20)
             .width(Length::Fixed(460.0))
-            .push(h4_bold(format!("Recover \"{}\"", self.cube.name)).width(Length::Fill))
+            .push(h4_bold(format!("Recover \"{}\"", display_name)).width(Length::Fill))
             .push(
                 p1_regular(
                     "This Cube has two backups. Choose how to recover it — \
@@ -6828,6 +7349,7 @@ impl DeleteCubeModal {
     fn view(&self) -> Element<Message> {
         let pin_ready = !self.cube.has_pin(&self.datadir_root) || self.pin_input.is_complete();
         let can_delete = pin_ready && self.warning.is_none();
+        let display_name = catalog_display_name(&self.cube.name);
         let mut confirm_button = button::secondary(None, "Delete Cube")
             .width(Length::Fixed(200.0))
             .style(theme::button::destructive);
@@ -6848,7 +7370,7 @@ impl DeleteCubeModal {
         let help_text_1 = if has_vault {
             format!(
                 "Are you sure you want to delete the Cube \"{}\" and {}?",
-                self.cube.name,
+                display_name,
                 if has_remote_backend {
                     "its associated Vault configuration"
                 } else {
@@ -6858,7 +7380,7 @@ impl DeleteCubeModal {
         } else {
             format!(
                 "Are you sure you want to delete the Cube \"{}\"?",
-                self.cube.name
+                display_name
             )
         };
 
@@ -6873,7 +7395,7 @@ impl DeleteCubeModal {
         let mut col = Column::new()
             .spacing(10)
             .push(Container::new(
-                h4_bold(format!("Delete Cube \"{}\"", self.cube.name))
+                h4_bold(format!("Delete Cube \"{}\"", display_name))
                     .style(theme::text::destructive)
                     .width(Length::Fill),
             ))
@@ -8542,15 +9064,179 @@ mod tests {
         };
 
         let _ = home.update(Message::View(ViewMessage::RenameCube(0)));
-        assert_eq!(home.rename_cube_modal, Some((0, "Local A".to_string())));
+        let key = CubeCatalogKey {
+            chain: ChainId::Bitcoin,
+            cube_id: "local-a".into(),
+        };
+        assert_eq!(
+            home.rename_cube_modal,
+            Some((key.clone(), "Local A".to_string()))
+        );
 
         let _ = home.update(Message::View(ViewMessage::RenameCubeNameEdited(
             "Renamed".to_string(),
         )));
-        assert_eq!(home.rename_cube_modal, Some((0, "Renamed".to_string())));
+        assert_eq!(home.rename_cube_modal, Some((key, "Renamed".to_string())));
 
         let _ = home.update(Message::View(ViewMessage::RenameCubeCancel));
         assert!(home.rename_cube_modal.is_none());
+    }
+
+    #[test]
+    fn rename_confirmation_resolves_the_same_cube_after_reorder_and_refuses_removal() {
+        let datadir = fresh_datadir();
+        let directory = datadir.network_directory(ChainId::Bitcoin);
+        std::fs::create_dir_all(directory.path()).unwrap();
+        let first = CubeSettings::new_with_raw_id("first".into(), "First".into(), ChainId::Bitcoin);
+        let second =
+            CubeSettings::new_with_raw_id("second".into(), "Second".into(), ChainId::Bitcoin);
+        let settings_path = directory.path().join(settings::SETTINGS_FILE_NAME);
+        std::fs::write(
+            &settings_path,
+            serde_json::to_vec(&settings::Settings {
+                cubes: vec![first.clone(), second.clone()],
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let mut home = Home::new_for_chain(datadir.clone(), Some(ChainId::Bitcoin)).0;
+        home.state = State::Cubes {
+            cubes: vec![first.clone(), second.clone()],
+            create_cube: false,
+            source: ChainId::Bitcoin,
+        };
+        drop(
+            home.update(Message::View(ViewMessage::RenameCatalog(CubeCatalogKey {
+                chain: ChainId::Bitcoin,
+                cube_id: first.id.clone(),
+            }))),
+        );
+        drop(home.update(Message::View(ViewMessage::RenameCubeNameEdited(
+            "Renamed first".into(),
+        ))));
+        drop(home.update(Message::FocusedCubes {
+            for_chain: ChainId::Bitcoin,
+            res: Ok(State::Cubes {
+                cubes: vec![second.clone(), first.clone()],
+                create_cube: false,
+                source: ChainId::Bitcoin,
+            }),
+        }));
+        assert!(matches!(&home.state, State::Cubes { cubes, .. }
+            if cubes.first().is_some_and(|cube| cube.id == second.id)));
+        let output = drain(home.update(Message::View(ViewMessage::RenameCubeConfirm)));
+        assert!(matches!(output.as_slice(), [Message::CubeRenamed(Ok(()))]));
+        let saved: settings::Settings =
+            serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+        assert_eq!(
+            saved
+                .cubes
+                .iter()
+                .find(|cube| cube.id == first.id)
+                .unwrap()
+                .name,
+            "Renamed first"
+        );
+        assert_eq!(
+            saved
+                .cubes
+                .iter()
+                .find(|cube| cube.id == second.id)
+                .unwrap()
+                .name,
+            "Second"
+        );
+
+        enable_btcb2(&mut home);
+        assert!(home.connect_account.is_authenticated());
+
+        // The row may disappear while the dialog remains open. No local or
+        // remote rename is then scheduled for whichever row took its place.
+        drop(
+            home.update(Message::View(ViewMessage::RenameCatalog(CubeCatalogKey {
+                chain: ChainId::Bitcoin,
+                cube_id: second.id.clone(),
+            }))),
+        );
+        drop(home.update(Message::FocusedCubes {
+            for_chain: ChainId::Bitcoin,
+            res: Ok(State::Cubes {
+                cubes: vec![first.clone()],
+                create_cube: false,
+                source: ChainId::Bitcoin,
+            }),
+        }));
+        assert!(drain(home.update(Message::View(ViewMessage::RenameCubeConfirm))).is_empty());
+        assert!(home.rename_cube_modal.is_none());
+        assert!(home.error().is_some());
+        assert!(home.pending_remote_rename.is_none());
+        let saved: settings::Settings =
+            serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+        assert_eq!(
+            saved
+                .cubes
+                .iter()
+                .find(|cube| cube.id == second.id)
+                .unwrap()
+                .name,
+            "Second"
+        );
+
+        drop(
+            home.update(Message::View(ViewMessage::RenameCatalog(CubeCatalogKey {
+                chain: ChainId::Bitcoin,
+                cube_id: first.id.clone(),
+            }))),
+        );
+        drop(home.update(Message::FocusedCubes {
+            for_chain: ChainId::Bitcoin,
+            res: Ok(State::Cubes {
+                cubes: vec![first.clone(), first.clone()],
+                create_cube: false,
+                source: ChainId::Bitcoin,
+            }),
+        }));
+        assert!(drain(home.update(Message::View(ViewMessage::RenameCubeConfirm))).is_empty());
+        assert!(
+            home.rename_cube_modal.is_none(),
+            "ambiguous identity invalidates the draft"
+        );
+        assert!(home.pending_remote_rename.is_none());
+
+        drop(home.update(Message::FocusedCubes {
+            for_chain: ChainId::Bitcoin,
+            res: Ok(State::Cubes {
+                cubes: vec![first.clone()],
+                create_cube: false,
+                source: ChainId::Bitcoin,
+            }),
+        }));
+        drop(
+            home.update(Message::View(ViewMessage::RenameCatalog(CubeCatalogKey {
+                chain: ChainId::Bitcoin,
+                cube_id: first.id.clone(),
+            }))),
+        );
+        home.network = ChainId::Testnet4;
+        assert!(drain(home.update(Message::View(ViewMessage::RenameCubeConfirm))).is_empty());
+        assert!(
+            home.rename_cube_modal.is_none(),
+            "another chain cannot inherit a rename draft"
+        );
+        assert!(home.pending_remote_rename.is_none());
+        let saved: settings::Settings =
+            serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+        assert_eq!(
+            saved
+                .cubes
+                .iter()
+                .find(|cube| cube.id == first.id)
+                .unwrap()
+                .name,
+            "Renamed first"
+        );
+        std::fs::remove_dir_all(datadir.path()).unwrap();
     }
 
     #[test]
@@ -8735,6 +9421,283 @@ mod tests {
         }
     }
 
+    #[test]
+    fn launcher_catalog_uses_sanitized_names_and_chain_bound_ids() {
+        assert_eq!(
+            catalog_display_name("  Family\n\u{202e} Cube  "),
+            "Family Cube"
+        );
+        assert_eq!(catalog_display_name("\u{0000}\n"), "Unnamed Cube");
+
+        let mut home = home();
+        home.network = ChainId::Bitcoin;
+        home.state = State::Cubes {
+            cubes: vec![
+                CubeSettings::new_with_raw_id("b".into(), "B".into(), ChainId::Bitcoin),
+                CubeSettings::new_with_raw_id("a".into(), "A".into(), ChainId::Bitcoin),
+            ],
+            create_cube: false,
+            source: ChainId::Bitcoin,
+        };
+        let key = CubeCatalogKey {
+            chain: ChainId::Bitcoin,
+            cube_id: "a".into(),
+        };
+        assert_eq!(home.catalog_index(&key), Some(1));
+        if let State::Cubes { cubes, .. } = &mut home.state {
+            cubes.reverse();
+        }
+        assert_eq!(home.catalog_index(&key), Some(0));
+        assert_eq!(
+            home.catalog_index(&CubeCatalogKey {
+                chain: ChainId::Testnet4,
+                cube_id: "a".into(),
+            }),
+            None
+        );
+        if let State::Cubes { cubes, .. } = &mut home.state {
+            cubes.push(cubes[0].clone());
+        }
+        assert_eq!(home.catalog_index(&key), None);
+    }
+
+    #[test]
+    fn recovery_service_open_resolves_exact_server_and_local_identity() {
+        let datadir = fresh_datadir();
+        let directory = datadir.network_directory(ChainId::Bitcoin);
+        std::fs::create_dir_all(directory.path()).unwrap();
+        let local = CubeSettings::new_with_raw_id(
+            "local-uuid".to_string(),
+            "Local Cube".to_string(),
+            ChainId::Bitcoin,
+        );
+        std::fs::write(
+            directory.path().join(settings::SETTINGS_FILE_NAME),
+            serde_json::to_vec(&settings::Settings {
+                cubes: vec![local],
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let target = RecoveryServiceTarget {
+            cube_id: 193,
+            network: "mainnet".to_string(),
+        };
+        let mut server = registered_cube_response("local-uuid");
+        server.network = "mainnet".to_string();
+        assert!(matches!(
+            resolve_recovery_service_destination(&datadir, &target, &[server.clone()]).unwrap(),
+            RecoveryServiceDestination::Local(ChainId::Bitcoin, cube, _) if cube.id == "local-uuid"
+        ));
+        assert!(matches!(
+            resolve_recovery_service_destination(
+                &datadir,
+                &target,
+                &[CubeResponse {
+                    uuid: "other-device-uuid".to_string(),
+                    ..server.clone()
+                }],
+            )
+            .unwrap(),
+            RecoveryServiceDestination::Remote(ChainId::Bitcoin)
+        ));
+        let mut wrong_network = server.clone();
+        wrong_network.network = "testnet4".to_string();
+        assert!(resolve_recovery_service_destination(&datadir, &target, &[wrong_network]).is_err());
+        assert!(
+            resolve_recovery_service_destination(&datadir, &target, &[server.clone(), server])
+                .is_err()
+        );
+        std::fs::remove_dir_all(datadir.path()).unwrap();
+    }
+
+    #[test]
+    fn recovery_service_completion_only_opens_the_current_account_selection() {
+        let mut home = signed_in_home();
+        home.active_section = HomeSection::Connect(app::menu::ConnectSubMenu::Overview);
+        let target = RecoveryServiceTarget {
+            cube_id: 193,
+            network: "mainnet".to_string(),
+        };
+        let mut server = registered_cube_response("local-uuid");
+        server.network = "mainnet".to_string();
+        home.connect_account.recovery_services = RecoveryServicesState::Ready(vec![server.into()]);
+        home.recovery_open_request = 4;
+        let generation = home.connect_account.session_generation();
+        let result = || {
+            Ok(RecoveryServiceDestination::Local(
+                ChainId::Bitcoin,
+                CubeSettings::new_with_raw_id(
+                    "local-uuid".to_string(),
+                    "Local Cube".to_string(),
+                    ChainId::Bitcoin,
+                ),
+                app::Config::new(false),
+            ))
+        };
+
+        assert!(drain(home.update(Message::RecoveryServiceResolved {
+            target: target.clone(),
+            session_generation: generation,
+            user_id: 7,
+            request: 3,
+            result: result(),
+        }))
+        .is_empty());
+        assert!(drain(home.update(Message::RecoveryServiceResolved {
+            target: target.clone(),
+            session_generation: generation,
+            user_id: 8,
+            request: 4,
+            result: result(),
+        }))
+        .is_empty());
+        let outputs = drain(home.update(Message::RecoveryServiceResolved {
+            target,
+            session_generation: generation,
+            user_id: 7,
+            request: 4,
+            result: result(),
+        }));
+        assert!(
+            matches!(outputs.as_slice(), [Message::RunToRecovery(_, _, ChainId::Bitcoin, cube)] if cube.id == "local-uuid")
+        );
+    }
+
+    #[test]
+    fn remote_fork_recovery_selection_stays_on_connect_with_a_truthful_error() {
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            let mut home = signed_in_home();
+            enable_btcb2(&mut home);
+            home.global_blake2b_enabled = true;
+            home.developer_mode = true; // testnet4 is available only in developer mode
+            home.active_section = HomeSection::Connect(app::menu::ConnectSubMenu::Overview);
+            let original_network = home.network;
+            let target = RecoveryServiceTarget {
+                cube_id: 193,
+                network: settings::network_to_api_string(chain),
+            };
+            let mut server = registered_cube_response("remote-only-fork");
+            server.network = target.network.clone();
+            home.connect_account.recovery_services =
+                RecoveryServicesState::Ready(vec![server.into()]);
+            drop(home.update(Message::View(ViewMessage::ConnectAccount(
+                ConnectAccountMessage::OpenRecoveryService(target.clone()),
+            ))));
+            let request = home.recovery_open_request;
+            assert!(drain(home.update(Message::RecoveryServiceResolved {
+                target,
+                session_generation: home.connect_account.session_generation(),
+                user_id: 7,
+                request,
+                result: Ok(RecoveryServiceDestination::Remote(chain)),
+            }))
+            .is_empty());
+            assert!(matches!(
+                home.active_section,
+                HomeSection::Connect(app::menu::ConnectSubMenu::Overview)
+            ));
+            assert_eq!(home.network, original_network);
+            let error = &home.connect_account.error.as_ref().unwrap().user;
+            assert!(error.guidance.contains("original device"));
+            assert!(!error.retryable);
+        }
+    }
+
+    #[test]
+    fn remote_bitcoin_recovery_selection_opens_the_catalog() {
+        let mut home = signed_in_home();
+        home.active_section = HomeSection::Connect(app::menu::ConnectSubMenu::Overview);
+        let target = RecoveryServiceTarget {
+            cube_id: 193,
+            network: "mainnet".to_string(),
+        };
+        let mut server = registered_cube_response("remote-bitcoin");
+        server.network = target.network.clone();
+        home.connect_account.recovery_services = RecoveryServicesState::Ready(vec![server.into()]);
+        drop(home.update(Message::View(ViewMessage::ConnectAccount(
+            ConnectAccountMessage::OpenRecoveryService(target.clone()),
+        ))));
+        let request = home.recovery_open_request;
+        // The fetch Task is allowed to remain pending; the selected route must
+        // already be the remote-only catalog that can display this chain.
+        drop(home.update(Message::RecoveryServiceResolved {
+            target,
+            session_generation: home.connect_account.session_generation(),
+            user_id: 7,
+            request,
+            result: Ok(RecoveryServiceDestination::Remote(ChainId::Bitcoin)),
+        }));
+        assert_eq!(home.active_section, HomeSection::Cubes);
+        assert_eq!(home.network, ChainId::Bitcoin);
+        assert!(home.connect_account.error.is_none());
+    }
+
+    #[test]
+    fn recovery_selection_is_invalidated_on_security_plan_and_leave_return() {
+        for leave in [
+            HomeSection::Connect(app::menu::ConnectSubMenu::Security),
+            HomeSection::Connect(app::menu::ConnectSubMenu::PlanBilling),
+        ] {
+            let mut home = signed_in_home();
+            home.active_section = HomeSection::Connect(app::menu::ConnectSubMenu::Overview);
+            let target = RecoveryServiceTarget {
+                cube_id: 193,
+                network: "mainnet".to_string(),
+            };
+            let mut server = registered_cube_response("local-uuid");
+            server.network = "mainnet".to_string();
+            home.connect_account.recovery_services =
+                RecoveryServicesState::Ready(vec![server.into()]);
+            drop(home.update(Message::View(ViewMessage::ConnectAccount(
+                ConnectAccountMessage::OpenRecoveryService(target.clone()),
+            ))));
+            let old_request = home.recovery_open_request;
+            let session_generation = home.connect_account.session_generation();
+            if matches!(
+                leave,
+                HomeSection::Connect(app::menu::ConnectSubMenu::PlanBilling)
+            ) {
+                drop(home.update(Message::View(ViewMessage::ConnectAccount(
+                    ConnectAccountMessage::OpenPlanBilling,
+                ))));
+            } else {
+                drop(home.update(Message::View(ViewMessage::GoToSection(leave))));
+            }
+            assert_ne!(home.recovery_open_request, old_request);
+            let completion = |request| Message::RecoveryServiceResolved {
+                target: target.clone(),
+                session_generation,
+                user_id: 7,
+                request,
+                result: Ok(RecoveryServiceDestination::Remote(ChainId::Bitcoin)),
+            };
+            assert!(drain(home.update(completion(old_request))).is_empty());
+            assert_ne!(home.active_section, HomeSection::Cubes);
+            drop(home.update(Message::View(ViewMessage::GoToSection(
+                HomeSection::Connect(app::menu::ConnectSubMenu::Overview),
+            ))));
+            assert!(drain(home.update(completion(old_request))).is_empty());
+            assert_ne!(home.active_section, HomeSection::Cubes);
+            // Returning to Overview refreshes the row list. Model that
+            // completion before making a new selection; the old selection
+            // must still remain invalid across the page visit.
+            let mut server = registered_cube_response("local-uuid");
+            server.network = "mainnet".to_string();
+            home.connect_account.recovery_services =
+                RecoveryServicesState::Ready(vec![server.into()]);
+            drop(home.update(Message::View(ViewMessage::ConnectAccount(
+                ConnectAccountMessage::OpenRecoveryService(target.clone()),
+            ))));
+            assert!(home.recovery_open_request > old_request);
+            // A fresh selection on the returned Overview is still actionable.
+            let fresh = home.recovery_open_request;
+            drop(home.update(completion(fresh)));
+            assert_eq!(home.active_section, HomeSection::Cubes);
+        }
+    }
+
     /// The client-side limit check is advisory; the server is authoritative and
     /// can refuse a Cube that was already created locally. When it does, the
     /// Cubes list must stop promising a sync that will never happen.
@@ -8880,16 +9843,21 @@ mod tests {
     #[test]
     fn pure_home_view_helpers_build_for_local_remote_and_form_variants() {
         let mut local = cube("local-a", "Local A", Network::Bitcoin);
-        let _ = cubes_list_item(&local, 0, false, None);
+        let _ = cubes_list_item(&local, ChainId::Bitcoin, false, None);
         // Sovereign + signed in, with the server's refusal recorded: the
         // warning variant of the sync tooltip.
-        let _ = cubes_list_item(&local, 0, true, Some("Out of Cube slots".to_string()));
+        let _ = cubes_list_item(
+            &local,
+            ChainId::Bitcoin,
+            true,
+            Some("Out of Cube slots".to_string()),
+        );
 
         local.remote_synced = true;
-        let _ = cubes_list_item(&local, 1, true, None);
+        let _ = cubes_list_item(&local, ChainId::Bitcoin, true, None);
 
         local.recovery_kit_last_backed_up_descriptor_fingerprint = Some("hash".to_string());
-        let _ = cubes_list_item(&local, 2, true, None);
+        let _ = cubes_list_item(&local, ChainId::Bitcoin, true, None);
 
         let mut remote = remote_cube("remote-a", "Remote A", Network::Bitcoin);
         let _ = remote_cube_list_item(&remote);
@@ -8992,7 +9960,13 @@ mod tests {
             create_cube: false,
             source: crate::chain::ChainId::Bitcoin,
         };
-        home.rename_cube_modal = Some((0, "Renamed Cube".to_string()));
+        home.rename_cube_modal = Some((
+            CubeCatalogKey {
+                chain: ChainId::Bitcoin,
+                cube_id: "local-a".into(),
+            },
+            "Renamed Cube".to_string(),
+        ));
         home.view();
         home.rename_cube_modal = None;
         home.delete_remote_cube_modal = Some(DeleteRemoteCubeModal {
@@ -9006,6 +9980,104 @@ mod tests {
             cube: remote_cube("remote-c", "Remote C", Network::Bitcoin),
         });
         home.view();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delete_and_recovery_modals_render_safe_names_without_changing_action_identity() {
+        use iced::advanced::{
+            layout,
+            renderer::Headless,
+            widget::{Id, Operation, Tree},
+            Layout,
+        };
+
+        #[derive(Default)]
+        struct Labels(Vec<String>);
+
+        impl Operation for Labels {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+
+            fn text(&mut self, _: Option<&Id>, _: iced::Rectangle, text: &str) {
+                self.0.push(text.to_owned());
+            }
+        }
+
+        let renderer = <iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer for modal text");
+        let labels = |mut element: Element<Message>| {
+            let mut tree = Tree::new(element.as_widget());
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(iced::Size::ZERO, iced::Size::new(900.0, 1200.0)),
+            );
+            let mut labels = Labels::default();
+            element
+                .as_widget_mut()
+                .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
+            labels.0
+        };
+
+        let raw_bidi_name = "  Family\n\u{202e}\u{200b} Cube  ";
+        let remote = remote_cube("remote-uuid", raw_bidi_name, Network::Bitcoin);
+        let delete_remote_labels = labels(
+            DeleteRemoteCubeModal {
+                cube: remote.clone(),
+                deleting: false,
+                error: None,
+            }
+            .view(),
+        );
+        assert!(delete_remote_labels.contains(&"Delete Remote Cube \"Family Cube\"".into()));
+        assert!(delete_remote_labels.contains(&"Delete Remote Cube".into()));
+        let recovery_labels = labels(
+            RecoveryMethodModal {
+                cube: remote.clone(),
+            }
+            .view(),
+        );
+        assert!(recovery_labels.contains(&"Recover \"Family Cube\"".into()));
+        assert!(recovery_labels.contains(&"Recover with password".into()));
+        assert!(recovery_labels.contains(&"Recover with phone".into()));
+        assert!(delete_remote_labels
+            .iter()
+            .chain(recovery_labels.iter())
+            .all(|label| !label.contains('\u{202e}') && !label.contains('\u{200b}')));
+        assert_eq!(remote.name, raw_bidi_name);
+        assert_eq!(remote.uuid, "remote-uuid");
+
+        let raw_long_name = "界".repeat(300);
+        let local = cube("local-id", &raw_long_name, Network::Bitcoin);
+        let datadir = test_datadir();
+        let delete_local_labels = labels(
+            DeleteCubeModal::new(
+                local.clone(),
+                datadir.network_directory(Network::Bitcoin),
+                datadir.path().to_path_buf(),
+                None,
+                Some(true),
+                false,
+            )
+            .view(),
+        );
+        let bounded_name = format!("{}…", "界".repeat(79));
+        assert!(delete_local_labels.contains(&format!("Delete Cube \"{bounded_name}\"")));
+        assert!(delete_local_labels.contains(&format!(
+            "Are you sure you want to delete the Cube \"{bounded_name}\"?"
+        )));
+        assert!(delete_local_labels.contains(&"Delete Cube".into()));
+        assert!(!delete_local_labels
+            .iter()
+            .any(|label| label.contains(&raw_long_name)));
+        assert_eq!(local.id, "local-id");
+        assert_eq!(local.name, raw_long_name);
     }
 
     // ---------------------------------------------------------------------
@@ -10974,6 +12046,7 @@ mod chain_identity_open_tests {
 
     fn is_run_for(msg: &Message, chain: ChainId, id: &str) -> bool {
         matches!(msg, Message::Run(_, _, c, cube) if *c == chain && cube.id == id)
+            || matches!(msg, Message::RunClaim(_, _, c, cube, _) if *c == chain && cube.id == id)
     }
 
     #[test]
@@ -11160,7 +12233,8 @@ mod chain_identity_open_tests {
         let pair =
             app::claim_intent::ForkHandoff::new(&root, "source".into(), "target".into()).unwrap();
         let mut home = Home::new(root.clone(), Some(Network::Bitcoin)).0;
-        assert!(drain(home.update(Message::ContinueForkClaim(pair.clone()))).is_empty());
+        home.set_claim_owner(app::cache::AppGeneration::next());
+        assert!(drain(home.update(Message::BeginClaimPair(pair.clone()))).is_empty());
         assert!(home.pending_fork_claim.is_some());
         assert!(app::claim_intent::take_for_cube(&root, "target").is_none());
         let mut client = CoincubeClient::new();
@@ -11176,21 +12250,35 @@ mod chain_identity_open_tests {
             .iter()
             .any(|m| is_run_for(m, ChainId::BitcoinBlake2b, "target")));
         assert!(home.pending_fork_claim.is_none());
-        assert!(matches!(
-            app::claim_intent::take_for_cube(&root, "target"),
-            Some(app::claim_intent::Intent::Fork(_))
-        ));
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            Message::RunClaim(_, _, ChainId::BitcoinBlake2b, cube, intent)
+                if cube.id == "target" && matches!(&intent.route, ClaimRoute::Begin(_))
+        )));
         assert!(app::claim_intent::take_for_cube(&root, "target").is_none());
+        assert!(
+            !home.is_claim_route(),
+            "a consumed route must free the one launcher"
+        );
+        home.set_claim_owner(app::cache::AppGeneration::next());
+        let continued = drain(home.update(Message::ContinueForkClaim(pair.clone())));
+        assert!(continued.iter().any(|message| matches!(
+            message,
+            Message::RunClaim(_, _, ChainId::BitcoinBlake2b, cube, intent)
+                if cube.id == "target" && matches!(&intent.route, ClaimRoute::Continue(_))
+        )));
         // Returning opens the exact source through the ordinary unlock route;
         // only that source and root can consume the recovery intent.
+        home.set_claim_owner(app::cache::AppGeneration::next());
         let messages = drain(home.update(Message::ReturnBitcoinClaim(pair.clone())));
         assert!(messages
             .iter()
             .any(|m| is_run_for(m, ChainId::Bitcoin, "source")));
-        assert!(matches!(
-            app::claim_intent::take_for_cube(&root, "source"),
-            Some(app::claim_intent::Intent::RecoverBitcoin(_))
-        ));
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            Message::RunClaim(_, _, ChainId::Bitcoin, cube, intent)
+                if cube.id == "source" && matches!(&intent.route, ClaimRoute::Return(_))
+        )));
         assert!(app::claim_intent::take_for_cube(&root, "source").is_none());
         let foreign = app::claim_intent::ForkHandoff::new(
             &CoincubeDirectory::new(root.path().join("other")),
@@ -11217,6 +12305,36 @@ mod chain_identity_open_tests {
         assert!(home.error().unwrap().contains("ambiguous"));
         assert!(app::claim_intent::take_for_cube(&root, "target").is_none());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn claim_navigation_cannot_borrow_another_app_or_destination() {
+        let _guard = crate::app::session::test_guard();
+        let (app, handoff, path) = app::claim_step1_tests::returning_claim_fixture(false);
+        let root = app.datadir().clone();
+        let target = handoff.resolve_target(&root).unwrap();
+        let owner = app.cache().app_generation;
+        let intent = ClaimOpenIntent::new(
+            owner,
+            &root,
+            app.cube_settings().id.clone(),
+            target.id.clone(),
+            ClaimRoute::Begin(handoff),
+        );
+        assert!(intent.validates(&app, &root, ChainId::BitcoinBlake2b, &target));
+
+        let mut stale = intent.clone();
+        stale.owner = app::cache::AppGeneration::next();
+        assert!(!stale.validates(&app, &root, ChainId::BitcoinBlake2b, &target));
+        let mut wrong_target = intent.clone();
+        wrong_target.fork_cube = "unrelated".into();
+        assert!(!wrong_target.validates(&app, &root, ChainId::BitcoinBlake2b, &target));
+        let mut wrong_root = intent;
+        wrong_root.root = path.join("other");
+        assert!(!wrong_root.validates(&app, &root, ChainId::BitcoinBlake2b, &target));
+
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[test]

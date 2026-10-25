@@ -207,7 +207,7 @@ fn item_with_route<'a>(
 /// to Settings (where the user adds a coordinator to lift the network gate;
 /// the greyed rail item is otherwise inert, so this avoids a configure
 /// catch-22), Buy/Sell to its own (greyed) panel.
-fn marketplace_landing_menu(ctx: &NavContext<'_>) -> Menu {
+pub(super) fn marketplace_landing_menu(ctx: &NavContext<'_>) -> Menu {
     let p2p = Menu::Marketplace(MarketplaceSubMenu::P2P(P2PSubMenu::Overview));
     let p2p_settings = Menu::Marketplace(MarketplaceSubMenu::P2P(P2PSubMenu::Settings));
     let buy_sell = Menu::Marketplace(MarketplaceSubMenu::BuySell);

@@ -1,4 +1,6 @@
 pub mod feerate_picker;
+#[cfg(test)]
+pub mod landing;
 pub mod picker;
 pub mod recipient_identity;
 

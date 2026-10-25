@@ -32,14 +32,15 @@ use crate::services::sideshift::{ShiftResponse, ShiftStatusKind};
 pub fn spark_sideshift_receive_view(
     flow: &SparkSideshiftReceiveFlow,
     bitcoin_unit: BitcoinDisplayUnit,
+    mask_amounts: bool,
 ) -> Element<'_, Msg> {
     match flow.phase() {
         SparkShiftPhase::Setup => setup_body(flow),
         SparkShiftPhase::FetchingAffiliate | SparkShiftPhase::CreatingShift => {
             loading_body("Setting up your deposit address…")
         }
-        SparkShiftPhase::Active => active_body(flow, bitcoin_unit),
-        SparkShiftPhase::Arrived => arrived_body(flow, bitcoin_unit),
+        SparkShiftPhase::Active => active_body(flow, bitcoin_unit, mask_amounts),
+        SparkShiftPhase::Arrived => arrived_body(flow, bitcoin_unit, mask_amounts),
         SparkShiftPhase::Failed => error_body(flow.error()),
     }
 }
@@ -124,6 +125,7 @@ fn setup_body(flow: &SparkSideshiftReceiveFlow) -> Element<'_, Msg> {
 fn active_body(
     flow: &SparkSideshiftReceiveFlow,
     bitcoin_unit: BitcoinDisplayUnit,
+    mask_amounts: bool,
 ) -> Element<'_, Msg> {
     let Some(shift) = flow.shift() else {
         return error_body(Some("Shift data missing."));
@@ -230,11 +232,12 @@ fn active_body(
                 | ShiftStatusKind::Settled
         ) {
             if let Some(sats) = flow.settle_amount_sat() {
-                col = col.push(
-                    text(settle_amount_display(sats, status, bitcoin_unit))
-                        .size(P1_SIZE)
-                        .bold(),
-                );
+                col = col.push(observed_settlement_amount(
+                    sats,
+                    status,
+                    bitcoin_unit,
+                    mask_amounts,
+                ));
             }
         }
         col.push(
@@ -268,6 +271,7 @@ fn active_body(
 fn arrived_body(
     flow: &SparkSideshiftReceiveFlow,
     bitcoin_unit: BitcoinDisplayUnit,
+    mask_amounts: bool,
 ) -> Element<'_, Msg> {
     let mut col = Column::new()
         .spacing(12)
@@ -280,11 +284,7 @@ fn arrived_body(
         );
 
     if let Some(sats) = flow.arrived_amount_sat() {
-        col = col.push(
-            text(arrived_amount_display(sats, bitcoin_unit))
-                .size(H4_SIZE)
-                .bold(),
-        );
+        col = col.push(observed_arrival_amount(sats, bitcoin_unit, mask_amounts));
     }
 
     Container::new(
@@ -342,6 +342,43 @@ fn arrived_amount_display(sats: u64, bitcoin_unit: BitcoinDisplayUnit) -> String
         Amount::from_sat(sats).to_formatted_string_with_unit(bitcoin_unit),
         bitcoin_unit_label(bitcoin_unit),
     )
+}
+
+fn passive_shift_amount(amount: String, mask_amounts: bool) -> String {
+    if mask_amounts {
+        "••••••".to_string()
+    } else {
+        amount
+    }
+}
+
+fn observed_settlement_amount(
+    sats: u64,
+    status: &ShiftStatusKind,
+    bitcoin_unit: BitcoinDisplayUnit,
+    mask_amounts: bool,
+) -> Element<'static, Msg> {
+    text(passive_shift_amount(
+        settle_amount_display(sats, status, bitcoin_unit),
+        mask_amounts,
+    ))
+    .size(P1_SIZE)
+    .bold()
+    .into()
+}
+
+fn observed_arrival_amount(
+    sats: u64,
+    bitcoin_unit: BitcoinDisplayUnit,
+    mask_amounts: bool,
+) -> Element<'static, Msg> {
+    text(passive_shift_amount(
+        arrived_amount_display(sats, bitcoin_unit),
+        mask_amounts,
+    ))
+    .size(H4_SIZE)
+    .bold()
+    .into()
 }
 
 fn bitcoin_unit_label(bitcoin_unit: BitcoinDisplayUnit) -> &'static str {
@@ -443,6 +480,60 @@ fn error_body(error: Option<&str>) -> Element<'_, Msg> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::cache::Cache;
+    use crate::app::state::preferences::{BalancePrivacy, BalancePrivacyChrome};
+    use crate::app::view::shared::landing::capture;
+
+    #[test]
+    fn observed_settle_and_arrival_amounts_follow_passive_privacy_authority() {
+        let mut cache = Cache::default();
+        for privacy in [
+            None,
+            Some(BalancePrivacy::Unresolved),
+            Some(BalancePrivacy::Hidden),
+            Some(BalancePrivacy::Shown),
+        ] {
+            cache.balance_privacy = privacy.map(|privacy| BalancePrivacyChrome {
+                privacy,
+                busy: false,
+                interactive: false,
+            });
+            for (name, amount, content) in [
+                (
+                    "spark-shift-settle-privacy",
+                    settle_amount_display(
+                        76_543_219,
+                        &ShiftStatusKind::Settled,
+                        BitcoinDisplayUnit::Sats,
+                    ),
+                    observed_settlement_amount(
+                        76_543_219,
+                        &ShiftStatusKind::Settled,
+                        BitcoinDisplayUnit::Sats,
+                        cache.balance_amounts_masked(),
+                    ),
+                ),
+                (
+                    "spark-shift-arrival-privacy",
+                    arrived_amount_display(87_654_321, BitcoinDisplayUnit::Sats),
+                    observed_arrival_amount(
+                        87_654_321,
+                        BitcoinDisplayUnit::Sats,
+                        cache.balance_amounts_masked(),
+                    ),
+                ),
+            ] {
+                let mounted =
+                    capture::inspect(name, content, (1440, 900), "dark", theme::Theme::dark());
+                if privacy == Some(BalancePrivacy::Shown) {
+                    assert!(mounted.contains(&amount));
+                } else {
+                    assert!(mounted.contains("••••••"));
+                    assert!(!mounted.contains(&amount));
+                }
+            }
+        }
+    }
 
     #[test]
     fn settled_guidance_uses_spark_confirming_copy() {

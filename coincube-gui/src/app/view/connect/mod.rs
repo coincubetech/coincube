@@ -781,14 +781,13 @@ pub fn recovery_services_ux<'a>(
                 col = col.push(
                     container(
                         Column::new()
-                            .push(text::p1_bold(&row.name).style(theme::text::primary))
+                            .push(
+                                text::p1_bold(crate::cube_display::name(&row.name))
+                                    .style(theme::text::primary),
+                            )
                             .push(text::p2_regular(network).style(theme::text::secondary))
                             .push(text::p2_regular(kit).style(theme::text::primary))
                             .push(text::p2_regular(eligibility).style(theme::text::secondary))
-                            .push(
-                                text::p2_regular("Open Cube to manage")
-                                    .style(theme::text::secondary),
-                            )
                             .spacing(5)
                             .padding(14),
                     )
@@ -3713,6 +3712,30 @@ mod renewal_banner_tests {
         .unwrap();
         account.recovery_services = RecoveryServicesState::Ready(vec![cube.into()]);
         let _ = recovery_services_ux(&account);
+    }
+
+    #[tokio::test]
+    async fn in_cube_recovery_rows_guide_to_launcher_without_inert_open_action() {
+        use iced::advanced::renderer::Headless;
+
+        let renderer = <iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer");
+        let mut account = dashboard_panel();
+        let cube: crate::services::coincube::CubeResponse = serde_json::from_str(
+            r#"{"id":7,"uuid":"cube-7","name":"Family","network":"bitcoin","status":"active","hasRecoveryKit":true}"#,
+        )
+        .unwrap();
+        account.recovery_services = RecoveryServicesState::Ready(vec![cube.into()]);
+        let labels = visible_labels(recovery_services_ux(&account), &renderer);
+        assert!(labels
+            .iter()
+            .any(|label| label.contains("Open a Cube from the launcher")));
+        assert!(!labels.iter().any(|label| label == "Open Cube to manage"));
     }
 
     #[tokio::test]

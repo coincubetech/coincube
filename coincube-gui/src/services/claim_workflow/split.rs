@@ -683,9 +683,9 @@ pub(super) fn validate(intent: &Intent) -> Result<(), Error> {
         || record.target_index.is_some() != record.target_script.is_some()
         || record.target_index.is_some_and(|index| index >= 1 << 31)
         || record.target_script.as_ref().is_some_and(|script| {
-            !script.is_p2wsh()
-                && !script.is_p2tr()
-                && !(record.kind == SplitKind::Ancestry
+            !(script.is_p2wsh()
+                || script.is_p2tr()
+                || record.kind == SplitKind::Ancestry
                     && record.funding.as_ref().is_some_and(|funding| {
                         funding.imported_address_window.is_some()
                             && funding.imported_target_descriptor.is_some()

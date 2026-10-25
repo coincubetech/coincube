@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time;
 
@@ -17,7 +19,6 @@ use tracing::{info, warn};
 
 use crate::chain::ChainIdExt;
 use crate::dir::{BitcoindDirectory, CoincubeDirectory};
-use crate::utils::now_fallible;
 
 /// The flavour of managed Bitcoin node COINCUBE downloads, configures, and runs.
 ///
@@ -1873,7 +1874,298 @@ impl std::fmt::Display for StartInternalBitcoindError {
 #[derive(Debug, Clone)]
 pub struct Bitcoind {
     pub config: BitcoindConfig,
-    lock: LockFile,
+    _owner: Arc<BitcoindOwner>,
+}
+
+#[derive(Debug)]
+struct BitcoindOwner {
+    config: BitcoindConfig,
+    lock: Option<LockFile>,
+}
+
+static OWNER_CLEANUP: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
+
+fn owner_cleanup() -> &'static (Mutex<usize>, Condvar) {
+    OWNER_CLEANUP.get_or_init(|| (Mutex::new(0), Condvar::new()))
+}
+
+/// Wait for final-owner releases after the UI has closed, up to `timeout`.
+/// A lifecycle lock may be held by another process indefinitely. If the wait
+/// expires, process exit releases our OS locks and the next attach reconciles
+/// our stale owner files before deciding whether the node may be stopped.
+pub fn wait_for_managed_node_cleanup(timeout: time::Duration) -> bool {
+    let (count, changed) = owner_cleanup();
+    let mut pending = count.lock().unwrap_or_else(|e| e.into_inner());
+    let deadline = time::Instant::now() + timeout;
+    while *pending != 0 {
+        let remaining = deadline.saturating_duration_since(time::Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        pending = changed
+            .wait_timeout(pending, remaining)
+            .unwrap_or_else(|e| e.into_inner())
+            .0;
+    }
+    true
+}
+
+/// Serializes the whole managed-node handoff, including Tor preparation and
+/// the last owner's shutdown, across threads and GUI processes. The conf lock
+/// protects individual writes; it cannot protect the interval between a Tor
+/// replacement and the node acquiring its owner lock.
+pub struct ManagedNodeLifecycle {
+    file: std::fs::File,
+    directory: BitcoindDirectory,
+}
+
+impl ManagedNodeLifecycle {
+    pub fn acquire(
+        root: &CoincubeDirectory,
+        family: NodeChainFamily,
+    ) -> Result<Self, StartInternalBitcoindError> {
+        Self::acquire_directory(root.bitcoind_directory_for(family))
+    }
+
+    fn acquire_directory(directory: BitcoindDirectory) -> Result<Self, StartInternalBitcoindError> {
+        use fs4::fs_std::FileExt;
+        std::fs::create_dir_all(directory.path())
+            .map_err(|e| StartInternalBitcoindError::Lock(e.to_string()))?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(directory.path().join("lifecycle.lock"))
+            .map_err(|e| StartInternalBitcoindError::Lock(e.to_string()))?;
+        file.lock_exclusive()
+            .map_err(|e| StartInternalBitcoindError::Lock(e.to_string()))?;
+        let lifecycle = Self { file, directory };
+        lifecycle.reconcile_stale_owners().map_err(|e| {
+            StartInternalBitcoindError::Lock(format!(
+                "Could not reconcile managed-node owners: {e}"
+            ))
+        })?;
+        Ok(lifecycle)
+    }
+
+    /// Remove only owner files proved stale while the datadir lifecycle lock
+    /// excludes every new-version attach/stop. Unknown files and uncertain
+    /// liveness remain owners, so a read failure cannot stop a live node.
+    fn reconcile_stale_owners(&self) -> std::io::Result<()> {
+        use fs4::fs_std::FileExt;
+        let locks = self.directory.path().join(LOCK_DIRECTORY_NAME);
+        let networks = match std::fs::read_dir(&locks) {
+            Ok(networks) => networks,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        for network in networks {
+            let network = network?;
+            for owner in std::fs::read_dir(network.path())? {
+                let owner = owner?;
+                let name = owner.file_name();
+                let Some(name) = name.to_str() else { continue };
+                let Some((pid, suffix)) = parse_owner_name(name) else {
+                    continue;
+                };
+                let stale = if let Some(uuid) = suffix.strip_prefix("v2-") {
+                    if uuid::Uuid::parse_str(uuid).is_err() {
+                        continue;
+                    }
+                    let file = std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(owner.path())?;
+                    let stale = file.try_lock_exclusive()?;
+                    drop(file);
+                    stale
+                } else if suffix.parse::<u64>().is_ok() || uuid::Uuid::parse_str(suffix).is_ok() {
+                    !legacy_process_alive(pid)?
+                } else {
+                    false
+                };
+                if stale {
+                    std::fs::remove_file(owner.path())?;
+                }
+            }
+            if std::fs::read_dir(network.path())?.next().is_none() {
+                std::fs::remove_dir(network.path())?;
+            }
+        }
+        if std::fs::read_dir(&locks)?.next().is_none() {
+            std::fs::remove_dir(locks)?;
+        }
+        Ok(())
+    }
+
+    /// Includes other processes' owners. Called only while the lifecycle lock
+    /// is held, so attach and last-owner release cannot cross this observation.
+    pub fn try_has_owners(&self) -> std::io::Result<bool> {
+        let locks = self.directory.path().join(LOCK_DIRECTORY_NAME);
+        let networks = match std::fs::read_dir(locks) {
+            Ok(networks) => networks,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        for network in networks {
+            let network = network?;
+            let mut owners = std::fs::read_dir(network.path())?;
+            if let Some(owner) = owners.next() {
+                owner?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// A settings change may proceed with its own Cube's owner, but never with
+    /// another live Cube attached. The caller's path is only an identity hint:
+    /// it must match an owner file observed under this lifecycle lock.
+    pub fn ensure_exclusive_settings_owner(
+        &self,
+        initiating_owner: Option<&Path>,
+    ) -> Result<(), String> {
+        let locks = self.directory.path().join(LOCK_DIRECTORY_NAME);
+        let networks = match std::fs::read_dir(locks) {
+            Ok(networks) => networks,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(format!("Could not enumerate managed-node owners: {e}")),
+        };
+        for network in networks {
+            let network =
+                network.map_err(|e| format!("Could not enumerate managed-node owners: {e}"))?;
+            for owner in std::fs::read_dir(network.path())
+                .map_err(|e| format!("Could not enumerate managed-node owners: {e}"))?
+            {
+                let owner =
+                    owner.map_err(|e| format!("Could not enumerate managed-node owners: {e}"))?;
+                if initiating_owner != Some(owner.path().as_path()) {
+                    return Err("Another Cube owns the managed node. Close it before changing node settings here.".into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A failed enumeration is treated as an active owner for cleanup.
+    pub fn has_owners(&self) -> bool {
+        self.try_has_owners().unwrap_or(true)
+    }
+
+    pub fn try_has_foreign_owners(&self) -> std::io::Result<bool> {
+        let locks = self.directory.path().join(LOCK_DIRECTORY_NAME);
+        let networks = match std::fs::read_dir(locks) {
+            Ok(networks) => networks,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        let own_prefix = format!("{}-", std::process::id());
+        for network in networks {
+            for owner in std::fs::read_dir(network?.path())? {
+                let owner = owner?;
+                if !owner.file_name().to_string_lossy().starts_with(&own_prefix) {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    pub fn ensure_foreign_attach_safe(
+        &self,
+        root: &CoincubeDirectory,
+        family: NodeChainFamily,
+    ) -> Result<(), StartInternalBitcoindError> {
+        if family != NodeChainFamily::Bitcoin
+            || !self.try_has_foreign_owners().map_err(|e| {
+                StartInternalBitcoindError::Lock(format!(
+                    "Could not enumerate managed-node owners: {e}"
+                ))
+            })?
+        {
+            return Ok(());
+        }
+        let config_path = internal_bitcoind_config_path(&internal_bitcoind_datadir(root));
+        let conf = InternalBitcoindConfig::from_file(&config_path).map_err(|e| {
+            StartInternalBitcoindError::ConfigUnavailable(format!(
+                "Another process owns this node and its Tor configuration could not be verified: {e}"
+            ))
+        })?;
+        if conf.inbound_tor
+            || conf.outbound_via_tor
+            || conf.tor_control_port.is_some()
+            || conf.tor_socks_port.is_some()
+        {
+            return Err(StartInternalBitcoindError::ConfigUnavailable(
+                "Another app process owns this node's managed Tor. Close that process before opening this Cube here."
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ManagedNodeLifecycle {
+    fn drop(&mut self) {
+        if self
+            .directory
+            .path()
+            .ends_with(NodeChainFamily::Bitcoin.root_dir_name())
+            && !self.has_owners()
+        {
+            if let Some(root) = self.directory.path().parent() {
+                crate::node::tor::stop_managed_tor_for(&CoincubeDirectory::new(root.to_path_buf()));
+            }
+        }
+        let _ = self.file.unlock();
+    }
+}
+
+fn parse_owner_name(name: &str) -> Option<(i32, &str)> {
+    let name = name.strip_suffix(".lock")?;
+    let (pid, suffix) = name.split_once('-')?;
+    let pid: i32 = pid.parse().ok()?;
+    (pid > 0 && !suffix.is_empty()).then_some((pid, suffix))
+}
+
+#[cfg(unix)]
+fn legacy_process_alive(pid: i32) -> std::io::Result<bool> {
+    // kill(pid, 0) sends no signal. EPERM proves the process exists; only
+    // ESRCH proves absence. All other failures preserve its owner file.
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(false),
+        Some(libc::EPERM) => Ok(true),
+        _ => Err(error),
+    }
+}
+
+#[cfg(windows)]
+fn legacy_process_alive(pid: i32) -> std::io::Result<bool> {
+    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows::Win32::System::Threading::{
+        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+    };
+    let handle = match unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid as u32) } {
+        Ok(handle) => handle,
+        Err(error) if error.code().0 as u32 == 0x8007_0057 => return Ok(false),
+        Err(error) if error.code().0 as u32 == 0x8007_0005 => return Ok(true),
+        Err(error) => return Err(std::io::Error::other(error)),
+    };
+    let status = unsafe { WaitForSingleObject(handle, 0) };
+    let _ = unsafe { CloseHandle(handle) };
+    if status == WAIT_OBJECT_0 {
+        Ok(false)
+    } else if status == WAIT_TIMEOUT {
+        Ok(true)
+    } else {
+        Err(std::io::Error::other(
+            "Could not check legacy owner process",
+        ))
+    }
 }
 
 /// The flavour the managed node is configured to run as, or `None` when nothing
@@ -1988,6 +2280,20 @@ pub fn stop_and_wait_managed_bitcoind(config: &BitcoindConfig) {
 }
 
 impl Bitcoind {
+    pub fn owner_lock_path(&self) -> Option<&Path> {
+        self._owner.lock.as_ref().map(|lock| lock.path.as_path())
+    }
+
+    fn owned(config: BitcoindConfig, lock: LockFile) -> Self {
+        Self {
+            config: config.clone(),
+            _owner: Arc::new(BitcoindOwner {
+                config,
+                lock: Some(lock),
+            }),
+        }
+    }
+
     /// A handle with no node behind it, for a test that has to hand a caller an
     /// existing managed-node handle without running one. Takes the same lock
     /// file a started node would, so the lock bookkeeping stays honest, and
@@ -1998,11 +2304,10 @@ impl Bitcoind {
         coincube_datadir: &CoincubeDirectory,
         network: Network,
     ) -> Self {
-        Self {
-            config,
-            lock: LockFile::create(coincube_datadir.bitcoind_directory(), network)
-                .expect("synthetic lock file"),
-        }
+        let lock = LockFile::create(coincube_datadir.bitcoind_directory(), network)
+            .expect("synthetic lock file");
+        lock.activate();
+        Self::owned(config, lock)
     }
 
     #[cfg(test)]
@@ -2011,17 +2316,16 @@ impl Bitcoind {
         root: &CoincubeDirectory,
         network: Network,
     ) -> Self {
-        Self {
-            config,
-            lock: LockFile::create(
-                BitcoindDirectory::new(internal_bitcoind_datadir_for(
-                    root,
-                    NodeChainFamily::BitcoinBlake2b,
-                )),
-                network,
-            )
-            .expect("synthetic local node owner"),
-        }
+        let lock = LockFile::create(
+            BitcoindDirectory::new(internal_bitcoind_datadir_for(
+                root,
+                NodeChainFamily::BitcoinBlake2b,
+            )),
+            network,
+        )
+        .expect("synthetic local node owner");
+        lock.activate();
+        Self::owned(config, lock)
     }
 
     /// Start the managed node for a chain, by identity.
@@ -2034,13 +2338,70 @@ impl Bitcoind {
         config: BitcoindConfig,
         coincube_datadir: &CoincubeDirectory,
     ) -> Result<Self, StartInternalBitcoindError> {
+        // Generic startup has no authenticated Claim capability. Refuse a
+        // dormant chain before the lifecycle lock creates its family root.
+        if let crate::chain::RuntimeSupport::Dormant { reason } = chain.runtime_support() {
+            return Err(StartInternalBitcoindError::ChainUnavailable(reason));
+        }
         Self::preflight_for_chain(chain, coincube_datadir)?;
-        Self::maybe_start_on_chain(chain, config, coincube_datadir)
+        let lifecycle =
+            ManagedNodeLifecycle::acquire(coincube_datadir, NodeChainFamily::from_chain(chain))?;
+        Self::maybe_start_for_chain_locked(chain, config, coincube_datadir, &lifecycle)
     }
 
-    /// Everything [`Self::maybe_start_for_chain`] refuses, decided without a
-    /// side effect: the chain must have a runtime, be of the Bitcoin family,
-    /// and the provider the ledger names must serve it. Returns that provider.
+    pub fn maybe_start_for_chain_locked(
+        chain: crate::chain::ChainId,
+        config: BitcoindConfig,
+        coincube_datadir: &CoincubeDirectory,
+        _lifecycle: &ManagedNodeLifecycle,
+    ) -> Result<Self, StartInternalBitcoindError> {
+        Self::maybe_start_for_chain_locked_with_restart_owner(
+            chain,
+            config,
+            coincube_datadir,
+            _lifecycle,
+            None,
+        )
+    }
+
+    fn maybe_start_for_chain_locked_with_restart_owner(
+        chain: crate::chain::ChainId,
+        config: BitcoindConfig,
+        coincube_datadir: &CoincubeDirectory,
+        lifecycle: &ManagedNodeLifecycle,
+        restart_owner: Option<&Path>,
+    ) -> Result<Self, StartInternalBitcoindError> {
+        if let Some(owner) = restart_owner {
+            lifecycle
+                .ensure_exclusive_settings_owner(Some(owner))
+                .map_err(StartInternalBitcoindError::ConfigUnavailable)?;
+        }
+        let existing_owners = lifecycle.try_has_owners().map_err(|e| {
+            StartInternalBitcoindError::Lock(format!(
+                "Could not enumerate managed-node owners: {e}"
+            ))
+        })?;
+        lifecycle
+            .ensure_foreign_attach_safe(coincube_datadir, NodeChainFamily::from_chain(chain))?;
+        let foreign_owners = lifecycle.try_has_foreign_owners().map_err(|e| {
+            StartInternalBitcoindError::Lock(format!(
+                "Could not enumerate managed-node owners: {e}"
+            ))
+        })?;
+        Self::preflight_for_chain(chain, coincube_datadir)?;
+        Self::maybe_start_on_chain(
+            chain,
+            config,
+            coincube_datadir,
+            existing_owners,
+            foreign_owners,
+            restart_owner.is_some(),
+        )
+    }
+
+    /// Check that the configured provider serves this chain without a side
+    /// effect. Generic startup also checks runtime support at its entry point;
+    /// the separately admitted Claim path calls this under its lifecycle lock.
     ///
     /// For callers that have work of their own to do before the start —
     /// the loader provisions Tor, rewrites the managed conf for inbound and
@@ -2076,13 +2437,45 @@ impl Bitcoind {
         config: BitcoindConfig,
         coincube_datadir: &CoincubeDirectory,
     ) -> Result<Self, StartInternalBitcoindError> {
-        Self::maybe_start_on_chain(network.into(), config, coincube_datadir)
+        Self::maybe_start_for_chain(network.into(), config, coincube_datadir)
+    }
+
+    pub fn maybe_start_locked(
+        network: bitcoin::Network,
+        config: BitcoindConfig,
+        coincube_datadir: &CoincubeDirectory,
+        lifecycle: &ManagedNodeLifecycle,
+    ) -> Result<Self, StartInternalBitcoindError> {
+        Self::maybe_start_for_chain_locked(network.into(), config, coincube_datadir, lifecycle)
+    }
+
+    /// The settings restart already stopped the node while holding the
+    /// lifecycle lock. Its own Cube still holds an owner file until the new
+    /// handle is adopted, so only that authenticated owner may pass the
+    /// otherwise correct unreachable-owner refusal.
+    pub fn maybe_restart_locked(
+        network: bitcoin::Network,
+        config: BitcoindConfig,
+        coincube_datadir: &CoincubeDirectory,
+        lifecycle: &ManagedNodeLifecycle,
+        initiating_owner: Option<&Path>,
+    ) -> Result<Self, StartInternalBitcoindError> {
+        Self::maybe_start_for_chain_locked_with_restart_owner(
+            network.into(),
+            config,
+            coincube_datadir,
+            lifecycle,
+            initiating_owner,
+        )
     }
 
     fn maybe_start_on_chain(
         chain: crate::chain::ChainId,
         config: BitcoindConfig,
         coincube_datadir: &CoincubeDirectory,
+        existing_owners: bool,
+        foreign_owners: bool,
+        authorized_restart: bool,
     ) -> Result<Self, StartInternalBitcoindError> {
         let network = chain.bitcoin_network();
         let family = NodeChainFamily::from_chain(chain);
@@ -2114,6 +2507,11 @@ impl Bitcoind {
             .check_chain(chain)
             .map_err(StartInternalBitcoindError::ProviderChainMismatch)?;
         let bitcoind_datadir = internal_bitcoind_datadir_for(coincube_datadir, family);
+        // Claim ownership before probing or spawning. Once a process is live,
+        // a failure to create this lock would otherwise leave an ownerless
+        // node and an ownerless Tor. Errors below drop the provisional lock.
+        let owner_lock = LockFile::create(coincube_datadir.bitcoind_directory_for(family), network)
+            .map_err(|e| StartInternalBitcoindError::Lock(e.to_string()))?;
         // Settle the datadir's identity before the first connection to it, not after.
         // Every managed-node start comes through here — the loader with a config it read
         // off disk, the installer with one it just wrote, the settings switch — and each
@@ -2150,6 +2548,20 @@ impl Bitcoind {
                 };
                 (running, running_flavor)
             });
+        if existing_owners && running.is_none() && !authorized_restart {
+            return Err(StartInternalBitcoindError::ConfigUnavailable(
+                "The managed node has active Cube owners but is unreachable. Close those Cubes before starting a replacement.".into(),
+            ));
+        }
+        if foreign_owners
+            && !running
+                .as_ref()
+                .is_some_and(|(_, flavor)| *flavor == configured_flavor)
+        {
+            return Err(StartInternalBitcoindError::ConfigUnavailable(
+                "Another app process owns this managed node; it cannot be restarted or replaced here. Close that process first.".into(),
+            ));
+        }
         if let Some((running_node, running_flavor)) = &running {
             if chain.is_blake2b() {
                 running_node
@@ -2158,8 +2570,7 @@ impl Bitcoind {
             }
             // The managed node is shared by every Vault, so flavour is global.
             // If the running node already matches the configured flavour, reuse
-            // it: it has read its file already, so no conf rewrite and no lock
-            // taken on this path.
+            // it: it has read its file already, so no conf rewrite is needed.
             if *running_flavor == configured_flavor {
                 info!("Internal bitcoind is already running ({running_flavor:?})");
                 // Reconcile here too: this vault may be attaching to a node another
@@ -2175,14 +2586,8 @@ impl Bitcoind {
                         },
                     );
                 }
-                return Ok(Bitcoind {
-                    config,
-                    lock: LockFile::create(
-                        coincube_datadir.bitcoind_directory_for(family),
-                        network,
-                    )
-                    .map_err(|e| StartInternalBitcoindError::Lock(format!("{:?}", e)))?,
-                });
+                owner_lock.activate();
+                return Ok(Bitcoind::owned(config, owner_lock));
             }
         }
         // Rewrite the conf from its parsed form before the binary reads it.
@@ -2370,14 +2775,8 @@ impl Bitcoind {
                             observed,
                         );
                     }
-                    return Ok(Self {
-                        config,
-                        lock: LockFile::create(
-                            coincube_datadir.bitcoind_directory_for(family),
-                            network,
-                        )
-                        .map_err(|e| StartInternalBitcoindError::Lock(format!("{:?}", e)))?,
-                    });
+                    owner_lock.activate();
+                    return Ok(Self::owned(config, owner_lock));
                 }
                 Err(coincubed::BitcoindError::CookieFile(_)) => {
                     // This is only raised if we're using cookie authentication.
@@ -2405,7 +2804,22 @@ impl Bitcoind {
 
     /// Stop (internal) bitcoind.
     pub fn stop(self) {
-        match self.lock.delete() {
+        // Clones are references to one Cube's ownership token. Closing one
+        // reference must not release the token while another still needs it.
+        // BitcoindOwner::drop schedules release after the final Arc goes away.
+    }
+}
+
+impl BitcoindOwner {
+    fn release(config: BitcoindConfig, mut lock: LockFile) {
+        let lifecycle = match ManagedNodeLifecycle::acquire_directory(lock.directory.clone()) {
+            Ok(lifecycle) => lifecycle,
+            Err(e) => {
+                tracing::error!("Failed to acquire managed-node lifecycle lock: {e}");
+                return;
+            }
+        };
+        match lock.delete() {
             Err(e) => {
                 tracing::error!("Failed to release bitcoind lock: {}", e);
             }
@@ -2413,10 +2827,11 @@ impl Bitcoind {
                 info!("Other processes are using internal bitcoind. Process lock has been deleted");
             }
             Ok(true) => {
-                match coincubed::BitcoinD::new(&self.config, "internal_bitcoind_stop".to_string()) {
+                match coincubed::BitcoinD::new(&config, "internal_bitcoind_stop".to_string()) {
                     Ok(bitcoind) => {
                         info!("Stopping internal bitcoind...");
                         bitcoind.stop();
+                        wait_for_internal_bitcoind_shutdown(&config);
                         info!("Stopped coincube managed bitcoind");
                     }
                     Err(e) => {
@@ -2425,16 +2840,46 @@ impl Bitcoind {
                 }
             }
         }
+        drop(lifecycle);
+    }
+}
+
+impl Drop for BitcoindOwner {
+    fn drop(&mut self) {
+        // A canceled spawn_blocking receiver drops its completed result. Keep
+        // that from leaving a running node and Tor without an owner. Arc's
+        // inner Drop runs exactly once after all handle clones are gone. Move
+        // the owner lock into the worker so it stays live until cleanup, without
+        // waiting for the cross-process lifecycle lock on the UI thread.
+        let Some(lock) = self.lock.take() else { return };
+        let config = self.config.clone();
+        let (count, _) = owner_cleanup();
+        *count.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        thread::spawn(move || {
+            struct Completion;
+            impl Drop for Completion {
+                fn drop(&mut self) {
+                    let (count, changed) = owner_cleanup();
+                    *count.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+                    changed.notify_all();
+                }
+            }
+            let _completion = Completion;
+            Self::release(config, lock);
+        });
     }
 }
 
 const LOCK_DIRECTORY_NAME: &str = "locks";
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct LockFile {
     path: PathBuf,
     directory: BitcoindDirectory,
     network: Network,
+    _file: Option<std::fs::File>,
+    released: AtomicBool,
+    provisional: AtomicBool,
 }
 
 impl LockFile {
@@ -2442,28 +2887,52 @@ impl LockFile {
         directory: BitcoindDirectory,
         network: Network,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        use fs4::fs_std::FileExt;
         let mut path = directory.clone().path().to_path_buf();
         path.push(LOCK_DIRECTORY_NAME);
         path.push(network.to_string());
         std::fs::create_dir_all(&path)?;
 
         path.push(format!(
-            "{}-{}.lock",
+            "{}-v2-{}.lock",
             std::process::id(),
-            now_fallible()?.as_secs()
+            uuid::Uuid::new_v4()
         ));
 
-        std::fs::File::create(&path)?;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        if let Err(e) = file.lock_exclusive() {
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+            return Err(Box::new(e));
+        }
         Ok(Self {
             path,
             directory,
             network,
+            _file: Some(file),
+            released: AtomicBool::new(false),
+            provisional: AtomicBool::new(true),
         })
     }
 
+    fn activate(&self) {
+        self.provisional.store(false, Ordering::Release);
+    }
+
     // returns true if the lock directory is removed because empty.
-    fn delete(self) -> Result<bool, Box<dyn std::error::Error>> {
-        std::fs::remove_file(self.path)?;
+    fn delete(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
+        if self.released.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        // On Windows, deleting an open locked file is deferred until its handle
+        // closes. Close it while the lifecycle guard still excludes new owners,
+        // before checking whether this was the final owner.
+        drop(self._file.take());
+        std::fs::remove_file(&self.path)?;
+        self.released.store(true, Ordering::Release);
         if std::fs::read_dir(
             self.directory
                 .path()
@@ -2490,6 +2959,17 @@ impl LockFile {
             Ok(true)
         } else {
             Ok(false)
+        }
+    }
+}
+
+impl Drop for LockFile {
+    fn drop(&mut self) {
+        if self.provisional.load(Ordering::Acquire) && !self.released.load(Ordering::Acquire) {
+            // A start failed after claiming ownership but before returning a
+            // Bitcoind handle. Its surrounding lifecycle guard still holds
+            // the OS lock and will stop ownerless Tor after this file is gone.
+            let _ = self.delete();
         }
     }
 }
@@ -2571,6 +3051,302 @@ mod tests {
     use super::*;
     use coincube_core::miniscript::bitcoin::Network;
     use ini::Ini;
+
+    #[test]
+    fn same_process_owners_are_unique_and_released_once() {
+        let root = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("managed-owners-{}", uuid::Uuid::new_v4())),
+        );
+        let directory = root.bitcoind_directory();
+        let mut first = LockFile::create(directory.clone(), Network::Bitcoin).unwrap();
+        let mut second = LockFile::create(directory.clone(), Network::Bitcoin).unwrap();
+        assert_ne!(
+            first.path, second.path,
+            "same-second starts need distinct owners"
+        );
+        assert!(
+            !first.delete().unwrap(),
+            "the second Cube still owns the node"
+        );
+        assert!(second.path.exists());
+        assert!(!first.delete().unwrap(), "a stale owner releases only once");
+        assert!(
+            second.path.exists(),
+            "an old owner cannot stop its replacement"
+        );
+        assert!(second.delete().unwrap());
+        assert!(!directory.path().join(LOCK_DIRECTORY_NAME).exists());
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[test]
+    fn final_owner_delete_removes_lock_directory_before_struct_drop() {
+        let root = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("final-owner-delete-{}", uuid::Uuid::new_v4())),
+        );
+        let directory = root.bitcoind_directory();
+        let mut owner = LockFile::create(directory.clone(), Network::Bitcoin).unwrap();
+        owner.activate();
+        let locks = directory.path().join("locks/bitcoin");
+        assert!(locks.exists());
+        assert!(owner.delete().unwrap());
+        assert!(!owner.path.exists());
+        assert!(!locks.exists(), "final owner removes its lock directory");
+        assert!(!owner.delete().unwrap(), "release only happens once");
+        drop(owner);
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[test]
+    fn failed_start_drops_provisional_owner_before_handoff() {
+        let root = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("provisional-owner-{}", uuid::Uuid::new_v4())),
+        );
+        let directory = root.bitcoind_directory();
+        let provisional = LockFile::create(directory.clone(), Network::Bitcoin).unwrap();
+        assert!(provisional.path.exists());
+        drop(provisional);
+        assert!(!directory.path().join("locks").exists());
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[test]
+    fn abandoned_start_result_releases_its_owner() {
+        let root = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("abandoned-owner-{}", uuid::Uuid::new_v4())),
+        );
+        let config = BitcoindConfig {
+            addr: "127.0.0.1:1".parse().unwrap(),
+            rpc_auth: coincubed::config::BitcoindRpcAuth::CookieFile(
+                root.path().join("bitcoind/.cookie"),
+            ),
+        };
+        let node = Bitcoind::for_test(config, &root, Network::Bitcoin);
+        assert!(root
+            .bitcoind_directory()
+            .path()
+            .join("locks/bitcoin")
+            .exists());
+        drop(node);
+        assert!(wait_for_managed_node_cleanup(time::Duration::from_secs(
+            120
+        )));
+        assert!(!root.bitcoind_directory().path().join("locks").exists());
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[test]
+    fn stopping_a_clone_keeps_the_cube_owner_until_last_reference() {
+        let root = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("cloned-owner-{}", uuid::Uuid::new_v4())),
+        );
+        let config = BitcoindConfig {
+            addr: "127.0.0.1:1".parse().unwrap(),
+            rpc_auth: coincubed::config::BitcoindRpcAuth::CookieFile(
+                root.path().join("bitcoind/.cookie"),
+            ),
+        };
+        let owner = Bitcoind::for_test(config, &root, Network::Bitcoin);
+        let clone = owner.clone();
+        let locks = root.bitcoind_directory().path().join("locks/bitcoin");
+        clone.stop();
+        assert_eq!(std::fs::read_dir(&locks).unwrap().count(), 1);
+        owner.stop();
+        assert!(wait_for_managed_node_cleanup(time::Duration::from_secs(
+            120
+        )));
+        assert!(!locks.exists());
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[test]
+    fn concurrent_clone_drops_release_one_owner() {
+        let root = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("concurrent-drops-{}", uuid::Uuid::new_v4())),
+        );
+        let config = BitcoindConfig {
+            addr: "127.0.0.1:1".parse().unwrap(),
+            rpc_auth: coincubed::config::BitcoindRpcAuth::CookieFile(
+                root.path().join("bitcoind/.cookie"),
+            ),
+        };
+        let owner = Bitcoind::for_test(config, &root, Network::Bitcoin);
+        let a = owner.clone();
+        let b = owner.clone();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let t1 = {
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                a.stop();
+            })
+        };
+        let t2 = {
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                b.stop();
+            })
+        };
+        drop(owner);
+        let locks = root.bitcoind_directory().path().join("locks/bitcoin");
+        assert_eq!(std::fs::read_dir(&locks).unwrap().count(), 1);
+        barrier.wait();
+        t1.join().unwrap();
+        t2.join().unwrap();
+        assert!(wait_for_managed_node_cleanup(time::Duration::from_secs(
+            120
+        )));
+        assert!(!locks.exists(), "the last Arc drop must release the owner");
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[test]
+    fn final_owner_drop_does_not_wait_for_contended_lifecycle_lock() {
+        let root = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("contended-drop-{}", uuid::Uuid::new_v4())),
+        );
+        let config = BitcoindConfig {
+            addr: "127.0.0.1:1".parse().unwrap(),
+            rpc_auth: coincubed::config::BitcoindRpcAuth::CookieFile(
+                root.path().join("bitcoind/.cookie"),
+            ),
+        };
+        let node = Bitcoind::for_test(config, &root, Network::Bitcoin);
+        let owner_path = node._owner.lock.as_ref().unwrap().path.clone();
+        let lifecycle = ManagedNodeLifecycle::acquire(&root, NodeChainFamily::Bitcoin).unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        let dropping = std::thread::spawn(move || {
+            drop(node);
+            sent.send(()).unwrap();
+        });
+        let dropped_without_waiting = received.recv_timeout(time::Duration::from_secs(2));
+        assert!(
+            owner_path.exists(),
+            "owner must survive until cleanup acquires the lock"
+        );
+        assert!(!wait_for_managed_node_cleanup(time::Duration::from_millis(
+            10
+        )));
+        drop(lifecycle);
+        dropping.join().unwrap();
+        assert!(
+            dropped_without_waiting.is_ok(),
+            "last owner drop blocked on lifecycle cleanup"
+        );
+        assert!(wait_for_managed_node_cleanup(time::Duration::from_secs(
+            120
+        )));
+        assert!(!owner_path.exists());
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[test]
+    fn crashed_v2_owner_is_reconciled_before_attach() {
+        let root = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("stale-v2-owner-{}", uuid::Uuid::new_v4())),
+        );
+        let owners = root.bitcoind_directory().path().join("locks/bitcoin");
+        std::fs::create_dir_all(&owners).unwrap();
+        std::fs::write(
+            owners.join(format!(
+                "{}-v2-{}.lock",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            )),
+            b"",
+        )
+        .unwrap();
+        let lifecycle = ManagedNodeLifecycle::acquire(&root, NodeChainFamily::Bitcoin).unwrap();
+        assert!(!lifecycle.has_owners());
+        drop(lifecycle);
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[test]
+    fn live_locked_v2_owner_survives_reconciliation() {
+        let root = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("live-v2-owner-{}", uuid::Uuid::new_v4())),
+        );
+        let mut owner = LockFile::create(root.bitcoind_directory(), Network::Bitcoin).unwrap();
+        owner.activate();
+        let path = owner.path.clone();
+        let lifecycle = ManagedNodeLifecycle::acquire(&root, NodeChainFamily::Bitcoin).unwrap();
+        assert!(lifecycle.has_owners());
+        assert!(path.exists(), "a live locked owner must never be deleted");
+        drop(lifecycle);
+        owner.delete().unwrap();
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_dead_pid_is_pruned_but_live_pid_is_preserved() {
+        let root = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("legacy-owners-{}", uuid::Uuid::new_v4())),
+        );
+        let owners = root.bitcoind_directory().path().join("locks/bitcoin");
+        std::fs::create_dir_all(&owners).unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let path = owners.join(format!("{}-123.lock", child.id()));
+        std::fs::write(&path, b"").unwrap();
+        let lifecycle = ManagedNodeLifecycle::acquire(&root, NodeChainFamily::Bitcoin).unwrap();
+        assert!(path.exists());
+        drop(lifecycle);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let lifecycle = ManagedNodeLifecycle::acquire(&root, NodeChainFamily::Bitcoin).unwrap();
+        assert!(!path.exists());
+        assert!(!lifecycle.has_owners());
+        drop(lifecycle);
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[test]
+    fn unreadable_owner_directory_never_looks_empty() {
+        let root = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("unreadable-owners-{}", uuid::Uuid::new_v4())),
+        );
+        let lifecycle = ManagedNodeLifecycle::acquire(&root, NodeChainFamily::Bitcoin).unwrap();
+        std::fs::write(
+            root.bitcoind_directory().path().join("locks"),
+            b"not a directory",
+        )
+        .unwrap();
+        assert!(lifecycle.try_has_owners().is_err());
+        assert!(lifecycle.has_owners());
+        drop(lifecycle);
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[test]
+    fn foreign_process_attach_requires_outbound_only_config() {
+        let root = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("foreign-owner-{}", uuid::Uuid::new_v4())),
+        );
+        let lifecycle = ManagedNodeLifecycle::acquire(&root, NodeChainFamily::Bitcoin).unwrap();
+        let locks = root.bitcoind_directory().path().join("locks/bitcoin");
+        std::fs::create_dir_all(&locks).unwrap();
+        std::fs::write(locks.join("other-process.lock"), b"").unwrap();
+        let config_path = internal_bitcoind_config_path(&internal_bitcoind_datadir(&root));
+        let mut conf = InternalBitcoindConfig::new();
+        conf.to_file(&config_path).unwrap();
+        assert!(lifecycle
+            .ensure_foreign_attach_safe(&root, NodeChainFamily::Bitcoin)
+            .is_ok());
+        conf.inbound_tor = true;
+        conf.tor_control_port = Some(9051);
+        conf.tor_socks_port = Some(9050);
+        conf.to_file(&config_path).unwrap();
+        assert!(lifecycle
+            .ensure_foreign_attach_safe(&root, NodeChainFamily::Bitcoin)
+            .is_err());
+        drop(lifecycle);
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
 
     fn a_marker_datadir(name: &str) -> (std::path::PathBuf, PathBuf) {
         let dir = std::env::temp_dir().join(format!(
@@ -4190,8 +4966,10 @@ mod tests {
             .copied()
         {
             match Bitcoind::maybe_start_for_chain(chain, config.clone(), &root) {
-                Err(StartInternalBitcoindError::ConfigUnavailable(_)) => {}
-                other => panic!("expected ConfigUnavailable, got {:?}", other.map(|_| ())),
+                Err(StartInternalBitcoindError::ChainUnavailable(reason)) => {
+                    assert_eq!(reason, crate::chain::BTCB2_DORMANT_REASON);
+                }
+                other => panic!("expected ChainUnavailable, got {:?}", other.map(|_| ())),
             }
             untouched(&root);
         }
@@ -4338,6 +5116,103 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&conf_path).unwrap(), rewritten);
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sole_owner_restart_reaches_replacement_spawn_but_second_owner_cannot() {
+        use std::io::{Read, Write};
+        use std::os::unix::fs::PermissionsExt;
+
+        let (base, root) = a_temp_coincube_datadir("exclusive-restart");
+        std::fs::create_dir_all(internal_bitcoind_datadir(&root)).unwrap();
+        let exe = internal_bitcoind_exe_path(&root, CORE_VERSION);
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        let spawned = exe.parent().unwrap().join("restart-spawned");
+        std::fs::write(
+            &exe,
+            format!(
+                "#!/bin/sh\nprintf 'spawned\\n' > '{}'\nexec sleep 30\n",
+                spawned.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let config = BitcoindConfig {
+            rpc_auth: coincubed::config::BitcoindRpcAuth::UserPass("user".into(), "pass".into()),
+            addr: listener.local_addr().unwrap(),
+        };
+        let first = Bitcoind::for_test(config.clone(), &root, Network::Bitcoin);
+        let other = Bitcoind::for_test(config.clone(), &root, Network::Bitcoin);
+        let owner_path = first.owner_lock_path().unwrap().to_path_buf();
+        let lifecycle = ManagedNodeLifecycle::acquire(&root, NodeChainFamily::Bitcoin).unwrap();
+        let refused = Bitcoind::maybe_restart_locked(
+            Network::Bitcoin,
+            config.clone(),
+            &root,
+            &lifecycle,
+            Some(&owner_path),
+        );
+        assert!(matches!(
+            refused,
+            Err(StartInternalBitcoindError::ConfigUnavailable(_))
+        ));
+        assert!(!spawned.exists());
+        drop(lifecycle);
+        drop(other);
+        assert!(wait_for_managed_node_cleanup(time::Duration::from_secs(
+            120
+        )));
+
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server = {
+            let done = done.clone();
+            let spawned = spawned.clone();
+            std::thread::spawn(move || {
+                for (n, stream) in listener.incoming().enumerate() {
+                    if done.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let Ok(mut stream) = stream else { break };
+                    let _ = stream.set_read_timeout(Some(time::Duration::from_millis(200)));
+                    let _ = stream.read(&mut [0u8; 4096]);
+                    if n > 0 {
+                        let deadline = time::Instant::now() + time::Duration::from_secs(20);
+                        while !spawned.exists() && time::Instant::now() < deadline {
+                            thread::sleep(time::Duration::from_millis(20));
+                        }
+                    }
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                    let _ = stream.flush();
+                }
+            })
+        };
+        let lifecycle = ManagedNodeLifecycle::acquire(&root, NodeChainFamily::Bitcoin).unwrap();
+        let result = Bitcoind::maybe_restart_locked(
+            Network::Bitcoin,
+            config.clone(),
+            &root,
+            &lifecycle,
+            Some(&owner_path),
+        );
+        assert!(matches!(
+            result,
+            Err(StartInternalBitcoindError::BitcoinDError(_))
+        ));
+        assert!(spawned.exists(), "the replacement binary was never spawned");
+        drop(lifecycle);
+        done.store(true, Ordering::SeqCst);
+        let _ = std::net::TcpStream::connect(config.addr);
+        server.join().unwrap();
+        drop(first);
+        assert!(wait_for_managed_node_cleanup(time::Duration::from_secs(
+            120
+        )));
+        let _ = std::fs::remove_dir_all(base);
     }
 
     // #605: a Knots binary is spawned with `-torexecute=0`, so losing its Tor
@@ -4953,12 +5828,17 @@ mod local_fork_smoke {
             crate::chain::ChainId::BitcoinBlake2bTestnet4,
         )
         .unwrap();
-        let node = Bitcoind::maybe_start_for_chain(
+        // This isolated smoke fixture exercises the authenticated local-fork
+        // node route, whose caller has already admitted the chain.
+        let lifecycle = ManagedNodeLifecycle::acquire(&root, family).unwrap();
+        let node = Bitcoind::maybe_start_for_chain_locked(
             crate::chain::ChainId::BitcoinBlake2bTestnet4,
             cfg.clone(),
             &root,
+            &lifecycle,
         )
         .unwrap();
+        drop(lifecycle);
         let rpc = coincubed::BitcoinD::new(&cfg, "smoke".into()).unwrap();
         assert!(rpc
             .check_local_fork_chain(crate::chain::ChainId::BitcoinBlake2bTestnet4, false)
