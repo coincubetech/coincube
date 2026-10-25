@@ -113,6 +113,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
+    // The final-root creator proof must precede the logger's create_dir_all,
+    // all global side reads, and GUI construction. Both default and --datadir
+    // reach this same boundary. A malformed global file remains untouched;
+    // GUI's strict load will keep the first view masked and offer a retry.
+    if let Err(error) = config.coincube_directory.bootstrap_privacy()? {
+        eprintln!("{}", error);
+    }
+
     if live_split {
         coincube_gui::live_split::enable_for_this_process();
     }

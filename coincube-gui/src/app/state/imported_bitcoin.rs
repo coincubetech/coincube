@@ -2064,10 +2064,10 @@ impl ImportedBitcoinPanel {
                 if generation == self.generation =>
             {
                 self.busy = false;
-                if !self
+                if self
                     .draft
                     .as_ref()
-                    .is_some_and(|draft| draft.psbt.unsigned_tx.compute_txid() == draft_id)
+                    .is_none_or(|draft| draft.psbt.unsigned_tx.compute_txid() != draft_id)
                 {
                     return Task::none();
                 }
@@ -2136,10 +2136,10 @@ impl ImportedBitcoinPanel {
                 if generation == self.generation =>
             {
                 self.busy = false;
-                if !self
+                if self
                     .draft
                     .as_ref()
-                    .is_some_and(|draft| draft.psbt.unsigned_tx.compute_txid() == draft_id)
+                    .is_none_or(|draft| draft.psbt.unsigned_tx.compute_txid() != draft_id)
                 {
                     return Task::none();
                 }
@@ -2624,7 +2624,7 @@ impl ImportedBitcoinPanel {
         content.into()
     }
 
-    fn wallet_view(&self) -> Element<'_, view::Message> {
+    fn wallet_view(&self, mask_amounts: bool) -> Element<'_, view::Message> {
         let ready = self.is_ready();
         let mut content = Column::new()
             .spacing(16)
@@ -2632,7 +2632,10 @@ impl ImportedBitcoinPanel {
             .push(h2("Vault"));
         if ready {
             if let Some(balance) = self.authoritative_balance() {
-                content = content.push(h3(format!("{} sats available", balance.to_sat())));
+                content = content.push(h3(format!(
+                    "{} available",
+                    passive_wallet_amount(balance.to_sat(), mask_amounts)
+                )));
             }
             content = content
                 .push(p1_regular("The signing keys remain in your original wallet or hardware devices. Your Cube recovery seed cannot sign for this Bitcoin wallet."))
@@ -2680,7 +2683,8 @@ impl ImportedBitcoinPanel {
                     };
                     content = content
                         .push(p1_regular(format!(
-                            "{direction} · {amount} sats · {date} · {confirmation}"
+                            "{direction} · {} · {date} · {confirmation}",
+                            passive_wallet_amount(amount, mask_amounts)
                         )))
                         .push(caption(tx.txid.to_string()));
                 }
@@ -3059,18 +3063,26 @@ impl ImportedBitcoinPanel {
     }
 }
 
+fn passive_wallet_amount(sats: u64, mask_amounts: bool) -> String {
+    if mask_amounts {
+        "••••".to_owned()
+    } else {
+        format!("{sats} sats")
+    }
+}
+
 impl State for ImportedBitcoinPanel {
     fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
         let body = if self.import.active_attachment().is_none() {
             self.setup_view()
         } else if !self.is_ready() {
-            self.wallet_view()
+            self.wallet_view(cache.balance_amounts_masked())
         } else {
             match menu {
                 Menu::Vault(VaultSubMenu::Send) => self.send_view(false),
                 Menu::Vault(VaultSubMenu::PSBTs(_)) => self.send_view(true),
                 Menu::Vault(VaultSubMenu::Settings(option)) => self.settings_view(*option),
-                _ => self.wallet_view(),
+                _ => self.wallet_view(cache.balance_amounts_masked()),
             }
         };
         view::dashboard(menu, cache, body)
@@ -3114,6 +3126,7 @@ impl State for ImportedBitcoinPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use coincube_core::miniscript::bitcoin::{
         absolute::LockTime,
         bip32::{ChildNumber, DerivationPath, Xpriv, Xpub},

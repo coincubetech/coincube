@@ -879,6 +879,7 @@ impl State for SparkSend {
                 bitcoin_unit: cache.bitcoin_unit,
                 reference_btc_usd_price: super::reference_btc_usd_price(cache),
                 show_direction_badges: cache.show_direction_badges,
+                mask_amounts: cache.balance_amounts_masked(),
                 cross_chain_ctx: self.cross_chain.as_ref(),
                 slippage_input: &self.slippage_input,
                 advanced_open: self.advanced_open,

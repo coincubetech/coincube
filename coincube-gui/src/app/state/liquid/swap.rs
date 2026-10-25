@@ -823,6 +823,7 @@ impl State for LiquidSwap {
             recent_swaps: &self.recent_swap_payments,
             usdt_id: usdt_asset_id(self.breez_client.network()).unwrap_or(""),
             fiat_converter: cache.fiat_price.as_ref().and_then(|p| p.try_into().ok()),
+            mask_amounts: cache.balance_amounts_masked(),
         })
         .map(view::Message::LiquidSwap);
 

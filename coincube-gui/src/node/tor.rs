@@ -405,6 +405,11 @@ impl InboundTorPreference {
 /// registry — mirroring `dir::ACTIVE_DATADIR` — lets shutdown stop Tor without
 /// threading a handle through every struct that owns the node.
 static MANAGED_TOR: OnceLock<Mutex<Option<Tor>>> = OnceLock::new();
+static MANAGED_TOR_ROOT: OnceLock<Mutex<Option<std::path::PathBuf>>> = OnceLock::new();
+
+fn registered_root() -> &'static Mutex<Option<std::path::PathBuf>> {
+    MANAGED_TOR_ROOT.get_or_init(|| Mutex::new(None))
+}
 
 fn registry() -> &'static Mutex<Option<Tor>> {
     MANAGED_TOR.get_or_init(|| Mutex::new(None))
@@ -415,6 +420,32 @@ fn register_managed_tor(tor: Tor) {
     if let Ok(mut slot) = registry().lock() {
         if let Some(previous) = slot.replace(tor) {
             previous.stop();
+        }
+    }
+}
+
+fn register_managed_tor_for(root: &CoincubeDirectory, tor: Tor) {
+    if let Ok(mut owner) = registered_root().lock() {
+        register_managed_tor(tor);
+        *owner = Some(root.path().to_path_buf());
+    }
+}
+
+fn foreign_managed_tor(root: &CoincubeDirectory) -> bool {
+    registered_root().lock().is_ok_and(|owner| {
+        owner.as_ref().is_some_and(|path| path != root.path()) && managed_tor_ports().is_some()
+    })
+}
+
+pub fn stop_managed_tor_for(root: &CoincubeDirectory) {
+    if let Ok(mut owner) = registered_root().lock() {
+        if owner.as_ref().is_some_and(|path| path == root.path()) {
+            if let Ok(mut slot) = registry().lock() {
+                if let Some(tor) = slot.take() {
+                    tor.stop();
+                }
+                *owner = None;
+            }
         }
     }
 }
@@ -446,9 +477,13 @@ pub(crate) fn registry_test_guard() -> RegistryTestGuard {
 #[cfg(test)]
 pub(crate) struct RegistryTestGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
 
-/// Stop and deregister the managed Tor, if any. Idempotent; call from every app
-/// shutdown path alongside stopping the managed bitcoind.
+/// Stop and deregister the process-global managed Tor, if any. Normal node
+/// shutdown uses [`stop_managed_tor_for`] under the lifecycle lock so a Cube
+/// cannot stop a Tor belonging to another datadir.
 pub fn stop_managed_tor() {
+    if let Ok(mut owner) = registered_root().lock() {
+        *owner = None;
+    }
     if let Ok(mut slot) = registry().lock() {
         if let Some(tor) = slot.take() {
             tor.stop();
@@ -628,6 +663,19 @@ pub fn prepare_inbound_tor_for_chain(
     prepare_inbound_tor(coincube_datadir, chain.bitcoin_network())
 }
 
+/// Prepare Tor only when this start is the first owner of the managed node.
+/// An attached Cube must keep the existing node's Tor ports and process alive.
+pub fn prepare_inbound_tor_for_chain_locked(
+    coincube_datadir: &CoincubeDirectory,
+    chain: crate::chain::ChainId,
+    lifecycle: &crate::node::bitcoind::ManagedNodeLifecycle,
+) -> Result<bool, PrepareInboundTorError> {
+    if lifecycle.has_owners() {
+        return Ok(false);
+    }
+    prepare_inbound_tor_for_chain(coincube_datadir, chain)
+}
+
 pub fn prepare_inbound_tor(
     coincube_datadir: &CoincubeDirectory,
     network: Network,
@@ -670,12 +718,19 @@ pub fn prepare_inbound_tor(
     // The conf is durably outbound-only (or absent): any prior managed tor
     // from this process is now safe to replace, and is — on every path from
     // here on, including "no conf" and "Tor stays off", exactly as before.
-    stop_managed_tor();
+    stop_managed_tor_for(coincube_datadir);
 
     let Some(reserved) = reserved else {
         // No managed-node config on disk → nothing to do (external backend).
         return Ok(false);
     };
+
+    // One process-global Tor slot cannot be rebound to a second datadir while
+    // the first datadir still has active owners. The second node starts with
+    // its freshly persisted outbound-only config instead.
+    if foreign_managed_tor(coincube_datadir) {
+        return Ok(false);
+    }
 
     // Mainnet-only (see the doc comment above).
     if network != Network::Bitcoin {
@@ -707,7 +762,7 @@ pub fn prepare_inbound_tor(
     };
     match persist_inbound_fields(coincube_datadir, fields) {
         Ok(true) => {
-            register_managed_tor(tor);
+            register_managed_tor_for(coincube_datadir, tor);
             info!("inbound-over-tor enabled; bitcoind will host a v3 onion service");
             Ok(true)
         }
@@ -846,6 +901,84 @@ mod tests {
 
     static SEQ: AtomicU64 = AtomicU64::new(0);
 
+    #[cfg(unix)]
+    #[test]
+    fn attached_cube_preserves_tor_until_last_owner_closes() {
+        let _registry = registry_test_guard();
+        let root = temp_datadir("concurrent-tor-owners");
+        let child = std::process::Command::new("sleep")
+            .arg("60")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let process = Arc::new(Mutex::new(child));
+        let fixture = DisposableManagedChild(Tor {
+            ports: TorPorts {
+                control: 9051,
+                socks: 9050,
+            },
+            process: process.clone(),
+        });
+        register_managed_tor_for(&root, fixture.0.clone());
+        let config = coincubed::config::BitcoindConfig {
+            addr: "127.0.0.1:1".parse().unwrap(),
+            rpc_auth: coincubed::config::BitcoindRpcAuth::CookieFile(
+                root.path().join("bitcoind/.cookie"),
+            ),
+        };
+        let first =
+            crate::node::bitcoind::Bitcoind::for_test(config.clone(), &root, Network::Bitcoin);
+        let lifecycle = crate::node::bitcoind::ManagedNodeLifecycle::acquire(
+            &root,
+            crate::node::bitcoind::NodeChainFamily::Bitcoin,
+        )
+        .unwrap();
+        assert!(!prepare_inbound_tor_for_chain_locked(
+            &root,
+            crate::chain::ChainId::Bitcoin,
+            &lifecycle,
+        )
+        .unwrap());
+        let second = crate::node::bitcoind::Bitcoind::for_test(config, &root, Network::Bitcoin);
+        drop(lifecycle);
+        first.stop();
+        assert!(process.lock().unwrap().try_wait().unwrap().is_none());
+        second.stop();
+        assert!(process.lock().unwrap().try_wait().unwrap().is_some());
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_start_guard_cleans_up_ownerless_tor() {
+        let _registry = registry_test_guard();
+        let root = temp_datadir("failed-start-tor");
+        let lifecycle = crate::node::bitcoind::ManagedNodeLifecycle::acquire(
+            &root,
+            crate::node::bitcoind::NodeChainFamily::Bitcoin,
+        )
+        .unwrap();
+        let child = std::process::Command::new("sleep")
+            .arg("60")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let process = Arc::new(Mutex::new(child));
+        let fixture = DisposableManagedChild(Tor {
+            ports: TorPorts {
+                control: 9051,
+                socks: 9050,
+            },
+            process: process.clone(),
+        });
+        register_managed_tor_for(&root, fixture.0.clone());
+        drop(lifecycle);
+        assert!(process.lock().unwrap().try_wait().unwrap().is_some());
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
     /// Stops only this disposable child, even if setup or an assertion unwinds.
     /// The registry test lock is declared before this guard, so it remains held
     /// until the child has been deregistered and reaped.
@@ -887,7 +1020,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn cube_and_loader_lock_leave_global_tor_for_final_window_shutdown() {
+    fn app_and_loader_without_node_ownership_leave_global_tor_alone() {
         let _registry = registry_test_guard();
         let _session = crate::app::session::test_guard();
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -935,10 +1068,9 @@ mod tests {
             crate::gui::GUI::new(crate::gui::Config::new(root.clone(), None), None);
         drop(startup);
         drop(gui.update(crate::gui::Message::CtrlC));
-        assert_eq!(managed_tor_ports(), None);
-        assert!(!alive(), "final window shutdown stops its global Tor owner");
+        assert!(alive(), "window shutdown cannot stop another owner's Tor");
         stop_managed_tor();
-        assert!(!alive(), "global teardown is idempotent");
+        assert!(!alive());
         drop(gui);
         std::fs::remove_dir_all(root.path()).ok();
     }

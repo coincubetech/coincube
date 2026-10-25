@@ -150,6 +150,7 @@ impl State for LiquidOverview {
                     cache.bitcoin_unit,
                     usdt_asset_id(self.breez_client.network()).unwrap_or(""),
                     &[],
+                    cache.balance_amounts_masked(),
                 ),
             )
         } else {
@@ -168,6 +169,7 @@ impl State for LiquidOverview {
                 cache.show_direction_badges,
                 cache.display_mode,
                 crate::app::state::liquid::swap::swap_supported(self.breez_client.network()),
+                cache.balance_amounts_masked(),
             )
             .map(view::Message::LiquidOverview);
 

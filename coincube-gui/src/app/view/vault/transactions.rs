@@ -9,11 +9,8 @@ use iced::{
 
 use coincube_ui::{
     component::{
-        amount::*,
-        button, card, form,
-        pagination::pagination_controls,
-        text::*,
-        transaction::{TransactionBadge, TransactionDirection, TransactionListItem},
+        amount::*, button, card, form, pagination::pagination_controls, text::*,
+        transaction::TransactionDirection,
     },
     icon::{self, receipt_icon},
     theme,
@@ -34,7 +31,6 @@ use crate::{
     },
     daemon::model::{HistoryTransaction, Txid},
     export::ImportExportMessage,
-    utils::format_time_ago,
 };
 
 pub fn transactions_view<'a>(
@@ -58,13 +54,14 @@ pub fn transactions_view<'a>(
     let list = txs
         .iter()
         .enumerate()
-        .fold(Column::new().spacing(10), |col, (i, tx)| {
+        .fold(Column::new().spacing(2), |col, (i, tx)| {
             col.push(tx_list_view(
                 i,
                 tx,
                 cache.bitcoin_unit,
                 fiat_converter,
                 cache.show_direction_badges,
+                cache.balance_amounts_masked(),
             ))
         });
 
@@ -83,7 +80,23 @@ pub fn transactions_view<'a>(
         // unbounded parent and break layout. Pagination keeps each page
         // bounded (PAGE_SIZE rows), so the page scroll is enough.
         Column::new()
-            .spacing(10)
+            .spacing(12)
+            .push(
+                Row::new()
+                    .spacing(12)
+                    .push(
+                        Container::new(text("Time").size(CAPTION_SIZE)).width(Length::Fixed(104.0)),
+                    )
+                    .push(Container::new(text("Details").size(CAPTION_SIZE)).width(Length::Fill))
+                    .push(
+                        Container::new(text("Amount").size(CAPTION_SIZE))
+                            .width(Length::Fixed(190.0)),
+                    )
+                    .push(
+                        Container::new(text("Status").size(CAPTION_SIZE))
+                            .width(Length::Fixed(90.0)),
+                    ),
+            )
             .push(list)
             .push(pagination_controls(
                 Message::VaultPrevPage,
@@ -103,7 +116,7 @@ pub fn transactions_view<'a>(
         Column::new()
             .push(
                 Row::new()
-                    .push(Container::new(h3("Transactions").bold()))
+                    .push(Container::new(h3("Activity").bold()))
                     .push(Space::new().width(Length::Fill))
                     .push(
                         button::secondary(Some(icon::backup_icon()), "Export")
@@ -112,7 +125,7 @@ pub fn transactions_view<'a>(
             )
             .push(body)
             .align_x(Alignment::Center)
-            .spacing(25),
+            .spacing(16),
     )
 }
 
@@ -122,6 +135,7 @@ fn tx_list_view(
     bitcoin_unit: BitcoinDisplayUnit,
     fiat_converter: Option<FiatAmountConverter>,
     show_direction_badges: bool,
+    mask_amounts: bool,
 ) -> Element<'_, Message> {
     let direction = if tx.is_external() {
         TransactionDirection::Incoming
@@ -141,42 +155,94 @@ fn tx_list_view(
     };
 
     let label = if let Some(outpoint) = tx.is_single_payment() {
-        tx.labels.get(&outpoint.to_string()).cloned()
+        tx.labels.get(&outpoint.to_string())
     } else {
-        tx.labels.get(&tx.tx.compute_txid().to_string()).cloned()
+        tx.labels.get(&tx.tx.compute_txid().to_string())
     };
-
-    let mut badges = Vec::new();
-    if tx.time.is_none() {
-        badges.push(TransactionBadge::Unconfirmed);
+    let title = label.filter(|label| !label.is_empty()).map_or_else(
+        || match direction {
+            TransactionDirection::Incoming => "Received Bitcoin",
+            TransactionDirection::Outgoing => "Sent Bitcoin",
+            TransactionDirection::SelfTransfer => "Self-transfer",
+        },
+        String::as_str,
+    );
+    let date = tx
+        .time
+        .and_then(|t| DateTime::<Utc>::from_timestamp(t as i64, 0))
+        .map(|t| t.with_timezone(&Local).format("%b %d, %H:%M").to_string())
+        .unwrap_or_else(|| "Pending".to_owned());
+    let status = if tx.time.is_none() {
+        "Unconfirmed"
+    } else {
+        "Confirmed"
+    };
+    let sign = match direction {
+        TransactionDirection::Incoming => "+",
+        TransactionDirection::Outgoing => "−",
+        TransactionDirection::SelfTransfer => "",
+    };
+    let mut details = Row::new().spacing(8).align_y(Alignment::Center).push(
+        coincube_ui::image::asset_network_logo("btc", "bitcoin", 24.0),
+    );
+    if show_direction_badges {
+        details = details.push(text(match direction {
+            TransactionDirection::Incoming => "↓",
+            TransactionDirection::Outgoing => "↑",
+            TransactionDirection::SelfTransfer => "↺",
+        }));
     }
-    if tx.is_batch() {
-        badges.push(TransactionBadge::Batch);
-    }
-
-    let mut item = TransactionListItem::new(direction, amount, bitcoin_unit)
-        .with_custom_icon(coincube_ui::image::asset_network_logo(
-            "btc", "bitcoin", 40.0,
-        ))
-        .with_show_direction_badge(show_direction_badges)
-        .with_badges(badges);
-
-    if let Some(label) = label {
-        item = item.with_label(label);
-    }
-
-    if let Some(t) = tx.time {
-        item = item.with_time_ago(format_time_ago(t as i64));
-    }
-
-    if let Some(fiat_amount) = fiat_converter.map(|converter| {
+    details = details.push(
+        Column::new().spacing(2).push(text(title).bold()).push(
+            text(if tx.is_batch() {
+                "Batch transaction"
+            } else {
+                "Bitcoin on-chain"
+            })
+            .size(CAPTION_SIZE)
+            .style(theme::text::secondary),
+        ),
+    );
+    let mut amount_column = Column::new().align_x(Alignment::End).spacing(2).push(
+        Row::new()
+            .spacing(3)
+            .align_y(Alignment::Center)
+            .push(text(if mask_amounts { "" } else { sign }))
+            .push(if mask_amounts {
+                Row::new().push(text("••••••").size(P2_SIZE))
+            } else {
+                amount_with_size_and_unit(amount, P2_SIZE, bitcoin_unit)
+            }),
+    );
+    if let Some(converter) = fiat_converter.filter(|_| !mask_amounts) {
         let fiat = converter.convert(*amount);
-        format!("{} {}", fiat.to_formatted_string(), fiat.currency())
-    }) {
-        item = item.with_fiat_amount(fiat_amount);
+        amount_column = amount_column.push(
+            text(format!(
+                "≈ {} {} · current rate",
+                fiat.to_formatted_string(),
+                fiat.currency()
+            ))
+            .size(CAPTION_SIZE)
+            .style(theme::text::secondary),
+        );
     }
-
-    item.view(Message::Select(i)).into()
+    Container::new(
+        Button::new(
+            Row::new()
+                .spacing(12)
+                .align_y(Alignment::Center)
+                .push(Container::new(text(date).size(CAPTION_SIZE)).width(Length::Fixed(104.0)))
+                .push(details.width(Length::Fill))
+                .push(Container::new(amount_column).width(Length::Fixed(190.0)))
+                .push(Container::new(text(status).size(CAPTION_SIZE)).width(Length::Fixed(90.0))),
+        )
+        .padding(10)
+        .width(Length::Fill)
+        .on_press(Message::Select(i))
+        .style(theme::button::transparent_border),
+    )
+    .style(theme::card::simple)
+    .into()
 }
 
 /// Return the modal view for a new RBF transaction.
@@ -319,6 +385,16 @@ pub fn transaction_detail_view<'a>(
     supports_vault_rbf: bool,
 ) -> Element<'a, Message> {
     let txid = tx.tx.compute_txid().to_string();
+    let display_amount = if tx.is_external() || tx.is_send_to_self() {
+        &tx.incoming_amount
+    } else {
+        &tx.outgoing_amount
+    };
+    let status = if tx.time.is_some() {
+        "Confirmed"
+    } else {
+        "Unconfirmed · awaiting a Bitcoin confirmation"
+    };
     let back_btn: Element<'_, Message> = button::secondary(Some(icon::previous_icon()), "Back")
         .width(Length::Fixed(150.0))
         .on_press(Message::Close)
@@ -330,12 +406,13 @@ pub fn transaction_detail_view<'a>(
         Column::new()
             .push(back_btn)
             .push(if tx.is_send_to_self() {
-                Container::new(h3("Transaction")).width(Length::Fill)
+                Container::new(h3("Self-transfer")).width(Length::Fill)
             } else if tx.is_external() {
-                Container::new(h3("Incoming transaction")).width(Length::Fill)
+                Container::new(h3("Received Bitcoin")).width(Length::Fill)
             } else {
-                Container::new(h3("Outgoing transaction")).width(Length::Fill)
+                Container::new(h3("Sent Bitcoin")).width(Length::Fill)
             })
+            .push(text("Vault · Bitcoin on-chain").size(P2_SIZE).style(theme::text::secondary))
             .push(if let Some(outpoint) = tx.is_single_payment() {
                 // if the payment is a payment of a single payment transaction then
                 // the label of the transaction is attached to the label of the payment outpoint
@@ -357,24 +434,34 @@ pub fn transaction_detail_view<'a>(
             .push(
                 Column::new().spacing(20).push(
                     Column::new()
-                        .push(if tx.is_send_to_self() {
-                            Container::new(h1("Self-transfer"))
-                        } else if tx.is_external() {
-                            Container::new(amount_with_size_and_unit(&tx.incoming_amount, H1_SIZE, bitcoin_unit))
+                        .push(Container::new(if cache.balance_amounts_masked() {
+                            Row::new().push(text("••••••").size(H1_SIZE))
                         } else {
-                            Container::new(amount_with_size_and_unit(&tx.outgoing_amount, H1_SIZE, bitcoin_unit))
-                        })
+                            amount_with_size_and_unit(display_amount, H1_SIZE, bitcoin_unit)
+                        }))
+                        .push(cache.fiat_price.as_ref().and_then(|price| price.try_into().ok()).filter(|_| !cache.balance_amounts_masked()).map(|converter: FiatAmountConverter| {
+                            let fiat = converter.convert(*display_amount);
+                            text(format!("≈ {} {} · current rate", fiat.to_formatted_string(), fiat.currency()))
+                                .size(P2_SIZE)
+                                .style(theme::text::secondary)
+                        }))
+                        .push(text(status).size(P2_SIZE))
                         .push(tx.fee_amount.map(|fee_amount| {
                             Row::new()
                                 .align_y(Alignment::Center)
                                 .push(h3("Miner fee: ").style(theme::text::secondary))
-                                .push(amount_with_size_and_unit(&fee_amount, H3_SIZE, bitcoin_unit))
+                                .push(if cache.balance_amounts_masked() {
+                                    Row::new().push(text("••••••").size(H3_SIZE))
+                                } else {
+                                    amount_with_size_and_unit(&fee_amount, H3_SIZE, bitcoin_unit)
+                                })
                                 .push(text(" ").size(H3_SIZE))
                                 .push(
-                                    text(format!(
-                                        "({} sats/vbyte)",
-                                        fee_amount.to_sat() / tx.tx.vsize() as u64
-                                    ))
+                                    text(if cache.balance_amounts_masked() {
+                                        "••••••".to_string()
+                                    } else {
+                                        format!("({} sats/vbyte)", fee_amount.to_sat() / tx.tx.vsize() as u64)
+                                    })
                                     .size(H4_SIZE)
                                     .style(theme::text::secondary),
                                 )
@@ -407,11 +494,8 @@ pub fn transaction_detail_view<'a>(
             })
             .push(card::simple(
                 Column::new()
-                    .push(tx.time.map(|t| {
-                        let date = DateTime::<Utc>::from_timestamp(t as i64, 0)
-                                        .expect("Correct unix timestamp")
-                                        .with_timezone(&Local)
-                                        .format("%b. %d, %Y - %T");
+                    .push(tx.time.and_then(|t| DateTime::<Utc>::from_timestamp(t as i64, 0)).map(|t| {
+                        let date = t.with_timezone(&Local).format("%b. %d, %Y - %T %Z");
                         Row::new()
                             .width(Length::Fill)
                             .push(Container::new(text("Date:").bold()).width(Length::Fill))
@@ -443,15 +527,16 @@ pub fn transaction_detail_view<'a>(
                     .push(if tx.is_external() {
                         None
                     } else {
-                        Some(super::psbt::inputs_view(
+                        Some(super::psbt::history_inputs_view(
                             &tx.coins,
                             &tx.tx,
                             &tx.labels,
                             labels_editing,
                             bitcoin_unit,
+                            cache.balance_amounts_masked(),
                         ))
                     })
-                    .push(super::psbt::outputs_view(
+                    .push(super::psbt::history_outputs_view(
                         &tx.tx,
                         cache.network,
                         &tx.change_indexes,
@@ -460,6 +545,7 @@ pub fn transaction_detail_view<'a>(
                         bitcoin_unit,
                         tx.is_single_payment().is_some(),
                         tx.is_external(),
+                        cache.balance_amounts_masked(),
                     )),
             )
             .spacing(20),
