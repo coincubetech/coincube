@@ -7069,10 +7069,11 @@ struct DeleteRemoteCubeModal {
 
 impl DeleteRemoteCubeModal {
     fn view(&self) -> Element<Message> {
+        let display_name = catalog_display_name(&self.cube.name);
         let mut col = Column::new()
             .spacing(10)
             .push(Container::new(
-                h4_bold(format!("Delete Remote Cube \"{}\"", self.cube.name))
+                h4_bold(format!("Delete Remote Cube \"{}\"", display_name))
                     .style(theme::text::destructive)
                     .width(Length::Fill),
             ))
@@ -7139,11 +7140,12 @@ struct RecoveryMethodModal {
 
 impl RecoveryMethodModal {
     fn view(&self) -> Element<Message> {
+        let display_name = catalog_display_name(&self.cube.name);
         let col = Column::new()
             .spacing(15)
             .padding(20)
             .width(Length::Fixed(460.0))
-            .push(h4_bold(format!("Recover \"{}\"", self.cube.name)).width(Length::Fill))
+            .push(h4_bold(format!("Recover \"{}\"", display_name)).width(Length::Fill))
             .push(
                 p1_regular(
                     "This Cube has two backups. Choose how to recover it — \
@@ -7341,6 +7343,7 @@ impl DeleteCubeModal {
     fn view(&self) -> Element<Message> {
         let pin_ready = !self.cube.has_pin(&self.datadir_root) || self.pin_input.is_complete();
         let can_delete = pin_ready && self.warning.is_none();
+        let display_name = catalog_display_name(&self.cube.name);
         let mut confirm_button = button::secondary(None, "Delete Cube")
             .width(Length::Fixed(200.0))
             .style(theme::button::destructive);
@@ -7361,7 +7364,7 @@ impl DeleteCubeModal {
         let help_text_1 = if has_vault {
             format!(
                 "Are you sure you want to delete the Cube \"{}\" and {}?",
-                self.cube.name,
+                display_name,
                 if has_remote_backend {
                     "its associated Vault configuration"
                 } else {
@@ -7371,7 +7374,7 @@ impl DeleteCubeModal {
         } else {
             format!(
                 "Are you sure you want to delete the Cube \"{}\"?",
-                self.cube.name
+                display_name
             )
         };
 
@@ -7386,7 +7389,7 @@ impl DeleteCubeModal {
         let mut col = Column::new()
             .spacing(10)
             .push(Container::new(
-                h4_bold(format!("Delete Cube \"{}\"", self.cube.name))
+                h4_bold(format!("Delete Cube \"{}\"", display_name))
                     .style(theme::text::destructive)
                     .width(Length::Fill),
             ))
@@ -9971,6 +9974,104 @@ mod tests {
             cube: remote_cube("remote-c", "Remote C", Network::Bitcoin),
         });
         home.view();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delete_and_recovery_modals_render_safe_names_without_changing_action_identity() {
+        use iced::advanced::{
+            layout,
+            renderer::Headless,
+            widget::{Id, Operation, Tree},
+            Layout,
+        };
+
+        #[derive(Default)]
+        struct Labels(Vec<String>);
+
+        impl Operation for Labels {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+
+            fn text(&mut self, _: Option<&Id>, _: iced::Rectangle, text: &str) {
+                self.0.push(text.to_owned());
+            }
+        }
+
+        let renderer = <iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer for modal text");
+        let labels = |mut element: Element<Message>| {
+            let mut tree = Tree::new(element.as_widget());
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(iced::Size::ZERO, iced::Size::new(900.0, 1200.0)),
+            );
+            let mut labels = Labels::default();
+            element
+                .as_widget_mut()
+                .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
+            labels.0
+        };
+
+        let raw_bidi_name = "  Family\n\u{202e}\u{200b} Cube  ";
+        let remote = remote_cube("remote-uuid", raw_bidi_name, Network::Bitcoin);
+        let delete_remote_labels = labels(
+            DeleteRemoteCubeModal {
+                cube: remote.clone(),
+                deleting: false,
+                error: None,
+            }
+            .view(),
+        );
+        assert!(delete_remote_labels.contains(&"Delete Remote Cube \"Family Cube\"".into()));
+        assert!(delete_remote_labels.contains(&"Delete Remote Cube".into()));
+        let recovery_labels = labels(
+            RecoveryMethodModal {
+                cube: remote.clone(),
+            }
+            .view(),
+        );
+        assert!(recovery_labels.contains(&"Recover \"Family Cube\"".into()));
+        assert!(recovery_labels.contains(&"Recover with password".into()));
+        assert!(recovery_labels.contains(&"Recover with phone".into()));
+        assert!(delete_remote_labels
+            .iter()
+            .chain(recovery_labels.iter())
+            .all(|label| !label.contains('\u{202e}') && !label.contains('\u{200b}')));
+        assert_eq!(remote.name, raw_bidi_name);
+        assert_eq!(remote.uuid, "remote-uuid");
+
+        let raw_long_name = "界".repeat(300);
+        let local = cube("local-id", &raw_long_name, Network::Bitcoin);
+        let datadir = test_datadir();
+        let delete_local_labels = labels(
+            DeleteCubeModal::new(
+                local.clone(),
+                datadir.network_directory(Network::Bitcoin),
+                datadir.path().to_path_buf(),
+                None,
+                Some(true),
+                false,
+            )
+            .view(),
+        );
+        let bounded_name = format!("{}…", "界".repeat(79));
+        assert!(delete_local_labels.contains(&format!("Delete Cube \"{bounded_name}\"")));
+        assert!(delete_local_labels.contains(&format!(
+            "Are you sure you want to delete the Cube \"{bounded_name}\"?"
+        )));
+        assert!(delete_local_labels.contains(&"Delete Cube".into()));
+        assert!(!delete_local_labels
+            .iter()
+            .any(|label| label.contains(&raw_long_name)));
+        assert_eq!(local.id, "local-id");
+        assert_eq!(local.name, raw_long_name);
     }
 
     // ---------------------------------------------------------------------
