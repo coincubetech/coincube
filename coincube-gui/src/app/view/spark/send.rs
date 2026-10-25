@@ -1191,10 +1191,14 @@ mod tests {
     const COMPACT: (u32, u32) = (1024, 768);
     const WIDE: (u32, u32) = (1440, 900);
     const FULL_HEIGHT: (u32, u32) = (1440, 2400);
-    const SYNTHETIC_BALANCE_SATS: u64 = 25_053;
+    // Unified spendable balance includes the BTC component and synthetic USDB.
+    const SYNTHETIC_BALANCE_SATS: u64 = 35_000;
+    const SYNTHETIC_BITCOIN_SATS: u64 = 25_053;
     /// Shaped like the real kinds, valid as none of them.
     const SYNTHETIC_INVOICE: &str =
-        "lnbc1500n1synthetic0r07b0fixture0not0a0payable0invoice0long0enough0to0test0wrapping";
+        "lnbc15n1synthetic0r07b0fixture0not0a0payable0invoice0long0enough0to0test0wrapping";
+    const SYNTHETIC_CROSS_CHAIN_ADDRESS: &str =
+        "0xsynthetic-r07b-usdc-cross-chain-address-not-payable";
     const SYNTHETIC_HINT: &str = "Your bitcoin balance is 25,053 sats; the rest is converted \
                                   from your synthetic USDB at the time of sending.";
 
@@ -1256,6 +1260,17 @@ mod tests {
             fixture.destination = SYNTHETIC_INVOICE.to_string();
             fixture.amount = "1500".to_string();
             fixture.invoice_amount = true;
+            fixture
+        }
+
+        fn ordinary_prepared() -> Self {
+            Self::invoice(ordinary_prepared())
+        }
+
+        fn cross_chain_prepared() -> Self {
+            let mut fixture = Self::filled(cross_chain_prepared());
+            fixture.destination = SYNTHETIC_CROSS_CHAIN_ADDRESS.to_string();
+            fixture.target = SparkSendTarget::Usdc;
             fixture
         }
 
@@ -1623,28 +1638,27 @@ mod tests {
             }
         }
 
-        /// Optional evidence: set `R07B_CAPTURE_DIR` (and `R07B_CAPTURE_HEAD`
-        /// to the exact commit) to save the real rendered pixels. Without it
-        /// the test only asserts. Headless pixels are not native-shell proof.
-        fn capture(&mut self, scenario: &str, theme: &theme::Theme, appearance: &str) {
-            let Ok(directory) = std::env::var("R07B_CAPTURE_DIR") else {
-                return;
-            };
-            let head = std::env::var("R07B_CAPTURE_HEAD").unwrap_or_else(|_| "uncommitted".into());
-            std::fs::create_dir_all(&directory).expect("create the disposable capture directory");
+        fn render_pixels(&mut self, scenario: &str, theme: &theme::Theme, redraw: bool) -> Vec<u8> {
             let viewport = Rectangle::with_size(self.size);
-            self.element.as_widget_mut().update(
-                &mut self.tree,
-                &Event::Window(iced::window::Event::RedrawRequested(
-                    std::time::Instant::now(),
-                )),
-                Layout::new(&self.node),
-                mouse::Cursor::Unavailable,
-                &self.renderer,
-                &mut clipboard::Null,
-                &mut Shell::new(&mut Vec::new()),
-                &viewport,
-            );
+            if redraw {
+                // The picker lives in Modal's separate overlay tree. Use the
+                // same overlay-first event route as actual pointer/key input.
+                let messages = self.send(
+                    Event::Window(iced::window::Event::RedrawRequested(
+                        std::time::Instant::now(),
+                    )),
+                    mouse::Cursor::Unavailable,
+                );
+                assert!(
+                    messages.is_empty(),
+                    "{}: initial redraw emitted user intent {:?}",
+                    scenario,
+                    messages
+                );
+            }
+            // A regression paints this same tree both before and after its
+            // first redraw. Never composite a later frame over earlier pixels.
+            iced::advanced::Renderer::reset(&mut self.renderer, viewport);
             let style = iced::advanced::renderer::Style {
                 text_color: theme.colors.text.primary,
             };
@@ -1674,11 +1688,24 @@ mod tests {
                 );
             }
             let (width, height) = (self.size.width as u32, self.size.height as u32);
-            let pixels = self.renderer.screenshot(
+            self.renderer.screenshot(
                 Size::new(width, height),
                 1.0,
                 theme.colors.general.background,
-            );
+            )
+        }
+
+        /// Optional evidence: set `R07B_CAPTURE_DIR` (and `R07B_CAPTURE_HEAD`
+        /// to the exact commit) to save the real rendered pixels. Without it
+        /// the test only asserts. Headless pixels are not native-shell proof.
+        fn capture(&mut self, scenario: &str, theme: &theme::Theme, appearance: &str) {
+            let Ok(directory) = std::env::var("R07B_CAPTURE_DIR") else {
+                return;
+            };
+            let head = std::env::var("R07B_CAPTURE_HEAD").unwrap_or_else(|_| "uncommitted".into());
+            std::fs::create_dir_all(&directory).expect("create the disposable capture directory");
+            let pixels = self.render_pixels(scenario, theme, true);
+            let (width, height) = (self.size.width as u32, self.size.height as u32);
             let filename = format!(
                 "r07b-{}-{}-{}x{}-{}-dashboard-synthetic.png",
                 scenario, appearance, width, height, head
@@ -1738,6 +1765,35 @@ mod tests {
             ThemeMode::Dark => "dark",
             ThemeMode::Light => "light",
         }
+    }
+
+    fn rendered_luma_range(pixels: &[u8], size: Size, bounds: Rectangle) -> u16 {
+        let width = size.width as u32;
+        let height = size.height as u32;
+        let x0 = bounds.x.max(0.0).floor() as u32;
+        let y0 = bounds.y.max(0.0).floor() as u32;
+        let x1 = (bounds.x + bounds.width).ceil().min(size.width) as u32;
+        let y1 = (bounds.y + bounds.height).ceil().min(size.height) as u32;
+        assert!(
+            x1 > x0 && y1 > y0 && x1 <= width && y1 <= height,
+            "text bounds must be visible: {:?} in {:?}",
+            bounds,
+            size
+        );
+        let mut min = u16::MAX;
+        let mut max = 0;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let at = ((y * width + x) * 4) as usize;
+                let luma = ((u32::from(pixels[at]) * 299
+                    + u32::from(pixels[at + 1]) * 587
+                    + u32::from(pixels[at + 2]) * 114)
+                    / 1000) as u16;
+                min = min.min(luma);
+                max = max.max(luma);
+            }
+        }
+        max - min
     }
 
     /// The YOU SEND card's former balance expression, kept verbatim so the
@@ -2019,9 +2075,8 @@ mod tests {
         // Notes, hints and a new target appear without moving the inputs'
         // slots, so a focused field stays focused and keeps its value.
         harness.focus(DESTINATION_INPUT_ID);
-        let mut changed = Fixture::filled(SparkSendPhase::Idle);
+        let mut changed = Fixture::invoice(SparkSendPhase::Idle);
         changed.target = SparkSendTarget::Spark;
-        changed.invoice_amount = true;
         let changed_cache = changed.cache();
         harness.rerender(screen(&changed, &menu, &changed_cache, false));
         let probe = harness.probe();
@@ -2030,7 +2085,7 @@ mod tests {
             probe.input_text(DESTINATION_INPUT_ID).as_deref(),
             Some(SYNTHETIC_INVOICE)
         );
-        assert_eq!(probe.input_text(AMOUNT_INPUT_ID).as_deref(), Some("30000"));
+        assert_eq!(probe.input_text(AMOUNT_INPUT_ID).as_deref(), Some("1500"));
 
         // An invoice-set amount shows and selects but does not edit.
         let invoice = Fixture::invoice(SparkSendPhase::Idle);
@@ -2255,6 +2310,25 @@ mod tests {
                 assert!(probe.contains("THEY RECEIVE"));
                 assert!(probe.contains("Close"));
                 harness.assert_no_horizontal_overflow(scenario);
+                let close_bounds = probe
+                    .text
+                    .iter()
+                    .rev()
+                    .find(|(value, _)| value == "Close")
+                    .map(|(_, bounds)| *bounds)
+                    .expect("picker Close text bounds");
+                let before = harness.render_pixels(scenario, &theme, false);
+                let after = harness.render_pixels(scenario, &theme, true);
+                let disabled = rendered_luma_range(&before, harness.size, close_bounds);
+                let enabled = rendered_luma_range(&after, harness.size, close_bounds);
+                assert!(
+                    enabled > disabled.saturating_mul(2),
+                    "{} {}: initial redraw must visibly enable Close (before {}, after {})",
+                    scenario,
+                    appearance(mode),
+                    disabled,
+                    enabled
+                );
                 harness.capture(scenario, &theme, appearance(mode));
             }
         }
@@ -2297,6 +2371,49 @@ mod tests {
         })
     }
 
+    #[test]
+    fn synthetic_prepared_facts_match_the_quoted_scenarios() {
+        let ordinary = Fixture::ordinary_prepared();
+        let SparkSendPhase::Prepared(ordinary_quote) = &ordinary.phase else {
+            panic!("ordinary fixture must be prepared");
+        };
+        assert_eq!(
+            ordinary.amount.parse::<u64>(),
+            Ok(ordinary_quote.amount_sat)
+        );
+        assert_eq!(ordinary_quote.method, "Bolt11Invoice");
+        assert_eq!(ordinary.target, SparkSendTarget::Lightning);
+        assert_eq!(ordinary.destination, SYNTHETIC_INVOICE);
+        assert!(ordinary.invoice_amount);
+        assert!(ordinary.hint.is_none());
+        assert!(ordinary_quote.amount_sat + ordinary_quote.fee_sat < SYNTHETIC_BITCOIN_SATS);
+
+        let mismatch = with(Fixture::ordinary_prepared(), |f| f.mismatch = true);
+        assert_eq!(mismatch.amount, ordinary.amount);
+        assert_eq!(mismatch.destination, ordinary.destination);
+        assert_eq!(mismatch.target, ordinary.target);
+        assert!(mismatch.hint.is_none());
+
+        let cross_chain = Fixture::cross_chain_prepared();
+        let SparkSendPhase::Prepared(cross_chain_quote) = &cross_chain.phase else {
+            panic!("cross-chain fixture must be prepared");
+        };
+        assert_eq!(
+            cross_chain.amount.parse::<u64>(),
+            Ok(cross_chain_quote.amount_sat)
+        );
+        assert_eq!(cross_chain_quote.method, "CrossChainAddress");
+        assert_eq!(cross_chain.target, SparkSendTarget::Usdc);
+        assert_eq!(cross_chain.destination, SYNTHETIC_CROSS_CHAIN_ADDRESS);
+        assert_eq!(
+            cross_chain_quote.cross_chain.as_ref().unwrap().route.asset,
+            "USDC"
+        );
+        assert!(cross_chain.hint.as_deref().unwrap().contains("25,053 sats"));
+        assert!(SYNTHETIC_BITCOIN_SATS < cross_chain_quote.amount_sat);
+        assert!(cross_chain_quote.amount_sat < SYNTHETIC_BALANCE_SATS);
+    }
+
     fn outcome_unknown(
         checking: bool,
         outcome: Option<ReconcileOutcome>,
@@ -2322,13 +2439,13 @@ mod tests {
         let cases = [
             Case {
                 scenario: "prepared",
-                fixture: Fixture::filled(ordinary_prepared()),
+                fixture: Fixture::ordinary_prepared(),
                 present: &["Preview", "Bolt11Invoice", "Confirm and send", "Cancel"],
                 absent: &["Get a fresh quote"],
             },
             Case {
                 scenario: "mismatch",
-                fixture: with(Fixture::filled(ordinary_prepared()), |f| f.mismatch = true),
+                fixture: with(Fixture::ordinary_prepared(), |f| f.mismatch = true),
                 present: &[
                     crate::services::branta::MISMATCH_MESSAGE,
                     "Replace payment request",
@@ -2337,7 +2454,7 @@ mod tests {
             },
             Case {
                 scenario: "quote-valid",
-                fixture: with(Fixture::filled(cross_chain_prepared()), |f| {
+                fixture: with(Fixture::cross_chain_prepared(), |f| {
                     f.countdown = Some(cross_chain::QuoteCountdown::Valid { seconds_left: 42 })
                 }),
                 present: &["Quote valid for 42s.", "Confirm and send", "Total you send"],
@@ -2345,7 +2462,7 @@ mod tests {
             },
             Case {
                 scenario: "quote-expired",
-                fixture: with(Fixture::filled(cross_chain_prepared()), |f| {
+                fixture: with(Fixture::cross_chain_prepared(), |f| {
                     f.countdown = Some(cross_chain::QuoteCountdown::Expired)
                 }),
                 present: &["This quote has expired.", "Get a fresh quote"],
@@ -2353,7 +2470,7 @@ mod tests {
             },
             Case {
                 scenario: "quote-unknown",
-                fixture: with(Fixture::filled(cross_chain_prepared()), |f| {
+                fixture: with(Fixture::cross_chain_prepared(), |f| {
                     f.countdown = Some(cross_chain::QuoteCountdown::Unknown)
                 }),
                 present: &["Get a fresh quote"],
@@ -2449,13 +2566,10 @@ mod tests {
     fn later_phase_captures_in_both_themes() {
         let menu = spark_send_menu();
         for mode in themes() {
-            let mut mismatch = Fixture::filled(ordinary_prepared()).themed(mode);
+            let mut mismatch = Fixture::ordinary_prepared().themed(mode);
             mismatch.mismatch = true;
             for (scenario, fixture) in [
-                (
-                    "prepared",
-                    Fixture::filled(ordinary_prepared()).themed(mode),
-                ),
+                ("prepared", Fixture::ordinary_prepared().themed(mode)),
                 ("mismatch", mismatch),
                 (
                     "outcome-unknown-checking",
