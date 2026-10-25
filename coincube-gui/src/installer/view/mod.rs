@@ -3450,7 +3450,7 @@ mod policy_layout_tests {
             "wsh(andor(pk([01020304/48'/1'/0'/2']{first}/<0;1>/*),older(144),andor(pk([05060708/48'/1'/0'/2']{second}/<0;1>/*),older(52596),pk([090a0b0c/48'/1'/0'/2']{third}/<0;1>/*))))"
         ))
         .unwrap();
-        let keys = [
+        let keys = IntoIterator::into_iter([
             (
                 [1, 2, 3, 4],
                 "Synthetic first recovery signer with a long display name",
@@ -3463,8 +3463,7 @@ mod policy_layout_tests {
                 [9, 10, 11, 12],
                 "Synthetic primary signer with a long display name",
             ),
-        ]
-        .into_iter()
+        ])
         .map(|(bytes, name)| {
             let fingerprint = Fingerprint::from(bytes);
             (
@@ -3485,7 +3484,7 @@ mod policy_layout_tests {
     }
 
     #[tokio::test]
-    async fn mounted_installer_policy_keeps_recovery_copy_inside_card() {
+    async fn mounted_installer_backup_shell_keeps_recovery_copy_inside_card() {
         for bytes in coincube_ui::font::load() {
             iced::advanced::graphics::text::font_system()
                 .write()
@@ -3498,7 +3497,7 @@ mod policy_layout_tests {
         if let Some(directory) = &capture_dir {
             std::fs::create_dir_all(directory).unwrap();
         }
-        for (width, height) in [(1024, 768), (1440, 900)] {
+        for (width, height) in [(1024, 768), (1440, 900), (1024, 2400), (1440, 2400)] {
             for (theme_name, theme) in [
                 ("dark", theme::Theme::dark()),
                 ("light", theme::Theme::light()),
@@ -3510,11 +3509,7 @@ mod policy_layout_tests {
                 )
                 .await
                 .expect("software renderer");
-                let mut element: Element<'_, Message> =
-                    card::simple(display_policy(descriptor.policy(), &keys))
-                        .width(Length::Fill)
-                        .max_width(1500)
-                        .into();
+                let mut element = backup_descriptor((0, 0), None, &descriptor, &keys, None, false);
                 let mut tree = Tree::new(element.as_widget());
                 let size = iced::Size::new(width as f32, height as f32);
                 let node = element.as_widget_mut().layout(
@@ -3540,7 +3535,10 @@ mod policy_layout_tests {
                 ] {
                     assert!(
                         mounted.labels.iter().any(|(text, _)| text == required),
-                        "{width}px {theme_name}: missing complete policy text: {required}"
+                        "{}px {}: missing complete policy text: {}",
+                        width,
+                        theme_name,
+                        required
                     );
                 }
                 assert_eq!(
@@ -3550,28 +3548,50 @@ mod policy_layout_tests {
                         .filter(|(text, _)| text == "can spend coins after a relative timelock of")
                         .count(),
                     2,
-                    "{width}px {theme_name}: both recovery clauses must mount"
+                    "{}px {}: both recovery clauses must mount",
+                    width,
+                    theme_name
                 );
                 for sequence in ["144 blocks (~1d)", "52596 blocks (~1y)"] {
                     assert!(
                         mounted.labels.iter().any(|(text, _)| text == sequence),
-                        "{width}px {theme_name}: missing recovery block delay: {sequence}"
+                        "{}px {}: missing recovery block delay: {}",
+                        width,
+                        theme_name,
+                        sequence
                     );
                 }
+                let heading = mounted
+                    .labels
+                    .iter()
+                    .find(|(text, _)| text == "The wallet policy:")
+                    .expect("mounted policy heading")
+                    .1;
                 let (viewport, content) = mounted
                     .scrolls
                     .iter()
+                    .rev()
                     .find(|(_, content)| {
-                        mounted.labels.iter().any(|(text, bounds)| {
-                            text == "The wallet policy:"
-                                && bounds.x >= content.x
-                                && bounds.x < content.x + content.width
-                        })
+                        heading.x >= content.x
+                            && heading.x < content.x + content.width
+                            && heading.y >= content.y
+                            && heading.y < content.y + content.height
                     })
                     .expect("mounted policy scroll viewport");
                 assert!(
                     viewport.x >= -1.0 && viewport.x + viewport.width <= width as f32 + 1.0,
-                    "{width}px {theme_name}: policy viewport escapes window: {viewport:?}"
+                    "{}px {}: policy viewport escapes window: {:?}",
+                    width,
+                    theme_name,
+                    viewport
+                );
+                assert!(
+                    viewport.x > width as f32 * 0.1
+                        && viewport.x + viewport.width < width as f32 * 0.9,
+                    "{}px {}: policy viewport did not follow the installer shell width: {:?}",
+                    width,
+                    theme_name,
+                    viewport
                 );
                 assert!(
                     mounted.containers.iter().any(|card| {
@@ -3580,13 +3600,30 @@ mod policy_layout_tests {
                             && viewport.y >= card.y - 1.0
                             && viewport.y + viewport.height <= card.y + card.height + 1.0
                     }),
-                    "{width}px {theme_name}: policy viewport escapes its card"
+                    "{}px {}: policy viewport escapes its card",
+                    width,
+                    theme_name
                 );
-                for (text, bounds) in &mounted.labels {
+                let start = mounted
+                    .labels
+                    .iter()
+                    .position(|(text, _)| text == "The wallet policy:")
+                    .unwrap();
+                let end = mounted
+                    .labels
+                    .iter()
+                    .position(|(text, _)| text == "I have backed up my descriptor")
+                    .unwrap();
+                for (text, bounds) in &mounted.labels[start..end] {
                     assert!(
                         bounds.x >= content.x - 1.0
                             && bounds.x + bounds.width <= content.x + content.width + 1.0,
-                        "{width}px {theme_name}: policy text escapes scroll content: {text} {bounds:?} {content:?}"
+                        "{}px {}: policy text escapes scroll content: {} {:?} {:?}",
+                        width,
+                        theme_name,
+                        text,
+                        bounds,
+                        content
                     );
                 }
                 let screen = iced::Rectangle::with_size(size);
@@ -3609,7 +3646,8 @@ mod policy_layout_tests {
                     );
                     image::save_buffer(
                         std::path::Path::new(directory).join(format!(
-                            "r11a-installer-policy-{theme_name}-{width}x{height}.png"
+                            "r11a-installer-policy-{}-{}x{}.png",
+                            theme_name, width, height
                         )),
                         &pixels,
                         width,
