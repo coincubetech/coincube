@@ -1776,7 +1776,9 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
     // default values for absent wallets don't skew the total.
     // An imported Vault can report coins before its bounded history search is
     // complete. Those coins are not an authoritative balance yet.
-    let display_vault_balance = if has_imported_bitcoin && imported_balance.is_none() {
+    let imported_balance_loaded =
+        has_imported_bitcoin && imported_installed && imported_balance.is_some();
+    let display_vault_balance = if has_imported_bitcoin && !imported_balance_loaded {
         Amount::ZERO
     } else {
         vault_balance
@@ -2304,7 +2306,7 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
             vault_pending_receive_sats,
             display_mode,
             if has_imported_bitcoin {
-                imported_balance.is_some()
+                imported_balance_loaded
             } else {
                 vault_loaded
             },
@@ -2319,7 +2321,8 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
         || (has_liquid
             && ((liquid_balance_loaded && !liquid_balance_error)
                 || (usdt_balance_loaded && !usdt_balance_error)))
-        || (has_vault && vault_loaded && (!has_imported_bitcoin || imported_balance.is_some()));
+        || imported_balance_loaded
+        || (has_vault && !has_imported_bitcoin && vault_loaded);
     let total_balance_label_row = Row::new()
         .spacing(0)
         .align_y(Alignment::Center)
@@ -2790,6 +2793,70 @@ mod tests {
                 assert!(!zero.contains("No wallet balance has loaded successfully"));
             }
         }
+    }
+
+    #[test]
+    fn imported_bitcoin_counts_only_after_an_installed_authoritative_balance() {
+        use crate::app::view::shared::landing::capture;
+
+        let fixture = ViewFixture::new();
+        let inspect = |config| {
+            capture::inspect(
+                "hub-import-balance",
+                global_home_view(config),
+                (1024, 768),
+                "dark",
+                theme::Theme::dark(),
+            )
+        };
+        let imported = || {
+            let mut config = fixture.config(0, None, None);
+            config.has_vault = false;
+            config.has_spark = false;
+            config.has_liquid = false;
+            config.has_imported_bitcoin = true;
+            config.imported_installed = true;
+            config.imported_balance = Some(Amount::from_sat(375_000));
+            config
+        };
+        let known = inspect(imported());
+        assert!(!known.contains("No wallet balance has loaded successfully"));
+
+        let mut known_zero_config = imported();
+        known_zero_config.imported_balance = Some(Amount::ZERO);
+        known_zero_config.vault_balance = Amount::ZERO;
+        let known_zero = inspect(known_zero_config);
+        assert!(!known_zero.contains("No wallet balance has loaded successfully"));
+
+        let mut pending_config = imported();
+        pending_config.imported_balance = None;
+        let pending = inspect(pending_config);
+        assert!(pending.contains("No wallet balance has loaded successfully"));
+
+        let mut uninstalled_config = imported();
+        uninstalled_config.imported_installed = false;
+        let uninstalled = inspect(uninstalled_config);
+        assert!(uninstalled.contains("No wallet balance has loaded successfully"));
+
+        let mut mixed_known_config = imported();
+        mixed_known_config.has_vault = true;
+        mixed_known_config.vault_loaded = false;
+        let mixed_known = inspect(mixed_known_config);
+        assert!(!mixed_known.contains("No wallet balance has loaded successfully"));
+
+        let mut mixed_pending_config = imported();
+        mixed_pending_config.has_vault = true;
+        mixed_pending_config.imported_balance = None;
+        mixed_pending_config.vault_loaded = true;
+        let mixed_pending = inspect(mixed_pending_config);
+        assert!(mixed_pending.contains("No wallet balance has loaded successfully"));
+
+        let mut partial_config = imported();
+        partial_config.has_spark = true;
+        partial_config.spark_balance_loaded = false;
+        partial_config.spark_balance_error = true;
+        let partial = inspect(partial_config);
+        assert!(partial.contains("Partial total"));
     }
 
     #[test]
