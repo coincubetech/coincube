@@ -159,6 +159,9 @@ pub struct LocalSigningState {
     pub unpaired_notice: Option<String>,
     /// Fingerprint of the phone whose local pairing is awaiting review.
     pub pending_remove_phone: Option<String>,
+    /// Full identity approved by that review; the short row id alone can
+    /// identify a different phone if the store changes before confirmation.
+    pending_remove_cert_pin: Option<[u8; 32]>,
 }
 
 impl Default for LocalSigningState {
@@ -185,6 +188,7 @@ impl Default for LocalSigningState {
             sync_in_flight: false,
             unpaired_notice: None,
             pending_remove_phone: None,
+            pending_remove_cert_pin: None,
         }
     }
 }
@@ -401,6 +405,7 @@ impl LocalSigningState {
             // A removal review belongs to the vault that displayed the row.
             // WalletUpdated can switch this active panel without `reload`.
             self.pending_remove_phone = None;
+            self.pending_remove_cert_pin = None;
         }
         self.apply_wallet(wallet);
         if vault_changed && !matches!(self.flow, PairingFlow::Idle) {
@@ -569,16 +574,26 @@ impl LocalSigningState {
         }
     }
 
-    /// Remove a row by 8-hex fingerprint. No-op if not present.
-    pub(crate) fn apply_remove_phone(&mut self, dir: &crate::dir::CoincubeDirectory, fp8: &str) {
-        let to_remove = self.phones.phones.iter().find_map(|p| {
-            if crate::phone_signer::identity::pin_hex8(&p.cert_pin) == fp8 {
-                Some(p.cert_pin)
-            } else {
-                None
-            }
+    /// Resolve the short row identifier only within the active Vault. Refuse
+    /// ambiguous prefixes rather than removing an arbitrary phone.
+    fn unique_current_vault_phone(&self, fp8: &str) -> Option<[u8; 32]> {
+        let vault = self.wallet_fingerprint?;
+        let mut matches = self.phones.phones.iter().filter(|phone| {
+            phone.vault_fingerprint == vault
+                && crate::phone_signer::identity::pin_hex8(&phone.cert_pin) == fp8
         });
-        if let Some(pk) = to_remove {
+        let cert_pin = matches.next()?.cert_pin;
+        if matches.next().is_some() {
+            tracing::warn!("ambiguous paired-phone fingerprint {} in active Vault", fp8);
+            return None;
+        }
+        Some(cert_pin)
+    }
+
+    /// Remove a uniquely identified phone from the active Vault. No-op if the
+    /// short fingerprint is absent or ambiguous.
+    pub(crate) fn apply_remove_phone(&mut self, dir: &crate::dir::CoincubeDirectory, fp8: &str) {
+        if let Some(pk) = self.unique_current_vault_phone(fp8) {
             // Tombstone BEFORE the store delete so an in-flight
             // `Task::perform` whose `run_pairing` resolves between
             // here and the disk write sees the tombstone and skips
@@ -889,19 +904,14 @@ impl State for LocalSigningState {
                 Task::none()
             }
             LocalSigningMessage::ReviewRemovePhone(fp8) => {
-                self.pending_remove_phone = self
-                    .phones
-                    .phones
-                    .iter()
-                    .find(|phone| {
-                        crate::phone_signer::identity::pin_hex8(&phone.cert_pin) == fp8
-                            && Some(phone.vault_fingerprint) == self.wallet_fingerprint
-                    })
-                    .map(|_| fp8);
+                let cert_pin = self.unique_current_vault_phone(&fp8);
+                self.pending_remove_phone = cert_pin.map(|_| fp8);
+                self.pending_remove_cert_pin = cert_pin;
                 Task::none()
             }
             LocalSigningMessage::CancelRemovePhone => {
                 self.pending_remove_phone = None;
+                self.pending_remove_cert_pin = None;
                 Task::none()
             }
             LocalSigningMessage::RemovePhone(fp8) => {
@@ -909,13 +919,10 @@ impl State for LocalSigningState {
                     return Task::none();
                 }
                 self.pending_remove_phone = None;
-                if !self
-                    .phones
-                    .phones
-                    .iter()
-                    .find(|phone| crate::phone_signer::identity::pin_hex8(&phone.cert_pin) == fp8)
-                    .is_some_and(|phone| Some(phone.vault_fingerprint) == self.wallet_fingerprint)
-                {
+                let Some(reviewed_pin) = self.pending_remove_cert_pin.take() else {
+                    return Task::none();
+                };
+                if self.unique_current_vault_phone(&fp8) != Some(reviewed_pin) {
                     return Task::none();
                 }
                 self.apply_remove_phone(&cache.datadir_path, &fp8);
@@ -971,6 +978,7 @@ impl State for LocalSigningState {
         wallet: Option<Arc<Wallet>>,
     ) -> Task<Message> {
         self.pending_remove_phone = None;
+        self.pending_remove_cert_pin = None;
         if let Some(w) = wallet.as_ref() {
             self.wallet = Some(w.clone());
             self.apply_wallet_update(w);
@@ -1139,6 +1147,135 @@ mod tests {
             LocalSigningMessage::RemovePhone(fp),
         ));
         assert_eq!(pairing_store::load(&dir).unwrap().pending_unpairs.len(), 1);
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn removal_uses_active_vault_when_cert_pins_share_fp8() {
+        let dir = fresh_dir();
+        let mut other_vault_phone = paired(41, "Other Vault", None);
+        other_vault_phone.cert_pin[4] = 1;
+        other_vault_phone.vault_fingerprint = Fingerprint::from([1, 2, 3, 4]);
+        let mut current_vault_phone = paired(41, "Current Vault", None);
+        current_vault_phone.cert_pin[4] = 2;
+        assert_ne!(other_vault_phone.cert_pin, current_vault_phone.cert_pin);
+        assert_eq!(fp8_of(&other_vault_phone), fp8_of(&current_vault_phone));
+        // The other Vault's colliding row comes first in the store.
+        seed_store(
+            &dir,
+            vec![other_vault_phone.clone(), current_vault_phone.clone()],
+        );
+        let cache = Cache {
+            datadir_path: dir.clone(),
+            ..Cache::default()
+        };
+        let mut state = LocalSigningState::default();
+        state.wallet_fingerprint = Some(current_vault_phone.vault_fingerprint);
+        state.refresh_phones_from(&dir);
+        state.initialised = true;
+        let fp8 = fp8_of(&current_vault_phone);
+
+        drop(send(
+            &mut state,
+            &cache,
+            LocalSigningMessage::ReviewRemovePhone(fp8.clone()),
+        ));
+        assert_eq!(state.pending_remove_phone.as_deref(), Some(fp8.as_str()));
+        drop(send(
+            &mut state,
+            &cache,
+            LocalSigningMessage::RemovePhone(fp8),
+        ));
+
+        let stored = pairing_store::load(&dir).unwrap();
+        assert_eq!(stored.phones.len(), 1);
+        assert_eq!(stored.phones[0].cert_pin, other_vault_phone.cert_pin);
+        assert_eq!(stored.pending_unpairs.len(), 1);
+        assert_eq!(
+            stored.pending_unpairs[0].cert_pin,
+            current_vault_phone.cert_pin
+        );
+        assert!(state
+            .tombstones
+            .lock()
+            .unwrap()
+            .contains(&current_vault_phone.cert_pin));
+        assert!(!state
+            .tombstones
+            .lock()
+            .unwrap()
+            .contains(&other_vault_phone.cert_pin));
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn removal_refuses_ambiguous_fp8_within_active_vault() {
+        let dir = fresh_dir();
+        let mut first = paired(42, "First", None);
+        first.cert_pin[4] = 1;
+        let mut second = paired(42, "Second", None);
+        second.cert_pin[4] = 2;
+        assert_eq!(fp8_of(&first), fp8_of(&second));
+        seed_store(&dir, vec![first.clone()]);
+        let cache = Cache {
+            datadir_path: dir.clone(),
+            ..Cache::default()
+        };
+        let mut state = LocalSigningState::default();
+        state.wallet_fingerprint = Some(Fingerprint::default());
+        state.refresh_phones_from(&dir);
+        state.initialised = true;
+        let fp8 = fp8_of(&first);
+
+        drop(send(
+            &mut state,
+            &cache,
+            LocalSigningMessage::ReviewRemovePhone(fp8.clone()),
+        ));
+        assert_eq!(state.pending_remove_phone.as_deref(), Some(fp8.as_str()));
+        // A second row appears before confirmation; the old review must
+        // not authorize an arbitrary removal under the same short id.
+        seed_store(&dir, vec![first.clone(), second.clone()]);
+        state.refresh_phones_from(&dir);
+        drop(send(
+            &mut state,
+            &cache,
+            LocalSigningMessage::RemovePhone(fp8.clone()),
+        ));
+        assert!(state.pending_remove_phone.is_none());
+        drop(send(
+            &mut state,
+            &cache,
+            LocalSigningMessage::ReviewRemovePhone(fp8.clone()),
+        ));
+        assert!(state.pending_remove_phone.is_none());
+        state.apply_remove_phone(&dir, &fp8);
+        let stored = pairing_store::load(&dir).unwrap();
+        assert_eq!(stored.phones.len(), 2);
+        assert!(stored.pending_unpairs.is_empty());
+        assert!(state.tombstones.lock().unwrap().is_empty());
+
+        // Even if one colliding row replaces the reviewed row, the old
+        // confirmation cannot remove that different full cert pin.
+        seed_store(&dir, vec![first]);
+        state.refresh_phones_from(&dir);
+        drop(send(
+            &mut state,
+            &cache,
+            LocalSigningMessage::ReviewRemovePhone(fp8.clone()),
+        ));
+        seed_store(&dir, vec![second.clone()]);
+        state.refresh_phones_from(&dir);
+        drop(send(
+            &mut state,
+            &cache,
+            LocalSigningMessage::RemovePhone(fp8),
+        ));
+        let stored = pairing_store::load(&dir).unwrap();
+        assert_eq!(stored.phones.len(), 1);
+        assert_eq!(stored.phones[0].cert_pin, second.cert_pin);
+        assert!(stored.pending_unpairs.is_empty());
+        assert!(state.tombstones.lock().unwrap().is_empty());
         std::fs::remove_dir_all(dir.path()).unwrap();
     }
 
@@ -1396,6 +1533,7 @@ mod tests {
         seed_store(&dir, vec![p1.clone(), p2.clone()]);
 
         let mut state = LocalSigningState::default();
+        state.wallet_fingerprint = Some(Fingerprint::default());
         state.refresh_phones_from(&dir);
         let fp2 = fp8_of(&p2);
         state.apply_remove_phone(&dir, &fp2);
@@ -1414,6 +1552,7 @@ mod tests {
         let p = paired(9, "iPhone", Some("10.0.0.9:8443"));
         seed_store(&dir, vec![p.clone()]);
         let mut state = LocalSigningState::default();
+        state.wallet_fingerprint = Some(Fingerprint::default());
         state.refresh_phones_from(&dir);
         state.apply_remove_phone(&dir, &fp8_of(&p));
 
@@ -1499,6 +1638,7 @@ mod tests {
         seed_store(&dir, vec![p.clone()]);
 
         let mut state = LocalSigningState::default();
+        state.wallet_fingerprint = Some(Fingerprint::default());
         state.refresh_phones_from(&dir);
 
         // Snapshot the Arc the way the spawned `Task::perform` would —
