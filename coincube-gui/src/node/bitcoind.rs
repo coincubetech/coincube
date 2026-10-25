@@ -1874,6 +1874,12 @@ impl std::fmt::Display for StartInternalBitcoindError {
 #[derive(Debug, Clone)]
 pub struct Bitcoind {
     pub config: BitcoindConfig,
+    _owner: Arc<BitcoindOwner>,
+}
+
+#[derive(Debug)]
+struct BitcoindOwner {
+    config: BitcoindConfig,
     lock: LockFile,
 }
 
@@ -2114,6 +2120,13 @@ pub fn stop_and_wait_managed_bitcoind(config: &BitcoindConfig) {
 }
 
 impl Bitcoind {
+    fn owned(config: BitcoindConfig, lock: LockFile) -> Self {
+        Self {
+            config: config.clone(),
+            _owner: Arc::new(BitcoindOwner { config, lock }),
+        }
+    }
+
     /// A handle with no node behind it, for a test that has to hand a caller an
     /// existing managed-node handle without running one. Takes the same lock
     /// file a started node would, so the lock bookkeeping stays honest, and
@@ -2127,7 +2140,7 @@ impl Bitcoind {
         let lock = LockFile::create(coincube_datadir.bitcoind_directory(), network)
             .expect("synthetic lock file");
         lock.activate();
-        Self { config, lock }
+        Self::owned(config, lock)
     }
 
     #[cfg(test)]
@@ -2145,7 +2158,7 @@ impl Bitcoind {
         )
         .expect("synthetic local node owner");
         lock.activate();
-        Self { config, lock }
+        Self::owned(config, lock)
     }
 
     /// Start the managed node for a chain, by identity.
@@ -2359,10 +2372,7 @@ impl Bitcoind {
                     );
                 }
                 owner_lock.activate();
-                return Ok(Bitcoind {
-                    config,
-                    lock: owner_lock,
-                });
+                return Ok(Bitcoind::owned(config, owner_lock));
             }
         }
         // Rewrite the conf from its parsed form before the binary reads it.
@@ -2551,10 +2561,7 @@ impl Bitcoind {
                         );
                     }
                     owner_lock.activate();
-                    return Ok(Self {
-                        config,
-                        lock: owner_lock,
-                    });
+                    return Ok(Self::owned(config, owner_lock));
                 }
                 Err(coincubed::BitcoindError::CookieFile(_)) => {
                     // This is only raised if we're using cookie authentication.
@@ -2584,9 +2591,11 @@ impl Bitcoind {
     pub fn stop(self) {
         // Clones are references to one Cube's ownership token. Closing one
         // reference must not release the token while another still needs it.
-        // Drop releases the token when the final reference goes away.
+        // BitcoindOwner::drop releases it after the final Arc goes away.
     }
+}
 
+impl BitcoindOwner {
     fn release(&self) {
         let lifecycle = match ManagedNodeLifecycle::acquire_directory(self.lock.directory.clone()) {
             Ok(lifecycle) => lifecycle,
@@ -2620,26 +2629,24 @@ impl Bitcoind {
     }
 }
 
-impl Drop for Bitcoind {
+impl Drop for BitcoindOwner {
     fn drop(&mut self) {
         // A canceled spawn_blocking receiver drops its completed result. Keep
-        // that from leaving a running node and Tor without an owner. Other
-        // clones are the same owner's handle, not independent Cube owners.
-        if Arc::strong_count(&self.lock.released) == 1 {
-            self.release();
-        }
+        // that from leaving a running node and Tor without an owner. Arc's
+        // inner Drop runs exactly once after all handle clones are gone.
+        self.release();
     }
 }
 
 const LOCK_DIRECTORY_NAME: &str = "locks";
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct LockFile {
     path: PathBuf,
     directory: BitcoindDirectory,
     network: Network,
-    released: Arc<AtomicBool>,
-    provisional: Arc<AtomicBool>,
+    released: AtomicBool,
+    provisional: AtomicBool,
 }
 
 impl LockFile {
@@ -2666,8 +2673,8 @@ impl LockFile {
             path,
             directory,
             network,
-            released: Arc::new(AtomicBool::new(false)),
-            provisional: Arc::new(AtomicBool::new(true)),
+            released: AtomicBool::new(false),
+            provisional: AtomicBool::new(true),
         })
     }
 
@@ -2714,10 +2721,7 @@ impl LockFile {
 
 impl Drop for LockFile {
     fn drop(&mut self) {
-        if Arc::strong_count(&self.released) == 1
-            && self.provisional.load(Ordering::Acquire)
-            && !self.released.load(Ordering::Acquire)
-        {
+        if self.provisional.load(Ordering::Acquire) && !self.released.load(Ordering::Acquire) {
             // A start failed after claiming ownership but before returning a
             // Bitcoind handle. Its surrounding lifecycle guard still holds
             // the OS lock and will stop ownerless Tor after this file is gone.
@@ -2811,7 +2815,6 @@ mod tests {
         );
         let directory = root.bitcoind_directory();
         let first = LockFile::create(directory.clone(), Network::Bitcoin).unwrap();
-        let stale_clone = first.clone();
         let second = LockFile::create(directory.clone(), Network::Bitcoin).unwrap();
         assert_ne!(
             first.path, second.path,
@@ -2822,10 +2825,7 @@ mod tests {
             "the second Cube still owns the node"
         );
         assert!(second.path.exists());
-        assert!(
-            !stale_clone.delete().unwrap(),
-            "a stale clone releases only once"
-        );
+        assert!(!first.delete().unwrap(), "a stale owner releases only once");
         assert!(
             second.path.exists(),
             "an old owner cannot stop its replacement"
@@ -2888,6 +2888,45 @@ mod tests {
         assert_eq!(std::fs::read_dir(&locks).unwrap().count(), 1);
         owner.stop();
         assert!(!locks.exists());
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[test]
+    fn concurrent_clone_drops_release_one_owner() {
+        let root = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("concurrent-drops-{}", uuid::Uuid::new_v4())),
+        );
+        let config = BitcoindConfig {
+            addr: "127.0.0.1:1".parse().unwrap(),
+            rpc_auth: coincubed::config::BitcoindRpcAuth::CookieFile(
+                root.path().join("bitcoind/.cookie"),
+            ),
+        };
+        let owner = Bitcoind::for_test(config, &root, Network::Bitcoin);
+        let a = owner.clone();
+        let b = owner.clone();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let t1 = {
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                a.stop();
+            })
+        };
+        let t2 = {
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                b.stop();
+            })
+        };
+        drop(owner);
+        let locks = root.bitcoind_directory().path().join("locks/bitcoin");
+        assert_eq!(std::fs::read_dir(&locks).unwrap().count(), 1);
+        barrier.wait();
+        t1.join().unwrap();
+        t2.join().unwrap();
+        assert!(!locks.exists(), "the last Arc drop must release the owner");
         std::fs::remove_dir_all(root.path()).unwrap();
     }
 
