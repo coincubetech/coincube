@@ -27,7 +27,7 @@ pub use vault::fiat::FiatAmountConverter;
 pub use vault::warning::warn;
 
 use iced::{
-    widget::{column, container, row, scrollable, Space},
+    widget::{container, row, scrollable, Space},
     Alignment, Length,
 };
 

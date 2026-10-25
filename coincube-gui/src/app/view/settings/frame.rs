@@ -3,7 +3,7 @@
 use coincube_ui::component::text::*;
 use coincube_ui::font;
 use coincube_ui::theme;
-use coincube_ui::widget::{action::Action, Element, RowExt};
+use coincube_ui::widget::{action::Action, Element};
 use iced::widget::{rule, Column, Row};
 use iced::Length;
 
@@ -62,7 +62,7 @@ fn route_choices(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
     choices.push(RouteChoice {
         id: "tenshu.settings.route.scope.device",
         label: "This device",
-        intent: Message::OpenAppPreferences,
+        intent: Message::Menu(Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::About))),
         selected: scope == RouteScope::Device,
         enabled: true,
     });
@@ -122,7 +122,7 @@ fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
                     },
                     label,
                     intent: Message::Menu(Menu::Cube(CubeSubMenu::Settings(section))),
-                    selected: matches!(menu, Menu::Cube(CubeSubMenu::Settings(current)) if *current == section || (section == CubeSettingsOption::General && *current == CubeSettingsOption::Avatar)),
+                    selected: matches!(menu, Menu::Cube(CubeSubMenu::Settings(current)) if *current == section),
                     enabled: true,
                 })
                 .collect()
@@ -143,6 +143,9 @@ fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
         ]
         .iter()
         .copied()
+        .filter(|(section, _, _)| {
+            !cache.has_imported_bitcoin || *section != SettingsOption::ImportExport
+        })
         .map(|(section, label, id)| RouteChoice {
             id: match id {
                 "wallet" => "tenshu.settings.route.vault.wallet",
@@ -153,7 +156,7 @@ fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
             label,
             intent: Message::Menu(Menu::Vault(VaultSubMenu::Settings(Some(section)))),
             selected: matches!(menu, Menu::Vault(VaultSubMenu::Settings(Some(current))) if *current == section)
-                || (section == SettingsOption::Wallet
+                || (section == SettingsOption::Node
                     && matches!(menu, Menu::Vault(VaultSubMenu::Settings(None)))),
             enabled: section != SettingsOption::LocalSigning || !cache.has_imported_bitcoin,
         })
@@ -191,36 +194,38 @@ fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
             selected: false,
             enabled: true,
         }],
-        // The App preferences page already owns About and Download Stats.
-        // This legacy route keeps an exit to that device page, with no tabs.
-        Some(RouteScope::Device) => Vec::new(),
+        // This base still renders device information through the existing
+        // About and Download Stats routes.
+        Some(RouteScope::Device) => vec![
+            RouteChoice {
+                id: "tenshu.settings.route.device.about",
+                label: "About",
+                intent: Message::Menu(Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::About))),
+                selected: matches!(menu, Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::About))),
+                enabled: true,
+            },
+            RouteChoice {
+                id: "tenshu.settings.route.device.stats",
+                label: "Download stats",
+                intent: Message::Menu(Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Stats))),
+                selected: matches!(menu, Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Stats))),
+                enabled: true,
+            },
+        ],
         None => Vec::new(),
     }
 }
 
 /// The Settings scope and section choices live in page content on every route.
 pub fn in_content_navigation(menu: &Menu, cache: &Cache) -> Option<Element<'static, Message>> {
-    let scope = route_scope(menu)?;
+    route_scope(menu)?;
     let scope_row = route_choice_row(route_choices(menu, cache));
     let mut content = Column::new()
         .spacing(12)
         .width(Length::Fill)
         .push(text("Settings").size(H2_SIZE).font(font::SEMIBOLD))
         .push(scope_row);
-    if scope == RouteScope::Device {
-        content = content.push(
-            Action::new(
-                "tenshu.settings.route.device.preferences",
-                text("Open App preferences and About").size(P2_SIZE),
-                Message::FocusAction,
-            )
-            .padding([8, 16])
-            .style(theme::button::secondary)
-            .on_press(Message::OpenAppPreferences),
-        );
-    } else {
-        content = content.push(route_choice_row(section_routes(menu, cache)));
-    }
+    content = content.push(route_choice_row(section_routes(menu, cache)));
     Some(content.push(rule::horizontal(1)).into())
 }
 
@@ -266,6 +271,21 @@ mod tests {
         assert!(section_routes(&menu, &cache)
             .iter()
             .any(|choice| choice.label.contains("Pair with Keychain") && !choice.enabled));
+        assert!(!section_routes(&menu, &cache)
+            .iter()
+            .any(|choice| choice.label == "Data & exports"));
+    }
+
+    #[test]
+    fn vault_settings_default_selects_node() {
+        let menu = Menu::Vault(VaultSubMenu::Settings(None));
+        let sections = section_routes(&menu, &Cache::default());
+        assert!(sections
+            .iter()
+            .any(|choice| choice.label == "Node" && choice.selected));
+        assert!(!sections
+            .iter()
+            .any(|choice| choice.label == "Wallet & signers" && choice.selected));
     }
 
     #[test]
