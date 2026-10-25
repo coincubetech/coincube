@@ -832,8 +832,10 @@ mod privacy_tests {
             theme::Theme::dark(),
         );
         assert!(hidden.contains("••••••"));
-        assert!(!hidden.contains("1.35"));
-        assert!(!hidden.contains("2468.13"));
+        let usdt_balance = format_usdt_display(135_791_113);
+        assert!(!hidden.contains(&usdt_balance));
+        let usdt_recent = format_usdt_display(246_813_000_000);
+        assert!(!hidden.contains(&usdt_recent));
         let shown = capture::inspect(
             "sideshift-shown",
             render(false),
@@ -841,8 +843,8 @@ mod privacy_tests {
             "dark",
             theme::Theme::dark(),
         );
-        assert!(shown.contains("1.35"));
-        assert!(shown.contains("2468.13"));
+        assert!(shown.contains(&usdt_balance));
+        assert!(shown.contains(&usdt_recent));
 
         let amount_phase = SendPhase::AmountInput;
         let amount_hidden = capture::inspect(

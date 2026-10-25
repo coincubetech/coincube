@@ -857,6 +857,16 @@ pub fn refundable_detail_view<'a>(
     mask_amounts: bool,
 ) -> Element<'a, Message> {
     let btc_amount = Amount::from_sat(refundable.amount_sat);
+    let header_amount: Element<'_, Message> = if mask_amounts {
+        text("••••••").size(H1_SIZE).into()
+    } else {
+        coincube_ui::component::amount::amount_with_size_and_unit::<Message>(
+            &btc_amount,
+            H1_SIZE,
+            bitcoin_unit,
+        )
+        .into()
+    };
 
     let date_text =
         format_timestamp(refundable.timestamp as u64).unwrap_or_else(|| "Unknown".to_string());
@@ -891,18 +901,7 @@ pub fn refundable_detail_view<'a>(
         .push(
             Column::new().spacing(20).push(
                 Column::new()
-                    .push(Container::new(Row::new().spacing(5).push(
-                        if mask_amounts {
-                            text("••••••").size(H1_SIZE).into()
-                        } else {
-                            coincube_ui::component::amount::amount_with_size_and_unit::<Message>(
-                                &btc_amount,
-                                H1_SIZE,
-                                bitcoin_unit,
-                            )
-                            .into()
-                        },
-                    )))
+                    .push(Container::new(Row::new().spacing(5).push(header_amount)))
                     .push_maybe(fiat_converter.filter(|_| !mask_amounts).map(|converter| {
                         let fiat = converter.convert(btc_amount);
                         Row::new().align_y(Alignment::Center).push(

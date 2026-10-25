@@ -753,7 +753,6 @@ mod privacy_tests {
                 is_incoming: true,
                 status: DomainPaymentStatus::Complete,
                 details: DomainPaymentDetails::Lightning {
-                    swap_id: Some("privacy-btc".into()),
                     description: "Bitcoin payment".into(),
                     payer_note: None,
                 },
@@ -804,7 +803,8 @@ mod privacy_tests {
         for sentinel in ["12,345,678", "98,765,432", "2468.13", "3,456.78"] {
             assert!(
                 !hidden.contains(sentinel),
-                "hidden Liquid send amount {sentinel}"
+                "hidden Liquid send amount {}",
+                sentinel
             );
         }
         let shown = capture::inspect(
@@ -825,7 +825,8 @@ mod privacy_tests {
             "dark",
             theme::Theme::dark(),
         );
-        assert!(!hidden_usdt.contains("1.35 USDt"));
+        let usdt_balance = format!("{} USDt", format_usdt_display(135_791_113));
+        assert!(!hidden_usdt.contains(&usdt_balance));
         let shown_usdt = capture::inspect(
             "liquid-send-usdt-shown",
             render(false, SendAsset::Usdt),
@@ -833,7 +834,7 @@ mod privacy_tests {
             "dark",
             theme::Theme::dark(),
         );
-        assert!(shown_usdt.contains("1.35 USDt"));
+        assert!(shown_usdt.contains(&usdt_balance));
 
         let picker_hidden = capture::inspect(
             "liquid-send-picker-hidden",
@@ -864,7 +865,7 @@ mod privacy_tests {
             theme::Theme::dark(),
         );
         assert!(picker_shown.contains("12,345,678"));
-        assert!(picker_shown.contains("1.35 USDt"));
+        assert!(picker_shown.contains(&usdt_balance));
     }
 }
 

@@ -1546,7 +1546,11 @@ mod tests {
             theme::Theme::dark(),
         );
         for sats in ["123456789 sats", "22222222 sats", "33333333 sats"] {
-            assert!(active.contains(sats), "missing authorization amount {sats}");
+            assert!(
+                active.contains(sats),
+                "missing authorization amount {}",
+                sats
+            );
         }
         assert!(!active.contains("********"));
 

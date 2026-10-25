@@ -1219,7 +1219,8 @@ mod privacy_tests {
                         passive_pair_amount(987_654_321, masked)
                     )))
                     .push(p1_bold(passive_pair_amount(123_456_789, masked)))
-                    .push(coin_input_row(&coin, "Before fork", Some(6), masked)),
+                    .push(coin_input_row(&coin, "Before fork", Some(6), masked))
+                    .into(),
                 (1024, 768),
                 "dark",
                 theme::Theme::dark(),

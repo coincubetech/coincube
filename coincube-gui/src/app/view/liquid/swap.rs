@@ -806,27 +806,35 @@ mod privacy_tests {
         let hidden = capture::inspect(
             "liquid-swap-hidden",
             render(true),
-            (1440, 900),
+            (1440, 1800),
             "dark",
             theme::Theme::dark(),
         );
         assert!(hidden.contains("••••••"));
-        for sentinel in ["12,345,678", "98,765,432", "2468.13", "1.35 USDt"] {
+        let usdt_balance = format!("{} USDt", format_usdt_display(135_791_113));
+        let usdt_recent = format_usdt_display(246_813_000_000);
+        for sentinel in [
+            "12,345,678",
+            "98,765,432",
+            usdt_recent.as_str(),
+            usdt_balance.as_str(),
+        ] {
             assert!(
                 !hidden.contains(sentinel),
-                "hidden Liquid swap amount {sentinel}"
+                "hidden Liquid swap amount {}",
+                sentinel
             );
         }
         let shown = capture::inspect(
             "liquid-swap-shown",
             render(false),
-            (1440, 900),
+            (1440, 1800),
             "dark",
             theme::Theme::dark(),
         );
         assert!(shown.contains("12,345,678"));
         assert!(shown.contains("98,765,432"));
-        assert!(shown.contains("2468.13"));
-        assert!(shown.contains("1.35 USDt"));
+        assert!(shown.contains(&usdt_recent));
+        assert!(shown.contains(&usdt_balance));
     }
 }
