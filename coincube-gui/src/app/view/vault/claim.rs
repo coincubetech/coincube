@@ -387,7 +387,9 @@ fn funding_view<'a>(
             .push(p1_regular("Review the coins, return addresses and fees. Both transfers return funds to your Vaults, minus network fees."));
         if let (Some(review), Some(descriptor)) = (panel.funding_review(), panel.wallet().inheritance_descriptor()) {
             let (threshold, _) = descriptor.policy().primary_path().thresh_origins();
-            body = body.push(funding_review_view(review, threshold, cache.balance_amounts_masked()));
+            // This screen immediately offers Review and sign. Show exact
+            // inputs, destinations and fees for transaction authorization.
+            body = body.push(funding_review_view(review, threshold));
         }
         body
             .push_maybe((!signing_available).then(|| card::warning(
@@ -403,7 +405,6 @@ fn funding_view<'a>(
 fn funding_review_view(
     review: &VerifiedCoinPairReview,
     threshold: usize,
-    balance_masked: bool,
 ) -> Element<'static, Message> {
     let address = |output: &TxOut| {
         Address::from_script(&output.script_pubkey, Network::Bitcoin)
@@ -423,25 +424,24 @@ fn funding_review_view(
                     ))
                     .width(Length::Fill),
                 )
-                .push(p1_bold(if balance_masked {
-                    "********".to_string()
-                } else {
-                    format!("{} sats", review.bitcoin.shared_total.to_sat())
-                })),
+                .push(p1_bold(format!(
+                    "{} sats",
+                    review.bitcoin.shared_total.to_sat()
+                ))),
         )
         .push(p2_regular(format!(
             "Signing threshold: {threshold} signature{} per input",
             if threshold == 1 { "" } else { "s" }
         )));
     for coin in &review.bitcoin.shared {
-        rows = rows.push(coin_input_row(coin, "Before fork", None, balance_masked));
+        rows = rows.push(coin_input_row(coin, "Before fork", None, false));
     }
     rows.push(p1_bold("Bitcoin transaction"))
         .push(coin_input_row(
             &review.bitcoin.funding,
             "Bitcoin-only deposit — replay protected",
             Some(review.bitcoin_confirmations),
-            balance_masked,
+            false,
         ))
         .push(p2_regular(format!(
             "Back to this Vault: {} · {} sats",
@@ -454,7 +454,7 @@ fn funding_review_view(
             &review.fork.funding,
             "BTCB2-only deposit — replay protected",
             Some(review.fork_confirmations),
-            balance_masked,
+            false,
         ))
         .push(p2_regular(format!(
             "Back to the paired BTCB2 Vault: {} · {} sats",
@@ -1486,6 +1486,92 @@ mod tests {
     use super::*;
     use crate::app::state::preferences::{BalancePrivacy, BalancePrivacyChrome};
     use crate::app::view::shared::landing::capture;
+    use crate::app::view::vault::ancestry_coins::{CoinPairReview, CoinRow};
+
+    #[test]
+    fn active_funding_review_shows_exact_inputs_while_passive_deposit_stays_hidden() {
+        use crate::services::{
+            claim_observation::http::FundingProofStatus, foreign_scan::AddressFunds,
+        };
+        use coincube_core::miniscript::bitcoin::{OutPoint, ScriptBuf, Txid};
+        use std::str::FromStr;
+
+        let row = |id: u8, sats| {
+            let output = TxOut {
+                value: Amount::from_sat(sats),
+                script_pubkey: ScriptBuf::new(),
+            };
+            CoinRow {
+                outpoint: OutPoint::new(Txid::from_str(&format!("{id:064x}")).unwrap(), 0),
+                amount: output.value,
+                output,
+            }
+        };
+        let shared = row(1, 123_456_789);
+        let bitcoin_funding = row(2, 22_222_222);
+        let fork_funding = row(3, 33_333_333);
+        let review = VerifiedCoinPairReview {
+            coins: CoinPairReview {
+                bitcoin: CoinReview {
+                    shared: vec![shared.clone()],
+                    funding: bitcoin_funding,
+                    shared_total: shared.amount,
+                    input_total: Amount::from_sat(145_679_011),
+                    fee: Amount::from_sat(1_000),
+                    destination: TxOut {
+                        value: Amount::from_sat(145_678_011),
+                        script_pubkey: ScriptBuf::new(),
+                    },
+                },
+                fork: CoinReview {
+                    shared: vec![shared],
+                    funding: fork_funding,
+                    shared_total: Amount::from_sat(123_456_789),
+                    input_total: Amount::from_sat(156_790_122),
+                    fee: Amount::from_sat(2_000),
+                    destination: TxOut {
+                        value: Amount::from_sat(156_788_122),
+                        script_pubkey: ScriptBuf::new(),
+                    },
+                },
+            },
+            bitcoin_confirmations: 6,
+            fork_confirmations: 6,
+        };
+        let active = capture::inspect(
+            "claim-active-funding-review",
+            funding_review_view(&review, 2),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        for sats in ["123456789 sats", "22222222 sats", "33333333 sats"] {
+            assert!(active.contains(sats), "missing authorization amount {sats}");
+        }
+        assert!(!active.contains("********"));
+
+        let passive = capture::inspect(
+            "claim-passive-deposit",
+            deposit_row(
+                "Bitcoin",
+                Some(&Ok(AddressFunds {
+                    confirmed_sats: 987_654_321,
+                    largest_confirmed_sats: 987_654_321,
+                    min_confirmations: 3,
+                    ..AddressFunds::default()
+                })),
+                100_000,
+                FundingProofStatus::Pending,
+                false,
+                true,
+            ),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(passive.contains("********"));
+        assert!(!passive.contains("987,654,321"));
+    }
 
     #[test]
     fn mounted_deposit_observation_masks_only_owned_amounts() {
