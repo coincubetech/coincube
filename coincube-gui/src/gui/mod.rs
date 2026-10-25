@@ -58,6 +58,89 @@ fn refreshes_claim_pair(message: &AppMessage) -> bool {
     )
 }
 
+/// The eye's message must retain the generation emitted by the App view.
+/// A bare `Run` has no provenance and cannot change a device-wide setting.
+fn balance_privacy_eye_change(
+    tab: Option<&tab::Tab>,
+    message: &tab::Message,
+) -> Option<(crate::app::settings::preferences::PreferenceChange, bool)> {
+    let run_change = |message: &tab::Message| match message {
+        tab::Message::Run(AppMessage::View(crate::app::view::Message::ChangeDevicePreference(
+            change,
+        ))) => Some(*change),
+        _ => None,
+    };
+    match message {
+        tab::Message::AppAsync(generation, inner) => run_change(inner).map(|change| {
+            let current = tab.is_some_and(|tab| {
+                tab.accepts_app_generation(*generation)
+                    && matches!(&tab.state, tab::State::App(app) if !app.cube_settings().network.is_blake2b())
+            });
+            (change, current)
+        }),
+        tab::Message::ForkAsync(generation, inner) => run_change(inner).map(|change| {
+            let current = tab.is_some_and(|tab| {
+                tab.accepts_fork_generation(*generation)
+                    && matches!(&tab.state, tab::State::App(app) if app.cube_settings().network.is_blake2b())
+            });
+            (change, current)
+        }),
+        other => run_change(other).map(|change| (change, false)),
+    }
+}
+
+#[cfg(test)]
+mod balance_privacy_eye_origin_tests {
+    use super::*;
+    use crate::app::{self, settings::preferences::PreferenceChange, view};
+
+    #[test]
+    fn queued_eye_event_cannot_change_device_privacy_after_app_closes() {
+        let _guard = app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path =
+            std::env::temp_dir().join(format!("privacy-eye-origin-{}", uuid::Uuid::new_v4()));
+        let (app, _) = app::claim_step1_tests::bitcoin_app(&path);
+        let mut tab = tab::Tab::new(1, tab::State::App(app));
+        let generation = tab.app_generation_token().unwrap();
+        let change = PreferenceChange::HideBalances(false);
+        let eye = || {
+            tab::Message::AppAsync(
+                generation,
+                Box::new(tab::Message::Run(AppMessage::View(
+                    view::Message::ChangeDevicePreference(change),
+                ))),
+            )
+        };
+
+        assert_eq!(
+            balance_privacy_eye_change(Some(&tab), &eye()),
+            Some((change, true))
+        );
+        assert_eq!(
+            balance_privacy_eye_change(
+                Some(&tab),
+                &tab::Message::Run(AppMessage::View(view::Message::ChangeDevicePreference(
+                    change
+                )))
+            ),
+            Some((change, false)),
+            "a bare Run event has no App generation"
+        );
+        drop(tab.update(tab::Message::LockCubeToLauncher));
+        assert!(matches!(tab.state, tab::State::Home(_)));
+        assert_eq!(
+            balance_privacy_eye_change(Some(&tab), &eye()),
+            Some((change, false))
+        );
+        std::fs::remove_dir_all(path).ok();
+    }
+}
+
 /// Exact provider/account context to revalidate on the next local PIN attempt.
 /// Holding this candidate grants neither seed access nor daemon authority.
 #[derive(Clone)]
@@ -374,6 +457,21 @@ impl GUI {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        // Intercept before stripping AppAsync/ForkAsync so a queued eye press
+        // from a closed or replaced Cube cannot mutate device preferences.
+        if let Message::Pane(pane_id, pane::Message::Tab(tab_id, inner)) = &message {
+            let tab = self
+                .panes
+                .get(*pane_id)
+                .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == *tab_id));
+            if let Some((change, current)) = balance_privacy_eye_change(tab, inner) {
+                return if current {
+                    self.change_balance_privacy(change)
+                } else {
+                    Task::none()
+                };
+            }
+        }
         // Validate session-tagged App callbacks before inspecting global auth
         // actions. A queued event from an old App cannot affect a reopened one.
         let message = match message {
@@ -1780,22 +1878,6 @@ impl GUI {
                 }
             }
             Message::Pane(i, msg) => {
-                if let pane::Message::Tab(tab_id, inner) = &msg {
-                    if let tab::Message::Run(AppMessage::View(
-                        crate::app::view::Message::ChangeDevicePreference(change),
-                    )) = inner.as_ref()
-                    {
-                        let current = self
-                            .panes
-                            .get(i)
-                            .is_some_and(|pane| pane.tabs.iter().any(|tab| tab.id == *tab_id));
-                        return if current {
-                            self.change_balance_privacy(*change)
-                        } else {
-                            Task::none()
-                        };
-                    }
-                }
                 // Bind the Claim's Bitcoin tab to its exact, currently open
                 // BTCB2 wallet immediately before a deposit or signed-pair
                 // broadcast check. Fork Cubes
