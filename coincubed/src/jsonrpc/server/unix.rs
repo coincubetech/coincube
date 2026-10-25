@@ -175,8 +175,23 @@ fn rpcserver_loop_with_timeout(
         // `read_command` propagates and which closes the connection with the
         // request unread. Each connection is served by its own blocking thread;
         // only the accept loop needs to poll.
-        connection.set_nonblocking(false)?;
-        connection.set_read_timeout(Some(idle_timeout))?;
+        // A client can disconnect between accept and socket configuration.
+        // The socket belongs to that client, so its failure must not stop the
+        // listener or keep later clients from reaching the daemon.
+        if let Err(error) = connection.set_nonblocking(false) {
+            log::warn!(
+                "Discarding JSONRPC client: blocking setup failed: {}",
+                error
+            );
+            continue;
+        }
+        if let Err(error) = connection.set_read_timeout(Some(idle_timeout)) {
+            log::warn!(
+                "Discarding JSONRPC client: read timeout setup failed: {}",
+                error
+            );
+            continue;
+        }
         log::trace!("New JSONRPC connection");
 
         while connections_counter.load(atomic::Ordering::Relaxed) >= MAX_CONNECTIONS {
@@ -375,6 +390,59 @@ mod tests {
         with_rpc_fixture(time::Duration::from_secs(1), false, |path, _, _| {
             request_from_late_client(path, true);
         });
+    }
+
+    /// A peer can close after connecting but before the accept loop configures
+    /// its socket. That abandoned connection must not stop later RPC clients.
+    #[test]
+    fn closed_peer_before_accept_does_not_stop_rpc_server() {
+        for closed_peer_first in [false, true] {
+            let daemon = crate::testutils::DummyCoincube::new(
+                crate::testutils::DummyBitcoind::new(),
+                crate::testutils::DummyDatabase::new(),
+            );
+            let socket_path = env::temp_dir().join(format!(
+                "rpc-closed-peer-{}-{:?}-{closed_peer_first}",
+                process::id(),
+                thread::current().id()
+            ));
+            let listener = rpcserver_setup(&socket_path).unwrap();
+            if closed_peer_first {
+                // Queue a real, already closed socket before starting accept().
+                drop(net::UnixStream::connect(&socket_path).unwrap());
+            }
+            let shutdown = sync::Arc::new(atomic::AtomicBool::new(false));
+            let server = thread::spawn({
+                let control = daemon.control().clone();
+                let shutdown = shutdown.clone();
+                move || {
+                    rpcserver_loop_with_timeout(
+                        listener,
+                        control,
+                        shutdown,
+                        time::Duration::from_secs(30),
+                        sync::Arc::new(atomic::AtomicU32::new(0)),
+                    )
+                }
+            });
+
+            let response = std::panic::catch_unwind(|| {
+                request_from_late_client(&socket_path, false);
+            });
+            shutdown.store(true, atomic::Ordering::Relaxed);
+            let server_result = server.join().unwrap();
+            daemon.shutdown();
+            fs::remove_file(&socket_path).unwrap();
+            assert!(
+                server_result.is_ok(),
+                "RPC server exited after closed_peer_first={}: {:?}",
+                closed_peer_first,
+                server_result
+            );
+            if let Err(panic) = response {
+                std::panic::resume_unwind(panic);
+            }
+        }
     }
 
     fn read_one_command(socket_path: &path::Path) -> thread::JoinHandle<Option<Request>> {
