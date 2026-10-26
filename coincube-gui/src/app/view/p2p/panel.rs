@@ -6683,6 +6683,8 @@ mod book_filter_tests {
         panel.orders[2].min_amount = Some(50_000.0);
         panel.orders[2].max_amount = Some(200_000.0);
         panel.orders[2].sats_amount = Some(450_000);
+        panel.orders[2].payment_methods =
+            vec!["Bank Transfer".into(), "Cash App".into(), "M-Pesa".into()];
         panel.orders[3].min_amount = Some(10_000.0);
         panel.orders[3].max_amount = Some(50_000.0);
         panel.recompute_available_payment_methods();
@@ -6704,9 +6706,12 @@ mod book_filter_tests {
                 assert!(inspection.contains("Fixed · 450,000 sats"));
                 assert!(inspection.contains("Market"));
                 assert!(inspection.contains("No rating"));
+                assert!(inspection.contains("Bank Transfer, Cash App, M-Pesa"));
                 assert_eq!(inspection.contains("Creator Reputation"), size.0 == 1440);
                 if size.0 == 1440 {
                     for label in [
+                        "Payment Method",
+                        "Bank Transfer, Cash App, M-Pesa",
                         "YOU ARE SELLING",
                         "50,000 – 200,000 NGN",
                         "10,000 – 50,000 KES",

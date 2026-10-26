@@ -6,7 +6,7 @@ use coincube_ui::{
 };
 use iced::{
     advanced::widget::Id,
-    widget::{column, container, row, Space},
+    widget::{column, container, row, text::Wrapping, Space},
     Alignment, Length,
 };
 
@@ -81,7 +81,7 @@ fn book_columns<'a>(
     row![
         container(side).width(Length::Fixed(120.0)),
         container(amount).width(Length::Fixed(145.0)),
-        container(payment).width(Length::Fill),
+        container(payment).width(Length::Fill).clip(true),
         container(price).width(Length::Fixed(125.0)),
         container(reputation).width(Length::Fixed(140.0)),
         container(trailing).width(Length::Fixed(16.0)),
@@ -95,7 +95,9 @@ pub fn order_table_header<'a>() -> Element<'a, view::Message> {
     container(book_columns(
         caption("Side").style(theme::text::secondary),
         caption("Amount").style(theme::text::secondary),
-        caption("Payment Method").style(theme::text::secondary),
+        caption("Payment Method")
+            .wrapping(Wrapping::None)
+            .style(theme::text::secondary),
         caption("Market Price").style(theme::text::secondary),
         caption("Creator Reputation").style(theme::text::secondary),
         caption(""),
@@ -221,7 +223,10 @@ pub fn order_card<'a>(order: &'a P2POrder, compact: bool) -> Element<'a, view::M
         book_columns(
             p2_bold(side).size(13).style(side_style),
             p2_bold(amount).size(13).style(theme::text::primary),
-            p2_regular(payment).size(13).style(theme::text::primary),
+            p2_regular(payment)
+                .size(13)
+                .wrapping(Wrapping::None)
+                .style(theme::text::primary),
             p2_regular(price).size(13).style(theme::text::primary),
             p2_regular(reputation)
                 .size(13)
