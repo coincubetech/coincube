@@ -163,7 +163,7 @@ pub(super) fn view_for_cube(settings: &Settings, supported: bool) -> Ui<'_> {
 
     page = page
         .push(planned_card())
-        .push(muted("Today · Persistent per-client Vault reads and experimental Regtest setup and unsigned transaction preparation. Planned · Guided pairing, multiple wallets and general transaction preparation."));
+        .push(muted("Today · Persistent per-client read access. Experimental Regtest setup and unsigned transaction preparation require separate enablement and consent. Planned · Guided pairing, multiple wallets and general transaction preparation."));
 
     container(page)
         .width(Length::Fill)
