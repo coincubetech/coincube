@@ -447,6 +447,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owner_verified_removal_works_with_corrupt_local_key_manifest() {
+        let mut f = Fixture::new().await;
+        f.install().await;
+        let key_root = f
+            .directory
+            .path()
+            .join("imported-local-keys")
+            .join(f.operation_id().to_string());
+        crate::dir::create_directory(&key_root).unwrap();
+        fs::write(key_root.join("manifest.json"), b"{invalid").unwrap();
+        fs::write(key_root.join("orphan.key"), b"synthetic ciphertext").unwrap();
+        let unrelated = f.directory.path().join("keep-me");
+        fs::write(&unrelated, b"unrelated").unwrap();
+
+        remove_cube_import(&f.directory, &f.cube).await.unwrap();
+        assert!(!key_root.exists());
+        assert_eq!(fs::read(unrelated).unwrap(), b"unrelated");
+        assert_eq!(Settings::from_file(&f.directory).unwrap().cubes.len(), 1);
+    }
+
+    #[tokio::test]
     async fn stale_retry_without_owner_does_not_remove_unclaimed_wallet_row() {
         let mut f = Fixture::new().await;
         f.install().await;

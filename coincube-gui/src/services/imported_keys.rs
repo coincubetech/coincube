@@ -1,14 +1,17 @@
 //! Operation-scoped encrypted local keys for an imported Bitcoin wallet.
 //!
 //! An immutable ciphertext is written and synced before its public manifest is
-//! atomically replaced. The manifest is the only admission point. A crash may
-//! leave an undeclared ciphertext, which is removed on the next successful
-//! mutation; it can never become a signer. No mnemonic enters Cube Settings.
+//! atomically replaced. The manifest is the only admission point. An
+//! undeclared ciphertext causes inventory and signing to fail closed; it is
+//! never deleted based on this unauthenticated public manifest. No mnemonic
+//! enters Cube Settings. A whole-operation-directory rollback is not detected
+//! here; an external authenticated anchor and recovery protocol are required
+//! before Keys, ordinary Send, or Recovery Kit may consume this repository.
 
 use std::{
     collections::HashSet,
     fs::{self, File, OpenOptions},
-    io::{ErrorKind, Write},
+    io::{ErrorKind, Read, Write},
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -299,20 +302,39 @@ impl<'a> LocalKeyRepository<'a> {
     fn read_manifest(&self) -> Result<Manifest, String> {
         let path = self.root().join(MANIFEST);
         reject_non_file(&path)?;
-        let bytes = match fs::read(path) {
-            Ok(bytes) => bytes,
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = match options.open(&path) {
+            Ok(file) => file,
             Err(e) if e.kind() == ErrorKind::NotFound => {
-                if fs::read_dir(self.root())
-                    .map_err(|_| "Cannot inspect imported key storage.")?
-                    .filter_map(Result::ok)
-                    .any(|entry| entry.file_name().to_string_lossy().ends_with(".key"))
+                for entry in
+                    fs::read_dir(self.root()).map_err(|_| "Cannot inspect imported key storage.")?
                 {
-                    return Err("Imported key manifest is missing for existing records.".into());
+                    let entry = entry.map_err(|_| "Cannot inspect imported key storage.")?;
+                    if entry.file_name().to_string_lossy().ends_with(".key") {
+                        return Err("Imported key manifest is missing for existing records.".into());
+                    }
                 }
                 return Ok(self.manifest(vec![]));
             }
             Err(_) => return Err("Cannot read imported key manifest.".into()),
         };
+        if !file
+            .metadata()
+            .map_err(|_| "Cannot inspect imported key manifest.")?
+            .is_file()
+        {
+            return Err("Imported key manifest endpoint is unsafe.".into());
+        }
+        let mut bytes = Vec::with_capacity(16_385);
+        file.take(16_385)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "Cannot read imported key manifest.")?;
         if bytes.len() > 16_384 {
             return Err("Imported key manifest is oversized.".into());
         }
@@ -348,7 +370,33 @@ impl<'a> LocalKeyRepository<'a> {
                 return Err("Duplicate or invalid imported key record.".into());
             }
         }
+        self.check_inventory(&manifest)?;
         Ok(manifest)
+    }
+
+    fn check_inventory(&self, manifest: &Manifest) -> Result<(), String> {
+        let declared: HashSet<_> = manifest
+            .records
+            .iter()
+            .map(LocalKeyRecord::file_name)
+            .collect();
+        let mut present = HashSet::new();
+        for entry in
+            fs::read_dir(self.root()).map_err(|_| "Cannot inspect imported key storage.")?
+        {
+            let entry = entry.map_err(|_| "Cannot inspect imported key storage.")?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".key") {
+                if !declared.contains(&name) {
+                    return Err("Imported key inventory contains an undeclared record.".into());
+                }
+                present.insert(name);
+            }
+        }
+        if present != declared {
+            return Err("Imported key inventory is missing a declared record.".into());
+        }
+        Ok(())
     }
 
     fn read_key(
@@ -358,15 +406,7 @@ impl<'a> LocalKeyRepository<'a> {
         device: &coincube_core::seed_crypt::DeviceSecret,
     ) -> Result<VerifiedImportedKey, String> {
         let path = self.root().join(record.file_name());
-        reject_non_file(&path)?;
-        if fs::metadata(&path)
-            .map_err(|_| "Imported key record is missing.")?
-            .len()
-            != imported_key_crypt::WIRE_LEN as u64
-        {
-            return Err("Imported key record has an invalid length.".into());
-        }
-        let bytes = fs::read(path).map_err(|_| "Imported key record is missing.")?;
+        let bytes = read_key_frame(&path)?;
         if bytes[imported_key_crypt::MARKER.len()] != DEVICE_BOUND_FORMAT_VERSION {
             return Err("Imported key protection was downgraded.".into());
         }
@@ -411,9 +451,6 @@ impl<'a> LocalKeyRepository<'a> {
                 &self.root().join(MANIFEST),
                 &serde_json::to_vec(&manifest).map_err(|_| "Cannot encode key manifest.")?,
             )?;
-        }
-        if manifest.records.is_empty() {
-            self.clean_unreferenced(&manifest)?;
         }
         let device = self.device(manifest.records.is_empty())?;
         self.admit_locked(
@@ -462,6 +499,7 @@ impl<'a> LocalKeyRepository<'a> {
         if verified.account() != account {
             return Err("The supplied words do not match this exact wallet account.".into());
         }
+        let retired = matching.map(|index| manifest.records[index].clone());
         let record = LocalKeyRecord::from_account(
             account,
             matching.map_or_else(Uuid::new_v4, |index| manifest.records[index].record_id),
@@ -474,20 +512,24 @@ impl<'a> LocalKeyRepository<'a> {
             Protection::DeviceBound(device),
         )
         .map_err(|_| "Cannot encrypt imported key.")?;
-        write_new(&self.root().join(record.file_name()), &ciphertext)?;
+        let staged = self.root().join(record.file_name());
+        write_new(&staged, &ciphertext)?;
         if let Some(index) = matching {
             manifest.records[index] = record.clone();
         } else {
             manifest.records.push(record.clone());
         }
         if !is_current() {
+            remove_staged(&staged)?;
             return Err("Imported key admission was cancelled.".into());
         }
         write_replace(
             &self.root().join(MANIFEST),
             &serde_json::to_vec(&manifest).map_err(|_| "Cannot encode key manifest.")?,
         )?;
-        self.clean_unreferenced(&manifest)?;
+        if let Some(retired) = retired {
+            self.remove_retired(&retired)?;
+        }
         Ok(record)
     }
 
@@ -574,7 +616,7 @@ impl<'a> LocalKeyRepository<'a> {
             .iter()
             .position(|r| r.record_id == record_id && r.revision == expected_revision)
             .ok_or("Imported key revision is stale or missing.")?;
-        manifest.records.remove(index);
+        let retired = manifest.records.remove(index);
         self.check_active()?;
         if !is_current() {
             return Err("Imported key removal was cancelled.".into());
@@ -583,26 +625,17 @@ impl<'a> LocalKeyRepository<'a> {
             &self.root().join(MANIFEST),
             &serde_json::to_vec(&manifest).map_err(|_| "Cannot encode key manifest.")?,
         )?;
-        self.clean_unreferenced(&manifest)
+        self.remove_retired(&retired)
     }
 
-    fn clean_unreferenced(&self, manifest: &Manifest) -> Result<(), String> {
-        let live: HashSet<_> = manifest
-            .records
-            .iter()
-            .map(LocalKeyRecord::file_name)
-            .collect();
-        for entry in
-            fs::read_dir(self.root()).map_err(|_| "Cannot inspect imported key storage.")?
-        {
-            let entry = entry.map_err(|_| "Cannot inspect imported key storage.")?;
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.ends_with(".key") && !live.contains(name.as_ref()) {
-                fs::remove_file(entry.path()).map_err(|_| "Cannot remove stale imported key.")?;
-            }
+    fn remove_retired(&self, record: &LocalKeyRecord) -> Result<(), String> {
+        let path = self.root().join(record.file_name());
+        reject_non_file(&path)?;
+        match fs::remove_file(&path) {
+            Ok(()) => sync_parent(&path),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+            Err(_) => Err("Cannot remove the replaced imported key.".into()),
         }
-        Ok(())
     }
 
     /// Called by the import removal transaction after it has checked the
@@ -622,7 +655,6 @@ impl<'a> LocalKeyRepository<'a> {
         }
         self.ensure_root()?;
         let lock = self.lock()?;
-        self.read_manifest()?;
         let tombstone = self.tombstone();
         write_new(&tombstone, b"removed-v1")?;
         drop(lock);
@@ -649,6 +681,54 @@ fn reject_non_file(path: &Path) -> Result<(), String> {
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
         Err(_) => Err("Cannot inspect imported key storage endpoint.".into()),
     }
+}
+
+/// Read from one opened endpoint with a fixed upper bound. The file can
+/// change after metadata inspection, so the actual returned length is the
+/// authority before any frame byte is indexed.
+fn read_key_frame(path: &Path) -> Result<Vec<u8>, String> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(path)
+        .map_err(|_| "Imported key record is missing or unsafe.")?;
+    let meta = file
+        .metadata()
+        .map_err(|_| "Cannot inspect imported key record.")?;
+    if !meta.is_file() {
+        return Err("Imported key record is not a regular file.".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o077 != 0 {
+            return Err("Imported key file permissions are unsafe.".into());
+        }
+    }
+    read_exact_frame(file)
+}
+
+fn read_exact_frame(reader: impl Read) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::with_capacity(imported_key_crypt::WIRE_LEN + 1);
+    reader
+        .take((imported_key_crypt::WIRE_LEN + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Cannot read imported key record.")?;
+    if bytes.len() != imported_key_crypt::WIRE_LEN {
+        return Err("Imported key record has an invalid length.".into());
+    }
+    Ok(bytes)
+}
+
+fn remove_staged(path: &Path) -> Result<(), String> {
+    reject_non_file(path)?;
+    fs::remove_file(path).map_err(|_| "Cannot discard cancelled imported key.")?;
+    sync_parent(path)
 }
 
 fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -790,6 +870,18 @@ mod tests {
         fn repository(&self) -> LocalKeyRepository<'_> {
             LocalKeyRepository::new(&self.directory, &self.cube, &self.attachment).unwrap()
         }
+
+        fn save_cube(&self, cube: CubeSettings) {
+            let settings = Settings {
+                cubes: vec![cube],
+                ..Settings::default()
+            };
+            fs::write(
+                self.directory.path().join("settings.json"),
+                serde_json::to_vec(&settings).unwrap(),
+            )
+            .unwrap();
+        }
     }
 
     impl Drop for Fixture {
@@ -834,6 +926,19 @@ mod tests {
         let reopened = fixture.repository();
         let manifest = reopened.read_manifest().unwrap();
         assert_eq!(manifest.records.len(), 2);
+        // A same-scope empty public manifest cannot hide the still-encrypted
+        // local records or authorize their deletion on a later admission.
+        let original_manifest = fs::read(reopened.root().join(MANIFEST)).unwrap();
+        write_replace(
+            &reopened.root().join(MANIFEST),
+            &serde_json::to_vec(&reopened.manifest(vec![])).unwrap(),
+        )
+        .unwrap();
+        assert!(reopened.read_manifest().is_err());
+        for record in &records {
+            assert!(reopened.root().join(record.file_name()).exists());
+        }
+        write_replace(&reopened.root().join(MANIFEST), &original_manifest).unwrap();
         for (index, record) in manifest.records.iter().enumerate() {
             assert_eq!(
                 reopened
@@ -1006,8 +1111,16 @@ mod tests {
         assert_eq!(manifest.records.len(), 2);
         assert!(manifest.records.contains(&replaced));
         assert!(manifest.records.contains(&second));
-        repository.clean_unreferenced(&manifest).unwrap();
         assert!(!repository.root().join(first.file_name()).exists());
+        let ciphertexts: HashSet<_> = fs::read_dir(repository.root())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".key"))
+            .collect();
+        assert_eq!(
+            ciphertexts,
+            HashSet::from([replaced.file_name(), second.file_name()])
+        );
         assert_eq!(
             repository
                 .read_key(&second, "synthetic unlock", &device)
@@ -1026,5 +1139,98 @@ mod tests {
         assert!(!repository.root().exists());
         repository.remove_operation_storage().unwrap();
         assert!(repository.lock().is_err());
+    }
+
+    #[test]
+    fn owner_removal_accepts_corrupt_or_missing_inventory() {
+        for corrupt_manifest in [true, false] {
+            let fixture = Fixture::new();
+            let repository = fixture.repository();
+            repository.ensure_root().unwrap();
+            write_new(&repository.root().join("orphan.key"), b"opaque ciphertext").unwrap();
+            if corrupt_manifest {
+                write_new(&repository.root().join(MANIFEST), b"{invalid").unwrap();
+            }
+            assert!(repository.read_manifest().is_err());
+            repository.remove_operation_storage().unwrap();
+            assert!(repository.is_removed().unwrap());
+            assert!(!repository.root().exists());
+        }
+    }
+
+    #[test]
+    fn short_or_growing_record_read_is_bounded_and_never_indexes_short_data() {
+        use std::io::Cursor;
+        let len = imported_key_crypt::WIRE_LEN;
+        assert!(read_exact_frame(Cursor::new(vec![0u8; len - 1])).is_err());
+        assert!(read_exact_frame(std::io::repeat(0)).is_err());
+        let fixture = Fixture::new();
+        let repository = fixture.repository();
+        repository.ensure_root().unwrap();
+        let path = repository.root().join("short.key");
+        write_new(&path, b"short").unwrap();
+        assert!(read_key_frame(&path).is_err());
+        fs::write(&path, vec![0u8; len + 1]).unwrap();
+        assert!(read_key_frame(&path).is_err());
+        #[cfg(unix)]
+        {
+            let link = repository.root().join("link.key");
+            std::os::unix::fs::symlink(&path, &link).unwrap();
+            assert!(read_key_frame(&link).is_err());
+        }
+    }
+
+    #[test]
+    fn public_inventory_requires_current_cube_import_unlock_and_no_duress() {
+        let _guard = app::session::test_guard();
+        app::session::close();
+        let fixture = Fixture::new();
+        fixture.save_cube(fixture.cube.clone());
+        let repository = fixture.repository();
+        assert!(repository.records().is_err(), "locked Cube must refuse");
+
+        app::session::open("another-cube", Zeroizing::new("synthetic PIN".into()));
+        assert!(
+            repository.records().is_err(),
+            "wrong Cube session must refuse"
+        );
+        app::session::open(
+            fixture.cube.id.clone(),
+            Zeroizing::new("synthetic PIN".into()),
+        );
+        assert!(repository.records().unwrap().is_empty());
+
+        let mut changed = fixture.cube.clone();
+        changed.bitcoin_import.as_mut().unwrap().operation_id = Uuid::new_v4();
+        fixture.save_cube(changed);
+        assert!(
+            repository.records().is_err(),
+            "changed live operation must refuse"
+        );
+        fixture.save_cube(fixture.cube.clone());
+
+        for state in [
+            DuressLocalState {
+                enrolled: true,
+                ..DuressLocalState::default()
+            },
+            DuressLocalState {
+                arming: true,
+                ..DuressLocalState::default()
+            },
+            DuressLocalState {
+                active: true,
+                ..DuressLocalState::default()
+            },
+        ] {
+            state.save(&fixture.root).unwrap();
+            assert!(repository.records().is_err(), "Duress Mode must refuse");
+        }
+        DuressLocalState::default().save(&fixture.root).unwrap();
+        assert!(repository.records().unwrap().is_empty());
+
+        repository.remove_operation_storage().unwrap();
+        assert!(repository.records().is_err(), "tombstone must refuse");
+        app::session::close();
     }
 }

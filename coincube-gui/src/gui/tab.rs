@@ -141,6 +141,8 @@ impl State {
 /// - `data/` — wallet databases (BDK, plus breez/spark per-Cube working data
 ///   under `data/<wallet_id>/`),
 /// - `mnemonics/` — the master seed phrases (the crown jewels),
+/// - `imported-local-keys/` — encrypted independent imported roots, public
+///   account inventory and operation tombstones,
 /// - `settings.json` — Cube metadata. (The PIN and duress-PIN hashes that used
 ///   to live here are gone; the duress *marker* now lives in `mnemonics/`, so
 ///   it is wiped by that entry.)
@@ -151,7 +153,7 @@ impl State {
 /// live outside any network directory. Re-checking existence each call makes
 /// this robust to an interrupted wipe: whatever remains is targeted again.
 fn duress_wipe_targets(root: &std::path::Path) -> Vec<std::path::PathBuf> {
-    const CUBE_MATERIAL: &[&str] = &["data", "mnemonics", "settings.json"];
+    const CUBE_MATERIAL: &[&str] = &["data", "mnemonics", "imported-local-keys", "settings.json"];
     let mut targets = Vec::new();
 
     // A duress wipe must never leave seeds or PIN hashes behind because a virus
@@ -5319,10 +5321,23 @@ mod duress_wipe_target_tests {
         let net = root.join("bitcoin");
         touch(&net.join("data").join("cube_a").join("wallet.db"));
         touch(&net.join("mnemonics").join("aabbccdd-master"));
+        touch(
+            &net.join("imported-local-keys")
+                .join("operation-a")
+                .join("record.key"),
+        );
         touch(&net.join("settings.json"));
         touch(&net.join("connect.json"));
+        touch(&root.join("duress-state.json"));
         // A second network is covered too.
         touch(&root.join("testnet").join("mnemonics").join("seed"));
+        touch(
+            &root
+                .join("testnet")
+                .join("imported-local-keys")
+                .join("operation-b")
+                .join("manifest.json"),
+        );
         // bitcoind (root-level, not a network dir): the blockchain is preserved,
         // but inbound-over-Tor identifying material (Tor data + onion key) is
         // obliterated — see Decision 4.
@@ -5352,6 +5367,10 @@ mod duress_wipe_target_tests {
             "mnemonics/ (seeds) must be wiped"
         );
         assert!(
+            targets.contains(&net.join("imported-local-keys")),
+            "imported independent keys and inventory must be wiped"
+        );
+        assert!(
             targets.contains(&net.join("settings.json")),
             "settings.json (PIN hashes) must be wiped"
         );
@@ -5359,10 +5378,18 @@ mod duress_wipe_target_tests {
             targets.contains(&root.join("testnet").join("mnemonics")),
             "every network's seeds must be wiped"
         );
+        assert!(
+            targets.contains(&root.join("testnet").join("imported-local-keys")),
+            "every network's imported keys must be wiped"
+        );
         // Cached Connect auth is preserved.
         assert!(
             !targets.iter().any(|t| t.ends_with("connect.json")),
             "connect.json (cached auth) must survive"
+        );
+        assert!(
+            !targets.iter().any(|t| t.ends_with("duress-state.json")),
+            "root-level duress state must survive for activation recovery"
         );
         // The blockchain is preserved (expensive to re-sync, not sensitive)...
         assert!(
@@ -5410,6 +5437,10 @@ mod duress_wipe_target_tests {
         assert!(
             !targets.contains(&net.join("mnemonics")),
             "absent mnemonics/ must not be targeted"
+        );
+        assert!(
+            !targets.contains(&net.join("imported-local-keys")),
+            "absent imported-local-keys/ must not be targeted"
         );
         assert!(
             !targets.contains(&net.join("settings.json")),
