@@ -89,8 +89,8 @@ fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
             let mut sections = vec![
                 (CubeSettingsOption::General, "Display & appearance", "display"),
                 (CubeSettingsOption::Recovery, "Backup & protection", "backup"),
-                (CubeSettingsOption::AiAccess, "AI access", "ai-access"),
                 (CubeSettingsOption::PaymentChecks, "Payment checks", "payment-checks"),
+                (CubeSettingsOption::AiAccess, "AI access", "ai-access"),
                 (CubeSettingsOption::DataExports, "Data & exports", "data"),
                 (CubeSettingsOption::Stats, "Download stats", "stats"),
                 (CubeSettingsOption::About, "About", "about"),
@@ -104,8 +104,8 @@ fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
                     id: match id {
                         "display" => "tenshu.settings.route.cube.display",
                         "backup" => "tenshu.settings.route.cube.backup",
-                        "ai-access" => "tenshu.settings.route.cube.ai-access",
                         "payment-checks" => "tenshu.settings.route.cube.payment-checks",
+                        "ai-access" => "tenshu.settings.route.cube.ai-access",
                         "data" => "tenshu.settings.route.cube.data",
                         "stats" => "tenshu.settings.route.cube.stats",
                         "about" => "tenshu.settings.route.cube.about",
@@ -318,11 +318,26 @@ mod tests {
     }
 
     #[test]
-    fn cube_settings_exposes_read_only_ai_access_route() {
-        let menu = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::AiAccess));
-        assert!(section_routes(&menu, &Cache::default())
+    fn cube_settings_exposes_ai_access_in_the_rendered_route_choices() {
+        let menu = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::General));
+        let sections = section_routes(&menu, &Cache::default());
+        assert!(sections.iter().any(|choice| {
+            choice.id == "tenshu.settings.route.cube.ai-access"
+                && choice.label == "AI access"
+                && choice.enabled
+                && !choice.selected
+                && matches!(
+                    choice.intent,
+                    Message::Menu(Menu::Cube(CubeSubMenu::Settings(
+                        CubeSettingsOption::AiAccess
+                    )))
+                )
+        }));
+
+        let ai_menu = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::AiAccess));
+        assert!(section_routes(&ai_menu, &Cache::default())
             .iter()
-            .any(|choice| { choice.label == "AI access" && choice.selected && choice.enabled }));
+            .any(|choice| choice.label == "AI access" && choice.selected));
     }
 
     #[test]

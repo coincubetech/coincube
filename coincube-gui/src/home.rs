@@ -7190,8 +7190,8 @@ impl DeleteCubeModal {
 
                 self.warning = None;
 
-                // Pairings are authorization material scoped to this Cube.
-                // Remove them before deleting its wallet and settings.
+                // Pairing is identifying authorization material. Remove it
+                // before deleting the Cube, while its exact identity is known.
                 if let Err(error) =
                     crate::app::local_mcp::remove_cube_pairings(&self.datadir_root, &self.cube)
                 {

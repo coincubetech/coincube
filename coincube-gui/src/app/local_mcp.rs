@@ -13,6 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 mod pairings;
 mod presentation;
+#[cfg(feature = "mcp-transactions")]
+pub(crate) mod transactions;
 
 /// Remove only the selected Cube's pairing files, never its keystore/seed.
 pub(crate) fn remove_cube_pairings(
@@ -527,6 +529,15 @@ impl Settings {
                 // capability choices; the previous grant is not a template.
                 self.wallet_allowed = false;
                 self.capabilities = [false; 3];
+                #[cfg(feature = "mcp-transactions")]
+                {
+                    self.transactions_allowed = false;
+                }
+                #[cfg(feature = "mcp-proposals")]
+                {
+                    self.proposals_allowed = false;
+                    self.creation_allowed = false;
+                }
             }
         }
     }
@@ -548,6 +559,15 @@ impl Settings {
                 self.revoke();
                 self.wallet_allowed = false;
                 self.capabilities = [false; 3];
+                #[cfg(feature = "mcp-transactions")]
+                {
+                    self.transactions_allowed = false;
+                }
+                #[cfg(feature = "mcp-proposals")]
+                {
+                    self.proposals_allowed = false;
+                    self.creation_allowed = false;
+                }
                 self.client_name.clear();
                 self.enabled = value && cfg!(any(unix, windows));
                 if let Some(store) = &mut self.pairing_store {
@@ -1230,6 +1250,10 @@ mod tests {
             enabled: true,
             wallet_allowed: true,
             capabilities: [true, false, true],
+            #[cfg(feature = "mcp-transactions")]
+            transactions_allowed: true,
+            #[cfg(feature = "mcp-proposals")]
+            creation_allowed: true,
             client_name: "first client".into(),
             ..Settings::default()
         };
@@ -1237,6 +1261,10 @@ mod tests {
         assert!(settings.client_name.is_empty());
         assert!(!settings.wallet_allowed);
         assert_eq!(settings.capabilities, [false; 3]);
+        #[cfg(feature = "mcp-transactions")]
+        assert!(!settings.transactions_allowed);
+        #[cfg(feature = "mcp-proposals")]
+        assert!(!settings.creation_allowed);
 
         settings.client_name = "second client".into();
         assert!(!settings.wallet_allowed && !settings.capabilities.iter().any(|v| *v));
@@ -1288,6 +1316,8 @@ mod tests {
             daemon: Some(daemon.clone()),
             supported: true,
             proposal_supported: false,
+            #[cfg(feature = "mcp-transactions")]
+            last_poll_at_startup: None,
         });
         assert_eq!(paired.paired.len(), 1);
         let render = |scenario: &str, settings: &Settings| {
@@ -1893,7 +1923,7 @@ mod tests {
             );
             for message in [
                 Message::ClientName("History client".into()),
-                Message::Wallet(true),
+                Message::Capability(0, false),
                 Message::Capability(1, true),
                 Message::Pair,
             ] {
@@ -2112,11 +2142,14 @@ mod tests {
             let tools = discovered["tools"].as_array().unwrap();
             let names: std::collections::BTreeSet<_> = tools.iter()
                 .map(|tool| tool["name"].as_str().unwrap()).collect();
-            assert_eq!(tools.len(), 5);
+            assert_eq!(tools.len(), 10);
             assert_eq!(names, std::collections::BTreeSet::from([
                 "tenshu_get_capabilities", "tenshu_list_wallets",
                 "tenshu_get_wallet_summary", "tenshu_get_transactions",
-                "tenshu_get_wallet_policy_summary",
+                "tenshu_get_wallet_policy_summary", "tenshu_prepare_wallet_proposal",
+                "tenshu_get_wallet_proposal", "tenshu_prepare_wallet_creation",
+                "tenshu_prepare_transaction",
+                "tenshu_get_prepared_transaction",
             ]));
             let call = |id, name: &str, arguments: Value| json!({"jsonrpc":"2.0", "id":id, "method":"tools/call", "params":{"name":name,"arguments":arguments}});
             let listed = response(&mut stdin, &mut stdout, call(3, "tenshu_list_wallets", json!({}))).await;
@@ -2131,6 +2164,25 @@ mod tests {
             let denied = response(&mut stdin, &mut stdout, call(7, "tenshu_get_wallet_summary", json!({"wallet_id":"another-wallet"}))).await;
             assert_eq!(denied["isError"], true);
             assert_eq!(denied["structuredContent"]["error"]["code"], "access_denied");
+            let setup_denied = response(&mut stdin, &mut stdout, call(10, "tenshu_prepare_wallet_creation", json!({
+                "request_id":"read-grant-must-not-prepare",
+                "topology":{
+                    "primary":{"threshold":3,"key_count":5},
+                    "recovery":{"quorum":{"threshold":2,"key_count":3},"relative_delay_blocks":144}
+                },
+                "keys":{"primary":vec!["unverified";5],"recovery":vec!["unverified";3]}
+            }))).await;
+            assert_eq!(setup_denied["isError"], true);
+            assert_eq!(setup_denied["structuredContent"], json!({"error":{"code":"access_denied"}}));
+            let transaction_denied = response(&mut stdin, &mut stdout, call(11, "tenshu_prepare_transaction", json!({
+                "wallet_id": id, "request_id": "read-grant-must-not-prepare",
+                "recipients": [{"address": "bcrt1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqdku202", "amount_sats": 10000}],
+                "fee_rate_sat_vb": 2, "max_fee_sats": 1000
+            }))).await;
+            assert_eq!(transaction_denied["isError"], true);
+            assert_eq!(transaction_denied["structuredContent"], json!({"error":{"code":"access_denied"}}));
+            let draft_denied = response(&mut stdin, &mut stdout, call(12, "tenshu_get_prepared_transaction", json!({"wallet_id": id, "draft_id": "foreign"}))).await;
+            assert_eq!(draft_denied["structuredContent"], json!({"error":{"code":"access_denied"}}));
             super::super::session::close();
             let locked = response(&mut stdin, &mut stdout, call(8, "tenshu_get_wallet_summary", json!({"wallet_id":id}))).await;
             assert_eq!(locked["structuredContent"]["error"]["code"], "access_denied");

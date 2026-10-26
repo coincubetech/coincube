@@ -163,7 +163,7 @@ pub(super) fn view_for_cube(settings: &Settings, supported: bool) -> Ui<'_> {
 
     page = page
         .push(planned_card())
-        .push(muted("Today · Persistent per-client read access to one active embedded Vault. Planned · Guided pairing, multiple wallets, managed setup and general transaction preparation."));
+        .push(muted("Today · Persistent per-client Vault reads and experimental Regtest setup and unsigned transaction preparation. Planned · Guided pairing, multiple wallets and general transaction preparation."));
 
     container(page)
         .width(Length::Fill)
@@ -212,7 +212,7 @@ fn pairing_card(settings: &Settings) -> Ui<'_> {
         .spacing(11)
         .width(Length::Fill)
         .push(heading("Choose this client's access"))
-        .push(muted("Each client needs a name, this Vault, and at least one read permission. Nothing is selected automatically for the next client."))
+        .push(muted("Each client needs a name, this Vault, and an explicit permission. Nothing is selected automatically for the next client."))
         .push(selection(
             "tenshu.ai-access.enable",
             "Enable AI access for this Cube",
@@ -492,7 +492,7 @@ pub(super) fn paired_clients(settings: &Settings) -> Ui<'_> {
 fn empty_card<'a>() -> Ui<'a> {
     card(column![
         heading("No clients paired"),
-        muted("Pair one client with a name and explicit read permissions. Its access lasts until you revoke it."),
+        muted("Pair one client with a name and explicit permissions. Its access lasts until you revoke it."),
     ]
     .spacing(5))
 }
@@ -500,13 +500,13 @@ fn empty_card<'a>() -> Ui<'a> {
 fn planned_card<'a>() -> Ui<'a> {
     card(column![
         section_title("More ways to work with AI", "Planned", Tone::Muted),
-        muted("Guided pairing with a one-time code, multiple wallet scopes, editing permissions, AI-managed wallet setup and general unsigned transaction preparation are not available here yet."),
+        muted("Guided pairing with a one-time code, multiple wallet scopes, editing permissions, and general unsigned transaction preparation are planned. Regtest wallet setup uses a separate native flow."),
         Row::new()
             .spacing(6)
             .push(chip("Guided pairing · Planned", Tone::Muted))
             .push(chip("Multiple wallets · Planned", Tone::Muted))
-            .push(chip("Manage setup · Planned", Tone::Muted))
-            .push(chip("Prepare transactions · Planned", Tone::Muted))
+            .push(chip("General wallet setup · Planned", Tone::Muted))
+            .push(chip("General transactions · Planned", Tone::Muted))
             .wrap(),
     ]
     .spacing(9))

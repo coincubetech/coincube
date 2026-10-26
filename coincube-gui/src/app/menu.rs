@@ -29,8 +29,8 @@ pub enum CubeSubMenu {
 /// Avatar and Members, lifted out of the per-Cube Connect surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CubeSettingsOption {
-    General,
     AiAccess,
+    General,
     /// Backup & recovery: local paper backup, the Connect Recovery Kit
     /// (password / Keychain), and Vault Recovery Alerts. Split out of General
     /// so each screen stays focused.

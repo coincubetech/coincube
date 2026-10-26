@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use iced::advanced::widget::Id;
 use iced::{
     alignment::Horizontal,
     widget::{checkbox, scrollable, tooltip, Space},
@@ -29,6 +30,24 @@ use coincube_ui::{
     icon, theme,
     widget::{Button, Column, ColumnExt, Container, Element, Row, RowExt, TextInput},
 };
+
+pub(crate) fn action_id(scope: u64, name: &str) -> Id {
+    Id::from(format!("tenshu.psbt.{scope}.{name}"))
+}
+
+fn primary_action<'a>(
+    id: Id,
+    label: &'static str,
+) -> coincube_ui::widget::action::Action<'a, Message> {
+    button::primary_action(id, None, label, Message::FocusAction)
+}
+
+fn secondary_action<'a>(
+    id: Id,
+    label: &'static str,
+) -> coincube_ui::widget::action::Action<'a, Message> {
+    button::secondary_action(id, None, label, Message::FocusAction)
+}
 
 use crate::{
     app::{
@@ -150,6 +169,7 @@ fn replay_status_view<'a>(pill: &ReplayPill<'a>) -> Element<'a, Message> {
 
 #[allow(clippy::too_many_arguments)]
 pub fn psbt_view<'a>(
+    action_scope: u64,
     cache: &'a Cache,
     tx: &'a SpendTx,
     saved: bool,
@@ -187,6 +207,7 @@ pub fn psbt_view<'a>(
             )
             .push(spend_header(tx, labels_editing, bitcoin_unit))
             .push(spend_overview_view(
+                action_scope,
                 tx,
                 desc_info,
                 key_aliases,
@@ -221,7 +242,7 @@ pub fn psbt_view<'a>(
             .push(if saved {
                 Row::new()
                     .push(
-                        button::secondary(None, "Delete")
+                        secondary_action(action_id(action_scope, "overview.delete"), "Delete")
                             .width(Length::Fixed(200.0))
                             .on_press_maybe(if currently_signing {
                                 None
@@ -234,7 +255,7 @@ pub fn psbt_view<'a>(
                 Row::new()
                     .push(Space::new().width(Length::Fill))
                     .push(
-                        button::secondary(None, "Save")
+                        secondary_action(action_id(action_scope, "overview.save"), "Save")
                             .width(Length::Fixed(150.0))
                             .on_press_maybe(if currently_signing {
                                 None
@@ -510,7 +531,7 @@ pub fn delete_action<'a>(deleted: bool) -> Element<'a, Message> {
 /// over Wi-Fi (local signing, no Connect needed). `signed_in` tweaks the
 /// wording — once tokens exist, the blocker is device/stream readiness
 /// rather than a missing sign-in.
-pub fn keychain_unavailable_action<'a>(signed_in: bool) -> Element<'a, Message> {
+pub fn keychain_unavailable_action<'a>(action_scope: u64, signed_in: bool) -> Element<'a, Message> {
     let body = if signed_in {
         "Connect hasn't finished setting up this device for Keychain \
          signing. Set it up now, or pair a phone over Wi-Fi to sign \
@@ -538,18 +559,30 @@ pub fn keychain_unavailable_action<'a>(signed_in: bool) -> Element<'a, Message> 
                     .spacing(10)
                     .push(Column::new().width(Length::Fill))
                     .push(
-                        button::transparent(None, "Cancel")
-                            .on_press(Message::Spend(SpendTxMessage::Cancel)),
+                        button::secondary_action(
+                            action_id(action_scope, "keychain-unavailable.cancel"),
+                            None,
+                            "Cancel",
+                            Message::FocusAction,
+                        )
+                        .style(theme::button::container)
+                        .on_press(Message::Spend(SpendTxMessage::Cancel)),
                     )
                     .push(
-                        button::secondary(None, "Pair a phone")
-                            .on_press(Message::Spend(SpendTxMessage::KeychainPairPhone))
-                            .width(Length::Fixed(140.0)),
+                        secondary_action(
+                            action_id(action_scope, "keychain-unavailable.pair"),
+                            "Pair a phone",
+                        )
+                        .on_press(Message::Spend(SpendTxMessage::KeychainPairPhone))
+                        .width(Length::Fixed(140.0)),
                     )
                     .push(
-                        button::primary(None, primary_label)
-                            .on_press(Message::Spend(primary_msg))
-                            .width(Length::Fixed(190.0)),
+                        primary_action(
+                            action_id(action_scope, "keychain-unavailable.connect"),
+                            primary_label,
+                        )
+                        .on_press(Message::Spend(primary_msg))
+                        .width(Length::Fixed(190.0)),
                     )
                     .align_y(Alignment::Center),
             ),
@@ -619,6 +652,7 @@ pub fn spend_header<'a>(
 
 #[allow(clippy::too_many_arguments)]
 pub fn spend_overview_view<'a>(
+    action_scope: u64,
     tx: &'a SpendTx,
     desc_info: &'a CoincubePolicy,
     key_aliases: &'a HashMap<Fingerprint, String>,
@@ -628,6 +662,7 @@ pub fn spend_overview_view<'a>(
     broadcast_ready: bool,
 ) -> Element<'a, Message> {
     spend_overview_with_cancel(
+        action_scope,
         tx,
         desc_info,
         key_aliases,
@@ -641,6 +676,7 @@ pub fn spend_overview_view<'a>(
 
 #[allow(clippy::too_many_arguments)]
 pub fn spend_overview_with_cancel<'a>(
+    action_scope: u64,
     tx: &'a SpendTx,
     desc_info: &'a CoincubePolicy,
     key_aliases: &'a HashMap<Fingerprint, String>,
@@ -659,13 +695,17 @@ pub fn spend_overview_with_cancel<'a>(
     // Force the user to save (which commits the derivation-index increment to the
     // database) before exporting, otherwise the exported PSBT can lead to change
     // address reuse.
-    let export_button = button::secondary(Some(icon::backup_icon()), "Export").on_press_maybe(
-        if currently_signing || !saved {
-            None
-        } else {
-            Some(Message::ExportPsbt)
-        },
-    );
+    let export_button = button::secondary_action(
+        action_id(action_scope, "overview.export"),
+        Some(icon::backup_icon()),
+        "Export",
+        Message::FocusAction,
+    )
+    .on_press_maybe(if currently_signing || !saved {
+        None
+    } else {
+        Some(Message::ExportPsbt)
+    });
     Column::new()
         .spacing(20)
         .push(
@@ -696,9 +736,11 @@ pub fn spend_overview_with_cancel<'a>(
                                                 ))
                                             })
                                             .push(
-                                                button::secondary(
+                                                button::secondary_action(
+                                                    action_id(action_scope, "overview.import"),
                                                     Some(icon::restore_icon()),
                                                     "Import",
+                                                    Message::FocusAction,
                                                 )
                                                 .on_press_maybe(if currently_signing || !saved {
                                                     None
@@ -717,8 +759,10 @@ pub fn spend_overview_with_cancel<'a>(
                                             .style(theme::text::secondary),
                                     )
                                     .push(
-                                        Button::new(
+                                        coincube_ui::widget::action::Action::new(
+                                            action_id(action_scope, "overview.copy-txid"),
                                             icon::clipboard_icon().style(theme::text::secondary),
+                                            Message::FocusAction,
                                         )
                                         .on_press(Message::CopyWithToast(
                                             tx.psbt.unsigned_tx.compute_txid().to_string(),
@@ -741,7 +785,7 @@ pub fn spend_overview_with_cancel<'a>(
             Some(
                 Row::new()
                     .push(Space::new().width(Length::Fill))
-                    .push_maybe(cancel.map(|message| button::secondary(None, "Cancel")
+                    .push_maybe(cancel.map(|message| secondary_action(action_id(action_scope, "overview.cancel"), "Cancel")
                         .on_press(message).width(Length::Fixed(150.0))))
                     .push(if tx.status != SpendStatus::Pending {
                         None
@@ -752,7 +796,7 @@ pub fn spend_overview_with_cancel<'a>(
                         // as its own row.
                         Some(
                             Row::new().push(
-                                button::primary(None, "Sign")
+                                primary_action(action_id(action_scope, "overview.sign"), "Sign")
                                     .on_press(Message::Spend(SpendTxMessage::Sign))
                                     .width(Length::Fixed(150.0)),
                             ),
@@ -762,7 +806,7 @@ pub fn spend_overview_with_cancel<'a>(
                         // spend awaits its acknowledgement.
                         Some(
                             Row::new().push(
-                                button::primary(None, "Broadcast")
+                                primary_action(action_id(action_scope, "overview.broadcast"), "Broadcast")
                                     .on_press_maybe(
                                         broadcast_ready
                                             .then_some(Message::Spend(SpendTxMessage::Broadcast)),
@@ -1660,7 +1704,23 @@ fn signing_key_kind_caption(kind: &SigningKeyKind) -> Option<&'static str> {
 
 /// Render one signer row inside a spending-path card. The key icon is colored
 /// with the path color, matching the creation "Set keys" look.
-fn signing_key_row(row: &SigningKeyRow, color: iced::Color) -> Element<'static, Message> {
+fn signing_key_row(
+    row: &SigningKeyRow,
+    color: iced::Color,
+    action_scope: u64,
+    sequence: Option<u16>,
+) -> Element<'static, Message> {
+    let row_id = |action: &str| {
+        action_id(
+            action_scope,
+            &format!(
+                "picker.path.{}.key.{}.{}",
+                sequence.map_or_else(|| "primary".to_string(), |seq| seq.to_string()),
+                row.fingerprint,
+                action
+            ),
+        )
+    };
     let key_icon = match row.kind {
         SigningKeyKind::Hardware => icon::usb_drive_icon(),
         _ => icon::round_key_icon(),
@@ -1701,7 +1761,8 @@ fn signing_key_row(row: &SigningKeyRow, color: iced::Color) -> Element<'static, 
                 // Bubbles straight to the tab (which opens/focuses the Home
                 // tab for sign-in) without routing through the PSBT panel, so
                 // the picker stays open behind the new tab.
-                button::secondary(None, "Sign in to Connect").on_press(Message::OpenConnectSignIn),
+                secondary_action(row_id("sign-in"), "Sign in to Connect")
+                    .on_press(Message::OpenConnectSignIn),
             )
             .into(),
         SigningKeyState::NeedsAccountSwitch(reason) => Column::new()
@@ -1709,13 +1770,18 @@ fn signing_key_row(row: &SigningKeyRow, color: iced::Color) -> Element<'static, 
             .align_x(Alignment::End)
             .push(p1_regular(reason.clone()).style(theme::text::secondary))
             .push(
-                button::secondary(None, "Switch account")
+                secondary_action(row_id("switch-account"), "Switch account")
                     .on_press(Message::OpenConnectSwitchAccount),
             )
             .into(),
-        SigningKeyState::Retry(idx) => button::secondary(Some(icon::reload_icon()), "Retry")
-            .on_press(Message::Spend(SpendTxMessage::RetryKeychainSigner(*idx)))
-            .into(),
+        SigningKeyState::Retry(idx) => button::secondary_action(
+            row_id("retry"),
+            Some(icon::reload_icon()),
+            "Retry",
+            Message::FocusAction,
+        )
+        .on_press(Message::Spend(SpendTxMessage::RetryKeychainSigner(*idx)))
+        .into(),
         // Stacked like `NeedsSignIn`, for the same reason: beside the `Fill`
         // info column the buttons' labels would wrap.
         SigningKeyState::LanFailed {
@@ -1728,14 +1794,21 @@ fn signing_key_row(row: &SigningKeyRow, color: iced::Color) -> Element<'static, 
                 .align_x(Alignment::End)
                 .push(p1_regular(reason.clone()).style(theme::text::secondary));
             if *connect {
-                col = col.push(button::primary(None, "Send through Connect").on_press(
-                    Message::Spend(SpendTxMessage::SelectKeychainSigner(row.fingerprint)),
-                ));
+                col = col.push(
+                    primary_action(row_id("send-connect"), "Send through Connect").on_press(
+                        Message::Spend(SpendTxMessage::SelectKeychainSigner(row.fingerprint)),
+                    ),
+                );
             }
             if retry.is_some() {
                 col = col.push(
-                    button::secondary(Some(icon::reload_icon()), "Try Wi-Fi again")
-                        .on_press(Message::SelectPsbtHardwareWallet(row.fingerprint)),
+                    button::secondary_action(
+                        row_id("retry-wifi"),
+                        Some(icon::reload_icon()),
+                        "Try Wi-Fi again",
+                        Message::FocusAction,
+                    )
+                    .on_press(Message::SelectPsbtHardwareWallet(row.fingerprint)),
                 );
             }
             col.into()
@@ -1757,7 +1830,9 @@ fn signing_key_row(row: &SigningKeyRow, color: iced::Color) -> Element<'static, 
                     "Request",
                 ),
             };
-            button::primary(None, label).on_press(msg).into()
+            primary_action(row_id("activate"), label)
+                .on_press(msg)
+                .into()
         }
     };
 
@@ -1806,7 +1881,7 @@ fn signing_threshold_badge<'a>(
 /// Render one spending-path card, mirroring the creation "Set keys" page. The
 /// active path is fully expanded; inactive paths default to a collapsed header
 /// (title + subtitle + note) with a caret, toggled via `ToggleSpendPath`.
-fn signing_path_card(path: SigningPath) -> Element<'static, Message> {
+fn signing_path_card(path: SigningPath, action_scope: u64) -> Element<'static, Message> {
     let SigningPath {
         title,
         is_primary,
@@ -1851,7 +1926,14 @@ fn signing_path_card(path: SigningPath) -> Element<'static, Message> {
         } else {
             icon::collapse_icon()
         };
-        Button::new(
+        coincube_ui::widget::action::Action::new(
+            action_id(
+                action_scope,
+                &format!(
+                    "picker.path.{}.toggle",
+                    sequence.map_or_else(|| "primary".to_string(), |seq| seq.to_string())
+                ),
+            ),
             Column::new()
                 .spacing(6)
                 .push(
@@ -1871,6 +1953,7 @@ fn signing_path_card(path: SigningPath) -> Element<'static, Message> {
                     p2_regular("This spending path isn't available for this transaction.")
                         .style(theme::text::secondary),
                 ),
+            Message::FocusAction,
         )
         .padding(10)
         .width(Length::Fill)
@@ -1884,16 +1967,25 @@ fn signing_path_card(path: SigningPath) -> Element<'static, Message> {
     if expanded {
         let mut keys_col = Column::new().spacing(5);
         for key in &keys {
-            keys_col = keys_col.push(signing_key_row(key, color));
+            keys_col = keys_col.push(signing_key_row(key, color, action_scope, sequence));
         }
         col = col
             .push(keys_col)
             .push(signing_threshold_badge(color, collected, threshold, total));
         if can_request_all {
             col = col.push(
-                button::secondary(None, "Request from everyone")
-                    .on_press(Message::Spend(SpendTxMessage::RequestFromEveryone))
-                    .width(Length::Fill),
+                secondary_action(
+                    action_id(
+                        action_scope,
+                        &format!(
+                            "picker.path.{}.request-all",
+                            sequence.map_or_else(|| "primary".to_string(), |seq| seq.to_string())
+                        ),
+                    ),
+                    "Request from everyone",
+                )
+                .on_press(Message::Spend(SpendTxMessage::RequestFromEveryone))
+                .width(Length::Fill),
             );
         }
     }
@@ -1908,11 +2000,18 @@ fn signing_path_card(path: SigningPath) -> Element<'static, Message> {
 /// listing its keys with per-key signability, mirroring the vault-creation
 /// "Set keys" layout.
 pub fn sign_action<'a>(
+    action_scope: u64,
     paths: Vec<SigningPath>,
     keychain_notices: Vec<String>,
     error: Option<String>,
 ) -> Element<'a, Message> {
-    let mut col = Column::new().spacing(15).width(Length::Fill);
+    let mut col = Column::new().spacing(15).width(Length::Fill).push(
+        Row::new().push(Space::new().width(Length::Fill)).push(
+            secondary_action(action_id(action_scope, "picker.close"), "Close")
+                .on_press(Message::Spend(SpendTxMessage::Cancel))
+                .width(Length::Fixed(100.0)),
+        ),
+    );
     if let Some(error) = error {
         col = col.push(card::warning(error));
     }
@@ -1920,7 +2019,7 @@ pub fn sign_action<'a>(
         col = col.push(p1_regular(notice.clone()).style(theme::text::secondary));
     }
     for path in paths {
-        col = col.push(signing_path_card(path));
+        col = col.push(signing_path_card(path, action_scope));
     }
     card::simple(scrollable(col.padding(5)))
         // Wide enough that long device names, the per-path key rows and their
@@ -2271,12 +2370,14 @@ pub fn update_spend_success_view<'a>() -> Element<'a, Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::view::shared::landing::capture;
     use coincube_core::{
         border_wallet::OrderedPattern,
         descriptors::CoincubeDescriptor,
         miniscript::bitcoin::{absolute, bip32::ChildNumber, transaction, Amount, Sequence, TxIn},
     };
     use coincubed::commands::LCSpendInfo;
+    use iced::keyboard::key::Named;
     use std::str::FromStr;
 
     const DESC: &str = "wsh(or_d(multi(2,[f714c228/48'/1'/0'/2']tpubDEwJnTwfKoMvu8AXXBPydBVWDpzNP5tatjjZ56q4TQioGL7iL9xzTbMoCCQ3tfGihtff7vtR4xsjcRuhZ7HWARVAkGZ1HZcpBhVdou76k7j/<0;1>/*,[2522f23c/48'/1'/0'/2']tpubDEoTU4bDW1EXN1rnLXnRfue1a7DeqjJcs39PkEeLcVXhVKzCnFo9yQX2EeeXJ6kh4hgbz5o9v7YAc1EE97AEJpJbKNmDxE3ZQo4msGPSp2J/<0;1>/*),and_v(v:thresh(1,pkh([f714c228/48'/1'/0'/2']tpubDEwJnTwfKoMvu8AXXBPydBVWDpzNP5tatjjZ56q4TQioGL7iL9xzTbMoCCQ3tfGihtff7vtR4xsjcRuhZ7HWARVAkGZ1HZcpBhVdou76k7j/<2;3>/*),a:pkh([2522f23c/48'/1'/0'/2']tpubDEoTU4bDW1EXN1rnLXnRfue1a7DeqjJcs39PkEeLcVXhVKzCnFo9yQX2EeeXJ6kh4hgbz5o9v7YAc1EE97AEJpJbKNmDxE3ZQo4msGPSp2J/<2;3>/*)),older(65535))))#9s8ekrce";
@@ -2381,6 +2482,292 @@ mod tests {
     }
 
     #[test]
+    fn signer_picker_mounted_keyboard_actions_and_replacement() {
+        let fp = fingerprint("f714c228");
+        let make_path = |state| SigningPath {
+            title: "Primary spending option:".into(),
+            is_primary: true,
+            sequence: None,
+            active: true,
+            threshold: 1,
+            total: 1,
+            collected: 0,
+            keys: vec![signing_row(fp, "This Cube", SigningKeyKind::Master, state)],
+            can_request_all: false,
+            expanded: true,
+        };
+        let close = action_id(91, "picker.close");
+        let sign = action_id(91, &format!("picker.path.primary.key.{fp}.activate"));
+        let mounted = capture::inspect_full_window(
+            "psbt-picker-keyboard",
+            sign_action(
+                91,
+                vec![make_path(SigningKeyState::Available(
+                    SigningKeyAction::Master,
+                ))],
+                vec![],
+                None,
+            ),
+            (1200, 800),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(mounted.has_focus(close.clone()));
+        assert!(mounted.has_focus(sign.clone()));
+        assert!(
+            mounted.focus.iter().position(|(id, _)| id == &close)
+                < mounted.focus.iter().position(|(id, _)| id == &sign)
+        );
+        for key in [Named::Enter, Named::Space] {
+            assert!(matches!(
+                capture::activate_with_key(
+                    sign_action(
+                        91,
+                        vec![make_path(SigningKeyState::Available(
+                            SigningKeyAction::Master
+                        ))],
+                        vec![],
+                        None
+                    ),
+                    sign.clone(),
+                    (1200, 800),
+                    false,
+                    key
+                )
+                .as_slice(),
+                [Message::Spend(SpendTxMessage::SelectMasterSigner)]
+            ));
+        }
+        let busy = capture::inspect_full_window(
+            "psbt-picker-busy",
+            sign_action(
+                91,
+                vec![make_path(SigningKeyState::InProgress("Signing…".into()))],
+                vec![],
+                None,
+            ),
+            (1024, 768),
+            "light",
+            theme::Theme::light(),
+        );
+        assert!(!busy.has_focus(sign));
+        assert!(busy.has_focus(close));
+
+        let inactive = || SigningPath {
+            title: "Recovery spending option:".into(),
+            is_primary: false,
+            sequence: Some(42),
+            active: false,
+            threshold: 1,
+            total: 1,
+            collected: 0,
+            keys: vec![signing_row(
+                fp,
+                "Unavailable",
+                SigningKeyKind::Hardware,
+                SigningKeyState::Disabled("This path is unavailable".into()),
+            )],
+            can_request_all: false,
+            expanded: false,
+        };
+        let toggle = action_id(91, "picker.path.42.toggle");
+        let collapsed = capture::inspect_full_window(
+            "psbt-picker-inactive-path",
+            sign_action(91, vec![inactive()], vec![], None),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(collapsed.has_focus(toggle.clone()));
+        assert!(!collapsed.has_focus(action_id(91, &format!("picker.path.42.key.{fp}.activate"))));
+        for key in [Named::Enter, Named::Space] {
+            assert!(matches!(
+                capture::activate_with_key(
+                    sign_action(91, vec![inactive()], vec![], None),
+                    toggle.clone(),
+                    (1024, 768),
+                    false,
+                    key,
+                )
+                .as_slice(),
+                [Message::Spend(SpendTxMessage::ToggleSpendPath(Some(42)))]
+            ));
+        }
+    }
+
+    #[test]
+    fn keychain_unavailable_has_distinct_keyboard_handoff_actions() {
+        for (size, appearance, theme) in [
+            ((1024, 768), "dark", theme::Theme::dark()),
+            ((1440, 900), "light", theme::Theme::light()),
+        ] {
+            let mounted = capture::inspect_full_window(
+                "psbt-keychain-unavailable",
+                keychain_unavailable_action(92, false),
+                size,
+                appearance,
+                theme,
+            );
+            for name in ["cancel", "pair", "connect"] {
+                assert!(mounted.has_focus(action_id(92, &format!("keychain-unavailable.{name}"))));
+            }
+            assert!(matches!(
+                capture::activate_with_key(
+                    keychain_unavailable_action(92, false),
+                    action_id(92, "keychain-unavailable.connect"),
+                    size,
+                    false,
+                    Named::Enter,
+                )
+                .as_slice(),
+                [Message::Spend(SpendTxMessage::KeychainConnectSignIn)]
+            ));
+            assert!(matches!(
+                capture::activate_with_key(
+                    keychain_unavailable_action(92, true),
+                    action_id(92, "keychain-unavailable.pair"),
+                    size,
+                    false,
+                    Named::Space,
+                )
+                .as_slice(),
+                [Message::Spend(SpendTxMessage::KeychainPairPhone)]
+            ));
+        }
+        assert_ne!(action_id(92, "picker.close"), action_id(93, "picker.close"));
+    }
+
+    #[test]
+    fn overview_preserves_disabled_gates_and_modal_hides_base_from_tab_order() {
+        let fixture = crate::app::state::vault::test_support::unified::fixture();
+        let policy = fixture.descriptor.policy();
+        let mut input_coin = coin(1, 50_000, false);
+        input_coin.outpoint = fixture.psbt.unsigned_tx.input[0].previous_output;
+        let tx = SpendTx::new(
+            None,
+            fixture.psbt.clone(),
+            vec![input_coin],
+            &fixture.descriptor,
+            &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
+            Network::Signet,
+        );
+        let aliases = HashMap::new();
+        let overview = |currently_signing| {
+            spend_overview_with_cancel(
+                94,
+                &tx,
+                &policy,
+                &aliases,
+                currently_signing,
+                true,
+                None,
+                false,
+                Some(Message::Spend(SpendTxMessage::Cancel)),
+            )
+        };
+        let enabled = capture::inspect_full_window(
+            "psbt-overview-enabled",
+            overview(false),
+            (1200, 800),
+            "dark",
+            theme::Theme::dark(),
+        );
+        for name in ["export", "import", "copy-txid", "cancel", "sign"] {
+            assert!(
+                enabled.has_focus(action_id(94, &format!("overview.{name}"))),
+                "missing {name}: {:?}",
+                enabled.focus
+            );
+        }
+        for key in [Named::Enter, Named::Space] {
+            assert!(matches!(
+                capture::activate_with_key(
+                    overview(false),
+                    action_id(94, "overview.sign"),
+                    (1200, 800),
+                    false,
+                    key,
+                )
+                .as_slice(),
+                [Message::Spend(SpendTxMessage::Sign)]
+            ));
+        }
+        let busy = capture::inspect_full_window(
+            "psbt-overview-busy",
+            overview(true),
+            (1024, 768),
+            "light",
+            theme::Theme::light(),
+        );
+        for name in ["export", "import"] {
+            assert!(!busy.has_focus(action_id(94, &format!("overview.{name}"))));
+        }
+        // Inspect the actual overlay operation too. The generic content-only
+        // capture intentionally probes just the root, not overlay widgets.
+        use iced::advanced::{
+            layout,
+            renderer::Headless,
+            widget::{Operation, Tree},
+            Layout,
+        };
+        struct FocusProbe(Vec<Id>);
+        impl Operation for FocusProbe {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn focusable(
+                &mut self,
+                id: Option<&Id>,
+                _bounds: iced::Rectangle,
+                _: &mut dyn iced::advanced::widget::operation::Focusable,
+            ) {
+                if let Some(id) = id {
+                    self.0.push(id.clone());
+                }
+            }
+        }
+        let size = iced::Size::new(1200.0, 800.0);
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let mut element: Element<'_, Message> = coincube_ui::widget::modal::Modal::new(
+            overview(false),
+            sign_action(95, vec![], vec![], None),
+        )
+        .into();
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(iced::Size::ZERO, size),
+        );
+        let mut probe = FocusProbe(Vec::new());
+        element
+            .as_widget_mut()
+            .operate(&mut tree, Layout::new(&node), &renderer, &mut probe);
+        let viewport = iced::Rectangle::with_size(size);
+        let mut overlay = element
+            .as_widget_mut()
+            .overlay(
+                &mut tree,
+                Layout::new(&node),
+                &renderer,
+                &viewport,
+                iced::Vector::ZERO,
+            )
+            .unwrap();
+        let overlay_node = overlay.as_overlay_mut().layout(&renderer, size);
+        overlay
+            .as_overlay_mut()
+            .operate(Layout::new(&overlay_node), &renderer, &mut probe);
+        assert!(probe.0.contains(&action_id(95, "picker.close")));
+        assert!(!probe.0.contains(&action_id(94, "overview.sign")));
+    }
+
+    #[test]
     fn action_modals_build_for_success_pending_and_error_states() {
         let mut conflicts = HashSet::new();
         conflicts.insert(Txid::from_str(&format!("{:064x}", 1)).unwrap());
@@ -2392,8 +2779,8 @@ mod tests {
         let _ = save_action(true);
         let _ = delete_action(false);
         let _ = delete_action(true);
-        let _ = keychain_unavailable_action(false);
-        let _ = keychain_unavailable_action(true);
+        let _ = keychain_unavailable_action(1, false);
+        let _ = keychain_unavailable_action(1, true);
         let _ = broadcast_action(
             &HashSet::new(),
             false,
@@ -2647,6 +3034,7 @@ mod tests {
         };
 
         let _ = sign_action(
+            1,
             vec![active, inactive_collapsed, inactive_expanded],
             vec!["Connect is not ready yet.".to_string()],
             Some("Signing device unavailable.".to_string()),

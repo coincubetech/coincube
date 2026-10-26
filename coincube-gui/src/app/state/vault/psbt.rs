@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use iced::Subscription;
@@ -21,6 +22,47 @@ use coincube_ui::component::form;
 use coincube_ui::{widget::modal, widget::Element};
 
 use crate::daemon::model::LabelsLoader;
+
+static NEXT_PSBT_ACTION_SCOPE: AtomicU64 = AtomicU64::new(1);
+
+/// Restore only a mounted PSBT control when no other tab or sheet owns focus.
+fn restore_psbt_focus(target: iced::advanced::widget::Id) -> Task<Message> {
+    use iced::advanced::widget::{
+        operation::{focusable, Outcome},
+        Id, Operation,
+    };
+    struct Restore {
+        target: Id,
+        mounted: bool,
+        focused: bool,
+    }
+    impl Operation<()> for Restore {
+        fn focusable(
+            &mut self,
+            id: Option<&Id>,
+            _bounds: iced::Rectangle,
+            state: &mut dyn focusable::Focusable,
+        ) {
+            self.mounted |= id == Some(&self.target);
+            self.focused |= state.is_focused();
+        }
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<()>)) {
+            operate(self);
+        }
+        fn finish(&self) -> Outcome<()> {
+            if self.mounted && !self.focused {
+                Outcome::Chain(Box::new(focusable::focus(self.target.clone())))
+            } else {
+                Outcome::None
+            }
+        }
+    }
+    iced_runtime::task::effect(iced_runtime::Action::widget(Restore {
+        target,
+        mounted: false,
+        focused: false,
+    }))
+}
 use crate::export::{ImportExportMessage, ImportExportType, Progress};
 use crate::{
     app::{
@@ -141,6 +183,9 @@ pub(crate) fn claim_signing_dispatch(message: &Message) -> bool {
 }
 
 pub struct PsbtState {
+    action_scope: u64,
+    /// A direct signer choice may remove the focused row when its result lands.
+    signer_focus_return: bool,
     pub wallet: Arc<Wallet>,
     pub desc_policy: Option<CoincubePolicy>,
     pub tx: SpendTx,
@@ -225,6 +270,8 @@ impl PsbtState {
             ReplayReview::new(&tx.psbt, &secp256k1::Secp256k1::verification_only())
         });
         Self {
+            action_scope: NEXT_PSBT_ACTION_SCOPE.fetch_add(1, Ordering::Relaxed),
+            signer_focus_return: false,
             desc_policy: wallet
                 .inheritance_descriptor()
                 .map(|descriptor| descriptor.policy()),
@@ -244,6 +291,33 @@ impl PsbtState {
             revalidated_for: None,
             bitcoin_finalization: std::sync::Mutex::new(None),
         }
+    }
+
+    pub(crate) fn action_scope(&self) -> u64 {
+        self.action_scope
+    }
+
+    fn action_id(&self, name: &str) -> iced::advanced::widget::Id {
+        view::vault::psbt::action_id(self.action_scope, name)
+    }
+
+    fn overview_focus_id(&self, cache: &Cache) -> iced::advanced::widget::Id {
+        if self.tx.status != SpendStatus::Pending {
+            return self.action_id("overview.copy-txid");
+        }
+        let sign = match &self.replay {
+            None => !self.broadcast_ready(cache),
+            Some(review) => !review.signatures_complete(&self.entangled_inputs(cache)),
+        };
+        self.action_id(if sign {
+            "overview.sign"
+        } else if self.broadcast_ready(cache) {
+            "overview.broadcast"
+        } else {
+            // Replay acknowledgement, a recheck, or a Claim can leave
+            // Broadcast visible but disabled. Copy Tx ID remains enabled.
+            "overview.copy-txid"
+        })
     }
 
     /// Recompute the replay review from the current (merged) PSBT. A no-op on
@@ -580,6 +654,7 @@ impl PsbtState {
 
     pub fn interrupt(&mut self) {
         self.modal = None;
+        self.signer_focus_return = false;
     }
 
     /// Single authority for reflecting collected signatures. Recomputes
@@ -664,6 +739,33 @@ impl PsbtState {
         cache: &Cache,
         message: Message,
     ) -> Task<Message> {
+        let was_picker = matches!(&self.modal, Some(PsbtModal::Sign(sign)) if sign.display_modal);
+        let was_unavailable = matches!(self.modal, Some(PsbtModal::KeychainUnavailable(_)));
+        let opened_picker = matches!(
+            &message,
+            Message::View(view::Message::Spend(view::SpendTxMessage::Sign))
+        );
+        let dismissed = matches!(
+            &message,
+            Message::View(view::Message::Spend(view::SpendTxMessage::Cancel))
+        );
+        let direct_signer = matches!(
+            &message,
+            Message::View(view::Message::SelectPsbtHardwareWallet(_))
+                | Message::View(view::Message::Spend(
+                    view::SpendTxMessage::SelectMasterSigner
+                        | view::SpendTxMessage::SelectBorderWallet(_)
+                        | view::SpendTxMessage::SelectKeychainSigner(_)
+                        | view::SpendTxMessage::RequestFromEveryone
+                        | view::SpendTxMessage::RetryKeychainSigner(_)
+                ))
+        );
+        if direct_signer && was_picker {
+            self.signer_focus_return = true;
+        }
+        if dismissed {
+            self.signer_focus_return = false;
+        }
         // Order matters: the message is applied **before** any new re-check
         // is kicked, so a pass can never start a check and then resolve it
         // with an older answer. A reply is accepted only for the generation
@@ -687,7 +789,36 @@ impl PsbtState {
         // And whatever just happened, a Broadcast dialog open on a spend that
         // is no longer ready comes down with the reason.
         let dialog = self.close_broadcast_dialog_if_not_ready(cache);
-        Task::batch([task, recheck, dialog])
+        let focus = if opened_picker {
+            match &self.modal {
+                Some(PsbtModal::Sign(sign)) if sign.display_modal => restore_psbt_focus(
+                    view::vault::psbt::action_id(sign.action_scope, "picker.close"),
+                ),
+                _ => Task::none(),
+            }
+        } else if direct_signer {
+            match &self.modal {
+                Some(PsbtModal::KeychainUnavailable(_)) => {
+                    restore_psbt_focus(self.action_id("keychain-unavailable.connect"))
+                }
+                Some(PsbtModal::Sign(sign))
+                    if sign.display_modal && sign.border_wallet_recon.is_none() =>
+                {
+                    restore_psbt_focus(view::vault::psbt::action_id(
+                        sign.action_scope,
+                        "picker.close",
+                    ))
+                }
+                _ => Task::none(),
+            }
+        } else if (dismissed && (was_picker || was_unavailable))
+            || (was_picker && self.modal.is_none() && std::mem::take(&mut self.signer_focus_return))
+        {
+            restore_psbt_focus(self.overview_focus_id(cache))
+        } else {
+            Task::none()
+        };
+        Task::batch([task, recheck, dialog, focus])
     }
 
     fn update_inner(
@@ -862,6 +993,7 @@ impl PsbtState {
                     *display_modal = true;
                     return Task::none();
                 }
+                self.signer_focus_return = false;
 
                 // Build (and launch) the nested Keychain flow up front when
                 // Connect is ready, so keychain rows populate with friendly
@@ -905,7 +1037,9 @@ impl PsbtState {
                     );
                     self.modal = Some(PsbtModal::KeychainUnavailable(KeychainUnavailableModal {
                         signed_in: connect_session_available(cache),
+                        action_scope: self.action_scope,
                     }));
+                    self.signer_focus_return = false;
                     return Task::none();
                 }
                 // Connect is ready. If the picker was opened before Connect
@@ -1148,6 +1282,7 @@ impl PsbtState {
                 .into();
         };
         let content = view::vault::psbt::psbt_view(
+            self.action_scope,
             cache,
             &self.tx,
             self.saved,
@@ -1427,6 +1562,7 @@ pub struct KeychainUnavailableModal {
     /// is device/stream readiness rather than a missing sign-in, which the
     /// view uses to adjust its wording.
     pub signed_in: bool,
+    action_scope: u64,
 }
 
 fn connect_session_available(cache: &Cache) -> bool {
@@ -1494,7 +1630,7 @@ impl Modal for KeychainUnavailableModal {
     fn view<'a>(&'a self, content: Element<'a, view::Message>) -> Element<'a, view::Message> {
         modal::Modal::new(
             content,
-            view::vault::psbt::keychain_unavailable_action(self.signed_in),
+            view::vault::psbt::keychain_unavailable_action(self.action_scope, self.signed_in),
         )
         .on_blur(Some(view::Message::Spend(view::SpendTxMessage::Cancel)))
         .into()
@@ -1793,6 +1929,7 @@ impl Drop for BorderWalletReconstructionState {
 }
 
 pub struct SignModal {
+    action_scope: u64,
     wallet: Arc<Wallet>,
     hws: HardwareWallets,
     network: Network,
@@ -1845,6 +1982,7 @@ impl SignModal {
         keychain_enabled: bool,
     ) -> Self {
         Self {
+            action_scope: NEXT_PSBT_ACTION_SCOPE.fetch_add(1, Ordering::Relaxed),
             signing: HashSet::new(),
             hws: HardwareWallets::new(datadir_path, network).with_wallet(wallet.clone()),
             wallet,
@@ -2826,7 +2964,7 @@ impl Modal for SignModal {
                     .or_else(|| self.error.as_ref().map(crate::user_error::report));
                 modal::Modal::new(
                     content,
-                    view::vault::psbt::sign_action(paths, notices, error),
+                    view::vault::psbt::sign_action(self.action_scope, paths, notices, error),
                 )
                 .on_blur(Some(view::Message::Spend(view::SpendTxMessage::Cancel)))
                 .into()
@@ -3072,6 +3210,144 @@ mod tests {
 
     fn wallet() -> Wallet {
         Wallet::new(CoincubeDescriptor::from_str(DESC).unwrap())
+    }
+
+    fn focus_after_restore(
+        task: Task<Message>,
+        target: iced::advanced::widget::Id,
+        mounted: bool,
+        focused_elsewhere: bool,
+    ) -> Option<iced::advanced::widget::Id> {
+        use iced::advanced::{
+            layout,
+            renderer::Headless,
+            widget::{operation, operation::focusable, Operation, Tree},
+            Layout,
+        };
+        use iced::futures::StreamExt;
+        for bytes in coincube_ui::font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(bytes);
+        }
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let elsewhere = iced::advanced::widget::Id::new("other.sheet.input");
+        let control = |id| {
+            coincube_ui::component::button::secondary_action(
+                id,
+                None,
+                "Control",
+                view::Message::FocusAction,
+            )
+            .on_press(view::Message::Spend(view::SpendTxMessage::Cancel))
+        };
+        let mut column = iced::widget::Column::new().push(control(elsewhere.clone()));
+        if mounted {
+            column = column.push(control(target.clone()));
+        }
+        let mut element: Element<'_, view::Message> = column.into();
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(iced::Size::ZERO, iced::Size::new(760.0, 600.0)),
+        );
+        let mut apply = |mut op: Box<dyn Operation<()>>| loop {
+            element.as_widget_mut().operate(
+                &mut tree,
+                Layout::new(&node),
+                &renderer,
+                &mut operation::black_box(op.as_mut()),
+            );
+            match op.finish() {
+                operation::Outcome::Chain(next) => op = next,
+                _ => break,
+            }
+        };
+        if focused_elsewhere {
+            apply(Box::new(focusable::focus(elsewhere)));
+        }
+        if let Some(mut stream) = iced_runtime::task::into_stream(task) {
+            while let Some(action) = iced::futures::executor::block_on(stream.next()) {
+                if let iced_runtime::Action::Widget(op) = action {
+                    apply(op);
+                    break;
+                }
+            }
+        }
+        let mut find: Box<dyn Operation<iced::advanced::widget::Id>> =
+            Box::new(focusable::find_focused());
+        loop {
+            element.as_widget_mut().operate(
+                &mut tree,
+                Layout::new(&node),
+                &renderer,
+                &mut operation::black_box(find.as_mut()),
+            );
+            match find.finish() {
+                operation::Outcome::Some(id) => return Some(id),
+                operation::Outcome::None => return None,
+                operation::Outcome::Chain(next) => find = next,
+            }
+        }
+    }
+
+    #[test]
+    fn psbt_focus_is_scoped_and_async_restore_respects_other_focus() {
+        let fixture = crate::app::state::vault::test_support::unified::fixture();
+        let make_state = || {
+            let wallet = Arc::new(Wallet::new(fixture.descriptor.clone()));
+            let tx = SpendTx::new(
+                None,
+                fixture.psbt.clone(),
+                Vec::new(),
+                &fixture.descriptor,
+                &secp256k1::Secp256k1::verification_only(),
+                Network::Signet,
+            );
+            PsbtState::new(wallet, tx, false)
+        };
+        let first = make_state();
+        let second = make_state();
+        let target = first.action_id("overview.sign");
+        assert_ne!(target, second.action_id("overview.sign"));
+        assert_eq!(
+            focus_after_restore(
+                restore_psbt_focus(target.clone()),
+                target.clone(),
+                true,
+                false
+            ),
+            Some(target.clone())
+        );
+        assert_eq!(
+            focus_after_restore(
+                restore_psbt_focus(target.clone()),
+                target.clone(),
+                false,
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            focus_after_restore(
+                restore_psbt_focus(target.clone()),
+                second.action_id("overview.sign"),
+                true,
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            focus_after_restore(restore_psbt_focus(target.clone()), target, true, true),
+            Some(iced::advanced::widget::Id::new("other.sheet.input"))
+        );
     }
 
     fn enter_phrase_words(state: &mut BorderWalletReconstructionState, phrase: &str) {
@@ -4606,6 +4882,7 @@ mod tests {
     /// The Bitcoin Blake2b side of the same entry points.
     mod blake2b_paths {
         use super::super::*;
+        use super::focus_after_restore;
         use crate::app::state::vault::{
             replay::{ReplayStatus, UnknownReason},
             test_support::unified::{fixture, legacy, signer, unified},
@@ -5272,6 +5549,205 @@ mod tests {
             let _ = state.reconcile_and_maybe_close(&Cache::default());
             assert!(!state.replay.as_ref().unwrap().acknowledged());
             assert!(!state.broadcast_ready(&Cache::default()));
+        }
+
+        #[test]
+        fn closing_picker_with_complete_replay_signatures_focuses_enabled_copy_action() {
+            let f = fixture();
+            let wallet = wallet_with_hot_signer(&f);
+            let tx = SpendTx::new(
+                None,
+                legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]),
+                Vec::new(),
+                &f.descriptor,
+                &secp256k1::Secp256k1::new(),
+                Network::Bitcoin,
+            );
+            let mut state = PsbtState::new(wallet, tx, true);
+            // The synthetic fixture omits its Coin, so SpendTx otherwise
+            // classifies it as Deprecated and hides both signing actions.
+            state.tx.status = SpendStatus::Pending;
+            let cache = Cache::default();
+            assert!(state
+                .replay
+                .as_ref()
+                .unwrap()
+                .signatures_complete(&state.entangled_inputs(&cache)));
+            assert!(!state.broadcast_ready(&cache));
+
+            state.modal = Some(PsbtModal::Sign(SignModal::new(
+                state.tx.signers(),
+                state.wallet.clone(),
+                cache.datadir_path.clone(),
+                cache.network,
+                state.saved,
+                state.tx.recovery_timelock(),
+                None,
+                false,
+            )));
+            let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
+                crate::daemon::client::Coincubed::new(MockDaemon::new(vec![]).run()),
+            );
+            let task = state.update(
+                daemon,
+                &cache,
+                Message::View(view::Message::Spend(view::SpendTxMessage::Cancel)),
+            );
+            assert!(state.modal.is_none());
+            let copy = state.action_id("overview.copy-txid");
+            assert_eq!(state.overview_focus_id(&cache), copy);
+            assert_eq!(
+                focus_after_restore(task, copy.clone(), true, false),
+                Some(copy)
+            );
+
+            state.replay.as_mut().unwrap().set_acknowledged(true);
+            assert!(state.broadcast_ready(&cache));
+            assert_eq!(
+                state.overview_focus_id(&cache),
+                state.action_id("overview.broadcast")
+            );
+        }
+
+        fn pending_focus_state(psbt: Psbt) -> PsbtState {
+            let f = fixture();
+            let tx = SpendTx::new(
+                None,
+                psbt,
+                Vec::new(),
+                &f.descriptor,
+                &secp256k1::Secp256k1::new(),
+                Network::Bitcoin,
+            );
+            let mut state = PsbtState::new(wallet_with_hot_signer(&f), tx, true);
+            // The synthetic fixture omits its Coin; see the Cancel test above.
+            state.tx.status = SpendStatus::Pending;
+            state
+        }
+
+        fn focus_daemon() -> Arc<dyn Daemon + Sync + Send> {
+            Arc::new(crate::daemon::client::Coincubed::new(
+                MockDaemon::new(vec![]).run(),
+            ))
+        }
+
+        fn picker_close_id(state: &PsbtState) -> iced::advanced::widget::Id {
+            match &state.modal {
+                Some(PsbtModal::Sign(sign)) if sign.display_modal => {
+                    view::vault::psbt::action_id(sign.action_scope, "picker.close")
+                }
+                _ => panic!("the signer picker is not displayed"),
+            }
+        }
+
+        #[test]
+        fn opening_the_picker_through_update_focuses_its_close_action() {
+            let mut state = pending_focus_state(fixture().psbt);
+            let task = state.update(
+                focus_daemon(),
+                &Cache::default(),
+                Message::View(view::Message::Spend(view::SpendTxMessage::Sign)),
+            );
+            let close = picker_close_id(&state);
+            assert_ne!(close, state.action_id("overview.sign"));
+            assert_eq!(
+                focus_after_restore(task, close.clone(), true, false),
+                Some(close)
+            );
+        }
+
+        #[test]
+        fn a_direct_signer_through_update_keeps_focus_in_the_open_picker() {
+            let mut state = pending_focus_state(fixture().psbt);
+            let cache = Cache::default();
+            let _ = state.update(
+                focus_daemon(),
+                &cache,
+                Message::View(view::Message::Spend(view::SpendTxMessage::Sign)),
+            );
+            let task = state.update(
+                focus_daemon(),
+                &cache,
+                Message::View(view::Message::Spend(
+                    view::SpendTxMessage::SelectMasterSigner,
+                )),
+            );
+            assert!(state.signer_focus_return);
+            let close = picker_close_id(&state);
+            assert_eq!(
+                focus_after_restore(task, close.clone(), true, false),
+                Some(close)
+            );
+        }
+
+        #[test]
+        fn a_keychain_signer_without_connect_focuses_the_unavailable_connect_action() {
+            let mut state = pending_focus_state(fixture().psbt);
+            let cache = Cache::default();
+            let _ = state.update(
+                focus_daemon(),
+                &cache,
+                Message::View(view::Message::Spend(view::SpendTxMessage::Sign)),
+            );
+            let task = state.update(
+                focus_daemon(),
+                &cache,
+                Message::View(view::Message::Spend(
+                    view::SpendTxMessage::RequestFromEveryone,
+                )),
+            );
+            assert!(matches!(
+                state.modal,
+                Some(PsbtModal::KeychainUnavailable(_))
+            ));
+            // The handoff replaces the picker; it never returns to the overview.
+            assert!(!state.signer_focus_return);
+            let connect = state.action_id("keychain-unavailable.connect");
+            assert_eq!(
+                focus_after_restore(task, connect.clone(), true, false),
+                Some(connect)
+            );
+        }
+
+        #[test]
+        fn the_picker_closing_after_signing_through_update_focuses_the_overview() {
+            let f = fixture();
+            let mut state = pending_focus_state(f.psbt.clone());
+            let cache = Cache::default();
+            let _ = state.update(
+                focus_daemon(),
+                &cache,
+                Message::View(view::Message::Spend(view::SpendTxMessage::Sign)),
+            );
+            let _ = state.update(
+                focus_daemon(),
+                &cache,
+                Message::View(view::Message::Spend(
+                    view::SpendTxMessage::SelectMasterSigner,
+                )),
+            );
+            assert!(state.signer_focus_return);
+
+            // A signature merge that does not satisfy the path leaves the
+            // picker open and never initiates a restore.
+            state.tx.psbt = unified(&f.psbt, &f.signers[0]);
+            let task = state.update(focus_daemon(), &cache, Message::Reconcile);
+            let close = picker_close_id(&state);
+            assert_eq!(focus_after_restore(task, close, true, false), None);
+            assert!(state.signer_focus_return);
+
+            // The satisfying merge closes the picker and returns to Broadcast.
+            state.tx.psbt = unified(&state.tx.psbt, &f.signers[1]);
+            let task = state.update(focus_daemon(), &cache, Message::Reconcile);
+            assert!(state.modal.is_none());
+            assert!(!state.signer_focus_return);
+            assert!(state.broadcast_ready(&cache));
+            let broadcast = state.action_id("overview.broadcast");
+            assert_eq!(state.overview_focus_id(&cache), broadcast);
+            assert_eq!(
+                focus_after_restore(task, broadcast.clone(), true, false),
+                Some(broadcast)
+            );
         }
 
         /// `#276` I13 through the state: a legacy-only spend of a deposit

@@ -13,7 +13,7 @@ import tempfile
 import time
 
 
-def check(binary):
+def check(binary, expect_proposals=False, expect_transactions=False):
     with tempfile.TemporaryDirectory(prefix="mcp-smoke-", dir="/tmp") as directory:
         endpoint = str(Path(directory) / "rpc")
         credential = secrets.token_hex(32)
@@ -77,14 +77,17 @@ def check(binary):
                         "tenshu_get_capabilities", "tenshu_list_wallets",
                         "tenshu_get_wallet_summary", "tenshu_get_transactions",
                         "tenshu_get_wallet_policy_summary",
+                        "tenshu_prepare_wallet_proposal", "tenshu_get_wallet_proposal",
+                        "tenshu_prepare_wallet_creation",
+                        "tenshu_prepare_transaction", "tenshu_get_prepared_transaction",
                     }
                     send({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
                         "name": "tenshu_get_capabilities", "arguments": {}}})
                     capabilities = receive(3)["structuredContent"]
                     assert capabilities["schema_version"] == 1
-                    assert capabilities["wallet_proposals"] is False
+                    assert capabilities["wallet_proposals"] is expect_proposals
                     assert capabilities["wallet_creation_via_mcp"] is False
-                    assert capabilities["transaction_preparation"] is False
+                    assert capabilities["transaction_preparation"] is expect_transactions
                     send({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {
                         "name": "tenshu_list_wallets", "arguments": {}}})
                     assert receive(4)["structuredContent"]["wallets"][0]["wallet_id"] == "packaging-fixture"
@@ -101,6 +104,7 @@ def check(binary):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        raise SystemExit("usage: check_mcp_binary.py /path/to/tenshu-mcp")
-    check(sys.argv[1])
+    flags = set(sys.argv[2:])
+    if len(sys.argv) < 2 or not flags <= {"--expect-proposals", "--expect-transactions"} or len(flags) != len(sys.argv[2:]):
+        raise SystemExit("usage: check_mcp_binary.py /path/to/tenshu-mcp [--expect-proposals] [--expect-transactions]")
+    check(sys.argv[1], "--expect-proposals" in flags, "--expect-transactions" in flags)

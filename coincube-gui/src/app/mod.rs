@@ -7,10 +7,6 @@ pub mod config;
 pub mod error;
 pub mod features;
 mod imported_kit_metadata;
-// R23a ports only read/pair behavior. The pinned source also contains R24/R25
-// cfg branches, but this GUI manifest defines neither feature, including under
-// --all-features. Keep the exception local until those slices are reviewed.
-#[allow(unexpected_cfgs)]
 pub mod local_mcp;
 pub mod local_switch;
 pub mod menu;
@@ -1050,6 +1046,8 @@ fn load_fork_claim_panel(
 }
 
 pub struct App {
+    // Pairing records grow independently of the tab's by-value state. Keep them
+    // on the heap so debug GUI transitions fit the Windows test-thread stack.
     local_mcp: Box<local_mcp::Settings>,
     cache: Cache,
     wallet: Option<Arc<Wallet>>,
@@ -6284,29 +6282,6 @@ impl App {
             .unwrap_or(DaemonBackend::RemoteBackend)
     }
 
-    fn mcp_supported(&self) -> bool {
-        !self.cube_settings.network.is_blake2b()
-            && self
-                .wallet
-                .as_ref()
-                .is_some_and(|wallet| wallet.main_descriptor.as_vault().is_some())
-            && self.daemon_backend().is_embedded()
-            && !self.daemon_switch_in_progress
-    }
-
-    fn refresh_mcp_pairings(&mut self) {
-        let supported = self.mcp_supported();
-        self.local_mcp.ensure_pairings(local_mcp::PairingContext {
-            root: self.datadir.path(),
-            chain: self.cube_settings.network,
-            cube_id: &self.cube_settings.id,
-            wallet: self.wallet.clone(),
-            daemon: self.daemon.clone(),
-            supported,
-            proposal_supported: false,
-        });
-    }
-
     /// The Vault scan a backend switch would discard, if one is running.
     fn running_vault_scan(&self) -> Option<local_switch::RunningScan> {
         running_vault_scan(self.daemon_backend(), &self.cache)
@@ -6419,9 +6394,9 @@ impl App {
                     // App::view; no section message is dispatched to the
                     // SettingsState. Side-effect loads (avatar fetch,
                     // members fetch) are kicked below.
-                    menu::CubeSettingsOption::Avatar
-                    | menu::CubeSettingsOption::Members
-                    | menu::CubeSettingsOption::AiAccess => None,
+                    menu::CubeSettingsOption::AiAccess
+                    | menu::CubeSettingsOption::Avatar
+                    | menu::CubeSettingsOption::Members => None,
                 };
                 if let Some(section_msg) = section_msg {
                     // Fire even if daemon is None — the inner settings
@@ -6820,6 +6795,7 @@ impl App {
             imported.stop();
         }
         // Before the daemon that would carry a claim submission goes away.
+        self.local_mcp.revoke();
         self.revoke_claim();
         if self.daemon_backend().is_embedded() {
             if let Some(daemon) = &self.daemon {
@@ -7300,7 +7276,35 @@ impl App {
                 _ => None,
             };
             let requested = matches!(&message, local_mcp::Message::RequestRevokePair(_));
-            let supported = self.mcp_supported();
+            #[cfg(feature = "mcp-transactions")]
+            if let local_mcp::Message::ReviewTransaction {
+                client_id,
+                draft_id,
+            } = &message
+            {
+                if self.mcp_supported()
+                    && self.cube_settings.network == crate::chain::ChainId::Regtest
+                {
+                    if let Some(wallet) = &self.wallet {
+                        if let Some(native) = self
+                            .local_mcp
+                            .prepared_transaction(client_id, draft_id, wallet)
+                        {
+                            if let Some(panel) = self.panels.current_mut() {
+                                panel.interrupt();
+                            }
+                            self.panels.create_spend = Some(CreateSpendPanel::from_mcp_prepared(
+                                wallet.clone(),
+                                native,
+                                self.cache.blockheight(),
+                            ));
+                            self.panels.current = Menu::Vault(menu::VaultSubMenu::Send);
+                        }
+                    }
+                }
+                return Task::none();
+            }
+            let supported = self.mcp_supported() || self.mcp_proposals_supported();
             let config = self.local_mcp.update(
                 message,
                 self.wallet.clone(),
@@ -7314,11 +7318,12 @@ impl App {
                     return iced::widget::operation::focus(id);
                 }
             }
-            return config.map_or_else(Task::none, clipboard::write);
+            return match config {
+                Some(config) => clipboard::write(config),
+                None => Task::none(),
+            };
         }
-        if matches!(&message, Message::LoadWallet(_) | Message::WalletUpdated(_)) {
-            self.local_mcp.revoke();
-        }
+
         // Known metadata changes must not leave a previously healthy Kit
         // fingerprint visible if their subsequent settings reload fails.
         if matches!(
@@ -7326,6 +7331,9 @@ impl App {
             Message::SettingsSaved | Message::LoadWallet(_) | Message::WalletUpdated(_)
         ) {
             self.imported_kit_metadata.invalidate();
+        }
+        if matches!(&message, Message::LoadWallet(_) | Message::WalletUpdated(_)) {
+            self.local_mcp.revoke();
         }
         let task = self.update_dispatch(message);
         // Sync *after* dispatch: if this update just mutated
@@ -11195,6 +11203,63 @@ impl App {
         }
     }
 
+    pub(crate) fn mcp_proposals_supported(&self) -> bool {
+        cfg!(feature = "mcp-proposals")
+            && self.cube_settings.network == crate::chain::ChainId::Regtest
+            && self.wallet.is_none()
+            && self.daemon.is_none()
+            && self.cube_settings.vault_wallet_id.is_none()
+            && self.cube_settings.bitcoin_import.is_none()
+            && !self.daemon_switch_in_progress
+            && session::generation_for(&self.cube_settings.id).is_some()
+    }
+
+    fn refresh_mcp_pairings(&mut self) {
+        let supported = self.mcp_supported();
+        let proposal_supported = self.mcp_proposals_supported();
+        self.local_mcp.ensure_pairings(local_mcp::PairingContext {
+            root: self.datadir.path(),
+            chain: self.cube_settings.network,
+            cube_id: &self.cube_settings.id,
+            wallet: self.wallet.clone(),
+            daemon: self.daemon.clone(),
+            supported,
+            proposal_supported,
+            #[cfg(feature = "mcp-transactions")]
+            last_poll_at_startup: self.cache.last_poll_at_startup,
+        });
+    }
+
+    #[cfg(feature = "mcp-proposals")]
+    pub(crate) fn take_mcp_proposal(
+        &mut self,
+        paired_client: Option<&str>,
+    ) -> Option<(local_mcp::Settings, crate::installer::proposal::Session)> {
+        if !self.mcp_proposals_supported() {
+            return None;
+        }
+        let proposal = match paired_client {
+            Some(id) => self
+                .local_mcp
+                .paired_proposal_session(&self.cube_settings.id, id)?,
+            None => self.local_mcp.proposal_session(&self.cube_settings.id)?,
+        };
+        Some((*std::mem::take(&mut self.local_mcp), proposal))
+    }
+
+    fn mcp_supported(&self) -> bool {
+        !self.cube_settings.network.is_blake2b()
+            && self
+                .wallet
+                .as_ref()
+                .is_some_and(|wallet| wallet.main_descriptor.as_vault().is_some())
+            && self
+                .daemon
+                .as_ref()
+                .is_some_and(|daemon| daemon.backend().is_embedded())
+            && !self.daemon_switch_in_progress
+    }
+
     fn received_celebration_view(&self) -> Element<'_, view::Message> {
         // The underlying amount remains available for a later explicit Show,
         // but an arrival must never reveal it while privacy is hidden or
@@ -11229,6 +11294,18 @@ impl App {
                 &self.panels.current,
                 &self.cache,
                 self.received_celebration_view(),
+            )
+        } else if matches!(
+            self.panels.current,
+            Menu::Cube(menu::CubeSubMenu::Settings(
+                menu::CubeSettingsOption::AiAccess
+            ))
+        ) {
+            view::dashboard(
+                &self.panels.current,
+                &self.cache,
+                self.local_mcp
+                    .view_for_cube(self.mcp_supported(), self.mcp_proposals_supported()),
             )
         } else if let (Menu::Vault(menu::VaultSubMenu::Claim), Some(panel)) = (
             &self.panels.current,

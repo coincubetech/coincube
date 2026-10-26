@@ -53,7 +53,6 @@ use zeroize::Zeroizing;
 use crate::app::settings::CubeSettings;
 
 struct Session {
-    /// Non-secret identity for the current unlock lifetime.
     generation: u64,
     /// The Cube this PIN belongs to. Checked on read so a stale session from a
     /// previously-open Cube can never hand its PIN to a different one.
@@ -314,8 +313,8 @@ fn next_generation() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Non-secret lifetime identity for scoped read grants. Reopening even the
-/// same Cube invalidates the previous generation.
+/// Non-secret lifetime identity for scoped read grants. Never returns PIN/key data.
+/// Closing or reopening even the same Cube invalidates the previous identity.
 pub fn generation_for(cube_id: &str) -> Option<u64> {
     lock_session()
         .as_ref()
@@ -323,8 +322,8 @@ pub fn generation_for(cube_id: &str) -> Option<u64> {
         .map(|s| s.generation)
 }
 
-/// Serialize a short native pairing admission with lock/close/reopen.
-/// The callback must not call any session API.
+/// Serialize native authorization persistence with lock/close/reopen.
+/// The callback must be short and synchronous and must not call session APIs.
 pub(crate) fn admit_generation<T>(
     cube_id: &str,
     generation: u64,
@@ -336,6 +335,18 @@ pub(crate) fn admit_generation<T>(
         return None;
     }
     admit()
+}
+
+/// Close only the captured experimental setup session, never a newer unlock.
+#[cfg(feature = "mcp-proposals")]
+pub(crate) fn close_generation(cube_id: &str, generation: u64) {
+    let mut current = lock_session();
+    if current
+        .as_ref()
+        .is_some_and(|s| s.cube_id == cube_id && s.generation == generation)
+    {
+        *current = None;
+    }
 }
 
 /// Id of the currently open Cube, if any.
@@ -387,6 +398,14 @@ pub(crate) fn close_cube(cube_id: &str) {
         .is_some_and(|session| session.cube_id == cube_id)
     {
         *session = None;
+    }
+}
+
+/// Advance only the synthetic test session's idle clock without a wall-clock wait.
+#[cfg(all(test, feature = "mcp-proposals"))]
+pub(crate) fn age_for_proposal_test(duration: Duration) {
+    if let Some(session) = lock_session().as_mut() {
+        session.last_activity = Instant::now() - duration;
     }
 }
 
