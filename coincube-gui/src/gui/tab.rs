@@ -4316,7 +4316,12 @@ impl Tab {
                     Message::AppAsync(generation, Box::new(Message::Run(message)))
                 })
             }
-            State::Home(v) => v.view().map(Message::Launch),
+            State::Home(v) => v
+                .view_with_privacy(
+                    self.balance_privacy
+                        .is_none_or(|chrome| chrome.privacy.masks_amounts()),
+                )
+                .map(Message::Launch),
             State::Loader(v) => v.view().map(Message::Load),
             State::Login(v) => v.view().map(Message::Login),
             State::PinEntry(v) => {
