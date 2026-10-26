@@ -46,6 +46,25 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config protobuf-compiler libdbus-1-dev libwebkit2gtk-4.1-dev
           cargo clippy --all-targets -- -D warnings
+          cargo clippy -p coincube-gui --all-targets --features mcp-proposals,mcp-transactions --locked -- -D warnings
+
+  mcp_tests:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+          components: clippy
+      - run: cargo test -p coincube-mcp --features adapter --locked
+      - run: cargo test -p coincube-mcp --features adapter,native-proposals,native-transactions --locked
+      - run: cargo clippy -p coincube-mcp --features adapter --all-targets --locked -- -D warnings
 
   # coincube-spark-bridge is excluded from the root workspace (see the root
   # Cargo.toml), so the bare `cargo test` in unit_tests does not reach it and
@@ -181,6 +200,14 @@ jobs:
         # concurrency costs little and, with the in-code retries, removes the
         # remaining Windows flakiness.
         run: |
+          # Exercise Windows MCP early, including the separately built STDIO
+          # companion, before the longer full workspace suite.
+          cargo build -p coincube-mcp --features adapter --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:TENSHU_MCP_TEST_ADAPTER = Join-Path $PWD 'target/debug/tenshu-mcp.exe'
+          cargo test -p coincube-gui --lib app::local_mcp::tests --no-default-features --locked -- --include-ignored --test-threads=2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Remove-Item Env:TENSHU_MCP_TEST_ADAPTER
           cargo test --no-default-features -- --test-threads=2
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python contrib/check_windows_binary.py target/debug/coincube.exe
@@ -236,6 +263,21 @@ jobs:
           python3 contrib/test_keyring_supervision.py
           python3 contrib/test_keyring_supervision.py --live-kill
           dbus-run-session -- python3 contrib/with_test_keyring.py -- cargo test --color always -- --nocapture
+      - name: Real wallet through installed STDIO companion
+        if: matrix.toolchain == 'pinned' && runner.os != 'Windows'
+        shell: bash
+        run: |
+          cargo build -p coincube-mcp --features adapter --locked
+          adapter="$PWD/target/debug/tenshu-mcp"
+          TENSHU_MCP_TEST_ADAPTER="$adapter" cargo test -p coincube-gui --lib stdio_client_reads_real_wallet_and_observes_revocation -- --ignored
+      - name: Experimental Regtest proposals, transactions and native lock boundaries
+        if: matrix.toolchain == 'pinned'
+        env:
+          BREEZ_API_KEY: DUMMY_REGTEST_ONLY
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          cargo test -p coincube-gui --lib --features mcp-proposals,mcp-transactions --locked proposal -- --test-threads=2
+          cargo test -p coincube-gui --lib --features mcp-proposals,mcp-transactions --locked mcp_transaction -- --test-threads=2
       - name: Preserve Secret Service fixture diagnostics
         if: always() && runner.os == 'Linux'
         uses: actions/upload-artifact@v4

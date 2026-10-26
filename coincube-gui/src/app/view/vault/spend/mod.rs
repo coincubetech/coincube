@@ -53,6 +53,7 @@ pub fn spend_view<'a>(
     identities: &'a [(usize, crate::services::branta::LookupResult)],
     replay: Option<psbt::ReplayPill<'a>>,
     broadcast_ready: bool,
+    mcp_review: bool,
 ) -> Element<'a, Message> {
     let is_recovery = tx
         .psbt
@@ -69,6 +70,7 @@ pub fn spend_view<'a>(
                 Container::new(h3(if is_recovery { "Recovery" } else { "Send" }))
                     .width(Length::Fill),
             )
+            .push_maybe(mcp_review.then(|| mcp_prepared_review(tx, network)))
             .push(psbt::spend_header(tx, labels_editing, bitcoin_unit))
             .push_maybe(if spend_warnings.is_empty() || saved {
                 None
@@ -176,11 +178,92 @@ fn feerate_preset_id(block_target: usize) -> Id {
     Id::from(format!("tenshu.vault.send.feerate-preset.{block_target}"))
 }
 
-/// A Slow/Normal/Fast feerate preset in the fee segment. It shows as selected
-/// while its estimate fills the feerate field. While its own estimate is being
-/// fetched it is disabled and shows a loading indicator, keeping its block
-/// target identity. A disabled Action leaves the focus order, so focus on the
-/// preset being fetched is not retained.
+/// Always-visible review for an MCP-origin construction. Read the actual loaded
+/// PSBT/SpendTx, never the assistant's summary. Ordinary spend screens do not use it.
+/// Ordinary widgets intentionally avoid the lazy collapsible component here.
+pub(crate) fn mcp_prepared_review<'a, R>(
+    tx: &SpendTx,
+    network: Network,
+) -> iced::Element<'a, Message, coincube_ui::theme::Theme, R>
+where
+    R: iced::advanced::text::Renderer<Font = iced::Font> + 'a,
+{
+    let unsigned = tx.psbt.inputs.iter().all(|i| {
+        i.partial_sigs.is_empty()
+            && i.final_script_sig.is_none()
+            && i.final_script_witness.is_none()
+            && i.tap_key_sig.is_none()
+            && i.tap_script_sigs.is_empty()
+    });
+    let mut content = Column::new()
+        .spacing(10)
+        .padding(20)
+        .width(Length::Fill)
+        .push(iced::widget::text("Prepared transaction review").size(24))
+        .push(
+            iced::widget::text(if unsigned {
+                "Unsigned transaction. Your signature is required."
+            } else {
+                "Signatures present. Review signing status in Tenshu."
+            })
+            .size(20),
+        )
+        .push(iced::widget::text(
+            "MCP cannot sign or broadcast this transaction.",
+        ))
+        .push(iced::widget::text(format!(
+            "Payment total: {} sats",
+            tx.spend_amount.to_sat()
+        )));
+    let input_total = tx.psbt.inputs.iter().try_fold(0u64, |sum, i| {
+        sum.checked_add(i.witness_utxo.as_ref()?.value.to_sat())
+    });
+    content = content
+        .push(iced::widget::text(
+            input_total
+                .map(|v| format!("Input total: {v} sats"))
+                .unwrap_or_else(|| "Input total unavailable".into()),
+        ))
+        .push(iced::widget::text(
+            tx.fee_amount
+                .map(|v| format!("Miner fee: {} sats", v.to_sat()))
+                .unwrap_or_else(|| "Miner fee unavailable".into()),
+        ));
+    let changes: Vec<_> = tx
+        .psbt
+        .unsigned_tx
+        .output
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| tx.change_indexes.contains(index))
+        .map(|(_, output)| output)
+        .collect();
+    let total: u64 = changes.iter().map(|o| o.value.to_sat()).sum();
+    content = content
+        .push(iced::widget::text(format!("Change returned to this Vault: {total} sats")).size(20));
+    for output in changes {
+        let address = coincube_core::miniscript::bitcoin::Address::from_script(
+            &output.script_pubkey,
+            network,
+        )
+        .map(|v| v.to_string())
+        .unwrap_or_else(|_| "Address unavailable; do not sign".into());
+        content = content
+            .push(iced::widget::text(format!(
+                "Change output: {} sats",
+                output.value.to_sat()
+            )))
+            .push(iced::widget::text(format!("Change address: {address}")).width(Length::Fill));
+    }
+    Container::new(content)
+        .width(Length::Fill)
+        .style(theme::card::simple)
+        .into()
+}
+
+/// A Fast/Normal/Slow feerate preset button. Renders with an orange outline
+/// when its estimate currently fills the feerate field, and is disabled while
+/// its own estimate is being fetched.
 fn feerate_preset_button<'a>(
     label: &'static str,
     block_target: usize,

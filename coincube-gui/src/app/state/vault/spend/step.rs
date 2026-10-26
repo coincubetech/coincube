@@ -87,6 +87,14 @@ impl TransactionDraft {
         }
     }
 
+    #[cfg(feature = "mcp-transactions")]
+    pub(super) fn from_mcp(native: crate::app::local_mcp::transactions::NativeDraft) -> Self {
+        let mut draft = Self::new(Network::Regtest, None);
+        draft.inputs = native.coins;
+        draft.generated = Some((native.psbt, native.warnings));
+        draft
+    }
+
     pub fn is_recovery(&self) -> bool {
         self.recovery_timelock.is_some()
     }
@@ -1543,6 +1551,7 @@ pub struct SaveSpend {
     wallet: Arc<Wallet>,
     spend: Option<(psbt::PsbtState, Vec<String>)>,
     curve: secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    mcp_review: bool,
 }
 
 impl SaveSpend {
@@ -1551,7 +1560,13 @@ impl SaveSpend {
             wallet,
             spend: None,
             curve: secp256k1::Secp256k1::verification_only(),
+            mcp_review: false,
         }
+    }
+    #[cfg(feature = "mcp-transactions")]
+    pub(crate) fn with_mcp_review(mut self) -> Self {
+        self.mcp_review = true;
+        self
     }
 }
 
@@ -1650,6 +1665,7 @@ impl Step for SaveSpend {
             psbt_state.recipient_identities(),
             psbt_state.replay_presentation(cache),
             psbt_state.broadcast_ready(cache),
+            self.mcp_review,
         );
         if let Some(modal) = &psbt_state.modal {
             modal.as_ref().view(content)
