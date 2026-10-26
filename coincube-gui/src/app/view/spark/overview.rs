@@ -55,6 +55,15 @@ pub enum SparkStatus {
     Error(String),
 }
 
+/// Current bridge state for the contextual action. A routine refresh is
+/// distinct from a failed bridge even while both keep the action disabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SparkLandingAvailability {
+    Ready,
+    Refreshing,
+    Unavailable,
+}
+
 /// Which underlying Spark payment rail fulfilled a transaction. Drives
 /// the asset icon on the overview row — Spark-native and Lightning
 /// payments share the same wallet balance but should look different at
@@ -154,8 +163,13 @@ pub fn spark_landing_address<'a>(
                     .spacing(4)
                     .width(Length::Fill)
                     .push(h4_bold("Lightning Address"))
-                    .push(text(short_address).size(P2_SIZE)),
+                    .push(
+                        text("Receive to a readable address")
+                            .size(P2_SIZE)
+                            .style(theme::text::secondary),
+                    ),
             )
+            .push(text(short_address).size(P2_SIZE))
             .push(
                 button::secondary_compact_action(
                     landing_control_id(&state.cube_uuid, "Spark", "ln-copy"),
@@ -188,50 +202,45 @@ pub fn spark_landing_context<'a>(
     address: Element<'a, crate::app::view::Message>,
     active: Option<bool>,
     saving: bool,
-    available: bool,
+    availability: SparkLandingAvailability,
     cube_id: &str,
 ) -> Element<'a, crate::app::view::Message> {
     use crate::app::view::{Message, SparkOverviewMessage};
 
-    let status = match (available, active, saving) {
-        (false, _, _) => "Spark is unavailable",
-        (_, _, true) => "Saving…",
-        (_, Some(true), false) => "Stable Balance is ON",
-        (_, Some(false), false) => "Stable Balance is OFF",
-        (_, None, false) => "Stable Balance setting is unknown",
+    let status = stable_balance_status_text(availability, active, saving);
+    let label = match active {
+        Some(true) => "Stable Balance · On on this device",
+        Some(false) => "Stable Balance · Off on this device",
+        None => "Stable Balance",
     };
-    let next = active.map(|enabled| !enabled);
-    let button = landing_button(
+    let toggle = coincube_ui::component::tenshu::toggle(
         landing_control_id(cube_id, "Spark", "stable-balance-toggle"),
-        if active == Some(true) {
-            "Turn off"
-        } else {
-            "Turn on"
-        },
-        None,
+        active.unwrap_or(false),
         Message::FocusAction,
-        (available && !saving)
-            .then_some(next)
-            .flatten()
-            .map(|enabled| {
-                Message::SparkOverview(SparkOverviewMessage::ToggleStableBalance(enabled))
-            }),
-        landing_subtle_button_style,
+    )
+    .on_toggle_maybe(
+        (availability == SparkLandingAvailability::Ready && !saving && active.is_some()).then_some(
+            |enabled| Message::SparkOverview(SparkOverviewMessage::ToggleStableBalance(enabled)),
+        ),
     );
     let stable = Container::new(
         Column::new()
             .spacing(8)
-            .push(h4_bold("Stable Balance"))
-            .push(text("Keep a portion of your Bitcoin balance pegged to USD. Set per device; not restored with the seed. No guaranteed peg.")
-                .size(P2_SIZE).style(theme::text::secondary))
             .push(
                 Row::new()
                     .spacing(12)
                     .align_y(Alignment::Center)
-                    .push(text(status).size(P2_SIZE))
-                    .push(iced::widget::Space::new().width(Length::Fill))
-                    .push(button),
-            ),
+                    .push(
+                        Column::new()
+                            .spacing(4)
+                            .width(Length::Fill)
+                            .push(h4_bold(label))
+                            .push(text("Keep a portion of your Bitcoin balance pegged to USD. Set per device; not restored with the seed. No guaranteed peg.")
+                                .size(P2_SIZE).style(theme::text::secondary)),
+                    )
+                    .push(toggle),
+            )
+            .push_maybe(status.map(|copy| text(copy).size(P2_SIZE).style(theme::text::secondary))),
     )
     .padding(20)
     .width(Length::Fill)
@@ -243,6 +252,20 @@ pub fn spark_landing_context<'a>(
         .push(address)
         .push(stable)
         .into()
+}
+
+pub(crate) fn stable_balance_status_text(
+    availability: SparkLandingAvailability,
+    active: Option<bool>,
+    saving: bool,
+) -> Option<&'static str> {
+    match (availability, saving, active) {
+        (SparkLandingAvailability::Unavailable, _, _) => Some("Spark is unavailable"),
+        (_, true, _) => Some("Saving…"),
+        (SparkLandingAvailability::Refreshing, _, _) => Some("Refreshing…"),
+        (SparkLandingAvailability::Ready, _, None) => Some("Stable Balance setting is unknown"),
+        (SparkLandingAvailability::Ready, _, Some(_)) => None,
+    }
 }
 
 impl<'a> SparkOverviewView<'a> {
@@ -455,7 +478,7 @@ fn connected_view<'a>(
                 (stable_balance_active == Some(false)
                     && stable_balance.as_ref().is_some_and(|sb| sb.balance > 0))
                 .then(|| {
-                    text("USDB is held while Stable Balance is off. Review Spark settings.")
+                    text("USDB is held while Stable Balance is off. Use the toggle below.")
                         .size(P2_SIZE)
                         .style(theme::text::warning)
                 }),
@@ -722,7 +745,7 @@ mod tests {
                             address,
                             Some(true),
                             false,
-                            true,
+                            SparkLandingAvailability::Ready,
                             "synthetic-cube",
                         ))
                         .into(),
@@ -731,12 +754,94 @@ mod tests {
                     theme,
                 );
                 assert!(mounted.contains("sats@coincube.io"));
-                assert!(mounted.contains("Stable Balance is ON"));
+                assert!(mounted.contains("Receive to a readable address"));
+                assert!(mounted.contains("Stable Balance · On on this device"));
                 assert!(mounted.has_focus(landing_control_id(
                     "synthetic-cube",
                     "Spark",
                     "stable-balance-toggle"
                 )));
+                let section = capture::inspect(
+                    "spark-context-scrolled-section-on",
+                    spark_landing_context(
+                        spark_landing_address(&connect),
+                        Some(true),
+                        false,
+                        SparkLandingAvailability::Ready,
+                        "synthetic-cube",
+                    ),
+                    size,
+                    appearance,
+                    theme,
+                );
+                assert!(section.contains("Stable Balance · On on this device"));
+                assert!(section.contains("Receive to a readable address"));
+                let off_section = capture::inspect(
+                    "spark-context-scrolled-section-off",
+                    spark_landing_context(
+                        spark_landing_address(&connect),
+                        Some(false),
+                        false,
+                        SparkLandingAvailability::Ready,
+                        "synthetic-cube",
+                    ),
+                    size,
+                    appearance,
+                    theme,
+                );
+                assert!(off_section.contains("Stable Balance · Off on this device"));
+                for (availability, expected, scenario) in [
+                    (
+                        SparkLandingAvailability::Refreshing,
+                        "Refreshing…",
+                        "spark-context-scrolled-section-refreshing",
+                    ),
+                    (
+                        SparkLandingAvailability::Unavailable,
+                        "Spark is unavailable",
+                        "spark-context-scrolled-section-unavailable",
+                    ),
+                ] {
+                    let state = capture::inspect(
+                        scenario,
+                        spark_landing_context(
+                            spark_landing_address(&connect),
+                            Some(true),
+                            false,
+                            availability,
+                            "synthetic-cube",
+                        ),
+                        size,
+                        appearance,
+                        theme,
+                    );
+                    assert!(state.contains(expected));
+                    assert!(!state.has_focus(landing_control_id(
+                        "synthetic-cube",
+                        "Spark",
+                        "stable-balance-toggle"
+                    )));
+                }
+                for pointer in [false, true] {
+                    let emitted = capture::activate(
+                        spark_landing_context(
+                            spark_landing_address(&connect),
+                            Some(true),
+                            false,
+                            SparkLandingAvailability::Ready,
+                            "synthetic-cube",
+                        ),
+                        landing_control_id("synthetic-cube", "Spark", "stable-balance-toggle"),
+                        size,
+                        pointer,
+                    );
+                    assert!(emitted.iter().any(|message| matches!(
+                        message,
+                        view::Message::SparkOverview(SparkOverviewMessage::ToggleStableBalance(
+                            false
+                        ))
+                    )));
+                }
                 for control in ["ln-copy", "ln-change"] {
                     assert!(mounted.has_focus(landing_control_id(
                         "synthetic-cube",
@@ -766,7 +871,7 @@ mod tests {
                         spark_landing_address(&connect),
                         Some(true),
                         true,
-                        true,
+                        SparkLandingAvailability::Ready,
                         "synthetic-cube",
                     ),
                     size,
@@ -840,7 +945,7 @@ mod tests {
                         spark_landing_address(&connect),
                         Some(true),
                         false,
-                        true,
+                        SparkLandingAvailability::Ready,
                         "synthetic-cube",
                     ));
                 let page = iced::widget::scrollable(body)
@@ -1226,6 +1331,7 @@ mod tests {
                 assert!(missing_quote.contains("2.50 USDB"));
                 assert!(missing_quote.contains("needs a BTC/USD quote"));
                 assert!(missing_quote.contains("held while Stable Balance is off"));
+                assert!(missing_quote.contains("Use the toggle below."));
                 assert!(missing_quote.contains("Last known balance"));
                 let unknown_setting = capture::inspect(
                     "spark-setting-unknown-loaded-empty",

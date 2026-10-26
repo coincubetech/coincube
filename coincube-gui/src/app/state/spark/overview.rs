@@ -20,6 +20,7 @@ use crate::app::cache::Cache;
 use crate::app::menu::{Menu, SparkSubMenu};
 use crate::app::message::Message;
 use crate::app::state::{redirect, State};
+use crate::app::view::spark::overview::SparkLandingAvailability;
 use crate::app::view::spark::{
     SparkOverviewView, SparkPaymentMethod, SparkRecentTransaction, SparkStatus,
 };
@@ -70,7 +71,11 @@ impl SparkOverview {
     /// Settings toggle's reachability gate while keeping the last successful
     /// snapshot visible as stale portfolio context.
     fn bridge_reachable(&self) -> bool {
-        bridge_reachable(
+        self.landing_availability() == SparkLandingAvailability::Ready
+    }
+
+    fn landing_availability(&self) -> SparkLandingAvailability {
+        landing_availability(
             self.backend.is_some(),
             self.loading,
             self.snapshot.is_some(),
@@ -123,7 +128,7 @@ impl SparkOverview {
                 address,
                 self.stable_balance_active,
                 self.stable_balance_saving,
-                self.bridge_reachable(),
+                self.landing_availability(),
                 &cache.cube_id,
             ));
         }
@@ -323,13 +328,19 @@ impl State for SparkOverview {
     }
 }
 
-fn bridge_reachable(
+fn landing_availability(
     backend_available: bool,
     loading: bool,
     snapshot_present: bool,
     refresh_failed: bool,
-) -> bool {
-    backend_available && snapshot_present && !loading && !refresh_failed
+) -> SparkLandingAvailability {
+    if !backend_available || refresh_failed {
+        SparkLandingAvailability::Unavailable
+    } else if loading || !snapshot_present {
+        SparkLandingAvailability::Refreshing
+    } else {
+        SparkLandingAvailability::Ready
+    }
 }
 
 /// Build the view-level `SparkRecentTransaction` row from a bridge
@@ -703,8 +714,8 @@ mod tests {
     #[test]
     fn retained_snapshot_after_bridge_error_does_not_enable_stable_balance() {
         let mut panel = SparkOverview::new(None);
-        let available_with_backend = |panel: &SparkOverview| {
-            bridge_reachable(
+        let availability_with_backend = |panel: &SparkOverview| {
+            landing_availability(
                 true,
                 panel.loading,
                 panel.snapshot.is_some(),
@@ -730,10 +741,22 @@ mod tests {
                 view::SparkOverviewMessage::StableBalanceLoaded(false),
             )),
         );
-        assert!(available_with_backend(&panel));
+        assert_eq!(
+            availability_with_backend(&panel),
+            SparkLandingAvailability::Ready
+        );
 
         panel.loading = true;
-        assert!(!available_with_backend(&panel));
+        let refreshing = availability_with_backend(&panel);
+        assert_eq!(refreshing, SparkLandingAvailability::Refreshing);
+        assert_eq!(
+            view::spark::overview::stable_balance_status_text(
+                refreshing,
+                panel.stable_balance_active,
+                false
+            ),
+            Some("Refreshing…"),
+        );
         let _ = panel.update(
             None,
             &Cache::default(),
@@ -743,7 +766,16 @@ mod tests {
         );
         assert!(panel.snapshot.is_some());
         assert_eq!(panel.stable_balance_active, Some(false));
-        assert!(!available_with_backend(&panel));
+        let unavailable = availability_with_backend(&panel);
+        assert_eq!(unavailable, SparkLandingAvailability::Unavailable);
+        assert_eq!(
+            view::spark::overview::stable_balance_status_text(
+                unavailable,
+                panel.stable_balance_active,
+                false
+            ),
+            Some("Spark is unavailable"),
+        );
 
         // A settings reply can arrive after the failed info refresh; it
         // cannot make the stale snapshot actionable again.
@@ -754,6 +786,9 @@ mod tests {
                 view::SparkOverviewMessage::StableBalanceLoaded(true),
             )),
         );
-        assert!(!available_with_backend(&panel));
+        assert_eq!(
+            availability_with_backend(&panel),
+            SparkLandingAvailability::Unavailable
+        );
     }
 }
