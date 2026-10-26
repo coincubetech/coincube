@@ -7273,6 +7273,34 @@ impl App {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         self.refresh_mcp_pairings();
         if let Message::View(view::Message::LocalMcp(message)) = message {
+            let focus_after = match &message {
+                local_mcp::Message::RequestRevokePair(_) => Some(iced::advanced::widget::Id::from(
+                    "tenshu.ai-access.revoke.keep",
+                )),
+                local_mcp::Message::CancelRevokePair => {
+                    self.local_mcp.pending_revoke().map(|(_, id)| {
+                        iced::advanced::widget::Id::from(format!(
+                            "tenshu.ai-access.client.{id}.revoke"
+                        ))
+                    })
+                }
+                local_mcp::Message::RevokePair(id)
+                    if self
+                        .local_mcp
+                        .pending_revoke()
+                        .is_some_and(|(_, pending)| pending == id) =>
+                {
+                    Some(iced::advanced::widget::Id::from(
+                        if self.mcp_supported() || self.mcp_proposals_supported() {
+                            "tenshu.ai-access.enable"
+                        } else {
+                            view::nav::shell::CUBE_SWITCHER_ID
+                        },
+                    ))
+                }
+                _ => None,
+            };
+            let requested_revoke = matches!(&message, local_mcp::Message::RequestRevokePair(_));
             #[cfg(feature = "mcp-transactions")]
             if let local_mcp::Message::ReviewTransaction {
                 client_id,
@@ -7310,6 +7338,11 @@ impl App {
                 &self.cube_settings.id,
             );
             self.refresh_mcp_pairings();
+            if let Some(id) = focus_after {
+                if !requested_revoke || self.local_mcp.pending_revoke().is_some() {
+                    return iced::widget::operation::focus(id);
+                }
+            }
             return match config {
                 Some(config) => clipboard::write(config),
                 None => Task::none(),
@@ -11405,12 +11438,30 @@ impl App {
                 .view(&self.panels.current, &self.cache)
         };
 
-        let content = if self.cache.network != bitcoin::Network::Bitcoin {
-            iced::widget::column![network_banner(self.cache.network), view.map(Message::View)]
-                .into()
+        let view: Element<'_, view::Message> = if self.cache.network != bitcoin::Network::Bitcoin {
+            iced::widget::column![network_banner(self.cache.network), view].into()
         } else {
-            view.map(Message::View)
+            view
         };
+        let view = if matches!(
+            self.panels.current,
+            Menu::Cube(menu::CubeSubMenu::Settings(
+                menu::CubeSettingsOption::AiAccess
+            ))
+        ) {
+            if let Some(dialog) = self.local_mcp.revoke_dialog() {
+                coincube_ui::widget::modal::Modal::new(view, dialog)
+                    .on_blur(Some(view::Message::LocalMcp(
+                        local_mcp::Message::CancelRevokePair,
+                    )))
+                    .into()
+            } else {
+                view
+            }
+        } else {
+            view
+        };
+        let content = view.map(Message::View);
 
         // Overlay toast at bottom if present
         let content: Element<'_, Message> = match self.errors.is_empty() {
