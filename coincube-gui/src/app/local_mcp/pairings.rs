@@ -44,6 +44,9 @@ impl Location {
     pub fn chain_matches(&self, chain: crate::chain::ChainId) -> bool {
         self.binding.chain == chain.dir_name()
     }
+    pub fn cube_matches(&self, cube: &str) -> bool {
+        self.binding.cube == cube
+    }
     pub fn new(datadir: &Path, chain: crate::chain::ChainId, cube: &str) -> io::Result<Self> {
         let root = datadir.canonicalize()?;
         let binding = Binding {
@@ -143,6 +146,48 @@ fn confirm_directory(directory: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// This lock stays outside the removable registry directory, so a failed
+/// remove_dir_all cannot unlink the inode that protects Store::open.
+fn lock_lifecycle(location: &Location) -> io::Result<Arc<fs::File>> {
+    let parent = location
+        .directory
+        .parent()
+        .ok_or_else(|| io::Error::other("invalid pairing path"))?;
+    match fs::create_dir(parent) {
+        Ok(()) => protect_new(parent, true)?,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => check_private(parent, true)?,
+        Err(e) => return Err(e),
+    }
+    if parent.canonicalize()? != parent {
+        return Err(io::Error::other("pairing parent redirected"));
+    }
+    let name = location
+        .directory
+        .file_name()
+        .ok_or_else(|| io::Error::other("invalid pairing path"))?;
+    let path = parent.join(format!("{}.lifecycle.lock", name.to_string_lossy()));
+    let file = match fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(file) => {
+            protect_new(&path, false)?;
+            file
+        }
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            check_private(&path, false)?;
+            fs::OpenOptions::new().read(true).write(true).open(&path)?
+        }
+        Err(e) => return Err(e),
+    };
+    if !file.try_lock_exclusive()? {
+        return Err(io::Error::other("pairing registry already open"));
+    }
+    Ok(Arc::new(file))
+}
+
 /// The owner lock lives as long as any endpoint for this registry. A competing
 /// process cannot restore a stale copy or overwrite another process's locator.
 pub(super) struct Store {
@@ -150,6 +195,7 @@ pub(super) struct Store {
     key: Zeroizing<[u8; 32]>,
     document: Document,
     _owner: Arc<fs::File>,
+    _lifecycle_owner: Arc<fs::File>,
 }
 impl Store {
     pub(super) fn open(
@@ -157,16 +203,13 @@ impl Store {
         key: Zeroizing<[u8; 32]>,
         create: bool,
     ) -> io::Result<Self> {
-        let parent = location
-            .directory
-            .parent()
-            .ok_or_else(|| io::Error::other("invalid pairing path"))?;
-        for path in [parent, location.directory.as_path()] {
-            match fs::create_dir(path) {
-                Ok(()) => protect_new(path, true)?,
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => check_private(path, true)?,
-                Err(e) => return Err(e),
+        let lifecycle_owner = lock_lifecycle(&location)?;
+        match fs::create_dir(&location.directory) {
+            Ok(()) => protect_new(&location.directory, true)?,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                check_private(&location.directory, true)?
             }
+            Err(e) => return Err(e),
         }
         if location.directory.canonicalize()? != location.directory {
             return Err(io::Error::other("pairing path redirected"));
@@ -209,6 +252,7 @@ impl Store {
             key,
             document,
             _owner: Arc::new(owner),
+            _lifecycle_owner: lifecycle_owner,
         };
         if create && !path.exists() {
             store.persist(&store.document)?;
@@ -271,7 +315,7 @@ impl Store {
         Ok(document)
     }
     pub fn owner(&self) -> Arc<fs::File> {
-        self._owner.clone()
+        self._lifecycle_owner.clone()
     }
     pub fn enabled(&self) -> bool {
         self.document.enabled
@@ -384,10 +428,17 @@ fn remove_cube_at(
     location: &Location,
     invalidate_key: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<()> {
+    let _lifecycle_owner = match lock_lifecycle(location) {
+        Ok(owner) => owner,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            // The chain directory is already gone; no registry can remain.
+            let _ = invalidate_key();
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
     match fs::symlink_metadata(&location.directory) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            // A leftover keystore item has no registry to decrypt. Cube
-            // deletion must still work when the optional keystore is down.
             let _ = invalidate_key();
             return Ok(());
         }
@@ -407,14 +458,20 @@ fn remove_cube_at(
             }
             Some(owner)
         }
-        // A previous removal can have deleted owner.lock before failing to
-        // remove another file. Let the same Cube deletion finish on retry.
-        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            // A pre-repair process can still own an unlinked child lock inode.
+            // Its live grant cannot be proved revoked while ciphertext remains.
+            if location.directory.join("clients.enc").exists() {
+                return Err(io::Error::other(
+                    "pairing owner lock missing while authorization remains",
+                ));
+            }
+            None
+        }
         Err(e) => return Err(e),
     };
     fs::remove_dir_all(&location.directory)?;
-    // Only the encrypted registry carries durable client authorization. Its
-    // removal must succeed; the now-inert wrapping key is best-effort cleanup.
+    // The encrypted registry carries authorization. A leftover wrapping key is inert.
     let _ = invalidate_key();
     Ok(())
 }
@@ -427,43 +484,60 @@ mod tests {
         Location::new(root, crate::chain::ChainId::Regtest, cube).unwrap()
     }
     #[test]
-    fn cube_removal_retries_after_partial_directory_or_key_deletion() {
+    fn cube_removal_recovers_from_partial_directory_and_key_deletion() {
         let root = std::env::temp_dir().join(format!("mcp-delete-retry-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&root).unwrap();
         let location = location(&root, "retry");
         fs::create_dir_all(&location.directory).unwrap();
+        protect_new(location.directory.parent().unwrap(), true).unwrap();
         protect_new(&location.directory, true).unwrap();
         fs::write(location.directory.join("clients.enc"), b"partial").unwrap();
-
-        // A prior remove_dir_all may have removed owner.lock first. Once the
-        // directory is gone, a keystore failure cannot block Cube deletion.
-        // The callback avoids any real keystore entry in this synthetic test.
-        let mut invalidations = 0;
-        remove_cube_at(&location, || {
-            invalidations += 1;
-            Err(io::Error::other("synthetic keyring failure"))
-        })
-        .unwrap();
+        assert!(
+            remove_cube_at(&location, || Ok(())).is_err(),
+            "missing legacy lock with authorization must fail closed"
+        );
+        fs::remove_file(location.directory.join("clients.enc")).unwrap();
+        remove_cube_at(&location, || Err(io::Error::other("keystore unavailable"))).unwrap();
         assert!(!location.directory.exists());
-        remove_cube_at(&location, || {
-            invalidations += 1;
-            Ok(())
-        })
-        .unwrap();
-        assert_eq!(invalidations, 2);
+        remove_cube_at(&location, || Err(io::Error::other("keystore unavailable"))).unwrap();
         fs::remove_dir_all(root).unwrap();
     }
-
     #[test]
-    fn cube_without_pairings_deletes_when_keystore_is_unavailable() {
-        let root = std::env::temp_dir().join(format!("mcp-delete-empty-{}", uuid::Uuid::new_v4()));
+    fn cube_removal_excludes_live_store_even_after_child_lock_is_unlinked() {
+        let root = std::env::temp_dir().join(format!("mcp-delete-owner-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&root).unwrap();
-        let location = location(&root, "never-paired");
+        let location = location(&root, "owned");
+        let store = Store::open(location.clone(), Zeroizing::new([61; 32]), true).unwrap();
+        // Simulate a pre-repair partial remover unlinking owner.lock while a
+        // runtime retains the stable parent lock from this version.
+        fs::remove_file(location.directory.join("owner.lock")).unwrap();
+        assert!(remove_cube_at(&location, || Ok(())).is_err());
+        assert!(location.directory.join("clients.enc").exists());
+        drop(store);
+        // Without a visible legacy lock, ciphertext still requires explicit
+        // recovery; the new lifecycle lock does not assert old-process safety.
+        assert!(remove_cube_at(&location, || Ok(())).is_err());
+        fs::remove_file(location.directory.join("clients.enc")).unwrap();
+        remove_cube_at(&location, || Ok(())).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn cube_removal_rejects_live_legacy_child_owner_and_recovers_after_release() {
+        let root = std::env::temp_dir().join(format!("mcp-delete-legacy-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let location = location(&root, "legacy");
+        fs::create_dir_all(&location.directory).unwrap();
+        protect_new(location.directory.parent().unwrap(), true).unwrap();
+        protect_new(&location.directory, true).unwrap();
+        let child = location.directory.join("owner.lock");
+        let holder = fs::File::create(&child).unwrap();
+        protect_new(&child, false).unwrap();
+        assert!(holder.try_lock_exclusive().unwrap());
+        fs::write(location.directory.join("clients.enc"), b"legacy").unwrap();
+        assert!(remove_cube_at(&location, || Ok(())).is_err());
+        drop(holder);
+        remove_cube_at(&location, || Ok(())).unwrap();
         assert!(!location.directory.exists());
-        remove_cube_at(&location, || {
-            Err(io::Error::other("synthetic keystore unavailable"))
-        })
-        .unwrap();
         fs::remove_dir_all(root).unwrap();
     }
     fn fixture() -> (PathBuf, Store) {

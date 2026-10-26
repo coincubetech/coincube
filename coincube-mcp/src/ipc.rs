@@ -252,6 +252,30 @@ pub struct Server {
     task: JoinHandle<()>,
     _directory: Option<tempfile::TempDir>,
 }
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+enum AcceptErrorAction {
+    Retry,
+    Backoff,
+    Revoke,
+}
+
+#[cfg(unix)]
+fn accept_error_action(error: &io::Error) -> AcceptErrorAction {
+    // A peer can disappear before accept completes. File descriptor and memory
+    // pressure can also clear without rebuilding the desktop's paired grant.
+    // Delay resource retries so a persistent EMFILE/ENFILE cannot spin.
+    match error.raw_os_error() {
+        Some(libc::ECONNABORTED | libc::EINTR | libc::EAGAIN | libc::EPROTO) => {
+            AcceptErrorAction::Retry
+        }
+        Some(libc::EMFILE | libc::ENFILE | libc::ENOMEM | libc::ENOBUFS) => {
+            AcceptErrorAction::Backoff
+        }
+        _ => AcceptErrorAction::Revoke,
+    }
+}
+
 impl Server {
     /// Bind a protected current-logon named pipe and start authenticated reads.
     /// Requires an active Tokio runtime; setup errors do not authorize a client.
@@ -286,7 +310,20 @@ impl Server {
                     _ = permission.wait_expiry() => { permission.revoke(); break; }
                     Some(_) = workers.join_next(), if !workers.is_empty() => {}
                     connection = listener.accept(), if workers.len() < 8 => {
-                        let Ok((stream, _)) = connection else { permission.revoke(); break; };
+                        let (stream, _) = match connection {
+                            Ok(accepted) => accepted,
+                            Err(error) => match accept_error_action(&error) {
+                                AcceptErrorAction::Retry => {
+                                    tokio::time::sleep(Duration::from_millis(10)).await;
+                                    continue;
+                                }
+                                AcceptErrorAction::Backoff => {
+                                    tokio::time::sleep(Duration::from_millis(100)).await;
+                                    continue;
+                                }
+                                AcceptErrorAction::Revoke => { permission.revoke(); break; }
+                            },
+                        };
                         let reader = reader.clone(); let grant = permission.clone();
                         workers.spawn(async move { let _ = tokio::time::timeout(DEADLINE, serve(stream, reader, grant)).await; });
                     }
@@ -397,4 +434,29 @@ pub async fn call(socket: &Path, credential: &str, request: Request) -> Result<R
     tokio::time::timeout(DEADLINE, operation)
         .await
         .map_err(|_| Error::Unavailable)?
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transient_accept_failures_preserve_pairing_and_resource_errors_back_off() {
+        for code in [libc::ECONNABORTED, libc::EINTR, libc::EAGAIN, libc::EPROTO] {
+            assert_eq!(
+                accept_error_action(&io::Error::from_raw_os_error(code)),
+                AcceptErrorAction::Retry
+            );
+        }
+        for code in [libc::EMFILE, libc::ENFILE, libc::ENOMEM, libc::ENOBUFS] {
+            assert_eq!(
+                accept_error_action(&io::Error::from_raw_os_error(code)),
+                AcceptErrorAction::Backoff
+            );
+        }
+        assert_eq!(
+            accept_error_action(&io::Error::from_raw_os_error(libc::EBADF)),
+            AcceptErrorAction::Revoke
+        );
+    }
 }

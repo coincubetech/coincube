@@ -7277,15 +7277,17 @@ impl App {
                         .pending_revoke()
                         .is_some_and(|(_, pending)| pending == id) =>
                 {
-                    Some(iced::advanced::widget::Id::from(if self.mcp_supported() {
-                        "tenshu.ai-access.enable"
-                    } else {
-                        view::nav::shell::CUBE_SWITCHER_ID
-                    }))
+                    Some(iced::advanced::widget::Id::from(
+                        if self.mcp_supported() || self.mcp_proposals_supported() {
+                            "tenshu.ai-access.enable"
+                        } else {
+                            view::nav::shell::CUBE_SWITCHER_ID
+                        },
+                    ))
                 }
                 _ => None,
             };
-            let requested = matches!(&message, local_mcp::Message::RequestRevokePair(_));
+            let requested_revoke = matches!(&message, local_mcp::Message::RequestRevokePair(_));
             #[cfg(feature = "mcp-transactions")]
             if let local_mcp::Message::ReviewTransaction {
                 client_id,
@@ -7324,7 +7326,7 @@ impl App {
             );
             self.refresh_mcp_pairings();
             if let Some(id) = focus_after {
-                if !requested || self.local_mcp.pending_revoke().is_some() {
+                if !requested_revoke || self.local_mcp.pending_revoke().is_some() {
                     return iced::widget::operation::focus(id);
                 }
             }
