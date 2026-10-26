@@ -20,6 +20,9 @@ pub mod state;
 // Admission contract for the later cross-Cube Transfer UI. No payment route uses it yet.
 #[allow(dead_code)]
 mod transfer_destination;
+// Private B-side verification and read-only Vault backend attachment. No UI route uses it.
+#[allow(dead_code)]
+mod transfer_destination_loader;
 mod unswept_notice;
 pub mod view;
 pub mod wallet;
@@ -7260,6 +7263,34 @@ impl App {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         self.refresh_mcp_pairings();
         if let Message::View(view::Message::LocalMcp(message)) = message {
+            let focus_after = match &message {
+                local_mcp::Message::RequestRevokePair(_) => Some(iced::advanced::widget::Id::from(
+                    "tenshu.ai-access.revoke.keep",
+                )),
+                local_mcp::Message::CancelRevokePair => {
+                    self.local_mcp.pending_revoke().map(|(_, id)| {
+                        iced::advanced::widget::Id::from(format!(
+                            "tenshu.ai-access.client.{id}.revoke"
+                        ))
+                    })
+                }
+                local_mcp::Message::RevokePair(id)
+                    if self
+                        .local_mcp
+                        .pending_revoke()
+                        .is_some_and(|(_, pending)| pending == id) =>
+                {
+                    Some(iced::advanced::widget::Id::from(
+                        if self.mcp_supported() || self.mcp_proposals_supported() {
+                            "tenshu.ai-access.enable"
+                        } else {
+                            view::nav::shell::CUBE_SWITCHER_ID
+                        },
+                    ))
+                }
+                _ => None,
+            };
+            let requested_revoke = matches!(&message, local_mcp::Message::RequestRevokePair(_));
             #[cfg(feature = "mcp-transactions")]
             if let local_mcp::Message::ReviewTransaction {
                 client_id,
@@ -7297,6 +7328,11 @@ impl App {
                 &self.cube_settings.id,
             );
             self.refresh_mcp_pairings();
+            if let Some(id) = focus_after {
+                if !requested_revoke || self.local_mcp.pending_revoke().is_some() {
+                    return iced::widget::operation::focus(id);
+                }
+            }
             return match config {
                 Some(config) => clipboard::write(config),
                 None => Task::none(),
@@ -10156,6 +10192,7 @@ impl App {
             Message::View(view::Message::SparkSettings(
                 view::SparkSettingsMessage::StableBalanceSaved(Ok(enabled)),
             )) => {
+                self.panels.spark_overview.finish_stable_balance_save();
                 let record = self.record_spark_stable_balance(enabled);
                 let panel = self.panels.spark_settings.update(
                     self.daemon.clone(),
@@ -10164,7 +10201,40 @@ impl App {
                         view::SparkSettingsMessage::StableBalanceSaved(Ok(enabled)),
                     )),
                 );
-                return Task::batch([record, panel]);
+                return Task::batch([record, panel, self.panels.spark_overview.reload(None, None)]);
+            }
+            // Overview shares the same Settings save owner. Route both the
+            // request and failed settlement there even when Overview is active.
+            Message::View(view::Message::SparkSettings(
+                view::SparkSettingsMessage::StableBalanceToggled(enabled),
+            )) => {
+                if !self.panels.spark_overview.try_start_stable_balance_save() {
+                    return Task::none();
+                }
+                return self.panels.spark_settings.update(
+                    self.daemon.clone(),
+                    &self.cache,
+                    Message::View(view::Message::SparkSettings(
+                        view::SparkSettingsMessage::StableBalanceToggled(enabled),
+                    )),
+                );
+            }
+            Message::View(view::Message::SparkSettings(
+                view::SparkSettingsMessage::StableBalanceSaved(Err(err)),
+            )) => {
+                self.panels.spark_overview.finish_stable_balance_save();
+                let panel = self.panels.spark_settings.update(
+                    self.daemon.clone(),
+                    &self.cache,
+                    Message::View(view::Message::SparkSettings(
+                        view::SparkSettingsMessage::StableBalanceSaved(Err(err.clone())),
+                    )),
+                );
+                return Task::batch([
+                    panel,
+                    self.panels.spark_overview.reload(None, None),
+                    Task::done(Message::View(view::Message::ShowError(err))),
+                ]);
             }
             Message::View(view::Message::FlipDisplayMode) => {
                 if !self.cache.fiat_toggle_allowed() {
@@ -11314,6 +11384,35 @@ impl App {
                 &self.cache,
                 view::feature_unavailable_panel(reason),
             )
+        } else if matches!(
+            self.panels.current,
+            Menu::Spark(menu::SparkSubMenu::Overview)
+        ) {
+            // The Spark landing reuses the Connect-owned address form and its
+            // confirmation. No second address or auth state lives in Overview.
+            let address = if self.panels.connect.account.is_authenticated() {
+                view::spark::overview::spark_landing_address(&self.panels.connect.cube)
+            } else {
+                view::connect::sign_in_prompt::sign_in_prompt("claim a Lightning Address")
+            };
+            let confirmation = self
+                .panels
+                .connect
+                .account
+                .is_authenticated()
+                .then(|| {
+                    view::spark::settings::lightning_address::lightning_address_confirmation(
+                        &self.panels.connect.cube,
+                    )
+                })
+                .flatten()
+                .map(|dialog| dialog.map(view::Message::ConnectCube));
+            self.panels.spark_overview.view_with_address_overlay(
+                &self.panels.current,
+                &self.cache,
+                address,
+                confirmation,
+            )
         } else if let Some(content) = self.connect_settings_content() {
             // Connect-dependent settings sub-pages (Spark → Settings →
             // Lightning Address, Cube → Settings → Avatar / Members)
@@ -11329,12 +11428,30 @@ impl App {
                 .view(&self.panels.current, &self.cache)
         };
 
-        let content = if self.cache.network != bitcoin::Network::Bitcoin {
-            iced::widget::column![network_banner(self.cache.network), view.map(Message::View)]
-                .into()
+        let view: Element<'_, view::Message> = if self.cache.network != bitcoin::Network::Bitcoin {
+            iced::widget::column![network_banner(self.cache.network), view].into()
         } else {
-            view.map(Message::View)
+            view
         };
+        let view = if matches!(
+            self.panels.current,
+            Menu::Cube(menu::CubeSubMenu::Settings(
+                menu::CubeSettingsOption::AiAccess
+            ))
+        ) {
+            if let Some(dialog) = self.local_mcp.revoke_dialog() {
+                coincube_ui::widget::modal::Modal::new(view, dialog)
+                    .on_blur(Some(view::Message::LocalMcp(
+                        local_mcp::Message::CancelRevokePair,
+                    )))
+                    .into()
+            } else {
+                view
+            }
+        } else {
+            view
+        };
+        let content = view.map(Message::View);
 
         // Overlay toast at bottom if present
         let content: Element<'_, Message> = match self.errors.is_empty() {

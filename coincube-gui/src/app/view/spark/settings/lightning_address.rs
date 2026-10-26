@@ -43,6 +43,19 @@ fn card_style(t: &theme::Theme) -> container::Style {
 }
 
 pub fn lightning_address_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCubeMessage> {
+    let body = lightning_address_body(state);
+    if let Some(dialog) = lightning_address_confirmation(state) {
+        Modal::new(body, dialog)
+            .on_blur(Some(ConnectCubeMessage::DismissChangeConfirmation))
+            .into()
+    } else {
+        body
+    }
+}
+
+/// Reuse the claim/edit form inside the Spark Overview page. The caller may
+/// place its confirmation over the whole page instead of only this card.
+pub fn lightning_address_body<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCubeMessage> {
     let current_address = state
         .lightning_address
         .as_ref()
@@ -104,7 +117,7 @@ pub fn lightning_address_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, Conn
 
         container(
             Column::new()
-                .push(text::p1_bold("Your Lightning Address").style(theme::text::primary))
+                .push(text::p1_bold("Change your Lightning Address").style(theme::text::primary))
                 .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
                 .push(text::p2_regular(format!("Current: {}", address)).color(color::GREY_3))
                 .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
@@ -336,16 +349,26 @@ pub fn lightning_address_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, Conn
         .into()
     };
 
-    let body: Element<ConnectCubeMessage> = Column::new()
+    Column::new()
         .push(text::h4_bold("Lightning Address").style(theme::text::primary))
         .push(iced::widget::Space::new().height(Length::Fixed(15.0)))
         .push(card_content)
         .spacing(0)
         .width(Length::Fill)
-        .into();
+        .into()
+}
 
-    if let Some(proposed) = state.ln_change_confirm_pending.clone() {
-        let current_addr = current_address.clone().unwrap_or_default();
+/// The same destructive-change question is used by Settings and Overview.
+pub fn lightning_address_confirmation<'a>(
+    state: &'a ConnectCubePanel,
+) -> Option<Element<'a, ConnectCubeMessage>> {
+    state.ln_change_confirm_pending.as_ref().map(|proposed| {
+        let current_addr = state
+            .lightning_address
+            .as_ref()
+            .and_then(|la| la.lightning_address.as_deref())
+            .map(normalize_lightning_address)
+            .unwrap_or_default();
         let new_addr = format!("{}{}", proposed, LN_ADDRESS_DOMAIN);
         let confirm_card = container(
             Column::new()
@@ -387,12 +410,8 @@ pub fn lightning_address_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, Conn
         .style(card_style)
         .width(Length::Fixed(560.0));
 
-        Modal::new(body, confirm_card)
-            .on_blur(Some(ConnectCubeMessage::DismissChangeConfirmation))
-            .into()
-    } else {
-        body
-    }
+        confirm_card.into()
+    })
 }
 
 fn normalize_lightning_address(address: &str) -> String {
