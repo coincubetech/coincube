@@ -303,6 +303,19 @@ pub(crate) mod capture {
         inspect_at_width(scenario, content, outer, appearance, theme, outer.0)
     }
 
+    /// Activity uses the wide dashboard body rather than the ordinary 8/10
+    /// content width. Match its measured shell width for layout captures.
+    pub fn inspect_wide_content<M: 'static>(
+        scenario: &str,
+        content: Element<'_, M>,
+        outer: (u32, u32),
+        appearance: &str,
+        theme: theme::Theme,
+        content_width: u32,
+    ) -> Inspection {
+        inspect_at_width(scenario, content, outer, appearance, theme, content_width)
+    }
+
     fn inspect_at_width<M: 'static>(
         scenario: &str,
         content: Element<'_, M>,
@@ -414,6 +427,18 @@ pub(crate) mod capture {
         outer: (u32, u32),
         pointer: bool,
     ) -> Vec<M> {
+        activate_with_key(content, target, outer, pointer, keyboard::key::Named::Enter)
+    }
+
+    /// Like `activate`, but exercises a specific activation key on a focused
+    /// production Action. The pointer path ignores `key`.
+    pub fn activate_with_key<M: Clone + 'static>(
+        content: Element<'_, M>,
+        target: Id,
+        outer: (u32, u32),
+        pointer: bool,
+        key: keyboard::key::Named,
+    ) -> Vec<M> {
         for bytes in font::load() {
             iced::advanced::graphics::text::font_system()
                 .write()
@@ -475,7 +500,7 @@ pub(crate) mod capture {
                 Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
             ]
         } else {
-            let key = keyboard::Key::Named(keyboard::key::Named::Enter);
+            let key = keyboard::Key::Named(key);
             let physical_key =
                 keyboard::key::Physical::Unidentified(keyboard::key::NativeCode::Unidentified);
             vec![

@@ -74,8 +74,8 @@ pub struct ViewModel<'a> {
     /// Effective session privacy from the GUI owner. Never infer it from
     /// `saved.hide_balances`: a local Hide can mask before its save succeeds.
     pub balance_privacy: BalancePrivacy,
-    /// Mirrors `BalancePrivacyChrome::interactive`: the accepted privacy
-    /// authority is ready and the shared preference lane is idle.
+    /// Mirrors `BalancePrivacyChrome::interactive`: explicit saves disable
+    /// controls; a periodic read keeps them usable and queues a click.
     pub balance_privacy_interactive: bool,
     /// The last save committed but its durability could not be confirmed.
     /// It is applied, not rolled back; the notice is neutral.

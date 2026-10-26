@@ -3,6 +3,7 @@ use std::io::{self, Cursor};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use bitcoin_hashes::sha256;
 use coincube_core::miniscript::bitcoin::Network;
@@ -588,7 +589,14 @@ pub fn port_is_valid(port: &u16) -> bool {
     !BITCOIND_DEFAULT_PORTS.contains(port)
 }
 
+static NEXT_NODE_UI_INSTANCE: AtomicU64 = AtomicU64::new(1);
+
+fn next_node_ui_instance() -> u64 {
+    NEXT_NODE_UI_INSTANCE.fetch_add(1, Ordering::Relaxed)
+}
+
 pub struct SelectBitcoindTypeStep {
+    ui_instance: u64,
     use_external: bool,
     use_connect: bool,
     install_node: bool,
@@ -623,6 +631,7 @@ impl From<SelectBitcoindTypeStep> for Box<dyn Step> {
 impl SelectBitcoindTypeStep {
     pub fn new() -> Self {
         Self {
+            ui_instance: next_node_ui_instance(),
             use_external: true,
             use_connect: true,
             install_node: true,
@@ -819,6 +828,7 @@ impl Step for SelectBitcoindTypeStep {
     ) -> Element<Message> {
         view::select_bitcoind_type(
             progress,
+            self.ui_instance,
             self.chain,
             self.install_node,
             self.show_advanced,
@@ -984,6 +994,7 @@ impl Default for DefineBitcoind {
 }
 
 pub struct InternalBitcoindStep {
+    ui_instance: u64,
     local_feature_client: Option<crate::services::coincube::CoincubeClient>,
     local_feature_request: u64,
     local_feature_pending: bool,
@@ -1039,6 +1050,7 @@ impl From<InternalBitcoindStep> for Box<dyn Step> {
 impl InternalBitcoindStep {
     pub fn new(coincube_datadir: &CoincubeDirectory) -> Self {
         Self {
+            ui_instance: next_node_ui_instance(),
             coincube_datadir: coincube_datadir.clone(),
             bitcoind_datadir: internal_bitcoind_datadir(coincube_datadir),
             network: Network::Bitcoin,
@@ -1833,6 +1845,7 @@ impl Step for InternalBitcoindStep {
         }
         view::start_internal_bitcoind(
             progress,
+            self.ui_instance,
             self.flavor,
             self.existing_flavor,
             self.flavor_confirmed,

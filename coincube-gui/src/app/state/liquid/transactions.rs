@@ -248,6 +248,11 @@ impl LiquidTransactions {
         self.selected_payment = Some(payment);
     }
 
+    pub fn preselect_refundable(&mut self, refundable: DomainRefundableSwap) {
+        self.selected_payment = None;
+        self.selected_refundable = Some(refundable);
+    }
+
     fn calculate_balance(&self) -> Amount {
         let usdt_id = usdt_asset_id(self.breez_client.network()).unwrap_or("");
         let mut balance: i64 = 0;

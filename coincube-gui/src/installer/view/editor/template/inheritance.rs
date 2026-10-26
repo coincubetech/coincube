@@ -1,10 +1,10 @@
-use iced::{alignment, widget::Space, Alignment, Length};
+use iced::{widget::Space, Alignment, Length};
 
 use coincube_ui::{
     color,
     component::{
         button, collapse,
-        text::{h3, p1_regular, text, Text, H3_SIZE},
+        text::{text, Text},
     },
     icon, theme,
     widget::*,
@@ -17,133 +17,70 @@ use crate::installer::{
     view::{
         editor::{
             define_descriptor_advanced_settings, defined_key, path,
-            template::diagram::{policy_timeline, PolicyRow, Timelock},
+            template::diagram::{PolicyRow, Timelock},
             undefined_key,
         },
         layout,
     },
 };
 
-pub fn inheritance_template_description(progress: (usize, usize)) -> Element<'static, Message> {
-    layout(
+pub fn inheritance_template_description(
+    progress: (usize, usize),
+    ui_instance: u64,
+    show_keychain_tip: bool,
+) -> Element<'static, Message> {
+    super::template_introduction(
         progress,
-        None,
-        "Introduction",
-        Column::new()
-            .align_x(Alignment::Start)
-            .push(h3("Simple inheritance wallet"))
-            .max_width(800.0)
-            .push(Container::new(
-                p1_regular("For this setup you will need 2 Keys: Your Primary Key (for yourself) and an Inheritance Key (for your heir). For security reasons, we suggest you use a separate Hardware Wallet for each key.")
-                .style(theme::text::secondary)
-                .align_x(alignment::Horizontal::Left)
-            ).align_x(alignment::Horizontal::Left).width(Length::Fill))
-            .push(Row::new()
-                .spacing(30)
-                .push(
-                    Row::new()
-                    .align_y(Alignment::Center)
-                    .spacing(10)
-                    .push(icon::round_key_icon().size(H3_SIZE).style(theme::text::adaptive(color::GREEN)))
-                    .push(p1_regular("Primary key").bold())
-                ).push(
-                    Row::new()
-                        .align_y(Alignment::Center)
-                        .spacing(10)
-                        .push(icon::round_key_icon().size(H3_SIZE).style(theme::text::adaptive(color::BLUE)))
-                        .push(p1_regular("Inheritance key").bold())
-            ))
-            .push(Container::new(
-                p1_regular("You will always be able to spend using your Primary Key.
-After a period of inactivity (but not before that) your Inheritance Key will become able to recover your funds.")
-                .style(theme::text::secondary)
-                .align_x(alignment::Horizontal::Left)
-            ).align_x(alignment::Horizontal::Left).width(Length::Fill))
-            .push(Container::new(
-                p1_regular("Tip: instead of coordinating a hardware wallet for your heir, you can invite a family member or friend to contribute a Keychain key for the inheritance key — they accept an invitation and provide their key remotely, dramatically simplifying setup.")
-                .style(theme::text::secondary)
-                .align_x(alignment::Horizontal::Left)
-            ).align_x(alignment::Horizontal::Left).width(Length::Fill))
-            .push(policy_timeline(vec![
-                PolicyRow {
-                    label: "Primary spending policy:",
-                    keys: vec![(1, color::GREEN)],
-                    box_label: "Primary Key",
-                    timelock: Timelock::None,
-                },
-                PolicyRow {
-                    label: "Recovery spending policy:",
-                    keys: vec![(2, color::BLUE)],
-                    box_label: "Inheritance Key",
-                    timelock: Timelock::After(0.5),
-                },
-            ]))
-            .push(Row::new().push(Space::new().width(Length::Fill)).push(button::primary(None, "Next").width(Length::Fixed(200.0)).on_press(Message::Next)))
-            .push(Space::new().height(50.0))
-            .spacing(20),
-        true,
-        Some(Message::Previous),
+        ui_instance,
+        show_keychain_tip,
+        "Simple inheritance wallet",
+        "You need 2 keys: your Primary Key and an Inheritance Key for your heir.",
+        "Your Primary Key can always spend. After the configured inactivity delay, the Inheritance Key can recover your funds.",
+        "Choose a separate signing device for your heir's key where practical.",
+        vec![
+            PolicyRow {
+                label: "Primary spending policy",
+                keys: vec![(1, color::GREEN)],
+                box_label: "Primary Key",
+                timelock: Timelock::None,
+            },
+            PolicyRow {
+                label: "Inheritance recovery policy",
+                keys: vec![(2, color::BLUE)],
+                box_label: "Inheritance Key",
+                timelock: Timelock::After(0.5),
+            },
+        ],
     )
 }
 
-pub fn two_of_three_inheritance_description(progress: (usize, usize)) -> Element<'static, Message> {
-    layout(
+pub fn two_of_three_inheritance_description(
+    progress: (usize, usize),
+    ui_instance: u64,
+    show_keychain_tip: bool,
+) -> Element<'static, Message> {
+    super::template_introduction(
         progress,
-        None,
-        "Introduction",
-        Column::new()
-            .align_x(Alignment::Start)
-            .push(h3("2-of-3 multisig with inheritance"))
-            .max_width(800.0)
-            .push(Container::new(
-                p1_regular("For this setup you will need 4 keys: three Primary Keys and an Inheritance Key. For security reasons, we suggest you use a separate Hardware Wallet for each key.")
-                .style(theme::text::secondary)
-                .align_x(alignment::Horizontal::Left)
-            ).align_x(alignment::Horizontal::Left).width(Length::Fill))
-            .push(Row::new()
-                .spacing(30)
-                .push(
-                    Row::new()
-                    .align_y(Alignment::Center)
-                    .spacing(10)
-                    .push(icon::round_key_icon().size(H3_SIZE).style(theme::text::success))
-                    .push(p1_regular("Primary keys #1-3").bold())
-                ).push(
-                    Row::new()
-                        .align_y(Alignment::Center)
-                        .spacing(10)
-                        .push(icon::round_key_icon().size(H3_SIZE).style(theme::text::adaptive(color::BLUE)))
-                        .push(p1_regular("Inheritance key").bold())
-            ))
-            .push(Container::new(
-                p1_regular("Any two of your three Primary Keys form a 2-of-3 multisig that can always spend. After a period of inactivity (but not before that) your Inheritance Key will become able to recover your funds.")
-                .style(theme::text::secondary)
-                .align_x(alignment::Horizontal::Left)
-            ).align_x(alignment::Horizontal::Left).width(Length::Fill))
-            .push(Container::new(
-                p1_regular("Tip: instead of coordinating a hardware wallet for your heir, you can invite a family member or friend to contribute a Keychain key for the inheritance key — they accept an invitation and provide their key remotely, dramatically simplifying setup.")
-                .style(theme::text::secondary)
-                .align_x(alignment::Horizontal::Left)
-            ).align_x(alignment::Horizontal::Left).width(Length::Fill))
-            .push(policy_timeline(vec![
-                PolicyRow {
-                    label: "Primary spending policy:",
-                    keys: vec![(1, color::GREEN), (2, color::GREEN), (3, color::GREEN)],
-                    box_label: "2-of-3 multisig",
-                    timelock: Timelock::None,
-                },
-                PolicyRow {
-                    label: "Recovery spending policy:",
-                    keys: vec![(4, color::BLUE)],
-                    box_label: "Inheritance Key",
-                    timelock: Timelock::After(0.5),
-                },
-            ]))
-            .push(Row::new().push(Space::new().width(Length::Fill)).push(button::primary(None, "Next").width(Length::Fixed(200.0)).on_press(Message::Next)))
-            .push(Space::new().height(50.0))
-            .spacing(20),
-        true,
-        Some(Message::Previous),
+        ui_instance,
+        show_keychain_tip,
+        "2-of-3 multisig with inheritance",
+        "You need 4 keys: three Primary Keys and an Inheritance Key.",
+        "Any two Primary Keys can spend now. After the configured inactivity delay, the Inheritance Key can recover your funds.",
+        "Choose a separate signing device for your heir's key where practical.",
+        vec![
+            PolicyRow {
+                label: "Primary spending policy",
+                keys: vec![(1, color::GREEN), (2, color::GREEN), (3, color::GREEN)],
+                box_label: "2-of-3 multisig",
+                timelock: Timelock::None,
+            },
+            PolicyRow {
+                label: "Inheritance recovery policy",
+                keys: vec![(4, color::BLUE)],
+                box_label: "Inheritance Key",
+                timelock: Timelock::After(0.5),
+            },
+        ],
     )
 }
 

@@ -32,7 +32,7 @@ fn fixture_context() -> NavContext<'static> {
 }
 
 #[test]
-fn activity_only_routes_to_usable_wallets() {
+fn activity_is_cube_scoped_even_without_a_wallet_backend() {
     let mut ctx = fixture_context();
     ctx.has_vault = false;
     ctx.network = ChainId::Testnet;
@@ -42,33 +42,31 @@ fn activity_only_routes_to_usable_wallets() {
     };
     assert_eq!(
         activity_route(&ctx),
-        None,
-        "testnet has no Spark or Liquid backend"
+        Some(Menu::Cube(CubeSubMenu::Activity))
     );
 
     ctx.network = ChainId::Regtest;
     assert_eq!(
         activity_route(&ctx),
-        Some(Menu::Spark(SparkSubMenu::Transactions(None)))
+        Some(Menu::Cube(CubeSubMenu::Activity))
     );
 
     ctx.network = ChainId::Bitcoin;
     assert_eq!(
         activity_route(&ctx),
-        Some(Menu::Spark(SparkSubMenu::Transactions(None)))
+        Some(Menu::Cube(CubeSubMenu::Activity))
     );
     ctx.has_imported_bitcoin = true;
     assert_eq!(
         activity_route(&ctx),
-        Some(Menu::Vault(VaultSubMenu::Transactions(None)))
+        Some(Menu::Cube(CubeSubMenu::Activity))
     );
 
     ctx.has_imported_bitcoin = false;
     ctx.network = ChainId::BitcoinBlake2b;
     assert_eq!(
         activity_route(&ctx),
-        None,
-        "the Liquid gate cannot enable Blake2b"
+        Some(Menu::Cube(CubeSubMenu::Activity))
     );
 }
 
@@ -432,6 +430,60 @@ fn shell_actions_follow_visual_order_and_dispatch_keyboard_once() {
             key(keyboard::key::Named::Space, false, true),
             mouse::Cursor::Unavailable,
             size
+        )
+        .as_slice(),
+        [Message::OpenConnectSignIn]
+    ));
+}
+
+#[test]
+fn signed_in_connect_chip_opens_account_sheet_intent() {
+    load_fonts();
+    let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+        coincube_ui::font::REGULAR,
+        14.into(),
+        Some("tiny-skia"),
+    ))
+    .unwrap();
+    let mut ctx = fixture_context();
+    ctx.connect_authenticated = true;
+    ctx.connect_email = Some("shell@example.invalid");
+    let mut element = shell_tree(&ctx, ShellState::default());
+    let mut tree = Tree::new(element.as_widget());
+    let size = Size::new(1024.0, 768.0);
+    let node = element.as_widget_mut().layout(
+        &mut tree,
+        &renderer,
+        &layout::Limits::new(Size::ZERO, size),
+    );
+    for _ in 0..2 {
+        operate(
+            &mut element,
+            &mut tree,
+            &node,
+            &renderer,
+            focusable::focus_next::<()>(),
+        );
+    }
+    assert_eq!(
+        operate(
+            &mut element,
+            &mut tree,
+            &node,
+            &renderer,
+            focusable::find_focused(),
+        ),
+        Some(Id::new("tenshu.connect.account"))
+    );
+    assert!(matches!(
+        send(
+            &mut element,
+            &mut tree,
+            &node,
+            &renderer,
+            key(keyboard::key::Named::Enter, false, true),
+            mouse::Cursor::Unavailable,
+            size,
         )
         .as_slice(),
         [Message::OpenConnectSignIn]

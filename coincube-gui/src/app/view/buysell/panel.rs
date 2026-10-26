@@ -1,14 +1,14 @@
 use iced::{
-    widget::{container, pick_list, text_input, Space},
+    widget::{pick_list, text_input, Space},
     Alignment, Length,
 };
 
 use coincube_core::miniscript::bitcoin;
 use coincube_ui::{
-    color,
     component::{button, text},
     icon::*,
     theme,
+    theme::tenshu::surface,
     widget::*,
 };
 
@@ -114,56 +114,133 @@ impl BuySellPanel {
     }
 
     pub fn view<'a>(&'a self, mask_amounts: bool) -> iced::Element<'a, ViewMessage, theme::Theme> {
-        let column = {
-            let column = Column::new()
-                // COINCUBE branding
-                .push(
-                    Row::new()
-                        .push(coincube_ui::image::coincube_wordmark::<ViewMessage>(20.0))
-                        .push(Space::new().width(Length::Fixed(8.0)))
-                        .push(text::h5_regular("| BUY/SELL").color(color::GREY_3))
-                        .align_y(Alignment::Center),
-                )
-                // render flow state
-                .push(match &self.step {
-                    // user management
-                    BuySellFlowState::Login { .. } => self.login_ux(),
-                    BuySellFlowState::Register { .. } => self.registration_ux(),
-                    BuySellFlowState::OtpVerification { .. } => self.otp_verification_ux(),
+        match &self.step {
+            BuySellFlowState::DetectingLocation(..)
+            | BuySellFlowState::Login { .. }
+            | BuySellFlowState::Register { .. }
+            | BuySellFlowState::OtpVerification { .. }
+            | BuySellFlowState::ModeSelect { .. } => {
+                Self::entry_view(&self.step, self.detected_country)
+            }
+            BuySellFlowState::Mavapay(state) => {
+                Self::provider_view(super::mavapay::ui::form(state, mask_amounts))
+            }
+            BuySellFlowState::Meld(state) => Self::provider_view(state.view()),
+        }
+    }
 
-                    BuySellFlowState::DetectingLocation(..) => self.geolocation_ux(),
-                    BuySellFlowState::ModeSelect { .. } => self.mode_select_ux(),
+    fn provider_view<'a>(
+        content: iced::Element<'a, ViewMessage, theme::Theme>,
+    ) -> iced::Element<'a, ViewMessage, theme::Theme> {
+        Container::new(
+            Column::new()
+                .push(text::h2("Buy/Sell").style(theme::text::primary))
+                .push(content)
+                .spacing(16)
+                .width(Length::Fill),
+        )
+        .width(Length::Fill)
+        .max_width(760)
+        .padding(24)
+        .align_y(Alignment::Start)
+        .align_x(Alignment::Center)
+        .into()
+    }
 
-                    // mavapay
-                    BuySellFlowState::Mavapay(state) => {
-                        super::mavapay::ui::form(state, mask_amounts)
-                    }
-
-                    // meld
-                    BuySellFlowState::Meld(state) => state.view(),
-                });
-
-            column
-                .align_x(Alignment::Center)
-                .spacing(7) // Reduced spacing for more compact layout
-                .width(Length::Fill)
+    fn entry_view<'a>(
+        step: &'a BuySellFlowState,
+        detected_country: Option<&'static Country>,
+    ) -> iced::Element<'a, ViewMessage, theme::Theme> {
+        let content = match step {
+            BuySellFlowState::DetectingLocation(..) => Self::geolocation_ux(step, detected_country),
+            BuySellFlowState::Login { .. } => Self::login_ux(step),
+            BuySellFlowState::Register { .. } => Self::registration_ux(step),
+            BuySellFlowState::OtpVerification { .. } => Self::otp_verification_ux(step),
+            BuySellFlowState::ModeSelect { .. } => Self::mode_select_ux(step, detected_country),
+            _ => unreachable!("entry presenter only accepts entry states"),
         };
+        let mut column = Column::new()
+            .push(text::h2("Buy/Sell").style(theme::text::primary))
+            .push(Self::entry_progress(step))
+            .push(
+                Container::new(content)
+                    .padding(22)
+                    .width(Length::Fill)
+                    .style(surface::card),
+            )
+            .spacing(16)
+            .width(Length::Fill);
+
+        if let Some(country) = detected_country {
+            let provider = if crate::services::mavapay::mavapay_supported(country.code) {
+                "Mavapay"
+            } else {
+                "Meld"
+            };
+            column = column.push(
+                Row::new()
+                    .push(
+                        text::p2_regular(format!("Country  {}", country.name))
+                            .style(theme::text::secondary),
+                    )
+                    .push(
+                        text::p2_regular(format!("Provider  {provider}"))
+                            .style(theme::text::secondary),
+                    )
+                    .spacing(24),
+            );
+        }
 
         Container::new(column)
             .width(Length::Fill)
+            .max_width(760)
+            .padding(24)
             .align_y(Alignment::Start)
             .align_x(Alignment::Center)
             .into()
+    }
+
+    fn entry_progress<'a>(step: &BuySellFlowState) -> iced::Element<'a, ViewMessage, theme::Theme> {
+        let current = match step {
+            BuySellFlowState::DetectingLocation(..) => 0,
+            BuySellFlowState::Login { .. }
+            | BuySellFlowState::Register { .. }
+            | BuySellFlowState::OtpVerification { .. } => 1,
+            BuySellFlowState::ModeSelect { .. } => 2,
+            _ => unreachable!("progress is only shown for entry states"),
+        };
+
+        let mut row = Row::new().spacing(12).width(Length::Fill);
+        for (index, label) in ["Location", "Sign in", "Buy or sell"].iter().enumerate() {
+            let step: iced::Element<'a, ViewMessage, theme::Theme> = if index < current {
+                Row::new()
+                    .push(check_icon().style(theme::text::success))
+                    .push(text::p2_regular(*label).style(theme::text::secondary))
+                    .spacing(4)
+                    .align_y(Alignment::Center)
+                    .into()
+            } else if index == current {
+                text::p2_bold(format!("{}  {label}", index + 1))
+                    .style(theme::tenshu::text::accent)
+                    .into()
+            } else {
+                text::p2_regular(format!("{}  {label}", index + 1))
+                    .style(theme::text::secondary)
+                    .into()
+            };
+            row = row.push(Container::new(step).width(Length::FillPortion(1)));
+        }
+        row.into()
     }
 }
 
 // TODO: Use labels instead of placeholders for all input forms
 impl BuySellPanel {
-    fn login_ux<'a>(self: &'a BuySellPanel) -> iced::Element<'a, ViewMessage, theme::Theme> {
+    fn login_ux<'a>(step: &'a BuySellFlowState) -> iced::Element<'a, ViewMessage, theme::Theme> {
         use coincube_ui::component::spinner;
         use std::time::Duration;
 
-        let BuySellFlowState::Login { email, loading } = &self.step else {
+        let BuySellFlowState::Login { email, loading } = step else {
             unreachable!();
         };
 
@@ -199,44 +276,36 @@ impl BuySellPanel {
         };
 
         let col = iced::widget::column![
-            // header
             text::h3("Sign in to your account").style(theme::text::primary),
-            Space::new().height(Length::Fixed(35.0)),
-            // input field
+            text::p2_medium("Email").style(theme::text::primary),
             text_input("Email", email)
                 .on_input(BuySellMessage::EmailChanged)
                 .on_submit_maybe((!*loading && valid_email).then_some(BuySellMessage::SubmitLogin))
                 .size(16)
                 .padding(15),
-            Space::new().height(Length::Fixed(15.0)),
-            // submit button
             submit_button,
-            Space::new().height(Length::Fixed(10.0)),
-            // separator
-            container(Space::new().height(Length::Fixed(3.0)).width(Length::Fill))
-                .style(theme::container::border),
-            Space::new().height(Length::Fixed(5.0)),
-            // sign-up redirect
             iced::widget::button(
-                text::p2_regular("Don't have an account? Sign up").color(color::ORANGE),
+                text::p2_regular("Don't have an account? Sign up")
+                    .style(theme::tenshu::text::accent),
             )
             .style(theme::button::link)
             .on_press(BuySellMessage::CreateNewAccount)
         ]
-        .align_x(Alignment::Center)
-        .spacing(2)
-        .max_width(500)
+        .align_x(Alignment::Start)
+        .spacing(16)
         .width(Length::Fill);
 
         let elem: iced::Element<BuySellMessage, theme::Theme> = col.into();
         elem.map(ViewMessage::BuySell)
     }
 
-    fn registration_ux<'a>(self: &'a BuySellPanel) -> iced::Element<'a, ViewMessage, theme::Theme> {
+    fn registration_ux<'a>(
+        step: &'a BuySellFlowState,
+    ) -> iced::Element<'a, ViewMessage, theme::Theme> {
         use coincube_ui::component::spinner;
         use std::time::Duration;
 
-        let BuySellFlowState::Register { email, loading } = &self.step else {
+        let BuySellFlowState::Register { email, loading } = step else {
             unreachable!();
         };
 
@@ -275,25 +344,16 @@ impl BuySellPanel {
                 .into()
         };
 
-        // TODO: include form validation messages
         iced::widget::column![
-            // Top bar with previous
             button::secondary(Some(previous_icon()), "Back")
                 .width(Length::Fixed(150.0))
                 .on_press_maybe(
                     (!*loading).then_some(ViewMessage::BuySell(BuySellMessage::ResetWidget))
                 ),
-            Space::new().height(Length::Fixed(10.0)),
-            // Title and subtitle
-            iced::widget::column![
-                text::h3("Create an Account").style(theme::text::primary),
-                text::p2_regular("Create a COINCUBE account to access Buy/Sell and other features")
-                    .style(theme::text::secondary)
-            ]
-            .spacing(10)
-            .align_x(Alignment::Center),
-            Space::new().height(Length::Fixed(20.0)),
-            // Email Input
+            text::h3("Create an Account").style(theme::text::primary),
+            text::p2_regular("Create a COINCUBE account to access Buy/Sell and other features")
+                .style(theme::text::secondary),
+            text::p2_medium("Email Address").style(theme::text::primary),
             text_input("Email Address", email)
                 .on_input(|i| ViewMessage::BuySell(BuySellMessage::EmailChanged(i)))
                 .on_submit_maybe(
@@ -302,18 +362,16 @@ impl BuySellPanel {
                 )
                 .size(16)
                 .padding(15),
-            Space::new().height(Length::Fixed(20.0)),
             submit_button,
         ]
-        .align_x(Alignment::Center)
-        .spacing(5)
-        .max_width(500)
+        .align_x(Alignment::Start)
+        .spacing(16)
         .width(Length::Fill)
         .into()
     }
 
     fn otp_verification_ux<'a>(
-        self: &'a BuySellPanel,
+        step: &'a BuySellFlowState,
     ) -> iced::Element<'a, ViewMessage, theme::Theme> {
         use coincube_ui::component::spinner;
         use std::time::Duration;
@@ -324,12 +382,11 @@ impl BuySellPanel {
             sending,
             is_signup: _,
             cooldown,
-        } = &self.step
+        } = step
         else {
             unreachable!()
         };
 
-        // Top bar with previous
         let top_bar = Row::new()
             .push(
                 button::secondary(Some(previous_icon()), "Back")
@@ -338,17 +395,6 @@ impl BuySellPanel {
             )
             .align_y(Alignment::Center);
 
-        // Widget title
-        let title =
-            text::p2_regular("Enter the OTP sent to your email").style(theme::text::primary);
-
-        // Email display
-        let email_display = Column::new()
-            .push(text::p2_regular(email).style(theme::text::primary))
-            .spacing(10)
-            .align_x(Alignment::Center);
-
-        // OTP Input
         let otp_input = text_input("Enter OTP code", otp)
             .on_input(BuySellMessage::OtpChanged)
             .on_submit_maybe((!otp.is_empty() && !*sending).then_some(BuySellMessage::VerifyOtp))
@@ -422,106 +468,99 @@ impl BuySellPanel {
 
         let col = iced::widget::column![
             top_bar,
-            Space::new().height(Length::Fixed(10.0)),
-            title,
-            Space::new().height(Length::Fixed(30.0)),
-            email_display,
-            Space::new().height(Length::Fixed(20.0)),
+            text::h3("Enter the OTP sent to your email").style(theme::text::primary),
+            text::p2_regular(email).style(theme::text::secondary),
+            text::p2_medium("OTP code").style(theme::text::primary),
             otp_input,
-            Space::new().height(Length::Fixed(20.0)),
             action_buttons,
         ]
-        .align_x(Alignment::Center)
-        .spacing(5)
-        .max_width(500)
+        .align_x(Alignment::Start)
+        .spacing(16)
         .width(Length::Fill);
 
         let elem: iced::Element<BuySellMessage, theme::Theme> = col.into();
         elem.map(ViewMessage::BuySell)
     }
 
-    fn mode_select_ux<'a>(&'a self) -> iced::Element<'a, ViewMessage, theme::Theme> {
-        let BuySellFlowState::ModeSelect { buy_or_sell } = &self.step else {
+    fn mode_select_ux<'a>(
+        step: &'a BuySellFlowState,
+        detected_country: Option<&'static Country>,
+    ) -> iced::Element<'a, ViewMessage, theme::Theme> {
+        let BuySellFlowState::ModeSelect { buy_or_sell } = step else {
             unreachable!()
         };
 
         iced::widget::column![
-            // mode select ux
-            iced::widget::column![
-                button::secondary(Some(bitcoin_icon()), "Buy Bitcoin using Fiat Currencies",)
-                    .on_press(ViewMessage::BuySell(BuySellMessage::SelectBuyOrSell(
-                        BuyOrSell::Buy,
-                    )))
-                    .style({
-                        match buy_or_sell {
-                            Some(BuyOrSell::Buy) => coincube_ui::theme::button::primary,
-                            _ => coincube_ui::theme::button::secondary,
-                        }
-                    })
-                    .padding(35)
-                    .width(iced::Length::Fill),
-                button::secondary(Some(dollar_icon()), "Sell Bitcoin to a Fiat Currency")
-                    .on_press(ViewMessage::BuySell(BuySellMessage::SelectBuyOrSell(
-                        BuyOrSell::Sell,
-                    )))
-                    .style({
-                        match buy_or_sell {
-                            Some(BuyOrSell::Sell) => coincube_ui::theme::button::primary,
-                            _ => coincube_ui::theme::button::secondary,
-                        }
-                    })
-                    .padding(35)
-                    .width(iced::Length::Fill),
-            ]
-            .spacing(15)
-            .padding(5),
-            // separator
-            iced::widget::container(Space::new().height(3))
-                .style(|_| {
-                    iced::widget::container::background(iced::Background::Color(color::GREY_3))
+            text::h3("Buy or sell").style(theme::text::primary),
+            button::secondary(Some(bitcoin_icon()), "Buy Bitcoin using Fiat Currencies")
+                .on_press(ViewMessage::BuySell(BuySellMessage::SelectBuyOrSell(
+                    BuyOrSell::Buy
+                )))
+                .style(if *buy_or_sell == Some(BuyOrSell::Buy) {
+                    theme::button::primary
+                } else {
+                    theme::button::secondary
                 })
+                .padding(18)
                 .width(Length::Fill),
-            // history view
+            button::secondary(Some(dollar_icon()), "Sell Bitcoin to a Fiat Currency")
+                .on_press(ViewMessage::BuySell(BuySellMessage::SelectBuyOrSell(
+                    BuyOrSell::Sell
+                )))
+                .style(if *buy_or_sell == Some(BuyOrSell::Sell) {
+                    theme::button::primary
+                } else {
+                    theme::button::secondary
+                })
+                .padding(18)
+                .width(Length::Fill),
             buy_or_sell.is_none().then(|| {
                 iced::widget::row![
                     button::secondary(Some(history_icon()), "View Order History")
                         .on_press(ViewMessage::BuySell(BuySellMessage::ViewHistory))
-                        .width(iced::Length::Fill),
+                        .width(Length::Shrink),
                     button::secondary(Some(escape_icon()), "Log Out")
                         .on_press(ViewMessage::BuySell(BuySellMessage::LogOut))
-                        .width(iced::Length::Fill)
+                        .width(Length::Shrink)
                 ]
                 .spacing(10)
             }),
-            // submit
             buy_or_sell.is_some().then(|| {
-                button::secondary(Some(globe_icon()), "Continue")
+                button::primary(Some(globe_icon()), "Continue")
                     .on_press_maybe(
-                        self.detected_country
+                        detected_country
                             .is_some()
                             .then_some(ViewMessage::BuySell(BuySellMessage::StartSession)),
                     )
-                    .width(iced::Length::Fill)
+                    .width(Length::Fill)
             })
         ]
-        .align_x(Alignment::Center)
-        .spacing(12)
-        .max_width(640)
+        .align_x(Alignment::Start)
+        .spacing(16)
         .width(Length::Fill)
         .into()
     }
 
-    fn geolocation_ux<'a>(&'a self) -> iced::Element<'a, ViewMessage, theme::Theme> {
-        let BuySellFlowState::DetectingLocation(manual) = &self.step else {
+    fn geolocation_ux<'a>(
+        step: &'a BuySellFlowState,
+        detected_country: Option<&'static Country>,
+    ) -> iced::Element<'a, ViewMessage, theme::Theme> {
+        let BuySellFlowState::DetectingLocation(manual) = step else {
             unreachable!()
         };
 
         let col = match *manual {
             true => Column::new()
+                .push(text::h3("Location").style(theme::text::primary))
+                .push(
+                    text::p2_regular("Choose your country to find an available provider.")
+                        .style(theme::text::secondary),
+                )
+                .push(text::p2_medium("Select Country:").style(theme::text::primary))
                 .push(
                     pick_list(
                         crate::services::coincube::get_countries(),
-                        self.detected_country,
+                        detected_country,
                         |c| {
                             let static_country = crate::services::coincube::get_countries()
                                 .iter()
@@ -533,24 +572,145 @@ impl BuySellPanel {
                     .padding(10)
                     .placeholder("Select Country: "),
                 )
-                .align_x(Alignment::Center)
+                .align_x(Alignment::Start)
+                .spacing(16)
                 .width(Length::Fill),
             false => Column::new()
-                .push(Space::new().height(Length::Fixed(30.0)))
+                .push(text::h3("Location").style(theme::text::primary))
                 .push(text::p1_bold("Detecting your location...").style(theme::text::primary))
-                .push(Space::new().height(Length::Fixed(20.0)))
                 .push(
                     text::text("Please wait...")
                         .size(14)
                         .style(theme::text::secondary),
                 )
-                .align_x(Alignment::Center)
-                .spacing(10)
-                .max_width(500)
+                .align_x(Alignment::Start)
+                .spacing(16)
                 .width(Length::Fill),
         };
 
         let elem: iced::Element<BuySellMessage, theme::Theme> = col.into();
         elem.map(ViewMessage::BuySell)
+    }
+}
+
+#[cfg(test)]
+mod entry_presenter_tests {
+    use super::*;
+    use crate::app::view::shared::landing::capture;
+
+    fn country(code: &str) -> &'static Country {
+        get_countries()
+            .iter()
+            .find(|country| country.code == code)
+            .expect("synthetic country is available")
+    }
+
+    fn has_exact(inspection: &capture::Inspection, needle: &str) -> bool {
+        inspection.text.iter().any(|(value, _)| value == needle)
+    }
+
+    /// Draws the production entry presenter with synthetic state. Set
+    /// R06A_CAPTURE_DIR to write content-only PNGs from the software renderer.
+    #[test]
+    fn entry_states_show_only_completed_real_stages_at_compact_and_wide_sizes() {
+        let scenarios = [
+            (
+                "detecting",
+                BuySellFlowState::DetectingLocation(false),
+                None,
+                0,
+            ),
+            (
+                "manual-country",
+                BuySellFlowState::DetectingLocation(true),
+                None,
+                0,
+            ),
+            (
+                "login",
+                BuySellFlowState::Login {
+                    email: "alex@example.test".to_owned(),
+                    loading: false,
+                },
+                Some(country("US")),
+                1,
+            ),
+            (
+                "otp",
+                BuySellFlowState::OtpVerification {
+                    email: "alex@example.test".to_owned(),
+                    otp: String::new(),
+                    sending: false,
+                    is_signup: false,
+                    cooldown: 28,
+                },
+                Some(country("US")),
+                1,
+            ),
+            (
+                "mode",
+                BuySellFlowState::ModeSelect { buy_or_sell: None },
+                Some(country("NG")),
+                2,
+            ),
+        ];
+
+        for (name, step, detected_country, current) in &scenarios {
+            for (appearance, theme) in [
+                ("dark", theme::Theme::dark()),
+                ("light", theme::Theme::light()),
+            ] {
+                for size in [(1024, 768), (1440, 900)] {
+                    let inspection = capture::inspect(
+                        &format!("r19-buysell-{name}"),
+                        BuySellPanel::entry_view(step, *detected_country),
+                        size,
+                        appearance,
+                        theme,
+                    );
+                    assert!(has_exact(&inspection, "Buy/Sell"), "{}", name);
+                    for (index, label) in ["Location", "Sign in", "Buy or sell"].iter().enumerate()
+                    {
+                        if index < *current {
+                            assert!(has_exact(&inspection, label), "{}: {}", name, label);
+                            assert!(
+                                !has_exact(&inspection, &format!("{}  {label}", index + 1)),
+                                "{}: completed step remains numbered",
+                                name
+                            );
+                        } else {
+                            let expected = format!("{}  {label}", index + 1);
+                            assert!(has_exact(&inspection, &expected), "{}: {}", name, expected);
+                        }
+                    }
+                    assert_eq!(
+                        inspection
+                            .text
+                            .iter()
+                            .filter(|(value, _)| value == "\u{f633}")
+                            .count(),
+                        *current,
+                        "{name}: stage completion must come from the current state"
+                    );
+                    match *name {
+                        "detecting" => assert!(inspection.contains("Detecting your location...")),
+                        "manual-country" => assert!(inspection.contains("Select Country:")),
+                        "login" => assert!(inspection.contains("Sign in to your account")),
+                        "otp" => assert!(inspection.contains("Resend in 28s")),
+                        "mode" => {
+                            assert!(inspection.contains("View Order History"));
+                            assert!(inspection.contains("Log Out"));
+                        }
+                        _ => unreachable!(),
+                    }
+                    if *name == "mode" {
+                        assert!(inspection.contains("Mavapay"));
+                    }
+                    if *name == "manual-country" || *name == "detecting" {
+                        assert!(!inspection.contains("Provider"));
+                    }
+                }
+            }
+        }
     }
 }

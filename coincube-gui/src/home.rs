@@ -1,4 +1,5 @@
 use iced::{
+    advanced::widget::Id,
     alignment::Horizontal,
     widget::{pick_list, scrollable, Space, Stack, Toggler},
     Alignment, Length, Subscription, Task,
@@ -8,7 +9,9 @@ use coincube_core::{bip39, miniscript::bitcoin::Network};
 use coincube_ui::{
     component::{button, card, network_banner, notification, spinner, text::*},
     icon, image, theme,
-    widget::{modal::Modal, CheckBox, Column, Container, Element, Row},
+    widget::{
+        action::Action as FocusableAction, modal::Modal, CheckBox, Column, Container, Element, Row,
+    },
 };
 use coincubed::config::ConfigError;
 use tokio::runtime::Handle;
@@ -1750,6 +1753,9 @@ impl Home {
                             | ViewMessage::CreateWallet
                             | ViewMessage::GoToSection(HomeSection::Cubes)
                             | ViewMessage::ConnectAccount(app::view::ConnectAccountMessage::LogOut)
+                            | ViewMessage::ConnectSheetAccount(
+                                app::view::ConnectAccountMessage::LogOut
+                            )
                     )
                 ) {
                     self.claim_owner = None;
@@ -1810,6 +1816,7 @@ impl Home {
                         | ViewMessage::Check
                         | ViewMessage::Run(_)
                         | ViewMessage::ConnectAccount(_)
+                        | ViewMessage::ConnectSheetAccount(_)
                         | ViewMessage::ToggleConnect
                         | ViewMessage::ToggleDeveloperMode(_)
                         | ViewMessage::ToggleBitcoinBlake2bBeta(_)
@@ -3968,18 +3975,27 @@ impl Home {
                     }
                 }
             }
-            Message::View(ViewMessage::ConnectAccount(msg)) => {
+            Message::View(
+                view @ (ViewMessage::ConnectAccount(_) | ViewMessage::ConnectSheetAccount(_)),
+            ) => {
+                let sheet_message = matches!(view, ViewMessage::ConnectSheetAccount(_));
+                let msg = match view {
+                    ViewMessage::ConnectAccount(msg) | ViewMessage::ConnectSheetAccount(msg) => msg,
+                    _ => unreachable!(),
+                };
                 // The banner CTAs navigate the panel to Plan & Billing by
                 // setting its `active_sub`, but the sidebar highlight follows
                 // the host's `active_section`. Mirror the move here so the two
                 // stay in sync (otherwise the rail keeps highlighting Overview
                 // while the pane shows the picker/checkout, and re-selecting
                 // Overview would silently reset `active_sub`).
-                if matches!(
-                    msg,
-                    ConnectAccountMessage::OpenPlanBilling
-                        | ConnectAccountMessage::RenewCurrentPlan
-                ) {
+                if !sheet_message
+                    && matches!(
+                        msg,
+                        ConnectAccountMessage::OpenPlanBilling
+                            | ConnectAccountMessage::RenewCurrentPlan
+                    )
+                {
                     self.leave_recovery_services();
                     self.active_section =
                         HomeSection::Connect(app::menu::ConnectSubMenu::PlanBilling);
@@ -5196,6 +5212,38 @@ impl Home {
         )
     }
 
+    /// Return the ID of the Connect control actually mounted by this Launcher
+    /// mode. The no-Cube creation form uses the legacy rail, not the catalog.
+    pub(crate) fn connect_sheet_origin_id(&self) -> Id {
+        if launcher_catalog::catalog_visible(self) {
+            return if self.connect_account.is_authenticated() {
+                launcher_catalog::connect_id()
+            } else {
+                launcher_catalog::sign_in_id()
+            };
+        }
+        if !self.connect_account.is_authenticated() {
+            return Id::new(LEGACY_CONNECT_SIGN_IN_ID);
+        }
+        Id::new(LEGACY_CONNECT_ENTRY_ID)
+    }
+
+    /// Replace a saved Connect control only when it belongs to the Launcher.
+    /// Other sheet triggers retain their exact return target.
+    pub(crate) fn connect_sheet_return_id(&self, saved: &Id) -> Option<Id> {
+        if *saved == launcher_catalog::connect_id()
+            || *saved == launcher_catalog::sign_in_id()
+            || *saved == Id::new(LEGACY_CONNECT_ENTRY_ID)
+            || *saved == Id::new(LEGACY_CONNECT_SIGN_IN_ID)
+        {
+            // Both Launcher modes replace their action with status-only copy
+            // during a pending session check, so there is no control to focus.
+            (!self.connect_account.is_checking_session()).then(|| self.connect_sheet_origin_id())
+        } else {
+            Some(saved.clone())
+        }
+    }
+
     pub fn view(&self) -> Element<Message> {
         // The visible Launcher List has its own compact chrome and owns its
         // body scrolling. Every other Home screen keeps the legacy frame.
@@ -5648,6 +5696,15 @@ fn global_settings_view(home: &Home) -> Element<Message> {
     content.into()
 }
 
+const LEGACY_CONNECT_SIGN_IN_ID: &str = "tenshu.launcher.legacy:connect:sign-in";
+const LEGACY_CONNECT_ENTRY_ID: &str = "tenshu.launcher.legacy:connect:entry";
+
+fn legacy_connect_focus(id: Id) -> Message {
+    Message::View(ViewMessage::Catalog(
+        launcher_catalog::CatalogMessage::Focus(id),
+    ))
+}
+
 fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
     use coincube_ui::{component::button as btn, icon as ic};
 
@@ -5686,7 +5743,8 @@ fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
         } else {
             ic::down_icon()
         };
-        let connect_button: Element<Message> = iced::widget::Button::new(
+        let connect_button: Element<Message> = FocusableAction::new(
+            LEGACY_CONNECT_ENTRY_ID,
             Container::new(
                 Row::new()
                     .spacing(10)
@@ -5701,6 +5759,7 @@ fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
             .align_x(Alignment::Start)
             .width(Length::Fill)
             .padding(15),
+            legacy_connect_focus,
         )
         .width(Length::Fill)
         .style(coincube_ui::theme::button::menu)
@@ -5818,11 +5877,18 @@ fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
     } else {
         bottom_col = bottom_col.push(
             Container::new(
-                btn::primary(None, "Sign In")
-                    .on_press(msg(ViewMessage::GoToSection(HomeSection::Connect(
-                        app::menu::ConnectSubMenu::Overview,
-                    ))))
-                    .width(Length::Fill),
+                FocusableAction::new(
+                    LEGACY_CONNECT_SIGN_IN_ID,
+                    Container::new(p1_bold("Sign In"))
+                        .center_x(Length::Fill)
+                        .padding(5),
+                    legacy_connect_focus,
+                )
+                .on_press(msg(ViewMessage::GoToSection(HomeSection::Connect(
+                    app::menu::ConnectSubMenu::Overview,
+                ))))
+                .style(theme::button::primary)
+                .width(Length::Fill),
             )
             .padding(10)
             .width(Length::Fill),
@@ -6852,6 +6918,8 @@ pub enum ViewMessage {
     ToggleConnect,
     /// Account-level Connect messages (login, plan, security, etc.)
     ConnectAccount(ConnectAccountMessage),
+    /// Account action from the GUI-owned sheet; retain the Launcher section.
+    ConnectSheetAccount(ConnectAccountMessage),
     /// Heir "Recover a Vault" discovery-surface messages (COIN-377 / PR 1).
     RecoverVault(RecoverVaultMessage),
     /// PR 8 foreign-wallet discovery surface. Scan-only until the shared

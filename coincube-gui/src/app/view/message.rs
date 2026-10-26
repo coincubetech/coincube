@@ -121,6 +121,7 @@ pub enum VaultReceiveMessage {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    Activity(crate::app::view::activity::ActivityMessage),
     ImportedBitcoin(crate::app::state::imported_bitcoin::ImportMessage),
     /// Close the read-only foreign-wallet sweep review and destroy its
     /// session-only evidence.
@@ -288,6 +289,9 @@ pub enum Message {
     /// plans". The Pane intercepts it and focuses the Home tab on its
     /// Connect → Plan & Billing section. Mirrors [`OpenConnectSignIn`].
     OpenPlanBilling,
+    /// A focusable paid-feature CTA records its own return target for the
+    /// Connect sheet's Close and Escape route.
+    OpenPlanBillingFrom(&'static str),
     /// Remote duress activation arrived over the gRPC stream (Phase 7b). The
     /// tab shell intercepts this and locks the running app into the cryptic
     /// "Duress Mode Activated" screen — WITHOUT wiping (remote activation can
@@ -955,6 +959,7 @@ pub enum LiquidOverviewMessage {
 
 #[derive(Debug, Clone)]
 pub enum LiquidSendMessage {
+    FocusAction(iced::advanced::widget::Id),
     PresetAsset(crate::app::state::liquid::send::SendAsset),
     InputEdited(String),
     /// Carries (original_input, validation_result) so stale async results are discarded.
@@ -1026,6 +1031,8 @@ pub enum LiquidSendMessage {
 /// [`crate::app::state::liquid::swap`].
 #[derive(Debug, Clone)]
 pub enum LiquidSwapMessage {
+    /// Focus a keyboard action after pointer activation.
+    FocusAction(iced::advanced::widget::Id),
     /// Balances + recorded-swap payments loaded for the Swap screen.
     DataLoaded {
         btc_balance: Amount,
@@ -1116,6 +1123,8 @@ pub enum SendPopupMessage {
 
 #[derive(Debug, Clone)]
 pub enum LiquidReceiveMessage {
+    FocusAction(iced::advanced::widget::Id),
+    BackToOverview,
     ToggleMethod(ReceiveMethod),
     Copy,
     ShowQrCode,

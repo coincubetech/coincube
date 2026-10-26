@@ -1,10 +1,10 @@
-use iced::{alignment, widget::Space, Alignment, Length};
+use iced::{widget::Space, Alignment, Length};
 
 use coincube_ui::{
     color,
     component::{
         button, collapse,
-        text::{h3, p1_regular, text, Text, H3_SIZE},
+        text::{text, Text},
     },
     icon, theme,
     widget::*,
@@ -17,60 +17,12 @@ use crate::installer::{
     view::{
         editor::{
             define_descriptor_advanced_settings, defined_key, path,
-            template::diagram::{policy_timeline, PolicyRow, Timelock},
+            template::diagram::{PolicyRow, Timelock},
             undefined_key, uneditable_defined_key,
         },
         layout,
     },
 };
-
-/// A left-aligned, full-width secondary body paragraph — the prose block
-/// repeated throughout the multisig template "Introduction" screens.
-fn intro_paragraph(text: &str) -> Element<'_, Message> {
-    Container::new(
-        p1_regular(text)
-            .style(theme::text::secondary)
-            .align_x(alignment::Horizontal::Left),
-    )
-    .align_x(alignment::Horizontal::Left)
-    .width(Length::Fill)
-    .into()
-}
-
-/// Shared scaffold for the multisig template "Introduction" screens: a
-/// left-aligned 800px-wide column headed by `heading`, followed by the
-/// caller's `body` widgets and the standard "Next" button, wired to the
-/// installer's Previous/Next navigation.
-fn intro_description(
-    progress: (usize, usize),
-    heading: &'static str,
-    body: Vec<Element<'static, Message>>,
-) -> Element<'static, Message> {
-    let mut content = Column::new()
-        .align_x(Alignment::Start)
-        .push(h3(heading))
-        .max_width(800.0);
-    for widget in body {
-        content = content.push(widget);
-    }
-    layout(
-        progress,
-        None,
-        "Introduction",
-        content
-            .push(
-                Row::new().push(Space::new().width(Length::Fill)).push(
-                    button::primary(None, "Next")
-                        .width(Length::Fixed(200.0))
-                        .on_press(Message::Next),
-                ),
-            )
-            .push(Space::new().height(50.0))
-            .spacing(20),
-        true,
-        Some(Message::Previous),
-    )
-}
 
 /// The "Second recovery option" path section (orange, single backup key)
 /// shared verbatim by the two inheritance + backup-recovery "Set keys"
@@ -127,124 +79,66 @@ fn second_recovery_path_section(use_taproot: bool, recovery_path: &Path) -> Elem
 
 pub fn multisig_security_template_description(
     progress: (usize, usize),
+    ui_instance: u64,
+    show_keychain_tip: bool,
 ) -> Element<'static, Message> {
-    intro_description(
+    super::template_introduction(
         progress,
+        ui_instance,
+        show_keychain_tip,
         "Expanding multisig wallet",
+        "You need 3 keys: two Primary Keys and a Recovery Key.",
+        "Both Primary Keys are needed to spend now. After the configured inactivity delay, any two of the three keys can recover your funds.",
+        "Choose a separate signing device for the recovery key where practical.",
         vec![
-            intro_paragraph("For this setup you will need 3 keys: two Primary Keys and a Recovery Key. For security reasons, we suggest you use a separate Hardware Wallet for each key."),
-            Row::new()
-                .spacing(30)
-                .push(
-                    Row::new()
-                        .align_y(Alignment::Center)
-                        .spacing(10)
-                        .push(icon::round_key_icon().size(H3_SIZE).style(theme::text::success))
-                        .push(p1_regular("Primary key #1").bold()),
-                )
-                .push(
-                    Row::new()
-                        .align_y(Alignment::Center)
-                        .spacing(10)
-                        .push(icon::round_key_icon().size(H3_SIZE).style(theme::text::success))
-                        .push(p1_regular("Primary key #2").bold()),
-                )
-                .push(
-                    Row::new()
-                        .align_y(Alignment::Center)
-                        .spacing(10)
-                        .push(
-                            icon::round_key_icon()
-                                .size(H3_SIZE)
-                                .style(theme::text::adaptive(color::ORANGE)),
-                        )
-                        .push(p1_regular("Recovery key").bold()),
-                )
-                .into(),
-            intro_paragraph("The Primary Keys will compose a 2-of-2 multisig which will always be able to spend. In case one of your keys becomes unavailable, after a period of inactivity you will be able to recover your funds using the Recovery Key together with one of your Primary Keys (2-of-3 multisig):"),
-            intro_paragraph("Tip: you don't need to gather every hardware wallet in one place. You can invite a family member or friend to contribute a Keychain key for the Recovery Key — they accept an invitation and provide their key remotely, dramatically simplifying setup."),
-            policy_timeline(vec![
-                PolicyRow {
-                    label: "Primary spending policy:",
-                    keys: vec![(1, color::GREEN), (2, color::GREEN)],
-                    box_label: "2-of-2 multisig",
-                    timelock: Timelock::None,
-                },
-                PolicyRow {
-                    label: "Recovery spending policy:",
-                    keys: vec![(1, color::GREEN), (2, color::GREEN), (3, color::ORANGE)],
-                    box_label: "2-of-3 multisig",
-                    timelock: Timelock::After(0.5),
-                },
-            ]),
+            PolicyRow {
+                label: "Primary spending policy",
+                keys: vec![(1, color::GREEN), (2, color::GREEN)],
+                box_label: "2-of-2 multisig",
+                timelock: Timelock::None,
+            },
+            PolicyRow {
+                label: "Recovery spending policy",
+                keys: vec![(1, color::GREEN), (2, color::GREEN), (3, color::ORANGE)],
+                box_label: "2-of-3 multisig",
+                timelock: Timelock::After(0.5),
+            },
         ],
     )
 }
 
 pub fn multisig_inheritance_recovery_description(
     progress: (usize, usize),
+    ui_instance: u64,
+    show_keychain_tip: bool,
 ) -> Element<'static, Message> {
-    intro_description(
+    super::template_introduction(
         progress,
+        ui_instance,
+        show_keychain_tip,
         "Multisig with inheritance & backup recovery",
+        "You need 7 keys: three Primary, three Inheritance and one Recovery Key.",
+        "Any two Primary Keys can spend now. After inactivity, any two Inheritance Keys can recover. The Recovery Key becomes available after a longer delay.",
+        "Choose separate signing devices for the inheritance keys where practical.",
         vec![
-            intro_paragraph("For this setup you will need 7 keys: three Primary Keys, three Inheritance Keys and a second Recovery Key. For security reasons, we suggest you use a separate Hardware Wallet for each key."),
-            Row::new()
-                .spacing(30)
-                .push(
-                    Row::new()
-                        .align_y(Alignment::Center)
-                        .spacing(10)
-                        .push(icon::round_key_icon().size(H3_SIZE).style(theme::text::success))
-                        .push(p1_regular("Primary keys #1-3").bold()),
-                )
-                .push(
-                    Row::new()
-                        .align_y(Alignment::Center)
-                        .spacing(10)
-                        .push(
-                            icon::round_key_icon()
-                                .size(H3_SIZE)
-                                .style(theme::text::adaptive(color::BLUE)),
-                        )
-                        .push(p1_regular("Inheritance keys #4-6").bold()),
-                )
-                .push(
-                    Row::new()
-                        .align_y(Alignment::Center)
-                        .spacing(10)
-                        .push(
-                            icon::round_key_icon()
-                                .size(H3_SIZE)
-                                .style(theme::text::adaptive(color::ORANGE)),
-                        )
-                        .push(p1_regular("Recovery key #7").bold()),
-                )
-                .into(),
-            intro_paragraph("Any two of your three Primary Keys form a 2-of-3 multisig that can always spend. After a period of inactivity, any two of your three Inheritance Keys can recover the funds, and a second Recovery Key becomes available as an additional backup after a longer period. Both recovery timelocks can be configured in the next step."),
-            intro_paragraph("Tip: you don't need to gather every hardware wallet in one place. You can invite family or friends to contribute Keychain keys for the inheritance keys — they accept an invitation and provide their key remotely, dramatically simplifying setup."),
-            policy_timeline(vec![
-                PolicyRow {
-                    label: "Primary spending policy:",
-                    keys: vec![(1, color::GREEN), (2, color::GREEN), (3, color::GREEN)],
-                    box_label: "2-of-3 multisig",
-                    timelock: Timelock::None,
-                },
-                PolicyRow {
-                    label: "Inheritance spending policy:",
-                    keys: vec![(4, color::BLUE), (5, color::BLUE), (6, color::BLUE)],
-                    box_label: "2-of-3 multisig",
-                    timelock: Timelock::After(0.5),
-                },
-                PolicyRow {
-                    label: "Second recovery policy:",
-                    keys: vec![(7, color::ORANGE)],
-                    box_label: "Recovery Key",
-                    // Longer timelock than the inheritance path: the spend
-                    // window opens only after the inheritance path is active.
-                    timelock: Timelock::After(0.68),
-                },
-            ]),
+            PolicyRow {
+                label: "Primary spending policy",
+                keys: vec![(1, color::GREEN), (2, color::GREEN), (3, color::GREEN)],
+                box_label: "2-of-3 multisig",
+                timelock: Timelock::None,
+            },
+            PolicyRow {
+                label: "Inheritance recovery policy",
+                keys: vec![(4, color::BLUE), (5, color::BLUE), (6, color::BLUE)],
+                box_label: "2-of-3 multisig",
+                timelock: Timelock::After(0.42),
+            },
+            PolicyRow {
+                label: "Second recovery policy",
+                keys: vec![(7, color::ORANGE)],
+                box_label: "Recovery Key",
+                timelock: Timelock::After(0.7),
+            },
         ],
     )
 }
@@ -440,75 +334,43 @@ pub fn multisig_security_template<'a>(
 
 pub fn expanding_multisig_inheritance_recovery_description(
     progress: (usize, usize),
+    ui_instance: u64,
+    show_keychain_tip: bool,
 ) -> Element<'static, Message> {
-    intro_description(
+    super::template_introduction(
         progress,
+        ui_instance,
+        show_keychain_tip,
         "Expanding multisig with inheritance & backup recovery",
+        "You need 7 keys. The Primary Keys are reused in the inheritance path.",
+        "Any two Primary Keys can spend now. After inactivity, any two of the six Primary and Inheritance Keys can recover. The Recovery Key opens after a longer delay.",
+        "Choose separate signing devices for the inheritance keys where practical.",
         vec![
-            intro_paragraph("For this setup you will need 7 keys: three Primary Keys, three Inheritance Keys and a second Recovery Key. Your Primary Keys are reused in the inheritance path, so no extra devices are needed. For security reasons, we suggest you use a separate Hardware Wallet for each key."),
-            Row::new()
-                .spacing(30)
-                .push(
-                    Row::new()
-                        .align_y(Alignment::Center)
-                        .spacing(10)
-                        .push(icon::round_key_icon().size(H3_SIZE).style(theme::text::success))
-                        .push(p1_regular("Primary keys #1-3").bold()),
-                )
-                .push(
-                    Row::new()
-                        .align_y(Alignment::Center)
-                        .spacing(10)
-                        .push(
-                            icon::round_key_icon()
-                                .size(H3_SIZE)
-                                .style(theme::text::adaptive(color::BLUE)),
-                        )
-                        .push(p1_regular("Inheritance keys #4-6").bold()),
-                )
-                .push(
-                    Row::new()
-                        .align_y(Alignment::Center)
-                        .spacing(10)
-                        .push(
-                            icon::round_key_icon()
-                                .size(H3_SIZE)
-                                .style(theme::text::adaptive(color::ORANGE)),
-                        )
-                        .push(p1_regular("Recovery key #7").bold()),
-                )
-                .into(),
-            intro_paragraph("Any two of your three Primary Keys form a 2-of-3 multisig that can always spend. After a period of inactivity, any two of the six keys — your Primary Keys together with your Inheritance Keys — can recover the funds (2-of-6), so a single heir plus one of your own keys is enough. A second Recovery Key becomes available as a final backup after a longer period. Both recovery timelocks can be configured in the next step."),
-            intro_paragraph("Tip: you don't need to gather every hardware wallet in one place. You can invite family or friends to contribute Keychain keys for the inheritance keys — they accept an invitation and provide their key remotely, dramatically simplifying setup."),
-            policy_timeline(vec![
-                PolicyRow {
-                    label: "Primary spending policy:",
-                    keys: vec![(1, color::GREEN), (2, color::GREEN), (3, color::GREEN)],
-                    box_label: "2-of-3 multisig",
-                    timelock: Timelock::None,
-                },
-                PolicyRow {
-                    label: "Inheritance spending policy:",
-                    keys: vec![
-                        (1, color::GREEN),
-                        (2, color::GREEN),
-                        (3, color::GREEN),
-                        (4, color::BLUE),
-                        (5, color::BLUE),
-                        (6, color::BLUE),
-                    ],
-                    box_label: "2-of-6 multisig",
-                    timelock: Timelock::After(0.5),
-                },
-                PolicyRow {
-                    label: "Second recovery policy:",
-                    keys: vec![(7, color::ORANGE)],
-                    box_label: "Recovery Key",
-                    // Longer timelock than the inheritance path: the spend
-                    // window opens only after the inheritance path is active.
-                    timelock: Timelock::After(0.68),
-                },
-            ]),
+            PolicyRow {
+                label: "Primary spending policy",
+                keys: vec![(1, color::GREEN), (2, color::GREEN), (3, color::GREEN)],
+                box_label: "2-of-3 multisig",
+                timelock: Timelock::None,
+            },
+            PolicyRow {
+                label: "Inheritance recovery policy",
+                keys: vec![
+                    (1, color::GREEN),
+                    (2, color::GREEN),
+                    (3, color::GREEN),
+                    (4, color::BLUE),
+                    (5, color::BLUE),
+                    (6, color::BLUE),
+                ],
+                box_label: "2-of-6 multisig",
+                timelock: Timelock::After(0.42),
+            },
+            PolicyRow {
+                label: "Second recovery policy",
+                keys: vec![(7, color::ORANGE)],
+                box_label: "Recovery Key",
+                timelock: Timelock::After(0.7),
+            },
         ],
     )
 }

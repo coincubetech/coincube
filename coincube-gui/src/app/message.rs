@@ -34,6 +34,21 @@ use crate::{
 
 #[derive(Debug)]
 pub enum Message {
+    ActivityVaultLoaded(u64, Result<(Vec<HistoryTransaction>, bool), String>),
+    ActivityPsbtLoaded(u64, Result<Vec<SpendTx>, String>),
+    ActivitySparkLoaded(
+        u64,
+        Result<(Vec<coincube_spark_protocol::PaymentSummary>, bool), String>,
+    ),
+    ActivityLiquidLoaded(
+        u64,
+        Result<(Vec<crate::app::wallets::DomainPayment>, bool), String>,
+    ),
+    ActivityRefundablesLoaded(
+        u64,
+        Result<Vec<crate::app::wallets::DomainRefundableSwap>, String>,
+    ),
+    ActivityOpenDetail(super::state::activity::ActivityTarget),
     ImportedBitcoin(Box<super::state::imported_bitcoin::ImportEvent>),
     VaultSpendPrepared {
         generation: u64,

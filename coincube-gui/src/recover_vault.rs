@@ -322,7 +322,8 @@ impl RecoverVaultPanel {
 /// Renders the discovery surface for the launcher main-content area.
 pub fn view(panel: &RecoverVaultPanel) -> Element<'_, RecoverVaultMessage> {
     let header = Column::new()
-        .spacing(6)
+        .spacing(8)
+        .push(caption("IMPORT OR RESTORE · KEYHOLDER RECOVERY").style(theme::text::secondary))
         .push(h4_bold("Recover a Vault"))
         .push(
             p2_regular(
@@ -375,6 +376,7 @@ pub fn view(panel: &RecoverVaultPanel) -> Element<'_, RecoverVaultMessage> {
     Column::new()
         .spacing(20)
         .width(Length::Fill)
+        .max_width(700)
         .push(header)
         .push(body)
         .into()
@@ -390,7 +392,7 @@ fn vault_row<'a>(
         .clone()
         .unwrap_or_else(|| format!("Vault #{}", v.cube_id));
 
-    let meta = format!("{} • {}", tier_label(v), state_label(v.recovery_state()));
+    let meta = format!("{} · {}", tier_label(v), state_label(v.recovery_state()));
 
     let mut left = Column::new()
         .spacing(4)

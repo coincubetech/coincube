@@ -98,6 +98,7 @@ impl ToastContent {
 
 struct Panels {
     current: Menu,
+    activity: state::activity::Activity,
     imported_bitcoin: Option<Box<state::imported_bitcoin::ImportedBitcoinPanel>>,
     // Always available panels
     global_home: GlobalHome,
@@ -224,6 +225,10 @@ impl Panels {
 
         Self {
             current: Menu::Cube(crate::app::menu::CubeSubMenu::Overview),
+            activity: state::activity::Activity::new(
+                Some(liquid_backend.clone()),
+                spark_backend.clone(),
+            ),
             imported_bitcoin: bitcoin_import.map(|import| {
                 let mut panel = state::imported_bitcoin::ImportedBitcoinPanel::new(
                     datadir.network_directory(chain),
@@ -353,6 +358,7 @@ impl Panels {
 
         Self {
             current: Menu::Cube(crate::app::menu::CubeSubMenu::Overview),
+            activity: state::activity::Activity::new(liquid_backend.clone(), spark_backend.clone()),
             imported_bitcoin: None,
             global_home: GlobalHome::new(
                 wallet.clone(),
@@ -639,6 +645,7 @@ impl Panels {
         }
         match &self.current {
             Menu::Cube(crate::app::menu::CubeSubMenu::Overview) => Some(&self.global_home),
+            Menu::Cube(crate::app::menu::CubeSubMenu::Activity) => Some(&self.activity),
             Menu::Cube(crate::app::menu::CubeSubMenu::Settings(_)) => {
                 Some(&self.global_settings as &dyn State)
             }
@@ -735,6 +742,7 @@ impl Panels {
         }
         match &self.current {
             Menu::Cube(crate::app::menu::CubeSubMenu::Overview) => Some(&mut self.global_home),
+            Menu::Cube(crate::app::menu::CubeSubMenu::Activity) => Some(&mut self.activity),
             Menu::Cube(crate::app::menu::CubeSubMenu::Settings(_)) => {
                 Some(&mut self.global_settings as &mut dyn State)
             }
@@ -3947,6 +3955,7 @@ impl App {
         // keychain-unavailable modal offers "Sign with Connect" rather than a
         // "Sign in to Connect" that would no-op.
         cache_with_vault.has_connect_session = connect_auth_arc.is_some();
+        cache_with_vault.restorable_connect_session = panels.connect.account.has_stored_session();
         cache_with_vault.p2p_test_coordinator = panels
             .p2p
             .as_ref()
@@ -4770,6 +4779,15 @@ impl App {
     /// treats a `SetSession` completion from this tab as a sign-in.
     pub fn connect_auth_epoch(&self) -> u64 {
         self.panels.connect.account.auth_epoch()
+    }
+
+    /// Retained account state rendered by the GUI's account-wide Connect sheet.
+    pub(crate) fn connect_sheet_account(&self) -> &state::connect::ConnectAccountPanel {
+        &self.panels.connect.account
+    }
+
+    pub(crate) fn connect_sheet_account_mut(&mut self) -> &mut state::connect::ConnectAccountPanel {
+        &mut self.panels.connect.account
     }
 
     /// True when this tab's ConnectAccountPanel either already holds an
@@ -9596,12 +9614,78 @@ impl App {
                 }
                 return Task::batch([close_task, self.set_current_panel(menu)]);
             }
+            Message::ActivityOpenDetail(target) => {
+                // Hand off the source record to its owning wallet panel. Those
+                // panels retain signing, refund and replacement safeguards.
+                match target {
+                    state::activity::ActivityTarget::Vault(tx) => {
+                        if self.panels.transactions.is_some() {
+                            let load = self.set_current_panel(Menu::Vault(
+                                menu::VaultSubMenu::Transactions(None),
+                            ));
+                            let panel = self.panels.transactions.as_mut().expect("checked above");
+                            panel.preselect(tx);
+                            return load;
+                        }
+                    }
+                    state::activity::ActivityTarget::Psbt(tx) => {
+                        if self.panels.psbts.is_some() {
+                            let load = self
+                                .set_current_panel(Menu::Vault(menu::VaultSubMenu::PSBTs(None)));
+                            let panel = self.panels.psbts.as_mut().expect("checked above");
+                            panel.preselect(tx);
+                            return load;
+                        }
+                    }
+                    state::activity::ActivityTarget::Spark(payment) => {
+                        let row =
+                            state::spark::overview::payment_summary_to_recent_tx(&payment, None);
+                        self.panels.current = Menu::Spark(menu::SparkSubMenu::Transactions(None));
+                        let load = self
+                            .panels
+                            .spark_transactions
+                            .reload(self.daemon.clone(), self.wallet.clone());
+                        let select = self.panels.spark_transactions.update(
+                            self.daemon.clone(),
+                            &self.cache,
+                            Message::View(view::Message::SparkTransactions(
+                                view::SparkTransactionsMessage::Preselect(row),
+                            )),
+                        );
+                        return Task::batch([load, select]);
+                    }
+                    state::activity::ActivityTarget::Liquid(payment) => {
+                        if let Some(panel) = self.panels.liquid_transactions.as_mut() {
+                            self.panels.current =
+                                Menu::Liquid(menu::LiquidSubMenu::Transactions(None));
+                            let load = panel.reload(self.daemon.clone(), self.wallet.clone());
+                            let select = panel.update(
+                                self.daemon.clone(),
+                                &self.cache,
+                                Message::View(view::Message::PreselectPayment(payment)),
+                            );
+                            return Task::batch([load, select]);
+                        }
+                    }
+                    state::activity::ActivityTarget::Refundable(refundable) => {
+                        if let Some(panel) = self.panels.liquid_transactions.as_mut() {
+                            let load = panel.reload(self.daemon.clone(), self.wallet.clone());
+                            panel.preselect_refundable(refundable);
+                            self.panels.current =
+                                Menu::Liquid(menu::LiquidSubMenu::Transactions(None));
+                            return load;
+                        }
+                    }
+                }
+                return Task::none();
+            }
             msg @ Message::View(view::Message::ConnectAccount(_))
             | msg @ Message::View(view::Message::ConnectCube(_)) => {
                 if self.cache.chain().is_blake2b() && !self.requires_connect() {
                     self.panels.connect.account.use_local_backend();
                 }
                 let was_authenticated = self.cache.connect_authenticated;
+                let previous_server_cube_id = self.panels.connect.cube.server_cube_id;
                 let explicit_logout = matches!(
                     &msg,
                     Message::View(view::Message::ConnectAccount(
@@ -9647,6 +9731,18 @@ impl App {
                     .connect
                     .update(self.daemon.clone(), &self.cache, msg);
                 self.cache.connect_authenticated = self.panels.connect.account.is_authenticated();
+                self.cache.restorable_connect_session =
+                    self.panels.connect.account.has_stored_session();
+                let refresh_recovery_kit = if self.panels.connect.account.is_authenticated()
+                    && self.panels.connect.cube.server_cube_id.is_some()
+                    && (!was_authenticated || previous_server_cube_id.is_none())
+                {
+                    Task::done(Message::View(view::Message::Settings(
+                        view::SettingsMessage::RecoveryKit(view::RecoveryKitMessage::LoadStatus),
+                    )))
+                } else {
+                    Task::none()
+                };
                 if let Some(bound) = &self.fork_connect_client {
                     let current = self.panels.connect.account.authenticated_client();
                     let changed = current.as_ref().is_some_and(|current| {
@@ -9848,6 +9944,7 @@ impl App {
                     )));
                     return Task::batch([
                         task,
+                        refresh_recovery_kit,
                         persist_grant,
                         pending_claim,
                         pending_split,
@@ -9859,6 +9956,7 @@ impl App {
                 }
                 return Task::batch([
                     task,
+                    refresh_recovery_kit,
                     persist_grant,
                     pending_claim,
                     pending_split,
@@ -10016,11 +10114,9 @@ impl App {
                         })
                         .await
                     },
-                    |res| {
-                        if let Err(e) = res {
-                            tracing::warn!("Failed to persist display_mode: {}", e);
-                        }
-                        Message::Tick
+                    |res| match res {
+                        Ok(()) => Message::SettingsSaved,
+                        Err(e) => Message::SettingsSaveFailed(e.into()),
                     },
                 );
             }
@@ -10846,6 +10942,7 @@ impl App {
         self.fork_connect_client = None;
         self.panels.connect.account.use_local_backend();
         self.cache.has_connect_session = false;
+        self.cache.restorable_connect_session = false;
         self.cache.connect_authenticated = false;
         self.cache.connect_tokens = None;
         self.cache.connect_email = None;
@@ -10874,6 +10971,7 @@ impl App {
             self.fork_connect_client = None;
             self.panels.connect.revoke_admitted_client();
             self.cache.has_connect_session = false;
+            self.cache.restorable_connect_session = false;
             self.cache.connect_authenticated = false;
             self.cache.connect_tokens = None;
             self.cache.connect_email = None;
@@ -16655,6 +16753,16 @@ pub(crate) mod claim_step1_tests {
             .unwrap(),
         );
         (app, wallet)
+    }
+
+    pub(crate) fn signed_in_connect_for_shell(app: &mut App) {
+        app.panels.connect.account.user = Some(crate::services::coincube::User {
+            id: 7,
+            email: "shell@example.invalid".into(),
+            email_verified: Some(true),
+        });
+        app.panels.connect.account.step = state::connect::ConnectFlowStep::Dashboard;
+        app.cache.connect_authenticated = true;
     }
 
     /// A completed imported wallet whose real preparation gate succeeds.

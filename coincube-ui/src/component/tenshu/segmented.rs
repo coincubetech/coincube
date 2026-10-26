@@ -304,6 +304,10 @@ fn muted(shell: &ShellPalette) -> Color {
     shell.muted
 }
 
+fn ink(shell: &ShellPalette) -> Color {
+    shell.ink
+}
+
 fn accent_ink(shell: &ShellPalette) -> Color {
     shell.accent_ink
 }
@@ -360,14 +364,28 @@ where
                     enabled,
                 } = segment;
                 let is_selected = selected == Some(value);
+                // A group without an on_select handler is inert even when its
+                // individual segments were not explicitly disabled.
+                let interactive = enabled && on_select.is_some();
                 let on_press = on_select
                     .as_ref()
-                    .filter(|_| enabled)
+                    .filter(|_| interactive)
                     .map(|on_select| on_select(value));
                 let action = match look {
                     Look::Segmented(size) => {
                         let label = label_text(label, size.text_size(), is_selected, font::MEDIUM);
-                        let icon = icon.map(|icon| icon.size(size::ICON_SMALL));
+                        let icon = icon.map(|icon| {
+                            if interactive {
+                                icon.size(size::ICON_SMALL)
+                            } else {
+                                glyph(
+                                    icon,
+                                    size::ICON_SMALL,
+                                    if is_selected { ink } else { muted },
+                                    false,
+                                )
+                            }
+                        });
                         let content = Container::new(with_icon(icon, label, 6.0))
                             .height(Length::Fill)
                             .align_x(alignment::Horizontal::Center)
@@ -384,7 +402,8 @@ where
                     Look::Chips => {
                         let label = label_text(label, type_size::CHIP, is_selected, font::REGULAR);
                         let color = if is_selected { accent_ink } else { muted };
-                        let icon = icon.map(|icon| glyph(icon, size::ICON_SMALL, color, enabled));
+                        let icon =
+                            icon.map(|icon| glyph(icon, size::ICON_SMALL, color, interactive));
                         let content = Container::new(with_icon(icon, label, 6.0))
                             .height(Length::Fill)
                             .align_y(alignment::Vertical::Center);
@@ -421,7 +440,7 @@ where
                     Look::Nav => {
                         let label = label_text(label, type_size::BODY, is_selected, font::REGULAR);
                         let color = if is_selected { accent } else { muted };
-                        let icon = icon.map(|icon| glyph(icon, size::ICON, color, enabled));
+                        let icon = icon.map(|icon| glyph(icon, size::ICON, color, interactive));
                         let content = Container::new(with_icon(icon, label, 10.0))
                             .width(Length::Fill)
                             .height(Length::Fill)
@@ -438,13 +457,15 @@ where
                             Container::new(iced::widget::Space::new())
                                 .width(Length::Fixed(size::RADIO_DOT))
                                 .height(Length::Fixed(size::RADIO_DOT))
-                                .style(move |theme| style::radio_dot(theme, is_selected, enabled)),
+                                .style(move |theme| {
+                                    style::radio_dot(theme, is_selected, interactive)
+                                }),
                         )
                         .width(Length::Fixed(size::RADIO))
                         .height(Length::Fixed(size::RADIO))
                         .align_x(alignment::Horizontal::Center)
                         .align_y(alignment::Vertical::Center)
-                        .style(move |theme| style::radio_ring(theme, is_selected, enabled));
+                        .style(move |theme| style::radio_ring(theme, is_selected, interactive));
                         let mut text = Column::new().spacing(2).width(Length::Fill).push(
                             label_text(label, type_size::BODY, false, font::MEDIUM).line_height(
                                 iced::widget::text::LineHeight::Relative(type_size::LINE_HEIGHT),

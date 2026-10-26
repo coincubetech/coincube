@@ -431,6 +431,7 @@ mod tests {
                         &unit,
                         &[],
                         false,
+                        false,
                         &backup,
                         &pin,
                         None,

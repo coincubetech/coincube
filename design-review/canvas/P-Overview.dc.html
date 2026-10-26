@@ -204,6 +204,10 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
         <sc-if value="{{ conn.unk }}" hint-placeholder-val="{{ false }}"><span class="st unk end"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M7.2 7.2a1.9 1.9 0 1 1 2.6 1.75c-.5.25-.8.6-.8 1.15v.4M9 12.6v.01"/></svg>Not checked</span></sc-if>
         <sc-if value="{{ conn.warn }}" hint-placeholder-val="{{ false }}"><span class="st warn"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5 16 15H2z"/><path d="M9 7.5v3M9 12.75v.01"/></svg>Reconnect required</span><button type="button" class="mini">Reconnect</button></sc-if>
       </div>
+      <button type="button" class="eye" aria-pressed="{{ hide.allP }}" aria-label="Hide balances" onClick="{{ toggleAll }}">
+        <sc-if value="{{ hide.allShown }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/></svg></sc-if>
+        <sc-if value="{{ hide.all }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/><path d="M3 3l12 12"/></svg></sc-if>
+      </button>
       <a class="chip" href="P-AppPrefs-InCube.dc.html" title="App preferences" aria-label="App preferences" style="padding:0 10px"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 5h12M3 9h12M3 13h12"/><circle cx="7" cy="5" r="1.6" fill="var(--panel)"/><circle cx="12" cy="9" r="1.6" fill="var(--panel)"/><circle cx="6" cy="13" r="1.6" fill="var(--panel)"/></svg></a>
     </div>
   </header>
@@ -529,7 +533,9 @@ class Component extends DCLogic {
       nv:{overview:nvi('overview'),activity:nvi('activity'),backup:nvi('backup'),spark:nvi('spark'),vault:nvi('vault'),liquid:nvi('liquid'),settings:nvi('settings')},
       attn:attn,
       pg:{overview:page==='overview',vault:page==='vault',spark:page==='spark',liquid:page==='liquid',activity:page==='activity',backup:page==='backup',settings:page==='settings'},
-      hide:{total:hide.total,totalShown:!hide.total,totalP:hide.total?'true':'false',wallets:hw,walletsShown:!hw,walletsP:hw?'true':'false'},
+      hide:{total:hide.total,totalShown:!hide.total,totalP:hide.total?'true':'false',wallets:hw,walletsShown:!hw,walletsP:hw?'true':'false',all:hide.total&&hw,allShown:!(hide.total&&hw),allP:(hide.total&&hw)?'true':'false'},
+      // top-bar eye hides every balance on the page; the section eyes stay as finer controls
+      toggleAll:()=>{const all=!(hide.total&&hide.wallets);self.setState({hide:{for:hb,total:all,wallets:all}});},
       toggleTotal:()=>self.setState({hide:{for:hb,total:!hide.total,wallets:hide.wallets}}),
       toggleWallets:()=>self.setState({hide:{for:hb,total:hide.total,wallets:!hide.wallets}}),
       total:{fiat:m('$41.70',hide.total),sats:m('50,360',hide.total)},
@@ -568,7 +574,6 @@ class Component extends DCLogic {
       })()),
       scopes:[
         {label:'Cube · '+cubeName,desc:'Display, backup, payment checks, exports'},
-        {label:'This device',desc:'App preferences and Stable Balance'},
         {label:'Connect account',desc:signedOut?'Signed out on this device':'alex@example.test · plan, devices and security'},
         {label:vName,desc:'Signers, Keychain pairing, node and maintenance'},
         {label:'Spark · Daily spending',desc:'Lightning Address and connection'}

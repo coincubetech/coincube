@@ -510,17 +510,27 @@ impl<'a, M: Clone + 'static> From<TextField<'a, M>> for Element<'a, M> {
             label.into()
         };
 
-        let label: Element<'a, M> = match accessory {
-            Some(accessory) => iced::widget::Row::new()
-                .align_y(iced::Alignment::Center)
-                .push(Container::new(label).width(Length::Fill))
-                .push(accessory)
-                .into(),
-            None => label,
-        };
         let mut column = Column::new().spacing(6).width(width);
-        if !label_hidden {
-            column = column.push(label);
+        if label_hidden {
+            // Hiding the label must not hide an independently focusable
+            // accessory. Keep it above the input and aligned to the right.
+            if let Some(accessory) = accessory {
+                column = column.push(
+                    Row::new()
+                        .push(iced::widget::Space::new().width(Length::Fill))
+                        .push(accessory),
+                );
+            }
+        } else {
+            let label_row: Element<'a, M> = match accessory {
+                Some(accessory) => Row::new()
+                    .align_y(Alignment::Center)
+                    .push(Container::new(label).width(Length::Fill))
+                    .push(accessory)
+                    .into(),
+                None => label,
+            };
+            column = column.push(label_row);
         }
         column = column.push(control);
         let mut lines: Vec<Element<'a, M>> = Vec::new();

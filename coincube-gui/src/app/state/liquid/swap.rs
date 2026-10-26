@@ -841,6 +841,9 @@ impl State for LiquidSwap {
         self.bitcoin_unit = cache.bitcoin_unit;
         if let Message::View(view::Message::LiquidSwap(ref msg)) = message {
             match msg {
+                view::LiquidSwapMessage::FocusAction(id) => {
+                    return iced::widget::operation::focus(id.clone());
+                }
                 view::LiquidSwapMessage::DataLoaded {
                     btc_balance,
                     usdt_balance,

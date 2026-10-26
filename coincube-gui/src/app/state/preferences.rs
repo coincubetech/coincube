@@ -5,6 +5,7 @@
 //! when it owns an in-flight save. Hide masks immediately in this session;
 //! only a successful explicit Show can clear that mask.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -47,11 +48,13 @@ impl BalancePrivacy {
 }
 
 /// Read-only input for the shared top-bar eye. Chrome never consults disk.
-/// `interactive` is true only with an accepted, idle privacy authority.
+/// `interactive` is true only with accepted privacy choices and no explicit
+/// change pending or queued. A read-only background refresh stays interactive.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct BalancePrivacyChrome {
     pub privacy: BalancePrivacy,
-    /// An initialization, retry or save is in flight on the one ordered lane.
+    /// An explicit load or change is in flight, or a user change is queued.
+    /// Read-only background refreshes alone do not set this flag.
     pub busy: bool,
     pub interactive: bool,
 }
@@ -180,6 +183,8 @@ pub struct SaveRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BeginSaveError {
     Busy,
+    /// A user change was retained behind an in-flight background refresh.
+    Queued,
     GenerationExhausted,
     /// [`PreferencesOwner`] only: no choices are accepted yet, so only an
     /// explicit Show/Hide balances choice may be saved.
@@ -324,6 +329,8 @@ pub struct PreferencesOwner {
     lane: SaveCoordinator,
     accepted: Option<AcceptedPreferences>,
     last_refresh: Instant,
+    background_refresh: Option<u64>,
+    queued_changes: VecDeque<PreferenceChange>,
     /// A failed reread cannot leave a previously accepted Show visible.
     refresh_unresolved: bool,
     /// Session safety latch. A failed Hide or a later reload of persisted Show
@@ -348,6 +355,8 @@ impl PreferencesOwner {
             lane: SaveCoordinator::new(settings_path, Self::ROOT_GENERATION),
             accepted: None,
             last_refresh: Instant::now(),
+            background_refresh: None,
+            queued_changes: VecDeque::new(),
             refresh_unresolved: false,
             session_hide: false,
             notice: PreferencesNotice::None,
@@ -392,6 +401,19 @@ impl PreferencesOwner {
         self.lane.is_saving()
     }
 
+    /// A read-only periodic refresh must not look like a user-initiated save.
+    pub fn is_background_refreshing(&self) -> bool {
+        self.background_refresh.is_some()
+    }
+
+    pub fn has_queued_changes(&self) -> bool {
+        !self.queued_changes.is_empty()
+    }
+
+    pub fn pending_operation(&self) -> Option<Operation> {
+        self.lane.pending.as_ref().map(|request| request.operation)
+    }
+
     /// A retry of `load_or_initialize_preferences` on the shared lane.
     pub fn begin_initialize(&mut self) -> Result<SaveRequest, BeginSaveError> {
         let request = self.lane.begin_initialize()?;
@@ -405,7 +427,9 @@ impl PreferencesOwner {
         if self.last_refresh.elapsed() < Duration::from_secs(1) {
             return None;
         }
-        self.begin_initialize().ok()
+        let request = self.begin_initialize().ok()?;
+        self.background_refresh = Some(request.request_generation);
+        Some(request)
     }
 
     /// One explicit change. Before any choices are accepted only an explicit
@@ -414,6 +438,13 @@ impl PreferencesOwner {
     pub fn begin_save(&mut self, change: PreferenceChange) -> Result<SaveRequest, BeginSaveError> {
         if self.accepted.is_none() && !matches!(change, PreferenceChange::HideBalances(_)) {
             return Err(BeginSaveError::Unavailable);
+        }
+        if self.is_background_refreshing() {
+            self.queued_changes.push_back(change);
+            if matches!(change, PreferenceChange::HideBalances(true)) {
+                self.session_hide = true;
+            }
+            return Err(BeginSaveError::Queued);
         }
         let request = self.lane.begin(change)?;
         if matches!(change, PreferenceChange::HideBalances(true)) {
@@ -429,7 +460,13 @@ impl PreferencesOwner {
         request: &SaveRequest,
         result: Result<crate::app::settings::global::PreferencesReceipt, String>,
     ) -> SaveOutcome<AcceptedPreferences> {
-        match self.lane.complete_with(request, result) {
+        let outcome = self.lane.complete_with(request, result);
+        if !matches!(&outcome, SaveOutcome::Ignored)
+            && self.background_refresh == Some(request.request_generation)
+        {
+            self.background_refresh = None;
+        }
+        match outcome {
             SaveOutcome::Applied(receipt) => {
                 self.accept(&receipt);
                 if matches!(
@@ -466,6 +503,25 @@ impl PreferencesOwner {
             PreferencesNotice::None
         };
         self.accepted = Some(accepted);
+    }
+
+    /// Resume one user action after the periodic read has completed.
+    pub fn begin_next_queued_save(&mut self) -> Option<SaveRequest> {
+        if self.is_busy() {
+            return None;
+        }
+        let change = *self.queued_changes.front()?;
+        match self.begin_save(change) {
+            Ok(request) => {
+                self.queued_changes.pop_front();
+                Some(request)
+            }
+            Err(_) => {
+                // Keep the intent for a later retry or owner inspection.
+                self.notice = PreferencesNotice::SaveFailed;
+                None
+            }
+        }
     }
 }
 
@@ -933,6 +989,108 @@ mod tests {
         assert!(owner
             .begin_save(PreferenceChange::DeveloperMode(true))
             .is_ok());
+    }
+
+    #[test]
+    fn queued_hide_masks_immediately_and_saves_after_background_refresh() {
+        use crate::app::settings::global::GlobalSettings;
+
+        let root = OwnerRoot::new("queued-hide");
+        GlobalSettings::load_or_initialize_preferences(&root.root()).unwrap();
+        let shown = GlobalSettings::save_preference(
+            &root.settings(),
+            PreferenceChange::HideBalances(false),
+        )
+        .unwrap();
+        let mut owner = PreferencesOwner::new(root.settings(), &Ok(shown));
+        assert_eq!(owner.privacy(), BalancePrivacy::Shown);
+
+        owner.last_refresh = Instant::now() - Duration::from_secs(2);
+        let refresh = owner.begin_refresh_if_due().unwrap();
+        assert!(owner.is_background_refreshing());
+        assert_eq!(
+            owner.begin_save(PreferenceChange::HideBalances(true)),
+            Err(BeginSaveError::Queued)
+        );
+        assert_eq!(owner.privacy(), BalancePrivacy::HiddenLocally);
+        assert!(matches!(
+            owner.complete(&refresh, root.run(&refresh)),
+            SaveOutcome::Applied(_)
+        ));
+        assert!(!owner.is_background_refreshing());
+        assert_eq!(owner.privacy(), BalancePrivacy::HiddenLocally);
+        let hide = owner.begin_next_queued_save().unwrap();
+        assert_eq!(
+            hide.operation,
+            Operation::Save(PreferenceChange::HideBalances(true))
+        );
+        assert!(matches!(
+            owner.complete(&hide, root.run(&hide)),
+            SaveOutcome::Applied(_)
+        ));
+        assert_eq!(owner.privacy(), BalancePrivacy::Hidden);
+    }
+
+    #[test]
+    fn queued_show_waits_for_external_hide_receipt() {
+        use crate::app::settings::global::GlobalSettings;
+
+        let root = OwnerRoot::new("queued-show");
+        GlobalSettings::load_or_initialize_preferences(&root.root()).unwrap();
+        let shown = GlobalSettings::save_preference(
+            &root.settings(),
+            PreferenceChange::HideBalances(false),
+        )
+        .unwrap();
+        let mut owner = PreferencesOwner::new(root.settings(), &Ok(shown));
+
+        owner.last_refresh = Instant::now() - Duration::from_secs(2);
+        let refresh = owner.begin_refresh_if_due().unwrap();
+        assert_eq!(
+            owner.begin_save(PreferenceChange::HideBalances(false)),
+            Err(BeginSaveError::Queued)
+        );
+        GlobalSettings::save_preference(&root.settings(), PreferenceChange::HideBalances(true))
+            .unwrap();
+        assert!(matches!(
+            owner.complete(&refresh, root.run(&refresh)),
+            SaveOutcome::Applied(_)
+        ));
+        assert_eq!(owner.privacy(), BalancePrivacy::Hidden);
+        let show = owner.begin_next_queued_save().unwrap();
+        assert_eq!(
+            show.operation,
+            Operation::Save(PreferenceChange::HideBalances(false))
+        );
+        assert_eq!(owner.privacy(), BalancePrivacy::Hidden);
+        assert!(matches!(
+            owner.complete(&show, root.run(&show)),
+            SaveOutcome::Applied(_)
+        ));
+        assert_eq!(owner.privacy(), BalancePrivacy::Shown);
+    }
+
+    #[test]
+    fn queued_change_is_retained_when_a_new_request_cannot_start() {
+        use crate::app::settings::global::GlobalSettings;
+
+        let root = OwnerRoot::new("queued-exhaustion");
+        let startup = GlobalSettings::load_or_initialize_preferences(&root.root()).unwrap();
+        let mut owner = PreferencesOwner::new(root.settings(), &Ok(startup));
+        owner.last_refresh = Instant::now() - Duration::from_secs(2);
+        let refresh = owner.begin_refresh_if_due().unwrap();
+        assert_eq!(
+            owner.begin_save(PreferenceChange::DeveloperMode(true)),
+            Err(BeginSaveError::Queued)
+        );
+        owner.lane.next_request_generation = u64::MAX;
+        assert!(matches!(
+            owner.complete(&refresh, root.run(&refresh)),
+            SaveOutcome::Applied(_)
+        ));
+        assert!(owner.begin_next_queued_save().is_none());
+        assert_eq!(owner.queued_changes.len(), 1);
+        assert_eq!(owner.notice(), PreferencesNotice::SaveFailed);
     }
 
     /// Real receipts from a temporary installation root, not fabricated

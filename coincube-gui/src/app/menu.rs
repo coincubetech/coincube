@@ -17,6 +17,8 @@ pub enum Menu {
 pub enum CubeSubMenu {
     /// Cube landing / dashboard.
     Overview,
+    /// Activity across the wallets in this open Cube.
+    Activity,
     /// Cube-level settings. The inner enum drives the third rail —
     /// General / Recovery / Payment checks / About / Stats / Avatar / Members.
     Settings(CubeSettingsOption),
