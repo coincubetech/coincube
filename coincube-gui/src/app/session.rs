@@ -133,9 +133,10 @@ fn open_inner(cube_id: String, pin: Option<Zeroizing<String>>) {
 
 /// Hand the session the signer that verifying the PIN just produced.
 ///
-/// Called from the unlock's blocking task. It goes here rather than through an
-/// iced message because messages must be `Clone` and are cloned freely — every
-/// copy would be another master seed on the heap.
+/// Called when the live PIN screen accepts its matching unlock result. The
+/// blocking classifier keeps the signer in a private slot until then. It
+/// cannot travel through an iced message: messages are cloned freely and
+/// every copy would be another master seed on the heap.
 pub fn store_unlocked_signer(cube_id: &str, fingerprint: Fingerprint, signer: MasterSigner) {
     let mut guard = lock_session();
     match guard.as_mut() {

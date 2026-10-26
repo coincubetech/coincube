@@ -14,6 +14,10 @@ use coincube_ui::{
 use crate::app::settings::CubeSettings;
 use crate::pin_input;
 use crate::services::unlock::{self, PinOutcome};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 pub struct PinEntry {
     cube: CubeSettings,
@@ -76,16 +80,80 @@ pub enum Message {
     /// Carries only a classification, never the decrypted seed. Key material
     /// must not enter the message queue — iced clones messages, and every clone
     /// would be another copy of the mnemonic on the heap.
-    Classified(Result<Verdict, String>),
+    Classified(u64, Result<Verdict, String>),
     ForkClassified(u64, Result<Verdict, String>),
 }
 
 /// What [`Message::Classified`] reports back to the UI thread.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum Verdict {
     Unlock,
-    Duress,
+    Duress(VerifiedUnlockDuress),
     Wrong,
+}
+
+/// One-use emergency evidence minted only by a completed PIN trial. The
+/// captured origin survives Back, tab close, or a new PinEntry under the same
+/// tab id; it never borrows the currently visible Cube's identity.
+#[derive(Clone)]
+pub struct VerifiedUnlockDuress {
+    root: std::path::PathBuf,
+    cube_id: String,
+    chain: crate::chain::ChainId,
+    account_id: Option<String>,
+    claimed: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for VerifiedUnlockDuress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VerifiedUnlockDuress(<redacted>)")
+    }
+}
+
+impl VerifiedUnlockDuress {
+    fn from_classification(
+        root: std::path::PathBuf,
+        cube_id: String,
+        chain: crate::chain::ChainId,
+        account_id: Option<String>,
+    ) -> Self {
+        Self {
+            root,
+            cube_id,
+            chain,
+            account_id,
+            claimed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub(crate) fn origin(&self) -> (&std::path::Path, &str, crate::chain::ChainId) {
+        (&self.root, &self.cube_id, self.chain)
+    }
+
+    pub(crate) fn claim(
+        self,
+    ) -> Option<(
+        std::path::PathBuf,
+        String,
+        crate::chain::ChainId,
+        Option<String>,
+    )> {
+        (!self.claimed.swap(true, Ordering::AcqRel)).then_some((
+            self.root,
+            self.cube_id,
+            self.chain,
+            self.account_id,
+        ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        root: std::path::PathBuf,
+        cube_id: String,
+        chain: crate::chain::ChainId,
+    ) -> Self {
+        Self::from_classification(root, cube_id, chain, None)
+    }
 }
 
 fn next_fork_generation() -> u64 {
@@ -97,21 +165,14 @@ type ForkSignerSlot =
     std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<coincube_core::signer::MasterSigner>>>>;
 
 fn retain_unlocked_signer(
-    chain: crate::chain::ChainId,
-    cube_id: &str,
+    _chain: crate::chain::ChainId,
+    _cube_id: &str,
     slot: &ForkSignerSlot,
     signer: coincube_core::signer::MasterSigner,
 ) -> Result<Verdict, String> {
-    if chain.is_blake2b() {
-        *slot
-            .lock()
-            .map_err(|_| "Unlock state unavailable".to_string())? =
-            Some(std::sync::Arc::new(signer));
-    } else {
-        let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::signing_only();
-        let fingerprint = signer.fingerprint(&secp);
-        crate::app::session::store_unlocked_signer(cube_id, fingerprint, signer);
-    }
+    *slot
+        .lock()
+        .map_err(|_| "Unlock state unavailable".to_string())? = Some(std::sync::Arc::new(signer));
     Ok(Verdict::Unlock)
 }
 
@@ -149,6 +210,11 @@ impl PinEntry {
 
     pub fn cube(&self) -> &CubeSettings {
         &self.cube
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reviewer_trial_generation(&self) -> u64 {
+        self.fork_generation
     }
 
     pub fn pin(&self) -> zeroize::Zeroizing<String> {
@@ -209,6 +275,13 @@ impl PinEntry {
         self.fork_signer.lock().ok()?.take()
     }
 
+    /// The blocking worker holds only this private slot. Move the signer into
+    /// the process session after the matching PIN trial is accepted by its
+    /// still-live tab; a cancelled worker may never write the global session.
+    pub(crate) fn take_bitcoin_signer(&self) -> Option<coincube_core::signer::MasterSigner> {
+        Arc::try_unwrap(self.take_fork_signer()?).ok()
+    }
+
     /// The Connect identity rechecked by the successful fork classification.
     /// This is carried into a scoped Claim load so a rotated bearer can still
     /// be admitted for the same account without trusting a Home label.
@@ -231,11 +304,21 @@ impl PinEntry {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let message = match message {
             Message::ForkClassified(generation, verdict) => {
-                if generation != self.fork_generation {
+                if generation != self.fork_generation || !self.loading {
                     return Task::none();
                 }
                 self.fork_task.take();
-                Message::Classified(verdict)
+                self.fork_generation = next_fork_generation();
+                Message::Classified(generation, verdict)
+            }
+            Message::Classified(generation, verdict) => {
+                if generation != self.fork_generation || !self.loading {
+                    return Task::none();
+                }
+                // A repeated callback cannot affect a later attempt, even
+                // when this same PinEntry remains on screen after Wrong.
+                self.fork_generation = next_fork_generation();
+                Message::Classified(generation, verdict)
             }
             msg => msg,
         };
@@ -289,6 +372,7 @@ impl PinEntry {
                 let connect_client = connect_client.clone();
                 let requires_connect = self.requires_connect();
                 let expected_user = self.connect_expected_user;
+                let duress_account_id = self.duress_account_id.clone();
                 let generation = self.fork_generation;
                 let is_fork = cube.network.is_blake2b();
                 let task = Task::perform(
@@ -344,7 +428,14 @@ impl PinEntry {
                                     &fork_signer,
                                     *signer,
                                 ),
-                                Ok(PinOutcome::Duress) => Ok(Verdict::Duress),
+                                Ok(PinOutcome::Duress) => {
+                                    Ok(Verdict::Duress(VerifiedUnlockDuress::from_classification(
+                                        root,
+                                        cube.id,
+                                        cube.network,
+                                        duress_account_id,
+                                    )))
+                                }
                                 Ok(PinOutcome::Wrong) => Ok(Verdict::Wrong),
                                 // Everything else — a missing seed, a missing
                                 // keyring entry, an unreachable keychain — is an
@@ -368,7 +459,7 @@ impl PinEntry {
                         if is_fork {
                             Message::ForkClassified(generation, result)
                         } else {
-                            Message::Classified(result)
+                            Message::Classified(generation, result)
                         }
                     },
                 );
@@ -380,12 +471,12 @@ impl PinEntry {
                     task
                 }
             }
-            Message::Classified(Ok(Verdict::Unlock)) => {
+            Message::Classified(_, Ok(Verdict::Unlock)) => {
                 // Stay in `loading` — the Breez/Spark load runs next and the
                 // screen must not flash back to the keypad in between.
                 Task::done(Message::PinVerified)
             }
-            Message::Classified(Ok(Verdict::Duress)) => {
+            Message::Classified(_, Ok(Verdict::Duress(_proof))) => {
                 // Clear the buffer and bubble up the enrolled account id so the
                 // parent can drive the orchestrator. The neutral loading screen
                 // stays up during the brief async activation gap: it is
@@ -396,7 +487,7 @@ impl PinEntry {
                 let account_id = self.duress_account_id.clone();
                 Task::done(Message::DuressDetected { account_id })
             }
-            Message::Classified(Ok(Verdict::Wrong)) => {
+            Message::Classified(_, Ok(Verdict::Wrong)) => {
                 self.loading = false;
                 let penalty = unlock::throttle::ThrottleState::load(&self.datadir_root)
                     .current_penalty(&self.cube.id);
@@ -408,7 +499,7 @@ impl PinEntry {
                 self.pin_input.clear();
                 Task::none()
             }
-            Message::Classified(Err(e)) => {
+            Message::Classified(_, Err(e)) => {
                 // Deliberately NOT "Incorrect PIN". This is a locked keychain, a
                 // missing keyring entry, or unreadable files — telling a user
                 // their PIN is wrong in that situation is how they conclude
@@ -824,7 +915,7 @@ mod fork_handoff_tests {
     }
 
     #[test]
-    fn production_handoff_keeps_fork_signer_out_of_legacy_bitcoin_cache() {
+    fn blocking_handoff_keeps_both_signers_private_until_accepted() {
         let _guard = crate::app::session::test_guard();
         crate::app::session::close();
         crate::app::session::open("same-id", zeroize::Zeroizing::new("1234".to_string()));
@@ -836,6 +927,7 @@ mod fork_handoff_tests {
         let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::signing_only();
         let fp = signer.fingerprint(&secp);
         let twin = signer.try_clone().unwrap();
+        let bitcoin = entry(crate::chain::ChainId::Bitcoin);
         retain_unlocked_signer(
             crate::chain::ChainId::BitcoinBlake2b,
             "same-id",
@@ -847,13 +939,16 @@ mod fork_handoff_tests {
         retain_unlocked_signer(
             crate::chain::ChainId::Bitcoin,
             "same-id",
-            &fork.fork_signer,
+            &bitcoin.fork_signer,
             twin,
         )
         .unwrap();
-        assert!(crate::app::session::unlocked_signer("same-id", fp).is_some());
+        assert!(crate::app::session::unlocked_signer("same-id", fp).is_none());
         assert!(fork.take_fork_signer().is_some());
         assert!(fork.take_fork_signer().is_none());
+        let accepted = bitcoin.take_bitcoin_signer().unwrap();
+        crate::app::session::store_unlocked_signer("same-id", fp, accepted);
+        assert!(crate::app::session::unlocked_signer("same-id", fp).is_some());
         crate::app::session::close();
     }
 

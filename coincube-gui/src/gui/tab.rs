@@ -1629,11 +1629,36 @@ impl Tab {
         if !root.is_absolute() || cube_id.is_empty() {
             return Task::none();
         }
+        self.activate_local_duress(root, chain, account_id)
+    }
+
+    /// The unlock classifier itself minted this one-use proof. Its captured
+    /// Cube survives a Back, closed tab, or another PinEntry at the same id.
+    pub(super) fn activate_verified_unlock_duress(
+        &mut self,
+        proof: crate::pin_entry::VerifiedUnlockDuress,
+    ) -> Task<Message> {
+        let Some((root, cube_id, chain, account_id)) = proof.claim() else {
+            return Task::none();
+        };
+        if !root.is_absolute() || cube_id.is_empty() {
+            return Task::none();
+        }
+        self.activate_local_duress(root, chain, account_id)
+    }
+
+    fn activate_local_duress(
+        &mut self,
+        root: std::path::PathBuf,
+        chain: crate::chain::ChainId,
+        account_id: Option<String>,
+    ) -> Task<Message> {
         let datadir = CoincubeDirectory::new(root.clone());
         let network = chain.bitcoin_network();
         // Drop the current App, any in-flight seed reveal, and any different
         // Cube session before the local wipe. A restored Cube can have no
         // process session; verified marker evidence is sufficient.
+        self.stop();
         self.state = State::DuressActive(
             crate::app::view::duress::active_screen::DuressActiveScreen::with_context(
                 datadir.clone(),
@@ -3379,6 +3404,16 @@ impl Tab {
                                 self.state = State::Loader(loader);
                                 return command.map(Message::Load);
                             }
+
+                            let Some(signer) = pin_entry.take_bitcoin_signer() else {
+                                pin_entry.fail_open(
+                                    "Unlock this Cube again to recover its verified signer".into(),
+                                );
+                                return Task::none();
+                            };
+                            let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::signing_only();
+                            let fingerprint = signer.fingerprint(&secp);
+                            app::session::store_unlocked_signer(&cube.id, fingerprint, signer);
 
                             // ALWAYS load BreezClient (Liquid wallet) with PIN first
                             let config_clone = config.clone();
