@@ -887,7 +887,7 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
             let imported_row = |label: &'static str, value: String| {
                 Row::new()
                     .spacing(16)
-                    .push(p1_bold(label).width(Length::Fixed(185.0)))
+                    .push(p1_bold(label).width(Length::Fixed(250.0)))
                     .push(p1_regular(value).width(Length::Fill))
             };
             Column::new()
@@ -946,7 +946,9 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
 
     let scanning = matches!(panel.status, Status::Scanning);
     let reviewable = matches!(&panel.status, Status::Complete(summary) if summary.reviewable() && (imported.is_none() || summary.inventory.splittable > 0));
-    let scan_button = if imported.is_some() {
+    let scan_button = if imported.is_some() && reviewable {
+        button::secondary(None, "Scan again")
+    } else if imported.is_some() {
         button::primary_compact(
             None,
             if scanning {
@@ -1340,7 +1342,7 @@ mod tests {
                 can_continue,
                 "{name} imported gate"
             );
-            for size in [(1440, 900), (1024, 768)] {
+            for size in [(1440, 900), (1024, 768), (520, 768)] {
                 for (appearance, palette) in [
                     ("dark", theme::Theme::dark()),
                     ("light", theme::Theme::light()),
@@ -1367,6 +1369,13 @@ mod tests {
                         can_continue,
                         "{name}"
                     );
+                    assert!(mounted.contains(if can_continue {
+                        "Scan again"
+                    } else if name == "scanning" {
+                        "Checking availability…"
+                    } else {
+                        "Check BTCB2 availability"
+                    }));
                     assert_eq!(mounted.contains("Cancel"), name == "scanning", "{name}");
                     let conclusion = match name {
                         "ready" => "Ready to check",
