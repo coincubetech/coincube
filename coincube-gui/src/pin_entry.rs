@@ -3,12 +3,11 @@ use iced::{Alignment, Length, Task};
 
 use coincube_ui::{
     component::{
-        button,
         quote_display::{self, Quote, QuoteDisplayProps},
-        text::{h3, p1_regular, text},
+        text::{p1_regular, text},
     },
-    icon, theme,
-    widget::{Column, Container, Element, Row},
+    theme,
+    widget::{Column, Container, Element},
 };
 
 use crate::app::settings::CubeSettings;
@@ -481,54 +480,49 @@ impl PinEntry {
         }
     }
 
+    /// The prototype's unlock `.fc` below its heading: the PIN fieldset,
+    /// Unlock, the network-checks note and Cancel.
     fn unlock_controls(&self) -> Element<Message> {
-        let back_button = button::secondary(Some(icon::previous_icon()), "Back")
-            .width(Length::Fixed(150.0))
-            .on_press(Message::Back);
-
-        let header = Row::new()
-            .align_y(Alignment::Center)
-            .push(Container::new(back_button).center_x(Length::FillPortion(2)))
-            .push(Space::new().width(Length::FillPortion(8)))
-            .push(Space::new().width(Length::FillPortion(2)));
-
-        let title = h3(format!(
-            "Enter PIN for {}",
-            crate::cube_display::name(&self.cube.name)
-        ));
-
-        let mut content = Column::new()
-            .spacing(30)
-            .width(Length::Fill)
-            .align_x(Alignment::Center)
-            .push(title)
-            .push(self.pin_input.view().map(Message::PinInput));
-
+        use crate::home::launcher_presenter as face;
+        let mut fields = Column::new()
+            .push(Space::new().height(Length::Fixed(24.0)))
+            .push(face::face_words(
+                "PIN",
+                13.0,
+                coincube_ui::font::MEDIUM,
+                false,
+            ))
+            .push(Space::new().height(Length::Fixed(6.0)))
+            .push(self.pin_input.face_view().map(Message::PinInput))
+            .push(Space::new().height(Length::Fixed(6.0)))
+            .push(face::face_words(
+                "Enter this Cube's PIN.",
+                12.0,
+                coincube_ui::font::REGULAR,
+                true,
+            ));
         if let Some(error) = &self.error {
-            content = content.push(p1_regular(error).style(theme::text::error));
+            fields = fields
+                .push(Space::new().height(Length::Fixed(6.0)))
+                .push(p1_regular(error).size(12).style(theme::text::error));
         }
-
-        let can_submit = self.pin_input.is_complete();
-
-        let submit_button = button::primary(None, "Submit")
-            .width(Length::Fixed(200.0))
-            .on_press_maybe(if can_submit {
-                Some(Message::Submit)
-            } else {
-                None
-            });
-
-        content = content.push(submit_button);
-
-        Column::new()
-            .spacing(24)
-            .push(header)
-            .push(content)
-            .push(
-                p1_regular("Network checks run after your PIN is accepted.")
-                    .style(theme::text::secondary),
-            )
-            .into()
+        let unlock = iced::widget::button(face::face_button_label("Unlock"))
+            .height(Length::Fixed(36.0))
+            .padding([0.0, 16.0])
+            .style(face::face_primary_style)
+            .on_press_maybe(self.pin_input.is_complete().then_some(Message::Submit));
+        let fields = fields
+            .push(Space::new().height(Length::Fixed(20.0)))
+            .push(unlock);
+        let cancel = iced::widget::button(face::face_link_label("Cancel"))
+            .padding([2.0, 4.0])
+            .style(face::face_link_style)
+            .on_press(Message::Back);
+        face::unlock_face_body(
+            fields.into(),
+            "Network checks run after your PIN is accepted.",
+            cancel.into(),
+        )
     }
 }
 

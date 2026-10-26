@@ -57,8 +57,12 @@ use crate::{
 };
 use coincube_core::signer::{MasterSigner, MASTER_SEED_LABEL};
 
+#[cfg(test)]
+mod launcher_capture;
 mod launcher_catalog;
+mod launcher_chrome;
 mod launcher_coin;
+mod launcher_gpu;
 pub(crate) mod launcher_presenter;
 pub(crate) mod launcher_scene;
 pub(crate) use launcher_catalog::LauncherSceneContext;
@@ -512,6 +516,8 @@ pub struct Home {
     pub active_section: HomeSection,
     /// Current theme mode (dark/light) — used for theme-aware rendering
     pub theme_mode: coincube_ui::theme::palette::ThemeMode,
+    /// The GUI's accepted balance-privacy receipt for the Launcher's eye.
+    pub(crate) balance_privacy: Option<crate::app::state::preferences::BalancePrivacyChrome>,
     /// Last native accessibility observation used by Follow system motion.
     system_reduces_motion: Option<bool>,
     /// Whether the user has chosen to create a passkey-derived Cube (no PIN).
@@ -674,6 +680,7 @@ impl Home {
                 connect_expanded: false,
                 active_section: HomeSection::Cubes,
                 theme_mode: GlobalSettings::load_theme_mode(&GlobalSettings::path(&datadir_path)),
+                balance_privacy: None,
                 system_reduces_motion,
                 // Recomputed whenever the Create Cube form opens — see
                 // `Home::default_passkey_mode`. A freshly constructed `Home`
@@ -1103,6 +1110,33 @@ impl Home {
     }
 
     pub fn subscription(&self, foreground: bool) -> Subscription<Message> {
+        let base = self.launcher_subscription(foreground);
+        // Escape closes the network menu first, then shuts the Key card.
+        let menu = self.catalog.network_menu;
+        if foreground
+            && (menu || self.catalog.key_open())
+            && launcher_catalog::catalog_visible(self)
+        {
+            let escape =
+                iced::keyboard::listen()
+                    .with(menu)
+                    .filter_map(|(menu, event)| match event {
+                        iced::keyboard::Event::KeyPressed {
+                            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+                            ..
+                        } => Some(Message::View(ViewMessage::Catalog(if menu {
+                            launcher_catalog::CatalogMessage::NetworkMenu(false)
+                        } else {
+                            launcher_catalog::CatalogMessage::KeyClose
+                        }))),
+                        _ => None,
+                    });
+            return Subscription::batch([base, escape]);
+        }
+        base
+    }
+
+    fn launcher_subscription(&self, foreground: bool) -> Subscription<Message> {
         if let Some(ceremony) = &self.passkey_ceremony {
             if ceremony.active_webview.is_some() {
                 return ceremony
@@ -1147,7 +1181,7 @@ impl Home {
                 if self.catalog.motion.is_some() {
                     return Subscription::batch([
                         paging,
-                        iced::time::every(std::time::Duration::from_millis(16)).map(|now| {
+                        iced::window::frames().map(|now| {
                             Message::View(ViewMessage::Catalog(
                                 launcher_catalog::CatalogMessage::MotionTick(now),
                             ))
@@ -1158,7 +1192,7 @@ impl Home {
             }
         }
         if foreground && self.catalog.motion.is_some() && launcher_catalog::catalog_visible(self) {
-            return iced::time::every(std::time::Duration::from_millis(16)).map(|now| {
+            return iced::window::frames().map(|now| {
                 Message::View(ViewMessage::Catalog(
                     launcher_catalog::CatalogMessage::MotionTick(now),
                 ))
@@ -1788,6 +1822,7 @@ impl Home {
                         | ViewMessage::ToggleBitcoinBlake2bBeta(_)
                         | ViewMessage::ToggleTheme
                         | ViewMessage::OpenAppPreferences
+                        | ViewMessage::ChangeDevicePreference(_)
                         | ViewMessage::GoToSection(
                             HomeSection::Cubes
                                 | HomeSection::Settings
@@ -1912,6 +1947,7 @@ impl Home {
                 Task::none()
             }
             Message::View(ViewMessage::ShowCreateCube(show)) => {
+                self.catalog.dismiss_popovers();
                 if show {
                     self.pending_bitcoin_import = None;
                     // Opening the form picks the default afresh: whether the
@@ -1949,6 +1985,7 @@ impl Home {
                 Task::none()
             }
             Message::View(ViewMessage::ShowImportBitcoin) => {
+                self.catalog.dismiss_popovers();
                 if self.creating_cube
                     || !matches!(
                         self.state,
@@ -2816,6 +2853,7 @@ impl Home {
                 }
             }
             Message::View(ViewMessage::SelectNetwork(network)) => {
+                self.catalog.network_menu = false;
                 if !(self.developer_mode
                     || network == ChainId::Bitcoin
                     || network == ChainId::BitcoinBlake2b
@@ -3311,6 +3349,7 @@ impl Home {
             }
 
             Message::View(ViewMessage::GoToSection(section)) => {
+                self.catalog.dismiss_popovers();
                 // Duress launch kill-switch backstop: a deep-linked or otherwise
                 // programmatic navigation to the Duress section while it's gated
                 // off (the nav hides the entry, so a click can't produce this)
@@ -6897,6 +6936,9 @@ pub enum ViewMessage {
     ToggleTheme,
     /// Open the device-wide preferences sheet over the current screen.
     OpenAppPreferences,
+    /// The Launcher eye's device-wide hide-balances intent. The GUI applies
+    /// it only while this tab is still the Launcher.
+    ChangeDevicePreference(crate::app::settings::preferences::PreferenceChange),
     /// Toggle passkey mode for Cube creation (no PIN when enabled).
     TogglePasskeyMode(bool),
     /// Open a URL in the default browser

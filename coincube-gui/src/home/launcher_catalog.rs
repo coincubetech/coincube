@@ -18,19 +18,14 @@ use iced::{
     keyboard::{self, key},
     mouse,
     widget::{
-        button as iced_button, container, pick_list, responsive, rule, scrollable, text::Wrapping,
-        Space,
+        button as iced_button, container, responsive, rule, scrollable, text::Wrapping, Space,
     },
     Alignment, Length, Size, Task,
 };
 use std::time::{Duration, Instant};
 
 use coincube_ui::{
-    component::{
-        card,
-        tenshu::{ActionButton, ActionKind},
-        text::*,
-    },
+    component::{card, text::*},
     icon, theme,
     widget::{action::Action, text_input, Column, Container, Element, Row, TextInput},
 };
@@ -54,6 +49,7 @@ pub(super) const DETAILS_WIDTH: f32 = 440.0;
 const LIST_MIN_WIDTH: f32 = 560.0;
 const PANEL_GAP: f32 = 24.0;
 /// Height of the compact Launcher top bar.
+#[cfg(test)]
 const TOP_BAR_HEIGHT: f32 = 64.0;
 /// Horizontal gutter of the top bar, the body and the dock.
 const GUTTER: f32 = 24.0;
@@ -116,6 +112,10 @@ pub(crate) struct LauncherSceneContext {
     pub connect: String,
     pub wallets: &'static str,
     pub peers: Vec<LauncherScenePeer>,
+    /// Floor pages, for the arrows and dots that stay up under the face.
+    pub pages: usize,
+    /// The Launcher's bars, redrawn quiet behind the unlock face.
+    pub chrome: super::launcher_chrome::ChromeSnapshot,
 }
 
 #[derive(Debug, Clone)]
@@ -123,8 +123,98 @@ pub(crate) struct LauncherScenePeer {
     pub key: CubeCatalogKey,
     pub name: String,
     pub status: &'static str,
-    pub glyph_dark: String,
-    pub glyph_light: String,
+    pub marks: super::launcher_scene::CubeMarks,
+}
+
+/// The prototype's Key card: hover peeks, a click pins, a second click or
+/// Escape shuts it until the pointer leaves, so it does not reopen at once.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum KeyMode {
+    #[default]
+    Closed,
+    Peek,
+    Pinned,
+    Shut,
+}
+
+/// The two hover regions that make up the prototype's one `.keywrap`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyPart {
+    Button,
+    /// The card and the 8px gap under it.
+    Card,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct KeyCard {
+    pub mode: KeyMode,
+    /// Over the button or the card. They are separate Iced areas, and one
+    /// pointer move reports entering one before leaving the other, so each
+    /// keeps its own flag and the wrap counts as hovered while either is.
+    pub over_button: bool,
+    pub over_card: bool,
+}
+
+impl KeyCard {
+    fn hovered(&self) -> bool {
+        self.over_button || self.over_card
+    }
+
+    fn hover(&mut self, part: KeyPart, over: bool) {
+        match part {
+            KeyPart::Button => self.over_button = over,
+            KeyPart::Card => self.over_card = over,
+        }
+        let hovered = self.hovered();
+        self.mode = match (self.mode, hovered) {
+            (KeyMode::Closed, true) => KeyMode::Peek,
+            (KeyMode::Peek | KeyMode::Shut, false) => KeyMode::Closed,
+            (mode, _) => mode,
+        };
+        self.settle();
+    }
+
+    fn shut(&mut self) {
+        self.mode = if self.hovered() {
+            KeyMode::Shut
+        } else {
+            KeyMode::Closed
+        };
+        self.settle();
+    }
+
+    fn click(&mut self) {
+        if self.mode == KeyMode::Pinned {
+            self.shut();
+        } else {
+            self.mode = KeyMode::Pinned;
+        }
+    }
+
+    /// A hidden card is no longer under the pointer, and Iced sends no exit
+    /// for an area it stops drawing. Leaving the wrap that way clears a shut
+    /// card too, as the prototype's `keyLeave` does.
+    fn settle(&mut self) {
+        if !matches!(self.mode, KeyMode::Peek | KeyMode::Pinned) {
+            self.over_card = false;
+        }
+        if self.mode == KeyMode::Shut && !self.hovered() {
+            self.mode = KeyMode::Closed;
+        }
+    }
+}
+
+impl CatalogState {
+    /// Leaving the Launcher screen closes its popovers; Iced sends no hover
+    /// exit for areas that are no longer drawn.
+    pub(super) fn dismiss_popovers(&mut self) {
+        self.key = KeyCard::default();
+        self.network_menu = false;
+    }
+
+    pub(super) fn key_open(&self) -> bool {
+        matches!(self.key.mode, KeyMode::Peek | KeyMode::Pinned)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -138,6 +228,10 @@ pub(super) struct CatalogState {
     /// Set only by the actual floor face's Open action, then consumed by the
     /// tab handoff. A List fallback can never inherit floor provenance.
     pub(super) open_from_floor: bool,
+    /// The dock's Key card: open while hovered, or pinned by a click.
+    pub(super) key: KeyCard,
+    /// The top bar's network menu is open.
+    pub(super) network_menu: bool,
     /// Each floor Open gets a distinct origin carried by its queued Run.
     /// Clearing open_from_floor invalidates that origin even if the selected
     /// identity is later selected again.
@@ -219,6 +313,14 @@ pub enum CatalogMessage {
     Select(CubeCatalogKey),
     SelectFloor(CubeCatalogKey),
     MotionTick(Instant),
+    /// The pointer entered or left the Key button or its card.
+    KeyHover(KeyPart, bool),
+    /// A click pins or unpins the Key card.
+    KeyToggle,
+    /// Escape shuts it.
+    KeyClose,
+    /// Opens or closes the top bar's network menu.
+    NetworkMenu(bool),
     ClearSelection,
     Query(String),
     ClearQuery,
@@ -335,8 +437,7 @@ impl Home {
                 } else {
                     "Unavailable on this network"
                 },
-                glyph_dark: super::launcher_presenter::cube_glyph_source(row.cube, false),
-                glyph_light: super::launcher_presenter::cube_glyph_source(row.cube, true),
+                marks: super::launcher_gpu::marks(row.cube),
             })
             .collect::<Vec<_>>();
         if peers.get(selected_slot)?.key != selected.key {
@@ -350,6 +451,8 @@ impl Home {
             connect: selected.connect.1.clone(),
             wallets: super::launcher_presenter::local_wallets(cube),
             peers,
+            pages: projection.locals.len().div_ceil(FLOOR_PAGE_SIZE).max(1),
+            chrome: super::launcher_chrome::snapshot(self, &projection),
         })
     }
 
@@ -395,6 +498,22 @@ impl Home {
                     Task::none()
                 }
             }
+            CatalogMessage::KeyHover(part, over) => {
+                self.catalog.key.hover(part, over);
+                Task::none()
+            }
+            CatalogMessage::KeyToggle => {
+                self.catalog.key.click();
+                Task::none()
+            }
+            CatalogMessage::KeyClose => {
+                self.catalog.key.shut();
+                Task::none()
+            }
+            CatalogMessage::NetworkMenu(open) => {
+                self.catalog.network_menu = open;
+                Task::none()
+            }
             CatalogMessage::MotionTick(now) => {
                 if self
                     .catalog
@@ -410,8 +529,15 @@ impl Home {
                 Task::none()
             }
             CatalogMessage::ClearSelection => {
-                self.catalog.selected = None;
-                self.catalog.motion = None;
+                // Back spins the Cube to rest and brightens its peers, as the
+                // prototype's `toBrowse` reverses the same transitions.
+                let returning = self.catalog.selected.take();
+                self.catalog.motion = returning
+                    .filter(|_| {
+                        self.catalog.mode == LauncherMode::Cubes
+                            && project(self).floor_eligible(self.catalog.mode)
+                    })
+                    .map(super::launcher_scene::Motion::returning);
                 self.catalog.open_from_floor = false;
                 Task::none()
             }
@@ -548,6 +674,10 @@ impl Home {
     /// exactly one listed Cube (removed, duplicated, reloaded from another
     /// chain). Never moves it to another Cube. Runs after every message.
     pub(super) fn reconcile_catalog(&mut self) {
+        // The Key card belongs to the Key button, which needs a local Cube.
+        if project(self).local_total == 0 {
+            self.catalog.key = KeyCard::default();
+        }
         let pages = project(self).locals.len().div_ceil(FLOOR_PAGE_SIZE).max(1);
         self.catalog.page = self.catalog.page.min(pages - 1);
         if let Some(key) = &self.catalog.selected {
@@ -720,9 +850,18 @@ pub(super) fn connect_id() -> Id {
 pub(super) fn sign_in_id() -> Id {
     control_id("sign-in")
 }
+pub(super) fn privacy_id() -> Id {
+    control_id("privacy")
+}
+
+pub(super) fn key_id() -> Id {
+    control_id("key")
+}
+
 pub(super) fn settings_id() -> Id {
     control_id("settings")
 }
+#[cfg(test)]
 pub(super) fn theme_id() -> Id {
     control_id("theme")
 }
@@ -1339,14 +1478,6 @@ fn table_heading<'a>() -> Element<'a, ViewMessage> {
         .into()
 }
 
-fn rail_style(theme: &theme::Theme) -> container::Style {
-    container::Style {
-        background: Some(iced::Background::Color(theme.colors.shell.rail)),
-        text_color: Some(theme.colors.shell.ink),
-        ..Default::default()
-    }
-}
-
 fn body_style(theme: &theme::Theme) -> container::Style {
     container::Style {
         background: Some(iced::Background::Color(theme.colors.shell.background)),
@@ -1355,236 +1486,59 @@ fn body_style(theme: &theme::Theme) -> container::Style {
     }
 }
 
-/// Session status as the legacy sidebar shows it, compact.
-fn session_status<'a>(checking: bool) -> Element<'a, ViewMessage> {
-    let (label, style): (_, fn(&theme::Theme) -> iced::widget::text::Style) = if checking {
-        ("Checking…", theme::text::warning)
-    } else {
-        ("Signed in", theme::text::success)
-    };
-    Row::new()
-        .spacing(6)
-        .align_y(Alignment::Center)
-        .push(icon::dot_icon().size(8).style(style))
-        .push(p2_regular(label).style(muted))
-        .into()
-}
-
-/// Connect entry with the sidebar's exact states: signed in reaches the
-/// Overview; a pending session only says Checking and offers nothing new;
-/// signed out offers Sign In to the same Overview destination.
-fn connect_control<'a>(home: &Home) -> Element<'a, ViewMessage> {
-    let account = &home.connect_account;
-    let overview = ViewMessage::GoToSection(HomeSection::Connect(
-        crate::app::menu::ConnectSubMenu::Overview,
-    ));
-    if account.is_authenticated() {
-        Row::new()
-            .spacing(8)
-            .align_y(Alignment::Center)
-            .push(session_status(account.is_checking_session()))
-            .push(label_action(
-                connect_id(),
-                "Connect",
-                Some(overview),
-                link_style,
-            ))
-            .into()
-    } else if account.is_checking_session() {
-        session_status(true)
-    } else {
-        label_action(
-            sign_in_id(),
-            "Sign In",
-            Some(overview),
-            theme::button::primary,
-        )
-        .into()
-    }
-}
-
-/// Compact top bar over the currently selected network. Counts describe the
-/// visible list, while quota in the dock remains unfiltered.
-fn top_bar<'a>(home: &'a Home, projection: &Projection<'_>) -> Element<'a, ViewMessage> {
-    use coincube_ui::theme::palette::ThemeMode;
-    let theme_label = match home.theme_mode {
-        ThemeMode::Dark => "Light Mode",
-        ThemeMode::Light => "Dark Mode",
-    };
-    let shown = projection.locals.len() + projection.remotes.len();
-    let total = projection.local_total + projection.remote_total;
-    let count = if shown == total {
-        format!("{total} Cubes")
-    } else {
-        format!("{shown} of {total} Cubes")
-    };
-    Container::new(
-        Row::new()
-            .spacing(16)
-            .align_y(Alignment::Center)
-            .height(Length::Fill)
-            .push(
-                Row::new()
-                    .spacing(8)
-                    .align_y(Alignment::Center)
-                    .push(icon::cube_icon())
-                    .push(p1_bold("Tenshu")),
-            )
-            .push(
-                Container::new(
-                    pick_list(
-                        home.displayed_networks.as_slice(),
-                        Some(home.network),
-                        ViewMessage::SelectNetwork,
-                    )
-                    .style(theme::pick_list::primary)
-                    .padding([6, 12]),
-                )
-                .id(network_id()),
-            )
-            .push(p2_regular(count).style(muted))
-            .push(Space::new().width(Length::Fill))
-            .push(connect_control(home))
-            .push(label_action(
-                settings_id(),
-                "App preferences",
-                Some(ViewMessage::OpenAppPreferences),
-                link_style,
-            ))
-            .push(label_action(
-                theme_id(),
-                theme_label,
-                Some(ViewMessage::ToggleTheme),
-                link_style,
-            )),
-    )
-    .height(Length::Fixed(TOP_BAR_HEIGHT))
-    .padding([0.0, GUTTER])
-    .width(Length::Fill)
-    .style(rail_style)
-    .into()
-}
-
-/// The pinned dock: Create/Import with the existing quota, network gate and
-/// unfiltered limit copy, plus the sidebar's gated Recover a Vault and Split
-/// a Bitcoin wallet entries. Auto-height, so the limit copy never clips.
-fn dock<'a>(home: &Home, projection: &Projection<'_>) -> Element<'a, ViewMessage> {
-    let at_limit = projection.at_limit();
-    let create = ActionButton::new(create_id(), "Create Cube", ActionKind::Primary, focus)
-        .on_press_maybe((!at_limit).then_some(ViewMessage::ShowCreateCube(true)));
-    let import = ActionButton::new(
-        import_id(),
-        "Import Bitcoin wallet",
-        ActionKind::Secondary,
-        focus,
-    )
-    .on_press_maybe(
-        (!at_limit && projection.network == ChainId::Bitcoin)
-            .then_some(ViewMessage::ShowImportBitcoin),
-    );
-    let recover = (home.connect_account.is_authenticated()
-        && !home.network.is_blake2b()
-        && feature_flags::RECOVER_VAULT_ENABLED)
-        .then(|| {
-            label_action(
-                recover_vault_id(),
-                "Recover a Vault",
-                Some(ViewMessage::GoToSection(HomeSection::RecoverVault)),
-                link_style,
-            )
-        });
-    let split = (home.network == ChainId::Bitcoin
-        && home
-            .connect_chain_availability(ChainId::BitcoinBlake2b)
-            .is_available())
-    .then(|| {
-        label_action(
-            split_wallet_id(),
-            "Split a Bitcoin wallet",
-            Some(ViewMessage::GoToSection(HomeSection::SplitWallet)),
-            link_style,
-        )
-    });
-    Container::new(
-        Column::new()
-            .spacing(8)
-            .push(
-                Row::new()
-                    .spacing(8)
-                    .align_y(Alignment::Center)
-                    .push(create)
-                    .push(import)
-                    .push(Space::new().width(Length::Fill)),
-            )
-            .push((recover.is_some() || split.is_some()).then(|| {
-                Row::new()
-                    .spacing(8)
-                    .align_y(Alignment::Center)
-                    .push(recover)
-                    .push(split)
-            }))
-            .push(at_limit.then(|| {
-                p2_regular(if projection.has_local_list {
-                    format!(
-                        "Cube limit reached ({}/{}) on the {} plan. \
-                         Upgrade your Connect account to create more.",
-                        projection.total_count, projection.cube_limit, projection.tier,
-                    )
-                } else {
-                    format!(
-                        "Cube limit reached ({}/{}) on the {} plan. \
-                         Upgrade your Connect account or delete a remote Cube to create one here.",
-                        projection.total_count, projection.cube_limit, projection.tier,
-                    )
-                })
-                .style(muted)
-                .wrapping(Wrapping::WordOrGlyph)
-            })),
-    )
-    .padding([12.0, GUTTER])
-    .width(Length::Fill)
-    .style(rail_style)
-    .into()
-}
-
 /// The visible Launcher: compact top bar, one scrolling floor or List body,
 /// and the pinned dock. Both bodies consume the same catalog projection.
 pub(super) fn launcher_view(home: &Home) -> Element<'_, ViewMessage> {
     let projection = project(home);
-    let dock = dock(home, &projection);
-    let error = home
-        .error
-        .as_ref()
-        .filter(|_| !home.showing_create_form())
-        .map(|error| card::simple(p1_regular(error.clone())));
+    // `.quiet`: the bars mute while a Cube's face is up, as in every
+    // non-browse phase of the prototype.
+    let quiet = projection.selected.is_some();
+    let dock = super::launcher_chrome::dock(home, &projection, quiet);
+    let error = home.error.clone().filter(|_| !home.showing_create_form());
     let floor_visible = projection.floor_eligible(home.catalog.mode);
-    let body_content = Column::new()
-        .spacing(if floor_visible { 0 } else { 16 })
-        .width(Length::Fill)
-        .push(error)
-        .push(if floor_visible {
-            super::launcher_presenter::floor_body(home)
+    // The floor's stage fills the visible body, so it is laid out against
+    // the body's own height rather than the scrolled content's.
+    let body = responsive(move |size: Size| {
+        let body_content = Column::new()
+            .spacing(if floor_visible { 0 } else { 16 })
+            .width(Length::Fill)
+            .push(error.clone().map(|error| card::simple(p1_regular(error))))
+            .push(if floor_visible {
+                super::launcher_presenter::floor_body_in(home, size.height)
+            } else {
+                super::launcher_presenter::list_body(home)
+            });
+        let body_content = if floor_visible {
+            body_content
         } else {
-            super::launcher_presenter::list_body(home)
-        });
-    let body_content = if floor_visible {
-        body_content
-    } else {
-        body_content.padding([20.0, GUTTER])
-    };
-    let body = scrollable(body_content)
-        .id(CATALOG_SCROLL_ID)
-        .width(Length::Fill)
-        .height(Length::Fill);
-    Container::new(
-        Column::new()
+            body_content.padding([20.0, GUTTER])
+        };
+        scrollable(body_content)
+            .id(CATALOG_SCROLL_ID)
             .width(Length::Fill)
             .height(Length::Fill)
-            .push(top_bar(home, &projection))
-            .push(rule::horizontal(1))
-            .push(body)
-            .push(rule::horizontal(1))
-            .push(dock),
+            .into()
+    })
+    .width(Length::Fill)
+    .height(Length::Fill);
+    let screen = Column::new()
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .push(super::launcher_chrome::top_bar(home, &projection, quiet))
+        .push(rule::horizontal(1))
+        .push(body)
+        .push(rule::horizontal(1))
+        .push(dock);
+    Container::new(
+        iced::widget::Stack::new()
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .push(screen)
+            .push(super::launcher_chrome::key_layer(home))
+            .push(super::launcher_chrome::network_layer(
+                home,
+                projection.local_total + projection.remote_total,
+            )),
     )
     .width(Length::Fill)
     .height(Length::Fill)
@@ -1774,6 +1728,198 @@ mod tests {
 
     fn catalog(home: &mut Home, message: CatalogMessage) {
         let _ = home.update(Message::View(ViewMessage::Catalog(message)));
+    }
+
+    /// Moves a real pointer over the mounted Launcher, feeding each batch of
+    /// messages back through `Home::update` before the next move.
+    fn pointer_path(home: &mut Home, points: &[iced::Point]) -> Vec<ViewMessage> {
+        let mut all = Vec::new();
+        for point in points {
+            let cursor = iced::mouse::Cursor::Available(*point);
+            let messages = {
+                let mut mounted = mount_window(launcher_view(home), 1440.0, 900.0);
+                // A fresh mount has no hover state: replay the previous point
+                // (already applied to `home`) and keep only this move's output.
+                let previous = all_last(&all, iced::Point::new(720.0, 450.0));
+                let _ = mounted.send(
+                    iced::Event::Mouse(iced::mouse::Event::CursorMoved { position: previous }),
+                    iced::mouse::Cursor::Available(previous),
+                );
+                mounted.send(
+                    iced::Event::Mouse(iced::mouse::Event::CursorMoved { position: *point }),
+                    cursor,
+                )
+            };
+            for message in &messages {
+                let _ = home.update(Message::View(message.clone()));
+            }
+            all.push((*point, messages));
+        }
+        all.into_iter().flat_map(|(_, messages)| messages).collect()
+    }
+
+    fn all_last(path: &[(iced::Point, Vec<ViewMessage>)], fallback: iced::Point) -> iced::Point {
+        path.last().map(|(point, _)| *point).unwrap_or(fallback)
+    }
+
+    #[test]
+    fn a_peeked_key_card_survives_the_pointer_moving_up_onto_it() {
+        let mut home = home_with(&[("a", "Alpha")]);
+        let button = bounds_of(
+            &focus_bounds_window(launcher_view(&home), 1440.0, 900.0),
+            &key_id(),
+        );
+        let on_button = button.center();
+        // 4px above the button: inside the 8px gap that belongs to the card.
+        let in_gap = iced::Point::new(on_button.x, button.y - 4.0);
+        let card = iced::Point::new(on_button.x, button.y - 40.0);
+        let messages = pointer_path(&mut home, &[on_button, in_gap, card]);
+        assert!(
+            home.catalog.key_open(),
+            "the peek closed on the way up: {:?} -> {:?}",
+            messages,
+            home.catalog.key
+        );
+        assert_eq!(home.catalog.key.mode, KeyMode::Peek);
+    }
+
+    #[test]
+    fn hiding_the_key_card_under_the_pointer_lets_hover_peek_again() {
+        let mut home = home_with(&[("a", "Alpha")]);
+        let button = bounds_of(
+            &focus_bounds_window(launcher_view(&home), 1440.0, 900.0),
+            &key_id(),
+        );
+        let on_button = button.center();
+        let card = iced::Point::new(on_button.x, button.y - 40.0);
+        let away = iced::Point::new(720.0, 450.0);
+        // Escape while resting on a peeked card.
+        pointer_path(&mut home, &[on_button, card]);
+        assert_eq!(home.catalog.key.mode, KeyMode::Peek);
+        catalog(&mut home, CatalogMessage::KeyClose);
+        assert!(!home.catalog.key_open());
+        pointer_path(&mut home, &[away, on_button]);
+        assert_eq!(
+            home.catalog.key.mode,
+            KeyMode::Peek,
+            "hover must peek again: {:?}",
+            home.catalog.key
+        );
+        // A keyboard toggle that hides a pinned card under the pointer.
+        catalog(&mut home, CatalogMessage::KeyToggle);
+        // Each call starts a fresh pointer, so the path begins on the button.
+        pointer_path(&mut home, &[on_button, card]);
+        assert_eq!(home.catalog.key.mode, KeyMode::Pinned);
+        catalog(&mut home, CatalogMessage::KeyToggle);
+        assert!(!home.catalog.key_open());
+        pointer_path(&mut home, &[away, on_button]);
+        assert_eq!(
+            home.catalog.key.mode,
+            KeyMode::Peek,
+            "{:?}",
+            home.catalog.key
+        );
+    }
+
+    #[test]
+    fn presses_inside_the_network_menu_do_not_close_it() {
+        use super::super::launcher_chrome::network_option_id;
+        let mut home = rows(2);
+        catalog(&mut home, CatalogMessage::NetworkMenu(true));
+        let row = bounds_of(
+            &focus_bounds_window(launcher_view(&home), 1440.0, 900.0),
+            &network_option_id(home.network),
+        );
+        // The filter note sits under the last row, inside the menu.
+        let note = iced::Point::new(row.x + 20.0, row.y + row.height + 24.0);
+        let mut mounted = mount_window(launcher_view(&home), 1440.0, 900.0);
+        let cursor = iced::mouse::Cursor::Available(note);
+        let mut messages = mounted.send(
+            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)),
+            cursor,
+        );
+        messages.extend(mounted.send(
+            iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                iced::mouse::Button::Left,
+            )),
+            cursor,
+        ));
+        assert!(
+            !messages
+                .iter()
+                .any(|m| matches!(m, ViewMessage::Catalog(CatalogMessage::NetworkMenu(false)))),
+            "{:?}",
+            messages
+        );
+        // A press outside the menu still closes it.
+        let outside = iced::mouse::Cursor::Available(iced::Point::new(720.0, 700.0));
+        let messages = mounted.send(
+            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)),
+            outside,
+        );
+        assert!(messages
+            .iter()
+            .any(|m| matches!(m, ViewMessage::Catalog(CatalogMessage::NetworkMenu(false)))));
+    }
+
+    #[test]
+    fn leaving_the_launcher_closes_its_popovers() {
+        let mut home = home_with(&[("a", "Alpha")]);
+        catalog(&mut home, CatalogMessage::KeyHover(KeyPart::Button, true));
+        catalog(&mut home, CatalogMessage::NetworkMenu(true));
+        let _ = home.update(Message::View(ViewMessage::ShowCreateCube(true)));
+        assert!(!home.catalog.key_open());
+        assert!(!home.catalog.network_menu);
+        assert_eq!(home.catalog.key, KeyCard::default());
+    }
+
+    #[test]
+    fn the_key_peeks_on_hover_pins_on_click_and_shuts_until_the_pointer_leaves() {
+        let mut home = home_with(&[("a", "Alpha")]);
+        let closed = home_tree("key-card", &home, WIDE, "dark", theme::Theme::dark());
+        assert!(closed.has(&key_id()));
+        assert!(!closed.contains("Top: network"));
+
+        catalog(&mut home, CatalogMessage::KeyHover(KeyPart::Button, true));
+        assert_eq!(home.catalog.key.mode, KeyMode::Peek);
+        assert!(
+            home_tree("key-card", &home, WIDE, "dark", theme::Theme::dark())
+                .contains("Top: network")
+        );
+        catalog(&mut home, CatalogMessage::KeyHover(KeyPart::Button, false));
+        assert!(!home.catalog.key_open(), "a peek closes on hover-out");
+
+        catalog(&mut home, CatalogMessage::KeyHover(KeyPart::Button, true));
+        catalog(&mut home, CatalogMessage::KeyToggle);
+        catalog(&mut home, CatalogMessage::KeyHover(KeyPart::Button, false));
+        assert_eq!(home.catalog.key.mode, KeyMode::Pinned, "a click pins it");
+
+        catalog(&mut home, CatalogMessage::KeyHover(KeyPart::Button, true));
+        catalog(&mut home, CatalogMessage::KeyToggle);
+        assert_eq!(
+            home.catalog.key.mode,
+            KeyMode::Shut,
+            "a second click shuts it"
+        );
+        assert!(!home.catalog.key_open());
+        catalog(&mut home, CatalogMessage::KeyHover(KeyPart::Button, false));
+        catalog(&mut home, CatalogMessage::KeyHover(KeyPart::Button, true));
+        assert_eq!(
+            home.catalog.key.mode,
+            KeyMode::Peek,
+            "leaving clears the shut"
+        );
+
+        catalog(&mut home, CatalogMessage::KeyClose);
+        assert_eq!(home.catalog.key.mode, KeyMode::Shut, "Escape shuts a peek");
+        catalog(&mut home, CatalogMessage::KeyHover(KeyPart::Button, false));
+        catalog(&mut home, CatalogMessage::KeyToggle);
+        catalog(&mut home, CatalogMessage::KeyClose);
+        assert_eq!(
+            home.catalog.key.mode,
+            KeyMode::Closed,
+            "Escape away from the pointer closes, so hover can peek again"
+        );
     }
 
     fn cubes_mut(home: &mut Home) -> &mut Vec<CubeSettings> {
@@ -2752,88 +2898,6 @@ mod tests {
             messages
         }
 
-        /// Opens the pick list inside `field` with a real click, then hovers
-        /// and clicks the first option of the real menu overlay it opens.
-        fn choose_first_menu_option(&mut self, field: Rectangle) -> Vec<ViewMessage> {
-            let cursor = iced::mouse::Cursor::Available(field.center());
-            let mut messages = self.send(
-                iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)),
-                cursor,
-            );
-            messages.extend(self.send(
-                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
-                    iced::mouse::Button::Left,
-                )),
-                cursor,
-            ));
-            let viewport = Rectangle::with_size(Size::new(self.width, self.height));
-            let mut overlay = self
-                .element
-                .as_widget_mut()
-                .overlay(
-                    &mut self.tree,
-                    Layout::new(&self.node),
-                    &self.renderer,
-                    &viewport,
-                    iced::Vector::ZERO,
-                )
-                .expect("the network menu opens");
-            let node = overlay
-                .as_overlay_mut()
-                .layout(&self.renderer, Size::new(self.width, self.height));
-            // Rows and columns wrap even a single pick-list overlay in a
-            // window-sized Group. Follow its sole child to the menu list;
-            // the outer bounds would aim this click at the window corner.
-            let menu = {
-                // Node bounds are relative to each parent. The runtime's
-                // Layout applies those offsets when dispatching overlay input.
-                let mut menu_layout = Layout::new(&node);
-                loop {
-                    let mut children = menu_layout.children();
-                    match children.len() {
-                        0 => break menu_layout.bounds(),
-                        1 => menu_layout = children.next().expect("one menu child"),
-                        _ => panic!("expected one network menu overlay"),
-                    }
-                }
-            };
-            assert!(menu.width > 12.0 && menu.height > 4.0, "{:?}", menu);
-            assert!(
-                menu.x < field.x + field.width && menu.x + menu.width > field.x,
-                "{:?} {:?}",
-                menu,
-                field
-            );
-            assert!(
-                menu.y >= field.y + field.height - 1.0,
-                "{:?} {:?}",
-                menu,
-                field
-            );
-            let point = iced::Point::new(menu.x + 12.0, menu.y + 4.0);
-            assert!(
-                menu.contains(point) && viewport.contains(point),
-                "{:?} {:?}",
-                menu,
-                point
-            );
-            let cursor = iced::mouse::Cursor::Available(point);
-            for event in [
-                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position: point }),
-                iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)),
-            ] {
-                overlay.as_overlay_mut().update(
-                    &event,
-                    Layout::new(&node),
-                    cursor,
-                    &self.renderer,
-                    &mut iced::advanced::clipboard::Null,
-                    &mut iced::advanced::Shell::new(&mut messages),
-                );
-            }
-            messages
-        }
-
         /// Swap in a re-rendered element and reconcile the same tree, as the
         /// runtime does after a state change.
         fn rerender(&mut self, element: Element<'a, ViewMessage>) {
@@ -2889,8 +2953,8 @@ mod tests {
         // body: details stacked first, search, each actionable row (the
         // nameless row has no press target), then the pinned dock.
         let expected = vec![
+            network_id(),
             settings_id(),
-            theme_id(),
             close_details_id(),
             details_open_id(&key("b")),
             rename_id(&key("b")),
@@ -2902,6 +2966,7 @@ mod tests {
             open_id(&key("b")),
             create_id(),
             import_id(),
+            key_id(),
         ];
         let mut forward = Vec::new();
         for _ in 0..expected.len() {
@@ -3472,7 +3537,7 @@ mod tests {
         let create = tree.bounds(&create_id());
         assert!(create.y >= body.y + body.height, "{:?} {:?}", create, body);
         // One dock, one copy of each control.
-        for id in [create_id(), import_id(), settings_id(), theme_id()] {
+        for id in [create_id(), import_id(), settings_id(), key_id()] {
             assert_eq!(
                 tree.focus
                     .iter()
@@ -3643,46 +3708,51 @@ mod tests {
     }
 
     /// Bounds of the container carrying `id` in a window-sized layout.
-    fn container_bounds(
-        element: Element<'_, ViewMessage>,
-        width: f32,
-        height: f32,
-        id: &Id,
-    ) -> Rectangle {
-        struct Probe<'a>(&'a Id, Option<Rectangle>);
-        impl Operation for Probe<'_> {
-            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
-                operate(self);
-            }
-            fn container(&mut self, id: Option<&Id>, bounds: Rectangle) {
-                if id == Some(self.0) {
-                    self.1 = Some(bounds);
-                }
-            }
-        }
-        let mut mounted = mount_window(element, width, height);
-        let mut probe = Probe(id, None);
-        mounted.element.as_widget_mut().operate(
-            &mut mounted.tree,
-            Layout::new(&mounted.node),
-            &mounted.renderer,
-            &mut probe,
-        );
-        probe.1.expect("container present")
-    }
-
     #[test]
-    fn the_network_picker_opens_its_real_menu_and_sends_select_network() {
-        let home = rows(2);
-        let field = container_bounds(launcher_view(&home), 1440.0, 900.0, &network_id());
+    fn the_network_chip_opens_the_prototype_menu_and_sends_select_network() {
+        use super::super::launcher_chrome::network_option_id;
+        let mut home = rows(2);
+        home.displayed_networks = vec![ChainId::Bitcoin, ChainId::Testnet4];
+        let field = bounds_of(
+            &focus_bounds_window(launcher_view(&home), 1440.0, 900.0),
+            &network_id(),
+        );
         assert!(field.y + field.height <= TOP_BAR_HEIGHT, "{:?}", field);
-        let mut mounted = mount_window(launcher_view(&home), 1440.0, 900.0);
-        let messages = mounted.choose_first_menu_option(field);
-        let first = home.displayed_networks[0];
+        assert!(field.width < 220.0, "the chip hugs its label: {:?}", field);
+        assert!(matches!(
+            activate_chrome(&home, network_id(), Press::Pointer),
+            ViewMessage::Catalog(CatalogMessage::NetworkMenu(true))
+        ));
+
+        catalog(&mut home, CatalogMessage::NetworkMenu(true));
+        let tree = home_tree("network-menu", &home, WIDE, "dark", theme::Theme::dark());
+        assert!(tree.contains("Filters change what is shown, never a Cube's network."));
+        assert!(tree.contains("Bitcoin mainnet"));
+        assert!(tree.contains("Testnet4"));
+        let option = bounds_of(
+            &focus_bounds_window(launcher_view(&home), 1440.0, 900.0),
+            &network_option_id(ChainId::Testnet4),
+        );
         assert!(
-            matches!(messages.as_slice(), [ViewMessage::SelectNetwork(chain)] if *chain == first),
-            "{:?}",
-            messages
+            option.y >= field.y + 40.0 && (option.x - field.x).abs() < 12.0,
+            "the menu opens under the chip: chip {:?}, row {:?}",
+            field,
+            option
+        );
+        for press in [Press::Pointer, Press::Enter] {
+            assert!(matches!(
+                activate_chrome(&home, network_option_id(ChainId::Testnet4), press),
+                ViewMessage::SelectNetwork(ChainId::Testnet4)
+            ));
+            assert!(matches!(
+                activate_chrome(&home, network_option_id(home.network), press),
+                ViewMessage::Catalog(CatalogMessage::NetworkMenu(false))
+            ));
+        }
+        let _ = home.update(Message::View(ViewMessage::SelectNetwork(ChainId::Testnet4)));
+        assert!(
+            !home.catalog.network_menu,
+            "choosing a network closes the menu"
         );
     }
 
@@ -3708,7 +3778,9 @@ mod tests {
                 theme::Theme::dark(),
             );
             assert!(tree.contains("Checking…"));
-            assert!(tree.contains("Light Mode"));
+            // The theme lives in App preferences, as in the prototype.
+            assert!(!tree.contains("Light Mode"));
+            assert!(!tree.has(&theme_id()));
             assert!(!tree.has(&sign_in_id()));
             assert!(!tree.has(&connect_id()));
             assert!(!tree.has(&recover_vault_id()));
@@ -3717,8 +3789,8 @@ mod tests {
                 ViewMessage::OpenAppPreferences
             ));
             assert!(matches!(
-                activate_chrome(&checking, theme_id(), pointer),
-                ViewMessage::ToggleTheme
+                activate_chrome(&checking, key_id(), pointer),
+                ViewMessage::Catalog(CatalogMessage::KeyToggle)
             ));
             assert!(matches!(
                 activate_chrome(&checking, create_id(), pointer),
@@ -3736,7 +3808,7 @@ mod tests {
                 "light",
                 theme::Theme::light(),
             );
-            assert!(tree.contains("Dark Mode"));
+            assert!(!tree.contains("Dark Mode"));
 
             // Signed out: Sign In to the existing Overview destination.
             let mut signed_out = rows(2);
@@ -4148,10 +4220,11 @@ mod tests {
         assert_eq!(scene.selected_slot, 1);
         assert_eq!(scene.peers.len(), 4);
         assert_eq!(scene.peers[scene.selected_slot].name, "Cube 5");
+        // Peers carry only persisted face marks, never a rendered name.
         assert!(scene
             .peers
             .iter()
-            .all(|peer| !peer.glyph_dark.contains("Cube 5")));
+            .all(|peer| peer.marks.network == ChainId::Bitcoin));
         assert!(home.floor_open_matches_current_cube(&cube));
 
         // A queued Run still names the same ID after a reload, but its
