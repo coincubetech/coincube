@@ -2750,7 +2750,7 @@ pub(super) fn layout<'a>(
 /// decryption phase visible. The step's state machine remains authoritative.
 #[allow(clippy::too_many_arguments)]
 pub fn recovery_kit_restore<'a>(
-    progress: (usize, usize),
+    _progress: (usize, usize),
     scope: crate::installer::step::RestoreScope,
     phase: &'a crate::installer::step::recovery_kit_restore::RestorePhase,
     email: &'a form::Value<String>,
@@ -2769,32 +2769,36 @@ pub fn recovery_kit_restore<'a>(
         }
     };
 
-    let (step_label, step_title, step_detail) = match phase {
+    let flow_label = match scope {
+        crate::installer::step::RestoreScope::Full => "RECOVERY KIT",
+        crate::installer::step::RestoreScope::DescriptorOnly => "DESCRIPTOR RESTORE",
+    };
+    let (stage_label, step_title, step_detail) = match phase {
         RestorePhase::Email | RestorePhase::OtpEntry => (
-            "RECOVERY KIT · STEP 1 OF 3",
+            "STEP 1 OF 3",
             "Sign in to Connect",
             "Verify the account that holds this Cube's Recovery Kit.",
         ),
         RestorePhase::LoadingCubes | RestorePhase::CubePicker { .. } => (
-            "RECOVERY KIT · STEP 2 OF 3",
+            "STEP 2 OF 3",
             "Choose a Cube",
             match scope {
                 crate::installer::step::RestoreScope::Full => "Cubes on this network are listed. Only kits with a Master Seed can be selected for Cube recovery.",
-                crate::installer::step::RestoreScope::DescriptorOnly => "Cubes on this network are listed. Only kits with a wallet descriptor can be selected.",
+                crate::installer::step::RestoreScope::DescriptorOnly => "Cubes on this network are listed. Only those with a wallet descriptor in their Recovery Kit can be selected.",
             },
         ),
         RestorePhase::PasswordEntry { .. } | RestorePhase::Decrypting { .. } => (
-            "RECOVERY KIT · STEP 3 OF 3",
+            "STEP 3 OF 3",
             "Open the Recovery Kit",
             "The recovery password decrypts the backup on this device.",
         ),
         RestorePhase::Ready { .. } => (
-            "RECOVERY KIT · READY",
+            "READY",
             "Continue restoring",
             "Your Recovery Kit was decrypted. Continue with the remaining installer steps.",
         ),
         RestorePhase::Error { .. } => (
-            "RECOVERY KIT · NEEDS ATTENTION",
+            "NEEDS ATTENTION",
             "Recovery needs attention",
             "Review the error below, then retry the existing restore flow.",
         ),
@@ -2803,7 +2807,7 @@ pub fn recovery_kit_restore<'a>(
         .spacing(20)
         .width(Length::Fill)
         .max_width(700)
-        .push(p2_regular(step_label).style(theme::text::secondary))
+        .push(p2_regular(format!("{flow_label} · {stage_label}")).style(theme::text::secondary))
         .push(h4_bold(step_title))
         .push(p2_regular(step_detail).style(theme::text::secondary));
 
@@ -2859,7 +2863,12 @@ pub fn recovery_kit_restore<'a>(
             content = content.push(text::text("Loading your Cubes from Connect…"));
         }
         RestorePhase::CubePicker { cubes, .. } => {
-            content = content.push(p2_regular("Recovery Kit availability"));
+            content = content.push(p2_regular(match scope {
+                crate::installer::step::RestoreScope::Full => "Recovery Kit availability",
+                crate::installer::step::RestoreScope::DescriptorOnly => {
+                    "Wallet descriptor availability"
+                }
+            }));
             let mut col = Column::new().spacing(10);
             if cubes.is_empty() {
                 col = col.push(text::text(
@@ -3007,8 +3016,10 @@ pub fn recovery_kit_restore<'a>(
         );
     }
 
+    // This screen already shows progress through its own restore phases.
+    // The generic installer count describes later PIN/node steps as well.
     layout(
-        progress,
+        (0, 0),
         Some(email.value.as_str())
             .filter(|value| !value.is_empty() && !matches!(phase, RestorePhase::Email)),
         title,
@@ -3021,6 +3032,12 @@ pub fn recovery_kit_restore<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iced::advanced::{
+        layout,
+        renderer::Headless,
+        widget::{Id, Operation, Tree},
+        Layout,
+    };
 
     use crate::{
         installer::step::{
@@ -3292,6 +3309,126 @@ mod tests {
             true,
             None,
         );
+    }
+
+    #[derive(Debug, Default)]
+    struct RestoreLabels(Vec<String>);
+
+    impl Operation for RestoreLabels {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+
+        fn text(&mut self, _: Option<&Id>, _: iced::Rectangle, value: &str) {
+            self.0.push(value.to_owned());
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_kit_restore_progress_names_the_scope_without_installer_count() {
+        for bytes in coincube_ui::font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(bytes);
+        }
+        let mut renderer = <iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer");
+        let email = value("user@example.com", true);
+        let otp = value("", false);
+        let phase = RestorePhase::CubePicker {
+            cubes: vec![
+                candidate(1, "Everyday", true, true, true),
+                candidate(2, "Travel fund", true, false, true),
+                candidate(3, "Archive", false, false, false),
+            ],
+            selected: None,
+        };
+
+        for (scope, expected, availability, theme_name, theme) in [
+            (
+                RestoreScope::Full,
+                "RECOVERY KIT · STEP 2 OF 3",
+                "Recovery Kit availability",
+                "dark",
+                theme::Theme::dark(),
+            ),
+            (
+                RestoreScope::DescriptorOnly,
+                "DESCRIPTOR RESTORE · STEP 2 OF 3",
+                "Wallet descriptor availability",
+                "light",
+                theme::Theme::light(),
+            ),
+        ] {
+            let mut element =
+                recovery_kit_restore((1, 8), scope, &phase, &email, &otp, "", false, None);
+            let mut tree = Tree::new(element.as_widget());
+            let size = iced::Size::new(1024.0, 768.0);
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(iced::Size::ZERO, size),
+            );
+            let mut labels = RestoreLabels::default();
+            element
+                .as_widget_mut()
+                .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
+
+            assert!(
+                labels.0.iter().any(|label| label == expected),
+                "{:?}: {:?}",
+                scope,
+                labels
+            );
+            assert!(
+                labels.0.iter().any(|label| label == availability),
+                "{:?}: {:?}",
+                scope,
+                labels
+            );
+            assert!(
+                !labels.0.iter().any(|label| label == "1 | 8"),
+                "{:?}: {:?}",
+                scope,
+                labels
+            );
+
+            if let Ok(directory) = std::env::var("R14_CAPTURE_DIR") {
+                std::fs::create_dir_all(&directory).unwrap();
+                let screen = iced::Rectangle::with_size(size);
+                element.as_widget().draw(
+                    &tree,
+                    &mut renderer,
+                    &theme,
+                    &iced::advanced::renderer::Style {
+                        text_color: theme.colors.text.primary,
+                    },
+                    Layout::new(&node),
+                    iced::mouse::Cursor::Unavailable,
+                    &screen,
+                );
+                let pixels = renderer.screenshot(
+                    iced::Size::new(1024, 768),
+                    1.0,
+                    theme.colors.general.background,
+                );
+                image::save_buffer(
+                    std::path::Path::new(&directory)
+                        .join(format!("r14-{theme_name}-scope-progress-1024x768.png")),
+                    &pixels,
+                    1024,
+                    768,
+                    image::ColorType::Rgba8,
+                )
+                .unwrap();
+            }
+        }
     }
 }
 
