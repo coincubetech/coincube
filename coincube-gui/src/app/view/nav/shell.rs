@@ -8,10 +8,7 @@ use super::{marketplace, NavContext, SubItem};
 use crate::{
     app::{
         features,
-        menu::{
-            CubeSettingsOption, CubeSubMenu, LiquidSubMenu, Menu, SparkSubMenu, TopLevel,
-            VaultSubMenu,
-        },
+        menu::{CubeSettingsOption, CubeSubMenu, LiquidSubMenu, Menu, SparkSubMenu, VaultSubMenu},
         state::preferences::{BalancePrivacy, BalancePrivacyChrome},
         view::Message,
         ConnectionStatus,
@@ -491,40 +488,12 @@ fn activity_route(_ctx: &NavContext<'_>) -> Option<Menu> {
     Some(Menu::Cube(CubeSubMenu::Activity))
 }
 
-fn wallet_children<'a>(
-    menu: &Menu,
-    ctx: &NavContext<'a>,
-    group: TopLevel,
-) -> Vec<Element<'a, Message>> {
-    let items = match group {
-        TopLevel::Spark => super::spark::items(ctx),
-        TopLevel::Liquid => super::liquid::items(ctx),
-        TopLevel::Vault => super::vault::items(ctx),
-        TopLevel::Marketplace => marketplace::items(ctx),
-        TopLevel::Cube => return Vec::new(),
-    };
-    items
+/// Marketplace is the one sidebar entry with children (P2P, Buy/Sell), as
+/// on the canvas. Wallets have none: Send, Receive and their history are
+/// reached from each wallet's own page.
+fn marketplace_children<'a>(menu: &Menu, ctx: &NavContext<'a>) -> Vec<Element<'a, Message>> {
+    marketplace::items(ctx)
         .into_iter()
-        .filter(|item| {
-            if group == TopLevel::Vault {
-                !matches!(
-                    &item.route,
-                    Menu::Vault(
-                        VaultSubMenu::Coins(_)
-                            | VaultSubMenu::PSBTs(_)
-                            | VaultSubMenu::Recovery
-                            | VaultSubMenu::Claim
-                            | VaultSubMenu::Settings(_)
-                    )
-                )
-            } else if group == TopLevel::Spark {
-                !matches!(&item.route, Menu::Spark(SparkSubMenu::Settings(_)))
-            } else if group == TopLevel::Liquid {
-                !matches!(&item.route, Menu::Liquid(LiquidSubMenu::Settings(_)))
-            } else {
-                true
-            }
-        })
         .map(|item| subitem(menu, item, None))
         .collect()
 }
@@ -572,11 +541,6 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
             false,
             spark_reason,
         ));
-        if matches!(menu, Menu::Spark(_)) {
-            for item in wallet_children(menu, ctx, TopLevel::Spark) {
-                middle = middle.push(item);
-            }
-        }
     }
     if ctx.has_vault || ctx.has_imported_bitcoin {
         middle = middle.push(nav_row(
@@ -587,11 +551,6 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
             false,
             None,
         ));
-        if matches!(menu, Menu::Vault(_)) {
-            for item in wallet_children(menu, ctx, TopLevel::Vault) {
-                middle = middle.push(item);
-            }
-        }
     } else {
         middle = middle.push(nav_row(
             "Set up Vault",
@@ -614,11 +573,6 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
             false,
             liquid_reason,
         ));
-        if matches!(menu, Menu::Liquid(_)) {
-            for item in wallet_children(menu, ctx, TopLevel::Liquid) {
-                middle = middle.push(item);
-            }
-        }
     }
     let show_marketplace = (ctx.has_p2p && ctx.marketplace_flags.p2p_on())
         || (ctx.has_vault && ctx.marketplace_flags.buy_sell_on());
@@ -632,7 +586,7 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
             None,
         ));
         if matches!(menu, Menu::Marketplace(_)) {
-            for item in wallet_children(menu, ctx, TopLevel::Marketplace) {
+            for item in marketplace_children(menu, ctx) {
                 middle = middle.push(item);
             }
             if let Some(subpages) = super::tertiary::items_for(menu, ctx) {

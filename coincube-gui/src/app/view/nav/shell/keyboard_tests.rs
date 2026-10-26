@@ -1137,3 +1137,56 @@ async fn selected_successor_does_not_paint_over_focused_nav_ring() {
         }
     }
 }
+
+/// Focusable rows of the production sidebar on `menu`.
+fn sidebar_targets(ctx: &NavContext<'_>, menu: &Menu) -> usize {
+    load_fonts();
+    let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+        coincube_ui::font::REGULAR,
+        14.into(),
+        Some("tiny-skia"),
+    ))
+    .unwrap();
+    let mut element = sidebar(menu, ctx, ShellState::default());
+    let mut tree = Tree::new(element.as_widget());
+    let node = element.as_widget_mut().layout(
+        &mut tree,
+        &renderer,
+        &layout::Limits::new(Size::ZERO, Size::new(320.0, 4000.0)),
+    );
+    focus_snapshot(&mut element, &mut tree, &node, &renderer)
+        .bounds
+        .len()
+}
+
+#[test]
+fn wallets_have_no_sidebar_sub_menus() {
+    // The canvas sidebar lists each wallet once; Send, Receive and history
+    // live on the wallet's own page. Only Marketplace keeps children.
+    let mut ctx = fixture_context();
+    ctx.liquid_gate = features::LiquidGate {
+        server_enabled: true,
+        local_state_exists: true,
+    };
+    let baseline = sidebar_targets(&ctx, &Menu::Cube(CubeSubMenu::Overview));
+    for menu in [
+        Menu::Spark(SparkSubMenu::Overview),
+        Menu::Spark(SparkSubMenu::Send),
+        Menu::Spark(SparkSubMenu::Receive),
+        Menu::Spark(SparkSubMenu::Transactions(None)),
+        Menu::Vault(VaultSubMenu::Overview),
+        Menu::Vault(VaultSubMenu::Send),
+        Menu::Vault(VaultSubMenu::Receive),
+        Menu::Vault(VaultSubMenu::Transactions(None)),
+        Menu::Liquid(LiquidSubMenu::Overview),
+        Menu::Liquid(LiquidSubMenu::Send),
+        Menu::Liquid(LiquidSubMenu::Transactions(None)),
+    ] {
+        assert_eq!(
+            sidebar_targets(&ctx, &menu),
+            baseline,
+            "{:?} grew the sidebar",
+            menu
+        );
+    }
+}
