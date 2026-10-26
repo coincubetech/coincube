@@ -949,7 +949,6 @@ fn compose_footer<'a>(status: &'static str, prepare: Option<Message>) -> Element
             )
             .style(theme::button::primary)
             .padding([10, 24])
-            .focus_radius(21.0)
             .on_press_maybe(prepare),
         )
         .into()
@@ -1111,7 +1110,6 @@ pub fn send_target_picker_modal<'a>(
             )
             .style(theme::button::transparent_border)
             .padding([8, 18])
-            .focus_radius(17.0)
             .on_press(Message::SparkSend(SparkSendMessage::CloseReceivePicker)),
         ),
     );

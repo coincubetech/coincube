@@ -429,3 +429,39 @@ pub fn display_icon<'a>() -> Text<'a> {
 pub fn exclamation_circle_icon<'a>() -> Text<'a> {
     bootstrap_icon('\u{F333}')
 }
+
+pub fn person_outline_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F4E1}')
+}
+
+pub fn people_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F4D0}')
+}
+
+pub fn laptop_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F456}')
+}
+
+pub fn shield_check_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F52F}')
+}
+
+pub fn bell_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F18A}')
+}
+
+pub fn credit_card_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F2DC}')
+}
+
+pub fn dash_circle_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F2E6}')
+}
+
+pub fn question_circle_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F505}')
+}
+
+pub fn x_circle_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F623}')
+}

@@ -4776,16 +4776,19 @@ impl ConnectAccountPanel {
     /// are unloaded (`None` — in flight after sign-in, or the fetch failed) or
     /// a flag is absent, every flag reads `false`. A launch build must never
     /// surface the untested money feature on a stale, silent, or unreachable
-    /// API. See [`crate::app::features::MarketplaceServerFlags`].
+    /// API. The first-release ceiling is applied before the flags reach the
+    /// cache, even when an account override or server response enables them.
+    /// See [`crate::app::features::MarketplaceServerFlags`].
     pub fn marketplace_server_flags(&self) -> crate::app::features::MarketplaceServerFlags {
-        match &self.features {
+        let server_flags = match &self.features {
             None => crate::app::features::MarketplaceServerFlags::OFF,
             Some(f) => crate::app::features::MarketplaceServerFlags {
                 marketplace_enabled: f.marketplace_enabled.unwrap_or(false),
                 buy_sell_enabled: f.buy_sell_enabled.unwrap_or(false),
                 p2p_enabled: f.p2p_enabled.unwrap_or(false),
             },
-        }
+        };
+        server_flags.for_release()
     }
 
     /// The account-scoped Liquid grandfather flag from `GET /connect/features`
@@ -7615,16 +7618,16 @@ mod plan_lifecycle_tests {
     }
 
     #[test]
-    fn marketplace_flags_mirror_the_response() {
+    fn marketplace_flags_cannot_override_first_release_ceiling() {
         let mut panel = ConnectAccountPanel::new();
         panel.features = Some(features_with_marketplace(
             Some(true),
             Some(true),
-            Some(false),
+            Some(true),
         ));
         let flags = panel.marketplace_server_flags();
-        assert!(flags.marketplace_enabled);
-        assert!(flags.buy_sell_on());
+        assert_eq!(flags, crate::app::features::MarketplaceServerFlags::OFF);
+        assert!(!flags.buy_sell_on());
         assert!(!flags.p2p_on());
     }
 

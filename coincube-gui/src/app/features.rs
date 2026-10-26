@@ -66,6 +66,10 @@ pub struct MarketplaceServerFlags {
     pub p2p_enabled: bool,
 }
 
+/// First-release product ceiling. Turning this on is a deliberate release
+/// decision, independent of Connect defaults and per-account overrides.
+const MARKETPLACE_ENABLED_FOR_RELEASE: bool = false;
+
 impl MarketplaceServerFlags {
     /// Fail-closed value: everything off. The default state before features
     /// load, and the value used when the API is unreachable or silent.
@@ -74,6 +78,16 @@ impl MarketplaceServerFlags {
         buy_sell_enabled: false,
         p2p_enabled: false,
     };
+
+    /// Apply the local release ceiling before flags enter the cache used by
+    /// navigation, route availability, and P2P subscription/action guards.
+    pub fn for_release(self) -> Self {
+        if MARKETPLACE_ENABLED_FOR_RELEASE {
+            self
+        } else {
+            Self::OFF
+        }
+    }
 
     /// Whether the server permits Buy/Sell at all: the master switch AND the
     /// Buy/Sell flag. The single source of truth for "should Buy/Sell show".
@@ -696,6 +710,17 @@ mod tests {
         );
         assert!(!MarketplaceServerFlags::OFF.buy_sell_on());
         assert!(!MarketplaceServerFlags::OFF.p2p_on());
+    }
+
+    #[test]
+    fn first_release_rejects_true_server_flags_for_routes_and_actions() {
+        let flags = ALL_ON.for_release();
+        assert_eq!(flags, MarketplaceServerFlags::OFF);
+        assert!(!flags.buy_sell_on());
+        assert!(!flags.p2p_on());
+        assert!(!avail(&buy_sell_route(), Network::Bitcoin, flags));
+        assert!(!avail(&p2p_route(), Network::Bitcoin, flags));
+        assert!(!avail(&p2p_settings_route(), Network::Bitcoin, flags));
     }
 
     #[test]

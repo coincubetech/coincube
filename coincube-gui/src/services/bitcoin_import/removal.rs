@@ -234,6 +234,10 @@ pub async fn remove_cube_import(
             return Err("Another Cube still references this wallet; no files were removed.".into());
         }
     }
+    if let Some(attachment) = expected_attachment {
+        crate::services::imported_keys::LocalKeyRepository::new(directory, expected, attachment)?
+            .remove_operation_storage()?;
+    }
 
     // Keep the Cube visible until cleanup finishes. An interrupted removal
     // can be retried from its delete dialog, even if some owned files are gone.
@@ -440,6 +444,27 @@ mod tests {
         assert!(!journal.exists());
         assert_eq!(fs::read(unrelated).unwrap(), b"unrelated");
         remove_cube_import(&f.directory, &f.cube).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn owner_verified_removal_works_with_corrupt_local_key_manifest() {
+        let mut f = Fixture::new().await;
+        f.install().await;
+        let key_root = f
+            .directory
+            .path()
+            .join("imported-local-keys")
+            .join(f.operation_id().to_string());
+        crate::dir::create_directory(&key_root).unwrap();
+        fs::write(key_root.join("manifest.json"), b"{invalid").unwrap();
+        fs::write(key_root.join("orphan.key"), b"synthetic ciphertext").unwrap();
+        let unrelated = f.directory.path().join("keep-me");
+        fs::write(&unrelated, b"unrelated").unwrap();
+
+        remove_cube_import(&f.directory, &f.cube).await.unwrap();
+        assert!(!key_root.exists());
+        assert_eq!(fs::read(unrelated).unwrap(), b"unrelated");
+        assert_eq!(Settings::from_file(&f.directory).unwrap().cubes.len(), 1);
     }
 
     #[tokio::test]
