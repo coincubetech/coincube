@@ -29,9 +29,11 @@
 //! escrowed, so a reload or a restart shows the true selection. See
 //! [`RecoveryAlerts::escrow_tier`]. Invariant: escrow present ⟹ alerts on.
 
-use std::sync::Arc;
-
 use iced::Task;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use zeroize::Zeroizing;
 
 use crate::{
@@ -47,6 +49,23 @@ use crate::{
 };
 
 use view::{EscrowPin, RecoveryAlertsMessage, SettingsMessage};
+
+#[derive(Default)]
+struct EscrowSeedSlot(Mutex<Option<Zeroizing<Vec<u8>>>>);
+
+impl std::fmt::Debug for EscrowSeedSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("EscrowSeedSlot(<redacted>)")
+    }
+}
+
+impl EscrowSeedSlot {
+    fn clear(&self) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = None;
+        }
+    }
+}
 
 /// Settings-card state for Vault Recovery Alerts. Held on `SettingsState`.
 #[derive(Debug)]
@@ -93,14 +112,24 @@ pub struct RecoveryAlerts {
     /// each keystroke's previous buffer is wiped. Cleared as soon as it's
     /// consumed (or the flow is cancelled).
     pub pin: EscrowPin,
-    /// One Full-Cube PIN submission. Cancelling or choosing another tier
-    /// invalidates its late duress result before any local wipe is requested.
+    /// One Full-Cube PIN submission. Cancellation invalidates pending seed
+    /// staging and upload; a verified duress result still takes effect.
     pin_attempt: Option<crate::app::cache::AppGeneration>,
+    upload_attempt: Option<crate::app::cache::AppGeneration>,
+    seed_slot: Arc<EscrowSeedSlot>,
+    pin_cancelled: Arc<AtomicBool>,
 }
 
 impl Default for RecoveryAlerts {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for RecoveryAlerts {
+    fn drop(&mut self) {
+        self.cancel_pin_attempt();
+        self.pin.clear();
     }
 }
 
@@ -121,7 +150,33 @@ impl RecoveryAlerts {
             awaiting_pin: false,
             pin: EscrowPin::default(),
             pin_attempt: None,
+            upload_attempt: None,
+            seed_slot: Arc::new(EscrowSeedSlot::default()),
+            pin_cancelled: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    fn cancel_pin_attempt(&mut self) {
+        self.pin_cancelled.store(true, Ordering::Release);
+        self.seed_slot.clear();
+        self.pin_attempt = None;
+        self.upload_attempt = None;
+    }
+
+    fn take_seed_for_upload(
+        &mut self,
+        attempt: crate::app::cache::AppGeneration,
+        generation: u64,
+        session_generation: u64,
+    ) -> Option<Zeroizing<Vec<u8>>> {
+        if generation != session_generation
+            || self.pin_attempt != Some(attempt)
+            || !self.submitting
+            || self.pin_cancelled.load(Ordering::Acquire)
+        {
+            return None;
+        }
+        self.seed_slot.0.lock().ok()?.take()
     }
 
     /// Whether recovery **alerts** (the monitoring record) are on — any non-Off
@@ -463,7 +518,8 @@ pub fn update(
             }
             ra.awaiting_pin = false;
             ra.pin.clear();
-            ra.pin_attempt = None;
+            ra.cancel_pin_attempt();
+            ra.submitting = false;
             if !escrow_entitled {
                 ra.error =
                     Some("An encrypted recovery kit is part of the Estate plan.".to_string());
@@ -574,25 +630,84 @@ pub fn update(
         RecoveryAlertsMessage::CancelFullCube => {
             ra.awaiting_pin = false;
             ra.pin.clear();
-            ra.pin_attempt = None;
+            ra.cancel_pin_attempt();
+            ra.submitting = false;
             ra.error = None;
             Task::none()
         }
-        RecoveryAlertsMessage::FullCubePinDuress(attempt, generation) => {
+        RecoveryAlertsMessage::FullCubePinReady(attempt, generation) => {
             if generation != session_generation || ra.pin_attempt != Some(attempt) || !ra.submitting
             {
                 return Task::none();
             }
+            let seed_json = ra.take_seed_for_upload(attempt, generation, session_generation);
+            let (Some(seed_json), Some(client), Some(_), Some(server_cube_id)) =
+                (seed_json, client, ra.vault_id, server_cube_id)
+            else {
+                ra.cancel_pin_attempt();
+                ra.submitting = false;
+                ra.error = Some("Full-Cube PIN result expired. Try again.".into());
+                return Task::none();
+            };
+            let Some(descriptor_json) =
+                descriptor_blob_json(wallet.as_deref(), local_cube_id, cache.chain())
+            else {
+                ra.cancel_pin_attempt();
+                ra.submitting = false;
+                ra.error = Some("This Vault's descriptor isn't available on this device.".into());
+                return Task::none();
+            };
+            let cube_enc_key = cache.cube_encryption_key.clone();
+            let network = cache.chain();
+            // Admission has consumed the private seed slot. Retain its
+            // cancellation token until the network task checks it, so a
+            // subsequent tier change can still suppress an unstarted upload.
             ra.pin_attempt = None;
+            ra.upload_attempt = Some(attempt);
+            let cancelled = Arc::clone(&ra.pin_cancelled);
+            Task::perform(
+                async move {
+                    if cancelled.load(Ordering::Acquire) {
+                        return Err("Full-Cube enrollment was cancelled.".into());
+                    }
+                    enroll_escrow(
+                        &client,
+                        server_cube_id,
+                        cube_enc_key.as_deref(),
+                        network.bitcoin_network(),
+                        descriptor_json,
+                        Some(seed_json),
+                    )
+                    .await
+                    .map_err(|e| e.to_string())
+                },
+                move |res| {
+                    ra_msg(RecoveryAlertsMessage::FullCubeUploadResult(
+                        attempt,
+                        session_generation,
+                        res,
+                    ))
+                },
+            )
+        }
+        RecoveryAlertsMessage::FullCubeUploadResult(attempt, generation, result) => {
+            if generation != session_generation || ra.upload_attempt != Some(attempt) {
+                return Task::none();
+            }
+            ra.cancel_pin_attempt();
             ra.submitting = false;
-            ra.awaiting_pin = false;
-            ra.pin.clear();
-            ra.error = None;
-            Task::done(Message::View(view::Message::DuressActivateLocal {
-                app: cache.app_generation,
-                cube_id: local_cube_id.to_string(),
-                chain: cache.chain(),
-            }))
+            ra.apply_change(result, Some(EscrowTier::FullCube));
+            Task::none()
+        }
+        RecoveryAlertsMessage::FullCubePinFailed(attempt, generation, error) => {
+            if generation != session_generation || ra.pin_attempt != Some(attempt) || !ra.submitting
+            {
+                return Task::none();
+            }
+            ra.cancel_pin_attempt();
+            ra.submitting = false;
+            ra.apply_change(Err(error), Some(EscrowTier::FullCube));
+            Task::none()
         }
         RecoveryAlertsMessage::ConfirmFullCube => {
             // Full-Cube is an escrow tier, so it's gated on `inheritanceEscrow`.
@@ -602,7 +717,7 @@ pub fn update(
             // We still require a resolved vault as a fast precondition, but
             // `enroll_escrow` re-fetches and uses that vault's id, so we don't
             // thread a (possibly stale) cached id through.
-            let (Some(client), Some(_), Some(server_cube_id)) =
+            let (Some(_client), Some(_), Some(_server_cube_id)) =
                 (client, ra.vault_id, server_cube_id)
             else {
                 ra.error = Some(
@@ -610,7 +725,7 @@ pub fn update(
                 );
                 return Task::none();
             };
-            let Some(descriptor_json) =
+            let Some(_descriptor_json) =
                 descriptor_blob_json(wallet.as_deref(), local_cube_id, cache.chain())
             else {
                 ra.error =
@@ -624,66 +739,83 @@ pub fn update(
             // empty buffer) and let it drop inside the blocking task, wiping the
             // PIN once the seed blob is built.
             let pin = std::mem::take(&mut ra.pin);
-            let seed_cube = match seed_blob_cube(cache, local_cube_id) {
-                Ok(c) => c,
-                Err(e) => {
-                    ra.error = Some(e);
-                    return Task::none();
-                }
-            };
-            let network_dir = cache.datadir_path.network_directory(cache.chain());
+            let (seed_cube, selected_cube) =
+                match seed_blob_cube_with_settings(cache, local_cube_id) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        ra.error = Some(e);
+                        return Task::none();
+                    }
+                };
             let datadir = cache.datadir_path.path().to_path_buf();
             let network = cache.chain();
-            // See the Vault-only branch: keyholder xpubs arrive blinded.
-            let cube_enc_key = cache.cube_encryption_key.clone();
             let local_cube_id = local_cube_id.to_string();
             ra.submitting = true;
             ra.awaiting_pin = false;
             ra.error = None;
             let attempt = crate::app::cache::AppGeneration::next();
             ra.pin_attempt = Some(attempt);
+            ra.pin_cancelled = Arc::new(AtomicBool::new(false));
+            ra.seed_slot = Arc::new(EscrowSeedSlot::default());
+            let cancelled = Arc::clone(&ra.pin_cancelled);
+            let slot = Arc::clone(&ra.seed_slot);
+            let app_generation = cache.app_generation;
             Task::perform(
                 async move {
                     let seed_trial = tokio::task::spawn_blocking(move || {
                         build_seed_blob_json(
-                            &network_dir,
                             &datadir,
                             network,
                             &local_cube_id,
                             pin.as_str(),
                             seed_cube,
+                            selected_cube,
+                            app_generation,
                         )
                     })
                     .await
                     .map_err(|e| format!("PIN task failed: {}", e));
                     match seed_trial {
-                        Ok(Ok(SeedBlobOutcome::Duress)) => FullCubeTaskResult::Duress,
-                        Ok(Ok(SeedBlobOutcome::Ready(seed_json))) => FullCubeTaskResult::Change(
-                            enroll_escrow(
-                                &client,
-                                server_cube_id,
-                                cube_enc_key.as_deref(),
-                                network.bitcoin_network(),
-                                descriptor_json,
-                                Some(seed_json),
-                            )
-                            .await
-                            .map_err(|e| e.to_string()),
-                        ),
-                        Ok(Err(error)) | Err(error) => FullCubeTaskResult::Change(Err(error)),
+                        Ok(Ok(SeedBlobOutcome::Duress(proof))) => FullCubeTaskResult::Duress(proof),
+                        Ok(Ok(SeedBlobOutcome::Ready(seed_json))) => {
+                            if cancelled.load(Ordering::Acquire) {
+                                FullCubeTaskResult::Expired
+                            } else if let Ok(mut staged) = slot.0.lock() {
+                                if cancelled.load(Ordering::Acquire) {
+                                    FullCubeTaskResult::Expired
+                                } else {
+                                    *staged = Some(seed_json);
+                                    FullCubeTaskResult::Ready
+                                }
+                            } else {
+                                FullCubeTaskResult::Expired
+                            }
+                        }
+                        Ok(Err(error)) | Err(error) => FullCubeTaskResult::Failed(error),
                     }
                 },
-                move |res| {
-                    ra_msg(match res {
-                        FullCubeTaskResult::Duress => {
-                            RecoveryAlertsMessage::FullCubePinDuress(attempt, session_generation)
-                        }
-                        FullCubeTaskResult::Change(result) => RecoveryAlertsMessage::ChangeResult(
-                            result,
+                move |res| match res {
+                    FullCubeTaskResult::Duress(proof) => {
+                        Message::View(view::Message::DuressActivateLocal(proof))
+                    }
+                    FullCubeTaskResult::Ready => ra_msg(RecoveryAlertsMessage::FullCubePinReady(
+                        attempt,
+                        session_generation,
+                    )),
+                    FullCubeTaskResult::Failed(error) => {
+                        ra_msg(RecoveryAlertsMessage::FullCubePinFailed(
+                            attempt,
                             session_generation,
-                            Some(EscrowTier::FullCube),
-                        ),
-                    })
+                            error,
+                        ))
+                    }
+                    FullCubeTaskResult::Expired => {
+                        ra_msg(RecoveryAlertsMessage::FullCubePinFailed(
+                            attempt,
+                            session_generation,
+                            "Full-Cube PIN result expired. Try again.".into(),
+                        ))
+                    }
                 },
             )
         }
@@ -727,7 +859,10 @@ fn descriptor_blob_json(
 /// Builds the cube-metadata half of the seed blob from on-disk settings + the
 /// live cache. Read on the main thread before the PIN task so a settings/cube
 /// lookup failure surfaces synchronously.
-fn seed_blob_cube(cache: &Cache, local_cube_id: &str) -> Result<SeedBlobCube, String> {
+fn seed_blob_cube_with_settings(
+    cache: &Cache,
+    local_cube_id: &str,
+) -> Result<(SeedBlobCube, settings::CubeSettings), String> {
     let network_dir = cache.datadir_path.network_directory(cache.chain());
     let s = settings::Settings::from_file(&network_dir)
         .map_err(|_| "Failed to read settings file.".to_string())?;
@@ -739,13 +874,19 @@ fn seed_blob_cube(cache: &Cache, local_cube_id: &str) -> Result<SeedBlobCube, St
     let created_at = chrono::DateTime::<chrono::Utc>::from_timestamp(cube.created_at, 0)
         .map(|t| t.to_rfc3339())
         .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string());
-    Ok(SeedBlobCube {
+    let blob = SeedBlobCube {
         uuid: local_cube_id.to_string(),
         name: cube.name.clone(),
         network: cache.chain().api_str().to_string(),
         created_at,
         lightning_address: cache.lightning_address.clone(),
-    })
+    };
+    Ok((blob, cube.clone()))
+}
+
+#[cfg(test)]
+fn seed_blob_cube(cache: &Cache, local_cube_id: &str) -> Result<SeedBlobCube, String> {
+    seed_blob_cube_with_settings(cache, local_cube_id).map(|(blob, _)| blob)
 }
 
 /// Verifies the PIN, unlocks the mnemonic, and serialises the full seed blob
@@ -757,43 +898,42 @@ fn seed_blob_cube(cache: &Cache, local_cube_id: &str) -> Result<SeedBlobCube, St
 /// done rather than lingering on the heap.
 enum SeedBlobOutcome {
     Ready(Zeroizing<Vec<u8>>),
-    Duress,
+    Duress(crate::services::unlock::throttle::VerifiedSeedExportDuress),
 }
 
 impl std::fmt::Debug for SeedBlobOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Ready(_) => f.write_str("Ready(<redacted>)"),
-            Self::Duress => f.write_str("Duress"),
+            Self::Duress(_) => f.write_str("Duress"),
         }
     }
 }
 
 enum FullCubeTaskResult {
-    Change(Result<VaultMonitoringStatus, String>),
-    Duress,
+    Ready,
+    Failed(String),
+    Expired,
+    Duress(crate::services::unlock::throttle::VerifiedSeedExportDuress),
 }
 
 fn build_seed_blob_json(
-    network_dir: &crate::dir::NetworkDirectory,
     datadir: &std::path::Path,
     network: impl Into<crate::chain::ChainId>,
     local_cube_id: &str,
     pin: &str,
     cube: SeedBlobCube,
+    selected_cube: settings::CubeSettings,
+    app: crate::app::cache::AppGeneration,
 ) -> Result<SeedBlobOutcome, String> {
     let network = network.into();
     if cube.network != network.api_str() || cube.uuid != local_cube_id {
         return Err("Cube recovery identity mismatch.".to_string());
     }
-    let s =
-        settings::Settings::from_file(network_dir).map_err(|_| "Failed to read settings file.")?;
-    let cube_settings = s
-        .cubes
-        .iter()
-        .find(|c| c.id == local_cube_id && c.network == network)
-        .ok_or("Cube not found in settings.")?;
-    let fingerprint = cube_settings
+    if selected_cube.id != local_cube_id || selected_cube.network != network {
+        return Err("Cube recovery identity mismatch.".into());
+    }
+    let fingerprint = selected_cube
         .master_signer_fingerprint
         .ok_or("This Cube has no master signer.")?;
     // `load_mnemonic_words` is the PIN check: the PIN the unlock authenticated
@@ -801,23 +941,24 @@ fn build_seed_blob_json(
     // cheap `verify_pin` hash that used to gate this is gone (I1).
     let trial = crate::services::unlock::throttle::classify_seed_export_cube(
         datadir,
-        cube_settings,
+        &selected_cube,
+        app,
         pin,
         || super::general::load_mnemonic_words(datadir, network, fingerprint, pin, local_cube_id),
     )?;
     let words = match trial {
-        crate::services::unlock::throttle::SeedExportAttempt::Words(words) => words,
-        crate::services::unlock::throttle::SeedExportAttempt::Duress => {
-            return Ok(SeedBlobOutcome::Duress);
+        crate::services::unlock::throttle::SeedExportCubeAttempt::Words(words) => words,
+        crate::services::unlock::throttle::SeedExportCubeAttempt::Duress(proof) => {
+            return Ok(SeedBlobOutcome::Duress(proof));
         }
-        crate::services::unlock::throttle::SeedExportAttempt::Wrong(penalty) => {
+        crate::services::unlock::throttle::SeedExportCubeAttempt::Wrong(penalty) => {
             return Err(if penalty.is_zero() {
                 "Incorrect PIN. Please try again.".into()
             } else {
                 crate::services::unlock::throttle::lockout_message(penalty)
             });
         }
-        crate::services::unlock::throttle::SeedExportAttempt::Locked(remaining) => {
+        crate::services::unlock::throttle::SeedExportCubeAttempt::Locked(remaining) => {
             return Err(crate::services::unlock::throttle::lockout_message(
                 remaining,
             ));
@@ -841,6 +982,38 @@ fn build_seed_blob_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cancelled_delayed_full_cube_trial_cannot_admit_seed_upload() {
+        let mut alerts = RecoveryAlerts::new();
+        let attempt = crate::app::cache::AppGeneration::next();
+        alerts.pin_attempt = Some(attempt);
+        alerts.submitting = true;
+        *alerts.seed_slot.0.lock().unwrap() = Some(Zeroizing::new(b"synthetic-seed-json".to_vec()));
+        assert!(alerts
+            .take_seed_for_upload(crate::app::cache::AppGeneration::next(), 7, 7)
+            .is_none());
+        alerts.cancel_pin_attempt();
+        assert!(alerts.take_seed_for_upload(attempt, 7, 7).is_none());
+        assert!(alerts.seed_slot.0.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn only_exact_live_full_cube_attempt_releases_staged_seed() {
+        let mut alerts = RecoveryAlerts::new();
+        let attempt = crate::app::cache::AppGeneration::next();
+        alerts.pin_attempt = Some(attempt);
+        alerts.submitting = true;
+        *alerts.seed_slot.0.lock().unwrap() = Some(Zeroizing::new(b"synthetic-seed-json".to_vec()));
+        assert!(alerts.take_seed_for_upload(attempt, 6, 7).is_none());
+        assert_eq!(
+            alerts
+                .take_seed_for_upload(attempt, 7, 7)
+                .unwrap()
+                .as_slice(),
+            b"synthetic-seed-json"
+        );
+        assert!(alerts.take_seed_for_upload(attempt, 7, 7).is_none());
+    }
     #[tokio::test]
     async fn backup_metadata_keeps_twin_cubes_separate() {
         use crate::{chain::ChainId, dir::CoincubeDirectory};
@@ -939,7 +1112,7 @@ mod tests {
         use crate::{chain::ChainId, dir::CoincubeDirectory};
         let root_path = std::env::temp_dir().join(format!("blob-guard-{}", uuid::Uuid::new_v4()));
         let root = CoincubeDirectory::new(root_path.clone());
-        let network_dir = root.network_directory(ChainId::BitcoinBlake2b);
+        let _network_dir = root.network_directory(ChainId::BitcoinBlake2b);
         let mismatched = SeedBlobCube {
             uuid: "twin".to_string(),
             name: "Twin Cube".to_string(),
@@ -948,12 +1121,17 @@ mod tests {
             lightning_address: None,
         };
         let err = build_seed_blob_json(
-            &network_dir,
             root_path.as_path(),
             ChainId::BitcoinBlake2b,
             "twin",
             "1234",
             mismatched.clone(),
+            settings::CubeSettings::new_with_raw_id(
+                "twin".into(),
+                "Twin Cube".into(),
+                ChainId::BitcoinBlake2b,
+            ),
+            crate::app::cache::AppGeneration::next(),
         )
         .expect_err("a Bitcoin-labelled Cube must not be escrowed as a fork Cube");
         assert!(
@@ -968,12 +1146,17 @@ mod tests {
             ..mismatched
         };
         let err = build_seed_blob_json(
-            &network_dir,
             root_path.as_path(),
             ChainId::BitcoinBlake2b,
             "twin",
             "1234",
             matching,
+            settings::CubeSettings::new_with_raw_id(
+                "twin".into(),
+                "Twin Cube".into(),
+                ChainId::BitcoinBlake2b,
+            ),
+            crate::app::cache::AppGeneration::next(),
         )
         .expect_err("no settings file exists in this fixture");
         assert!(

@@ -66,6 +66,48 @@ pub struct ImportedBackupSource {
     pub daemon: Arc<dyn Daemon + Send + Sync>,
 }
 
+#[cfg(test)]
+mod seed_export_duress_tests {
+    use super::*;
+
+    #[test]
+    fn cancelled_kit_rejects_late_seed_words() {
+        let cache = Cache::default();
+        let mut kit = RecoveryKit::new();
+        let attempt = crate::app::cache::AppGeneration::next();
+        kit.flow = RecoveryKitState::PinEntry {
+            mode: RecoveryKitMode::Create,
+            error: None,
+        };
+        kit.pin_attempt = Some(attempt);
+        kit.pin.digits = ["9".into(), "9".into(), "9".into(), "9".into()];
+        let run = |kit: &mut RecoveryKit, message| {
+            update_with_imported(
+                kit,
+                message,
+                &cache,
+                "destination",
+                SeedSource::Mnemonic,
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+        drop(run(&mut kit, RecoveryKitMessage::Cancel));
+        drop(run(
+            &mut kit,
+            RecoveryKitMessage::PinVerifiedAttempt(
+                attempt,
+                Ok(Zeroizing::new(vec!["abandon".into(); 12])),
+            ),
+        ));
+        assert!(matches!(kit.flow, RecoveryKitState::None));
+        assert!(kit.pin_attempt.is_none());
+        assert_eq!(kit.pin.value().as_str(), "");
+    }
+}
+
 impl ImportedBackupSource {
     async fn snapshot(&self, cube_uuid: &str) -> Result<ImportedDescriptorBlob, String> {
         let info = self.daemon.get_info().await.map_err(|e| e.to_string())?;
@@ -707,20 +749,6 @@ pub fn update_with_imported(
 
         RecoveryKitMessage::VerifyPin => verify_pin(rk, cache, local_cube_id),
 
-        RecoveryKitMessage::PinDuress(attempt) => {
-            if rk.pin_attempt != Some(attempt)
-                || !matches!(rk.flow, RecoveryKitState::PinEntry { .. })
-            {
-                return Task::none();
-            }
-            rk.reset_flow();
-            Task::done(Message::View(view::Message::DuressActivateLocal {
-                app: cache.app_generation,
-                cube_id: local_cube_id.to_string(),
-                chain: cache.chain(),
-            }))
-        }
-
         RecoveryKitMessage::PinVerifiedAttempt(attempt, result) => {
             if rk.pin_attempt != Some(attempt)
                 || !matches!(rk.flow, RecoveryKitState::PinEntry { .. })
@@ -1220,6 +1248,7 @@ fn verify_pin(rk: &mut RecoveryKit, cache: &Cache, local_cube_id: &str) -> Task<
     let throttle_root = datadir.clone();
     let attempt = crate::app::cache::AppGeneration::next();
     rk.pin_attempt = Some(attempt);
+    let app_generation = cache.app_generation;
     Task::perform(
         async move {
             // Wrap the decrypted mnemonic in `Zeroizing` at the
@@ -1240,6 +1269,7 @@ fn verify_pin(rk: &mut RecoveryKit, cache: &Cache, local_cube_id: &str) -> Task<
                 crate::services::unlock::throttle::classify_seed_export_cube(
                     &throttle_root,
                     &cube,
+                    app_generation,
                     &pin,
                     || {
                         super::general::load_mnemonic_words(
@@ -1257,13 +1287,13 @@ fn verify_pin(rk: &mut RecoveryKit, cache: &Cache, local_cube_id: &str) -> Task<
         },
         |res| {
             let outcome = match res {
-                Ok(crate::services::unlock::throttle::SeedExportAttempt::Words(words)) => {
+                Ok(crate::services::unlock::throttle::SeedExportCubeAttempt::Words(words)) => {
                     RecoveryKitMessage::PinVerifiedAttempt(attempt, Ok(words))
                 }
-                Ok(crate::services::unlock::throttle::SeedExportAttempt::Duress) => {
-                    RecoveryKitMessage::PinDuress(attempt)
+                Ok(crate::services::unlock::throttle::SeedExportCubeAttempt::Duress(proof)) => {
+                    return Message::View(view::Message::DuressActivateLocal(proof));
                 }
-                Ok(crate::services::unlock::throttle::SeedExportAttempt::Wrong(penalty)) => {
+                Ok(crate::services::unlock::throttle::SeedExportCubeAttempt::Wrong(penalty)) => {
                     RecoveryKitMessage::PinVerifiedAttempt(
                         attempt,
                         Err(if penalty.is_zero() {
@@ -1273,7 +1303,7 @@ fn verify_pin(rk: &mut RecoveryKit, cache: &Cache, local_cube_id: &str) -> Task<
                         }),
                     )
                 }
-                Ok(crate::services::unlock::throttle::SeedExportAttempt::Locked(remaining)) => {
+                Ok(crate::services::unlock::throttle::SeedExportCubeAttempt::Locked(remaining)) => {
                     RecoveryKitMessage::PinVerifiedAttempt(
                         attempt,
                         Err(crate::services::unlock::throttle::lockout_message(

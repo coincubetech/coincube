@@ -61,6 +61,63 @@ fn privacy_render_needs_cover(
         )
 }
 
+#[cfg(test)]
+mod seed_export_duress_gui_tests {
+    use super::*;
+
+    #[test]
+    fn stale_app_callback_carries_verified_duress_after_switch() {
+        let _guard = crate::app::session::test_guard();
+        crate::app::session::close();
+        let path = std::env::temp_dir().join(format!("seed-export-gui-{}", uuid::Uuid::new_v4()));
+        let (app, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+        let root = app.datadir().clone();
+        let cube_id = app.cube_settings().id.clone();
+        let chain = app.cube_settings().network;
+        let app_generation = app.cache().app_generation;
+        let (home, startup) = home::Home::new_for_chain(root.clone(), None);
+        drop(startup);
+        let mut gui = GUI::reviewer_app_home_gui(app, home);
+        let pane_id = gui.focus.unwrap();
+        let old_generation = gui.panes.get(pane_id).unwrap().tabs[0]
+            .app_generation_token()
+            .unwrap();
+        // The first App message registers this exact App/Cube/root origin.
+        drop(
+            gui.panes.get_mut(pane_id).unwrap().tabs[0]
+                .update(tab::Message::UnlockMotionTick(Instant::now())),
+        );
+        let (home, startup) = home::Home::new_for_chain(root.clone(), None);
+        drop(startup);
+        gui.panes.get_mut(pane_id).unwrap().tabs[0].state = tab::State::Home(home);
+        let proof = crate::services::unlock::throttle::verified_seed_export_duress_for_test(
+            path.clone(),
+            cube_id,
+            chain,
+            app_generation,
+        );
+        drop(gui.update(Message::Pane(
+            pane_id,
+            pane::Message::tab(
+                1,
+                tab::Message::AppAsync(
+                    old_generation,
+                    Box::new(tab::Message::Run(AppMessage::View(
+                        crate::app::view::Message::DuressActivateLocal(proof),
+                    ))),
+                ),
+            ),
+        )));
+        assert!(matches!(
+            gui.panes.get(pane_id).unwrap().tabs[0].state,
+            tab::State::DuressActive(_)
+        ));
+        assert!(!crate::app::session::is_open());
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+}
+
 use iced::window::Id;
 
 /// Both automatic polling and explicit signing actions need the current
@@ -1043,6 +1100,28 @@ impl GUI {
                 let tab::Message::AppAsync(generation, message) = *tab_message else {
                     unreachable!();
                 };
+                if let tab::Message::Run(AppMessage::View(
+                    crate::app::view::Message::DuressActivateLocal(_),
+                )) = message.as_ref()
+                {
+                    let exists = self
+                        .panes
+                        .get(pane_id)
+                        .is_some_and(|pane| pane.tabs.iter().any(|tab| tab.id == tab_id));
+                    if !exists {
+                        return Task::none();
+                    }
+                    let tab::Message::Run(AppMessage::View(
+                        crate::app::view::Message::DuressActivateLocal(proof),
+                    )) = *message
+                    else {
+                        unreachable!()
+                    };
+                    return self.update(Message::Pane(
+                        pane_id,
+                        pane::Message::tab(tab_id, tab::Message::LocalDuress(proof)),
+                    ));
+                }
                 let current = self
                     .panes
                     .get(pane_id)
@@ -1060,6 +1139,28 @@ impl GUI {
                 let tab::Message::ForkAsync(generation, message) = *tab_message else {
                     unreachable!();
                 };
+                if let tab::Message::Run(AppMessage::View(
+                    crate::app::view::Message::DuressActivateLocal(_),
+                )) = message.as_ref()
+                {
+                    let exists = self
+                        .panes
+                        .get(pane_id)
+                        .is_some_and(|pane| pane.tabs.iter().any(|tab| tab.id == tab_id));
+                    if !exists {
+                        return Task::none();
+                    }
+                    let tab::Message::Run(AppMessage::View(
+                        crate::app::view::Message::DuressActivateLocal(proof),
+                    )) = *message
+                    else {
+                        unreachable!()
+                    };
+                    return self.update(Message::Pane(
+                        pane_id,
+                        pane::Message::tab(tab_id, tab::Message::LocalDuress(proof)),
+                    ));
+                }
                 let current = self
                     .panes
                     .get(pane_id)

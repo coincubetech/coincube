@@ -300,11 +300,7 @@ pub enum Message {
     /// A settings PIN trial matched this Cube's local duress marker. The tab
     /// checks the originating App/Cube before invoking the same local wipe
     /// orchestrator used by ordinary PIN unlock; no seed travels in this event.
-    DuressActivateLocal {
-        app: crate::app::cache::AppGeneration,
-        cube_id: String,
-        chain: crate::chain::ChainId,
-    },
+    DuressActivateLocal(crate::services::unlock::throttle::VerifiedSeedExportDuress),
     ToggleTheme,
     DismissReceivedCelebration,
     /// Answer to the one-time recovery-alerts consent prompt overlay
@@ -570,8 +566,15 @@ pub enum RecoveryAlertsMessage {
     ConfirmFullCube,
     /// Abandon the in-progress Full-Cube PIN entry.
     CancelFullCube,
-    /// The exact Full-Cube PIN trial matched the local duress marker.
-    FullCubePinDuress(crate::app::cache::AppGeneration, u64),
+    /// Seed JSON was staged privately after the PIN trial. The handler must
+    /// admit this exact attempt before it may begin any escrow network call.
+    FullCubePinReady(crate::app::cache::AppGeneration, u64),
+    FullCubePinFailed(crate::app::cache::AppGeneration, u64, String),
+    FullCubeUploadResult(
+        crate::app::cache::AppGeneration,
+        u64,
+        Result<crate::services::coincube::VaultMonitoringStatus, String>,
+    ),
     /// Async result of a level change — the updated status. The `u64` is the
     /// spawn-time `session_generation` (see `StatusLoaded`); a stale result is
     /// dropped rather than clobbering a newer session's state. The trailing
@@ -1297,8 +1300,6 @@ pub enum BackupWalletMessage {
         crate::app::cache::AppGeneration,
         Result<zeroize::Zeroizing<Vec<String>>, String>,
     ),
-    /// The exact PIN trial matched the local duress marker; no words travel.
-    PinDuress(crate::app::cache::AppGeneration),
     /// Async result of persisting `backed_up = true` to settings.json after
     /// the user successfully completed the verification step.
     BackupSaveResult(Result<(), String>),
@@ -1331,7 +1332,6 @@ impl std::fmt::Debug for BackupWalletMessage {
                 .debug_tuple("PinVerifiedAttempt")
                 .field(&Err::<(), _>(e))
                 .finish(),
-            Self::PinDuress(_) => write!(f, "PinDuress"),
             Self::BackupSaveResult(res) => f.debug_tuple("BackupSaveResult").field(res).finish(),
         }
     }
@@ -1433,8 +1433,6 @@ pub enum RecoveryKitMessage {
         crate::app::cache::AppGeneration,
         Result<zeroize::Zeroizing<Vec<String>>, String>,
     ),
-    /// The exact PIN trial matched the local duress marker; no words travel.
-    PinDuress(crate::app::cache::AppGeneration),
     /// Recovery password input changed. Wrapped in `Zeroizing` at
     /// the message level (not just on the state field) because
     /// Iced's runtime clones messages between update/task/view —
@@ -1579,7 +1577,6 @@ impl std::fmt::Debug for RecoveryKitMessage {
                 .debug_tuple("PinVerifiedAttempt")
                 .field(&Err::<(), _>(e))
                 .finish(),
-            Self::PinDuress(_) => write!(f, "PinDuress"),
             Self::PasswordChanged(_) => f
                 .debug_tuple("PasswordChanged")
                 .field(&"<redacted>")

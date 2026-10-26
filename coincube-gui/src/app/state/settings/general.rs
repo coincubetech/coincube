@@ -510,6 +510,32 @@ mod tests {
     }
 
     #[test]
+    fn backup_stale_seed_result_after_cancel_cannot_reopen_flow() {
+        let mut state = state();
+        let attempt = crate::app::cache::AppGeneration::next();
+        state.backup_state = BackupSeedState::PinEntry { error: None };
+        state.backup_pin_attempt = Some(attempt);
+        state.backup_pin.digits = ["9".into(), "9".into(), "9".into(), "9".into()];
+        let _ = state.update(
+            None,
+            &Cache::default(),
+            backup_msg(view::BackupWalletMessage::PreviousStep),
+        );
+        let _ = state.update(
+            None,
+            &Cache::default(),
+            backup_msg(view::BackupWalletMessage::PinVerifiedAttempt(
+                attempt,
+                Ok(Zeroizing::new(words())),
+            )),
+        );
+        assert_eq!(state.backup_state, BackupSeedState::None);
+        assert!(state.backup_pin_attempt.is_none());
+        assert!(state.backup_mnemonic.is_none());
+        assert_eq!(state.backup_pin.value().as_str(), "");
+    }
+
+    #[test]
     fn intro_and_previous_step_transitions_clear_sensitive_state() {
         let mut state = state();
         state.backup_mnemonic = Some(Zeroizing::new(words()));
@@ -1127,6 +1153,7 @@ impl GeneralSettingsState {
                 let throttle_root = datadir.clone();
                 let attempt = crate::app::cache::AppGeneration::next();
                 self.backup_pin_attempt = Some(attempt);
+                let app_generation = cache.app_generation;
                 // Run Argon2id PIN verification + mnemonic decryption off
                 // the UI thread to avoid blocking the event loop.
                 Task::perform(
@@ -1142,6 +1169,7 @@ impl GeneralSettingsState {
                             unlock::throttle::classify_seed_export_cube(
                                 &throttle_root,
                                 &cube,
+                                app_generation,
                                 &pin,
                                 || {
                                     load_mnemonic_words(
@@ -1159,13 +1187,13 @@ impl GeneralSettingsState {
                     },
                     |res| {
                         let outcome = match res {
-                            Ok(unlock::throttle::SeedExportAttempt::Words(words)) => {
+                            Ok(unlock::throttle::SeedExportCubeAttempt::Words(words)) => {
                                 BackupWalletMessage::PinVerifiedAttempt(attempt, Ok(words))
                             }
-                            Ok(unlock::throttle::SeedExportAttempt::Duress) => {
-                                BackupWalletMessage::PinDuress(attempt)
+                            Ok(unlock::throttle::SeedExportCubeAttempt::Duress(proof)) => {
+                                return Message::View(view::Message::DuressActivateLocal(proof));
                             }
-                            Ok(unlock::throttle::SeedExportAttempt::Wrong(penalty)) => {
+                            Ok(unlock::throttle::SeedExportCubeAttempt::Wrong(penalty)) => {
                                 BackupWalletMessage::PinVerifiedAttempt(
                                     attempt,
                                     Err(if penalty.is_zero() {
@@ -1175,7 +1203,7 @@ impl GeneralSettingsState {
                                     }),
                                 )
                             }
-                            Ok(unlock::throttle::SeedExportAttempt::Locked(remaining)) => {
+                            Ok(unlock::throttle::SeedExportCubeAttempt::Locked(remaining)) => {
                                 BackupWalletMessage::PinVerifiedAttempt(
                                     attempt,
                                     Err(unlock::throttle::lockout_message(remaining)),
@@ -1190,22 +1218,6 @@ impl GeneralSettingsState {
                         ))
                     },
                 )
-            }
-            BackupWalletMessage::PinDuress(attempt) => {
-                if self.backup_pin_attempt != Some(attempt)
-                    || !matches!(self.backup_state, BackupSeedState::PinEntry { .. })
-                {
-                    return Task::none();
-                }
-                self.backup_pin_attempt = None;
-                self.backup_pin.clear();
-                self.backup_mnemonic = None;
-                self.backup_state = BackupSeedState::None;
-                Task::done(Message::View(view::Message::DuressActivateLocal {
-                    app: cache.app_generation,
-                    cube_id: self.cube_id.clone(),
-                    chain: cache.chain(),
-                }))
             }
             BackupWalletMessage::PinVerifiedAttempt(attempt, result) => {
                 if self.backup_pin_attempt != Some(attempt)

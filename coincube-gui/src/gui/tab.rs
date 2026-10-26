@@ -411,6 +411,9 @@ pub enum Message {
     /// An App callback is valid only for the App generation that emitted it.
     /// A retained Launcher tab can otherwise reuse this tab ID after Lock.
     AppAsync(u64, Box<Message>),
+    /// A verified settings duress marker survives an App generation change.
+    /// The proof is one-use and bound to the original data root/Cube.
+    LocalDuress(crate::services::unlock::throttle::VerifiedSeedExportDuress),
     ForkAsync(u64, Box<Message>),
     ForkTaskFinished(u64, u64),
     Launch(home::Message),
@@ -835,6 +838,12 @@ pub struct Tab {
     /// before the Cube is up waits here.
     pending_unlock_warnings: Vec<String>,
     app_generation: u64,
+    seed_export_origins: Vec<(
+        crate::app::cache::AppGeneration,
+        std::path::PathBuf,
+        String,
+        crate::chain::ChainId,
+    )>,
     claim_open: Option<home::ClaimOpenIntent>,
     fork_session_generation: u64,
     fork_save_task: Option<iced::task::Handle>,
@@ -895,6 +904,7 @@ impl Tab {
             unlock_floor: None,
             pending_unlock_warnings: Vec::new(),
             app_generation: 0,
+            seed_export_origins: Vec::new(),
             claim_open: None,
             fork_session_generation: 0,
             fork_save_task: None,
@@ -1388,7 +1398,26 @@ impl Tab {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        if let State::App(app) = &self.state {
+            let origin = app.cache().app_generation;
+            if !self
+                .seed_export_origins
+                .iter()
+                .any(|(known, _, _, _)| *known == origin)
+            {
+                self.seed_export_origins.push((
+                    origin,
+                    app.datadir().path().to_path_buf(),
+                    app.cube_settings().id.clone(),
+                    app.cube_settings().network,
+                ));
+            }
+        }
         let message = match message {
+            Message::LocalDuress(proof) => return self.activate_verified_seed_export_duress(proof),
+            Message::Run(app::Message::View(app::view::Message::DuressActivateLocal(proof))) => {
+                return self.activate_verified_seed_export_duress(proof);
+            }
             Message::UnlockMotionTick(now) => {
                 if self.unlock_motion.is_some_and(|started| {
                     home::launcher_presenter::unlock_turn_progress(started, now) >= 1.0
@@ -1490,6 +1519,59 @@ impl Tab {
                 result
             }
         }
+    }
+
+    fn activate_verified_seed_export_duress(
+        &mut self,
+        proof: crate::services::unlock::throttle::VerifiedSeedExportDuress,
+    ) -> Task<Message> {
+        let (origin_root, origin_cube, origin_chain, origin_app) = proof.origin();
+        if !self
+            .seed_export_origins
+            .iter()
+            .any(|(app, root, cube, chain)| {
+                *app == origin_app
+                    && crate::chain::same_path(root, origin_root)
+                    && cube == origin_cube
+                    && *chain == origin_chain
+            })
+        {
+            return Task::none();
+        }
+        let Some((root, cube_id, chain, _app, account_id)) = proof.claim() else {
+            return Task::none();
+        };
+        if !root.is_absolute() || cube_id.is_empty() {
+            return Task::none();
+        }
+        let datadir = CoincubeDirectory::new(root.clone());
+        let network = chain.bitcoin_network();
+        // Drop the current App, any in-flight seed reveal, and any different
+        // Cube session before the local wipe. A restored Cube can have no
+        // process session; verified marker evidence is sufficient.
+        self.state = State::DuressActive(
+            crate::app::view::duress::active_screen::DuressActiveScreen::with_context(
+                datadir.clone(),
+                Some(network),
+            ),
+        );
+        self.seed_export_origins.clear();
+        crate::app::session::close();
+        Task::perform(
+            async move {
+                run_local_duress_activation(&root, account_id).await;
+                let queue_pending = crate::services::duress::queue::DuressQueue::new(&root)
+                    .is_empty()
+                    .map(|empty| !empty)
+                    .unwrap_or(false);
+                (datadir, network, queue_pending)
+            },
+            |(datadir, network, queue_pending)| Message::DuressActivated {
+                datadir,
+                network,
+                queue_pending,
+            },
+        )
     }
 
     fn update_inner(&mut self, message: Message) -> Task<Message> {
@@ -3092,55 +3174,6 @@ impl Tab {
                             );
                         self.state = State::DuressActive(screen);
                         Task::none()
-                    }
-                    app::Message::View(app::view::Message::DuressActivateLocal {
-                        app: origin,
-                        cube_id,
-                        chain,
-                    }) => {
-                        // Only the App and Cube that issued this settings PIN
-                        // trial may trigger the local wipe. AppAsync already
-                        // fences a result after tab replacement; this checks
-                        // the inner origin if the same tab opened another App.
-                        if origin != app.cache().app_generation
-                            || cube_id != app.cube_settings().id
-                            || chain != app.cube_settings().network
-                            || crate::app::session::current_cube_id().as_deref()
-                                != Some(cube_id.as_str())
-                        {
-                            return Task::none();
-                        }
-                        let datadir = app.datadir().clone();
-                        let network = app.cache().network;
-                        let root = datadir.path().to_path_buf();
-                        let account_id = crate::services::duress::DuressLocalState::load(&root)
-                            .map(|state| state.account_id)
-                            .unwrap_or(None);
-                        // Replace the App first, dropping every displayed seed
-                        // and pending settings flow before the wipe starts.
-                        self.state = State::DuressActive(
-                            crate::app::view::duress::active_screen::DuressActiveScreen::with_context(
-                                datadir.clone(),
-                                Some(network),
-                            ),
-                        );
-                        crate::app::session::close();
-                        Task::perform(
-                            async move {
-                                run_local_duress_activation(&root, account_id).await;
-                                let queue_pending =
-                                    crate::services::duress::queue::DuressQueue::new(&root)
-                                        .is_empty()
-                                        .map(|empty| !empty)
-                                        .unwrap_or(false);
-                                (datadir, network, queue_pending)
-                            },
-                            |(datadir, network, queue_pending)| Message::DuressActivated {
-                                datadir,
-                                network,
-                                queue_pending,
-                            },
-                        )
                     }
                     app::Message::View(app::view::Message::OpenConnectSignIn) => {
                         // Re-check this tab's ConnectAccountPanel against
@@ -7721,5 +7754,80 @@ mod layout_tests {
             std::mem::size_of::<crate::loader::Loader>(),
             std::mem::size_of::<crate::app::App>(),
         );
+    }
+}
+
+#[cfg(test)]
+mod seed_export_duress_routing_tests {
+    use super::*;
+
+    #[test]
+    fn cancelled_or_switched_export_still_activates_verified_duress_without_session() {
+        let _guard = app::session::test_guard();
+        app::session::close();
+        let root = std::env::temp_dir().join(format!("seed-duress-tab-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let directory = CoincubeDirectory::new(root.clone());
+        let (home, startup) = home::Home::new_for_chain(directory, None);
+        drop(startup);
+        let mut tab = Tab::new(1, State::Home(home));
+        let app_generation = app::cache::AppGeneration::next();
+        tab.seed_export_origins.push((
+            app_generation,
+            root.clone(),
+            "verified-cube".into(),
+            crate::chain::ChainId::Bitcoin,
+        ));
+        let proof = crate::services::unlock::throttle::verified_seed_export_duress_for_test(
+            root.clone(),
+            "verified-cube".into(),
+            crate::chain::ChainId::Bitcoin,
+            app_generation,
+        );
+        drop(tab.update(Message::LocalDuress(proof)));
+        assert!(matches!(tab.state, State::DuressActive(_)));
+        assert!(!app::session::is_open());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unrelated_or_replayed_proof_cannot_activate_or_clear_another_session() {
+        let _guard = app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("seed-duress-other-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (home, startup) = home::Home::new_for_chain(CoincubeDirectory::new(root.clone()), None);
+        drop(startup);
+        let mut tab = Tab::new(1, State::Home(home));
+        let app_generation = app::cache::AppGeneration::next();
+        tab.seed_export_origins.push((
+            app_generation,
+            root.clone(),
+            "expected".into(),
+            crate::chain::ChainId::Bitcoin,
+        ));
+        app::session::open("other-cube".into(), zeroize::Zeroizing::new("2468".into()));
+        let forged = crate::services::unlock::throttle::verified_seed_export_duress_for_test(
+            root.clone(),
+            "unrelated".into(),
+            crate::chain::ChainId::Bitcoin,
+            app_generation,
+        );
+        assert_eq!(tab.update(Message::LocalDuress(forged)).units(), 0);
+        assert!(matches!(tab.state, State::Home(_)));
+        assert_eq!(
+            app::session::current_cube_id().as_deref(),
+            Some("other-cube")
+        );
+        let proof = crate::services::unlock::throttle::verified_seed_export_duress_for_test(
+            root.clone(),
+            "expected".into(),
+            crate::chain::ChainId::Bitcoin,
+            app_generation,
+        );
+        drop(tab.update(Message::LocalDuress(proof.clone())));
+        assert!(matches!(tab.state, State::DuressActive(_)));
+        assert!(!app::session::is_open());
+        assert_eq!(tab.update(Message::LocalDuress(proof)).units(), 0);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
