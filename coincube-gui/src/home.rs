@@ -467,6 +467,8 @@ pub struct Home {
     network_catalog: Vec<(ChainId, Vec<CubeSettings>)>,
     /// The networks `network_catalog` was last asked to load.
     network_catalog_requested: Vec<ChainId>,
+    /// Each load claims a generation; an older read is dropped on arrival.
+    network_catalog_generation: u64,
     /// Descriptor checksums that already have a Bitcoin Blake2b claim target
     /// on this device. Resolved from the fork chain's settings file when the
     /// network list is refreshed — never from the view, which would put a file
@@ -655,6 +657,7 @@ impl Home {
                 state: State::Unchecked,
                 network_catalog: Vec::new(),
                 network_catalog_requested: Vec::new(),
+                network_catalog_generation: 0,
                 displayed_networks: if developer_mode {
                     NETWORKS.to_vec()
                 } else {
@@ -1475,7 +1478,7 @@ impl Home {
     pub(crate) fn reload_global_settings(&mut self) -> Task<Message> {
         let task = self.reload_global_settings_inner();
         // Developer mode and the Blake2b beta change which networks show.
-        match self.refresh_network_catalog() {
+        match self.refresh_network_catalog(false) {
             Some(load) => Task::batch([task, load]),
             None => task,
         }
@@ -1672,23 +1675,31 @@ impl Home {
     /// Read the other listed networks' Cubes whenever the set changes: the
     /// current network's list was checked (it may have moved), or settings
     /// changed which networks are listed.
-    fn refresh_network_catalog(&mut self) -> Option<Task<Message>> {
+    /// `force` rereads even an unchanged set, after the current list was
+    /// checked, so another tab's create or delete shows here too.
+    fn refresh_network_catalog(&mut self, force: bool) -> Option<Task<Message>> {
         let wanted: Vec<ChainId> = self
             .displayed_networks
             .iter()
             .copied()
             .filter(|chain| *chain != self.network)
             .collect();
-        if wanted == self.network_catalog_requested {
+        if wanted == self.network_catalog_requested && (!force || wanted.is_empty()) {
             return None;
         }
+        self.network_catalog_generation += 1;
+        let generation = self.network_catalog_generation;
         self.network_catalog
             .retain(|(chain, _)| wanted.contains(chain));
         self.network_catalog_requested = wanted.clone();
         Some(Task::batch(wanted.into_iter().map(|chain| {
             let dir = self.datadir_path.network_directory(chain);
             Task::perform(read_network_catalog(chain, dir), move |cubes| {
-                Message::NetworkCatalogLoaded { chain, cubes }
+                Message::NetworkCatalogLoaded {
+                    generation,
+                    chain,
+                    cubes,
+                }
             })
         })))
     }
@@ -2652,10 +2663,17 @@ impl Home {
             }
             #[cfg(not(target_os = "macos"))]
             Message::NativePasskeyTick => Task::none(),
-            Message::NetworkCatalogLoaded { chain, cubes } => {
-                // A late read for a network that has since become current, or
-                // stopped being listed, describes nothing on screen.
-                if self.network_catalog_requested.contains(&chain) {
+            Message::NetworkCatalogLoaded {
+                generation,
+                chain,
+                cubes,
+            } => {
+                // A read superseded by a newer load, or for a network that
+                // has since become current or stopped being listed, is
+                // dropped: it describes nothing on screen.
+                if generation == self.network_catalog_generation
+                    && self.network_catalog_requested.contains(&chain)
+                {
                     match self.network_catalog.iter_mut().find(|(c, _)| *c == chain) {
                         Some((_, list)) => *list = cubes,
                         None => self.network_catalog.push((chain, cubes)),
@@ -2929,10 +2947,12 @@ impl Home {
                     tracing::debug!(
                         "Ignoring SelectNetwork action because developer mode is disabled"
                     );
+                    self.catalog.pending_select = None;
                     return Task::none();
                 }
                 if let Some(reason) = self.chain_availability(network).reason() {
                     self.set_error(reason.to_string());
+                    self.catalog.pending_select = None;
                     return Task::none();
                 }
                 self.network = network;
@@ -3078,6 +3098,7 @@ impl Home {
                     Task::none()
                 }
                 Err(e) => {
+                    self.catalog.pending_select = None;
                     self.error = Some(e.to_string());
                     Task::none()
                 }
@@ -3128,7 +3149,7 @@ impl Home {
                         }
                         _ => Task::none(),
                     };
-                    match self.refresh_network_catalog() {
+                    match self.refresh_network_catalog(true) {
                         Some(load) => Task::batch([select, load]),
                         None => select,
                     }
@@ -6912,6 +6933,7 @@ pub enum Message {
     },
     /// Another network's Cubes, read without touching its directory.
     NetworkCatalogLoaded {
+        generation: u64,
         chain: ChainId,
         cubes: Vec<CubeSettings>,
     },

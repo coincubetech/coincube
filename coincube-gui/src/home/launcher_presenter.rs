@@ -1421,6 +1421,10 @@ pub(super) fn floor_body_in(home: &Home, available: f32) -> Element<'_, ViewMess
     if !projection.floor_eligible(home.catalog.mode) {
         return list_body(home);
     }
+    // Only Connect restore rows are left: the List shows them.
+    if projection.locals.is_empty() && !projection.no_matches() {
+        return list_body(home);
+    }
     // P-Launcher's `.empty` state: every Cube is filtered out. Placed at
     // `top: 32%` of the stage, where the floor would be.
     if projection.locals.is_empty() {

@@ -838,7 +838,8 @@ pub(super) fn network_layer<'a>(
                     ..Default::default()
                 }
             })
-            .on_press(if on {
+            // Retry is possible while the filtered network is not yet current.
+            .on_press(if on && chain == home.network {
                 close.clone()
             } else {
                 ViewMessage::Catalog(CatalogMessage::Filter(NetworkFilter::Network(chain)))

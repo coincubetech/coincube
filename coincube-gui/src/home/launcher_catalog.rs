@@ -339,14 +339,28 @@ impl Home {
         &mut self,
         key: &CubeCatalogKey,
     ) -> Option<Task<Message>> {
-        if key.chain == self.network
-            || key.cube_id.is_empty()
+        if key.chain == self.network {
+            // While the switch to this network is still being checked, the
+            // latest pick wins over the one that started the switch.
+            let switching = self.catalog.pending_select.is_some()
+                && !matches!(&self.state, State::Cubes { source, .. } if *source == self.network);
+            if switching && !key.cube_id.is_empty() {
+                self.catalog.pending_select = Some(key.clone());
+                return Some(Task::none());
+            }
+            return None;
+        }
+        if key.cube_id.is_empty()
             || !self
                 .network_catalog(key.chain)
                 .iter()
                 .any(|cube| cube.id == key.cube_id)
         {
             return None;
+        }
+        if self.claim_handoff_pending() {
+            self.set_error(CLAIM_HOLDS_NETWORK);
+            return Some(Task::none());
         }
         self.catalog.pending_select = Some(key.clone());
         self.catalog.selected = None;
@@ -355,6 +369,21 @@ impl Home {
         Some(Task::done(Message::View(
             super::ViewMessage::SelectNetwork(key.chain),
         )))
+    }
+}
+
+/// Switching networks would cancel a Bitcoin Blake2b Claim handoff, which
+/// is bound to the Bitcoin Cube it started from.
+const CLAIM_HOLDS_NETWORK: &str = "Finish or cancel the Bitcoin Blake2b Claim before showing \
+     another network's Cubes.";
+
+impl Home {
+    /// A Claim handoff waits on this network; switching would cancel it.
+    pub(super) fn claim_handoff_pending(&self) -> bool {
+        self.pending_fork_claim.is_some()
+            || self.imported_claim.is_some()
+            || self.claim_owner.is_some()
+            || self.pending_begin_claim
     }
 }
 
@@ -623,6 +652,12 @@ impl Home {
             }
             CatalogMessage::Filter(filter) => {
                 self.catalog.network_menu = false;
+                if matches!(filter, NetworkFilter::Network(chain) if chain != self.network)
+                    && self.claim_handoff_pending()
+                {
+                    self.set_error(CLAIM_HOLDS_NETWORK);
+                    return Task::none();
+                }
                 self.catalog.filter = filter;
                 self.catalog.page = 0;
                 // A selection the filter hides falls back to browsing.
@@ -4084,31 +4119,163 @@ mod tests {
             chain: ChainId::Testnet4,
             cube_id: "t1".into(),
         };
+        let bench = CubeCatalogKey {
+            chain: ChainId::Testnet4,
+            cube_id: "t2".into(),
+        };
         let task = home.update_catalog(CatalogMessage::SelectFloor(lab.clone()));
-        assert!(task.units() > 0, "the switch to Testnet4 is requested");
+        assert!(
+            run_task(task).iter().any(|m| matches!(
+                m,
+                Message::View(ViewMessage::SelectNetwork(ChainId::Testnet4))
+            )),
+            "the switch to Testnet4 is requested"
+        );
         assert_eq!(home.catalog.pending_select, Some(lab.clone()));
         assert!(
             home.catalog.selected.is_none(),
             "nothing selected until checked"
         );
 
-        // The switch, then Testnet4's checked list arriving.
-        home.network = ChainId::Testnet4;
+        // The real switch. Its probe is not run: Testnet4's list arrives below.
+        drop(home.update(Message::View(ViewMessage::SelectNetwork(ChainId::Testnet4))));
+        assert_eq!(home.network, ChainId::Testnet4);
+        // A later pick while the switch is checked wins.
+        drop(home.update_catalog(CatalogMessage::SelectFloor(bench.clone())));
+        assert_eq!(home.catalog.pending_select, Some(bench.clone()));
+
         let checked = State::Cubes {
             cubes: home.network_catalog(ChainId::Testnet4).to_vec(),
             create_cube: false,
             source: ChainId::Testnet4,
         };
-        let task = home.update(Message::Checked {
+        let replay = run_task(home.update(Message::Checked {
             for_chain: ChainId::Testnet4,
             res: Ok(checked),
-        });
+        }));
         assert!(home.catalog.pending_select.is_none());
-        assert!(task.units() > 0, "the pending selection is replayed");
-        catalog(&mut home, CatalogMessage::SelectFloor(lab.clone()));
-        assert_eq!(home.catalog.selected, Some(lab));
+        assert!(
+            replay.iter().any(|m| matches!(
+                m,
+                Message::View(ViewMessage::Catalog(CatalogMessage::SelectFloor(key))) if *key == bench
+            )),
+            "the pending selection is replayed: {:?}",
+            replay
+        );
+        // As the runtime would: feed the replay back.
+        for message in replay {
+            if matches!(message, Message::View(ViewMessage::Catalog(_))) {
+                drop(home.update(message));
+            }
+        }
+        assert_eq!(home.catalog.selected, Some(bench));
         // The floor keeps every network, in the same order.
         assert_eq!(names(&home), ["Alpha", "Beta", "Lab", "Bench", "Sig"]);
+    }
+
+    /// Runs a task's futures to completion and returns its messages.
+    fn run_task(task: Task<Message>) -> Vec<Message> {
+        use iced_runtime::futures::futures::StreamExt;
+        let Some(stream) = iced_runtime::task::into_stream(task) else {
+            return Vec::new();
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                stream
+                    .filter_map(|action| async move {
+                        match action {
+                            iced_runtime::Action::Output(message) => Some(message),
+                            _ => None,
+                        }
+                    })
+                    .collect()
+                    .await
+            })
+    }
+
+    #[test]
+    fn a_pending_claim_handoff_keeps_the_network() {
+        let mut home = all_networks();
+        home.pending_begin_claim = true;
+        let lab = CubeCatalogKey {
+            chain: ChainId::Testnet4,
+            cube_id: "t1".into(),
+        };
+        let messages = run_task(home.update_catalog(CatalogMessage::SelectFloor(lab)));
+        assert!(messages.is_empty(), "no switch: {:?}", messages);
+        assert!(home.catalog.pending_select.is_none());
+        assert_eq!(home.error.as_deref(), Some(CLAIM_HOLDS_NETWORK));
+        let messages = run_task(home.update_catalog(CatalogMessage::Filter(
+            NetworkFilter::Network(ChainId::Signet),
+        )));
+        assert!(messages.is_empty());
+        assert_eq!(home.catalog.filter, NetworkFilter::All);
+        assert!(home.pending_begin_claim, "the handoff survives");
+    }
+
+    #[test]
+    fn a_refused_switch_drops_the_pending_selection() {
+        let mut home = all_networks();
+        home.catalog.pending_select = Some(CubeCatalogKey {
+            chain: ChainId::Testnet4,
+            cube_id: "t1".into(),
+        });
+        home.developer_mode = false;
+        drop(home.update(Message::View(ViewMessage::SelectNetwork(ChainId::Testnet4))));
+        assert_eq!(home.network, ChainId::Bitcoin);
+        assert!(home.catalog.pending_select.is_none());
+    }
+
+    #[test]
+    fn restore_rows_stay_on_screen_when_the_filter_hides_every_local_cube() {
+        let mut home = all_networks();
+        home.remote_cubes = vec![remote("r-1", "Cloud copy", true, true, false, false)];
+        home.remote_cubes[0].network = settings::network_to_api_string(ChainId::Bitcoin);
+        home.displayed_networks.push(ChainId::Regtest);
+        // Regtest is not current, so Bitcoin's restore rows are filtered too:
+        // every Cube is hidden and the canvas empty state shows.
+        home.catalog.filter = NetworkFilter::Network(ChainId::Regtest);
+        let tree = home_tree(
+            "filtered-remotes",
+            &home,
+            WIDE,
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(tree.contains("No Cubes match these filters"));
+        // Live hides only the test networks' Cubes, and Bitcoin has none
+        // local here: its restore row must stay reachable.
+        if let State::Cubes { cubes, .. } = &mut home.state {
+            cubes.clear();
+        }
+        home.catalog.filter = NetworkFilter::Live;
+        let projection = project(&home);
+        assert!(projection.locals.is_empty() && projection.hidden > 0);
+        assert!(!projection.no_matches());
+        let tree = home_tree("live-remotes", &home, WIDE, "dark", theme::Theme::dark());
+        assert!(tree.contains("Cloud copy"), "the restore row is gone");
+        assert!(!tree.contains("No Cubes match these filters"));
+    }
+
+    #[test]
+    fn a_superseded_catalog_read_is_dropped() {
+        let mut home = all_networks();
+        home.network_catalog_generation = 2;
+        drop(home.update(Message::NetworkCatalogLoaded {
+            generation: 1,
+            chain: ChainId::Signet,
+            cubes: Vec::new(),
+        }));
+        assert_eq!(home.network_catalog(ChainId::Signet).len(), 1);
+        drop(home.update(Message::NetworkCatalogLoaded {
+            generation: 2,
+            chain: ChainId::Signet,
+            cubes: Vec::new(),
+        }));
+        assert!(home.network_catalog(ChainId::Signet).is_empty());
     }
 
     #[test]
