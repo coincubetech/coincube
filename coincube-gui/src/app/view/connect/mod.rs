@@ -268,7 +268,8 @@ pub fn connect_sheet<'a>(
         if let Some(error) = acct.error.as_ref() {
             column = column.push(account_error_card(error));
         }
-        column.push(section_content).into()
+        let content: Element<ConnectAccountMessage> = column.push(section_content).into();
+        content.map(ConnectSheetMessage::Account)
     } else if active_section == ConnectSheetSection::Account {
         signed_out_account_ux()
     } else {
