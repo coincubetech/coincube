@@ -555,30 +555,14 @@ fn assert_mounted_wallet_policy(labels: &Labels, width: u32) {
 }
 
 #[tokio::test]
-async fn mounted_pair_nav_accepts_vault_and_denies_imported_wallet() {
+async fn mounted_settings_pair_route_accepts_vault_and_denies_imported_wallet() {
+    // Settings routes live in page content; the Cube sidebar contains only
+    // the Settings entry. Exercise the mounted choice in its actual location.
     load_fonts();
     let size = iced::Size::new(1440.0, 2400.0);
     let viewport = iced::Rectangle::with_size(size);
     for scenario in ["wallet_default", "wallet_imported"] {
         let fixture = Fixture::new(scenario, SettingsOption::Wallet);
-        let context = fixture_nav_context(&fixture.cache);
-        let items = crate::app::view::nav::tertiary::items_for(&fixture.menu, &context)
-            .expect("mounted Vault settings navigation");
-        let pair = items
-            .iter()
-            .find(|item| item.label == "Pair with Keychain")
-            .expect("Pair navigation item");
-        if scenario == "wallet_imported" {
-            assert_eq!(
-                pair.disabled_reason.as_deref(),
-                Some(
-                    "Pairing is unavailable for imported wallets: this wallet has no Keychain-eligible key in Tenshu."
-                )
-            );
-        } else {
-            assert!(pair.disabled_reason.is_none(), "Vault Pair must be enabled");
-        }
-
         let renderer = <iced::Renderer as Headless>::new(
             coincube_ui::font::REGULAR,
             iced::Pixels(16.0),
@@ -600,30 +584,31 @@ async fn mounted_pair_nav_accepts_vault_and_denies_imported_wallet() {
         let pair_bounds = labels
             .0
             .iter()
-            .find(|(label, _)| label == "Pair with Keychain")
-            .expect("mounted Pair navigation label")
+            .find(|(label, _)| label.starts_with("Pair with Keychain"))
+            .expect("mounted Pair settings choice")
             .1;
         let pair_center = pair_bounds.center();
-        let sidebar_scroll = labels
+        let content_scroll = labels
             .1
             .iter()
             .find(|bounds| {
-                bounds.width < 500.0
+                bounds.width > 500.0
                     && pair_center.x >= bounds.x
                     && pair_center.x <= bounds.x + bounds.width
                     && pair_center.y >= bounds.y
                     && pair_center.y <= bounds.y + bounds.height
             })
-            .expect("Pair must be inside the visible sidebar scroll viewport");
+            .expect("Pair must be inside the visible settings content viewport");
         assert!(
-            pair_bounds.x >= sidebar_scroll.x
-                && pair_bounds.x + pair_bounds.width <= sidebar_scroll.x + sidebar_scroll.width
-                && pair_bounds.y >= sidebar_scroll.y
-                && pair_bounds.y + pair_bounds.height <= sidebar_scroll.y + sidebar_scroll.height
+            pair_bounds.x >= crate::app::view::nav::shell::FULL_WIDTH
+                && pair_bounds.x >= content_scroll.x
+                && pair_bounds.x + pair_bounds.width <= content_scroll.x + content_scroll.width
+                && pair_bounds.y >= content_scroll.y
+                && pair_bounds.y + pair_bounds.height <= content_scroll.y + content_scroll.height
                 && pair_bounds.y + pair_bounds.height <= size.height,
-            "Pair label is clipped or offscreen: {:?} in {:?}",
+            "Pair settings choice is clipped or offscreen: {:?} in {:?}",
             pair_bounds,
-            sidebar_scroll
+            content_scroll
         );
 
         let mut messages = Vec::new();
@@ -645,7 +630,7 @@ async fn mounted_pair_nav_accepts_vault_and_denies_imported_wallet() {
         if scenario == "wallet_imported" {
             assert!(
                 messages.is_empty(),
-                "visible imported Pair emitted an intent: {:?}",
+                "disabled imported Pair settings choice emitted an intent: {:?}",
                 messages
             );
         } else {
@@ -654,9 +639,9 @@ async fn mounted_pair_nav_accepts_vault_and_denies_imported_wallet() {
                     messages.as_slice(),
                     [Message::FocusAction(id), Message::Menu(Menu::Vault(
                         VaultSubMenu::Settings(Some(SettingsOption::LocalSigning))
-                    ))] if id == &Id::new("tenshu.shell.sub.Pair with Keychain.Some(Menu(Vault(Settings(Some(LocalSigning)))))")
+                    ))] if id == &Id::new("tenshu.settings.route.vault.pair")
                 ),
-                "visible eligible Pair must focus its exact row and route once: {:?}",
+                "eligible Pair settings choice must focus and route once: {:?}",
                 messages
             );
         }
