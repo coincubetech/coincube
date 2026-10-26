@@ -310,6 +310,14 @@ fn create_pipe(path: &Path, sid: &str, first: bool) -> io::Result<NamedPipeServe
     }
 }
 
+fn replace_failed_pipe(listener: &mut NamedPipeServer, path: &Path, sid: &str) -> io::Result<()> {
+    // A peer may close before ConnectNamedPipe observes it. Keep this failed
+    // instance alive until its successor exists so the name never becomes free.
+    let next = create_pipe(path, sid, false)?;
+    *listener = next;
+    Ok(())
+}
+
 pub(super) fn start(reader: Arc<dyn Reader>, grant: Grant) -> io::Result<Server> {
     let sid = logon_sid()?;
     let mut random = [0u8; 32];
@@ -327,7 +335,16 @@ pub(super) fn start(reader: Arc<dyn Reader>, grant: Grant) -> io::Result<Server>
                 _ = permission.wait_expiry() => { permission.revoke(); break; }
                 Some(_) = workers.join_next(), if !workers.is_empty() => {}
                 connected = listener.connect(), if workers.len() < 8 => {
-                    if connected.is_err() { permission.revoke(); break; }
+                    if connected.is_err() {
+                        if replace_failed_pipe(&mut listener, &path, &sid).is_err() {
+                            permission.revoke();
+                            break;
+                        }
+                        // Bound persistent peer races or OS errors without
+                        // turning one failed connection into pairing revocation.
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        continue;
+                    }
                     // Keep an instance alive while creating its successor so
                     // another process can never acquire the first-instance slot.
                     let Ok(next) = create_pipe(&path, &sid, false) else { permission.revoke(); break; };
@@ -417,6 +434,14 @@ mod tests {
         // OS-reported owning PID differs from the trusted configuration.
         assert!(connect(&endpoint).await.is_err());
         drop(server);
+    }
+    #[test]
+    fn failed_connection_replacement_keeps_pipe_name_owned() {
+        let endpoint = path(std::process::id());
+        let sid = logon_sid().unwrap();
+        let mut listener = create_pipe(&endpoint, &sid, true).unwrap();
+        replace_failed_pipe(&mut listener, &endpoint, &sid).unwrap();
+        assert!(create_pipe(&endpoint, &sid, true).is_err());
     }
     #[tokio::test]
     async fn protected_acl_grants_only_this_logon_and_rejects_other_logon() {
