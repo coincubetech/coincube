@@ -459,6 +459,36 @@ impl Daemon for EmbeddedDaemon {
         .await
     }
 
+    async fn create_spend_tx_capped(
+        &self,
+        coins_outpoints: &[OutPoint],
+        destinations: &HashMap<Address<address::NetworkUnchecked>, u64>,
+        feerate_vb: u64,
+        change_address: Option<Address<address::NetworkUnchecked>>,
+        max_fee_sats: u64,
+    ) -> Result<CreateSpendResult, DaemonError> {
+        self.command(|daemon| {
+            daemon
+                .create_spend_within_limits(
+                    destinations,
+                    coins_outpoints,
+                    feerate_vb,
+                    change_address,
+                    Some(max_fee_sats),
+                )
+                .map_err(|error| match error {
+                    coincubed::commands::CommandError::FeeCeilingExceeded => {
+                        DaemonError::FeeCeilingExceeded
+                    }
+                    coincubed::commands::CommandError::FeeRateExceeded => {
+                        DaemonError::FeeRateExceeded
+                    }
+                    other => DaemonError::Unexpected(other.to_string()),
+                })
+        })
+        .await
+    }
+
     async fn rbf_psbt(
         &self,
         txid: &Txid,

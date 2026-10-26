@@ -181,7 +181,7 @@ impl Service {
                 .require_network(Network::Regtest)
                 .map_err(|_| Error::InvalidInput)?;
             if recipient.amount_sats < DUST_OUTPUT_SATS
-                || recipient.amount_sats <= address.script_pubkey().minimal_non_dust().to_sat()
+                || recipient.amount_sats < address.script_pubkey().minimal_non_dust().to_sat()
                 || destinations
                     .insert(address.into_unchecked(), recipient.amount_sats)
                     .is_some()
@@ -219,11 +219,26 @@ impl Service {
         >,
     ) -> Result<(Prepared, NativeDraft), wire::Error> {
         use wire::Error;
-        let result = self
+        let result = match self
             .daemon
-            .create_spend_tx(&[], destinations, input.fee_rate_sat_vb, None)
+            .create_spend_tx_capped(
+                &[],
+                destinations,
+                input.fee_rate_sat_vb,
+                None,
+                input.max_fee_sats,
+            )
             .await
-            .map_err(|_| Error::Unavailable)?;
+        {
+            Ok(result) => result,
+            Err(crate::daemon::DaemonError::FeeCeilingExceeded) => {
+                return Err(Error::FeeLimitExceeded);
+            }
+            Err(crate::daemon::DaemonError::FeeRateExceeded) => {
+                return Err(Error::FeeRateExceeded);
+            }
+            Err(_) => return Err(Error::Unavailable),
+        };
         let (psbt, warnings) = match result {
             CreateSpendResult::Success { psbt, warnings } => (psbt, warnings),
             CreateSpendResult::InsufficientFunds { .. } => return Err(Error::InsufficientFunds),
@@ -240,7 +255,8 @@ impl Service {
             .await
             .map_err(|_| Error::Unavailable)?
             .coins;
-        let (fee_sats, change_sats) = validate(input, &psbt, &coins, &self.descriptor)?;
+        let (fee_sats, change_sats, fee_rate_sat_vb) =
+            validate(input, &psbt, &coins, &self.descriptor)?;
         if self.revoked.load(Ordering::SeqCst) {
             return Err(Error::AccessDenied);
         }
@@ -252,7 +268,7 @@ impl Service {
             recipients: input.recipients.clone(),
             amount_sats: input.recipients.iter().map(|r| r.amount_sats).sum(),
             fee_sats,
-            fee_rate_sat_vb: input.fee_rate_sat_vb,
+            fee_rate_sat_vb,
             change_sats,
             input_count: outpoints.len(),
             signing_required: true,
@@ -297,7 +313,7 @@ fn validate(
     psbt: &Psbt,
     coins: &[Coin],
     descriptor: &CoincubeDescriptor,
-) -> Result<(u64, u64), wire::Error> {
+) -> Result<(u64, u64, u64), wire::Error> {
     use wire::Error;
     if psbt.serialize().len() > 65_536
         || psbt.inputs.is_empty()
@@ -364,7 +380,7 @@ fn validate(
     let mut changes = 0;
     for (n, output) in psbt.unsigned_tx.output.iter().enumerate() {
         if output.value.to_sat() < DUST_OUTPUT_SATS
-            || output.value <= output.script_pubkey.minimal_non_dust()
+            || output.value < output.script_pubkey.minimal_non_dust()
         {
             return Err(Error::Unavailable);
         }
@@ -399,7 +415,27 @@ fn validate(
     if fee > input.max_fee_sats {
         return Err(Error::FeeLimitExceeded);
     }
-    Ok((fee, change))
+    // The unsigned witness is empty. Include the same maximum satisfaction
+    // weight the spend engine used, or every valid draft looks over rate.
+    let satisfaction = descriptor.max_sat_weight(true) as u64;
+    let extra = satisfaction
+        .checked_mul(psbt.inputs.len() as u64)
+        .ok_or(Error::Unavailable)?;
+    let vsize = psbt
+        .unsigned_tx
+        .weight()
+        .to_wu()
+        .checked_add(extra)
+        .ok_or(Error::Unavailable)?
+        .div_ceil(4);
+    if vsize == 0 {
+        return Err(Error::Unavailable);
+    }
+    let measured_rate = fee.div_ceil(vsize);
+    if measured_rate > input.fee_rate_sat_vb {
+        return Err(Error::FeeRateExceeded);
+    }
+    Ok((fee, change, measured_rate))
 }
 
 #[cfg(test)]
@@ -549,7 +585,11 @@ mod tests {
             let native = service.native(&summary.draft_id).unwrap();
             assert_eq!(
                 validate(&input(), &native.psbt, &native.coins, &service.descriptor).unwrap(),
-                (summary.fee_sats, summary.change_sats)
+                (
+                    summary.fee_sats,
+                    summary.change_sats,
+                    summary.fee_rate_sat_vb
+                )
             );
             let mut cases = Vec::new();
             let mut signed = native.psbt.clone();
@@ -714,15 +754,22 @@ mod tests {
             let mut request = input();
             request.max_fee_sats = 1;
             let call = |v| wire::Request::PrepareTransaction(v);
+            let before = service.daemon.get_info().await.unwrap().change_index;
+            assert_eq!(
+                service.read(call(request.clone())).await.unwrap_err(),
+                wire::Error::FeeLimitExceeded
+            );
+            assert_eq!(
+                service.daemon.get_info().await.unwrap().change_index,
+                before,
+                "fee rejection reserved a change address"
+            );
             assert_eq!(
                 service.read(call(request.clone())).await.unwrap_err(),
                 wire::Error::FeeLimitExceeded
             );
             let index = service.daemon.get_info().await.unwrap().change_index;
-            assert_eq!(
-                service.read(call(request.clone())).await.unwrap_err(),
-                wire::Error::FeeLimitExceeded
-            );
+            assert_eq!(index, before, "fee rejection reserved a change address");
             assert_eq!(
                 service.daemon.get_info().await.unwrap().change_index,
                 index,
@@ -751,6 +798,7 @@ mod tests {
                 service.daemon.get_info().await.unwrap().change_index,
                 bounded
             );
+            assert_eq!(bounded, before, "rejected drafts reserved change");
             assert!(service.summaries().is_empty());
             assert!(service
                 .daemon

@@ -215,6 +215,7 @@ pub fn psbt_view<'a>(
                 saved,
                 replay,
                 broadcast_ready,
+                true,
             ))
             .push(
                 Column::new()
@@ -660,6 +661,7 @@ pub fn spend_overview_view<'a>(
     saved: bool,
     replay: Option<ReplayPill<'a>>,
     broadcast_ready: bool,
+    allow_signing: bool,
 ) -> Element<'a, Message> {
     spend_overview_with_cancel(
         action_scope,
@@ -671,6 +673,7 @@ pub fn spend_overview_view<'a>(
         replay,
         broadcast_ready,
         None,
+        allow_signing,
     )
 }
 
@@ -685,6 +688,7 @@ pub fn spend_overview_with_cancel<'a>(
     replay: Option<ReplayPill<'a>>,
     broadcast_ready: bool,
     cancel: Option<Message>,
+    allow_signing: bool,
 ) -> Element<'a, Message> {
     // The state supplies cryptographically verified readiness. Claimed
     // signature counts below are progress hints only.
@@ -789,7 +793,7 @@ pub fn spend_overview_with_cancel<'a>(
                         .on_press(message).width(Length::Fixed(150.0))))
                     .push(if tx.status != SpendStatus::Pending {
                         None
-                    } else if sign_or_broadcast {
+                    } else if sign_or_broadcast && allow_signing {
                         // A single "Sign" entry point opens the unified
                         // picker, which lists every signer — local (HW,
                         // master, border) and Keychain (contacts' phones) —
@@ -801,6 +805,8 @@ pub fn spend_overview_with_cancel<'a>(
                                     .width(Length::Fixed(150.0)),
                             ),
                         )
+                    } else if !allow_signing {
+                        None
                     } else {
                         // Disabled (never hidden) while a replayable BTCB2
                         // spend awaits its acknowledgement.
@@ -2663,6 +2669,7 @@ mod tests {
                 None,
                 false,
                 Some(Message::Spend(SpendTxMessage::Cancel)),
+                true,
             )
         };
         let enabled = capture::inspect_full_window(

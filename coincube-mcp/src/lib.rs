@@ -130,8 +130,9 @@ pub struct Summary {
 /// Minimized transaction projection using the existing UI's amount semantics.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Transaction {
-    /// Public transaction identifier, without raw transaction or script data.
-    pub txid: String,
+    /// Session-scoped activity id. It is not a chain transaction id and cannot
+    /// be looked up on a block explorer. A new unlock mints a new id.
+    pub activity_id: String,
     /// Incoming amount as represented by the existing wallet UI, in satoshis.
     pub incoming_sats: u64,
     /// Wallet spending to non-wallet outputs, in satoshis; zero for incoming payments.
@@ -209,6 +210,8 @@ pub enum Error {
     InsufficientFunds,
     /// Actual total fee exceeds the explicitly supplied ceiling.
     FeeLimitExceeded,
+    /// Measured sat/vB, rounded up, exceeds the explicitly supplied rate.
+    FeeRateExceeded,
 }
 impl Error {
     /// Return the stable machine-readable code exposed in MCP tool errors.
@@ -221,6 +224,7 @@ impl Error {
             Self::TransactionConflict => "transaction_conflict",
             Self::InsufficientFunds => "insufficient_funds",
             Self::FeeLimitExceeded => "fee_limit_exceeded",
+            Self::FeeRateExceeded => "fee_rate_exceeded",
         }
     }
 }

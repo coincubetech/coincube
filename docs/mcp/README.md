@@ -154,7 +154,7 @@ and scoped inside Tenshu, regardless of what the adapter or host claims.
 | `tenshu_get_capabilities` | `{}` | Public static build metadata only; no installed-wallet inventory or live consent. Proposal availability depends on the experimental native build flag; direct MCP wallet creation is prohibited by design. |
 | `tenshu_list_wallets` | `{}` | Only the authorized active Vault; opaque session ID and generic display name. |
 | `tenshu_get_wallet_summary` | `{"wallet_id":"…"}` | Confirmed, unconfirmed and available sats, network and sync state. |
-| `tenshu_get_transactions` | `{"wallet_id":"…","limit":20}` | Up to 50 most recent confirmed transactions; no pending history or pagination cursor. |
+| `tenshu_get_transactions` | `{"wallet_id":"…","limit":20}` | Up to 50 most recent confirmed transactions, newest first. Each row has a session activity id, not a chain transaction id. No pending history or pagination cursor. |
 | `tenshu_get_wallet_policy_summary` | `{"wallet_id":"…"}` | Deterministic script type, thresholds, key counts, relative recovery delays in blocks. |
 | `tenshu_prepare_wallet_proposal` | Explicit 3-of-5 primary, recovery quorum/delay, bounded retry ID | Requires separate proposal consent in the opt-in Regtest native build. Produces an in-memory topology draft; keys, actual descriptor validation and creation approval are native-only. |
 | `tenshu_get_wallet_proposal` | `{"proposal_id":"…"}` | Only the current proposal grant's draft. Existing read grants cannot access proposals, and proposal grants cannot access wallet reads. |
@@ -190,12 +190,16 @@ Key counts count policy keys, not independently verified people/devices. Recover
 conditions do not mean recovery can be performed now.
 
 No seeds, private keys, passwords, credentials, descriptors, wallet xpubs, raw
-scripts, labels or PSBTs are exported. Read tools omit addresses. A separately
+scripts, labels, PSBTs or chain transaction ids are exported. Read tools omit
+addresses. History rows use a session activity id that is not a block-explorer
+lookup key; a new unlock mints new ids. A separately
 authorized transaction tool echoes only its caller-supplied recipient addresses
 and amounts; the AI provider may receive those results. Topology/wallet drafts
-change bounded session memory. Transaction preparation also reserves an internal
-change index through the existing engine, without saving a spend, signing or
-broadcasting. Preparation tools are annotated as state-changing. Signing-session
+change bounded session memory. A successful transaction preparation reserves an
+internal change index through the existing engine, without saving a spend, signing
+or broadcasting. A preparation rejected for fee, rate, dust or another construction
+error does not reserve that index. Preparation tools are annotated as state-changing
+and are advertised only in builds that include them. Signing-session
 status is deferred because the existing remote and LAN workflows do not share a
 single authoritative read API.
 
@@ -274,8 +278,10 @@ build flag and bounded topology limits; that report is never live consent.
    local/device confirmations; they are not MCP approvals.
 4. Select real public keys locally. The wallet engine compiles the descriptor.
    The final native review verifies that its actual 3-of-5 primary and selected
-   recovery exactly match the proposal, and displays signer fingerprints, local
-   provenance and the descriptor. Only then does proposal status report
+   recovery exactly match the proposal, and displays the account xpub fingerprint
+   computed from each assistant-supplied key. The origin fingerprint in that key
+   was supplied by the assistant and is not presented as a checked device identity.
+   Only then does proposal status report
    `ready_for_native_review` / `descriptor_validated:true`. Revisions advance
    when validation is invalidated/restored. This proves neither independent
    custody nor a completed key/backup verification.
@@ -346,7 +352,10 @@ Arguments are a JSON object with `request_id`, `topology` and `keys`:
 Replace the placeholders with public account xpubs supplied for this setup. Only
 origin-bearing test-network account keys without derivation suffixes or wildcards
 are accepted; the origin path must match the account depth. All assignments need
-distinct fingerprints and underlying account keys in this first slice. Distinct
+distinct fingerprints and underlying account keys in this first slice. For an
+account deeper than the master key, the origin fingerprint is caller-supplied and
+is not checked against the xpub. Native review shows the account xpub fingerprint
+and says the origin was not checked. Distinct
 fingerprints are not proof of separate ownership. Private keys, seed phrases,
 PINs, arbitrary descriptors, filesystem paths and network overrides are not inputs.
 No hardware command, secret access or remote request is performed by this tool.
@@ -401,11 +410,20 @@ The first slice uses exact integer satoshis and an explicit fee ceiling, with
 send-max, self-send, recovery-path selection, caller-supplied change addresses,
 raw scripts/PSBTs and signing/broadcast arguments are excluded. The existing
 engine selects eligible coins on the primary path and constructs the unsigned
-PSBT. Preparation may reserve an internal change index; it does not reserve the
+PSBT. A successful draft reserves an internal change index so two drafts cannot
+share a change address; that reservation happens before the user opens the review.
+A draft rejected because the measured fee or sat/vB is above the request does not
+reserve an index. Preparation does not reserve the
 coins, save a spend, sign, broadcast, or guarantee future input availability.
 
-Tenshu verifies the actual inputs, recipient amounts, wallet-owned change,
-unsigned state and total fee before returning a minimized summary. The raw PSBT,
+The returned `fee_sats` and `fee_rate_sat_vb` are measured from the unsigned
+PSBT. The rate is the fee divided by virtual size, rounded up. That virtual
+size includes the descriptor's maximum witness satisfaction, because the
+unsigned transaction's witness is still empty. Tenshu rejects
+the draft when that rate is above the requested rate or the fee is above the
+ceiling, before committing a change index. Tenshu verifies the actual inputs, recipient amounts, wallet-owned change,
+unsigned state and total fee before returning a minimized summary. The review
+screen stays view-only until the user chooses Sign in Tenshu. The raw PSBT,
 input identities and change address stay inside Tenshu. Request IDs are immutable
 after an engine attempt: exact retries return the same draft or error without a
 new change reservation, and changed input conflicts. At most eight engine

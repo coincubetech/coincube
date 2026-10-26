@@ -358,6 +358,9 @@ pub enum ImportSpendMessage {
 pub enum SpendTxMessage {
     Delete,
     Sign,
+    /// Leave the view-only MCP review and show the ordinary save and sign controls.
+    #[cfg(feature = "mcp-transactions")]
+    ContinueNativeSigning,
     /// Request a Keychain signature from one specific signer, chosen from
     /// the unified signing picker. Carries the descriptor fingerprint of
     /// the keychain signer to address. Creates just that signer's

@@ -36,7 +36,7 @@ fn tool<I: JsonSchema + 'static, O: JsonSchema + 'static>(
 }
 /// Advertise implemented tools without exposing wallet data or secrets.
 pub fn tools() -> Vec<Tool> {
-    vec![
+    let mut tools = vec![
         tool::<Empty, Capabilities>(
             "tenshu_get_capabilities",
             "Describe implemented build capabilities only. No installed-wallet inventory or live consent. Unsupported creation/proposals are reported honestly.",
@@ -51,12 +51,15 @@ pub fn tools() -> Vec<Tool> {
         ),
         tool::<HistoryInput, History>(
             "tenshu_get_transactions",
-            "Read at most 50 recent confirmed transactions; excludes labels, addresses and scripts.",
+            "Read at most 50 recent confirmed transactions, newest first. Each row has a session activity id, not a chain transaction id. Excludes labels, addresses and scripts.",
         ),
         tool::<WalletInput, Policy>(
             "tenshu_get_wallet_policy_summary",
             "Deterministic Vault policy analysis without keys or descriptors. Recovery delays are relative blocks, not current eligibility.",
         ),
+    ];
+    if cfg!(feature = "native-proposals") {
+        tools.extend([
         tool::<proposal::PrepareInput, proposal::Proposal>(
             "tenshu_prepare_wallet_proposal",
             "Prepare a bounded session-only Regtest 3-of-5 topology draft with explicitly chosen recovery. Requires separate proposal consent; keys and descriptor validation happen in Tenshu. Never creates a wallet.",
@@ -69,6 +72,10 @@ pub fn tools() -> Vec<Tool> {
             "tenshu_prepare_wallet_creation",
             "Assemble one immutable Regtest 3-of-5 wallet proposal from origin-bearing public account xpubs and explicitly chosen recovery. Requires separate wallet-preparation pairing. Tenshu validates the actual descriptor and fills its builder. The user must verify hardware/keys/backups and authorize creation in Tenshu. Never supply seeds, private keys or PINs; never creates a wallet itself.",
         ).annotate(ToolAnnotations::new().read_only(false).destructive(false).idempotent(true).open_world(false)),
+        ]);
+    }
+    if cfg!(feature = "native-transactions") {
+        tools.extend([
         tool::<transaction::PrepareInput, transaction::Prepared>(
             "tenshu_prepare_transaction",
             "Prepare an unsigned Regtest Vault transaction from exact satoshi recipients, explicit fee rate and total-fee ceiling. Requires a separate transaction-preparation pairing. Repeated identical request_id returns the same draft; changed input conflicts. The PSBT stays in Tenshu for native review and user signing. Never signs, saves a spend or broadcasts; no fiat quotes, send-max, recovery selection or caller change address.",
@@ -77,7 +84,9 @@ pub fn tools() -> Vec<Tool> {
             "tenshu_get_prepared_transaction",
             "Read only this transaction pairing's unsigned session draft summary. No raw PSBT, input identities, change address, keys or signing material. Drafts end on lock/close/revocation.",
         ),
-    ]
+        ]);
+    }
+    tools
 }
 /// Decode typed arguments while withholding raw serialization error details.
 fn parse<T: serde::de::DeserializeOwned>(v: Value) -> Result<T, ErrorData> {

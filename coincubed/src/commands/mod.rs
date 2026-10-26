@@ -124,6 +124,12 @@ pub enum CommandError {
     /// Other durable reservations repeatedly won after this builder selected change.
     /// The caller may retry the complete command.
     ChangeReservationContended,
+    /// Caller fee ceiling rejected the construction before any change index commit.
+    FeeCeilingExceeded,
+    /// Measured sat/vB exceeded the requested rate before any change index commit.
+    FeeRateExceeded,
+    /// The PSBT fee could not be measured, so nothing was committed.
+    FeeMeasurement,
     RbfError(RbfErrorInfo),
     EmptyFilterList,
 }
@@ -228,6 +234,13 @@ impl fmt::Display for CommandError {
                 f,
                 "Change address reservations are busy. Retry the command."
             ),
+            Self::FeeCeilingExceeded => {
+                write!(f, "Actual fee exceeds the supplied ceiling.")
+            }
+            Self::FeeRateExceeded => {
+                write!(f, "Measured fee rate exceeds the supplied rate.")
+            }
+            Self::FeeMeasurement => write!(f, "Could not measure the transaction fee."),
             Self::RbfError(e) => write!(f, "RBF error: '{}'.", e),
             Self::EmptyFilterList => write!(f, "Filter list is empty, should supply None instead."),
         }
@@ -1336,12 +1349,81 @@ impl DaemonControl {
         ListCoinsResult { coins }
     }
 
+    /// Fee and virtual size of an unsigned PSBT. The virtual size includes the
+    /// descriptor's maximum witness satisfaction, because the unsigned
+    /// transaction's witness is still empty. Failure means the caller must
+    /// not commit a change index for this construction.
+    fn fee_and_vsize(&self, psbt: &Psbt) -> Result<(u64, u64), CommandError> {
+        if psbt.inputs.is_empty() || psbt.inputs.len() != psbt.unsigned_tx.input.len() {
+            return Err(CommandError::FeeMeasurement);
+        }
+        let mut total_in = 0u64;
+        for input in &psbt.inputs {
+            let value = input
+                .witness_utxo
+                .as_ref()
+                .ok_or(CommandError::FeeMeasurement)?
+                .value
+                .to_sat();
+            total_in = total_in
+                .checked_add(value)
+                .ok_or(CommandError::FeeMeasurement)?;
+        }
+        let mut total_out = 0u64;
+        for output in &psbt.unsigned_tx.output {
+            total_out = total_out
+                .checked_add(output.value.to_sat())
+                .ok_or(CommandError::FeeMeasurement)?;
+        }
+        let fee = total_in
+            .checked_sub(total_out)
+            .filter(|fee| *fee > 0)
+            .ok_or(CommandError::FeeMeasurement)?;
+        let satisfaction = match &self.config.main_descriptor {
+            WalletDescriptor::Vault(vault) => vault.max_sat_weight(true) as u64,
+            WalletDescriptor::Imported(_) => return Err(CommandError::FeeMeasurement),
+        };
+        let extra = satisfaction
+            .checked_mul(psbt.inputs.len() as u64)
+            .ok_or(CommandError::FeeMeasurement)?;
+        let weight = psbt
+            .unsigned_tx
+            .weight()
+            .to_wu()
+            .checked_add(extra)
+            .ok_or(CommandError::FeeMeasurement)?;
+        let vsize = weight.div_ceil(4);
+        if vsize == 0 {
+            return Err(CommandError::FeeMeasurement);
+        }
+        Ok((fee, vsize))
+    }
+
     pub fn create_spend(
         &self,
         destinations: &HashMap<bitcoin::Address<bitcoin::address::NetworkUnchecked>, u64>,
         coins_outpoints: &[bitcoin::OutPoint],
         feerate_vb: u64,
         change_address: Option<bitcoin::Address<bitcoin::address::NetworkUnchecked>>,
+    ) -> Result<CreateSpendResult, CommandError> {
+        self.create_spend_within_limits(
+            destinations,
+            coins_outpoints,
+            feerate_vb,
+            change_address,
+            None,
+        )
+    }
+
+    /// Build a spend and, when `max_fee_sats` is set, reject a fee or measured
+    /// rate above the caller's limits before committing a change index.
+    pub fn create_spend_within_limits(
+        &self,
+        destinations: &HashMap<bitcoin::Address<bitcoin::address::NetworkUnchecked>, u64>,
+        coins_outpoints: &[bitcoin::OutPoint],
+        feerate_vb: u64,
+        change_address: Option<bitcoin::Address<bitcoin::address::NetworkUnchecked>>,
+        max_fee_sats: Option<u64>,
     ) -> Result<CreateSpendResult, CommandError> {
         self.require_ordinary_imported_spend_support()?;
         let is_self_send = destinations.is_empty();
@@ -1481,6 +1563,15 @@ impl DaemonControl {
                     return Err(e.into());
                 }
             };
+            if let Some(max_fee) = max_fee_sats {
+                let (fee, vsize) = self.fee_and_vsize(&psbt)?;
+                if fee > max_fee {
+                    return Err(CommandError::FeeCeilingExceeded);
+                }
+                if fee.div_ceil(vsize) > feerate_vb {
+                    return Err(CommandError::FeeRateExceeded);
+                }
+            }
             if has_change && fresh_change && !self.commit_change_if_next(&change_info)? {
                 change_commit_conflicts += 1;
                 if change_commit_conflicts >= CHANGE_COMMIT_CONFLICT_LIMIT {

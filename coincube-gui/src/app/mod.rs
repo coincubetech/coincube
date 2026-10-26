@@ -11294,7 +11294,6 @@ impl App {
             daemon: self.daemon.clone(),
             supported,
             proposal_supported,
-            #[cfg(feature = "mcp-transactions")]
             last_poll_at_startup: self.cache.last_poll_at_startup,
         });
     }

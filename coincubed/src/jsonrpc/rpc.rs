@@ -173,7 +173,10 @@ impl From<commands::CommandError> for Error {
             | commands::CommandError::RbfError(..)
             | commands::CommandError::EmptyFilterList
             | commands::CommandError::RecoveryNotAvailable
-            | commands::CommandError::OutpointNotRecoverable(..) => {
+            | commands::CommandError::OutpointNotRecoverable(..)
+            | commands::CommandError::FeeCeilingExceeded
+            | commands::CommandError::FeeRateExceeded
+            | commands::CommandError::FeeMeasurement => {
                 Error::new(ErrorCode::InvalidParams, e.to_string())
             }
             commands::CommandError::UnsafeLegacyAlternative { .. } => Error::new(

@@ -124,6 +124,7 @@ pub struct Settings {
     pairing_poisoned: bool,
     pairing_generation: Option<u64>,
     revoke_confirmation: Option<String>,
+    last_poll_at_startup: Option<u32>,
 }
 pub(crate) struct PairingContext<'a> {
     pub root: &'a std::path::Path,
@@ -133,7 +134,8 @@ pub(crate) struct PairingContext<'a> {
     pub daemon: Option<Arc<dyn Daemon + Send + Sync>>,
     pub supported: bool,
     pub proposal_supported: bool,
-    #[cfg(feature = "mcp-transactions")]
+    /// Poll timestamp captured when this Cube's session started. A summary is
+    /// not synced until a later poll completes.
     pub last_poll_at_startup: Option<u32>,
 }
 impl Settings {
@@ -232,9 +234,9 @@ impl Settings {
             daemon,
             supported,
             proposal_supported,
-            #[cfg(feature = "mcp-transactions")]
             last_poll_at_startup,
         } = context;
+        self.last_poll_at_startup = last_poll_at_startup;
         if super::session::generation_for(cube_id).is_none() || self.pairing_poisoned {
             return;
         }
@@ -331,6 +333,8 @@ impl Settings {
                                 chain,
                                 daemon: daemon.clone(),
                                 wallet_id: opaque.clone(),
+                                activity_key: new_activity_key(),
+                                last_poll_at_startup,
                             });
                             (reader, grant)
                         })
@@ -752,6 +756,8 @@ impl Settings {
                         chain: wallet.chain,
                         daemon,
                         wallet_id,
+                        activity_key: new_activity_key(),
+                        last_poll_at_startup: self.last_poll_at_startup,
                     });
                     match wire::ipc::Server::start(reader, grant) {
                         Ok(server) => {
@@ -958,6 +964,26 @@ struct VaultReader {
     chain: crate::chain::ChainId,
     daemon: Arc<dyn Daemon + Send + Sync>,
     wallet_id: String,
+    /// Per-grant key for opaque activity ids. It never leaves the desktop.
+    activity_key: [u8; 32],
+    last_poll_at_startup: Option<u32>,
+}
+
+#[cfg(any(unix, windows))]
+fn new_activity_key() -> [u8; 32] {
+    use rand::RngCore;
+    let mut key = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut key);
+    key
+}
+
+#[cfg(any(unix, windows))]
+fn activity_id(key: &[u8; 32], txid: &coincube_core::miniscript::bitcoin::Txid) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(key);
+    hasher.update(txid.to_string().as_bytes());
+    hex::encode(&hasher.finalize()[..16])
 }
 #[cfg(any(unix, windows))]
 impl wire::Reader for VaultReader {
@@ -1044,7 +1070,7 @@ impl VaultReader {
                     info.block_height,
                     info.sync,
                     info.last_poll_timestamp,
-                    None,
+                    self.last_poll_at_startup,
                     &info.history_sync,
                 );
                 let sync_state = match sync {
@@ -1079,14 +1105,24 @@ impl VaultReader {
                     .list_history_txs(0, u32::MAX, u64::from(input.limit))
                     .await
                     .map_err(|_| wire::Error::Unavailable)?;
+                let mut transactions: Vec<_> = transactions
+                    .into_iter()
+                    .take(usize::from(input.limit))
+                    .map(|tx| project_transaction(&tx, &self.activity_key))
+                    .collect();
+                // The confirmed-history query applies DISTINCT after ORDER BY,
+                // which does not preserve newest-first. Sort here.
+                transactions.sort_by(|left, right| {
+                    right
+                        .timestamp
+                        .cmp(&left.timestamp)
+                        .then(right.height.cmp(&left.height))
+                        .then(left.activity_id.cmp(&right.activity_id))
+                });
                 Ok(wire::Response::History(wire::History {
                     wallet_id: self.wallet_id.clone(),
                     confirmed_only: true,
-                    transactions: transactions
-                        .into_iter()
-                        .take(usize::from(input.limit))
-                        .map(project_transaction)
-                        .collect(),
+                    transactions,
                 }))
             }
             wire::Request::Policy(_) => {
@@ -1124,9 +1160,12 @@ impl VaultReader {
 }
 
 #[cfg(any(unix, windows))]
-fn project_transaction(tx: crate::daemon::model::HistoryTransaction) -> wire::Transaction {
+fn project_transaction(
+    tx: &crate::daemon::model::HistoryTransaction,
+    activity_key: &[u8; 32],
+) -> wire::Transaction {
     wire::Transaction {
-        txid: tx.txid.to_string(),
+        activity_id: activity_id(activity_key, &tx.txid),
         incoming_sats: tx.incoming_amount.to_sat(),
         // The model totals every non-wallet output even for a deposit. In that
         // case those outputs belong to the sender, not this Vault's spending.
@@ -1510,7 +1549,8 @@ mod tests {
             vec![0, 2],
             Network::Regtest,
         );
-        let projected_batch = project_transaction(batch_history);
+        let activity_key = [7u8; 32];
+        let projected_batch = project_transaction(&batch_history, &activity_key);
         assert_eq!(projected_batch.incoming_sats, 1_100_000);
         assert_eq!(projected_batch.outgoing_sats, 0);
         for (wallet_inputs, wallet_outputs, expected_incoming, expected_outgoing) in [
@@ -1527,8 +1567,19 @@ mod tests {
                 wallet_outputs,
                 Network::Regtest,
             );
-            let projected = project_transaction(history);
-            assert_eq!(projected.txid, transaction.compute_txid().to_string());
+            let projected = project_transaction(&history, &activity_key);
+            let chain_id = transaction.compute_txid().to_string();
+            assert_eq!(projected.activity_id.len(), 32);
+            assert!(projected.activity_id.bytes().all(|b| b.is_ascii_hexdigit()));
+            assert!(!projected.activity_id.contains(chain_id.as_str()));
+            assert_eq!(
+                project_transaction(&history, &activity_key).activity_id,
+                projected.activity_id
+            );
+            assert_ne!(
+                project_transaction(&history, &[9u8; 32]).activity_id,
+                projected.activity_id
+            );
             assert_eq!(projected.incoming_sats, expected_incoming);
             assert_eq!(projected.outgoing_sats, expected_outgoing);
             assert_eq!(
@@ -1643,7 +1694,6 @@ mod tests {
             daemon: Some(daemon.clone()),
             supported: true,
             proposal_supported: false,
-            #[cfg(feature = "mcp-transactions")]
             last_poll_at_startup: None,
         });
         assert_eq!(paired.paired.len(), 1);
@@ -2179,7 +2229,6 @@ mod tests {
                     daemon: Some(daemon.clone()),
                     supported: true,
                     proposal_supported: false,
-                    #[cfg(feature = "mcp-transactions")]
                     last_poll_at_startup: None,
                 })
             };
@@ -2387,7 +2436,6 @@ mod tests {
                 daemon: Some(daemon.clone()),
                 supported: true,
                 proposal_supported: false,
-                #[cfg(feature = "mcp-transactions")]
                 last_poll_at_startup: None,
             });
             assert!(
@@ -2847,7 +2895,6 @@ mod proposal_consent_tests {
                     daemon: None,
                     supported: false,
                     proposal_supported: true,
-                    #[cfg(feature = "mcp-transactions")]
                     last_poll_at_startup: None,
                 })
             };
@@ -2953,7 +3000,6 @@ mod proposal_consent_tests {
                     daemon: None,
                     supported: false,
                     proposal_supported: true,
-                    #[cfg(feature = "mcp-transactions")]
                     last_poll_at_startup: None,
                 })
             };

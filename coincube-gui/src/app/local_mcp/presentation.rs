@@ -137,7 +137,7 @@ pub(super) fn view_for_cube(settings: &Settings, supported: bool) -> Ui<'_> {
         .push(notice(
             column![
                 heading("Your AI provider may receive financial information"),
-                muted("The connection is local, but your AI client may send what it reads to its provider. Pair only a client you trust. Never paste its private configuration into a chat."),
+                muted("The connection is local, but your AI client may send what it reads to its provider. History uses a session activity id, not a chain transaction id. Policy shape is included. Pair only a client you trust. Never paste its private configuration into a chat."),
             ]
             .spacing(5),
             Tone::Warn,

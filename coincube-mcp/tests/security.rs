@@ -410,7 +410,7 @@ mod protocol {
         });
         let client = ().serve(client_io).await.unwrap();
         let listed = client.list_all_tools().await.unwrap();
-        assert_eq!(listed.len(), 10);
+        assert_eq!(listed.len(), tools().len());
         assert!(listed.iter().all(|t| t.output_schema.is_some()
             && t.annotations.as_ref().unwrap().read_only_hint
                 == Some(
@@ -447,20 +447,29 @@ mod protocol {
             socket: "/not/a/wallet/socket".into(),
             credential: "x".repeat(64),
         };
-        assert_eq!(
-            tools().iter().map(|t| t.name.as_ref()).collect::<Vec<_>>(),
-            vec![
-                "tenshu_get_capabilities",
-                "tenshu_list_wallets",
-                "tenshu_get_wallet_summary",
-                "tenshu_get_transactions",
-                "tenshu_get_wallet_policy_summary",
+        let mut expected = vec![
+            "tenshu_get_capabilities",
+            "tenshu_list_wallets",
+            "tenshu_get_wallet_summary",
+            "tenshu_get_transactions",
+            "tenshu_get_wallet_policy_summary",
+        ];
+        if cfg!(feature = "native-proposals") {
+            expected.extend([
                 "tenshu_prepare_wallet_proposal",
                 "tenshu_get_wallet_proposal",
                 "tenshu_prepare_wallet_creation",
+            ]);
+        }
+        if cfg!(feature = "native-transactions") {
+            expected.extend([
                 "tenshu_prepare_transaction",
-                "tenshu_get_prepared_transaction"
-            ]
+                "tenshu_get_prepared_transaction",
+            ]);
+        }
+        assert_eq!(
+            tools().iter().map(|t| t.name.as_ref()).collect::<Vec<_>>(),
+            expected
         );
         for name in [
             "sign",

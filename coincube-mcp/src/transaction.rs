@@ -104,7 +104,9 @@ pub struct Prepared {
     pub amount_sats: u64,
     /// Actual total fee of this unsigned construction.
     pub fee_sats: u64,
-    /// Requested fee rate, not a claim about future confirmation time.
+    /// Measured fee rate in sat/vB, rounded up. Virtual size includes the
+    /// descriptor's maximum witness satisfaction because the unsigned
+    /// transaction has an empty witness.
     pub fee_rate_sat_vb: u64,
     /// Total change amount, without revealing its address.
     pub change_sats: u64,
