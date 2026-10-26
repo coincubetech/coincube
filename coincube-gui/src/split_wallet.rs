@@ -777,9 +777,14 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
             )
     } else {
         Column::new()
-            .spacing(12)
-            .push(p1_bold("Destination Cube"))
-            .push(target)
+            .spacing(18)
+            .push(
+                Column::new()
+                    .spacing(8)
+                    .push(p1_bold("Destination Cube"))
+                    .push(target),
+            )
+            .push(p1_bold("Original Bitcoin wallet"))
             .push(
                 wallet_source_form::view(&panel.source_form, &SourceFormCopy::split())
                     .map(Message::from),
@@ -802,6 +807,55 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
         .style(theme::text::secondary)
         .into(),
         Status::Failed(error) => p1_regular(error).style(theme::text::warning).into(),
+        Status::Complete(summary) if imported.is_none() => Column::new()
+            .spacing(12)
+            .push(p1_bold(format!(
+                "Found {} UTXO{} ({} confirmed), totaling {} sats",
+                summary.coins,
+                if summary.coins == 1 { "" } else { "s" },
+                summary.confirmed,
+                summary.sats
+            )))
+            .push(card::simple(
+                Column::new()
+                    .spacing(10)
+                    .push(p1_bold("Pre-fork (splittable)"))
+                    .push(p1_regular(format!("{} UTXOs, {} sats", summary.pre_fork, summary.pre_fork_sats)))
+                    .push(p1_bold("Confirmed after the fork"))
+                    .push(p1_regular(format!("{} · not part of this split; may still be replayable", summary.post_fork)))
+                    .push(p1_bold("Unclassified (excluded)"))
+                    .push(p1_regular(summary.unclassified.to_string()))
+                    .push(p1_bold("Unspent on both chains (splittable)"))
+                    .push(p1_regular(format!("{} UTXOs, {} sats", summary.inventory.splittable, summary.inventory.splittable_sats)))
+                    .push(p1_regular(format!(
+                        "Spent on Bitcoin: {} · Spent on Bitcoin Blake2b: {} · Pending or replayed: {}",
+                        summary.inventory.spent_on_bitcoin,
+                        summary.inventory.spent_on_btcb2,
+                        summary.inventory.pending,
+                    )))
+                    .push(caption(format!(
+                        "Post-fork funding candidates: {} seen only on Bitcoin · {} seen only on Bitcoin Blake2b. These still need verification before a split. {}",
+                        summary.inventory.bitcoin_only_candidates,
+                        summary.inventory.btcb2_only_candidates,
+                        fresh_index_copy(summary.inventory.fresh_receive),
+                    )).style(theme::text::secondary))
+                    .push(caption(format!(
+                        "{} BTCB2 addresses checked at BTCB2 tip {} · Bitcoin tip {} · fork height {} (observed)",
+                        summary.addresses, summary.tip, summary.inventory.bitcoin_tip, summary.inventory.fork_height,
+                    )).style(theme::text::secondary)),
+            ).padding(20))
+            .push(p1_regular(if summary.coins == 0 {
+                "No spendable outputs were found in this bounded scan."
+            } else if summary.confirmed != summary.coins {
+                "Wait for every discovered output to confirm, then scan again before reviewing a sweep."
+            } else if !summary.signable {
+                "Taproot (tr) wallets can be scanned but not split: there is no signing route for them yet."
+            } else if summary.pre_fork == 0 {
+                "No confirmed pre-fork coins were proven. Only pre-fork coins can be split; post-fork or unclassified coins are excluded."
+            } else {
+                "Continue to unlock the destination Cube and review bounded sweep economics. Spending remains locked."
+            }).style(theme::text::warning))
+            .into(),
         Status::Complete(summary) => Column::new()
             .spacing(6)
             .push(p1_bold(format!(
@@ -868,6 +922,8 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
                 "Check BTCB2 availability"
             },
         )
+    } else if reviewable {
+        button::secondary(None, "Scan again")
     } else {
         button::primary(
             None,
@@ -887,18 +943,26 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
         button::primary(None, "Continue to destination Cube").on_press(Message::Continue)
     }));
 
-    Container::new(
+    let content = if imported.is_some() {
         Column::new()
             .spacing(20)
             .push(header)
-            .push(card::simple(form).padding(if imported.is_some() { 24 } else { 35 }))
+            .push(card::simple(form).padding(24))
             .push(status)
-            .push(actions),
-    )
-    .padding(30)
-    .max_width(760)
-    .center_x(Length::Fill)
-    .into()
+            .push(actions)
+    } else {
+        Column::new()
+            .spacing(18)
+            .push(header)
+            .push(card::simple(form).padding(24))
+            .push(actions)
+            .push(status)
+    };
+    Container::new(content)
+        .padding(30)
+        .max_width(760)
+        .center_x(Length::Fill)
+        .into()
 }
 
 #[cfg(test)]
@@ -995,6 +1059,122 @@ mod tests {
             external: ranged_descriptor(0),
             internal: ranged_descriptor(1),
             address_window: window,
+        }
+    }
+
+    #[test]
+    fn launcher_scan_face_mounts_safe_states_in_both_themes() {
+        use crate::app::view::shared::landing::capture;
+
+        let _guard = crate::app::session::test_guard();
+        let mut panel = SplitWalletPanel::new();
+        panel.set_targets(vec![target()]);
+        let base = ScanSummary {
+            generation: panel.generation,
+            addresses: 40,
+            coins: 3,
+            confirmed: 3,
+            sats: 1_250_000,
+            pre_fork: 2,
+            pre_fork_sats: 1_000_000,
+            post_fork: 1,
+            unclassified: 0,
+            signable: true,
+            tip: "synthetic-btcb2-tip".into(),
+            inventory: InventorySummary {
+                fork_height: 100,
+                bitcoin_tip: "synthetic-bitcoin-tip".into(),
+                splittable: 2,
+                splittable_sats: 1_000_000,
+                spent_on_bitcoin: 0,
+                spent_on_btcb2: 0,
+                btcb2_post_fork: 1,
+                bitcoin_only_candidates: 0,
+                btcb2_only_candidates: 0,
+                pending: 0,
+                fresh_receive: FreshIndex::NotProven,
+            },
+        };
+        let mut zero = base.clone();
+        zero.coins = 0;
+        zero.confirmed = 0;
+        zero.sats = 0;
+        zero.pre_fork = 0;
+        zero.pre_fork_sats = 0;
+        zero.inventory.splittable = 0;
+        zero.inventory.splittable_sats = 0;
+        let mut pending = base.clone();
+        pending.confirmed = 2;
+        let mut taproot = base.clone();
+        taproot.signable = false;
+        let states = [
+            ("ready", Status::Editing, false),
+            ("scanning", Status::Scanning, false),
+            ("incomplete", Status::Failed("The scan did not cover every saved receive and change address on both chains. No balance conclusion was made. Scan again.".into()), false),
+            ("signed-out", Status::Failed("Sign in to Connect before scanning a Bitcoin wallet.".into()), false),
+            ("no-vault", Status::Failed("Create a Bitcoin Blake2b Vault before scanning a Bitcoin wallet.".into()), false),
+            ("eligible", Status::Complete(base), true),
+            ("zero", Status::Complete(zero), false),
+            ("pending", Status::Complete(pending), false),
+            ("taproot", Status::Complete(taproot), false),
+        ];
+        for (name, status, can_continue) in states {
+            panel.status = status;
+            assert_eq!(
+                matches!(&panel.status, Status::Complete(summary) if summary.reviewable()),
+                can_continue,
+                "{name} review gate"
+            );
+            for size in [(1440, 900), (1024, 768)] {
+                for (appearance, palette) in [
+                    ("dark", theme::Theme::dark()),
+                    ("light", theme::Theme::light()),
+                ] {
+                    let mounted = capture::inspect_full_window(
+                        &format!("foreign-split-{name}"),
+                        view(&panel),
+                        size,
+                        appearance,
+                        palette,
+                    );
+                    for text in [
+                        "Split a Bitcoin wallet",
+                        "Destination Cube",
+                        "Original Bitcoin wallet",
+                    ] {
+                        assert!(mounted.contains(text), "{}: missing {}", name, text);
+                    }
+                    assert!(mounted.contains(if name == "scanning" {
+                        "Scanning…"
+                    } else if name == "eligible" {
+                        "Scan again"
+                    } else {
+                        "Scan wallet"
+                    }));
+                    assert_eq!(
+                        mounted.contains("Continue to destination Cube"),
+                        can_continue,
+                        "{name}"
+                    );
+                    assert_eq!(mounted.contains("Cancel"), name == "scanning", "{name}");
+                    if name == "incomplete" {
+                        assert!(mounted.contains("No balance conclusion was made"));
+                        assert!(!mounted.contains("No spendable outputs were found"));
+                    }
+                    if name == "eligible" {
+                        for text in [
+                            "Pre-fork (splittable)",
+                            "Confirmed after the fork",
+                            "Unclassified (excluded)",
+                            "Unspent on both chains (splittable)",
+                            "may still be replayable",
+                            "synthetic-bitcoin-tip",
+                        ] {
+                            assert!(mounted.contains(text), "eligible: missing {}", text);
+                        }
+                    }
+                }
+            }
         }
     }
 
