@@ -137,6 +137,7 @@ pub(crate) struct PairingContext<'a> {
     pub last_poll_at_startup: Option<u32>,
 }
 impl Settings {
+    #[cfg(feature = "mcp-proposals")]
     fn enable_action(&self) -> Element<'_, view::Message> {
         coincube_ui::widget::action::Action::new(
             "tenshu.ai-access.enable",
