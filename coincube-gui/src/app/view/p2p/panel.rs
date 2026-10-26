@@ -25,7 +25,11 @@ use crate::app::{
 };
 use coincube_spark_protocol::PrepareSendOk;
 
-use super::components::order_card::{order_table_header, TakeOrderState};
+#[cfg(test)]
+use super::components::order_card::detail_action_id;
+use super::components::order_card::{
+    detail_primary_id, order_row_id, order_table_header, TakeOrderState,
+};
 use super::components::trade_card::{TradeRole, TradeStatus};
 use super::components::{
     order_card, order_detail, order_filter_sidebar, payment_methods_for, trade_card,
@@ -692,12 +696,8 @@ impl P2PPanel {
                 min_days_active: self.filter_min_days_active,
                 filtered_count: filtered_orders.len(),
             };
-            let stacked = size.width < 850.0;
-            let compact_rows = if stacked {
-                size.width < 680.0
-            } else {
-                size.width - 252.0 < 590.0
-            };
+            let stacked = size.width < 640.0;
+            let compact_rows = stacked || size.width - 264.0 < 660.0;
             let filters = order_filter_sidebar(filter_state, stacked);
             let mut list = column![].spacing(0).width(Length::Fill);
             if !compact_rows {
@@ -727,7 +727,7 @@ impl P2PPanel {
                     .into()
             } else {
                 row![filters, list]
-                    .spacing(20)
+                    .spacing(32)
                     .align_y(iced::alignment::Vertical::Top)
                     .width(Length::Fill)
                     .into()
@@ -735,6 +735,26 @@ impl P2PPanel {
         })
         .height(Length::Shrink)
         .into()
+    }
+
+    fn select_order_for_detail(&mut self, id: String) -> Option<iced::advanced::widget::Id> {
+        let focus_id = self
+            .orders
+            .iter()
+            .find(|order| order.id == id)
+            .map(detail_primary_id);
+        self.selected_order = Some(id);
+        self.taking_order = false;
+        self.take_order_amount = Default::default();
+        self.take_order_invoice = Default::default();
+        self.take_order_submitting = false;
+        focus_id
+    }
+
+    fn close_order_detail_view(&mut self) -> Option<iced::advanced::widget::Id> {
+        let return_to = self.selected_order.take().map(|id| order_row_id(&id));
+        self.taking_order = false;
+        return_to
     }
 
     /// Orders matching the current buy/sell tab + all active filters.
@@ -4970,15 +4990,14 @@ impl State for P2PPanel {
                 }
             }
             P2PMessage::SelectOrder(id) => {
-                self.selected_order = Some(id);
-                self.taking_order = false;
-                self.take_order_amount = Default::default();
-                self.take_order_invoice = Default::default();
-                self.take_order_submitting = false;
+                if let Some(focus_id) = self.select_order_for_detail(id) {
+                    return Task::done(Message::View(view::Message::FocusAction(focus_id)));
+                }
             }
             P2PMessage::CloseOrderDetail => {
-                self.selected_order = None;
-                self.taking_order = false;
+                if let Some(return_to) = self.close_order_detail_view() {
+                    return Task::done(Message::View(view::Message::FocusAction(return_to)));
+                }
             }
             P2PMessage::CopyOrderId(id) => {
                 return Task::done(Message::View(view::Message::Clipboard(id)));
@@ -6572,6 +6591,39 @@ mod book_filter_tests {
         assert_eq!(panel.filtered_orders()[0].id, "maker-buy-eur");
     }
 
+    #[test]
+    fn selecting_and_closing_detail_moves_focus_between_stable_controls() {
+        let mut panel = P2PPanel::new(
+            None,
+            None,
+            zeroize::Zeroizing::new(String::new()),
+            Some("All".into()),
+            Network::Bitcoin,
+        );
+        panel.orders = vec![order(
+            "synthetic-focus",
+            OrderType::Sell,
+            "EUR",
+            "SEPA instant",
+        )];
+        assert_eq!(
+            panel.select_order_for_detail("synthetic-focus".into()),
+            Some(detail_action_id("synthetic-focus", "take"))
+        );
+        assert_eq!(panel.selected_order.as_deref(), Some("synthetic-focus"));
+        assert_eq!(
+            panel.close_order_detail_view(),
+            Some(order_row_id("synthetic-focus"))
+        );
+        assert!(panel.selected_order.is_none());
+
+        panel.orders[0].is_mine = true;
+        assert_eq!(
+            panel.select_order_for_detail("synthetic-focus".into()),
+            Some(detail_action_id("synthetic-focus", "close"))
+        );
+    }
+
     /// R06A_CAPTURE_DIR writes content-only screenshots of the production Book
     /// presenter with clearly synthetic orders and no network or wallet session.
     #[test]
@@ -6606,10 +6658,28 @@ mod book_filter_tests {
                 assert!(inspection.contains("Market"));
                 assert!(inspection.contains("No rating"));
                 assert_eq!(inspection.contains("Creator Reputation"), size.0 == 1440);
+                if size.0 == 1024 {
+                    let side = inspection
+                        .text
+                        .iter()
+                        .find(|(value, _)| value == "BUYING")
+                        .expect("compact order side")
+                        .1;
+                    let filter_note = inspection
+                        .text
+                        .iter()
+                        .find(|(value, _)| {
+                            value.contains("Showing all traders regardless of reputation")
+                        })
+                        .expect("reputation filter note")
+                        .1;
+                    assert!(side.x > 232.0, "order stays beside compact filters");
+                    assert!(side.y < filter_note.y, "orders start above filter footer");
+                }
             }
         }
 
-        let target = iced::advanced::widget::Id::new("p2p-book-order-synthetic-1");
+        let target = order_row_id("synthetic-1");
         for size in [(1024, 768), (1440, 900)] {
             for pointer in [false, true] {
                 let messages = capture::activate(panel.book_view(), target.clone(), size, pointer);

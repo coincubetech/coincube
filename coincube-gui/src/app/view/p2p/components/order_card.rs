@@ -1,6 +1,6 @@
 use coincube_ui::widget::action::Action;
 use coincube_ui::{
-    component::{button, card, form, text::*},
+    component::{card, form, text::*},
     icon, theme,
     widget::*,
 };
@@ -79,11 +79,11 @@ fn book_columns<'a>(
     trailing: impl Into<Element<'a, view::Message>>,
 ) -> Row<'a, view::Message> {
     row![
-        container(side).width(Length::FillPortion(2)),
-        container(amount).width(Length::FillPortion(2)),
-        container(payment).width(Length::FillPortion(3)),
-        container(price).width(Length::FillPortion(2)),
-        container(reputation).width(Length::FillPortion(2)),
+        container(side).width(Length::Fixed(105.0)),
+        container(amount).width(Length::Fixed(105.0)),
+        container(payment).width(Length::Fill),
+        container(price).width(Length::Fixed(120.0)),
+        container(reputation).width(Length::Fixed(150.0)),
         container(trailing).width(Length::Fixed(16.0)),
     ]
     .spacing(12)
@@ -93,11 +93,11 @@ fn book_columns<'a>(
 
 pub fn order_table_header<'a>() -> Element<'a, view::Message> {
     container(book_columns(
-        caption("Side"),
-        caption("Amount"),
-        caption("Payment Method"),
-        caption("Market Price"),
-        caption("Creator Reputation"),
+        caption("Side").style(theme::text::secondary),
+        caption("Amount").style(theme::text::secondary),
+        caption("Payment Method").style(theme::text::secondary),
+        caption("Market Price").style(theme::text::secondary),
+        caption("Creator Reputation").style(theme::text::secondary),
         caption(""),
     ))
     .padding([8, 12])
@@ -147,6 +147,35 @@ fn book_side_label(order: &P2POrder) -> &'static str {
     }
 }
 
+pub fn order_row_id(id: &str) -> Id {
+    Id::from(format!("p2p-book-order-{id}"))
+}
+
+pub fn detail_action_id(id: &str, action: &str) -> Id {
+    Id::from(format!("p2p-book-detail-{id}-{action}"))
+}
+
+pub fn detail_primary_id(order: &P2POrder) -> Id {
+    detail_action_id(&order.id, if order.is_mine { "close" } else { "take" })
+}
+
+fn selling_style(theme: &coincube_ui::theme::Theme) -> iced::widget::text::Style {
+    iced::widget::text::Style {
+        color: Some(theme.colors.shell.accent_ink),
+    }
+}
+
+fn book_row_style(
+    theme: &coincube_ui::theme::Theme,
+    status: iced::widget::button::Status,
+) -> iced::widget::button::Style {
+    let mut style = theme::button::transparent(theme, status);
+    if matches!(status, iced::widget::button::Status::Hovered) {
+        style.background = Some(iced::Background::Color(theme.colors.shell.hover));
+    }
+    style
+}
+
 /// A single keyboard-actionable order entry. External orders describe the
 /// taker's action; the user's own orders describe their maker action.
 /// `order_type` remains the maker's side for selection and trading.
@@ -154,7 +183,7 @@ pub fn order_card<'a>(order: &'a P2POrder, compact: bool) -> Element<'a, view::M
     let side = book_side_label(order);
     let side_style = match (&order.order_type, order.is_mine) {
         (OrderType::Sell, false) | (OrderType::Buy, true) => theme::text::success as fn(&_) -> _,
-        (OrderType::Buy, false) | (OrderType::Sell, true) => theme::text::warning as fn(&_) -> _,
+        (OrderType::Buy, false) | (OrderType::Sell, true) => selling_style as fn(&_) -> _,
     };
     let payment = if order.payment_methods.is_empty() {
         "Unavailable".to_string()
@@ -197,11 +226,11 @@ pub fn order_card<'a>(order: &'a P2POrder, compact: bool) -> Element<'a, view::M
     };
 
     Action::new(
-        Id::from(format!("p2p-book-order-{}", order.id)),
+        order_row_id(&order.id),
         container(content).padding([10, 12]).width(Length::Fill),
         view::Message::FocusAction,
     )
-    .style(theme::button::transparent)
+    .style(book_row_style)
     .padding(0)
     .focus_radius(0.0)
     .on_press(view::Message::P2P(P2PMessage::SelectOrder(
@@ -217,6 +246,31 @@ pub struct TakeOrderState<'a> {
     pub amount: &'a form::Value<String>,
     pub invoice: &'a form::Value<String>,
     pub submitting: bool,
+}
+
+fn detail_button<'a>(
+    order_id: &str,
+    control: &'static str,
+    label: &'static str,
+    style: fn(
+        &coincube_ui::theme::Theme,
+        iced::widget::button::Status,
+    ) -> iced::widget::button::Style,
+    width: Length,
+    on_press: Option<view::Message>,
+) -> Element<'a, view::Message> {
+    Action::new(
+        detail_action_id(order_id, control),
+        container(p2_regular(label))
+            .width(width)
+            .align_x(iced::alignment::Horizontal::Center),
+        view::Message::FocusAction,
+    )
+    .style(style)
+    .width(width)
+    .padding([8, 12])
+    .on_press_maybe(on_press)
+    .into()
 }
 
 pub fn order_detail<'a>(
@@ -348,9 +402,16 @@ pub fn order_detail<'a>(
                 row![
                     p2_regular(&order.id).style(theme::text::secondary),
                     Space::new().width(Length::Fill),
-                    button::secondary_compact(None, "Copy").on_press(view::Message::P2P(
-                        P2PMessage::CopyOrderId(order.id.clone(),)
-                    )),
+                    detail_button(
+                        &order.id,
+                        "copy",
+                        "Copy",
+                        theme::button::secondary,
+                        Length::Shrink,
+                        Some(view::Message::P2P(P2PMessage::CopyOrderId(
+                            order.id.clone()
+                        ))),
+                    ),
                 ]
                 .spacing(8)
                 .align_y(iced::alignment::Vertical::Center),
@@ -462,14 +523,24 @@ pub fn order_detail<'a>(
             .spacing(4),
         );
 
-        let close_btn = button::secondary(None, "Close")
-            .on_press(view::Message::P2P(P2PMessage::CloseOrderDetail))
-            .width(Length::Fill);
-        let cancel_btn = button::alert(None, "Cancel Order")
-            .on_press(view::Message::P2P(P2PMessage::CancelOrder(
+        let close_btn = detail_button(
+            &order.id,
+            "close",
+            "Close",
+            theme::button::secondary,
+            Length::Fill,
+            Some(view::Message::P2P(P2PMessage::CloseOrderDetail)),
+        );
+        let cancel_btn = detail_button(
+            &order.id,
+            "cancel",
+            "Cancel Order",
+            theme::button::destructive,
+            Length::Fill,
+            Some(view::Message::P2P(P2PMessage::CancelOrder(
                 order.id.clone(),
-            )))
-            .width(Length::Fill);
+            ))),
+        );
         detail_col = detail_col.push(row![close_btn, cancel_btn].spacing(8));
     } else {
         // Is user buying? (taking a sell order)
@@ -528,32 +599,49 @@ pub fn order_detail<'a>(
             };
 
             let action_label = if is_buying { "Buy" } else { "Sell" };
-            let confirm_btn = if can_confirm && !state.submitting {
-                button::primary(None, action_label)
-                    .on_press(view::Message::P2P(P2PMessage::ConfirmTakeOrder))
-                    .width(Length::Fill)
-            } else {
-                button::primary(None, action_label).width(Length::Fill)
-            };
+            let confirm_btn = detail_button(
+                &order.id,
+                "confirm",
+                action_label,
+                theme::button::primary,
+                Length::Fill,
+                (can_confirm && !state.submitting)
+                    .then_some(view::Message::P2P(P2PMessage::ConfirmTakeOrder)),
+            );
 
             detail_col = detail_col.push(
                 row![
-                    button::secondary(None, "Close")
-                        .on_press(view::Message::P2P(P2PMessage::CloseOrderDetail))
-                        .width(Length::Fill),
+                    detail_button(
+                        &order.id,
+                        "close",
+                        "Close",
+                        theme::button::secondary,
+                        Length::Fill,
+                        Some(view::Message::P2P(P2PMessage::CloseOrderDetail)),
+                    ),
                     confirm_btn,
                 ]
                 .spacing(8),
             );
         } else {
             // Initial state: show Buy/Sell button that activates take order fields
-            let close_btn = button::secondary(None, "Close")
-                .on_press(view::Message::P2P(P2PMessage::CloseOrderDetail))
-                .width(Length::Fill);
+            let close_btn = detail_button(
+                &order.id,
+                "close",
+                "Close",
+                theme::button::secondary,
+                Length::Fill,
+                Some(view::Message::P2P(P2PMessage::CloseOrderDetail)),
+            );
             let action_label = if is_buying { "Buy" } else { "Sell" };
-            let action_btn = button::primary(None, action_label)
-                .on_press(view::Message::P2P(P2PMessage::TakeOrder))
-                .width(Length::Fill);
+            let action_btn = detail_button(
+                &order.id,
+                "take",
+                action_label,
+                theme::button::primary,
+                Length::Fill,
+                Some(view::Message::P2P(P2PMessage::TakeOrder)),
+            );
             detail_col = detail_col.push(row![close_btn, action_btn].spacing(8));
         }
     }
@@ -564,6 +652,7 @@ pub fn order_detail<'a>(
 #[cfg(test)]
 mod book_tests {
     use super::*;
+    use crate::app::view::shared::landing::capture;
 
     fn order(order_type: OrderType) -> P2POrder {
         P2POrder {
@@ -605,5 +694,88 @@ mod book_tests {
         assert_eq!(book_side_label(&buy), "YOU ARE BUYING");
         sell.is_mine = true;
         assert_eq!(book_side_label(&sell), "YOU ARE SELLING");
+    }
+
+    #[test]
+    fn selected_order_detail_actions_support_keyboard_and_pointer() {
+        let order = order(OrderType::Sell);
+        let size = (1024, 768);
+        let take = detail_primary_id(&order);
+        assert_eq!(take, detail_action_id(&order.id, "take"));
+
+        let enter = capture::activate(order_detail(&order, None).into(), take.clone(), size, false);
+        assert!(matches!(
+            enter.as_slice(),
+            [view::Message::P2P(P2PMessage::TakeOrder)]
+        ));
+        let pointer =
+            capture::activate(order_detail(&order, None).into(), take.clone(), size, true);
+        assert!(matches!(
+            pointer.as_slice(),
+            [view::Message::FocusAction(id), view::Message::P2P(P2PMessage::TakeOrder)]
+                if id == &take
+        ));
+        let close = capture::activate(
+            order_detail(&order, None).into(),
+            detail_action_id(&order.id, "close"),
+            size,
+            false,
+        );
+        assert!(matches!(
+            close.as_slice(),
+            [view::Message::P2P(P2PMessage::CloseOrderDetail)]
+        ));
+        let copy = capture::activate_with_key(
+            order_detail(&order, None).into(),
+            detail_action_id(&order.id, "copy"),
+            size,
+            false,
+            iced::keyboard::key::Named::Space,
+        );
+        assert!(matches!(
+            copy.as_slice(),
+            [view::Message::P2P(P2PMessage::CopyOrderId(id))] if id == &order.id
+        ));
+
+        let mut direct = order.clone();
+        direct.min_amount = None;
+        direct.max_amount = None;
+        let amount = form::Value::<String>::default();
+        let invoice = form::Value::<String>::default();
+        let confirm = capture::activate(
+            order_detail(
+                &direct,
+                Some(TakeOrderState {
+                    amount: &amount,
+                    invoice: &invoice,
+                    submitting: false,
+                }),
+            )
+            .into(),
+            detail_action_id(&direct.id, "confirm"),
+            size,
+            false,
+        );
+        assert!(matches!(
+            confirm.as_slice(),
+            [view::Message::P2P(P2PMessage::ConfirmTakeOrder)]
+        ));
+
+        let mut mine = order;
+        mine.is_mine = true;
+        assert_eq!(
+            detail_primary_id(&mine),
+            detail_action_id(&mine.id, "close")
+        );
+        let cancel = capture::activate(
+            order_detail(&mine, None).into(),
+            detail_action_id(&mine.id, "cancel"),
+            size,
+            false,
+        );
+        assert!(matches!(
+            cancel.as_slice(),
+            [view::Message::P2P(P2PMessage::CancelOrder(id))] if id == &mine.id
+        ));
     }
 }
