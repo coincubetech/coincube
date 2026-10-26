@@ -29,6 +29,7 @@ use crate::theme::tenshu::{self as tokens, size, space};
 use crate::theme::Theme;
 use crate::widget::{Column, Container, Element, Renderer, Row, Scrollable};
 
+mod choices;
 mod controls;
 
 #[derive(Debug, Clone, PartialEq)]
