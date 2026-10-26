@@ -7,7 +7,7 @@
 //! finalisation and reorg primitives are merged.
 
 use coincube_ui::{
-    component::{button, card, text::*},
+    component::{amount::format_u64_as_string, button, card, text::*},
     theme,
     widget::{Column, Container, Element, Row, RowExt},
 };
@@ -719,6 +719,20 @@ fn scan_error_copy(error: ScanError) -> String {
 /// identity stays read-only; scan, cancel and continuation actions follow the
 /// panel's current state.
 pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
+    let coin_amount = |count: usize, sats: u64| {
+        format!(
+            "{} UTXO{}, {} sats",
+            count,
+            if count == 1 { "" } else { "s" },
+            format_u64_as_string(sats, ",")
+        )
+    };
+    let result_row = |label: &'static str, value: String| {
+        Row::new()
+            .spacing(16)
+            .push(p1_bold(label).width(Length::Fixed(250.0)))
+            .push(p1_regular(value).width(Length::Fill))
+    };
     let imported = panel.imported_source.as_ref();
     let header = if imported.is_some() {
         Column::new().spacing(6).push(h3("Claim BTCB2")).push(
@@ -814,19 +828,24 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
                 summary.coins,
                 if summary.coins == 1 { "" } else { "s" },
                 summary.confirmed,
-                summary.sats
+                format_u64_as_string(summary.sats, ",")
             )))
             .push(card::simple(
                 Column::new()
-                    .spacing(10)
-                    .push(p1_bold("Pre-fork (splittable)"))
-                    .push(p1_regular(format!("{} UTXOs, {} sats", summary.pre_fork, summary.pre_fork_sats)))
-                    .push(p1_bold("Confirmed after the fork"))
-                    .push(p1_regular(format!("{} · not part of this split; may still be replayable", summary.post_fork)))
-                    .push(p1_bold("Unclassified (excluded)"))
-                    .push(p1_regular(summary.unclassified.to_string()))
-                    .push(p1_bold("Unspent on both chains (splittable)"))
-                    .push(p1_regular(format!("{} UTXOs, {} sats", summary.inventory.splittable, summary.inventory.splittable_sats)))
+                    .spacing(14)
+                    .push(result_row(
+                        "Pre-fork on Bitcoin Blake2b",
+                        coin_amount(summary.pre_fork, summary.pre_fork_sats),
+                    ))
+                    .push(result_row(
+                        "Confirmed after the fork",
+                        format!("{} · not part of this split; may still be replayable", summary.post_fork),
+                    ))
+                    .push(result_row("Unclassified (excluded)", summary.unclassified.to_string()))
+                    .push(result_row(
+                        "Unspent on both chains (splittable)",
+                        coin_amount(summary.inventory.splittable, summary.inventory.splittable_sats),
+                    ))
                     .push(p1_regular(format!(
                         "Spent on Bitcoin: {} · Spent on Bitcoin Blake2b: {} · Pending or replayed: {}",
                         summary.inventory.spent_on_bitcoin,
@@ -1107,6 +1126,14 @@ mod tests {
         pending.confirmed = 2;
         let mut taproot = base.clone();
         taproot.signable = false;
+        taproot.coins = 1;
+        taproot.confirmed = 1;
+        taproot.sats = 400_000;
+        taproot.pre_fork = 1;
+        taproot.pre_fork_sats = 400_000;
+        taproot.post_fork = 0;
+        taproot.inventory.splittable = 1;
+        taproot.inventory.splittable_sats = 400_000;
         let states = [
             ("ready", Status::Editing, false),
             ("scanning", Status::Scanning, false),
@@ -1163,15 +1190,21 @@ mod tests {
                     }
                     if name == "eligible" {
                         for text in [
-                            "Pre-fork (splittable)",
+                            "Pre-fork on Bitcoin Blake2b",
                             "Confirmed after the fork",
                             "Unclassified (excluded)",
                             "Unspent on both chains (splittable)",
                             "may still be replayable",
                             "synthetic-bitcoin-tip",
+                            "1,250,000 sats",
+                            "2 UTXOs, 1,000,000 sats",
                         ] {
                             assert!(mounted.contains(text), "eligible: missing {}", text);
                         }
+                    }
+                    if name == "taproot" {
+                        assert!(mounted.contains("1 UTXO, 400,000 sats"));
+                        assert!(!mounted.contains("1 UTXOs"));
                     }
                 }
             }
