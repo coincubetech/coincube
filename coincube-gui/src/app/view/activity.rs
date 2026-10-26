@@ -901,108 +901,14 @@ fn render_at_width<'a>(
                 .align_x(iced::alignment::Horizontal::Center),
         );
     }
-    let mut previous_day = None;
-    let mut first_day = true;
-    for entry in visible {
-        let is_selected = selected.is_some_and(|selected| selected.id == entry.id);
-        let day = (entry.timestamp != 0)
-            .then(|| DateTime::<Utc>::from_timestamp(entry.timestamp as i64, 0))
-            .flatten()
-            .map(|time| time.with_timezone(&Local).date_naive());
-        if first_day || day != previous_day {
-            list = list.push(
-                container(
-                    text(day_heading(day, Local::now().date_naive()))
-                        .size(13)
-                        .font(font::SEMIBOLD),
-                )
-                .padding(iced::Padding {
-                    top: 18.0,
-                    right: 8.0,
-                    bottom: 8.0,
-                    left: 8.0,
-                }),
-            );
-            list = list.push(rule::horizontal(1));
-            previous_day = day;
-            first_day = false;
-        }
-        let time = (entry.timestamp != 0)
-            .then(|| DateTime::<Utc>::from_timestamp(entry.timestamp as i64, 0))
-            .flatten()
-            .map_or_else(
-                || "—".to_owned(),
-                |time| time.with_timezone(&Local).format("%H:%M").to_string(),
-            );
-        let amount = signed_amount(entry, cache.balance_amounts_masked());
-        list = list.push(
-            Action::new(
-                row_focus_id(&entry.id),
-                row![
-                    text(time)
-                        .size(12)
-                        .style(theme::text::secondary)
-                        .width(Length::Fixed(44.0)),
-                    row![
-                        wallet_glyph(entry.wallet),
-                        text(entry.wallet.to_string()).size(12)
-                    ]
-                    .spacing(5)
-                    .align_y(Alignment::Center)
-                    .width(Length::Fixed(112.0)),
-                    row![
-                        direction_glyph(entry.direction),
-                        container(
-                            text(entry.title.clone())
-                                .size(13)
-                                .wrapping(iced::widget::text::Wrapping::None)
-                        )
-                        .clip(true)
-                    ]
-                    .spacing(5)
-                    .align_y(Alignment::Center)
-                    .width(Length::Fill),
-                    text(amount)
-                        .size(13)
-                        .font(font::SEMIBOLD)
-                        .align_x(iced::alignment::Horizontal::Right)
-                        .width(Length::Fixed(128.0)),
-                    container(status_mark(entry)).width(Length::Fixed(132.0)),
-                ]
-                .spacing(12)
-                .align_y(Alignment::Center),
-                Message::FocusAction,
-            )
-            .width(Length::Fill)
-            .padding([15, 8])
-            .style(move |theme, status| {
-                let mut style = coincube_ui::theme::button::transparent_border(theme, status);
-                if is_selected {
-                    style.background = Some(iced::Background::Color(theme.colors.shell.selected));
-                    style.border.color = theme.colors.shell.focus;
-                    style.border.width = 1.0;
-                    style.border.radius = 8.0.into();
-                }
-                style
-            })
-            .on_press(Message::Activity(ActivityMessage::Select(entry.id.clone()))),
+    let mut selected_detail = selected.map(|entry| {
+        let needs_signatures = matches!(
+            &entry.target,
+            ActivityTarget::Psbt(tx) if {
+                let path = tx.sigs.primary_path();
+                path.sigs_count < path.threshold
+            }
         );
-        list = list.push(rule::horizontal(1));
-    }
-    if activity.vault_has_more || activity.spark_has_more || activity.liquid_has_more {
-        let mut more = button::secondary(None, "Load older activity");
-        if !activity.vault_loading
-            && !activity.psbt_loading
-            && !activity.spark_loading
-            && !activity.liquid_loading
-            && !activity.refundables_loading
-        {
-            more = more.on_press(Message::Activity(ActivityMessage::LoadMore));
-        }
-        list = list.push(more);
-    }
-    let main: Element<'a, Message> = list.width(Length::Fill).into();
-    if let Some(entry) = selected {
         let mut detail = Column::new()
             .spacing(10)
             .push(
@@ -1038,7 +944,7 @@ fn render_at_width<'a>(
                     .style(theme::text::secondary),
             )
             .push(status_mark(entry));
-        if let Some(signer_status) = &entry.signer_status {
+        if let Some(signer_status) = entry.signer_status.as_ref().filter(|_| needs_signatures) {
             detail = detail
                 .push(Space::new().height(Length::Fixed(8.0)))
                 .push(rule::horizontal(1))
@@ -1146,6 +1052,19 @@ fn render_at_width<'a>(
                     ),
             );
         }
+        if let Some(signer_status) = entry.signer_status.as_ref().filter(|_| !needs_signatures) {
+            detail = detail.push(
+                Column::new()
+                    .spacing(8)
+                    .push(rule::horizontal(1))
+                    .push(h4_bold("PSBT and signers"))
+                    .push(
+                        text(signer_status.clone())
+                            .size(12)
+                            .style(theme::text::secondary),
+                    ),
+            );
+        }
         detail = detail.push(
             Action::new(
                 Id::from("tenshu.activity.detail.open"),
@@ -1169,20 +1088,123 @@ fn render_at_width<'a>(
                 ..Default::default()
             }
         });
-        if !detail_beside_list(width) {
-            // At the minimum window width, keep the selected detail next to the
-            // filters rather than below an arbitrarily long transaction list.
-            column![heading, detail.width(Length::Fill), main]
-                .spacing(16)
-                .into()
-        } else {
-            column![
-                heading,
-                row![main, detail.width(Length::Fixed(SELECTED_DETAIL_WIDTH))].spacing(DETAIL_GAP)
-            ]
-            .spacing(16)
-            .into()
+        detail
+    });
+    let mut previous_day = None;
+    let mut first_day = true;
+    for entry in visible {
+        let is_selected = selected.is_some_and(|selected| selected.id == entry.id);
+        let day = (entry.timestamp != 0)
+            .then(|| DateTime::<Utc>::from_timestamp(entry.timestamp as i64, 0))
+            .flatten()
+            .map(|time| time.with_timezone(&Local).date_naive());
+        if first_day || day != previous_day {
+            list = list.push(
+                container(
+                    text(day_heading(day, Local::now().date_naive()))
+                        .size(13)
+                        .font(font::SEMIBOLD),
+                )
+                .padding(iced::Padding {
+                    top: 18.0,
+                    right: 8.0,
+                    bottom: 8.0,
+                    left: 8.0,
+                }),
+            );
+            list = list.push(rule::horizontal(1));
+            previous_day = day;
+            first_day = false;
         }
+        let time = (entry.timestamp != 0)
+            .then(|| DateTime::<Utc>::from_timestamp(entry.timestamp as i64, 0))
+            .flatten()
+            .map_or_else(
+                || "—".to_owned(),
+                |time| time.with_timezone(&Local).format("%H:%M").to_string(),
+            );
+        let amount = signed_amount(entry, cache.balance_amounts_masked());
+        list = list.push(
+            Action::new(
+                row_focus_id(&entry.id),
+                row![
+                    text(time)
+                        .size(12)
+                        .style(theme::text::secondary)
+                        .width(Length::Fixed(44.0)),
+                    row![
+                        wallet_glyph(entry.wallet),
+                        text(entry.wallet.to_string()).size(12)
+                    ]
+                    .spacing(5)
+                    .align_y(Alignment::Center)
+                    .width(Length::Fixed(112.0)),
+                    row![
+                        direction_glyph(entry.direction),
+                        container(
+                            text(entry.title.clone())
+                                .size(13)
+                                .wrapping(iced::widget::text::Wrapping::None)
+                        )
+                        .clip(true)
+                    ]
+                    .spacing(5)
+                    .align_y(Alignment::Center)
+                    .width(Length::Fill),
+                    text(amount)
+                        .size(13)
+                        .font(font::SEMIBOLD)
+                        .align_x(iced::alignment::Horizontal::Right)
+                        .width(Length::Fixed(128.0)),
+                    container(status_mark(entry)).width(Length::Fixed(132.0)),
+                ]
+                .spacing(12)
+                .align_y(Alignment::Center),
+                Message::FocusAction,
+            )
+            .width(Length::Fill)
+            .padding([15, 8])
+            .style(move |theme, status| {
+                let mut style = coincube_ui::theme::button::transparent_border(theme, status);
+                if is_selected {
+                    style.background = Some(iced::Background::Color(theme.colors.shell.selected));
+                    style.border.color = theme.colors.shell.focus;
+                    style.border.width = 1.0;
+                    style.border.radius = 8.0.into();
+                }
+                style
+            })
+            .on_press(Message::Activity(ActivityMessage::Select(entry.id.clone()))),
+        );
+        if is_selected && !detail_beside_list(width) {
+            // Keep compact detail in the selected row's scroll position and
+            // immediately after it in keyboard traversal, even deep in history.
+            if let Some(detail) = selected_detail.take() {
+                list = list.push(detail.width(Length::Fill));
+            }
+        }
+        list = list.push(rule::horizontal(1));
+    }
+    if activity.vault_has_more || activity.spark_has_more || activity.liquid_has_more {
+        let mut more = button::secondary(None, "Load older activity");
+        if !activity.vault_loading
+            && !activity.psbt_loading
+            && !activity.spark_loading
+            && !activity.liquid_loading
+            && !activity.refundables_loading
+        {
+            more = more.on_press(Message::Activity(ActivityMessage::LoadMore));
+        }
+        list = list.push(more);
+    }
+    let main: Element<'a, Message> = list.width(Length::Fill).into();
+    if let Some(detail) = selected_detail {
+        column![
+            heading,
+            row![main, detail.width(Length::Fixed(SELECTED_DETAIL_WIDTH))].spacing(DETAIL_GAP)
+        ]
+        .spacing(16)
+        .into()
     } else {
         column![heading, main].spacing(16).into()
     }
@@ -1469,6 +1491,42 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn compact_detail_follows_a_deep_selected_row_in_focus_order() {
+        let cache = Cache::default();
+        let mut activity = Activity::new(None, None);
+        let payments: Vec<_> = (0..30)
+            .map(|index| {
+                let mut payment = spark_payment();
+                payment.id = format!("pay-{index}");
+                payment.description = Some(format!("Payment {index}"));
+                payment.timestamp -= index * 60;
+                payment
+            })
+            .collect();
+        let selected_id = Entry::spark(payments[15].clone()).id;
+        let next_id = Entry::spark(payments[16].clone()).id;
+        drop(activity.update(
+            None,
+            &cache,
+            crate::app::message::Message::ActivitySparkLoaded(0, Ok((payments, false))),
+        ));
+        activity.selected_id = Some(selected_id.clone());
+        let mounted = capture::inspect_wide_content(
+            "r09-activity-deep-compact-detail",
+            render_at_width(&activity, &cache, 768.0),
+            (1024, 768),
+            "dark",
+            coincube_ui::theme::Theme::dark(),
+            768,
+        );
+        let position = |id: Id| mounted.focus.iter().position(|(actual, _)| *actual == id);
+        let selected = position(row_focus_id(&selected_id)).expect("selected row mounted");
+        let close = position(Id::from("tenshu.activity.detail.close")).expect("detail mounted");
+        let next = position(row_focus_id(&next_id)).expect("next row mounted");
+        assert!(selected < close && close < next);
     }
 
     #[test]
