@@ -12521,6 +12521,9 @@ pub(crate) mod tests {
                     split_app(&root, false, true),
                     split_app(&root, false, true),
                 );
+                // The reviewer fixture starts unresolved. GUI::new loads an
+                // accepted receipt before the first preference change.
+                gui.reviewer_load_preferences();
                 rt.block_on(async {
                     for expected in [ThemeMode::Light, ThemeMode::Dark] {
                         let mut pending = vec![gui.reviewer_theme_toggle(1)];

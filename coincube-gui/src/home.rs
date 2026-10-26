@@ -1410,6 +1410,13 @@ impl Home {
         }
     }
 
+    /// Refresh only the Launcher presentation after a device style or motion
+    /// edit. Feature reconciliation can cancel an in-progress Split flow and
+    /// belongs to actual developer/network preference changes.
+    pub(crate) fn refresh_launcher_mode(&mut self) {
+        self.apply_launcher_mode();
+    }
+
     /// Update the purely visual Launcher mode when macOS Accessibility changes.
     pub(crate) fn set_system_reduces_motion(&mut self, observed: Option<bool>) {
         if self.system_reduces_motion != observed {

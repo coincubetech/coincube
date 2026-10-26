@@ -145,6 +145,8 @@ pub enum Message {
     Menu(Menu),
     /// Show the Launcher while keeping this Cube's session in its App tab.
     OpenLauncher,
+    /// Open installation-wide preferences above the retained Cube.
+    OpenAppPreferences,
     /// Lock through the tab's secure lifecycle, then show the Launcher.
     LockCubeToLauncher,
     ToggleCubeSwitcher,
