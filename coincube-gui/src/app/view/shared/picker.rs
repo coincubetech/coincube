@@ -92,20 +92,28 @@ where
             .style(if is_selected {
                 picker_row_selected
             } else {
-                theme::card::simple
+                picker_row_idle
             }),
     )
     .on_press(on_press)
     .style(|_: &theme::Theme, _| iced_button::Style {
         background: Some(Background::Color(color::TRANSPARENT)),
         border: iced::Border {
-            radius: 12.0.into(),
+            radius: 8.0.into(),
             ..Default::default()
         },
         ..Default::default()
     })
     .width(Length::Fill)
     .into()
+}
+
+/// An unselected picker row: the simple card surface with the square 8px
+/// corner every button takes since canvas v122.
+pub fn picker_row_idle(theme: &theme::Theme) -> container::Style {
+    let mut style = theme::card::simple(theme);
+    style.border.radius = 8.0.into();
+    style
 }
 
 /// Selected row in picker modals — orange border with subtle tinted background.
@@ -119,7 +127,7 @@ pub fn picker_row_selected(theme: &theme::Theme) -> container::Style {
         border: iced::Border {
             color: color::ORANGE,
             width: 1.0,
-            radius: 12.0.into(),
+            radius: 8.0.into(),
         },
         ..Default::default()
     }

@@ -98,7 +98,7 @@ fn send_route_action_style(
                 shell.line
             },
             width: 1.0,
-            radius: 12.0.into(),
+            radius: 8.0.into(),
         },
         ..Default::default()
     }
@@ -818,7 +818,7 @@ fn send_picker_action<'a>(
     Action::new(id, content, LiquidSendMessage::FocusAction)
         .width(Length::Fill)
         .padding([12, 16])
-        .focus_radius(12.0)
+        .focus_radius(8.0)
         .style(move |theme, status| {
             let shell = &theme.colors.shell;
             iced_button::Style {
@@ -835,7 +835,7 @@ fn send_picker_action<'a>(
                         shell.line
                     },
                     width: 1.0,
-                    radius: 12.0.into(),
+                    radius: 8.0.into(),
                 },
                 ..Default::default()
             }
