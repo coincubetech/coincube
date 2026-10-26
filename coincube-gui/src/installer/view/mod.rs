@@ -22,7 +22,7 @@ use coincube_core::{
 use coincube_ui::{
     component::{
         button, card, collapse, form, hw,
-        text::{h2, h3, h4_bold, p1_bold, p1_regular, text, Text},
+        text::{h3, h4_bold, p1_bold, p1_regular, text, Text},
     },
     icon, theme,
     widget::{action::Action, *},
@@ -58,7 +58,8 @@ pub fn import_wallet_or_descriptor<'a>(
 ) -> Element<'a, Message> {
     let mut col_wallets = Column::new()
         .spacing(20)
-        .push(h4_bold("Load a previously used wallet"));
+        .push(h4_bold("Wallets on this Connect account"))
+        .push(p2_regular("Choose a wallet on this Connect account."));
     let no_wallets = wallets.is_empty();
     for (i, (name, alias)) in wallets.into_iter().enumerate() {
         col_wallets = col_wallets.push(
@@ -74,7 +75,7 @@ pub fn import_wallet_or_descriptor<'a>(
         );
     }
     let card_wallets: Element<'a, Message> = if no_wallets {
-        h4_bold("You have no current wallets").into()
+        p2_regular("No previously used wallets are available on this account.").into()
     } else {
         card::simple(col_wallets).into()
     };
@@ -86,7 +87,7 @@ pub fn import_wallet_or_descriptor<'a>(
                     .spacing(5)
                     .push(h4_bold("Load a shared wallet").style(theme::text::primary))
                     .push(
-                        text("If you received an invitation to join a shared wallet")
+                        text("Use an invitation token from a shared wallet")
                             .style(theme::text::secondary),
                     ),
             )
@@ -100,7 +101,7 @@ pub fn import_wallet_or_descriptor<'a>(
                     .spacing(5)
                     .push(h4_bold("Load a shared wallet").style(theme::text::primary))
                     .push(
-                        text("Type the invitation token you received by email")
+                        text("Paste the invitation token you received by email")
                             .style(theme::text::secondary),
                     ),
             )
@@ -185,7 +186,7 @@ pub fn import_wallet_or_descriptor<'a>(
                     .spacing(5)
                     .push(h4_bold("Load a wallet from descriptor").style(theme::text::primary))
                     .push(
-                        text("Creates a new wallet from the descriptor")
+                        text("Import its public descriptor; signing keys are not imported here")
                             .style(theme::text::secondary),
                     ),
             )
@@ -199,7 +200,7 @@ pub fn import_wallet_or_descriptor<'a>(
                     .spacing(5)
                     .push(h4_bold("Load a wallet from descriptor").style(theme::text::primary))
                     .push(
-                        text("Creates a new wallet from the descriptor")
+                        text("Import its public descriptor; signing keys are not imported here")
                             .style(theme::text::secondary),
                     ),
             )
@@ -266,9 +267,13 @@ pub fn import_wallet_or_descriptor<'a>(
     layout(
         progress,
         email,
-        "Add wallet",
+        "Add an existing wallet",
         Column::new()
-            .spacing(50)
+            .spacing(24)
+            .push(h4_bold("Choose a wallet source"))
+            .push(p2_regular(
+                "Use a wallet on this account, a shared invitation, or a public descriptor. To restore a Cube from its Recovery Kit, use the Cube restore path.",
+            ))
             .push(error.map(|e| card::error("Something wrong happened", e.to_string())))
             .push(card_wallets)
             .push(card::simple(col_invitation_token).padding(0))
@@ -344,8 +349,11 @@ pub fn import_descriptor<'a>(
     layout(
         progress,
         email,
-        "Import the wallet",
+        "Import a public wallet descriptor",
         Column::new()
+            .push(p2_regular(
+                "This step reads a public descriptor or backup. It does not add signing keys. You can enter the wallet's recovery words in the next step or skip that step if its keys are held elsewhere.",
+            ))
             .push(
                 Column::new()
                     .spacing(20)
@@ -2425,17 +2433,18 @@ pub fn login(progress: (usize, usize), connection_step: Element<Message>) -> Ele
     layout(
         progress,
         None,
-        "Login",
+        "Sign in to Connect",
         Container::new(
             Column::new()
-                .spacing(50)
+                .spacing(20)
                 .max_width(700)
-                .align_x(Alignment::Center)
-                .width(Length::FillPortion(1))
-                .push(h2("COINCUBE | Connect"))
+                .width(Length::Fill)
+                .push(p2_regular("ADD WALLET · CONNECT").style(theme::text::secondary))
+                .push(p2_regular(
+                    "Use the Connect account that holds your wallet or invitation. The emailed sign-in code submits when complete. If you have an invitation, enter its token on the next screen.",
+                ))
                 .push(connection_step),
-        )
-        .center_x(Length::Fill),
+        ),
         true,
         Some(Message::Previous),
     )
@@ -2507,17 +2516,18 @@ pub fn connection_step_enter_otp<'a>(
 ) -> Element<'a, Message> {
     Column::new()
         .spacing(20)
-        .push(text(email).style(theme::text::success))
-        .push(text("An authentication token has been emailed to you"))
+        // The address is still unverified until this sign-in code succeeds.
+        .push(text(email).style(theme::text::secondary))
+        .push(text("A sign-in code has been emailed to you"))
         .push(connection_error.map(|e| text(e.to_string()).style(theme::text::warning)))
         .push(auth_error.map(|e| text(e.to_string()).style(theme::text::warning)))
         .push(
-            form::Form::new_trimmed("Token", otp, |msg| {
+            form::Form::new_trimmed("Sign-in code", otp, |msg| {
                 Message::SelectBackend(message::SelectBackend::OTPEdited(msg))
             })
             .size(text::P1_SIZE)
             .padding(10)
-            .warning("Token is not valid"),
+            .warning("Code is not valid"),
         )
         .push(
             Row::new()
@@ -2527,7 +2537,7 @@ pub fn connection_step_enter_otp<'a>(
                         .on_press(Message::SelectBackend(message::SelectBackend::EditEmail)),
                 )
                 .push(
-                    button::secondary(None, "Resend token").on_press_maybe(if processing {
+                    button::secondary(None, "Resend code").on_press_maybe(if processing {
                         None
                     } else {
                         Some(Message::SelectBackend(message::SelectBackend::RequestOTP))
@@ -2701,7 +2711,7 @@ pub(super) fn layout<'a>(
                                 .center_x(Length::FillPortion(2)),
                         )
                     } else {
-                        None
+                        Some(Container::new(Space::new()).width(Length::FillPortion(2)))
                     }),
             )
             .push(
@@ -2733,15 +2743,11 @@ pub(super) fn layout<'a>(
     .into()
 }
 
-/// Placeholder view for the Cube Recovery Kit restore step (W13/W14/W15).
-/// Renders a minimal but complete UI so every Phase has a reachable
-/// interaction. A design pass is expected as a follow-up.
-///
-/// The scope arg changes the headline copy and hides "Skip" when
-/// the flow is `Full` (W13 — the restore IS the point of the flow).
+/// The Recovery Kit journey keeps each existing authentication, selection and
+/// decryption phase visible. The step's state machine remains authoritative.
 #[allow(clippy::too_many_arguments)]
 pub fn recovery_kit_restore<'a>(
-    progress: (usize, usize),
+    _progress: (usize, usize),
     scope: crate::installer::step::RestoreScope,
     phase: &'a crate::installer::step::recovery_kit_restore::RestorePhase,
     email: &'a form::Value<String>,
@@ -2760,7 +2766,47 @@ pub fn recovery_kit_restore<'a>(
         }
     };
 
-    let mut content: Column<'a, Message> = Column::new().spacing(20).width(Length::Fill);
+    let flow_label = match scope {
+        crate::installer::step::RestoreScope::Full => "RECOVERY KIT",
+        crate::installer::step::RestoreScope::DescriptorOnly => "DESCRIPTOR RESTORE",
+    };
+    let (stage_label, step_title, step_detail) = match phase {
+        RestorePhase::Email | RestorePhase::OtpEntry => (
+            "STEP 1 OF 3",
+            "Sign in to Connect",
+            "Verify the account that holds this Cube's Recovery Kit.".to_string(),
+        ),
+        RestorePhase::LoadingCubes | RestorePhase::CubePicker { .. } => (
+            "STEP 2 OF 3",
+            "Choose a Cube",
+            match scope {
+                crate::installer::step::RestoreScope::Full => "Cubes on this network are listed. Only kits with a Master Seed can be selected for Cube recovery.",
+                crate::installer::step::RestoreScope::DescriptorOnly => "Cubes on this network are listed. Only those with a wallet descriptor in their Recovery Kit can be selected.",
+            }.to_string(),
+        ),
+        RestorePhase::PasswordEntry { .. } | RestorePhase::Decrypting { .. } => (
+            "STEP 3 OF 3",
+            "Open the Recovery Kit",
+            "The recovery password decrypts the backup on this device.".to_string(),
+        ),
+        RestorePhase::Ready { selected, .. } => (
+            "READY",
+            "Continue restoring",
+            format!("Recovery Kit for \"{}\" is open.", selected.name),
+        ),
+        RestorePhase::Error { .. } => (
+            "NEEDS ATTENTION",
+            "Recovery needs attention",
+            "Review the error below, then try again.".to_string(),
+        ),
+    };
+    let mut content: Column<'a, Message> = Column::new()
+        .spacing(20)
+        .width(Length::Fill)
+        .max_width(700)
+        .push(p2_regular(format!("{flow_label} · {stage_label}")).style(theme::text::secondary))
+        .push(h4_bold(step_title))
+        .push(p2_regular(step_detail).style(theme::text::secondary));
 
     match phase {
         RestorePhase::Email => {
@@ -2791,7 +2837,10 @@ pub fn recovery_kit_restore<'a>(
         }
         RestorePhase::OtpEntry => {
             content = content
-                .push(text::text("Enter the 6-digit code we sent to your email."))
+                .push(text::text(format!(
+                    "Enter the 6-digit code sent to {}.",
+                    email.value
+                )))
                 .push(
                     form::Form::new_trimmed("123456", otp, |v| {
                         // Wrap immediately — the `String` from iced's
@@ -2811,6 +2860,12 @@ pub fn recovery_kit_restore<'a>(
             content = content.push(text::text("Loading your Cubes from Connect…"));
         }
         RestorePhase::CubePicker { cubes, .. } => {
+            content = content.push(p2_regular(match scope {
+                crate::installer::step::RestoreScope::Full => "Recovery Kit availability",
+                crate::installer::step::RestoreScope::DescriptorOnly => {
+                    "Wallet descriptor availability"
+                }
+            }));
             let mut col = Column::new().spacing(10);
             if cubes.is_empty() {
                 col = col.push(text::text(
@@ -2834,16 +2889,23 @@ pub fn recovery_kit_restore<'a>(
                             }
                         };
                     let label = if available {
-                        format!("{} — kit available", c.name)
+                        match scope {
+                            crate::installer::step::RestoreScope::Full => {
+                                format!("{} · Recovery Kit available", c.name)
+                            }
+                            crate::installer::step::RestoreScope::DescriptorOnly => {
+                                format!("{} · Wallet descriptor available", c.name)
+                            }
+                        }
                     } else if !c.status.has_recovery_kit {
-                        format!("{} — no kit (disabled)", c.name)
+                        format!("{} · No Recovery Kit", c.name)
                     } else {
                         match scope {
                             crate::installer::step::RestoreScope::Full => {
-                                format!("{} — no seed in kit (disabled)", c.name)
+                                format!("{} · No Master Seed in kit", c.name)
                             }
                             crate::installer::step::RestoreScope::DescriptorOnly => {
-                                format!("{} — no descriptor in kit (disabled)", c.name)
+                                format!("{} · No descriptor in kit", c.name)
                             }
                         }
                     };
@@ -2851,8 +2913,13 @@ pub fn recovery_kit_restore<'a>(
                     // Raw `iced::widget::Button` because the labels are
                     // built from dynamic `String`s — `button::secondary`
                     // requires `&'static str`.
-                    let mut btn = Button::new(text::text(label))
-                        .width(Length::Fixed(360.0))
+                    let row_text = text::text(label).style(if available {
+                        theme::text::primary
+                    } else {
+                        theme::text::secondary
+                    });
+                    let mut btn = Button::new(row_text)
+                        .width(Length::Fill)
                         .padding([8, 16])
                         .style(theme::button::secondary);
                     if available {
@@ -2904,27 +2971,21 @@ pub fn recovery_kit_restore<'a>(
         }
         RestorePhase::Decrypting { .. } => {
             content = content.push(text::text(
-                "Decrypting your Recovery Kit. This takes a moment — \
-                 Argon2id key derivation is intentionally slow.",
+                "Decrypting your Recovery Kit on this device. This can take a moment.",
             ));
         }
-        RestorePhase::Ready { selected, .. } => {
+        RestorePhase::Ready { .. } => {
             // The happy path after a successful decrypt fires
             // `Message::Next` automatically, so the user rarely
             // lingers on this screen. But a user can land here
             // again by navigating back through the installer —
             // without an explicit Next button they'd be stuck.
-            content = content
-                .push(text::text(format!(
-                    "Ready to restore from \"{}\". Click Next to continue.",
-                    selected.name
-                )))
-                .push(
-                    button::primary(None, "Next")
-                        .on_press(Message::Next)
-                        .width(Length::Fixed(220.0))
-                        .padding([10, 20]),
-                );
+            content = content.push(
+                button::primary(None, "Next")
+                    .on_press(Message::Next)
+                    .width(Length::Fixed(220.0))
+                    .padding([10, 20]),
+            );
         }
         RestorePhase::Error { message } => {
             content = content
@@ -2954,9 +3015,13 @@ pub fn recovery_kit_restore<'a>(
         );
     }
 
+    // This screen already shows progress through its own restore phases.
+    // The generic installer count describes later PIN/node steps as well.
     layout(
-        progress,
-        None,
+        (0, 0),
+        Some(email.value.as_str()).filter(|value| {
+            !value.is_empty() && !matches!(phase, RestorePhase::Email | RestorePhase::OtpEntry)
+        }),
         title,
         content,
         true,
@@ -2967,6 +3032,12 @@ pub fn recovery_kit_restore<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iced::advanced::{
+        layout,
+        renderer::Headless,
+        widget::{Id, Operation, Tree},
+        Layout,
+    };
 
     use crate::{
         installer::step::{
@@ -3238,6 +3309,241 @@ mod tests {
             true,
             None,
         );
+    }
+
+    #[derive(Debug, Default)]
+    struct RestoreLabels(Vec<(String, iced::Rectangle)>);
+
+    impl Operation for RestoreLabels {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+
+        fn text(&mut self, _: Option<&Id>, bounds: iced::Rectangle, value: &str) {
+            self.0.push((value.to_owned(), bounds));
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_login_has_one_aligned_heading_and_distinct_code_copy() {
+        for bytes in coincube_ui::font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(bytes);
+        }
+        let mut renderer = <iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer");
+        let otp = value("", true);
+        let mut element = login(
+            (2, 8),
+            connection_step_enter_otp("user@example.com", &otp, false, None, None),
+        );
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(iced::Size::ZERO, iced::Size::new(1440.0, 900.0)),
+        );
+        let mut labels = RestoreLabels::default();
+        element
+            .as_widget_mut()
+            .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
+        let title_bounds: Vec<_> = labels
+            .0
+            .iter()
+            .filter(|(label, _)| label == "Sign in to Connect")
+            .map(|(_, bounds)| bounds)
+            .collect();
+        assert_eq!(title_bounds.len(), 1, "login heading should appear once");
+        let eyebrow_x = labels
+            .0
+            .iter()
+            .find(|(label, _)| label == "ADD WALLET · CONNECT")
+            .expect("Connect eyebrow")
+            .1
+            .x;
+        assert!((title_bounds[0].x - eyebrow_x).abs() < 1.0);
+        assert!(labels
+            .0
+            .iter()
+            .any(|(label, _)| label == "A sign-in code has been emailed to you"));
+        assert!(labels.0.iter().any(|(label, _)| label == "Resend code"));
+
+        if let Ok(directory) = std::env::var("R14_LOGIN_CAPTURE_DIR") {
+            std::fs::create_dir_all(&directory).unwrap();
+            let theme = theme::Theme::dark();
+            let size = iced::Size::new(1440.0, 900.0);
+            let screen = iced::Rectangle::with_size(size);
+            element.as_widget().draw(
+                &tree,
+                &mut renderer,
+                &theme,
+                &iced::advanced::renderer::Style {
+                    text_color: theme.colors.text.primary,
+                },
+                Layout::new(&node),
+                iced::mouse::Cursor::Unavailable,
+                &screen,
+            );
+            let pixels = renderer.screenshot(
+                iced::Size::new(1440, 900),
+                1.0,
+                theme.colors.general.background,
+            );
+            image::save_buffer(
+                std::path::Path::new(&directory).join("r14-connect-login-dark-1440x900.png"),
+                &pixels,
+                1440,
+                900,
+                image::ColorType::Rgba8,
+            )
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_kit_restore_progress_names_the_scope_without_installer_count() {
+        for bytes in coincube_ui::font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(bytes);
+        }
+        let mut renderer = <iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer");
+        let email = value("user@example.com", true);
+        let otp = value("", false);
+        let phase = RestorePhase::CubePicker {
+            cubes: vec![
+                candidate(1, "Everyday", true, true, true),
+                candidate(2, "Travel fund", true, false, true),
+                candidate(3, "Archive", false, false, false),
+            ],
+            selected: None,
+        };
+
+        for (scope, expected, availability, theme_name, theme) in [
+            (
+                RestoreScope::Full,
+                "RECOVERY KIT · STEP 2 OF 3",
+                "Recovery Kit availability",
+                "dark",
+                theme::Theme::dark(),
+            ),
+            (
+                RestoreScope::DescriptorOnly,
+                "DESCRIPTOR RESTORE · STEP 2 OF 3",
+                "Wallet descriptor availability",
+                "light",
+                theme::Theme::light(),
+            ),
+        ] {
+            let mut element =
+                recovery_kit_restore((1, 8), scope, &phase, &email, &otp, "", false, None);
+            let mut tree = Tree::new(element.as_widget());
+            let size = iced::Size::new(1024.0, 768.0);
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(iced::Size::ZERO, size),
+            );
+            let mut labels = RestoreLabels::default();
+            element
+                .as_widget_mut()
+                .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
+
+            assert!(
+                labels.0.iter().any(|(label, _)| label == expected),
+                "{:?}: {:?}",
+                scope,
+                labels
+            );
+            assert!(
+                labels.0.iter().any(|(label, _)| label == availability),
+                "{:?}: {:?}",
+                scope,
+                labels
+            );
+            assert!(
+                !labels.0.iter().any(|(label, _)| label == "1 | 8"),
+                "{:?}: {:?}",
+                scope,
+                labels
+            );
+            let title_x = labels
+                .0
+                .iter()
+                .find(|(label, _)| {
+                    label == "Restore from Cube Recovery Kit"
+                        || label == "Restore Wallet Descriptor from Connect"
+                })
+                .expect("restore title")
+                .1
+                .x;
+            let eyebrow_x = labels
+                .0
+                .iter()
+                .find(|(label, _)| label == expected)
+                .expect("restore eyebrow")
+                .1
+                .x;
+            assert!(
+                (title_x - eyebrow_x).abs() < 1.0,
+                "title and content should align: {} vs {}",
+                title_x,
+                eyebrow_x
+            );
+            let available_label = match scope {
+                RestoreScope::Full => "Everyday · Recovery Kit available",
+                RestoreScope::DescriptorOnly => "Everyday · Wallet descriptor available",
+            };
+            assert!(labels.0.iter().any(|(label, _)| label == available_label));
+            assert!(!labels
+                .0
+                .iter()
+                .any(|(label, _)| label.contains("· bitcoin ·")));
+
+            if let Ok(directory) = std::env::var("R14_CAPTURE_DIR") {
+                std::fs::create_dir_all(&directory).unwrap();
+                let screen = iced::Rectangle::with_size(size);
+                element.as_widget().draw(
+                    &tree,
+                    &mut renderer,
+                    &theme,
+                    &iced::advanced::renderer::Style {
+                        text_color: theme.colors.text.primary,
+                    },
+                    Layout::new(&node),
+                    iced::mouse::Cursor::Unavailable,
+                    &screen,
+                );
+                let pixels = renderer.screenshot(
+                    iced::Size::new(1024, 768),
+                    1.0,
+                    theme.colors.general.background,
+                );
+                image::save_buffer(
+                    std::path::Path::new(&directory)
+                        .join(format!("r14-{theme_name}-scope-progress-1024x768.png")),
+                    &pixels,
+                    1024,
+                    768,
+                    image::ColorType::Rgba8,
+                )
+                .unwrap();
+            }
+        }
     }
 }
 
