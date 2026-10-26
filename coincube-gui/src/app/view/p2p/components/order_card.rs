@@ -147,8 +147,9 @@ fn book_side_label(order: &P2POrder) -> &'static str {
     }
 }
 
-/// A single keyboard-actionable order entry. The label describes the taker's
-/// action, while `order_type` remains the maker's side for selection/trading.
+/// A single keyboard-actionable order entry. External orders describe the
+/// taker's action; the user's own orders describe their maker action.
+/// `order_type` remains the maker's side for selection and trading.
 pub fn order_card<'a>(order: &'a P2POrder, compact: bool) -> Element<'a, view::Message> {
     let side = book_side_label(order);
     let side_style = match (&order.order_type, order.is_mine) {
