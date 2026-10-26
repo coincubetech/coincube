@@ -207,6 +207,94 @@ impl PinInput {
     }
 }
 
+impl PinInput {
+    /// The Launcher unlock face's `.pinrow`: four 48px `.dg` boxes 10px
+    /// apart and the 40px `.pineye` toggle 4px after them. The installer and
+    /// settings keep [`PinInput::view`].
+    pub fn face_view(&self) -> Element<Message> {
+        use coincube_ui::theme;
+        use iced::widget::{button, text_input};
+        let mut row = Row::new().spacing(10).align_y(Alignment::Center);
+        for i in 0..4 {
+            let input = text_input("", &self.digits[i])
+                .size(22)
+                .font(coincube_ui::font::MEDIUM)
+                .line_height(iced::widget::text::LineHeight::Absolute(iced::Pixels(28.0)))
+                .width(Length::Fixed(48.0))
+                .align_x(iced::Alignment::Center)
+                .padding([9.0, 0.0])
+                .secure(self.hidden)
+                .on_input(move |v| Message::DigitChanged(i, v))
+                .on_submit(Message::Submit)
+                .style(|theme: &theme::Theme, status| {
+                    let shell = theme.colors.shell;
+                    text_input::Style {
+                        background: iced::Background::Color(shell.background),
+                        border: iced::Border {
+                            color: if matches!(status, text_input::Status::Focused { .. }) {
+                                shell.focus
+                            } else {
+                                shell.line
+                            },
+                            width: 1.0,
+                            radius: 8.0.into(),
+                        },
+                        icon: shell.muted,
+                        placeholder: shell.muted,
+                        value: shell.ink,
+                        selection: shell.selected,
+                    }
+                });
+            row = row.push(if i == 0 {
+                input.id(first_digit_id())
+            } else {
+                input
+            });
+        }
+        let shown = !self.hidden;
+        let eye = button(
+            if self.hidden {
+                icon::eye_icon()
+            } else {
+                icon::eye_slash_icon()
+            }
+            .size(20)
+            .align_x(iced::Alignment::Center)
+            .align_y(iced::Alignment::Center),
+        )
+        .on_press(Message::ToggleShow)
+        .width(Length::Fixed(40.0))
+        .height(Length::Fixed(40.0))
+        .padding(0)
+        .style(move |theme: &theme::Theme, status| {
+            let shell = theme.colors.shell;
+            let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+            button::Style {
+                background: None,
+                text_color: if shown { shell.ink } else { shell.muted },
+                border: iced::Border {
+                    color: if shown || hovered {
+                        shell.line
+                    } else {
+                        iced::Color::TRANSPARENT
+                    },
+                    width: 1.0,
+                    radius: 8.0.into(),
+                },
+                ..Default::default()
+            }
+        });
+        // `.pineye { margin-left: 4px }` on top of the row's 10px gap.
+        row.push(
+            coincube_ui::widget::Container::new(eye).padding(iced::Padding {
+                left: 4.0,
+                ..iced::Padding::ZERO
+            }),
+        )
+        .into()
+    }
+}
+
 impl Drop for PinInput {
     fn drop(&mut self) {
         // Scrub every digit buffer before the heap allocations are

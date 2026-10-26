@@ -338,7 +338,8 @@ impl Layout {
         }
         (
             self.width / 2.0,
-            TARGET_Y * self.height / DESIGN_STAGE_HEIGHT,
+            // `TY` is a fixed 392px; only a short stage pulls it up.
+            TARGET_Y * (self.height / DESIGN_STAGE_HEIGHT).min(1.0),
         )
     }
 
@@ -776,47 +777,50 @@ pub(super) fn details_svg(network: ChainId, light: bool, text: FaceText<'_>) -> 
         .map(|c| c.to_uppercase().collect())
         .unwrap_or_else(|| "?".into());
     let name: String = text.name.chars().take(26).collect();
+    let panel = if light { "#ffffff" } else { "#202020" };
+    let accent = if light { "#a14d00" } else { "#f3821d" };
+    // `.pn`: a 32px avatar, 10px gap, the name at 20px semibold.
     let _ = write!(
         svg,
-        "<circle cx=\"45\" cy=\"45\" r=\"16.5\" fill=\"{}\" stroke=\"{line}\"/><text x=\"45\" y=\"50\" text-anchor=\"middle\" font-size=\"14\" font-weight=\"600\" fill=\"{ink}\">{}</text><text x=\"72\" y=\"51\" font-size=\"18\" font-weight=\"600\" fill=\"{ink}\">{}</text>",
-        if light { "#ffffff" } else { "#202020" },
+        "<circle cx=\"44\" cy=\"44\" r=\"16\" fill=\"{panel}\"/><text x=\"44\" y=\"49\" text-anchor=\"middle\" font-size=\"14\" font-weight=\"600\" fill=\"{ink}\">{}</text><text x=\"70\" y=\"51\" font-size=\"20\" font-weight=\"600\" fill=\"{ink}\">{}</text>",
         xml_text(&initial),
         xml_text(&name)
     );
+    // `.pnet`: the 18px coin and the network's full name, 8px below.
     let _ = write!(
         svg,
-        "<text x=\"28\" y=\"91\" font-size=\"13\" fill=\"{muted}\">Network ·</text>{}<text x=\"113\" y=\"91\" font-size=\"13\" fill=\"{ink}\">{}</text><path d=\"M28 108H392\" stroke=\"{line}\"/>",
-        launcher_coin::fragment(network, 90.0, 77.0, 18.0, 1.0, 1.5),
-        xml_text(network.label())
+        "{}<text x=\"52\" y=\"83\" font-size=\"14\" fill=\"{ink}\">{}</text><path d=\"M28 108.5H392\" stroke=\"{line}\"/>",
+        launcher_coin::fragment(network, 28.0, 69.0, 18.0, 1.0, 1.5),
+        xml_text(super::launcher_chrome::network_name(network))
     );
+    // `.pdl`: 22px rows 10px apart, 16px under the rule.
     for (y, label, value) in [
-        (140, "Lock", "State unknown"),
-        (172, "Backup", text.backup),
-        (204, "Connect", text.connect),
-        (236, "Wallets", text.wallets),
+        (141, "Lock", "State unknown"),
+        (173, "Backup", text.backup),
+        (205, "Connect", text.connect),
+        (237, "Wallets", text.wallets),
     ] {
         let value: String = value.chars().take(34).collect();
         let _ = write!(
             svg,
-            "<text x=\"28\" y=\"{y}\" font-size=\"13\" fill=\"{muted}\">{label}</text><text x=\"112\" y=\"{y}\" font-size=\"14\" fill=\"{ink}\">{}</text>",
+            "<text x=\"28\" y=\"{y}\" font-size=\"13\" fill=\"{muted}\">{label}</text><text x=\"104\" y=\"{y}\" font-size=\"14\" fill=\"{ink}\">{}</text>",
             xml_text(&value)
         );
     }
-    let bad = if light { "#8f2e1d" } else { "#ffad9b" };
+    // `.pact`: Open, then the Back and Delete… links with accent underlines.
     let _ = write!(
         svg,
-        "<rect x=\"28\" y=\"330\" width=\"66\" height=\"30\" rx=\"6\" fill=\"#f3821d\"/><text x=\"61\" y=\"350\" text-anchor=\"middle\" font-size=\"13\" font-weight=\"600\" fill=\"#201407\">Open</text><text x=\"118\" y=\"350\" font-size=\"13\" font-weight=\"600\" fill=\"{}\">Back</text>",
-        if light { "#a14d00" } else { "#f59a45" }
+        "<rect x=\"28\" y=\"330.5\" width=\"66.5\" height=\"36\" rx=\"8\" fill=\"#f3821d\"/><text x=\"61.25\" y=\"353\" text-anchor=\"middle\" font-size=\"14\" font-weight=\"500\" fill=\"#201407\">Open</text><text x=\"114.5\" y=\"352\" font-size=\"14\" fill=\"{ink}\">Back</text><rect x=\"114.5\" y=\"358\" width=\"32\" height=\"1\" fill=\"{accent}\"/>"
     );
     if !network.is_blake2b() {
         let _ = write!(
             svg,
-            "<rect x=\"168.5\" y=\"330.5\" width=\"78\" height=\"29\" rx=\"6\" fill=\"none\" stroke=\"{bad}\"/><text x=\"207.5\" y=\"350\" text-anchor=\"middle\" font-size=\"13\" font-weight=\"600\" fill=\"{bad}\">Delete…</text>"
+            "<text x=\"170.5\" y=\"352\" font-size=\"14\" fill=\"{ink}\">Delete…</text><rect x=\"170.5\" y=\"358\" width=\"50\" height=\"1\" fill=\"{accent}\"/>"
         );
     }
     let _ = write!(
         svg,
-        "<text x=\"28\" y=\"386\" font-size=\"12\" fill=\"{muted}\">Next step · {}</text></svg>",
+        "<text x=\"28\" y=\"389\" font-size=\"12\" fill=\"{muted}\">Next step · {}</text></svg>",
         if text.passkey {
             "Passkey prompt"
         } else {
@@ -828,34 +832,47 @@ pub(super) fn details_svg(network: ChainId, light: bool, text: FaceText<'_>) -> 
 
 /// The unlock face as the PIN or passkey screen lays it out.
 pub(super) fn unlock_svg(network: ChainId, light: bool, name: &str, passkey: bool) -> String {
+    let ink = hex(Palette::new(light).ink);
     let muted = if light { "#575a54" } else { "#b9bbb5" };
     let line = if light { "#c4beb4" } else { "#424242" };
+    let field = if light { "#faf9f6" } else { "#161716" };
+    let accent = if light { "#a14d00" } else { "#f3821d" };
     let name: String = name.chars().take(22).collect();
+    // `.pn`: "Open <name>" semibold, then ` · <network>` muted, both 20px.
     let mut svg = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 420 420\" width=\"420\" height=\"420\" font-family=\"IBM Plex Sans\"><text x=\"28\" y=\"41\" font-size=\"13\" fill=\"{muted}\">Open {} · {}</text>",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 420 420\" width=\"420\" height=\"420\" font-family=\"IBM Plex Sans\"><text x=\"28\" y=\"48\" font-size=\"20\"><tspan font-weight=\"600\" fill=\"{ink}\">Open {}</tspan><tspan fill=\"{muted}\"> · {}</tspan></text>",
         xml_text(&name),
-        xml_text(network.label())
+        xml_text(super::launcher_chrome::network_name(network))
     );
     if passkey {
         let _ = write!(
             svg,
-            "<text x=\"28\" y=\"128\" font-size=\"14\" fill=\"{muted}\">Confirm with your passkey</text><rect x=\"28\" y=\"152\" width=\"200\" height=\"36\" rx=\"6\" fill=\"#f3821d\"/><text x=\"128\" y=\"175\" text-anchor=\"middle\" font-size=\"13\" font-weight=\"600\" fill=\"#201407\">Unlock with passkey</text>"
+            "<rect x=\"28\" y=\"78\" width=\"164\" height=\"36\" rx=\"8\" fill=\"#f3821d\"/><text x=\"110\" y=\"101\" text-anchor=\"middle\" font-size=\"14\" font-weight=\"500\" fill=\"#201407\">Unlock with passkey</text>"
         );
     } else {
-        // `PinInput::view`: four rounded digit boxes and the reveal toggle.
+        // `.fld`: the PIN legend, four 48px `.dg` boxes, `.pineye`, `.help`,
+        // then Unlock at `opacity: .45` until all four digits are in.
+        let _ = write!(
+            svg,
+            "<text x=\"28\" y=\"91\" font-size=\"13\" font-weight=\"500\" fill=\"{ink}\">PIN</text>"
+        );
         for i in 0..4 {
             let _ = write!(
                 svg,
-                "<rect x=\"{}\" y=\"57\" width=\"60\" height=\"68\" rx=\"18\" fill=\"none\" stroke=\"{line}\"/>",
-                28 + i * 75
+                "<rect x=\"{}.5\" y=\"101.5\" width=\"47\" height=\"47\" rx=\"8\" fill=\"{field}\" stroke=\"{line}\"/>",
+                28 + i * 58
             );
         }
         let _ = write!(
             svg,
-            "<circle cx=\"348\" cy=\"91\" r=\"25\" fill=\"#f3821d\"/><g transform=\"translate(340 83) scale(0.67)\"><path d=\"M1.5 12S5 5.5 12 5.5 22.5 12 22.5 12 19 18.5 12 18.5 1.5 12 1.5 12z\" fill=\"none\" stroke=\"#201407\" stroke-width=\"2\"/><circle cx=\"12\" cy=\"12\" r=\"3\" fill=\"#201407\"/></g>"
+            "<g transform=\"translate(274 115) scale(0.833)\"><path d=\"M1.5 12S5 5.5 12 5.5 22.5 12 22.5 12 19 18.5 12 18.5 1.5 12 1.5 12z\" fill=\"none\" stroke=\"{muted}\" stroke-width=\"1.8\"/><circle cx=\"12\" cy=\"12\" r=\"3\" fill=\"{muted}\"/></g><text x=\"28\" y=\"164\" font-size=\"12\" fill=\"{muted}\">Enter this Cube's PIN.</text><rect x=\"28\" y=\"189\" width=\"76\" height=\"36\" rx=\"8\" fill=\"#f3821d\" fill-opacity=\".45\"/><text x=\"66\" y=\"212\" text-anchor=\"middle\" font-size=\"14\" font-weight=\"500\" fill=\"#201407\" fill-opacity=\".45\">Unlock</text>"
         );
     }
-    svg.push_str("</svg>");
+    let _ = write!(
+        svg,
+        "<text x=\"28\" y=\"353\" font-size=\"13\" fill=\"{muted}\">Network checks run after your {} is accepted.</text><text x=\"32\" y=\"381\" font-size=\"14\" fill=\"{ink}\">Cancel</text><rect x=\"32\" y=\"388.5\" width=\"42\" height=\"1\" fill=\"{accent}\"/></svg>",
+        if passkey { "passkey" } else { "PIN" }
+    );
     svg
 }
 

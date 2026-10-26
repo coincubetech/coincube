@@ -148,6 +148,11 @@ fn home(light: bool) -> Home {
     };
     home.advisory_notice = None;
     home.catalog.mode = LauncherMode::Cubes;
+    home.balance_privacy = Some(crate::app::state::preferences::BalancePrivacyChrome {
+        privacy: crate::app::state::preferences::BalancePrivacy::Shown,
+        busy: false,
+        interactive: true,
+    });
     home.theme_mode = if light {
         coincube_ui::theme::palette::ThemeMode::Light
     } else {
@@ -195,6 +200,12 @@ fn launcher_capture() {
         let pick = if light { 3 } else { 1 };
         let other = if light { 1 } else { 3 };
         shot(&home, "01-floor", &mut renderer);
+        home.catalog.key.mode = super::launcher_catalog::KeyMode::Pinned;
+        shot(&home, "01-floor-key", &mut renderer);
+        home.catalog.key.mode = super::launcher_catalog::KeyMode::Closed;
+        home.catalog.network_menu = true;
+        shot(&home, "01-floor-menu", &mut renderer);
+        home.catalog.network_menu = false;
         // Browse -> details on the second Cube: every 82ms of the 820ms turn.
         home.catalog.selected = Some(key(pick));
         for step in 0..=10u64 {
@@ -313,14 +324,25 @@ fn launcher_capture() {
         } else {
             vec![0.0, 0.25, 0.5, 0.75]
         };
+        // The real PIN and passkey screens, with synthetic Cubes only.
+        let success = || crate::pin_entry::PinEntrySuccess::LoadApp {
+            datadir: crate::dir::CoincubeDirectory::new(Default::default()),
+            config: crate::app::Config::new(false),
+            network: cube.network.bitcoin_network(),
+            internal_bitcoind: None,
+            backup: None,
+            wallet_settings: None,
+            connect_client: None,
+        };
+        let entry =
+            crate::pin_entry::PinEntry::new(cube.clone(), Default::default(), success(), None);
         for progress in steps {
-            let pin = String::new();
-            let element: Element<'_, String> = launcher_presenter::unlock_turn_with_floor_controls(
+            let element = launcher_presenter::unlock_turn_with_floor_controls(
                 &cube,
                 mode,
                 &context,
                 Some(progress),
-                iced::widget::text_input("", &pin).into(),
+                entry.view_with_theme_and_floor(mode, Some(&context)),
             );
             save(
                 &mut renderer,
@@ -333,26 +355,29 @@ fn launcher_capture() {
                 )),
             );
         }
-        let pin = crate::pin_input::PinInput::new();
-        let face: Element<'_, crate::pin_input::Message> =
-            launcher_presenter::unlock_face_on_floor(&cube, mode, &context, || pin.view());
         save(
             &mut renderer,
-            face,
+            entry.view_with_theme_and_floor(mode, Some(&context)),
             size,
             &palette,
             directory.join(format!("{appearance}-08-unlock.png")),
         );
         // The unlock screens without a Launcher page behind them.
-        let pin = crate::pin_input::PinInput::new();
-        let lone: Element<'_, crate::pin_input::Message> =
-            launcher_presenter::unlock_face(&cube, mode, pin.view());
         save(
             &mut renderer,
-            lone,
+            entry.view_with_theme(mode),
             size,
             &palette,
             directory.join(format!("{appearance}-09-unlock-lone.png")),
+        );
+        let passkey =
+            crate::passkey_unlock::PasskeyUnlock::new(cube.clone(), Default::default(), success());
+        save(
+            &mut renderer,
+            passkey.view_with_theme_and_floor(mode, Some(&context)),
+            size,
+            &palette,
+            directory.join(format!("{appearance}-11-unlock-passkey.png")),
         );
     }
 }

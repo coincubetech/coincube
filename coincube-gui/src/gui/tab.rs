@@ -524,6 +524,9 @@ pub enum Message {
     /// the tab switch, so this is bubbled up rather than handled here.
     OpenLauncher,
     OpenAppPreferences(PreferencesSource),
+    /// The Launcher eye's hide-balances intent. The GUI applies it only while
+    /// the sending tab is still showing the Launcher.
+    HomeDevicePreference(crate::app::settings::preferences::PreferenceChange),
     /// Explicitly lock the Cube and return to the Launcher in this tab.
     LockCubeToLauncher,
     /// Completion of an authenticated fork installer generation.
@@ -951,8 +954,10 @@ impl Tab {
         chrome: Option<crate::app::state::preferences::BalancePrivacyChrome>,
     ) {
         self.balance_privacy = chrome;
-        if let State::App(app) = &mut self.state {
-            app.cache_mut().balance_privacy = chrome;
+        match &mut self.state {
+            State::App(app) => app.cache_mut().balance_privacy = chrome,
+            State::Home(home) => home.balance_privacy = chrome,
+            _ => {}
         }
     }
 
@@ -965,7 +970,10 @@ impl Tab {
                 app.cache_mut().theme_mode = mode;
                 app.cache_mut().balance_privacy = self.balance_privacy;
             }
-            State::Home(home) => home.theme_mode = mode,
+            State::Home(home) => {
+                home.theme_mode = mode;
+                home.balance_privacy = self.balance_privacy;
+            }
             _ => {}
         }
     }
@@ -1921,6 +1929,9 @@ impl Tab {
                 }
                 home::Message::View(home::ViewMessage::OpenAppPreferences) => {
                     Task::done(Message::OpenAppPreferences(PreferencesSource::Home))
+                }
+                home::Message::View(home::ViewMessage::ChangeDevicePreference(change)) => {
+                    Task::done(Message::HomeDevicePreference(change))
                 }
                 home::Message::GlobalSettingsChanged => Task::done(Message::GlobalSettingsChanged),
                 home::Message::ConnectSignedInBubble => Task::done(Message::ConnectSignedIn),
@@ -5494,6 +5505,8 @@ mod migration_warning_tests {
             connect: String::new(),
             wallets: "Not yet known",
             peers: Vec::new(),
+            pages: 1,
+            chrome: Default::default(),
         });
         let datadir = match &tab.state {
             State::Home(home) => home.datadir_path.clone(),
