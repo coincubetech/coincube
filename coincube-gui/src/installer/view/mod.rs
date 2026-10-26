@@ -1465,15 +1465,28 @@ fn node_option_card<'a>(
     .into()
 }
 
-fn node_install_toggle<'a>(install_node: bool, label: &'static str) -> Element<'a, Message> {
-    checkbox(install_node)
-        .label(label)
-        .spacing(8)
-        .style(theme::checkbox::primary)
-        .on_toggle(|_| {
-            Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::ToggleInstallNode)
-        })
-        .into()
+fn node_install_toggle<'a>(
+    ui_instance: u64,
+    install_node: bool,
+    label: &'static str,
+) -> Element<'a, Message> {
+    let (mark, state_and_action) = if install_node {
+        ("☑", "On — activate to turn Off")
+    } else {
+        ("☐", "Off — activate to turn On")
+    };
+    // Iced 0.14's checkbox is not keyboard focusable. The dynamic button text
+    // names both the current choice and the result of activating it.
+    Action::new(
+        format!("tenshu.installer.node.{}.install", ui_instance),
+        p1_regular(format!("{} {}: {}", mark, label, state_and_action)),
+        Message::FocusAction,
+    )
+    .style(theme::button::transparent)
+    .on_press(Message::SelectBitcoindType(
+        message::SelectBitcoindTypeMsg::ToggleInstallNode,
+    ))
+    .into()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1497,7 +1510,7 @@ pub fn select_bitcoind_type<'a>(
             choices = choices
                 .push(text("Use COINCUBE | Connect").bold())
                 .push(text(format!("Use the hosted {chain_name} node while a local node syncs, or use Connect alone.")))
-                .push(node_install_toggle(install_node, "Also install a pruned node on my device"))
+                .push(node_install_toggle(ui_instance, install_node, "Also install a pruned node on my device"))
                 .push(Action::new(format!("tenshu.installer.node.{}.blake2b-connect", ui_instance), p1_regular("Use Connect"), Message::FocusAction)
                     .style(theme::button::primary)
                     .on_press(Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::ContinueWithConnect)));
@@ -1582,6 +1595,7 @@ pub fn select_bitcoind_type<'a>(
                     (backed by Bitcoin Knots). No setup required.",
             ))
             .push(node_install_toggle(
+                ui_instance,
                 install_node,
                 "Also install a pruned Bitcoin node on my device",
             ));
@@ -3665,6 +3679,7 @@ mod node_management_chain_tests {
         mut element: Element<'static, Message>,
         target: &str,
         key: keyboard::Key,
+        focus_with_tab: bool,
     ) -> Vec<Message> {
         let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
             iced::Font::DEFAULT,
@@ -3679,8 +3694,11 @@ mod node_management_chain_tests {
             &renderer,
             &layout::Limits::new(Size::ZERO, size),
         );
-        let mut focus: Box<dyn Operation<()>> =
-            Box::new(focusable::focus::<()>(Id::from(target.to_owned())));
+        let mut focus: Box<dyn Operation<()>> = if focus_with_tab {
+            Box::new(focusable::focus_next::<()>())
+        } else {
+            Box::new(focusable::focus::<()>(Id::from(target.to_owned())))
+        };
         loop {
             element.as_widget_mut().operate(
                 &mut tree,
@@ -3692,6 +3710,20 @@ mod node_management_chain_tests {
                 operation::Outcome::None | operation::Outcome::Some(()) => break,
                 operation::Outcome::Chain(next) => focus = next,
             }
+        }
+        if focus_with_tab {
+            let mut focused = FocusedActions::default();
+            element
+                .as_widget_mut()
+                .operate(&mut tree, Layout::new(&node), &renderer, &mut focused);
+            assert!(
+                focused
+                    .0
+                    .iter()
+                    .any(|(id, on)| id == &Id::from(target.to_owned()) && *on),
+                "Tab navigation did not focus {target}: {:?}",
+                focused.0
+            );
         }
         let physical_key =
             keyboard::key::Physical::Unidentified(keyboard::key::NativeCode::Unidentified);
@@ -3729,7 +3761,7 @@ mod node_management_chain_tests {
     }
 
     #[test]
-    fn node_install_checkbox_keeps_checked_state_and_toggles_from_both_values() {
+    fn node_install_action_names_both_states_and_activates_after_tab() {
         let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
             iced::Font::DEFAULT,
             iced::Pixels(16.0),
@@ -3742,7 +3774,7 @@ mod node_management_chain_tests {
             "Also install a pruned Bitcoin node on my device",
         ] {
             for checked in [false, true] {
-                let mut element = node_install_toggle(checked, label);
+                let mut element = node_install_toggle(42, checked, label);
                 let mut tree = Tree::new(element.as_widget());
                 let node = element.as_widget_mut().layout(
                     &mut tree,
@@ -3756,34 +3788,40 @@ mod node_management_chain_tests {
                     &renderer,
                     &mut labels,
                 );
+                let (mark, state_and_action) = if checked {
+                    ("☑", "On — activate to turn Off")
+                } else {
+                    ("☐", "Off — activate to turn On")
+                };
                 assert!(
-                    labels.0.iter().any(|value| value == label),
-                    "native checkbox must retain its label: {:?}",
+                    labels
+                        .0
+                        .iter()
+                        .any(|value| value == &format!("{} {}: {}", mark, label, state_and_action)),
+                    "focusable action must name its current state and next action: {:?}",
                     labels.0
                 );
-                let mut messages = Vec::new();
-                element.as_widget_mut().update(
-                    &mut tree,
-                    &Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
-                    Layout::new(&node),
-                    mouse::Cursor::Available(iced::Point::new(8.0, 8.0)),
-                    &renderer,
-                    &mut iced::advanced::clipboard::Null,
-                    &mut iced::advanced::Shell::new(&mut messages),
-                    &Rectangle::with_size(Size::new(620.0, 80.0)),
-                );
-                assert!(
-                    matches!(
-                        messages.as_slice(),
-                        [Message::SelectBitcoindType(
-                            message::SelectBitcoindTypeMsg::ToggleInstallNode
-                        )]
-                    ),
-                    "checked={} label={}: {:?}",
-                    checked,
-                    label,
-                    messages
-                );
+                for key in [keyboard::key::Named::Enter, keyboard::key::Named::Space] {
+                    let messages = activate_node_action(
+                        node_install_toggle(42, checked, label),
+                        "tenshu.installer.node.42.install",
+                        keyboard::Key::Named(key),
+                        true,
+                    );
+                    assert!(
+                        matches!(
+                            messages.as_slice(),
+                            [Message::SelectBitcoindType(
+                                message::SelectBitcoindTypeMsg::ToggleInstallNode
+                            )]
+                        ),
+                        "checked={} label={} key={:?}: {:?}",
+                        checked,
+                        label,
+                        key,
+                        messages
+                    );
+                }
             }
         }
     }
@@ -3890,7 +3928,8 @@ mod node_management_chain_tests {
                     true,
                 );
                 let target = format!("tenshu.installer.node.42.{}", suffix);
-                let messages = activate_node_action(element, &target, keyboard::Key::Named(key));
+                let messages =
+                    activate_node_action(element, &target, keyboard::Key::Named(key), false);
                 assert_eq!(messages.len(), 1, "{target} {key:?}: {messages:?}");
                 assert!(
                     expected(&messages[0]),
