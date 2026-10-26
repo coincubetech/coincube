@@ -66,6 +66,18 @@ impl SparkOverview {
         }
     }
 
+    /// The backend handle can outlive a failed bridge refresh. Match the
+    /// Settings toggle's reachability gate while keeping the last successful
+    /// snapshot visible as stale portfolio context.
+    fn bridge_reachable(&self) -> bool {
+        bridge_reachable(
+            self.backend.is_some(),
+            self.loading,
+            self.snapshot.is_some(),
+            self.error.is_some(),
+        )
+    }
+
     /// Mount the shared Connect address form on the Spark landing without
     /// copying account or address state into this panel.
     pub fn view_with_address<'a>(
@@ -111,7 +123,7 @@ impl SparkOverview {
                 address,
                 self.stable_balance_active,
                 self.stable_balance_saving,
-                self.backend.is_some(),
+                self.bridge_reachable(),
                 &cache.cube_id,
             ));
         }
@@ -265,7 +277,7 @@ impl State for SparkOverview {
                     self.stable_balance_active = Some(active);
                 }
                 view::SparkOverviewMessage::ToggleStableBalance(enabled) => {
-                    if self.backend.is_some()
+                    if self.bridge_reachable()
                         && !self.stable_balance_saving
                         && self.stable_balance_active == Some(!enabled)
                     {
@@ -309,6 +321,15 @@ impl State for SparkOverview {
     fn subscription(&self) -> iced::Subscription<Message> {
         iced::Subscription::none()
     }
+}
+
+fn bridge_reachable(
+    backend_available: bool,
+    loading: bool,
+    snapshot_present: bool,
+    refresh_failed: bool,
+) -> bool {
+    backend_available && snapshot_present && !loading && !refresh_failed
 }
 
 /// Build the view-level `SparkRecentTransaction` row from a bridge
@@ -677,5 +698,62 @@ mod tests {
         );
         assert_eq!(panel.recent_transactions.len(), 1);
         assert_eq!(panel.recent_transactions[0].id, "payment-1");
+    }
+
+    #[test]
+    fn retained_snapshot_after_bridge_error_does_not_enable_stable_balance() {
+        let mut panel = SparkOverview::new(None);
+        let available_with_backend = |panel: &SparkOverview| {
+            bridge_reachable(
+                true,
+                panel.loading,
+                panel.snapshot.is_some(),
+                panel.error.is_some(),
+            )
+        };
+
+        let _ = panel.update(
+            None,
+            &Cache::default(),
+            Message::View(view::Message::SparkOverview(
+                view::SparkOverviewMessage::DataLoaded {
+                    balance: Amount::from_sat(42_000),
+                    stable_balance: None,
+                    recent_payments: vec![],
+                },
+            )),
+        );
+        let _ = panel.update(
+            None,
+            &Cache::default(),
+            Message::View(view::Message::SparkOverview(
+                view::SparkOverviewMessage::StableBalanceLoaded(false),
+            )),
+        );
+        assert!(available_with_backend(&panel));
+
+        panel.loading = true;
+        assert!(!available_with_backend(&panel));
+        let _ = panel.update(
+            None,
+            &Cache::default(),
+            Message::View(view::Message::SparkOverview(
+                view::SparkOverviewMessage::Error("bridge offline".to_string()),
+            )),
+        );
+        assert!(panel.snapshot.is_some());
+        assert_eq!(panel.stable_balance_active, Some(false));
+        assert!(!available_with_backend(&panel));
+
+        // A settings reply can arrive after the failed info refresh; it
+        // cannot make the stale snapshot actionable again.
+        let _ = panel.update(
+            None,
+            &Cache::default(),
+            Message::View(view::Message::SparkOverview(
+                view::SparkOverviewMessage::StableBalanceLoaded(true),
+            )),
+        );
+        assert!(!available_with_backend(&panel));
     }
 }
