@@ -1109,9 +1109,11 @@ mod tests {
 
     #[test]
     fn activity_rows_mount_at_compact_and_wide_widths_in_both_themes() {
-        let mut cache = Cache::default();
         // Both chains share Bitcoin address encoding, so Activity must use the Cube chain.
-        cache.fiat_chain = ChainId::BitcoinBlake2b;
+        let cache = Cache {
+            fiat_chain: ChainId::BitcoinBlake2b,
+            ..Default::default()
+        };
         let mut activity = Activity::new(None, None);
         let payment = spark_payment();
         let id = Entry::spark(payment.clone()).id;
