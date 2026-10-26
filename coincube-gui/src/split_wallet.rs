@@ -759,7 +759,7 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
 
     let form = if let Some(source) = imported {
         Column::new()
-            .spacing(24)
+            .spacing(16)
             .push(
                 Column::new()
                     .spacing(6)
@@ -773,6 +773,7 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
                         .style(theme::text::secondary),
                     ),
             )
+            .push(iced::widget::rule::horizontal(1))
             .push(
                 Column::new()
                     .spacing(6)
@@ -806,20 +807,27 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
     };
 
     let status: Element<Message> = match &panel.status {
-        Status::Editing => caption(if imported.is_some() {
-            "Checks BTCB2 history and verifies current Bitcoin activity. No funds are moved."
-        } else {
-            "Ready to scan. An incomplete scan is always an error, never a zero balance."
-        })
-        .style(theme::text::secondary)
-        .into(),
-        Status::Scanning => p1_regular(if imported.is_some() {
-            "Checking BTCB2 history and verifying current Bitcoin activity…"
-        } else {
-            "Scanning with fresh, authenticated chain observations…"
-        })
-        .style(theme::text::secondary)
-        .into(),
+        Status::Editing if imported.is_some() => Column::new()
+            .spacing(6)
+            .push(p1_bold("Ready to check"))
+            .push(caption("Checks BTCB2 history and verifies current Bitcoin activity. No funds are moved.").style(theme::text::secondary))
+            .into(),
+        Status::Editing => caption("Ready to scan. An incomplete scan is always an error, never a zero balance.")
+            .style(theme::text::secondary)
+            .into(),
+        Status::Scanning if imported.is_some() => Column::new()
+            .spacing(6)
+            .push(p1_bold("Checking availability…"))
+            .push(p1_regular("Checking BTCB2 history and verifying current Bitcoin activity…").style(theme::text::secondary))
+            .into(),
+        Status::Scanning => p1_regular("Scanning with fresh, authenticated chain observations…")
+            .style(theme::text::secondary)
+            .into(),
+        Status::Failed(error) if imported.is_some() => Column::new()
+            .spacing(6)
+            .push(p1_bold("Check unavailable").style(theme::text::warning))
+            .push(p1_regular(error).style(theme::text::warning))
+            .into(),
         Status::Failed(error) => p1_regular(error).style(theme::text::warning).into(),
         Status::Complete(summary) if imported.is_none() => Column::new()
             .spacing(12)
@@ -875,32 +883,37 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
                 "Continue to unlock the destination Cube and review bounded sweep economics. Spending remains locked."
             }).style(theme::text::warning))
             .into(),
-        Status::Complete(summary) => Column::new()
-            .spacing(6)
+        Status::Complete(summary) => {
+            let imported_row = |label: &'static str, value: String| {
+                Row::new()
+                    .spacing(16)
+                    .push(p1_bold(label).width(Length::Fixed(250.0)))
+                    .push(p1_regular(value).width(Length::Fill))
+            };
+            Column::new()
+            .spacing(12)
             .push(p1_bold(format!(
                 "Found {} UTXO{} ({} confirmed), totaling {} sats",
                 summary.coins,
                 if summary.coins == 1 { "" } else { "s" },
                 summary.confirmed,
-                summary.sats
+                format_u64_as_string(summary.sats, ",")
             )))
-            .push(p1_regular(format!(
-                "Pre-fork (splittable): {} UTXO{}, {} sats · Confirmed after the fork (not part of this split; may still be replayable): {} · Unclassified (excluded): {}",
-                summary.pre_fork,
-                if summary.pre_fork == 1 { "" } else { "s" },
-                summary.pre_fork_sats,
-                summary.post_fork,
-                summary.unclassified
-            )))
-            .push(p1_regular(format!(
-                "Unspent on both chains (splittable): {} UTXO{}, {} sats · Spent on Bitcoin: {} · Spent on Bitcoin Blake2b: {} · Pending or replayed: {}",
-                summary.inventory.splittable,
-                if summary.inventory.splittable == 1 { "" } else { "s" },
-                summary.inventory.splittable_sats,
-                summary.inventory.spent_on_bitcoin,
-                summary.inventory.spent_on_btcb2,
-                summary.inventory.pending,
-            )))
+            .push(card::simple(Column::new()
+                .spacing(12)
+                .push(imported_row("Pre-fork on Bitcoin Blake2b", coin_amount(summary.pre_fork, summary.pre_fork_sats)))
+                .push(iced::widget::rule::horizontal(1))
+                .push(imported_row("Confirmed after the fork", format!("{} · excluded; may still be replayable", summary.post_fork)))
+                .push(iced::widget::rule::horizontal(1))
+                .push(imported_row("Unclassified (excluded)", summary.unclassified.to_string()))
+                .push(iced::widget::rule::horizontal(1))
+                .push(imported_row("Unspent on both chains (splittable)", coin_amount(summary.inventory.splittable, summary.inventory.splittable_sats)))
+                .push(caption(format!(
+                    "Spent on Bitcoin: {} · Spent on Bitcoin Blake2b: {} · Pending or replayed: {}",
+                    summary.inventory.spent_on_bitcoin,
+                    summary.inventory.spent_on_btcb2,
+                    summary.inventory.pending,
+                )).style(theme::text::secondary))).padding(20))
             .push(caption(format!(
                 "Post-fork funding candidates: {} seen only on Bitcoin · {} seen only on Bitcoin Blake2b. These still need verification before a split. {}",
                 summary.inventory.bitcoin_only_candidates,
@@ -920,19 +933,22 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
                     "Taproot (tr) wallets can be scanned but not split: there is no signing route for them yet."
                 } else if summary.pre_fork == 0 {
                     "No confirmed pre-fork coins were proven. Only pre-fork coins can be split; post-fork or unclassified coins are excluded."
-                } else if imported.is_some() && summary.inventory.splittable == 0 {
+                } else if summary.inventory.splittable == 0 {
                     "No confirmed pre-fork coins remain unspent on both chains for this claim."
                 } else {
                     "Continue to unlock the destination Cube and review bounded sweep economics. Spending remains locked."
                 })
                     .style(theme::text::warning),
             )
-            .into(),
+            .into()
+        },
     };
 
     let scanning = matches!(panel.status, Status::Scanning);
     let reviewable = matches!(&panel.status, Status::Complete(summary) if summary.reviewable() && (imported.is_none() || summary.inventory.splittable > 0));
-    let scan_button = if imported.is_some() {
+    let scan_button = if imported.is_some() && reviewable {
+        button::secondary(None, "Scan again")
+    } else if imported.is_some() {
         button::primary_compact(
             None,
             if scanning {
@@ -967,8 +983,8 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
             .spacing(20)
             .push(header)
             .push(card::simple(form).padding(24))
-            .push(status)
             .push(actions)
+            .push(status)
     } else {
         Column::new()
             .spacing(18)
@@ -1243,6 +1259,167 @@ mod tests {
             assert_eq!(panel.selected_target_id(), Some(paired_target.id.as_str()));
         }
         assert!(!panel.polls_hardware());
+    }
+
+    #[test]
+    fn imported_claim_face_mounts_truthful_states_and_continue_gate() {
+        use crate::app::view::shared::landing::capture;
+
+        let _guard = crate::app::session::test_guard();
+        let mut panel = SplitWalletPanel::new();
+        panel.set_targets(vec![TargetCube {
+            id: "paired-cube".into(),
+            name: "Family savings · Blake2b".into(),
+        }]);
+        let mut source = imported_source(240);
+        source.name = "Family savings · original Bitcoin wallet".into();
+        panel.set_imported_source(source).unwrap();
+        let base = ScanSummary {
+            generation: panel.generation,
+            addresses: 480,
+            coins: 3,
+            confirmed: 3,
+            sats: 1_250_000,
+            pre_fork: 2,
+            pre_fork_sats: 1_000_000,
+            post_fork: 1,
+            unclassified: 0,
+            signable: true,
+            tip: "synthetic-btcb2-tip".into(),
+            inventory: InventorySummary {
+                fork_height: 100,
+                bitcoin_tip: "synthetic-bitcoin-tip".into(),
+                splittable: 2,
+                splittable_sats: 1_000_000,
+                spent_on_bitcoin: 0,
+                spent_on_btcb2: 0,
+                btcb2_post_fork: 1,
+                bitcoin_only_candidates: 0,
+                btcb2_only_candidates: 0,
+                pending: 0,
+                fresh_receive: FreshIndex::NotProven,
+            },
+        };
+        let mut no_splittable = base.clone();
+        no_splittable.inventory.splittable = 0;
+        no_splittable.inventory.splittable_sats = 0;
+        no_splittable.inventory.spent_on_bitcoin = 2;
+        let mut zero = base.clone();
+        zero.coins = 0;
+        zero.confirmed = 0;
+        zero.sats = 0;
+        zero.pre_fork = 0;
+        zero.pre_fork_sats = 0;
+        zero.post_fork = 0;
+        zero.inventory.splittable = 0;
+        zero.inventory.splittable_sats = 0;
+        let mut pending = base.clone();
+        pending.confirmed = 2;
+        let mut taproot = base.clone();
+        taproot.signable = false;
+        taproot.coins = 1;
+        taproot.confirmed = 1;
+        taproot.sats = 400_000;
+        taproot.pre_fork = 1;
+        taproot.pre_fork_sats = 400_000;
+        taproot.post_fork = 0;
+        taproot.inventory.splittable = 1;
+        taproot.inventory.splittable_sats = 400_000;
+        let states = [
+            ("ready", Status::Editing, false),
+            ("scanning", Status::Scanning, false),
+            ("incomplete", Status::Failed("The scan did not cover every saved receive and change address on both chains. No balance conclusion was made. Scan again.".into()), false),
+            ("eligible", Status::Complete(base), true),
+            ("no-splittable", Status::Complete(no_splittable), false),
+            ("zero", Status::Complete(zero), false),
+            ("pending", Status::Complete(pending), false),
+            ("taproot", Status::Complete(taproot), false),
+        ];
+        for (name, status, can_continue) in states {
+            panel.status = status;
+            assert_eq!(
+                matches!(&panel.status, Status::Complete(summary) if summary.reviewable() && summary.inventory.splittable > 0),
+                can_continue,
+                "{name} imported gate"
+            );
+            for size in [(1440, 900), (1024, 768), (520, 768)] {
+                for (appearance, palette) in [
+                    ("dark", theme::Theme::dark()),
+                    ("light", theme::Theme::light()),
+                ] {
+                    let mounted = capture::inspect_full_window(
+                        &format!("imported-claim-{name}"),
+                        view(&panel),
+                        size,
+                        appearance,
+                        palette,
+                    );
+                    for text in [
+                        "Claim BTCB2",
+                        "Original Bitcoin wallet",
+                        "Family savings · original Bitcoin wallet",
+                        "Receive and change addresses 0–239",
+                        "Paired Bitcoin Blake2b Cube",
+                        "Family savings · Blake2b",
+                    ] {
+                        assert!(mounted.contains(text), "{} missing {}", name, text);
+                    }
+                    assert_eq!(
+                        mounted.contains("Continue to destination Cube"),
+                        can_continue,
+                        "{name}"
+                    );
+                    assert!(mounted.contains(if can_continue {
+                        "Scan again"
+                    } else if name == "scanning" {
+                        "Checking availability…"
+                    } else {
+                        "Check BTCB2 availability"
+                    }));
+                    assert_eq!(mounted.contains("Cancel"), name == "scanning", "{name}");
+                    let conclusion = match name {
+                        "ready" => "Ready to check",
+                        "scanning" => {
+                            "Checking BTCB2 history and verifying current Bitcoin activity"
+                        }
+                        "incomplete" => "Check unavailable",
+                        "eligible" => "Spending remains locked",
+                        "no-splittable" => {
+                            "No confirmed pre-fork coins remain unspent on both chains"
+                        }
+                        "zero" => "No spendable outputs were found in this bounded scan",
+                        "pending" => "Wait for every discovered output to confirm",
+                        "taproot" => "Taproot (tr) wallets can be scanned but not split",
+                        _ => unreachable!(),
+                    };
+                    assert!(mounted.contains(conclusion), "{} missing conclusion", name);
+                    if name == "incomplete" {
+                        assert!(mounted.contains("No balance conclusion was made"));
+                        assert!(!mounted.contains("No spendable outputs were found"));
+                    }
+                    if name == "eligible" {
+                        for text in [
+                            "Pre-fork on Bitcoin Blake2b",
+                            "Unspent on both chains (splittable)",
+                            "1,250,000 sats",
+                            "2 UTXOs, 1,000,000 sats",
+                            "synthetic-bitcoin-tip",
+                        ] {
+                            assert!(mounted.contains(text), "eligible missing {}", text);
+                        }
+                    }
+                    if name == "no-splittable" {
+                        assert!(mounted
+                            .contains("No confirmed pre-fork coins remain unspent on both chains"));
+                        assert!(mounted.contains("0 UTXOs, 0 sats"));
+                    }
+                    if name == "taproot" {
+                        assert!(mounted.contains("1 UTXO, 400,000 sats"));
+                        assert!(!mounted.contains("1 UTXOs"));
+                    }
+                }
+            }
+        }
     }
 
     /// Check source-first layout and action dispatch at narrow and standard
