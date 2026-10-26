@@ -50,7 +50,7 @@ pub fn settings_content_section<'a>(
             show_direction_badges,
             saved,
         ),
-        SettingsSection::PaymentChecks => payment_checks_section(menu, cache),
+        SettingsSection::PaymentChecks => payment_checks_section(menu, cache, saved),
         SettingsSection::DataExports => data_exports_section(menu, cache),
         SettingsSection::Recovery => recovery_section(
             menu,
@@ -126,22 +126,26 @@ fn general_section<'a>(
     dashboard(menu, cache, col)
 }
 
-fn payment_checks_section<'a>(menu: &'a Menu, cache: &'a cache::Cache) -> Element<'a, Message> {
-    dashboard(
-        menu,
-        cache,
-        Column::new()
-            .spacing(20)
-            .push(super::header(
-                "Payment checks",
-                SettingsMessage::PaymentChecksSection,
-            ))
-            .push(p2_regular(
-                "Payment checks currently apply to all Cubes on this device.",
-            ))
-            .push(recipient_identity_checks_toggle())
-            .push(text("A check never guarantees who the recipient is. Unverifiable recipients appear as not verified.").size(14)),
-    )
+fn payment_checks_section<'a>(
+    menu: &'a Menu,
+    cache: &'a cache::Cache,
+    saved: bool,
+) -> Element<'a, Message> {
+    let mut content = Column::new()
+        .spacing(20)
+        .push(super::header(
+            "Payment checks",
+            SettingsMessage::PaymentChecksSection,
+        ))
+        .push(p2_regular(
+            "Payment checks currently apply to all Cubes on this device.",
+        ))
+        .push(recipient_identity_checks_toggle())
+        .push(text("A check never guarantees who the recipient is. Unverifiable recipients appear as not verified.").size(14));
+    if saved {
+        content = content.push(text("Saved").size(14));
+    }
+    dashboard(menu, cache, content)
 }
 
 fn recovery_kit_route() -> Menu {

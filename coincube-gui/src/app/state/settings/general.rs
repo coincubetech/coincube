@@ -1610,6 +1610,7 @@ impl State for GeneralSettingsState {
                 | Message::View(view::Message::Settings(
                     view::SettingsMessage::DisplayUnitChanged(_)
                         | view::SettingsMessage::ToggleDirectionBadges(_)
+                        | view::SettingsMessage::ToggleRecipientIdentityChecks(_)
                 ))
         ) {
             self.saved = false;
@@ -1830,7 +1831,10 @@ impl State for GeneralSettingsState {
                 match GlobalSettings::update_recipient_identity_checks(
                     &GlobalSettings::path(&cache.datadir_path), enabled,
                 ) {
-                    Ok(()) => Task::none(),
+                    Ok(()) => {
+                        self.saved = true;
+                        Task::none()
+                    }
                     Err(_) => Task::done(Message::View(view::Message::ShowError(
                         "Couldn't save your privacy preference. Your choice applies for this session; please try again before restarting.".into(),
                     ))),
