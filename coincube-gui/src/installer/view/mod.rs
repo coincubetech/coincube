@@ -59,9 +59,7 @@ pub fn import_wallet_or_descriptor<'a>(
     let mut col_wallets = Column::new()
         .spacing(20)
         .push(h4_bold("Wallets on this Connect account"))
-        .push(p2_regular(
-            "Choose a wallet already available to this Cube.",
-        ));
+        .push(p2_regular("Choose a wallet on this Connect account."));
     let no_wallets = wallets.is_empty();
     for (i, (name, alias)) in wallets.into_iter().enumerate() {
         col_wallets = col_wallets.push(
@@ -2435,7 +2433,7 @@ pub fn login(progress: (usize, usize), connection_step: Element<Message>) -> Ele
     layout(
         progress,
         None,
-        "Connect to a shared wallet",
+        "Sign in to Connect",
         Container::new(
             Column::new()
                 .spacing(20)
@@ -2444,7 +2442,7 @@ pub fn login(progress: (usize, usize), connection_step: Element<Message>) -> Ele
                 .push(p2_regular("ADD WALLET · CONNECT").style(theme::text::secondary))
                 .push(h2("Sign in to Connect"))
                 .push(p2_regular(
-                    "Use the account associated with this shared wallet. The emailed token is submitted when complete.",
+                    "Use the Connect account that holds your wallet or invitation. The emailed authentication code submits when complete. If you have an invitation, enter its token on the next screen.",
                 ))
                 .push(connection_step),
         )
@@ -2714,7 +2712,7 @@ pub(super) fn layout<'a>(
                                 .center_x(Length::FillPortion(2)),
                         )
                     } else {
-                        None
+                        Some(Container::new(Space::new()).width(Length::FillPortion(2)))
                     }),
             )
             .push(
@@ -2777,7 +2775,7 @@ pub fn recovery_kit_restore<'a>(
         RestorePhase::Email | RestorePhase::OtpEntry => (
             "STEP 1 OF 3",
             "Sign in to Connect",
-            "Verify the account that holds this Cube's Recovery Kit.",
+            "Verify the account that holds this Cube's Recovery Kit.".to_string(),
         ),
         RestorePhase::LoadingCubes | RestorePhase::CubePicker { .. } => (
             "STEP 2 OF 3",
@@ -2785,22 +2783,22 @@ pub fn recovery_kit_restore<'a>(
             match scope {
                 crate::installer::step::RestoreScope::Full => "Cubes on this network are listed. Only kits with a Master Seed can be selected for Cube recovery.",
                 crate::installer::step::RestoreScope::DescriptorOnly => "Cubes on this network are listed. Only those with a wallet descriptor in their Recovery Kit can be selected.",
-            },
+            }.to_string(),
         ),
         RestorePhase::PasswordEntry { .. } | RestorePhase::Decrypting { .. } => (
             "STEP 3 OF 3",
             "Open the Recovery Kit",
-            "The recovery password decrypts the backup on this device.",
+            "The recovery password decrypts the backup on this device.".to_string(),
         ),
-        RestorePhase::Ready { .. } => (
+        RestorePhase::Ready { selected, .. } => (
             "READY",
             "Continue restoring",
-            "Your Recovery Kit was decrypted. Continue with the remaining installer steps.",
+            format!("Recovery Kit for \"{}\" is open.", selected.name),
         ),
         RestorePhase::Error { .. } => (
             "NEEDS ATTENTION",
             "Recovery needs attention",
-            "Review the error below, then retry the existing restore flow.",
+            "Review the error below, then try again.".to_string(),
         ),
     };
     let mut content: Column<'a, Message> = Column::new()
@@ -2892,16 +2890,23 @@ pub fn recovery_kit_restore<'a>(
                             }
                         };
                     let label = if available {
-                        format!("{} · {} · Recovery Kit available", c.name, c.network)
+                        match scope {
+                            crate::installer::step::RestoreScope::Full => {
+                                format!("{} · Recovery Kit available", c.name)
+                            }
+                            crate::installer::step::RestoreScope::DescriptorOnly => {
+                                format!("{} · Wallet descriptor available", c.name)
+                            }
+                        }
                     } else if !c.status.has_recovery_kit {
-                        format!("{} · {} · No Recovery Kit", c.name, c.network)
+                        format!("{} · No Recovery Kit", c.name)
                     } else {
                         match scope {
                             crate::installer::step::RestoreScope::Full => {
-                                format!("{} · {} · No Master Seed in kit", c.name, c.network)
+                                format!("{} · No Master Seed in kit", c.name)
                             }
                             crate::installer::step::RestoreScope::DescriptorOnly => {
-                                format!("{} · {} · No descriptor in kit", c.name, c.network)
+                                format!("{} · No descriptor in kit", c.name)
                             }
                         }
                     };
@@ -2970,23 +2975,18 @@ pub fn recovery_kit_restore<'a>(
                 "Decrypting your Recovery Kit on this device. This can take a moment.",
             ));
         }
-        RestorePhase::Ready { selected, .. } => {
+        RestorePhase::Ready { .. } => {
             // The happy path after a successful decrypt fires
             // `Message::Next` automatically, so the user rarely
             // lingers on this screen. But a user can land here
             // again by navigating back through the installer —
             // without an explicit Next button they'd be stuck.
-            content = content
-                .push(text::text(format!(
-                    "Recovery Kit for \"{}\" decrypted. Continue to the remaining installer steps.",
-                    selected.name
-                )))
-                .push(
-                    button::primary(None, "Next")
-                        .on_press(Message::Next)
-                        .width(Length::Fixed(220.0))
-                        .padding([10, 20]),
-                );
+            content = content.push(
+                button::primary(None, "Next")
+                    .on_press(Message::Next)
+                    .width(Length::Fixed(220.0))
+                    .padding([10, 20]),
+            );
         }
         RestorePhase::Error { message } => {
             content = content
@@ -3020,8 +3020,9 @@ pub fn recovery_kit_restore<'a>(
     // The generic installer count describes later PIN/node steps as well.
     layout(
         (0, 0),
-        Some(email.value.as_str())
-            .filter(|value| !value.is_empty() && !matches!(phase, RestorePhase::Email)),
+        Some(email.value.as_str()).filter(|value| {
+            !value.is_empty() && !matches!(phase, RestorePhase::Email | RestorePhase::OtpEntry)
+        }),
         title,
         content,
         true,
@@ -3312,15 +3313,15 @@ mod tests {
     }
 
     #[derive(Debug, Default)]
-    struct RestoreLabels(Vec<String>);
+    struct RestoreLabels(Vec<(String, iced::Rectangle)>);
 
     impl Operation for RestoreLabels {
         fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
             operate(self);
         }
 
-        fn text(&mut self, _: Option<&Id>, _: iced::Rectangle, value: &str) {
-            self.0.push(value.to_owned());
+        fn text(&mut self, _: Option<&Id>, bounds: iced::Rectangle, value: &str) {
+            self.0.push((value.to_owned(), bounds));
         }
     }
 
@@ -3381,23 +3382,55 @@ mod tests {
                 .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
 
             assert!(
-                labels.0.iter().any(|label| label == expected),
+                labels.0.iter().any(|(label, _)| label == expected),
                 "{:?}: {:?}",
                 scope,
                 labels
             );
             assert!(
-                labels.0.iter().any(|label| label == availability),
+                labels.0.iter().any(|(label, _)| label == availability),
                 "{:?}: {:?}",
                 scope,
                 labels
             );
             assert!(
-                !labels.0.iter().any(|label| label == "1 | 8"),
+                !labels.0.iter().any(|(label, _)| label == "1 | 8"),
                 "{:?}: {:?}",
                 scope,
                 labels
             );
+            let title_x = labels
+                .0
+                .iter()
+                .find(|(label, _)| {
+                    label == "Restore from Cube Recovery Kit"
+                        || label == "Restore Wallet Descriptor from Connect"
+                })
+                .expect("restore title")
+                .1
+                .x;
+            let eyebrow_x = labels
+                .0
+                .iter()
+                .find(|(label, _)| label == expected)
+                .expect("restore eyebrow")
+                .1
+                .x;
+            assert!(
+                (title_x - eyebrow_x).abs() < 1.0,
+                "title and content should align: {} vs {}",
+                title_x,
+                eyebrow_x
+            );
+            let available_label = match scope {
+                RestoreScope::Full => "Everyday · Recovery Kit available",
+                RestoreScope::DescriptorOnly => "Everyday · Wallet descriptor available",
+            };
+            assert!(labels.0.iter().any(|(label, _)| label == available_label));
+            assert!(!labels
+                .0
+                .iter()
+                .any(|(label, _)| label.contains("· bitcoin ·")));
 
             if let Ok(directory) = std::env::var("R14_CAPTURE_DIR") {
                 std::fs::create_dir_all(&directory).unwrap();
