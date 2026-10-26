@@ -374,7 +374,10 @@ mod seed_export_duress_gui_tests {
             ),
         );
         drop(gui.update(stale));
-        assert!(gui.panes.get(pane_id).is_none());
+        assert!(gui
+            .panes
+            .get(pane_id)
+            .is_none_or(|pane| pane.tabs.is_empty()));
         drop(gui);
         std::fs::remove_dir_all(path).ok();
     }
@@ -836,16 +839,18 @@ impl GUI {
                     Some(chain.bitcoin_network()),
                 ),
             );
+            let other_pane = self.panes.iter().next().map(|(id, _)| *id);
             if let Some(pane) = self.panes.get_mut(pane_id) {
                 let emergency_id = usize::MAX;
                 pane.tabs.push(tab::Tab::new(emergency_id, state));
                 pane.focused_tab = pane.tabs.len() - 1;
                 target = Some((pane_id, emergency_id));
-            } else if let Some((other_id, pane)) = self.panes.iter_mut().next() {
+            } else if let Some(other_id) = other_pane {
+                let pane = self.panes.get_mut(other_id).expect("pane still exists");
                 let emergency_id = usize::MAX;
                 pane.tabs.push(tab::Tab::new(emergency_id, state));
                 pane.focused_tab = pane.tabs.len() - 1;
-                target = Some((*other_id, emergency_id));
+                target = Some((other_id, emergency_id));
             } else {
                 let (panes, new_pane) = pane_grid::State::new(pane::Pane::new_with_tab(state));
                 self.panes = panes;

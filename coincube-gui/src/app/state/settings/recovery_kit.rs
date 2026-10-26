@@ -1303,7 +1303,7 @@ fn verify_pin(rk: &mut RecoveryKit, cache: &Cache, local_cube_id: &str) -> Task<
             .await
             .map_err(|e| format!("PIN verification task failed: {}", e))?
         },
-        |res| {
+        move |res| {
             let outcome = match res {
                 Ok(crate::services::unlock::throttle::SeedExportCubeAttempt::Words(words)) => {
                     RecoveryKitMessage::PinVerifiedAttempt(attempt, Ok(words))

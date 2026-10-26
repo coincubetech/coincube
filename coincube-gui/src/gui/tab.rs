@@ -7891,7 +7891,7 @@ mod seed_export_duress_routing_tests {
             "expected".into(),
             crate::chain::ChainId::Bitcoin,
         ));
-        app::session::open("other-cube".into(), zeroize::Zeroizing::new("2468".into()));
+        app::session::open("other-cube", zeroize::Zeroizing::new("2468".into()));
         let forged = crate::services::unlock::throttle::verified_seed_export_duress_for_test(
             root.clone(),
             "unrelated".into(),

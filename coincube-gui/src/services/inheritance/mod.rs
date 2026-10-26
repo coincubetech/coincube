@@ -29,7 +29,7 @@ pub use escrow::{build_escrow_set, keyholders_from_vault, EscrowError, EscrowTie
 pub use heir::{decrypt_envelopes, HeirDecryptError};
 pub use owner::{
     disable_alerts, disable_escrow, enable_alerts, enroll_escrow, enroll_escrow_cancelable,
-    OwnerEscrowError,
+    EscrowAdmission, OwnerEscrowError,
 };
 pub use owner_self::{
     build_owner_self_envelope_set, find_owner_self_recipient, seal_and_upload_owner_self,

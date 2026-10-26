@@ -44,7 +44,7 @@ use crate::{
     },
     services::inheritance::{
         disable_alerts, disable_escrow, enable_alerts, enroll_escrow, enroll_escrow_cancelable,
-        EscrowTier,
+        EscrowAdmission, EscrowTier,
     },
     services::recovery::{SeedBlob, SeedBlobCube, SeedBlobMnemonic, BLOB_VERSION},
 };
@@ -678,11 +678,18 @@ pub fn update(
                         network.bitcoin_network(),
                         descriptor_json,
                         Some(seed_json),
-                        || cancelled.load(Ordering::Acquire),
-                        || {
-                            cancelled
-                                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                                .is_ok()
+                        EscrowAdmission {
+                            should_cancel: || cancelled.load(Ordering::Acquire),
+                            start_upload: || {
+                                cancelled
+                                    .compare_exchange(
+                                        false,
+                                        true,
+                                        Ordering::AcqRel,
+                                        Ordering::Acquire,
+                                    )
+                                    .is_ok()
+                            },
                         },
                     )
                     .await

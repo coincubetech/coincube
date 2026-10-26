@@ -93,8 +93,10 @@ pub async fn enroll_escrow(
         network,
         descriptor_json,
         seed_json,
-        || false,
-        || true,
+        EscrowAdmission {
+            should_cancel: || false,
+            start_upload: || true,
+        },
     )
     .await
 }
@@ -102,6 +104,11 @@ pub async fn enroll_escrow(
 /// Full-Cube PIN flow variant. Cancellation is checked after the awaited
 /// keyholder fetch and immediately before the escrow PUT. Once that PUT starts,
 /// monitoring must still be enabled to preserve escrow ⟹ heartbeat.
+pub struct EscrowAdmission<F, A> {
+    pub should_cancel: F,
+    pub start_upload: A,
+}
+
 pub async fn enroll_escrow_cancelable<F, A>(
     client: &CoincubeClient,
     server_cube_id: u64,
@@ -109,14 +116,13 @@ pub async fn enroll_escrow_cancelable<F, A>(
     network: Network,
     descriptor_json: Vec<u8>,
     seed_json: Option<Zeroizing<Vec<u8>>>,
-    should_cancel: F,
-    start_upload: A,
+    admission: EscrowAdmission<F, A>,
 ) -> Result<VaultMonitoringStatus, OwnerEscrowError>
 where
     F: Fn() -> bool + Send + Sync,
     A: Fn() -> bool + Send + Sync,
 {
-    if should_cancel() {
+    if (admission.should_cancel)() {
         return Err(OwnerEscrowError::Cancelled);
     }
     // 1. Resolve the current keyholders + xpubs, then build the envelope set
@@ -124,7 +130,7 @@ where
     //    is owned here so it's wiped when this fn returns; `build_escrow_set`
     //    only borrows the bytes to seal them, so it needs no `Zeroizing` itself.
     let vault = client.get_connect_vault(server_cube_id).await?;
-    if should_cancel() {
+    if (admission.should_cancel)() {
         return Err(OwnerEscrowError::Cancelled);
     }
     let keyholders = keyholders_from_vault(&vault, cube_enc_key, server_cube_id, network)?;
@@ -140,7 +146,7 @@ where
     drop(seed_json);
     // The caller atomically elects upload or cancellation here. A cancel that
     // wins first refuses the PUT; once upload wins, monitoring must complete.
-    if should_cancel() || !start_upload() {
+    if (admission.should_cancel)() || !(admission.start_upload)() {
         return Err(OwnerEscrowError::Cancelled);
     }
 
@@ -309,8 +315,10 @@ mod tests {
             Network::Bitcoin,
             b"descriptor".to_vec(),
             Some(Zeroizing::new(b"synthetic-seed".to_vec())),
-            || checks.fetch_add(1, Ordering::AcqRel) > 0,
-            || true,
+            EscrowAdmission {
+                should_cancel: || checks.fetch_add(1, Ordering::AcqRel) > 0,
+                start_upload: || true,
+            },
         )
         .await;
         assert!(matches!(result, Err(OwnerEscrowError::Cancelled)));

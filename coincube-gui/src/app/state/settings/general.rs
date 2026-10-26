@@ -1208,7 +1208,7 @@ impl GeneralSettingsState {
                         .await
                         .map_err(|e| format!("PIN verification task failed: {}", e))?
                     },
-                    |res| {
+                    move |res| {
                         let outcome = match res {
                             Ok(unlock::throttle::SeedExportCubeAttempt::Words(words)) => {
                                 BackupWalletMessage::PinVerifiedAttempt(attempt, Ok(words))
@@ -1591,6 +1591,7 @@ pub(super) fn load_mnemonic_words(
 /// "Incorrect PIN" sends the user to retype a PIN that was right, and each
 /// retry spends a guess against the shared unlock throttle — so a fault
 /// entirely outside their control locks them out of their own Cube.
+#[cfg(test)]
 pub(super) fn is_wrong_pin(e: &SignerError) -> bool {
     matches!(e, SignerError::InvalidPassword)
 }
