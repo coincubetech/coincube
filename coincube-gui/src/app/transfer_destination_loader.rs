@@ -125,7 +125,10 @@ impl ScopedDestination {
         {
             return Err(Refusal::Unsupported);
         }
-        if source.wallet == WalletIdentity::Vault(wallet_id.clone()) {
+        let destination_wallet = WalletIdentity::Vault(wallet_id.clone());
+        if source.wallet == destination_wallet
+            || source.wallet.shares_vault_descriptor(&destination_wallet)
+        {
             return Err(Refusal::SameWallet);
         }
         let (cube, _) = selected(&root, destination_cube_id, &wallet_id)?;
@@ -610,6 +613,165 @@ mod tests {
             ScopedDestination::new(root, source, "different-cube-id", wallet_id),
             Err(Refusal::SameWallet)
         ));
+    }
+
+    #[test]
+    fn a_restored_vault_with_a_new_timestamp_is_not_a_destination() {
+        let source = source();
+        let WalletIdentity::Vault(source_id) = &source.wallet else {
+            unreachable!();
+        };
+        let restored_id = WalletId::new(source_id.descriptor_checksum.clone(), Some(99));
+        assert_ne!(source.wallet, WalletIdentity::Vault(restored_id.clone()));
+        let root = CoincubeDirectory::new(std::env::temp_dir().join("unused-r16-restored-alias"));
+        assert!(matches!(
+            ScopedDestination::new(root, source, "different-cube-id", restored_id),
+            Err(Refusal::SameWallet)
+        ));
+    }
+
+    #[test]
+    fn synthetic_destination_pin_outcomes_leave_the_source_session_intact() {
+        use coincube_core::miniscript::bitcoin::secp256k1::Secp256k1;
+        use coincube_core::signer::MASTER_SEED_LABEL;
+
+        let _session_guard = super::super::session::test_guard();
+        super::super::session::close();
+        let root_path = std::env::temp_dir().join(format!(
+            "coincube-r16-b-pin-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let root = CoincubeDirectory::new(root_path.clone());
+        let bitcoin_dir = root.network_directory(ChainId::Bitcoin);
+        std::fs::create_dir_all(bitcoin_dir.path()).unwrap();
+
+        let secp = Secp256k1::signing_only();
+        let source_signer = MasterSigner::generate(Network::Bitcoin).unwrap();
+        let source_fp = source_signer.fingerprint(&secp);
+        super::super::session::open("source", Zeroizing::new("source-pin".into()));
+        super::super::session::store_unlocked_signer("source", source_fp, source_signer);
+
+        let destination_signer = MasterSigner::generate(Network::Bitcoin).unwrap();
+        let destination_fp = destination_signer.fingerprint(&secp);
+        let mut cube = CubeSettings::new_with_raw_id(
+            "destination".into(),
+            "Synthetic destination".into(),
+            ChainId::Bitcoin,
+        );
+        let wallet_id = WalletId::new("destination".into(), Some(1));
+        cube.vault_wallet_id = Some(wallet_id.clone());
+        cube.vault_fingerprint = Some("synthetic-vault".into());
+        cube.master_signer_fingerprint = Some(destination_fp);
+        destination_signer
+            .store_encrypted(
+                &root_path,
+                Network::Bitcoin,
+                &secp,
+                Some((
+                    format!("{}{}", MASTER_SEED_LABEL, cube.created_at),
+                    cube.created_at,
+                )),
+                "1234",
+                &cube.id,
+                None,
+            )
+            .unwrap();
+        let marker_name = unlock::marker::new_file_name(cube.created_at);
+        unlock::marker::write(
+            &root_path,
+            ChainId::Bitcoin,
+            &cube.id,
+            &marker_name,
+            "9999",
+            None,
+        )
+        .unwrap();
+        cube.duress_slot_file = Some(marker_name);
+        let wallet = WalletSettings {
+            name: "Synthetic destination".into(),
+            alias: None,
+            descriptor_checksum: wallet_id.descriptor_checksum.clone(),
+            pinned_at: wallet_id.timestamp,
+            keys: Vec::new(),
+            hardware_wallets: Vec::new(),
+            remote_backend_auth: None,
+            start_internal_bitcoind: None,
+            pending_rescan: None,
+            keychain_keys_recorded: false,
+        };
+        let settings = Settings {
+            cubes: vec![cube],
+            wallets: vec![wallet],
+            ..Settings::default()
+        };
+        std::fs::write(
+            bitcoin_dir
+                .path()
+                .join(super::super::settings::SETTINGS_FILE_NAME),
+            serde_json::to_vec(&settings).unwrap(),
+        )
+        .unwrap();
+
+        let source = source();
+        let mut destination = ScopedDestination::new(
+            root.clone(),
+            source.clone(),
+            "destination",
+            wallet_id.clone(),
+        )
+        .unwrap();
+        let wrong = destination
+            .begin_pin(&source, Zeroizing::new("4321".into()))
+            .unwrap()
+            .run();
+        assert_eq!(
+            destination.accept_pin(&source, wrong),
+            Err(Refusal::WrongCredential)
+        );
+        let counters =
+            serde_json::to_value(unlock::throttle::ThrottleState::load(&root_path)).unwrap();
+        assert_eq!(
+            counters["failures"]["destination"]["consecutive_failures"],
+            1
+        );
+        assert!(counters["failures"].get("source").is_none());
+        let correct = destination
+            .begin_pin(&source, Zeroizing::new("1234".into()))
+            .unwrap()
+            .run();
+        assert_eq!(destination.accept_pin(&source, correct), Ok(()));
+        assert!(destination.verified);
+        assert!(destination.pin_signer.lock().unwrap().is_none());
+        let counters =
+            serde_json::to_value(unlock::throttle::ThrottleState::load(&root_path)).unwrap();
+        assert!(counters["failures"].get("destination").is_none());
+        assert_eq!(
+            super::super::session::current_cube_id().as_deref(),
+            Some("source")
+        );
+        assert!(super::super::session::unlocked_signer("source", source_fp).is_some());
+        assert!(super::super::session::unlocked_signer("destination", destination_fp).is_none());
+
+        let mut duress_destination =
+            ScopedDestination::new(root.clone(), source.clone(), "destination", wallet_id).unwrap();
+        let duress = duress_destination
+            .begin_pin(&source, Zeroizing::new("9999".into()))
+            .unwrap()
+            .run();
+        assert_eq!(
+            duress_destination.accept_pin(&source, duress),
+            Err(Refusal::Duress)
+        );
+        assert!(!duress_destination.verified);
+        assert!(duress_destination.pin_signer.lock().unwrap().is_none());
+        assert_eq!(
+            super::super::session::current_cube_id().as_deref(),
+            Some("source")
+        );
+        assert!(super::super::session::unlocked_signer("source", source_fp).is_some());
+        super::super::session::close();
+        std::fs::remove_dir_all(root_path).unwrap();
     }
 
     struct CountClose(Arc<AtomicUsize>);

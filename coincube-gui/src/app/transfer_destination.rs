@@ -30,6 +30,16 @@ pub(crate) enum WalletIdentity {
     Spark(String),
 }
 
+impl WalletIdentity {
+    /// WalletId includes a timestamp. Two restored Vaults can therefore have
+    /// different IDs while referring to the same descriptor and address set.
+    pub(crate) fn shares_vault_descriptor(&self, other: &Self) -> bool {
+        matches!((self, other), (Self::Vault(a), Self::Vault(b))
+            if !a.descriptor_checksum.is_empty()
+                && a.descriptor_checksum == b.descriptor_checksum)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Destination {
     pub cube_id: String,
@@ -98,7 +108,7 @@ fn admit(
     if selected.cube_id.is_empty() || source.cube_id == selected.cube_id {
         return Err(Refusal::SelfCube);
     }
-    if source.wallet == selected.wallet {
+    if source.wallet == selected.wallet || source.wallet.shares_vault_descriptor(&selected.wallet) {
         return Err(Refusal::SameWallet);
     }
     if source.chain != ChainId::Bitcoin || selected.chain != ChainId::Bitcoin {
@@ -404,6 +414,27 @@ mod tests {
             assert_eq!(result.err(), Some(expected));
             assert_eq!(count.load(Ordering::SeqCst), 1);
         }
+    }
+
+    #[test]
+    fn restored_vault_with_new_timestamp_cannot_receive_from_its_own_descriptor() {
+        let (source, mut destination, _) = fixture();
+        let WalletIdentity::Vault(source_id) = &source.wallet else {
+            unreachable!();
+        };
+        destination.wallet = WalletIdentity::Vault(WalletId {
+            timestamp: Some(99),
+            descriptor_checksum: source_id.descriptor_checksum.clone(),
+        });
+        assert_ne!(source.wallet, destination.wallet);
+        let evidence = DestinationEvidence {
+            identity: destination.clone(),
+            ready: true,
+        };
+        assert_eq!(
+            admit(&source, &destination, &source, &evidence),
+            Err(Refusal::SameWallet)
+        );
     }
 
     #[test]
