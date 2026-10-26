@@ -30,7 +30,7 @@ fn text_input(c: &TextInput, status: Status) -> Style {
         background: Background::Color(c.active.background),
         border: if let Some(color) = c.active.border {
             Border {
-                radius: 25.0.into(),
+                radius: super::tenshu::radius::CONTROL.into(),
                 width: 1.0,
                 color,
             }
@@ -49,7 +49,7 @@ fn text_input(c: &TextInput, status: Status) -> Style {
             background: Background::Color(c.disabled.background),
             border: if let Some(color) = c.disabled.border {
                 Border {
-                    radius: 25.0.into(),
+                    radius: super::tenshu::radius::CONTROL.into(),
                     width: 1.0,
                     color,
                 }

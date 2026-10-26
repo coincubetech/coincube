@@ -256,7 +256,6 @@ fn route_choice_row(choices: Vec<RouteChoice>) -> Element<'static, Message> {
             Message::FocusAction,
         )
         .padding([8, 16])
-        .focus_radius(17.0)
         .style(if choice.selected {
             theme::button::primary
         } else {
