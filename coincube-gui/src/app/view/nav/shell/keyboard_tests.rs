@@ -32,7 +32,7 @@ fn fixture_context() -> NavContext<'static> {
 }
 
 #[test]
-fn activity_only_routes_to_usable_wallets() {
+fn activity_is_cube_scoped_even_without_a_wallet_backend() {
     let mut ctx = fixture_context();
     ctx.has_vault = false;
     ctx.network = ChainId::Testnet;
@@ -42,33 +42,31 @@ fn activity_only_routes_to_usable_wallets() {
     };
     assert_eq!(
         activity_route(&ctx),
-        None,
-        "testnet has no Spark or Liquid backend"
+        Some(Menu::Cube(CubeSubMenu::Activity))
     );
 
     ctx.network = ChainId::Regtest;
     assert_eq!(
         activity_route(&ctx),
-        Some(Menu::Spark(SparkSubMenu::Transactions(None)))
+        Some(Menu::Cube(CubeSubMenu::Activity))
     );
 
     ctx.network = ChainId::Bitcoin;
     assert_eq!(
         activity_route(&ctx),
-        Some(Menu::Spark(SparkSubMenu::Transactions(None)))
+        Some(Menu::Cube(CubeSubMenu::Activity))
     );
     ctx.has_imported_bitcoin = true;
     assert_eq!(
         activity_route(&ctx),
-        Some(Menu::Vault(VaultSubMenu::Transactions(None)))
+        Some(Menu::Cube(CubeSubMenu::Activity))
     );
 
     ctx.has_imported_bitcoin = false;
     ctx.network = ChainId::BitcoinBlake2b;
     assert_eq!(
         activity_route(&ctx),
-        None,
-        "the Liquid gate cannot enable Blake2b"
+        Some(Menu::Cube(CubeSubMenu::Activity))
     );
 }
 

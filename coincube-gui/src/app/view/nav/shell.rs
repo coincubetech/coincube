@@ -488,16 +488,8 @@ fn switcher_menu<'a>(ctx: &NavContext<'a>, state: ShellState) -> Element<'a, Mes
         .into()
 }
 
-fn activity_route(ctx: &NavContext<'_>) -> Option<Menu> {
-    if ctx.has_vault || ctx.has_imported_bitcoin {
-        Some(Menu::Vault(VaultSubMenu::Transactions(None)))
-    } else if features::spark(ctx.network).is_available() {
-        Some(Menu::Spark(SparkSubMenu::Transactions(None)))
-    } else if features::liquid_wallet_usable(ctx.network, ctx.liquid_gate) {
-        Some(Menu::Liquid(LiquidSubMenu::Transactions(None)))
-    } else {
-        None
-    }
+fn activity_route(_ctx: &NavContext<'_>) -> Option<Menu> {
+    Some(Menu::Cube(CubeSubMenu::Activity))
 }
 
 fn wallet_children<'a>(
@@ -543,7 +535,7 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
     let overview = Menu::Cube(CubeSubMenu::Overview);
     let backup = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Recovery));
     let activity = activity_route(ctx);
-    let activity_unavailable = activity.is_none();
+    let activity_unavailable = false;
     // A focused row paints 4px beyond its hit bounds. Later selected rows
     // have opaque fills, so they need this clearance to keep the ring visible.
     let mut top: Column<Message> = Column::new().spacing(4).padding([0, 10]);
@@ -552,12 +544,7 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
         .push(nav_row(
             "Activity",
             Some(receipt_icon()),
-            matches!(
-                menu,
-                Menu::Vault(VaultSubMenu::Transactions(_))
-                    | Menu::Spark(SparkSubMenu::Transactions(_))
-                    | Menu::Liquid(LiquidSubMenu::Transactions(_))
-            ),
+            matches!(menu, Menu::Cube(CubeSubMenu::Activity)),
             activity.map(Message::Menu),
             false,
             activity_unavailable.then(|| "No wallet with activity on this network".to_owned()),
@@ -683,7 +670,7 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
                     Menu::Vault(VaultSubMenu::Coins(_)) => "Coin control",
                     Menu::Vault(VaultSubMenu::PSBTs(_)) => "PSBT proposals",
                     Menu::Vault(VaultSubMenu::Recovery) => "Recovery path",
-                    Menu::Vault(VaultSubMenu::Claim) => item.label,
+                    Menu::Vault(VaultSubMenu::Claim) => "Split coins",
                     _ => item.label,
                 };
                 middle = middle.push(subitem(menu, item, Some(label)));

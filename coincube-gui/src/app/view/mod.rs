@@ -1,5 +1,7 @@
 mod message;
 
+pub mod activity;
+
 pub mod buysell;
 pub mod connect;
 pub mod duress;
