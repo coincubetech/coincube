@@ -7,8 +7,6 @@
 //! receive reply must carry its [`ReceiveRequest`]; a cancelled or replaced
 //! operation cannot admit a reply from its predecessor.
 
-use std::str::FromStr;
-
 use coincube_core::miniscript::bitcoin::{Address, Network};
 use zeroize::Zeroizing;
 
@@ -155,6 +153,16 @@ pub(crate) struct ReceiveArtifact {
     pub(crate) address: Address,
 }
 
+/// Opaque result reserved for a restricted destination backend that has
+/// verified its own Cube/wallet identity and called `get_new_address` on that
+/// wallet. There is deliberately no production constructor yet: the scoped
+/// loader does not exist, so this path cannot produce an artifact or enable a
+/// cross-Cube payment. A network-valid caller string is never receive proof.
+struct BackendReceiveProof {
+    request: ReceiveRequest,
+    address: Address<coincube_core::miniscript::bitcoin::address::NetworkUnchecked>,
+}
+
 pub(crate) struct TransferDestinationOwner {
     source: Source,
     destination: Destination,
@@ -211,28 +219,32 @@ impl TransferDestinationOwner {
         })
     }
 
-    /// Validate a backend result against the newest source and destination
-    /// evidence before any quote can consume it. The caller must also compare
-    /// `preparation` with its current amount/route/recipient generation.
-    pub(crate) fn accept_onchain(
+    /// Validate a restricted-backend result against the newest source and
+    /// destination evidence before any quote can consume it. This remains
+    /// private and unreachable in production until the destination loader can
+    /// construct `BackendReceiveProof` from the selected wallet's backend.
+    fn accept_onchain(
         &self,
         request: ReceiveRequest,
         current_source: &Source,
         evidence: &DestinationEvidence,
         current_preparation: AppGeneration,
-        address: &str,
+        current_amount_sat: u64,
+        proof: BackendReceiveProof,
     ) -> Result<ReceiveArtifact, Refusal> {
         if !self.active
             || request.operation != self.operation
             || request.source != self.source
             || request.destination != self.destination
             || request.preparation != current_preparation
+            || request.amount_sat != current_amount_sat
+            || proof.request != request
         {
             return Err(Refusal::StaleResult);
         }
         admit(&self.source, &self.destination, current_source, evidence)?;
-        let address = Address::from_str(address)
-            .map_err(|_| Refusal::InvalidAddress)?
+        let address = proof
+            .address
             .require_network(Network::Bitcoin)
             .map_err(|_| Refusal::InvalidAddress)?;
         Ok(ReceiveArtifact { request, address })
@@ -259,6 +271,7 @@ impl Drop for TransferDestinationOwner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -308,6 +321,23 @@ mod tests {
         )
         .unwrap();
         (owner, source, evidence)
+    }
+
+    fn synthetic_address(network: Network) -> String {
+        let key = coincube_core::miniscript::bitcoin::PublicKey::from_str(
+            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        )
+        .unwrap();
+        Address::p2pkh(key, network).to_string()
+    }
+
+    // Test-only stand-in for the future restricted backend. No production
+    // constructor exists, so production callers cannot label a string as B's.
+    fn synthetic_proof(request: &ReceiveRequest, address: &str) -> BackendReceiveProof {
+        BackendReceiveProof {
+            request: request.clone(),
+            address: Address::from_str(address).unwrap(),
+        }
     }
 
     #[test]
@@ -360,6 +390,7 @@ mod tests {
         let (mut first, source, evidence) = owner(count.clone());
         let prep = AppGeneration::next();
         let request = first.request(prep, 1000).unwrap();
+        let mainnet = synthetic_address(Network::Bitcoin);
         assert_eq!(first.request(prep, 0).err(), Some(Refusal::InvalidAmount));
         assert_eq!(
             first
@@ -368,7 +399,8 @@ mod tests {
                     &source,
                     &evidence,
                     AppGeneration::next(),
-                    "not-an-address"
+                    1000,
+                    synthetic_proof(&request, &mainnet)
                 )
                 .err(),
             Some(Refusal::StaleResult)
@@ -379,7 +411,14 @@ mod tests {
         assert!(first.credential.0.is_empty());
         assert_eq!(
             first
-                .accept_onchain(request, &source, &evidence, prep, "not-an-address")
+                .accept_onchain(
+                    request.clone(),
+                    &source,
+                    &evidence,
+                    prep,
+                    1000,
+                    synthetic_proof(&request, &mainnet)
+                )
                 .err(),
             Some(Refusal::StaleResult)
         );
@@ -390,7 +429,14 @@ mod tests {
         };
         assert_eq!(
             replacement
-                .accept_onchain(old, &source, &evidence, prep, "not-an-address")
+                .accept_onchain(
+                    old.clone(),
+                    &source,
+                    &evidence,
+                    prep,
+                    1000,
+                    synthetic_proof(&old, &mainnet)
+                )
                 .err(),
             Some(Refusal::StaleResult)
         );
@@ -404,30 +450,82 @@ mod tests {
         let (owner, source, mut evidence) = owner(count);
         let prep = AppGeneration::next();
         let request = owner.request(prep, 1_000).unwrap();
-        let synthetic_key = coincube_core::miniscript::bitcoin::PublicKey::from_str(
-            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
-        )
-        .unwrap();
-        let mainnet = Address::p2pkh(synthetic_key, Network::Bitcoin).to_string();
-        let testnet = Address::p2pkh(synthetic_key, Network::Testnet).to_string();
+        let mainnet = synthetic_address(Network::Bitcoin);
+        let testnet = synthetic_address(Network::Testnet);
         assert_eq!(
             owner
-                .accept_onchain(request.clone(), &source, &evidence, prep, &testnet)
+                .accept_onchain(
+                    request.clone(),
+                    &source,
+                    &evidence,
+                    prep,
+                    1_000,
+                    synthetic_proof(&request, &testnet)
+                )
                 .err(),
             Some(Refusal::InvalidAddress)
         );
         evidence.identity.wallet = WalletIdentity::Spark("replacement".into());
         assert_eq!(
             owner
-                .accept_onchain(request.clone(), &source, &evidence, prep, &mainnet)
+                .accept_onchain(
+                    request.clone(),
+                    &source,
+                    &evidence,
+                    prep,
+                    1_000,
+                    synthetic_proof(&request, &mainnet)
+                )
                 .err(),
             Some(Refusal::WalletChanged)
         );
         evidence.identity = request.destination.clone();
         let accepted = owner
-            .accept_onchain(request.clone(), &source, &evidence, prep, &mainnet)
+            .accept_onchain(
+                request.clone(),
+                &source,
+                &evidence,
+                prep,
+                1_000,
+                synthetic_proof(&request, &mainnet),
+            )
             .unwrap();
         assert_eq!(accepted.request, request);
         assert_eq!(accepted.address.to_string(), mainnet);
+    }
+
+    #[test]
+    fn edited_amount_and_unrelated_proof_refuse_an_inflight_result() {
+        let (owner, source, evidence) = owner(Arc::new(AtomicUsize::new(0)));
+        let prep = AppGeneration::next();
+        let old = owner.request(prep, 1_000).unwrap();
+        let edited = owner.request(prep, 2_000).unwrap();
+        let mainnet = synthetic_address(Network::Bitcoin);
+        assert_eq!(
+            owner
+                .accept_onchain(
+                    old.clone(),
+                    &source,
+                    &evidence,
+                    prep,
+                    2_000,
+                    synthetic_proof(&old, &mainnet)
+                )
+                .err(),
+            Some(Refusal::StaleResult)
+        );
+        assert_eq!(
+            owner
+                .accept_onchain(
+                    edited,
+                    &source,
+                    &evidence,
+                    prep,
+                    2_000,
+                    synthetic_proof(&old, &mainnet)
+                )
+                .err(),
+            Some(Refusal::StaleResult)
+        );
     }
 }
