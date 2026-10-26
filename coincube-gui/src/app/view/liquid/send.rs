@@ -10,7 +10,7 @@ use coincube_ui::{
     },
     icon::{self, receipt_icon},
     theme,
-    widget::{action::Action, Element},
+    widget::{action::Action, ColumnExt, Element, RowExt},
 };
 use iced::{
     widget::{button as iced_button, container, Column, Container, Row, Space},
@@ -79,12 +79,23 @@ fn send_payment_card_style(theme: &theme::Theme) -> container::Style {
     }
 }
 
-fn send_route_tile_style(theme: &theme::Theme) -> container::Style {
+fn send_route_action_style(
+    theme: &theme::Theme,
+    status: iced_button::Status,
+) -> iced_button::Style {
     let shell = &theme.colors.shell;
-    container::Style {
+    iced_button::Style {
         background: Some(Background::Color(shell.background)),
+        text_color: shell.ink,
         border: iced::Border {
-            color: shell.line,
+            color: if matches!(
+                status,
+                iced_button::Status::Hovered | iced_button::Status::Pressed
+            ) {
+                shell.accent_ink
+            } else {
+                shell.line
+            },
             width: 1.0,
             radius: 12.0.into(),
         },
@@ -93,6 +104,29 @@ fn send_route_tile_style(theme: &theme::Theme) -> container::Style {
 }
 
 const CONTINUE_ACTION_ID: &str = "tenshu.liquid.send.continue";
+pub(crate) const SEND_ROUTE_ACTION_ID: &str = "tenshu.liquid.send.source-route";
+pub(crate) const RECEIVE_ROUTE_ACTION_ID: &str = "tenshu.liquid.send.destination-route";
+
+pub(crate) fn send_asset_action_id(asset: SendAsset) -> &'static str {
+    match asset {
+        SendAsset::Lbtc => "tenshu.liquid.send.source-lbtc",
+        SendAsset::Usdt => "tenshu.liquid.send.source-usdt",
+    }
+}
+
+pub(crate) fn receive_target_action_id(asset: SendAsset, network: ReceiveNetwork) -> &'static str {
+    match (asset, network) {
+        (SendAsset::Lbtc, ReceiveNetwork::Lightning) => "tenshu.liquid.send.target-lightning",
+        (SendAsset::Lbtc, ReceiveNetwork::Liquid) => "tenshu.liquid.send.target-liquid-btc",
+        (SendAsset::Lbtc, ReceiveNetwork::Bitcoin) => "tenshu.liquid.send.target-bitcoin",
+        (SendAsset::Usdt, ReceiveNetwork::Liquid) => "tenshu.liquid.send.target-liquid-usdt",
+        (SendAsset::Usdt, ReceiveNetwork::Ethereum) => "tenshu.liquid.send.target-ethereum",
+        (SendAsset::Usdt, ReceiveNetwork::Tron) => "tenshu.liquid.send.target-tron",
+        (SendAsset::Usdt, ReceiveNetwork::Binance) => "tenshu.liquid.send.target-binance",
+        (SendAsset::Usdt, ReceiveNetwork::Solana) => "tenshu.liquid.send.target-solana",
+        _ => "tenshu.liquid.send.target-unsupported",
+    }
+}
 
 pub fn liquid_send_with_flow<'a>(config: LiquidSendFlowConfig<'a>) -> Element<'a, Message> {
     let base_content = match config.flow_state {
@@ -290,28 +324,16 @@ pub fn liquid_send_view<'a>(
             )
             .push(p2_regular("Liquid network").style(theme::text::secondary));
 
-        iced_button(
-            Container::new(card_content)
-                .padding(14)
-                .width(Length::Fill)
-                .height(Length::Fixed(132.0))
-                .style(send_route_tile_style),
+        Action::new(
+            SEND_ROUTE_ACTION_ID,
+            card_content,
+            LiquidSendMessage::FocusAction,
         )
-        .padding(0)
+        .padding(14)
+        .width(Length::Fill)
+        .height(Length::Fixed(132.0))
         .on_press(LiquidSendMessage::OpenSendPicker)
-        .style(|_: &theme::Theme, status| iced_button::Style {
-            background: Some(Background::Color(color::TRANSPARENT)),
-            border: iced::Border {
-                color: if matches!(status, iced_button::Status::Hovered) {
-                    color::ORANGE
-                } else {
-                    color::TRANSPARENT
-                },
-                width: 1.0,
-                radius: 16.0.into(),
-            },
-            ..Default::default()
-        })
+        .style(send_route_action_style)
     };
 
     let they_receive_card = {
@@ -360,28 +382,16 @@ pub fn liquid_send_view<'a>(
             )
             .push(p2_regular(network_label).style(theme::text::secondary));
 
-        iced_button(
-            Container::new(card_content)
-                .padding(14)
-                .width(Length::Fill)
-                .height(Length::Fixed(132.0))
-                .style(send_route_tile_style),
+        Action::new(
+            RECEIVE_ROUTE_ACTION_ID,
+            card_content,
+            LiquidSendMessage::FocusAction,
         )
-        .padding(0)
+        .padding(14)
+        .width(Length::Fill)
+        .height(Length::Fixed(132.0))
         .on_press(LiquidSendMessage::OpenReceivePicker)
-        .style(|_: &theme::Theme, status| iced_button::Style {
-            background: Some(Background::Color(color::TRANSPARENT)),
-            border: iced::Border {
-                color: if matches!(status, iced_button::Status::Hovered) {
-                    color::ORANGE
-                } else {
-                    color::TRANSPARENT
-                },
-                width: 1.0,
-                radius: 16.0.into(),
-            },
-            ..Default::default()
-        })
+        .style(send_route_action_style)
     };
 
     let arrow = text("→").size(H3_SIZE).style(theme::text::secondary);
@@ -481,11 +491,7 @@ pub fn liquid_send_view<'a>(
     .width(Length::Fill)
     .style(send_payment_card_style);
 
-    content = content.push(
-        Container::new(payment_card)
-            .max_width(720)
-            .center_x(Length::Fill),
-    );
+    content = content.push(payment_card);
 
     // ── Last transactions ────────────────────────────────────────────────────
     content = content.push(Column::new().spacing(10).push(h4_bold("Last transactions")));
@@ -644,10 +650,67 @@ pub fn liquid_send_view<'a>(
             .push(iced::widget::Space::new().height(Length::Fixed(40.0)));
     }
 
-    content.into()
+    // Bound the form and recent transactions together, then center that
+    // bounded column in the dashboard's available width.
+    Container::new(content.max_width(720))
+        .center_x(Length::Fill)
+        .into()
 }
 
 // ── Picker modal views ──────────────────────────────────────────────────────
+
+/// Liquid Send's picker rows are Actions so a keyboard user can choose the
+/// source asset or destination network after opening either route tile.
+fn send_picker_action<'a>(
+    id: &'static str,
+    ico: Element<'a, LiquidSendMessage>,
+    label: &'static str,
+    balance: &str,
+    network: &str,
+    selected: bool,
+    press: LiquidSendMessage,
+) -> Element<'a, LiquidSendMessage> {
+    let content = Row::new()
+        .spacing(12)
+        .align_y(Alignment::Center)
+        .push(ico)
+        .push(
+            Column::new().spacing(2).push(p1_bold(label)).push_maybe(
+                (!balance.is_empty())
+                    .then(|| p2_regular(balance.to_owned()).style(theme::text::secondary)),
+            ),
+        )
+        .push(Space::new().width(Length::Fill))
+        .push(p2_regular(network.to_owned()).style(theme::text::secondary))
+        .push_maybe(selected.then(|| icon::check2_icon().size(18).color(color::ORANGE)));
+    Action::new(id, content, LiquidSendMessage::FocusAction)
+        .width(Length::Fill)
+        .padding([12, 16])
+        .focus_radius(12.0)
+        .style(move |theme, status| {
+            let shell = &theme.colors.shell;
+            iced_button::Style {
+                background: Some(Background::Color(if selected {
+                    shell.selected
+                } else {
+                    shell.background
+                })),
+                text_color: shell.ink,
+                border: iced::Border {
+                    color: if selected || matches!(status, iced_button::Status::Hovered) {
+                        shell.accent_ink
+                    } else {
+                        shell.line
+                    },
+                    width: 1.0,
+                    radius: 12.0.into(),
+                },
+                ..Default::default()
+            }
+        })
+        .on_press(press)
+        .into()
+}
 
 /// Render the "You Send" picker modal content.
 pub fn send_picker_modal<'a>(
@@ -670,7 +733,8 @@ pub fn send_picker_modal<'a>(
         format!("{} USDt", format_usdt_display(usdt_balance))
     };
 
-    let lbtc_row = picker_row(
+    let lbtc_row = send_picker_action(
+        send_asset_action_id(SendAsset::Lbtc),
         asset_network_logo("lbtc", "liquid", 36.0),
         "L-BTC",
         &lbtc_balance,
@@ -679,7 +743,8 @@ pub fn send_picker_modal<'a>(
         LiquidSendMessage::SetSendAsset(SendAsset::Lbtc),
     );
 
-    let usdt_row = picker_row(
+    let usdt_row = send_picker_action(
+        send_asset_action_id(SendAsset::Usdt),
         asset_network_logo("usdt", "liquid", 36.0),
         "USDt",
         &usdt_balance,
@@ -733,7 +798,8 @@ pub fn receive_picker_modal<'a>(
         let ico: Element<'_, LiquidSendMessage> =
             asset_network_logo(asset_slug, network_slug, 36.0);
 
-        col = col.push(picker_row(
+        col = col.push(send_picker_action(
+            receive_target_action_id(asset, network),
             ico,
             label,
             "",
@@ -745,8 +811,6 @@ pub fn receive_picker_modal<'a>(
 
     col.into()
 }
-
-pub use crate::app::view::shared::picker::{picker_row, picker_row_selected};
 
 pub struct RecentTransaction {
     pub description: String,
@@ -1952,6 +2016,21 @@ mod privacy_tests {
                         unit.label()
                     )));
                     assert!(mounted.has_focus(iced::advanced::widget::Id::new(CONTINUE_ACTION_ID)));
+                    if width == 1440 {
+                        let x = |label| {
+                            mounted
+                                .text
+                                .iter()
+                                .find(|(value, _)| value == label)
+                                .expect("send heading in capture")
+                                .1
+                                .x
+                        };
+                        assert!(x("Last transactions") > 0.0);
+                        assert!(
+                            (x("Payment details") - x("Last transactions") - 24.0).abs() <= 4.0
+                        );
+                    }
                 }
             }
         }
@@ -1964,6 +2043,117 @@ mod privacy_tests {
         assert!(messages
             .iter()
             .any(|message| matches!(message, LiquidSendMessage::Send)));
+    }
+
+    #[test]
+    fn route_and_picker_actions_support_keyboard_selection() {
+        let input = form::Value::<String>::default();
+        let input_type = None;
+        let route_view = || {
+            liquid_send_view(
+                Amount::from_sat(123_456),
+                0,
+                SendAsset::Lbtc,
+                SendAsset::Lbtc,
+                ReceiveNetwork::Lightning,
+                None,
+                &[],
+                &input,
+                &input_type,
+                BitcoinDisplayUnit::Sats,
+                "",
+                false,
+                false,
+            )
+        };
+        let mounted = capture::inspect(
+            "liquid-send-routes",
+            route_view(),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        for id in [SEND_ROUTE_ACTION_ID, RECEIVE_ROUTE_ACTION_ID] {
+            assert!(mounted.has_focus(iced::advanced::widget::Id::new(id)));
+        }
+        let open_source = capture::activate(
+            route_view(),
+            iced::advanced::widget::Id::new(SEND_ROUTE_ACTION_ID),
+            (1024, 768),
+            false,
+        );
+        assert!(open_source
+            .iter()
+            .any(|message| matches!(message, LiquidSendMessage::OpenSendPicker)));
+        let open_destination = capture::activate_with_key(
+            route_view(),
+            iced::advanced::widget::Id::new(RECEIVE_ROUTE_ACTION_ID),
+            (1024, 768),
+            false,
+            iced::keyboard::key::Named::Space,
+        );
+        assert!(open_destination
+            .iter()
+            .any(|message| matches!(message, LiquidSendMessage::OpenReceivePicker)));
+
+        let source_picker = || {
+            send_picker_modal(
+                Amount::from_sat(123_456),
+                0,
+                SendAsset::Lbtc,
+                BitcoinDisplayUnit::Sats,
+                false,
+            )
+        };
+        let source_mounted = capture::inspect(
+            "liquid-send-source-picker",
+            source_picker(),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        for asset in [SendAsset::Lbtc, SendAsset::Usdt] {
+            assert!(source_mounted
+                .has_focus(iced::advanced::widget::Id::new(send_asset_action_id(asset))));
+        }
+        let select_source = capture::activate_with_key(
+            source_picker(),
+            iced::advanced::widget::Id::new(send_asset_action_id(SendAsset::Usdt)),
+            (1024, 768),
+            false,
+            iced::keyboard::key::Named::Space,
+        );
+        assert!(select_source
+            .iter()
+            .any(|message| matches!(message, LiquidSendMessage::SetSendAsset(SendAsset::Usdt))));
+
+        let target_picker = || {
+            receive_picker_modal(
+                SendAsset::Usdt,
+                SendAsset::Usdt,
+                ReceiveNetwork::Liquid,
+                true,
+            )
+        };
+        let target_mounted = capture::inspect(
+            "liquid-send-target-picker",
+            target_picker(),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        let ethereum = receive_target_action_id(SendAsset::Usdt, ReceiveNetwork::Ethereum);
+        assert!(target_mounted.has_focus(iced::advanced::widget::Id::new(ethereum)));
+        let select_target = capture::activate(
+            target_picker(),
+            iced::advanced::widget::Id::new(ethereum),
+            (1024, 768),
+            false,
+        );
+        assert!(select_target.iter().any(|message| matches!(
+            message,
+            LiquidSendMessage::SetReceiveTarget(SendAsset::Usdt, ReceiveNetwork::Ethereum)
+        )));
     }
 
     #[test]
