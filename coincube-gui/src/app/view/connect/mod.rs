@@ -167,6 +167,7 @@ pub enum ConnectSheetMessage {
     Account(ConnectAccountMessage),
     FocusAction(Id),
     SelectSection(ConnectSheetSection),
+    OpenAuthentication { create_account: bool },
     Close,
 }
 
@@ -184,21 +185,46 @@ pub enum ConnectSheetSection {
     RecoveryServices,
 }
 
+/// The sheet's account navigation and the separate email/token flow. Its
+/// owner retains this page while the underlying account state changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectSheetPage {
+    Sections(ConnectSheetSection),
+    Authentication,
+}
+
 /// Connect's content inside an origin-preserving sheet. The caller draws the
 /// retained Launcher or Cube behind it and routes Close to that exact origin.
 /// This view never creates another account state or signs out on Close.
 pub fn connect_sheet<'a>(
     acct: &'a ConnectAccountPanel,
-    active_section: ConnectSheetSection,
+    page: ConnectSheetPage,
 ) -> Element<'a, ConnectSheetMessage> {
     let blocked = acct.requires_authenticated_reopen();
     let signed_in = matches!(acct.step, ConnectFlowStep::Dashboard) && !blocked;
+    // Once token entry or duress verification begins, keep the real auth flow
+    // visible even if a stale caller page still names an account section.
+    let auth_in_progress = matches!(
+        acct.step,
+        ConnectFlowStep::OtpVerification { .. }
+            | ConnectFlowStep::CheckingDuress { .. }
+            | ConnectFlowStep::DuressRecovery { .. }
+    );
+    let show_auth =
+        !signed_in && (matches!(page, ConnectSheetPage::Authentication) || auth_in_progress);
+    let active_section = match page {
+        ConnectSheetPage::Sections(section) => section,
+        ConnectSheetPage::Authentication => ConnectSheetSection::Account,
+    };
     let title = if signed_in {
         "Connect account"
     } else {
         "Connect"
     };
-    let identity = acct.user.as_ref().map(|user| user.email.as_str());
+    let identity = signed_in
+        .then(|| acct.user.as_ref())
+        .flatten()
+        .map(|user| user.email.as_str());
     let mut heading = Row::new()
         .push(text::h4_bold(title).style(theme::text::primary))
         .spacing(16)
@@ -224,30 +250,31 @@ pub fn connect_sheet<'a>(
         .on_press(ConnectSheetMessage::Close),
     );
 
-    let content: Element<ConnectAccountMessage> = if blocked {
+    let content: Element<ConnectSheetMessage> = if blocked {
         text::p1_regular("Connect authorization ended. Close and reopen this Cube through authenticated Connect startup to reconnect.").into()
+    } else if show_auth {
+        connect_account_body(acct).map(ConnectSheetMessage::Account)
+    } else if acct.is_checking_session() {
+        text::p1_regular("Loading your Connect account…").into()
     } else if signed_in {
-        match active_section {
+        let section_content = match active_section {
             ConnectSheetSection::Account => overview_ux(acct),
             ConnectSheetSection::PlanBilling => plan_billing_ux(acct),
             ConnectSheetSection::Contacts => contacts::contacts_ux(acct),
             ConnectSheetSection::DevicesSecurity => security_ux(acct),
             ConnectSheetSection::RecoveryServices => recovery_services_ux(acct),
-        }
-    } else {
-        connect_account_body(acct)
-    };
-    let content: Element<ConnectSheetMessage> = if signed_in {
+        };
         let mut column = Column::new().spacing(12);
         if let Some(error) = acct.error.as_ref() {
             column = column.push(account_error_card(error));
         }
-        column.push(content).into()
+        column.push(section_content).into()
+    } else if active_section == ConnectSheetSection::Account {
+        signed_out_account_ux()
     } else {
-        content
-    }
-    .map(ConnectSheetMessage::Account);
-    let body: Element<ConnectSheetMessage> = if signed_in {
+        signed_out_section_ux(active_section)
+    };
+    let body: Element<ConnectSheetMessage> = if !show_auth {
         let sections = [
             (
                 "Account",
@@ -338,10 +365,83 @@ pub fn connect_sheet<'a>(
             .height(Length::Fill),
     )
     .padding(12)
-    .max_width(if signed_in { 1040 } else { 600 })
+    .max_width(if show_auth { 600 } else { 1040 })
     .height(Length::Fill)
     .style(card_style)
     .into()
+}
+
+fn signed_out_account_ux<'a>() -> Element<'a, ConnectSheetMessage> {
+    Column::new()
+        .push(text::h4_bold("Account").style(theme::text::primary))
+        .push(
+            text::p1_regular(
+                "Your Cubes stay usable while signed out. Sign in for Connect account services.",
+            )
+            .style(theme::text::secondary),
+        )
+        .push(iced::widget::Space::new().height(Length::Fixed(14.0)))
+        .push(connect_benefits().map(ConnectSheetMessage::Account))
+        .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
+        .push(
+            Row::new()
+                .push(
+                    FocusableAction::new(
+                        "tenshu.connect.sign-in",
+                        text::p2_regular("Sign in"),
+                        ConnectSheetMessage::FocusAction,
+                    )
+                    .padding(10)
+                    .style(theme::button::primary)
+                    .on_press(ConnectSheetMessage::OpenAuthentication {
+                        create_account: false,
+                    }),
+                )
+                .push(
+                    FocusableAction::new(
+                        "tenshu.connect.create-account",
+                        text::p2_regular("Create account"),
+                        ConnectSheetMessage::FocusAction,
+                    )
+                    .padding(10)
+                    .style(theme::button::secondary)
+                    .on_press(ConnectSheetMessage::OpenAuthentication {
+                        create_account: true,
+                    }),
+                )
+                .spacing(10),
+        )
+        .spacing(8)
+        .width(Length::Fill)
+        .into()
+}
+
+fn signed_out_section_ux<'a>(section: ConnectSheetSection) -> Element<'a, ConnectSheetMessage> {
+    let title = match section {
+        ConnectSheetSection::Account => "Account",
+        ConnectSheetSection::PlanBilling => "Plan & billing",
+        ConnectSheetSection::Contacts => "Contacts",
+        ConnectSheetSection::DevicesSecurity => "Devices & security",
+        ConnectSheetSection::RecoveryServices => "Recovery services",
+    };
+    Column::new()
+        .push(text::h4_bold(title).style(theme::text::primary))
+        .push(text::p1_regular("Sign in to see this").style(theme::text::secondary))
+        .push(
+            FocusableAction::new(
+                "tenshu.connect.gate.sign-in",
+                text::p2_regular("Sign in"),
+                ConnectSheetMessage::FocusAction,
+            )
+            .padding(10)
+            .style(theme::button::primary)
+            .on_press(ConnectSheetMessage::OpenAuthentication {
+                create_account: false,
+            }),
+        )
+        .spacing(12)
+        .width(Length::Fill)
+        .into()
 }
 
 fn connect_account_body<'a>(acct: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMessage> {
@@ -3316,10 +3416,7 @@ mod renewal_banner_tests {
     };
 
     /// Collect text from laid-out production widgets, including button labels.
-    fn visible_labels(
-        mut element: Element<'_, ConnectAccountMessage>,
-        renderer: &iced::Renderer,
-    ) -> Vec<String> {
+    fn visible_labels<M>(mut element: Element<'_, M>, renderer: &iced::Renderer) -> Vec<String> {
         use iced::advanced::{
             layout,
             widget::{Id, Operation, Tree},
@@ -3365,14 +3462,14 @@ mod renewal_banner_tests {
         let size = iced::Size::new(1000.0, 712.0);
         let mut account = ConnectAccountPanel::new();
 
-        for (name, step, section) in [
+        for (name, step, page) in [
             (
                 "sign-in",
                 ConnectFlowStep::Login {
                     email: String::new(),
                     loading: false,
                 },
-                ConnectSheetSection::Account,
+                ConnectSheetPage::Authentication,
             ),
             (
                 "sign-up",
@@ -3380,29 +3477,45 @@ mod renewal_banner_tests {
                     email: String::new(),
                     loading: false,
                 },
-                ConnectSheetSection::Account,
+                ConnectSheetPage::Authentication,
+            ),
+            (
+                "signed-out-account",
+                ConnectFlowStep::Login {
+                    email: String::new(),
+                    loading: false,
+                },
+                ConnectSheetPage::Sections(ConnectSheetSection::Account),
+            ),
+            (
+                "signed-out-plan-gate",
+                ConnectFlowStep::Login {
+                    email: String::new(),
+                    loading: false,
+                },
+                ConnectSheetPage::Sections(ConnectSheetSection::PlanBilling),
             ),
             (
                 "plan",
                 ConnectFlowStep::Dashboard,
-                ConnectSheetSection::PlanBilling,
+                ConnectSheetPage::Sections(ConnectSheetSection::PlanBilling),
             ),
             (
                 "security",
                 ConnectFlowStep::Dashboard,
-                ConnectSheetSection::DevicesSecurity,
+                ConnectSheetPage::Sections(ConnectSheetSection::DevicesSecurity),
             ),
             (
                 "recovery",
                 ConnectFlowStep::Dashboard,
-                ConnectSheetSection::RecoveryServices,
+                ConnectSheetPage::Sections(ConnectSheetSection::RecoveryServices),
             ),
         ] {
             account.step = step;
             if matches!(account.step, ConnectFlowStep::Dashboard) {
                 account.user = Some(user());
             }
-            let mut element = connect_sheet(&account, section);
+            let mut element = connect_sheet(&account, page);
             let mut tree = Tree::new(element.as_widget());
             let node = element.as_widget_mut().layout(
                 &mut tree,
@@ -3415,6 +3528,16 @@ mod renewal_banner_tests {
                 "{} overflows height",
                 name
             );
+            if name == "signed-out-account" {
+                let labels = visible_labels(connect_sheet(&account, page), &renderer);
+                assert!(labels.iter().any(|label| label == "Create account"));
+                assert!(labels.iter().any(|label| label == "Recovery services"));
+            }
+            if name == "signed-out-plan-gate" {
+                let labels = visible_labels(connect_sheet(&account, page), &renderer);
+                assert!(labels.iter().any(|label| label == "Sign in to see this"));
+                assert!(labels.iter().any(|label| label == "Account"));
+            }
         }
     }
 
