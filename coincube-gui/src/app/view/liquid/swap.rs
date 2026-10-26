@@ -205,6 +205,7 @@ fn flip_button<'a>() -> Element<'a, LiquidSwapMessage> {
         LiquidSwapMessage::FocusAction,
     )
     .padding(0)
+    .focus_radius(20.0)
     .on_press(LiquidSwapMessage::FlipAssets)
     .style(|t: &theme::Theme, _| iced_button::Style {
         background: Some(Background::Color(t.colors.shell.background)),
@@ -492,11 +493,13 @@ fn input_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMess
         CONTINUE_ACTION_ID,
         text("Continue")
             .size(P1_SIZE)
+            .font(coincube_ui::font::MEDIUM)
             .width(Length::Fill)
             .align_x(Alignment::Center),
         LiquidSwapMessage::FocusAction,
     )
     .padding([10, 16])
+    .focus_radius(25.0)
     .style(theme::button::primary)
     .width(Length::Fixed(240.0))
     .on_press_maybe(
