@@ -135,6 +135,22 @@ pub(crate) struct PairingContext<'a> {
     pub last_poll_at_startup: Option<u32>,
 }
 impl Settings {
+    pub(crate) fn pending_revoke(&self) -> Option<(&str, &str)> {
+        let id = self.revoke_confirmation.as_deref()?;
+        let client = self
+            .pairing_store
+            .as_ref()?
+            .clients()
+            .iter()
+            .find(|client| client.id == id)?;
+        Some((&client.name, id))
+    }
+
+    pub(crate) fn revoke_dialog(&self) -> Option<Element<'_, view::Message>> {
+        let (name, id) = self.pending_revoke()?;
+        Some(presentation::revoke_confirmation(name, id))
+    }
+
     #[cfg(feature = "mcp-proposals")]
     fn paired_clients_view(&self) -> Element<'_, view::Message> {
         presentation::paired_clients(self)
@@ -1528,6 +1544,248 @@ mod tests {
         runtime.block_on(daemon.stop()).unwrap();
         drop(daemon);
         drop(wallet);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ai_access_revoke_dialog_is_mounted_over_dashboard_and_confines_focus() {
+        use crate::app::menu::{CubeSettingsOption, CubeSubMenu, Menu};
+        use coincube_ui::{font, theme, widget::Renderer};
+        use iced::advanced::{
+            renderer::Headless,
+            widget::{operation, operation::focusable, operation::Focusable, Id, Operation},
+        };
+        use iced::{keyboard, mouse, Event, Rectangle, Size};
+        use iced_runtime::user_interface::{Cache as UiCache, UserInterface};
+
+        #[derive(Default)]
+        struct Probe {
+            text: Vec<(String, Rectangle)>,
+            focus: Vec<(Id, Rectangle)>,
+        }
+        impl Operation for Probe {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn text(&mut self, _: Option<&Id>, bounds: Rectangle, value: &str) {
+                self.text.push((value.to_owned(), bounds));
+            }
+            fn focusable(&mut self, id: Option<&Id>, bounds: Rectangle, _: &mut dyn Focusable) {
+                if let Some(id) = id {
+                    self.focus.push((id.clone(), bounds));
+                }
+            }
+        }
+        fn focused(
+            ui: &mut UserInterface<'_, super::super::Message, theme::Theme, Renderer>,
+            renderer: &Renderer,
+        ) -> Option<Id> {
+            use std::sync::{Arc, Mutex};
+            let result = Arc::new(Mutex::new(None));
+            let output = Arc::clone(&result);
+            let mut op: Box<dyn Operation<()>> =
+                Box::new(operation::map(focusable::find_focused(), move |value| {
+                    *output.lock().unwrap() = Some(value)
+                }));
+            loop {
+                ui.operate(renderer, &mut operation::black_box(op.as_mut()));
+                match op.finish() {
+                    operation::Outcome::None | operation::Outcome::Some(()) => break,
+                    operation::Outcome::Chain(next) => op = next,
+                }
+            }
+            drop(op);
+            Arc::try_unwrap(result).unwrap().into_inner().unwrap()
+        }
+        fn apply(
+            ui: &mut UserInterface<'_, super::super::Message, theme::Theme, Renderer>,
+            renderer: &Renderer,
+            operation: impl Operation<()> + 'static,
+        ) {
+            let mut operation: Box<dyn Operation<()>> = Box::new(operation);
+            loop {
+                ui.operate(renderer, &mut operation::black_box(operation.as_mut()));
+                match operation.finish() {
+                    operation::Outcome::None | operation::Outcome::Some(()) => break,
+                    operation::Outcome::Chain(next) => operation = next,
+                }
+            }
+        }
+        fn apply_task(
+            ui: &mut UserInterface<'_, super::super::Message, theme::Theme, Renderer>,
+            renderer: &Renderer,
+            task: iced::Task<super::super::Message>,
+        ) {
+            use iced::futures::StreamExt;
+            let stream = iced_runtime::task::into_stream(task).expect("focus task stream");
+            let actions = iced::futures::executor::block_on(stream.collect::<Vec<_>>());
+            for action in actions {
+                if let iced_runtime::Action::Widget(mut operation) = action {
+                    loop {
+                        ui.operate(renderer, &mut operation::black_box(operation.as_mut()));
+                        match operation.finish() {
+                            operation::Outcome::None | operation::Outcome::Some(()) => break,
+                            operation::Outcome::Chain(next) => operation = next,
+                        }
+                    }
+                }
+            }
+        }
+        fn escape() -> Event {
+            let key = keyboard::Key::Named(keyboard::key::Named::Escape);
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key: key.clone(),
+                modified_key: key,
+                physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Escape),
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::empty(),
+                text: None,
+                repeat: false,
+            })
+        }
+
+        let _guard = super::super::session::test_guard();
+        let root = std::env::temp_dir().join(format!("mcp-modal-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("bitcoin")).unwrap();
+        let (mut app, wallet) = super::super::claim_step1_tests::bitcoin_app(&root);
+        let location = pairings::Location::new(&root, wallet.chain, &app.cube_settings.id).unwrap();
+        let mut store =
+            pairings::Store::open(location.clone(), zeroize::Zeroizing::new([51; 32]), true)
+                .unwrap();
+        let id = store
+            .add(
+                "Synthetic local client".into(),
+                pairings::Scope::Read {
+                    wallet: wallet.id().to_string(),
+                    descriptor: pairings::descriptor_identity(&wallet),
+                    opaque: "synthetic-opaque".into(),
+                    capabilities: [true, false, false],
+                },
+            )
+            .unwrap();
+        app.local_mcp.enabled = true;
+        app.local_mcp.pairing_location = Some(location);
+        app.local_mcp.pairing_store = Some(store);
+        app.local_mcp.revoke_confirmation = Some(id.clone());
+        app.panels.current = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::AiAccess));
+        app.show_recovery_alerts_prompt = false;
+
+        for (width, height) in [(1024.0, 768.0), (1440.0, 900.0)] {
+            for bytes in font::load() {
+                iced::advanced::graphics::text::font_system()
+                    .write()
+                    .unwrap()
+                    .load_font(bytes);
+            }
+            let mut renderer = iced::futures::executor::block_on(<Renderer as Headless>::new(
+                font::REGULAR,
+                16.into(),
+                Some("tiny-skia"),
+            ))
+            .unwrap();
+            let mut ui = UserInterface::build(
+                app.view(),
+                Size::new(width, height),
+                UiCache::new(),
+                &mut renderer,
+            );
+            let mut probe = Probe::default();
+            ui.operate(&renderer, &mut operation::black_box(&mut probe));
+            let title = probe
+                .text
+                .iter()
+                .find(|(text, _)| text == "Revoke this client's access?")
+                .expect("mounted revoke dialog title")
+                .1;
+            assert!(title.y >= 0.0 && title.y + title.height <= height);
+            for target in [
+                "tenshu.ai-access.revoke.keep",
+                "tenshu.ai-access.revoke.confirm",
+            ] {
+                let (_, bounds) = probe
+                    .focus
+                    .iter()
+                    .find(|(id, _)| id == &Id::from(target))
+                    .expect("mounted dialog action");
+                assert!(bounds.y >= 0.0 && bounds.y + bounds.height <= height);
+            }
+            assert_eq!(
+                probe.focus.len(),
+                2,
+                "shell controls must be outside Tab order"
+            );
+            apply(&mut ui, &renderer, focusable::focus_next::<()>());
+            assert_eq!(
+                focused(&mut ui, &renderer),
+                Some(Id::from("tenshu.ai-access.revoke.keep"))
+            );
+            let mut messages = Vec::new();
+            ui.update(
+                &[escape()],
+                mouse::Cursor::Unavailable,
+                &mut renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut messages,
+            );
+            assert!(messages.iter().any(|message| matches!(
+                message,
+                super::super::Message::View(view::Message::LocalMcp(Message::CancelRevokePair))
+            )));
+        }
+        let mut renderer = iced::futures::executor::block_on(<Renderer as Headless>::new(
+            font::REGULAR,
+            16.into(),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let cancel = app.update(super::super::Message::View(view::Message::LocalMcp(
+            Message::CancelRevokePair,
+        )));
+        let mut ui = UserInterface::build(
+            app.view(),
+            Size::new(1024.0, 768.0),
+            UiCache::new(),
+            &mut renderer,
+        );
+        apply_task(&mut ui, &renderer, cancel);
+        assert_eq!(
+            focused(&mut ui, &renderer),
+            Some(Id::from(format!("tenshu.ai-access.client.{id}.revoke")))
+        );
+        drop(ui);
+
+        let request = app.update(super::super::Message::View(view::Message::LocalMcp(
+            Message::RequestRevokePair(id.clone()),
+        )));
+        let mut ui = UserInterface::build(
+            app.view(),
+            Size::new(1024.0, 768.0),
+            UiCache::new(),
+            &mut renderer,
+        );
+        apply_task(&mut ui, &renderer, request);
+        assert_eq!(
+            focused(&mut ui, &renderer),
+            Some(Id::from("tenshu.ai-access.revoke.keep"))
+        );
+        drop(ui);
+
+        let confirm = app.update(super::super::Message::View(view::Message::LocalMcp(
+            Message::RevokePair(id),
+        )));
+        let mut ui = UserInterface::build(
+            app.view(),
+            Size::new(1024.0, 768.0),
+            UiCache::new(),
+            &mut renderer,
+        );
+        apply_task(&mut ui, &renderer, confirm);
+        assert_eq!(
+            focused(&mut ui, &renderer),
+            Some(Id::from("tenshu.ai-access.enable"))
+        );
+        drop(ui);
+        drop(app);
         std::fs::remove_dir_all(root).unwrap();
     }
 

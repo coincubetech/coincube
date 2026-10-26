@@ -6,7 +6,7 @@ use super::{pairings, Message, Settings};
 use crate::app::view;
 use coincube_ui::font;
 use coincube_ui::theme::{self, tenshu::Tone};
-use coincube_ui::widget::{action::Action, modal::Modal, Element};
+use coincube_ui::widget::{action::Action, Element};
 use iced::widget::{column, container, row, text, text_input, Column, Row, Space};
 use iced::{Alignment, Background, Border, Length};
 use std::sync::atomic::Ordering;
@@ -165,23 +165,10 @@ pub(super) fn view_for_cube(settings: &Settings, supported: bool) -> Ui<'_> {
         .push(planned_card())
         .push(muted("Today · Persistent per-client read access to one active embedded Vault. Planned · Guided pairing, multiple wallets, managed setup and general transaction preparation."));
 
-    let content: Ui<'_> = container(page)
+    container(page)
         .width(Length::Fill)
         .max_width(930)
         .padding([20, 24])
-        .into();
-    let Some(id) = settings.revoke_confirmation.as_ref() else {
-        return content;
-    };
-    let Some(client) = settings
-        .pairing_store
-        .as_ref()
-        .and_then(|store| store.clients().iter().find(|client| &client.id == id))
-    else {
-        return content;
-    };
-    Modal::new(content, revoke_confirmation(&client.name, id))
-        .on_blur(Some(message(Message::CancelRevokePair)))
         .into()
 }
 
