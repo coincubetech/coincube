@@ -879,7 +879,7 @@ fn route_tile_style(theme: &theme::Theme, hovered: bool) -> (Background, iced::B
                 shell.line
             },
             width: 1.0,
-            radius: 12.0.into(),
+            radius: 8.0.into(),
         },
     )
 }
@@ -922,7 +922,7 @@ fn picker_action_style(
     iced::widget::button::Style {
         background: Some(Background::Color(color::TRANSPARENT)),
         border: iced::Border {
-            radius: 12.0.into(),
+            radius: 8.0.into(),
             ..Default::default()
         },
         ..Default::default()
@@ -1012,7 +1012,7 @@ fn spark_send_cards<'a>(target: SparkSendTarget, destination_empty: bool) -> Ele
     .style(receive_tile_button_style)
     .padding(0)
     .width(Length::Fill)
-    .focus_radius(12.0)
+    .focus_radius(8.0)
     .on_press(Message::SparkSend(SparkSendMessage::OpenReceivePicker));
 
     Row::new()
@@ -1053,14 +1053,14 @@ fn target_picker_row<'a>(target: SparkSendTarget, selected: bool) -> Element<'a,
             .style(if selected {
                 picker_row_selected
             } else {
-                theme::card::simple
+                crate::app::view::shared::picker::picker_row_idle
             }),
         Message::FocusAction,
     )
     .style(picker_action_style)
     .padding(0)
     .width(Length::Fill)
-    .focus_radius(12.0)
+    .focus_radius(8.0)
     .on_press(Message::SparkSend(SparkSendMessage::SetReceiveTarget(
         target,
     )))

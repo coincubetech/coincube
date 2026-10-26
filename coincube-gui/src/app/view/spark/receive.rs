@@ -621,7 +621,7 @@ fn card_button_style(
                 color::TRANSPARENT
             },
             width: 1.0,
-            radius: 16.0.into(),
+            radius: 8.0.into(),
         },
         ..Default::default()
     }
@@ -809,14 +809,14 @@ fn spark_picker_row<'a>(
             .style(if is_selected {
                 picker_row_selected
             } else {
-                theme::card::simple
+                crate::app::view::shared::picker::picker_row_idle
             }),
     )
     .on_press(on_press)
     .style(|_: &theme::Theme, _| iced::widget::button::Style {
         background: Some(Background::Color(color::TRANSPARENT)),
         border: iced::Border {
-            radius: 12.0.into(),
+            radius: 8.0.into(),
             ..Default::default()
         },
         ..Default::default()
@@ -836,7 +836,7 @@ fn picker_row_selected(theme: &theme::Theme) -> container::Style {
         border: iced::Border {
             color: color::ORANGE,
             width: 1.0,
-            radius: 12.0.into(),
+            radius: 8.0.into(),
         },
         ..Default::default()
     }
