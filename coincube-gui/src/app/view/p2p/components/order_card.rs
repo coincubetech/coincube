@@ -79,14 +79,14 @@ fn book_columns<'a>(
     trailing: impl Into<Element<'a, view::Message>>,
 ) -> Row<'a, view::Message> {
     row![
-        container(side).width(Length::Fixed(105.0)),
-        container(amount).width(Length::Fixed(105.0)),
+        container(side).width(Length::Fixed(120.0)),
+        container(amount).width(Length::Fixed(145.0)),
         container(payment).width(Length::Fill),
-        container(price).width(Length::Fixed(120.0)),
-        container(reputation).width(Length::Fixed(150.0)),
+        container(price).width(Length::Fixed(125.0)),
+        container(reputation).width(Length::Fixed(140.0)),
         container(trailing).width(Length::Fixed(16.0)),
     ]
-    .spacing(12)
+    .spacing(8)
     .align_y(iced::alignment::Vertical::Center)
     .width(Length::Fill)
 }
@@ -155,6 +155,10 @@ pub fn detail_action_id(id: &str, action: &str) -> Id {
     Id::from(format!("p2p-book-detail-{id}-{action}"))
 }
 
+pub fn detail_input_id(id: &str, field: &str) -> coincube_ui::widget::text_input::Id {
+    coincube_ui::widget::text_input::Id::new(&format!("p2p-book-detail-{id}-input-{field}"))
+}
+
 pub fn detail_primary_id(order: &P2POrder) -> Id {
     detail_action_id(&order.id, if order.is_mine { "close" } else { "take" })
 }
@@ -198,14 +202,14 @@ pub fn order_card<'a>(order: &'a P2POrder, compact: bool) -> Element<'a, view::M
             row![
                 p2_bold(side).style(side_style),
                 Space::new().width(Length::Fill),
-                p2_bold(amount),
+                p2_bold(amount).style(theme::text::primary),
                 p2_regular("›").style(theme::text::secondary),
             ]
             .spacing(8)
             .align_y(iced::alignment::Vertical::Center),
-            p2_regular(payment),
+            p2_regular(payment).style(theme::text::primary),
             row![
-                p2_regular(price).style(theme::text::secondary),
+                p2_regular(price).style(theme::text::primary),
                 Space::new().width(Length::Fill),
                 p2_regular(reputation).style(theme::text::secondary),
             ]
@@ -215,11 +219,13 @@ pub fn order_card<'a>(order: &'a P2POrder, compact: bool) -> Element<'a, view::M
         .into()
     } else {
         book_columns(
-            p2_bold(side).style(side_style),
-            p2_bold(amount),
-            p2_regular(payment),
-            p2_regular(price),
-            p2_regular(reputation),
+            p2_bold(side).size(13).style(side_style),
+            p2_bold(amount).size(13).style(theme::text::primary),
+            p2_regular(payment).size(13).style(theme::text::primary),
+            p2_regular(price).size(13).style(theme::text::primary),
+            p2_regular(reputation)
+                .size(13)
+                .style(theme::text::secondary),
             p2_regular("›").style(theme::text::secondary),
         )
         .into()
@@ -549,6 +555,7 @@ pub fn order_detail<'a>(
         if let Some(state) = take_state {
             // Inline take order fields
             if order.is_range_order() {
+                let prior_amount = state.amount.value.clone();
                 detail_col = detail_col.push(
                     column![
                         p2_regular(format!(
@@ -558,8 +565,24 @@ pub fn order_detail<'a>(
                             order.fiat_currency
                         ))
                         .style(theme::text::secondary),
-                        form::Form::new_amount_numeric("Fiat amount", state.amount, |v| {
-                            view::Message::P2P(P2PMessage::TakeOrderAmountEdited(v))
+                        coincube_ui::widget::text_input::TextInput::new(
+                            "Fiat amount",
+                            &state.amount.value,
+                        )
+                        .id(detail_input_id(&order.id, "amount"))
+                        .on_input(move |value| {
+                            // Preserve the Form's non-negative decimal input rule.
+                            let trimmed = value.trim_end_matches('.');
+                            let valid = value.is_empty()
+                                || (!value.starts_with('-')
+                                    && (trimmed.is_empty() || trimmed.parse::<f64>().is_ok())
+                                    && value.chars().all(|c| c.is_ascii_digit() || c == '.')
+                                    && value.matches('.').count() <= 1);
+                            view::Message::P2P(P2PMessage::TakeOrderAmountEdited(if valid {
+                                value
+                            } else {
+                                prior_amount.clone()
+                            }))
                         })
                         .padding(10),
                     ]
@@ -572,11 +595,16 @@ pub fn order_detail<'a>(
                     column![
                         p2_regular("Lightning invoice or address (optional)")
                             .style(theme::text::secondary),
-                        form::Form::new_trimmed(
+                        coincube_ui::widget::text_input::TextInput::new(
                             "Enter lightning invoice or address",
-                            state.invoice,
-                            |v| view::Message::P2P(P2PMessage::TakeOrderInvoiceEdited(v)),
+                            &state.invoice.value,
                         )
+                        .id(detail_input_id(&order.id, "invoice"))
+                        .on_input(|value| {
+                            view::Message::P2P(P2PMessage::TakeOrderInvoiceEdited(
+                                value.trim().to_string(),
+                            ))
+                        })
                         .padding(10),
                     ]
                     .spacing(8),
@@ -742,16 +770,26 @@ mod book_tests {
         direct.max_amount = None;
         let amount = form::Value::<String>::default();
         let invoice = form::Value::<String>::default();
+        let range_state = || TakeOrderState {
+            amount: &amount,
+            invoice: &invoice,
+            submitting: false,
+        };
+        for field in ["amount", "invoice"] {
+            let messages = capture::activate(
+                order_detail(&order, Some(range_state())).into(),
+                detail_input_id(&order.id, field).into(),
+                size,
+                false,
+            );
+            assert!(
+                messages.is_empty(),
+                "focusing {field} should not submit",
+                field = field
+            );
+        }
         let confirm = capture::activate(
-            order_detail(
-                &direct,
-                Some(TakeOrderState {
-                    amount: &amount,
-                    invoice: &invoice,
-                    submitting: false,
-                }),
-            )
-            .into(),
+            order_detail(&direct, Some(range_state())).into(),
             detail_action_id(&direct.id, "confirm"),
             size,
             false,

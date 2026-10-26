@@ -28,7 +28,7 @@ use coincube_spark_protocol::PrepareSendOk;
 #[cfg(test)]
 use super::components::order_card::detail_action_id;
 use super::components::order_card::{
-    detail_primary_id, order_row_id, order_table_header, TakeOrderState,
+    detail_input_id, detail_primary_id, order_row_id, order_table_header, TakeOrderState,
 };
 use super::components::trade_card::{TradeRole, TradeStatus};
 use super::components::{
@@ -755,6 +755,21 @@ impl P2PPanel {
         let return_to = self.selected_order.take().map(|id| order_row_id(&id));
         self.taking_order = false;
         return_to
+    }
+
+    fn first_take_input_id(&self) -> Option<iced::advanced::widget::Id> {
+        self.selected_order
+            .as_ref()
+            .and_then(|id| self.orders.iter().find(|order| order.id == *id))
+            .and_then(|order| {
+                if order.is_range_order() {
+                    Some(detail_input_id(&order.id, "amount").into())
+                } else if order.order_type == OrderType::Sell {
+                    Some(detail_input_id(&order.id, "invoice").into())
+                } else {
+                    None
+                }
+            })
     }
 
     /// Orders matching the current buy/sell tab + all active filters.
@@ -5239,11 +5254,16 @@ impl State for P2PPanel {
                     })
                     .unwrap_or(true);
 
+                let first_input = self.first_take_input_id();
+
                 if needs_input {
                     self.taking_order = true;
                     self.take_order_amount = Default::default();
                     self.take_order_invoice = Default::default();
                     self.take_order_submitting = false;
+                    if let Some(first_input) = first_input {
+                        return Task::done(Message::View(view::Message::FocusAction(first_input)));
+                    }
                 } else {
                     // No input needed — proceed directly
                     self.taking_order = true;
@@ -6622,6 +6642,21 @@ mod book_filter_tests {
             panel.select_order_for_detail("synthetic-focus".into()),
             Some(detail_action_id("synthetic-focus", "close"))
         );
+
+        panel.orders[0].min_amount = Some(50.0);
+        panel.orders[0].max_amount = Some(200.0);
+        assert_eq!(
+            panel.first_take_input_id(),
+            Some(detail_input_id("synthetic-focus", "amount").into())
+        );
+        panel.orders[0].min_amount = None;
+        panel.orders[0].max_amount = None;
+        assert_eq!(
+            panel.first_take_input_id(),
+            Some(detail_input_id("synthetic-focus", "invoice").into())
+        );
+        panel.orders[0].order_type = OrderType::Buy;
+        assert!(panel.first_take_input_id().is_none());
     }
 
     /// R06A_CAPTURE_DIR writes content-only screenshots of the production Book
@@ -6639,9 +6674,17 @@ mod book_filter_tests {
         panel.orders = vec![
             order("synthetic-1", OrderType::Sell, "EUR", "SEPA instant"),
             order("synthetic-2", OrderType::Sell, "USD", "Cash App"),
+            order("synthetic-own-ngn", OrderType::Sell, "NGN", "Bank Transfer"),
+            order("synthetic-kes", OrderType::Sell, "KES", "M-Pesa"),
         ];
         panel.orders[0].seller_rating = None;
         panel.orders[0].seller_reviews = None;
+        panel.orders[2].is_mine = true;
+        panel.orders[2].min_amount = Some(50_000.0);
+        panel.orders[2].max_amount = Some(200_000.0);
+        panel.orders[2].sats_amount = Some(450_000);
+        panel.orders[3].min_amount = Some(10_000.0);
+        panel.orders[3].max_amount = Some(50_000.0);
         panel.recompute_available_payment_methods();
 
         for (appearance, palette) in [
@@ -6651,13 +6694,38 @@ mod book_filter_tests {
             for size in [(1024, 768), (1440, 900)] {
                 let inspection =
                     capture::inspect("r20-p2p-book", panel.book_view(), size, appearance, palette);
-                assert!(inspection.contains("BUY BTC (2)"));
+                assert!(inspection.contains("BUY BTC (4)"));
                 assert!(inspection.contains("BUYING"));
+                assert!(inspection.contains("YOU ARE SELLING"));
                 assert!(inspection.contains("SEPA instant"));
                 assert!(inspection.contains("100.00 EUR"));
+                assert!(inspection.contains("50,000 – 200,000 NGN"));
+                assert!(inspection.contains("10,000 – 50,000 KES"));
+                assert!(inspection.contains("Fixed · 450,000 sats"));
                 assert!(inspection.contains("Market"));
                 assert!(inspection.contains("No rating"));
                 assert_eq!(inspection.contains("Creator Reputation"), size.0 == 1440);
+                if size.0 == 1440 {
+                    for label in [
+                        "YOU ARE SELLING",
+                        "50,000 – 200,000 NGN",
+                        "10,000 – 50,000 KES",
+                        "Fixed · 450,000 sats",
+                    ] {
+                        let bounds = inspection
+                            .text
+                            .iter()
+                            .find(|(value, _)| value == label)
+                            .expect("realistic book value")
+                            .1;
+                        assert!(
+                            bounds.height < 25.0,
+                            "{label} wrapped at 1440: {bounds:?}",
+                            label = label,
+                            bounds = bounds
+                        );
+                    }
+                }
                 if size.0 == 1024 {
                     let side = inspection
                         .text
