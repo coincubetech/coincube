@@ -222,7 +222,7 @@ pub fn connect_sheet<'a>(
         "Connect"
     };
     let identity = signed_in
-        .then(|| acct.user.as_ref())
+        .then_some(acct.user.as_ref())
         .flatten()
         .map(|user| user.email.as_str());
     let mut heading = Row::new()
