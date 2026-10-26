@@ -844,7 +844,8 @@ pub struct Tab {
         String,
         crate::chain::ChainId,
     )>,
-    pending_seed_export_trial: bool,
+    pending_seed_export_trials: usize,
+    closed_seed_export_origin: Option<usize>,
     claim_open: Option<home::ClaimOpenIntent>,
     fork_session_generation: u64,
     fork_save_task: Option<iced::task::Handle>,
@@ -906,7 +907,8 @@ impl Tab {
             pending_unlock_warnings: Vec::new(),
             app_generation: 0,
             seed_export_origins: Vec::new(),
-            pending_seed_export_trial: false,
+            pending_seed_export_trials: 0,
+            closed_seed_export_origin: None,
             claim_open: None,
             fork_session_generation: 0,
             fork_save_task: None,
@@ -1278,13 +1280,30 @@ impl Tab {
         matches!(self.state, State::App(_)).then_some(self.app_generation)
     }
 
-    pub(crate) fn has_pending_seed_export_trial(&self) -> bool {
-        self.pending_seed_export_trial
+    pub(crate) fn pending_seed_export_trials(&self) -> usize {
+        self.pending_seed_export_trials
+    }
+
+    pub(crate) fn finish_stale_seed_export_trial(&mut self) {
+        self.pending_seed_export_trials = self.pending_seed_export_trials.saturating_sub(1);
+    }
+
+    pub(crate) fn hold_closed_seed_export_trials(&mut self, origin: usize, count: usize) {
+        self.closed_seed_export_origin = Some(origin);
+        self.pending_seed_export_trials = count;
+    }
+
+    pub(crate) fn finish_closed_seed_export_trial(&mut self, origin: usize) -> Option<bool> {
+        if self.closed_seed_export_origin != Some(origin) || self.pending_seed_export_trials == 0 {
+            return None;
+        }
+        self.pending_seed_export_trials -= 1;
+        Some(self.pending_seed_export_trials == 0)
     }
 
     #[cfg(test)]
     pub(crate) fn mark_seed_export_trial_pending_for_test(&mut self) {
-        self.pending_seed_export_trial = true;
+        self.pending_seed_export_trials += 1;
     }
 
     pub(crate) fn preferences_source(&self) -> Option<PreferencesSource> {
@@ -1490,14 +1509,14 @@ impl Tab {
                 )
             )))
         ) {
-            self.pending_seed_export_trial = false;
+            self.pending_seed_export_trials = self.pending_seed_export_trials.saturating_sub(1);
         }
         let was_app = matches!(&self.state, State::App(_));
         let was_fork_app =
             matches!(&self.state, State::App(app) if app.cube_settings().network.is_blake2b());
         let mut result = self.update_inner(message);
         if preserve_seed_export_trial && result.units() > 0 {
-            self.pending_seed_export_trial = true;
+            self.pending_seed_export_trials += 1;
         }
         if !matches!(self.state, State::PinEntry(_) | State::PasskeyUnlock(_))
             || matches!(&self.state, State::PinEntry(pin) if pin.is_loading())
@@ -1622,7 +1641,7 @@ impl Tab {
             ),
         );
         self.seed_export_origins.clear();
-        self.pending_seed_export_trial = false;
+        self.pending_seed_export_trials = 0;
         crate::app::session::close();
         Task::perform(
             async move {

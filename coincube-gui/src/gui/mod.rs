@@ -253,10 +253,33 @@ mod seed_export_duress_gui_tests {
                 ),
             )
         });
+        let (release_wrong, delayed_wrong) = tokio::sync::oneshot::channel::<()>();
+        let pending_wrong = Task::perform(async move { delayed_wrong.await.unwrap() }, move |()| {
+            Message::Pane(
+                pane_id,
+                pane::Message::tab(
+                    1,
+                    tab::Message::AppAsync(
+                        generation,
+                        Box::new(tab::Message::Run(AppMessage::View(
+                            crate::app::view::Message::Settings(
+                                crate::app::view::SettingsMessage::BackupMasterSeed(
+                                    crate::app::view::BackupWalletMessage::PinVerifiedAttempt(
+                                        crate::app::cache::AppGeneration::next(),
+                                        Err("Incorrect PIN".into()),
+                                    ),
+                                ),
+                            ),
+                        ))),
+                    ),
+                ),
+            )
+        });
         drop(gui.update(Message::Pane(
             pane_id,
             pane::Message::View(pane::ViewMessage::CloseTab(1)),
         )));
+        gui.panes.get_mut(pane_id).unwrap().tabs[0].mark_seed_export_trial_pending_for_test();
         gui.panes.get_mut(pane_id).unwrap().tabs[0].mark_seed_export_trial_pending_for_test();
         drop(gui.update(Message::Pane(
             pane_id,
@@ -268,6 +291,22 @@ mod seed_export_duress_gui_tests {
             .expect("PIN trial keeps window alive");
         assert_eq!(pane.tabs.len(), 1);
         assert_eq!(pane.tabs[0].id, usize::MAX);
+        release_wrong.send(()).unwrap();
+        let wrong = runtime.block_on(async {
+            let mut stream = iced_runtime::task::into_stream(pending_wrong).unwrap();
+            while let Some(action) = stream.next().await {
+                if let iced_runtime::Action::Output(message) = action {
+                    return message;
+                }
+            }
+            panic!("first pending PIN task did not deliver")
+        });
+        drop(gui.update(wrong));
+        assert_eq!(
+            gui.panes.get(pane_id).unwrap().tabs[0].id,
+            usize::MAX,
+            "one wrong result must not close the window before another trial's Duress verdict"
+        );
         release.send(proof).unwrap();
         let delivered = runtime.block_on(async {
             let mut stream = iced_runtime::task::into_stream(pending).unwrap();
@@ -729,13 +768,20 @@ fn unresolved_test_preferences() -> PreferencesOwner {
 }
 
 impl GUI {
-    fn finish_closed_seed_export_trial(&mut self, pane_id: pane_grid::Pane) -> Task<Message> {
+    fn finish_closed_seed_export_trial(
+        &mut self,
+        pane_id: pane_grid::Pane,
+        origin_tab: usize,
+    ) -> Task<Message> {
         let Some(pane) = self.panes.get_mut(pane_id) else {
             return Task::none();
         };
         let Some(index) = pane.tabs.iter().position(|tab| tab.id == usize::MAX) else {
             return Task::none();
         };
+        if pane.tabs[index].finish_closed_seed_export_trial(origin_tab) != Some(true) {
+            return Task::none();
+        }
         pane.close_tab(index);
         if pane.tabs.is_empty() {
             self.panes.close(pane_id);
@@ -1451,7 +1497,16 @@ impl GUI {
                     let closed_trial_finished = is_seed_export_trial_result(message.as_ref());
                     tab::discard_closed_loader_result(*message);
                     return if closed_trial_finished {
-                        self.finish_closed_seed_export_trial(pane_id)
+                        if let Some(tab) = self
+                            .panes
+                            .get_mut(pane_id)
+                            .and_then(|pane| pane.tabs.iter_mut().find(|tab| tab.id == tab_id))
+                        {
+                            tab.finish_stale_seed_export_trial();
+                            Task::none()
+                        } else {
+                            self.finish_closed_seed_export_trial(pane_id, tab_id)
+                        }
                     } else {
                         Task::none()
                     };
@@ -1485,7 +1540,16 @@ impl GUI {
                     let closed_trial_finished = is_seed_export_trial_result(message.as_ref());
                     tab::discard_closed_loader_result(*message);
                     return if closed_trial_finished {
-                        self.finish_closed_seed_export_trial(pane_id)
+                        if let Some(tab) = self
+                            .panes
+                            .get_mut(pane_id)
+                            .and_then(|pane| pane.tabs.iter_mut().find(|tab| tab.id == tab_id))
+                        {
+                            tab.finish_stale_seed_export_trial();
+                            Task::none()
+                        } else {
+                            self.finish_closed_seed_export_trial(pane_id, tab_id)
+                        }
                     } else {
                         Task::none()
                     };
@@ -2571,17 +2635,18 @@ impl GUI {
                     if pane.tabs.get(i).is_some_and(|tab| tab.id == usize::MAX) {
                         return Task::none();
                     }
-                    let await_seed_trial = pane
+                    let pending_seed_trials = pane
                         .tabs
                         .get(i)
-                        .is_some_and(tab::Tab::has_pending_seed_export_trial);
+                        .map_or(0, tab::Tab::pending_seed_export_trials);
+                    let closed_tab_id = pane.tabs.get(i).map(|tab| tab.id);
                     let _ = pane
                         .update(
                             pane::Message::View(pane::ViewMessage::CloseTab(i)),
                             &self.config,
                         )
                         .map(move |msg| Message::Pane(pane_id, msg));
-                    if pane.tabs.is_empty() && await_seed_trial {
+                    if pane.tabs.is_empty() && pending_seed_trials > 0 {
                         // Closing the final tab must not close the Iced runtime
                         // before a submitted PIN can classify as Duress. Keep
                         // a neutral tab alive; a non-duress result closes it.
@@ -2590,8 +2655,12 @@ impl GUI {
                             self.config.network,
                         );
                         drop(startup);
-                        pane.tabs
-                            .push(tab::Tab::new(usize::MAX, tab::State::Home(home)));
+                        let mut placeholder = tab::Tab::new(usize::MAX, tab::State::Home(home));
+                        placeholder.hold_closed_seed_export_trials(
+                            closed_tab_id.expect("closed tab existed"),
+                            pending_seed_trials,
+                        );
+                        pane.tabs.push(placeholder);
                         pane.focused_tab = 0;
                         self.focus = Some(pane_id);
                     }

@@ -106,6 +106,21 @@ mod seed_export_duress_tests {
         assert!(kit.pin_attempt.is_none());
         assert_eq!(kit.pin.value().as_str(), "");
     }
+
+    #[test]
+    fn kit_second_submit_cannot_start_another_pin_trial() {
+        let cache = Cache::default();
+        let mut kit = RecoveryKit::new();
+        let attempt = crate::app::cache::AppGeneration::next();
+        kit.flow = RecoveryKitState::PinEntry {
+            mode: RecoveryKitMode::Create,
+            error: None,
+        };
+        kit.pin_attempt = Some(attempt);
+        kit.pin.digits = ["1".into(), "2".into(), "3".into(), "4".into()];
+        assert_eq!(verify_pin(&mut kit, &cache, "destination").units(), 0);
+        assert_eq!(kit.pin_attempt, Some(attempt));
+    }
 }
 
 impl ImportedBackupSource {
@@ -1196,6 +1211,9 @@ fn load_status(
 }
 
 fn verify_pin(rk: &mut RecoveryKit, cache: &Cache, local_cube_id: &str) -> Task<Message> {
+    if rk.pin_attempt.is_some() {
+        return Task::none();
+    }
     let mode = match &rk.flow {
         RecoveryKitState::PinEntry { mode, .. } => *mode,
         _ => return Task::none(),

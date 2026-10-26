@@ -536,6 +536,26 @@ mod tests {
     }
 
     #[test]
+    fn backup_second_submit_cannot_start_another_pin_trial() {
+        let mut state = state();
+        let attempt = crate::app::cache::AppGeneration::next();
+        state.backup_state = BackupSeedState::PinEntry { error: None };
+        state.backup_pin_attempt = Some(attempt);
+        state.backup_pin.digits = ["1".into(), "2".into(), "3".into(), "4".into()];
+        assert_eq!(
+            state
+                .update(
+                    None,
+                    &Cache::default(),
+                    backup_msg(view::BackupWalletMessage::VerifyPin)
+                )
+                .units(),
+            0
+        );
+        assert_eq!(state.backup_pin_attempt, Some(attempt));
+    }
+
+    #[test]
     fn intro_and_previous_step_transitions_clear_sensitive_state() {
         let mut state = state();
         state.backup_mnemonic = Some(Zeroizing::new(words()));
@@ -1115,6 +1135,9 @@ impl GeneralSettingsState {
                 })
             }
             BackupWalletMessage::VerifyPin => {
+                if self.backup_pin_attempt.is_some() {
+                    return Task::none();
+                }
                 if !matches!(self.backup_state, BackupSeedState::PinEntry { .. }) {
                     return Task::none();
                 }
