@@ -25,7 +25,11 @@ use crate::app::{
 };
 use coincube_spark_protocol::PrepareSendOk;
 
-use super::components::order_card::TakeOrderState;
+#[cfg(test)]
+use super::components::order_card::detail_action_id;
+use super::components::order_card::{
+    detail_input_id, detail_primary_id, order_row_id, order_table_header, TakeOrderState,
+};
 use super::components::trade_card::{TradeRole, TradeStatus};
 use super::components::{
     order_card, order_detail, order_filter_sidebar, payment_methods_for, trade_card,
@@ -663,6 +667,109 @@ impl P2PPanel {
         } else {
             Task::batch(tasks)
         }
+    }
+
+    /// Responsive production Book presenter, shared with the synthetic layout test.
+    fn book_view<'a>(&'a self) -> Element<'a, view::Message> {
+        iced::widget::responsive(move |size: iced::Size| {
+            let filtered_orders = self.filtered_orders();
+            // BUY BTC is the taker's intent: it matches maker sell orders.
+            let buy_count = self
+                .orders
+                .iter()
+                .filter(|o| o.order_type == OrderType::Sell && self.order_passes_filters(o))
+                .count();
+            let sell_count = self
+                .orders
+                .iter()
+                .filter(|o| o.order_type == OrderType::Buy && self.order_passes_filters(o))
+                .count();
+            let filter_state = OrderFilterState {
+                buy_sell: &self.buy_sell_filter,
+                buy_count,
+                sell_count,
+                filter_currency: &self.filter_currency,
+                currency_combo_state: &self.filter_currency_combo_state,
+                available_payment_methods: &self.filter_available_payment_methods,
+                deselected_payment_methods: &self.filter_deselected_payment_methods,
+                min_rating: self.filter_min_rating,
+                min_days_active: self.filter_min_days_active,
+                filtered_count: filtered_orders.len(),
+            };
+            let stacked = size.width < 640.0;
+            let compact_rows = stacked || size.width - 264.0 < 660.0;
+            let filters = order_filter_sidebar(filter_state, stacked);
+            let mut list = column![].spacing(0).width(Length::Fill);
+            if !compact_rows {
+                list = list
+                    .push(order_table_header())
+                    .push(iced::widget::rule::horizontal(1));
+            }
+            if filtered_orders.is_empty() {
+                list = list.push(
+                    container(p1_bold("No orders found"))
+                        .padding(40)
+                        .align_x(Alignment::Center)
+                        .width(Length::Fill),
+                );
+            } else {
+                for order in filtered_orders {
+                    list = list
+                        .push(order_card(order, compact_rows))
+                        .push(iced::widget::rule::horizontal(1));
+                }
+            }
+            let list = container(list).width(Length::Fill);
+            if stacked {
+                column![filters, list]
+                    .spacing(24)
+                    .width(Length::Fill)
+                    .into()
+            } else {
+                row![filters, list]
+                    .spacing(32)
+                    .align_y(iced::alignment::Vertical::Top)
+                    .width(Length::Fill)
+                    .into()
+            }
+        })
+        .height(Length::Shrink)
+        .into()
+    }
+
+    fn select_order_for_detail(&mut self, id: String) -> Option<iced::advanced::widget::Id> {
+        let focus_id = self
+            .orders
+            .iter()
+            .find(|order| order.id == id)
+            .map(detail_primary_id);
+        self.selected_order = Some(id);
+        self.taking_order = false;
+        self.take_order_amount = Default::default();
+        self.take_order_invoice = Default::default();
+        self.take_order_submitting = false;
+        focus_id
+    }
+
+    fn close_order_detail_view(&mut self) -> Option<iced::advanced::widget::Id> {
+        let return_to = self.selected_order.take().map(|id| order_row_id(&id));
+        self.taking_order = false;
+        return_to
+    }
+
+    fn first_take_input_id(&self) -> Option<iced::advanced::widget::Id> {
+        self.selected_order
+            .as_ref()
+            .and_then(|id| self.orders.iter().find(|order| order.id == *id))
+            .and_then(|order| {
+                if order.is_range_order() {
+                    Some(detail_input_id(&order.id, "amount").into())
+                } else if order.order_type == OrderType::Sell {
+                    Some(detail_input_id(&order.id, "invoice").into())
+                } else {
+                    None
+                }
+            })
     }
 
     /// Orders matching the current buy/sell tab + all active filters.
@@ -4218,33 +4325,6 @@ impl State for P2PPanel {
                         }
                     }
 
-                    let filtered_orders = self.filtered_orders();
-
-                    // Count offers per tab (applying all filters except buy/sell)
-                    let buy_count = self
-                        .orders
-                        .iter()
-                        .filter(|o| o.order_type == OrderType::Sell && self.order_passes_filters(o))
-                        .count();
-                    let sell_count = self
-                        .orders
-                        .iter()
-                        .filter(|o| o.order_type == OrderType::Buy && self.order_passes_filters(o))
-                        .count();
-
-                    let filter_state = OrderFilterState {
-                        buy_sell: &self.buy_sell_filter,
-                        buy_count,
-                        sell_count,
-                        filter_currency: &self.filter_currency,
-                        currency_combo_state: &self.filter_currency_combo_state,
-                        available_payment_methods: &self.filter_available_payment_methods,
-                        deselected_payment_methods: &self.filter_deselected_payment_methods,
-                        min_rating: self.filter_min_rating,
-                        min_days_active: self.filter_min_days_active,
-                        filtered_count: filtered_orders.len(),
-                    };
-
                     // --- Header ---
                     let mut overview_col = column![column![
                         h3("P2P Order Book").bold(),
@@ -4263,28 +4343,7 @@ impl State for P2PPanel {
                         );
                     }
 
-                    // --- Sidebar + order list side by side ---
-                    let sidebar = order_filter_sidebar(filter_state);
-
-                    let order_list: Element<'_, view::Message> = if filtered_orders.is_empty() {
-                        container(p1_bold("No orders found"))
-                            .padding(40)
-                            .align_x(Alignment::Center)
-                            .width(Length::Fill)
-                            .into()
-                    } else {
-                        column(filtered_orders.iter().map(|order| order_card(order).into()))
-                            .spacing(16)
-                            .width(Length::Fill)
-                            .into()
-                    };
-
-                    let content_row = row![sidebar, container(order_list).width(Length::Fill),]
-                        .spacing(20)
-                        .align_y(iced::alignment::Vertical::Top)
-                        .width(Length::Fill);
-
-                    overview_col = overview_col.push(content_row);
+                    overview_col = overview_col.push(self.book_view());
                     overview_col = overview_col.push(Space::new().height(Length::Fixed(40.0)));
 
                     let overview_content: Element<'_, view::Message> =
@@ -4946,15 +5005,14 @@ impl State for P2PPanel {
                 }
             }
             P2PMessage::SelectOrder(id) => {
-                self.selected_order = Some(id);
-                self.taking_order = false;
-                self.take_order_amount = Default::default();
-                self.take_order_invoice = Default::default();
-                self.take_order_submitting = false;
+                if let Some(focus_id) = self.select_order_for_detail(id) {
+                    return Task::done(Message::View(view::Message::FocusAction(focus_id)));
+                }
             }
             P2PMessage::CloseOrderDetail => {
-                self.selected_order = None;
-                self.taking_order = false;
+                if let Some(return_to) = self.close_order_detail_view() {
+                    return Task::done(Message::View(view::Message::FocusAction(return_to)));
+                }
             }
             P2PMessage::CopyOrderId(id) => {
                 return Task::done(Message::View(view::Message::Clipboard(id)));
@@ -5196,11 +5254,16 @@ impl State for P2PPanel {
                     })
                     .unwrap_or(true);
 
+                let first_input = self.first_take_input_id();
+
                 if needs_input {
                     self.taking_order = true;
                     self.take_order_amount = Default::default();
                     self.take_order_invoice = Default::default();
                     self.take_order_submitting = false;
+                    if let Some(first_input) = first_input {
+                        return Task::done(Message::View(view::Message::FocusAction(first_input)));
+                    }
                 } else {
                     // No input needed — proceed directly
                     self.taking_order = true;
@@ -6484,5 +6547,246 @@ impl State for P2PPanel {
             },
         }
         Task::none()
+    }
+}
+
+#[cfg(test)]
+mod book_filter_tests {
+    use super::*;
+    use crate::app::view::shared::landing::capture;
+
+    fn order(id: &str, order_type: OrderType, currency: &str, method: &str) -> P2POrder {
+        P2POrder {
+            id: id.into(),
+            order_type,
+            fiat_amount: 100.0,
+            fiat_currency: currency.into(),
+            min_amount: None,
+            max_amount: None,
+            sats_amount: None,
+            premium_percent: None,
+            payment_methods: vec![method.into()],
+            seller_rating: Some(4.5),
+            seller_reviews: Some(10),
+            seller_days_old: Some(30),
+            created_at: String::new(),
+            created_at_ts: 0,
+            time_ago: String::new(),
+            is_mine: false,
+        }
+    }
+
+    #[test]
+    fn book_keeps_taker_side_and_active_filters() {
+        let mut panel = P2PPanel::new(
+            None,
+            None,
+            zeroize::Zeroizing::new(String::new()),
+            Some("All".into()),
+            Network::Bitcoin,
+        );
+        panel.orders = vec![
+            order("maker-sell-eur", OrderType::Sell, "EUR", "SEPA instant"),
+            order("maker-sell-usd", OrderType::Sell, "USD", "Cash App"),
+            order("maker-buy-eur", OrderType::Buy, "EUR", "SEPA instant"),
+        ];
+
+        panel.buy_sell_filter = BuySellFilter::Buy;
+        assert_eq!(panel.filtered_orders().len(), 2);
+        assert!(panel
+            .filtered_orders()
+            .iter()
+            .all(|order| order.order_type == OrderType::Sell));
+
+        panel.filter_currency = "EUR".into();
+        panel
+            .filter_deselected_payment_methods
+            .insert("Cash App".into());
+        assert_eq!(panel.filtered_orders()[0].id, "maker-sell-eur");
+        panel.filter_min_rating = 5.0;
+        assert!(panel.filtered_orders().is_empty());
+
+        panel.filter_min_rating = 0.0;
+        panel.buy_sell_filter = BuySellFilter::Sell;
+        assert_eq!(panel.filtered_orders()[0].id, "maker-buy-eur");
+    }
+
+    #[test]
+    fn selecting_and_closing_detail_moves_focus_between_stable_controls() {
+        let mut panel = P2PPanel::new(
+            None,
+            None,
+            zeroize::Zeroizing::new(String::new()),
+            Some("All".into()),
+            Network::Bitcoin,
+        );
+        panel.orders = vec![order(
+            "synthetic-focus",
+            OrderType::Sell,
+            "EUR",
+            "SEPA instant",
+        )];
+        assert_eq!(
+            panel.select_order_for_detail("synthetic-focus".into()),
+            Some(detail_action_id("synthetic-focus", "take"))
+        );
+        assert_eq!(panel.selected_order.as_deref(), Some("synthetic-focus"));
+        assert_eq!(
+            panel.close_order_detail_view(),
+            Some(order_row_id("synthetic-focus"))
+        );
+        assert!(panel.selected_order.is_none());
+
+        panel.orders[0].is_mine = true;
+        assert_eq!(
+            panel.select_order_for_detail("synthetic-focus".into()),
+            Some(detail_action_id("synthetic-focus", "close"))
+        );
+
+        panel.orders[0].min_amount = Some(50.0);
+        panel.orders[0].max_amount = Some(200.0);
+        assert_eq!(
+            panel.first_take_input_id(),
+            Some(detail_input_id("synthetic-focus", "amount").into())
+        );
+        panel.orders[0].min_amount = None;
+        panel.orders[0].max_amount = None;
+        assert_eq!(
+            panel.first_take_input_id(),
+            Some(detail_input_id("synthetic-focus", "invoice").into())
+        );
+        panel.orders[0].order_type = OrderType::Buy;
+        assert!(panel.first_take_input_id().is_none());
+    }
+
+    /// R06A_CAPTURE_DIR writes content-only screenshots of the production Book
+    /// presenter with clearly synthetic orders and no network or wallet session.
+    #[test]
+    fn book_layout_has_actionable_rows_at_compact_and_wide_sizes() {
+        let mut panel = P2PPanel::new(
+            None,
+            None,
+            zeroize::Zeroizing::new(String::new()),
+            Some("All".into()),
+            Network::Bitcoin,
+        );
+        panel.buy_sell_filter = BuySellFilter::Buy;
+        panel.orders = vec![
+            order("synthetic-1", OrderType::Sell, "EUR", "SEPA instant"),
+            order("synthetic-2", OrderType::Sell, "USD", "Cash App"),
+            order("synthetic-own-ngn", OrderType::Sell, "NGN", "Bank Transfer"),
+            order("synthetic-kes", OrderType::Sell, "KES", "M-Pesa"),
+        ];
+        panel.orders[0].seller_rating = None;
+        panel.orders[0].seller_reviews = None;
+        panel.orders[2].is_mine = true;
+        panel.orders[2].min_amount = Some(50_000.0);
+        panel.orders[2].max_amount = Some(200_000.0);
+        panel.orders[2].sats_amount = Some(450_000);
+        panel.orders[2].payment_methods =
+            vec!["Bank Transfer".into(), "Cash App".into(), "M-Pesa".into()];
+        panel.orders[3].min_amount = Some(10_000.0);
+        panel.orders[3].max_amount = Some(50_000.0);
+        panel.recompute_available_payment_methods();
+
+        for (appearance, palette) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            for size in [(1024, 768), (1440, 900)] {
+                let inspection =
+                    capture::inspect("r20-p2p-book", panel.book_view(), size, appearance, palette);
+                assert!(inspection.contains("BUY BTC (4)"));
+                assert!(inspection.contains("BUYING"));
+                assert!(inspection.contains("YOU ARE SELLING"));
+                assert!(inspection.contains("SEPA instant"));
+                assert!(inspection.contains("100.00 EUR"));
+                assert!(inspection.contains("50,000 – 200,000 NGN"));
+                assert!(inspection.contains("10,000 – 50,000 KES"));
+                assert!(inspection.contains("Fixed · 450,000 sats"));
+                assert!(inspection.contains("Market"));
+                assert!(inspection.contains("No rating"));
+                assert!(inspection.contains("Bank Transfer, Cash App, M-Pesa"));
+                assert_eq!(inspection.contains("Creator Reputation"), size.0 == 1440);
+                if size.0 == 1440 {
+                    for label in [
+                        "Payment Method",
+                        "Bank Transfer, Cash App, M-Pesa",
+                        "YOU ARE SELLING",
+                        "50,000 – 200,000 NGN",
+                        "10,000 – 50,000 KES",
+                        "Fixed · 450,000 sats",
+                    ] {
+                        let bounds = inspection
+                            .text
+                            .iter()
+                            .find(|(value, _)| value == label)
+                            .expect("realistic book value")
+                            .1;
+                        assert!(
+                            bounds.height < 25.0,
+                            "{label} wrapped at 1440: {bounds:?}",
+                            label = label,
+                            bounds = bounds
+                        );
+                    }
+                }
+                if size.0 == 1024 {
+                    let side = inspection
+                        .text
+                        .iter()
+                        .find(|(value, _)| value == "BUYING")
+                        .expect("compact order side")
+                        .1;
+                    let filter_note = inspection
+                        .text
+                        .iter()
+                        .find(|(value, _)| {
+                            value.contains("Showing all traders regardless of reputation")
+                        })
+                        .expect("reputation filter note")
+                        .1;
+                    assert!(side.x > 232.0, "order stays beside compact filters");
+                    assert!(side.y < filter_note.y, "orders start above filter footer");
+                }
+            }
+        }
+
+        let target = order_row_id("synthetic-1");
+        for size in [(1024, 768), (1440, 900)] {
+            for pointer in [false, true] {
+                let messages = capture::activate(panel.book_view(), target.clone(), size, pointer);
+                let selections = messages
+                    .iter()
+                    .filter(|message| {
+                        matches!(
+                            message,
+                            view::Message::P2P(P2PMessage::SelectOrder(id))
+                                if id == "synthetic-1"
+                        )
+                    })
+                    .count();
+                assert_eq!(selections, 1, "{size:?} pointer={pointer}: {messages:?}");
+                assert_eq!(
+                    messages
+                        .iter()
+                        .filter(|message| matches!(message, view::Message::FocusAction(_)))
+                        .count(),
+                    usize::from(pointer),
+                    "{size:?} pointer={pointer}: {messages:?}"
+                );
+            }
+        }
+        let space = capture::activate_with_key(
+            panel.book_view(),
+            target,
+            (1024, 768),
+            false,
+            iced::keyboard::key::Named::Space,
+        );
+        assert!(matches!(
+            space.as_slice(),
+            [view::Message::P2P(P2PMessage::SelectOrder(id))] if id == "synthetic-1"
+        ));
     }
 }
