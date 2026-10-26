@@ -173,6 +173,8 @@ pub enum ConnectSheetMessage {
 
 pub const CLOSE_ID: &str = "tenshu.connect.close";
 pub const CONTENT_SCROLL_ID: &str = "tenshu.connect.content-scroll";
+pub const EMAIL_INPUT_ID: &str = "tenshu.connect.auth.email";
+pub const OTP_INPUT_ID: &str = "tenshu.connect.auth.otp";
 
 /// The five account-wide sections shown in the Connect sheet. Recovery
 /// services has its own section here without changing the older Home menu.
@@ -242,7 +244,11 @@ pub fn connect_sheet<'a>(
     heading = heading.push(
         FocusableAction::new(
             CLOSE_ID,
-            text::p2_regular("Close"),
+            Row::new()
+                .push(cross_icon().size(16))
+                .push(text::p2_regular("Close"))
+                .spacing(6)
+                .align_y(Alignment::Center),
             ConnectSheetMessage::FocusAction,
         )
         .padding(10)
@@ -258,7 +264,7 @@ pub fn connect_sheet<'a>(
         text::p1_regular("Loading your Connect account…").into()
     } else if signed_in {
         let section_content = match active_section {
-            ConnectSheetSection::Account => overview_ux(acct),
+            ConnectSheetSection::Account => sheet_account_ux(acct),
             ConnectSheetSection::PlanBilling => plan_billing_ux(acct),
             ConnectSheetSection::Contacts => contacts::contacts_ux(acct),
             ConnectSheetSection::DevicesSecurity => security_ux(acct),
@@ -306,26 +312,38 @@ pub fn connect_sheet<'a>(
         let mut navigation = Column::new().spacing(8).width(Length::Fixed(210.0));
         for (label, id, section) in sections {
             let selected = section == active_section;
-            let style = if selected {
-                theme::button::primary
-            } else {
-                theme::button::secondary
+            let icon = match section {
+                ConnectSheetSection::Account => person_icon(),
+                ConnectSheetSection::PlanBilling => card_icon(),
+                ConnectSheetSection::Contacts => phone_icon(),
+                ConnectSheetSection::DevicesSecurity => shield_icon(),
+                ConnectSheetSection::RecoveryServices => recovery_icon(),
             };
             navigation = navigation.push(
                 FocusableAction::new(
                     id,
-                    text::p2_regular(label),
+                    Row::new()
+                        .push(icon.size(18).color(if selected {
+                            color::ORANGE
+                        } else {
+                            color::GREY_3
+                        }))
+                        .push(text::p2_regular(label))
+                        .spacing(10)
+                        .align_y(Alignment::Center),
                     ConnectSheetMessage::FocusAction,
                 )
                 .width(Length::Fill)
                 .padding(10)
-                .style(style)
+                .style(move |theme, status| {
+                    theme::tenshu::control::nav_item(theme, status, selected)
+                })
                 .on_press(ConnectSheetMessage::SelectSection(section)),
             );
         }
         navigation = navigation.push(
             text::p2_regular(
-                "Account-wide. Each Cube's service connection is in its own Settings.",
+                "Account-wide. Each Cube's own service connection stays in that Cube's Settings › Connections.",
             )
             .style(theme::text::secondary),
         );
@@ -333,10 +351,13 @@ pub fn connect_sheet<'a>(
             Row::new()
                 .push(navigation)
                 .push(
-                    scrollable(content)
-                        .id(CONTENT_SCROLL_ID)
-                        .width(Length::Fill)
-                        .height(Length::Fill),
+                    scrollable(container(content).padding(iced::Padding {
+                        right: 30.0,
+                        ..iced::Padding::ZERO
+                    }))
+                    .id(CONTENT_SCROLL_ID)
+                    .width(Length::Fill)
+                    .height(Length::Fill),
                 )
                 .spacing(24)
                 .height(Length::Fill),
@@ -346,10 +367,13 @@ pub fn connect_sheet<'a>(
         .into()
     } else {
         container(
-            scrollable(content)
-                .id(CONTENT_SCROLL_ID)
-                .width(Length::Fill)
-                .height(Length::Fill),
+            scrollable(container(content).padding(iced::Padding {
+                right: 30.0,
+                ..iced::Padding::ZERO
+            }))
+            .id(CONTENT_SCROLL_ID)
+            .width(Length::Fill)
+            .height(Length::Fill),
         )
         .max_width(600)
         .center_x(Length::Fill)
@@ -375,12 +399,6 @@ pub fn connect_sheet<'a>(
 fn signed_out_account_ux<'a>() -> Element<'a, ConnectSheetMessage> {
     Column::new()
         .push(text::h4_bold("Account").style(theme::text::primary))
-        .push(
-            text::p1_regular(
-                "Your Cubes stay usable while signed out. Sign in for Connect account services.",
-            )
-            .style(theme::text::secondary),
-        )
         .push(iced::widget::Space::new().height(Length::Fixed(14.0)))
         .push(connect_benefits().map(ConnectSheetMessage::Account))
         .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
@@ -415,6 +433,113 @@ fn signed_out_account_ux<'a>() -> Element<'a, ConnectSheetMessage> {
         .spacing(8)
         .width(Length::Fill)
         .into()
+}
+
+/// Account-wide presentation for the sheet; the legacy Home panel keeps its
+/// own detailed overview, while this route follows the Connect artboard.
+fn sheet_account_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMessage> {
+    let email = state
+        .user
+        .as_ref()
+        .map(|user| user.email.as_str())
+        .unwrap_or("—");
+    let avatar = container(person_icon().size(24).color(color::ORANGE))
+        .width(48)
+        .height(48)
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center)
+        .style(|theme: &theme::Theme| container::Style {
+            background: Some(iced::Background::Color(theme.colors.shell.selected)),
+            border: iced::Border {
+                radius: 24.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+    let mut column = Column::new()
+        .push(text::h4_bold("Account").style(theme::text::primary))
+        .push(iced::widget::Space::new().height(Length::Fixed(18.0)))
+        .push(
+            Row::new()
+                .push(avatar)
+                .push(
+                    Column::new()
+                        .push(text::p1_bold(email).style(theme::text::primary))
+                        .push(
+                            text::p2_regular("Signed in on this device")
+                                .style(theme::text::secondary),
+                        )
+                        .spacing(3),
+                )
+                .spacing(14)
+                .align_y(Alignment::Center),
+        )
+        .push(iced::widget::Space::new().height(Length::Fixed(24.0)))
+        .push(overview_info_row(
+            "Sign-in method",
+            text::p1_regular("Email · one-time code")
+                .style(theme::text::primary)
+                .into(),
+        ))
+        .push(iced::widget::Space::new().height(Length::Fixed(18.0)));
+    if let Some(banner) = renewal_banner(state) {
+        column = column
+            .push(banner)
+            .push(iced::widget::Space::new().height(Length::Fixed(18.0)));
+    }
+    column = column
+        .push(
+            button::secondary(None, "Plan & billing")
+                .on_press(ConnectAccountMessage::OpenPlanBilling),
+        )
+        .push(iced::widget::Space::new().height(Length::Fixed(24.0)))
+        .push(text::p1_bold("What Connect provides").style(theme::text::primary))
+        .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
+        .push(connect_benefits())
+        .push(iced::widget::Space::new().height(Length::Fixed(28.0)));
+    let consequence = "Cubes stay on this device; Connect services pause until you sign in again.";
+    if state.review_sign_out {
+        column = column.push(
+            container(
+                Column::new()
+                    .push(
+                        text::p1_bold(format!("Sign out {email} on this device?"))
+                            .style(theme::text::primary),
+                    )
+                    .push(text::p2_regular(consequence).style(theme::text::secondary))
+                    .push(
+                        Row::new()
+                            .push(
+                                button::primary(None, "Sign out")
+                                    .on_press(ConnectAccountMessage::LogOut),
+                            )
+                            .push(
+                                button::secondary(None, "Cancel")
+                                    .on_press(ConnectAccountMessage::ReviewSignOut(false)),
+                            )
+                            .spacing(8),
+                    )
+                    .spacing(10),
+            )
+            .padding(16)
+            .style(|theme: &theme::Theme| container::Style {
+                background: Some(iced::Background::Color(theme.colors.shell.selected)),
+                border: iced::Border {
+                    radius: 8.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        );
+    } else {
+        column = column
+            .push(
+                button::secondary(None, "Sign out…")
+                    .on_press(ConnectAccountMessage::ReviewSignOut(true)),
+            )
+            .push(text::p2_regular(consequence).style(theme::text::secondary));
+    }
+    column.spacing(4).width(Length::Fill).into()
 }
 
 fn signed_out_section_ux<'a>(section: ConnectSheetSection) -> Element<'a, ConnectSheetMessage> {
@@ -670,6 +795,7 @@ fn login_ux<'a>(email: &'a str, loading: bool) -> Element<'a, ConnectAccountMess
         .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
         .push(
             TextInput::new("you@example.test", email)
+                .id(EMAIL_INPUT_ID)
                 .on_input(ConnectAccountMessage::EmailChanged)
                 .on_submit_maybe((!loading && valid).then_some(ConnectAccountMessage::SubmitLogin))
                 .size(16)
@@ -736,6 +862,7 @@ fn register_ux<'a>(
         .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
         .push(
             TextInput::new("you@example.test", email)
+                .id(EMAIL_INPUT_ID)
                 .on_input(ConnectAccountMessage::EmailChanged)
                 .on_submit_maybe(
                     (!loading && valid).then_some(ConnectAccountMessage::SubmitRegistration),
@@ -819,6 +946,7 @@ fn otp_ux<'a>(
         .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
         .push(
             TextInput::new("6-digit code", otp)
+                .id(OTP_INPUT_ID)
                 .on_input(ConnectAccountMessage::OtpChanged)
                 .on_submit_maybe((!sending && valid).then_some(ConnectAccountMessage::VerifyOtp))
                 .size(16)

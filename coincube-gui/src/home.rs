@@ -1716,6 +1716,9 @@ impl Home {
                             | ViewMessage::CreateWallet
                             | ViewMessage::GoToSection(HomeSection::Cubes)
                             | ViewMessage::ConnectAccount(app::view::ConnectAccountMessage::LogOut)
+                            | ViewMessage::ConnectSheetAccount(
+                                app::view::ConnectAccountMessage::LogOut
+                            )
                     )
                 ) {
                     self.claim_owner = None;
@@ -1776,6 +1779,7 @@ impl Home {
                         | ViewMessage::Check
                         | ViewMessage::Run(_)
                         | ViewMessage::ConnectAccount(_)
+                        | ViewMessage::ConnectSheetAccount(_)
                         | ViewMessage::ToggleConnect
                         | ViewMessage::ToggleDeveloperMode(_)
                         | ViewMessage::ToggleBitcoinBlake2bBeta(_)
@@ -3932,18 +3936,27 @@ impl Home {
                     }
                 }
             }
-            Message::View(ViewMessage::ConnectAccount(msg)) => {
+            Message::View(
+                view @ (ViewMessage::ConnectAccount(_) | ViewMessage::ConnectSheetAccount(_)),
+            ) => {
+                let sheet_message = matches!(view, ViewMessage::ConnectSheetAccount(_));
+                let msg = match view {
+                    ViewMessage::ConnectAccount(msg) | ViewMessage::ConnectSheetAccount(msg) => msg,
+                    _ => unreachable!(),
+                };
                 // The banner CTAs navigate the panel to Plan & Billing by
                 // setting its `active_sub`, but the sidebar highlight follows
                 // the host's `active_section`. Mirror the move here so the two
                 // stay in sync (otherwise the rail keeps highlighting Overview
                 // while the pane shows the picker/checkout, and re-selecting
                 // Overview would silently reset `active_sub`).
-                if matches!(
-                    msg,
-                    ConnectAccountMessage::OpenPlanBilling
-                        | ConnectAccountMessage::RenewCurrentPlan
-                ) {
+                if !sheet_message
+                    && matches!(
+                        msg,
+                        ConnectAccountMessage::OpenPlanBilling
+                            | ConnectAccountMessage::RenewCurrentPlan
+                    )
+                {
                     self.leave_recovery_services();
                     self.active_section =
                         HomeSection::Connect(app::menu::ConnectSubMenu::PlanBilling);
@@ -6816,6 +6829,8 @@ pub enum ViewMessage {
     ToggleConnect,
     /// Account-level Connect messages (login, plan, security, etc.)
     ConnectAccount(ConnectAccountMessage),
+    /// Account action from the GUI-owned sheet; retain the Launcher section.
+    ConnectSheetAccount(ConnectAccountMessage),
     /// Heir "Recover a Vault" discovery-surface messages (COIN-377 / PR 1).
     RecoverVault(RecoverVaultMessage),
     /// PR 8 foreign-wallet discovery surface. Scan-only until the shared

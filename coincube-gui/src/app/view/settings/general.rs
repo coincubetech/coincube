@@ -6,7 +6,7 @@ use coincube_ui::component::text::*;
 use coincube_ui::component::{button, card, tooltip_custom};
 use coincube_ui::icon;
 use coincube_ui::theme;
-use coincube_ui::widget::{ColumnExt, Element};
+use coincube_ui::widget::{action::Action as FocusableAction, ColumnExt, Element};
 
 use crate::app::cache;
 use crate::app::menu::{CubeSettingsOption, CubeSubMenu, Menu, SettingsOption, VaultSubMenu};
@@ -21,6 +21,9 @@ use crate::app::view::message::*;
 use crate::services::coincube::{RecoveryKitStatus, VaultMemberRole};
 use crate::services::fiat::{Currency, ALL_PRICE_SOURCES};
 use crate::services::inheritance::EscrowTier;
+
+pub const RECOVERY_ALERTS_VIEW_PLANS_ID: &str = "tenshu.settings.recovery-alerts.view-plans";
+pub const ESCROW_VIEW_PLANS_ID: &str = "tenshu.settings.escrow.view-plans";
 
 /// Render whichever settings sub-tab is active. The General and Recovery tabs
 /// share `GeneralSettingsState`; this dispatches on the section discriminator.
@@ -293,9 +296,16 @@ fn recovery_alerts_card<'a>(ra: &'a RecoveryAlerts) -> Element<'a, Message> {
             )
             .push(Space::new().height(Length::Fixed(12.0)))
             .push(
-                button::primary(None, "View plans")
-                    .width(Length::Fixed(160.0))
-                    .on_press(Message::OpenPlanBilling),
+                FocusableAction::new(
+                    RECOVERY_ALERTS_VIEW_PLANS_ID,
+                    iced::widget::container(text("View plans").bold())
+                        .center_x(Length::Fill)
+                        .padding(5),
+                    Message::FocusAction,
+                )
+                .width(Length::Fixed(160.0))
+                .style(theme::button::primary)
+                .on_press(Message::OpenPlanBillingFrom(RECOVERY_ALERTS_VIEW_PLANS_ID)),
             );
         return card::simple(body).width(Length::Fill).into();
     }
@@ -478,9 +488,16 @@ fn escrow_selector<'a>(
                 .size(13),
             )
             .push(
-                button::primary(None, "View plans")
-                    .width(Length::Fixed(160.0))
-                    .on_press(Message::OpenPlanBilling),
+                FocusableAction::new(
+                    ESCROW_VIEW_PLANS_ID,
+                    iced::widget::container(text("View plans").bold())
+                        .center_x(Length::Fill)
+                        .padding(5),
+                    Message::FocusAction,
+                )
+                .width(Length::Fixed(160.0))
+                .style(theme::button::primary)
+                .on_press(Message::OpenPlanBillingFrom(ESCROW_VIEW_PLANS_ID)),
             )
             .into();
     }

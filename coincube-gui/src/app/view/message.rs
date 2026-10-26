@@ -288,6 +288,9 @@ pub enum Message {
     /// plans". The Pane intercepts it and focuses the Home tab on its
     /// Connect → Plan & Billing section. Mirrors [`OpenConnectSignIn`].
     OpenPlanBilling,
+    /// A focusable paid-feature CTA records its own return target for the
+    /// Connect sheet's Close and Escape route.
+    OpenPlanBillingFrom(&'static str),
     /// Remote duress activation arrived over the gRPC stream (Phase 7b). The
     /// tab shell intercepts this and locks the running app into the cryptic
     /// "Duress Mode Activated" screen — WITHOUT wiping (remote activation can
