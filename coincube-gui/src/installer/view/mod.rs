@@ -22,7 +22,7 @@ use coincube_core::{
 use coincube_ui::{
     component::{
         button, card, collapse, form, hw,
-        text::{h2, h3, h4_bold, p1_bold, p1_regular, text, Text},
+        text::{h3, h4_bold, p1_bold, p1_regular, text, Text},
     },
     icon, theme,
     widget::{action::Action, *},
@@ -2440,13 +2440,11 @@ pub fn login(progress: (usize, usize), connection_step: Element<Message>) -> Ele
                 .max_width(700)
                 .width(Length::Fill)
                 .push(p2_regular("ADD WALLET · CONNECT").style(theme::text::secondary))
-                .push(h2("Sign in to Connect"))
                 .push(p2_regular(
-                    "Use the Connect account that holds your wallet or invitation. The emailed authentication code submits when complete. If you have an invitation, enter its token on the next screen.",
+                    "Use the Connect account that holds your wallet or invitation. The emailed sign-in code submits when complete. If you have an invitation, enter its token on the next screen.",
                 ))
                 .push(connection_step),
-        )
-        .center_x(Length::Fill),
+        ),
         true,
         Some(Message::Previous),
     )
@@ -2518,17 +2516,18 @@ pub fn connection_step_enter_otp<'a>(
 ) -> Element<'a, Message> {
     Column::new()
         .spacing(20)
-        .push(text(email).style(theme::text::success))
-        .push(text("An authentication token has been emailed to you"))
+        // The address is still unverified until this sign-in code succeeds.
+        .push(text(email).style(theme::text::secondary))
+        .push(text("A sign-in code has been emailed to you"))
         .push(connection_error.map(|e| text(e.to_string()).style(theme::text::warning)))
         .push(auth_error.map(|e| text(e.to_string()).style(theme::text::warning)))
         .push(
-            form::Form::new_trimmed("Token", otp, |msg| {
+            form::Form::new_trimmed("Sign-in code", otp, |msg| {
                 Message::SelectBackend(message::SelectBackend::OTPEdited(msg))
             })
             .size(text::P1_SIZE)
             .padding(10)
-            .warning("Token is not valid"),
+            .warning("Code is not valid"),
         )
         .push(
             Row::new()
@@ -2538,7 +2537,7 @@ pub fn connection_step_enter_otp<'a>(
                         .on_press(Message::SelectBackend(message::SelectBackend::EditEmail)),
                 )
                 .push(
-                    button::secondary(None, "Resend token").on_press_maybe(if processing {
+                    button::secondary(None, "Resend code").on_press_maybe(if processing {
                         None
                     } else {
                         Some(Message::SelectBackend(message::SelectBackend::RequestOTP))
@@ -3322,6 +3321,89 @@ mod tests {
 
         fn text(&mut self, _: Option<&Id>, bounds: iced::Rectangle, value: &str) {
             self.0.push((value.to_owned(), bounds));
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_login_has_one_aligned_heading_and_distinct_code_copy() {
+        for bytes in coincube_ui::font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(bytes);
+        }
+        let mut renderer = <iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer");
+        let otp = value("", true);
+        let mut element = login(
+            (2, 8),
+            connection_step_enter_otp("user@example.com", &otp, false, None, None),
+        );
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(iced::Size::ZERO, iced::Size::new(1440.0, 900.0)),
+        );
+        let mut labels = RestoreLabels::default();
+        element
+            .as_widget_mut()
+            .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
+        let title_bounds: Vec<_> = labels
+            .0
+            .iter()
+            .filter(|(label, _)| label == "Sign in to Connect")
+            .map(|(_, bounds)| bounds)
+            .collect();
+        assert_eq!(title_bounds.len(), 1, "login heading should appear once");
+        let eyebrow_x = labels
+            .0
+            .iter()
+            .find(|(label, _)| label == "ADD WALLET · CONNECT")
+            .expect("Connect eyebrow")
+            .1
+            .x;
+        assert!((title_bounds[0].x - eyebrow_x).abs() < 1.0);
+        assert!(labels
+            .0
+            .iter()
+            .any(|(label, _)| label == "A sign-in code has been emailed to you"));
+        assert!(labels.0.iter().any(|(label, _)| label == "Resend code"));
+
+        if let Ok(directory) = std::env::var("R14_LOGIN_CAPTURE_DIR") {
+            std::fs::create_dir_all(&directory).unwrap();
+            let theme = theme::Theme::dark();
+            let size = iced::Size::new(1440.0, 900.0);
+            let screen = iced::Rectangle::with_size(size);
+            element.as_widget().draw(
+                &tree,
+                &mut renderer,
+                &theme,
+                &iced::advanced::renderer::Style {
+                    text_color: theme.colors.text.primary,
+                },
+                Layout::new(&node),
+                iced::mouse::Cursor::Unavailable,
+                &screen,
+            );
+            let pixels = renderer.screenshot(
+                iced::Size::new(1440, 900),
+                1.0,
+                theme.colors.general.background,
+            );
+            image::save_buffer(
+                std::path::Path::new(&directory).join("r14-connect-login-dark-1440x900.png"),
+                &pixels,
+                1440,
+                900,
+                image::ColorType::Rgba8,
+            )
+            .unwrap();
         }
     }
 
