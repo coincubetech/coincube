@@ -1,7 +1,9 @@
 # Exported screens
 
 Static PNG exports of every board in the Tenshu prototype (canvas v121,
-2026-10-24), so the design can be read without a claude.ai session. Pixels only:
+2026-10-24), so the design can be read without a claude.ai session. Canvas v122
+only squared the button corners (see the review doc); these images still show
+the older rounded buttons. Pixels only:
 exact copy, spacing, tokens and state logic are in `../canvas/<source>`.
 
 - `dark/` is the main prototype page with the device settings at their defaults:

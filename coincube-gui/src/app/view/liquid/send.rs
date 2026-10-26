@@ -750,7 +750,7 @@ pub fn liquid_send_view<'a>(
                 border: iced::Border {
                     color: color::ORANGE,
                     width: 1.5,
-                    radius: 20.0.into(),
+                    radius: 8.0.into(),
                 },
                 ..Default::default()
             },
@@ -763,7 +763,7 @@ pub fn liquid_send_view<'a>(
                 _ => color::ORANGE,
             },
             border: iced::Border {
-                radius: 20.0.into(),
+                radius: 8.0.into(),
                 ..Default::default()
             },
             ..Default::default()
@@ -1011,7 +1011,7 @@ fn max_button(
         border: iced::Border {
             color: color::ORANGE,
             width: 1.0,
-            radius: 15.0.into(),
+            radius: 6.0.into(),
         },
         ..Default::default()
     })
@@ -1118,7 +1118,7 @@ pub fn amount_input_model<'a>(config: AmountInputConfig<'a>) -> Element<'a, Liqu
                 border: iced::Border {
                     color: color::ORANGE,
                     width: 1.0,
-                    radius: 15.0.into(),
+                    radius: 6.0.into(),
                 },
                 ..Default::default()
             });
@@ -1206,7 +1206,7 @@ pub fn amount_input_model<'a>(config: AmountInputConfig<'a>) -> Element<'a, Liqu
                     border: iced::Border {
                         color: color::ORANGE,
                         width: 1.0,
-                        radius: 15.0.into(),
+                        radius: 6.0.into(),
                     },
                     ..Default::default()
                 });
@@ -1402,7 +1402,7 @@ pub fn fiat_input_model<'a>(
                     background: Some(iced::Background::Color(bg_color)),
                     text_color,
                     border: iced::Border {
-                        radius: 20.0.into(),
+                        radius: 8.0.into(),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -1984,7 +1984,7 @@ fn _old_send_asset_toggle(_current_asset: SendAsset) -> Element<'static, LiquidS
                         color::GREY_2
                     },
                     border: iced::Border {
-                        radius: 50.0.into(),
+                        radius: 6.0.into(),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -1998,7 +1998,7 @@ fn _old_send_asset_toggle(_current_asset: SendAsset) -> Element<'static, LiquidS
                 color::TRANSPARENT
             })),
             border: iced::Border {
-                radius: 50.0.into(),
+                radius: 6.0.into(),
                 color: if lbtc_active {
                     color::ORANGE
                 } else {
@@ -2052,7 +2052,7 @@ fn _old_send_asset_toggle(_current_asset: SendAsset) -> Element<'static, LiquidS
                         color::GREY_2
                     },
                     border: iced::Border {
-                        radius: 50.0.into(),
+                        radius: 6.0.into(),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -2066,7 +2066,7 @@ fn _old_send_asset_toggle(_current_asset: SendAsset) -> Element<'static, LiquidS
                 color::TRANSPARENT
             })),
             border: iced::Border {
-                radius: 50.0.into(),
+                radius: 6.0.into(),
                 color: if usdt_active {
                     color::ORANGE
                 } else {
@@ -2085,7 +2085,7 @@ fn _old_send_asset_toggle(_current_asset: SendAsset) -> Element<'static, LiquidS
             background: Some(Background::Color(iced::color!(0x202020))),
             border: iced::Border {
                 color: iced::color!(0x202020),
-                radius: 50.0.into(),
+                radius: 10.0.into(),
                 width: 2.0,
             },
             ..Default::default()

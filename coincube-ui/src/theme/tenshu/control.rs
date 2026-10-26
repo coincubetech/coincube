@@ -51,7 +51,7 @@ pub fn toggle_pill(theme: &Theme, status: Status) -> button::Style {
         border: Border {
             color: fade_if(disabled, shell.line),
             width: 1.0,
-            radius: radius::CHIP.into(),
+            radius: radius::TOGGLE.into(),
         },
         ..button::Style::default()
     }

@@ -138,7 +138,7 @@ pub fn last_transactions_section<'a, M: 'a + Clone + 'static>(
                 border: iced::Border {
                     color: color::ORANGE,
                     width: 1.5,
-                    radius: 20.0.into(),
+                    radius: 8.0.into(),
                 },
                 ..Default::default()
             },
@@ -147,7 +147,7 @@ pub fn last_transactions_section<'a, M: 'a + Clone + 'static>(
             background: Some(Background::Color(color::TRANSPARENT)),
             text_color: color::ORANGE,
             border: iced::Border {
-                radius: 20.0.into(),
+                radius: 8.0.into(),
                 ..Default::default()
             },
             ..Default::default()
