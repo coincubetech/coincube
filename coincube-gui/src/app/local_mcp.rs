@@ -3,15 +3,16 @@ use super::{view, wallet::Wallet};
 use crate::daemon::Daemon;
 #[cfg(any(unix, windows))]
 use coincube_mcp as wire;
-use coincube_ui::{
-    component::text::{h3, text},
-    widget::Element,
-};
+#[cfg(feature = "mcp-proposals")]
+use coincube_ui::component::text::{h3, text};
+use coincube_ui::widget::Element;
+#[cfg(feature = "mcp-proposals")]
 use iced::widget::{button, checkbox, column, text_input};
 use std::sync::Arc;
 #[cfg(any(unix, windows))]
 use std::time::Duration;
 mod pairings;
+mod presentation;
 
 /// Remove only the selected Cube's pairing files, never its keystore/seed.
 pub(crate) fn remove_cube_pairings(
@@ -127,96 +128,9 @@ pub(crate) struct PairingContext<'a> {
     pub last_poll_at_startup: Option<u32>,
 }
 impl Settings {
+    #[cfg(feature = "mcp-proposals")]
     fn paired_clients_view(&self) -> Element<'_, view::Message> {
-        let msg = |m| view::Message::LocalMcp(m);
-        let mut content = column![h3("Paired clients"), text("Copy each client's private configuration once. Keep it out of chat and protect it like a password. A stolen configuration can impersonate that client until you revoke it. Labels are for your reference, not verified app identities.")].spacing(16);
-        if let Some(error) = self.pairing_error {
-            content = content.push(text(error));
-        }
-        let Some(store) = &self.pairing_store else {
-            return content.push(text("No persistent client is paired.")).into();
-        };
-        for client in store.clients() {
-            let runtime = self.paired.iter().find(|runtime| runtime.id == client.id);
-            let available = runtime.is_some_and(|v| v.server.grant.active());
-            let scope = match &client.scope {
-                pairings::Scope::Read { capabilities, .. } => {
-                    ["Balances", "Confirmed history", "Policy summary"]
-                        .iter()
-                        .copied()
-                        .zip(capabilities)
-                        .filter_map(|(name, allowed)| allowed.then_some(name))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                }
-                pairings::Scope::TransactionPreparation { .. } => "Unsigned Regtest transaction preparation only; native review and user signing required".into(),
-                pairings::Scope::Proposal => "Regtest wallet proposals only".into(),
-                pairings::Scope::WalletCreation => {
-                    "Regtest wallet preparation with public keys; native creation approval required"
-                        .into()
-                }
-            };
-            content = content.push(
-                column![
-                    text(format!("{} · Paired until revoked", client.name)),
-                    text(format!("This Cube · {scope}")),
-                    text(if !self.enabled {
-                        "Paused"
-                    } else if available {
-                        "Available while this Cube is unlocked"
-                    } else {
-                        "Unavailable for the current wallet or session"
-                    }),
-                    text(format!(
-                        "Successful operations this session: {}",
-                        runtime.map_or(0, |v| v
-                            .server
-                            .grant
-                            .successful_calls
-                            .load(std::sync::atomic::Ordering::Relaxed))
-                    )),
-                    button("Copy private client configuration").on_press_maybe(
-                        (!self.pairing_poisoned && available)
-                            .then(|| msg(Message::CopyPair(client.id.clone())))
-                    ),
-                    button("Revoke this client")
-                        .on_press(msg(Message::RevokePair(client.id.clone()))),
-                ]
-                .spacing(8),
-            );
-            #[cfg(feature = "mcp-transactions")]
-            if let Some(service) = runtime
-                .filter(|_| available)
-                .and_then(|v| v.transactions.as_ref())
-            {
-                for draft in service.summaries() {
-                    content = content.push(text(format!("Unsigned transaction: {} sats to {} recipient(s), fee {} sats. Review every address and amount before signing.", draft.amount_sats, draft.recipients.len(), draft.fee_sats)))
-                        .push(button("Review prepared transaction in Tenshu").on_press(msg(Message::ReviewTransaction { client_id: client.id.clone(), draft_id: draft.draft_id })));
-                }
-            }
-            #[cfg(feature = "mcp-proposals")]
-            if let Some(proposal) = runtime
-                .filter(|_| available)
-                .and_then(|v| v.proposals.as_ref())
-                .and_then(|s| s.pending().ok())
-                .flatten()
-            {
-                let keys_ready = runtime
-                    .and_then(|v| v.proposals.as_ref())
-                    .is_some_and(|store| {
-                        store
-                            .creation_input(&proposal.proposal_id)
-                            .ok()
-                            .flatten()
-                            .is_some()
-                    });
-                content = content.push(text(format!("{}: 3-of-5 primary, recovery {}-of-{} after {} blocks. {}", client.name,
-                    proposal.topology.recovery.quorum.threshold, proposal.topology.recovery.quorum.key_count, proposal.topology.recovery.relative_delay_blocks,
-                    if keys_ready { "Public keys and descriptor validated. Device ownership and backups still require your verification." } else { "Keys are not yet selected." })))
-                    .push(button(if keys_ready { "Review prepared wallet in Tenshu" } else { "Review proposal and select keys in Tenshu" }).on_press(msg(Message::ReviewPairedProposal(client.id.clone()))));
-            }
-        }
-        content.into()
+        presentation::paired_clients(self)
     }
     /// Stop the server and clear its approved display label synchronously.
     pub fn revoke(&mut self) {
@@ -875,106 +789,13 @@ impl Settings {
         supported: bool,
         proposal_supported: bool,
     ) -> Element<'_, view::Message> {
-        let message = |m| view::Message::LocalMcp(m);
         #[cfg(feature = "mcp-proposals")]
         if proposal_supported {
             return self.proposal_view();
         }
         #[cfg(not(feature = "mcp-proposals"))]
         let _ = proposal_supported;
-        let mut content = column![
-            h3("AI access"),
-            text("Today · Experimental local Vault reads and persistent scoped pairing. Planned · guided pairing, wallet setup, and transaction preparation."),
-            text("Connect a local AI client to this Cube's Vault. Your AI provider may receive financial information. Only enable access for a client you trust."),
-            text(if cfg!(feature = "mcp-transactions") && self.pairing_location.as_ref().is_some_and(|v| v.chain_matches(crate::chain::ChainId::Regtest)) { "Choose read access or separately scoped unsigned transaction preparation. No keys, signing or broadcast through MCP. Pairing remains trusted until revoked; access pauses on lock/close and resumes after ordinary unlock. Unsigned drafts end with the session." } else { "Read-only. No keys, signing, payments or wallet changes. Paired clients remain trusted until revoked. Wallet access pauses on lock or close and resumes after ordinary unlock." }),
-        ].spacing(16);
-        if !cfg!(any(unix, windows)) || !supported {
-            return content.push(text("MCP currently supports Bitcoin Vaults on macOS, Linux and Windows. This wallet is unavailable for MCP.")).into();
-        }
-        content = content.push(
-            checkbox(self.enabled)
-                .label("Enable AI access for this Cube")
-                .on_toggle(move |v| message(Message::Enable(v))),
-        );
-        if self.enabled {
-            content = content
-                .push(
-                    text_input("Client label (for your reference)", &self.client_name)
-                        .on_input(move |v| message(Message::ClientName(v))),
-                )
-                .push(
-                    checkbox(self.wallet_allowed)
-                        .label("Allow this client to access this Cube's Vault")
-                        .on_toggle(move |v| message(Message::Wallet(v))),
-                );
-            for (i, label) in [
-                "Read balances",
-                "Read confirmed transaction history",
-                "Read spending policy summary",
-            ]
-            .iter()
-            .copied()
-            .enumerate()
-            {
-                content = content.push(
-                    checkbox(self.capabilities[i])
-                        .label(label)
-                        .on_toggle(move |v| message(Message::Capability(i, v))),
-                );
-            }
-            #[cfg(feature = "mcp-transactions")]
-            if self
-                .pairing_location
-                .as_ref()
-                .is_some_and(|v| v.chain_matches(crate::chain::ChainId::Regtest))
-            {
-                content = content.push(checkbox(self.transactions_allowed)
-                    .label("Prepare unsigned Regtest transactions (separate from wallet reads)")
-                    .on_toggle(move |v| message(Message::Transactions(v))))
-                    .push(text("Exact satoshi recipients and explicit fee limits only. The PSBT stays in Tenshu; review recipient addresses, amounts, fees and change before signing. Up to 8 construction attempts per client and unlock, including failed engine attempts. No self-send, recovery selection or fiat conversion."));
-            }
-            content = content.push(
-                button("Pair client until revoked").on_press_maybe(
-                    (self.wallet_allowed
-                        && (self.capabilities.iter().any(|v| *v) || self.transaction_selection())
-                        && !self.client_name.trim().is_empty())
-                    .then(|| message(Message::Pair)),
-                ),
-            );
-            #[cfg(any(unix, windows))]
-            if let Some(server) = &self.server {
-                let calls = server
-                    .grant
-                    .successful_calls
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                content = content
-                    .push(text(format!(
-                        "Client: {} · {} · successful reads: {}",
-                        self.approved_name,
-                        if server.grant.active() {
-                            "Authorized"
-                        } else {
-                            "Inactive — approve again"
-                        },
-                        calls
-                    )))
-                    .push(button("Revoke access now").on_press(message(Message::Revoke)));
-                if server.grant.active() {
-                    content = content.push(button("Copy private client configuration").on_press(message(Message::CopyConfig)))
-                        .push(text("Paste into your MCP client's local configuration, then clear the clipboard. It contains a temporary access credential: do not paste it into a chat. Restart the client after replacing a grant. See docs/mcp/README.md."));
-                }
-            } else if self
-                .pairing_store
-                .as_ref()
-                .is_none_or(|s| s.clients().is_empty())
-            {
-                content = content.push(text("No client is authorized."));
-            }
-        }
-        if self.failed {
-            content = content.push(text("Could not start local MCP. No access was granted."));
-        }
-        content.push(self.paired_clients_view()).into()
+        presentation::view_for_cube(self, supported)
     }
 }
 
@@ -1443,16 +1264,57 @@ mod tests {
                     appearance,
                     palette,
                 );
-                assert!(inspection.contains("Today · Experimental local Vault reads"));
+                assert!(inspection.contains("Today · Persistent per-client read access"));
                 assert!(inspection.contains("Your AI provider may receive financial information"));
+                assert!(inspection.contains("Guided pairing · Planned"));
                 assert!(!inspection.contains("TENSHU_MCP_CREDENTIAL"));
             }
         };
         render("r23-empty", &empty);
         render("r23-paired", &paired);
+        let client_id = paired.pairing_store.as_ref().unwrap().clients()[0]
+            .id
+            .clone();
+        let copy_id =
+            iced::advanced::widget::Id::from(format!("tenshu.ai-access.client.{client_id}.copy"));
+        let revoke_id =
+            iced::advanced::widget::Id::from(format!("tenshu.ai-access.client.{client_id}.revoke"));
+        for key in [
+            iced::keyboard::key::Named::Enter,
+            iced::keyboard::key::Named::Space,
+        ] {
+            let emitted = capture::activate_with_key(
+                paired.view_for_cube(true, false),
+                copy_id.clone(),
+                (1024, 768),
+                false,
+                key,
+            );
+            assert!(emitted.iter().any(|intent| matches!(intent,
+                view::Message::LocalMcp(Message::CopyPair(id)) if id == &client_id
+            )));
+        }
+        let emitted = capture::activate(
+            paired.view_for_cube(true, false),
+            revoke_id.clone(),
+            (1024, 768),
+            true,
+        );
+        assert!(emitted.iter().any(|intent| matches!(intent,
+            view::Message::LocalMcp(Message::RevokePair(id)) if id == &client_id
+        )));
         paired.revoke();
         super::super::session::close();
         render("r23-locked", &paired);
+        let locked = capture::inspect(
+            "r23-locked-focus",
+            paired.view_for_cube(true, false),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(!locked.focus.iter().any(|(id, _)| id == &copy_id));
+        assert!(locked.focus.iter().any(|(id, _)| id == &revoke_id));
         drop(paired);
         runtime.block_on(daemon.stop()).unwrap();
         drop(daemon);
