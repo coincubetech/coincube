@@ -435,8 +435,8 @@ mod tests {
         assert!(connect(&endpoint).await.is_err());
         drop(server);
     }
-    #[test]
-    fn failed_connection_replacement_keeps_pipe_name_owned() {
+    #[tokio::test]
+    async fn failed_connection_replacement_keeps_pipe_name_owned() {
         let endpoint = path(std::process::id());
         let sid = logon_sid().unwrap();
         let mut listener = create_pipe(&endpoint, &sid, true).unwrap();

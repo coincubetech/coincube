@@ -144,6 +144,7 @@ impl State {
 /// - `settings.json` — Cube metadata. (The PIN and duress-PIN hashes that used
 ///   to live here are gone; the duress *marker* now lives in `mnemonics/`, so
 ///   it is wiped by that entry.)
+/// - `mcp-pairings/` — encrypted client authorization and bearer credentials.
 ///
 /// `connect.json` (the cached Connect auth the cryptic screen needs to check
 /// duress state) is deliberately NOT listed, so it survives — as do the
@@ -151,7 +152,7 @@ impl State {
 /// live outside any network directory. Re-checking existence each call makes
 /// this robust to an interrupted wipe: whatever remains is targeted again.
 fn duress_wipe_targets(root: &std::path::Path) -> Vec<std::path::PathBuf> {
-    const CUBE_MATERIAL: &[&str] = &["data", "mnemonics", "settings.json"];
+    const CUBE_MATERIAL: &[&str] = &["data", "mnemonics", "settings.json", "mcp-pairings"];
     let mut targets = Vec::new();
 
     // A duress wipe must never leave seeds or PIN hashes behind because a virus
@@ -5325,6 +5326,7 @@ mod duress_wipe_target_tests {
         touch(&net.join("data").join("cube_a").join("wallet.db"));
         touch(&net.join("mnemonics").join("aabbccdd-master"));
         touch(&net.join("settings.json"));
+        touch(&net.join("mcp-pairings").join("fixture").join("clients.enc"));
         touch(&net.join("connect.json"));
         // A second network is covered too.
         touch(&root.join("testnet").join("mnemonics").join("seed"));
@@ -5352,6 +5354,10 @@ mod duress_wipe_target_tests {
         let targets = duress_wipe_targets(&root);
 
         assert!(targets.contains(&net.join("data")), "data/ must be wiped");
+        assert!(
+            targets.contains(&net.join("mcp-pairings")),
+            "durable client authorization must be wiped"
+        );
         assert!(
             targets.contains(&net.join("mnemonics")),
             "mnemonics/ (seeds) must be wiped"

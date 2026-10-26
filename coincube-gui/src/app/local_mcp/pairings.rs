@@ -377,20 +377,39 @@ pub(super) fn descriptor_identity(wallet: &super::Wallet) -> String {
 
 pub(super) fn remove_cube(root: &Path, chain: crate::chain::ChainId, cube: &str) -> io::Result<()> {
     let location = Location::new(root, chain, cube)?;
-    if !location.exists() {
-        return Ok(());
+    remove_cube_at(&location, || location.invalidate_key())
+}
+
+fn remove_cube_at(
+    location: &Location,
+    invalidate_key: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    match fs::symlink_metadata(&location.directory) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return invalidate_key(),
+        Err(e) => return Err(e),
+        Ok(_) => {}
     }
     check_private(&location.directory, true)?;
     if location.directory.canonicalize()? != location.directory {
         return Err(io::Error::other("pairing path redirected"));
     }
     let lock = location.directory.join("owner.lock");
-    check_private(&lock, false)?;
-    let owner = fs::OpenOptions::new().read(true).write(true).open(lock)?;
-    if !owner.try_lock_exclusive()? {
-        return Err(io::Error::other("paired Cube is open in another process"));
-    }
-    fs::remove_dir_all(&location.directory)
+    let _owner = match check_private(&lock, false) {
+        Ok(()) => {
+            let owner = fs::OpenOptions::new().read(true).write(true).open(lock)?;
+            if !owner.try_lock_exclusive()? {
+                return Err(io::Error::other("paired Cube is open in another process"));
+            }
+            Some(owner)
+        }
+        // A previous removal can have deleted owner.lock before failing to
+        // remove another file. Let the same Cube deletion finish on retry.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
+    fs::remove_dir_all(&location.directory)?;
+    // If this fails, the absent-directory branch retries key invalidation.
+    invalidate_key()
 }
 
 #[cfg(test)]
@@ -399,6 +418,33 @@ mod tests {
     fn location(root: &Path, cube: &str) -> Location {
         fs::create_dir_all(root.join("regtest")).unwrap();
         Location::new(root, crate::chain::ChainId::Regtest, cube).unwrap()
+    }
+    #[test]
+    fn cube_removal_retries_after_partial_directory_or_key_deletion() {
+        let root = std::env::temp_dir().join(format!("mcp-delete-retry-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let location = location(&root, "retry");
+        fs::create_dir_all(&location.directory).unwrap();
+        protect_new(&location.directory, true).unwrap();
+        fs::write(location.directory.join("clients.enc"), b"partial").unwrap();
+
+        // A prior remove_dir_all may have removed owner.lock first. A keyring
+        // failure after directory removal is also retryable without creating
+        // or reading any real keystore entry in this synthetic test.
+        let mut invalidations = 0;
+        assert!(remove_cube_at(&location, || {
+            invalidations += 1;
+            Err(io::Error::other("synthetic keyring failure"))
+        })
+        .is_err());
+        assert!(!location.directory.exists());
+        remove_cube_at(&location, || {
+            invalidations += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(invalidations, 2);
+        fs::remove_dir_all(root).unwrap();
     }
     fn fixture() -> (PathBuf, Store) {
         let root = std::env::temp_dir().join(format!("mcp-add-recovery-{}", uuid::Uuid::new_v4()));
