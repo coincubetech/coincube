@@ -1345,6 +1345,7 @@ fn sign_view<'a>(
             .push_maybe(error.map(|reason| card::warning(reason.to_string())))
             .push_maybe(state.desc_policy.as_ref().map(|policy| {
                 psbt::spend_overview_with_cancel(
+                    state.action_scope(),
                     &state.tx,
                     policy,
                     &state.wallet.keys_aliases,
@@ -1409,6 +1410,7 @@ fn paired_sign_view<'a>(
             }))
             .push_maybe(error.map(|reason| card::warning(reason.to_string())))
             .push_maybe(state.desc_policy.as_ref().map(|policy| psbt::spend_overview_with_cancel(
+                state.action_scope(),
                 &state.tx,
                 policy,
                 &state.wallet.keys_aliases,
