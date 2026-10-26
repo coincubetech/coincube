@@ -2473,6 +2473,65 @@ mod tests {
     }
 
     #[test]
+    fn real_pin_and_passkey_faces_follow_the_prototype_and_keep_focus_targets() {
+        let cube = crate::app::settings::CubeSettings::new_with_raw_id(
+            "everyday".into(),
+            "Everyday".into(),
+            ChainId::Bitcoin,
+        );
+        let context = floor_context(&cube);
+        let success = || crate::pin_entry::PinEntrySuccess::LoadApp {
+            datadir: crate::dir::CoincubeDirectory::new(Default::default()),
+            config: crate::app::Config::new(false),
+            network: cube.network.bitcoin_network(),
+            internal_bitcoind: None,
+            backup: None,
+            wallet_settings: None,
+            connect_client: None,
+        };
+        let mode = coincube_ui::theme::palette::ThemeMode::Dark;
+        let entry = crate::pin_entry::PinEntry::new(cube.clone(), PathBuf::new(), success(), None);
+        let pin = capture::inspect_full_window(
+            "unlock-pin-face",
+            entry.view_with_theme_and_floor(mode, Some(&context)),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        for text in [
+            "Open Everyday",
+            " · Bitcoin mainnet",
+            "PIN",
+            "Enter this Cube's PIN.",
+            "Unlock",
+            "Network checks run after your PIN is accepted.",
+            "Cancel",
+        ] {
+            assert!(pin.contains(text), "missing {:?}", text);
+        }
+        // The old full-screen controls are gone from the face.
+        assert!(!pin.contains("Submit"));
+        assert!(!pin.contains("Enter PIN for"));
+        assert!(pin.has_focus(crate::pin_input::first_digit_id()));
+        // The quiet Launcher bars stand behind the face.
+        assert!(pin.contains("App preferences"));
+        assert!(pin.contains("Create Cube"));
+
+        let passkey =
+            crate::passkey_unlock::PasskeyUnlock::new(cube.clone(), PathBuf::new(), success());
+        let passkey = capture::inspect_full_window(
+            "unlock-passkey-face",
+            passkey.view_with_theme_and_floor(mode, Some(&context)),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(passkey.contains("Unlock with passkey"));
+        assert!(passkey.contains("Cancel"));
+        assert!(passkey.has_focus(crate::passkey_unlock::begin_button_id()));
+    }
+
+    #[test]
     fn unlock_cube_keeps_network_and_persisted_face_marks_in_both_themes() {
         use launcher_scene::{rest_face_svg, Face};
         let mut cube = crate::app::settings::CubeSettings::new_with_raw_id(

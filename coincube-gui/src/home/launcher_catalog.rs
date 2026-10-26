@@ -137,15 +137,35 @@ pub(super) enum KeyMode {
     Shut,
 }
 
+/// The two hover regions that make up the prototype's one `.keywrap`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyPart {
+    Button,
+    /// The card and the 8px gap under it.
+    Card,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct KeyCard {
     pub mode: KeyMode,
-    pub hovered: bool,
+    /// Over the button or the card. They are separate Iced areas, and one
+    /// pointer move reports entering one before leaving the other, so each
+    /// keeps its own flag and the wrap counts as hovered while either is.
+    pub over_button: bool,
+    pub over_card: bool,
 }
 
 impl KeyCard {
-    fn hover(&mut self, hovered: bool) {
-        self.hovered = hovered;
+    fn hovered(&self) -> bool {
+        self.over_button || self.over_card
+    }
+
+    fn hover(&mut self, part: KeyPart, over: bool) {
+        match part {
+            KeyPart::Button => self.over_button = over,
+            KeyPart::Card => self.over_card = over,
+        }
+        let hovered = self.hovered();
         self.mode = match (self.mode, hovered) {
             (KeyMode::Closed, true) => KeyMode::Peek,
             (KeyMode::Peek | KeyMode::Shut, false) => KeyMode::Closed,
@@ -154,7 +174,7 @@ impl KeyCard {
     }
 
     fn shut(&mut self) {
-        self.mode = if self.hovered {
+        self.mode = if self.hovered() {
             KeyMode::Shut
         } else {
             KeyMode::Closed
@@ -171,6 +191,13 @@ impl KeyCard {
 }
 
 impl CatalogState {
+    /// Leaving the Launcher screen closes its popovers; Iced sends no hover
+    /// exit for areas that are no longer drawn.
+    pub(super) fn dismiss_popovers(&mut self) {
+        self.key = KeyCard::default();
+        self.network_menu = false;
+    }
+
     pub(super) fn key_open(&self) -> bool {
         matches!(self.key.mode, KeyMode::Peek | KeyMode::Pinned)
     }
@@ -273,7 +300,7 @@ pub enum CatalogMessage {
     SelectFloor(CubeCatalogKey),
     MotionTick(Instant),
     /// The pointer entered or left the Key button or its card.
-    KeyHover(bool),
+    KeyHover(KeyPart, bool),
     /// A click pins or unpins the Key card.
     KeyToggle,
     /// Escape shuts it.
@@ -457,8 +484,8 @@ impl Home {
                     Task::none()
                 }
             }
-            CatalogMessage::KeyHover(hovered) => {
-                self.catalog.key.hover(hovered);
+            CatalogMessage::KeyHover(part, over) => {
+                self.catalog.key.hover(part, over);
                 Task::none()
             }
             CatalogMessage::KeyToggle => {
@@ -633,6 +660,10 @@ impl Home {
     /// exactly one listed Cube (removed, duplicated, reloaded from another
     /// chain). Never moves it to another Cube. Runs after every message.
     pub(super) fn reconcile_catalog(&mut self) {
+        // The Key card belongs to the Key button, which needs a local Cube.
+        if project(self).local_total == 0 {
+            self.catalog.key = KeyCard::default();
+        }
         let pages = project(self).locals.len().div_ceil(FLOOR_PAGE_SIZE).max(1);
         self.catalog.page = self.catalog.page.min(pages - 1);
         if let Some(key) = &self.catalog.selected {
@@ -1685,6 +1716,111 @@ mod tests {
         let _ = home.update(Message::View(ViewMessage::Catalog(message)));
     }
 
+    /// Moves a real pointer over the mounted Launcher, feeding each batch of
+    /// messages back through `Home::update` before the next move.
+    fn pointer_path(home: &mut Home, points: &[iced::Point]) -> Vec<ViewMessage> {
+        let mut all = Vec::new();
+        for point in points {
+            let cursor = iced::mouse::Cursor::Available(*point);
+            let messages = {
+                let mut mounted = mount_window(launcher_view(home), 1440.0, 900.0);
+                // A fresh mount has no hover state: replay the previous point
+                // (already applied to `home`) and keep only this move's output.
+                let previous = all_last(&all, iced::Point::new(720.0, 450.0));
+                let _ = mounted.send(
+                    iced::Event::Mouse(iced::mouse::Event::CursorMoved { position: previous }),
+                    iced::mouse::Cursor::Available(previous),
+                );
+                mounted.send(
+                    iced::Event::Mouse(iced::mouse::Event::CursorMoved { position: *point }),
+                    cursor,
+                )
+            };
+            for message in &messages {
+                let _ = home.update(Message::View(message.clone()));
+            }
+            all.push((*point, messages));
+        }
+        all.into_iter().flat_map(|(_, messages)| messages).collect()
+    }
+
+    fn all_last(path: &[(iced::Point, Vec<ViewMessage>)], fallback: iced::Point) -> iced::Point {
+        path.last().map(|(point, _)| *point).unwrap_or(fallback)
+    }
+
+    #[test]
+    fn a_peeked_key_card_survives_the_pointer_moving_up_onto_it() {
+        let mut home = home_with(&[("a", "Alpha")]);
+        let button = bounds_of(
+            &focus_bounds_window(launcher_view(&home), 1440.0, 900.0),
+            &key_id(),
+        );
+        let on_button = button.center();
+        // 4px above the button: inside the 8px gap that belongs to the card.
+        let in_gap = iced::Point::new(on_button.x, button.y - 4.0);
+        let card = iced::Point::new(on_button.x, button.y - 40.0);
+        let messages = pointer_path(&mut home, &[on_button, in_gap, card]);
+        assert!(
+            home.catalog.key_open(),
+            "the peek closed on the way up: {:?} -> {:?}",
+            messages,
+            home.catalog.key
+        );
+        assert_eq!(home.catalog.key.mode, KeyMode::Peek);
+    }
+
+    #[test]
+    fn presses_inside_the_network_menu_do_not_close_it() {
+        use super::super::launcher_chrome::network_option_id;
+        let mut home = rows(2);
+        catalog(&mut home, CatalogMessage::NetworkMenu(true));
+        let row = bounds_of(
+            &focus_bounds_window(launcher_view(&home), 1440.0, 900.0),
+            &network_option_id(home.network),
+        );
+        // The filter note sits under the last row, inside the menu.
+        let note = iced::Point::new(row.x + 20.0, row.y + row.height + 24.0);
+        let mut mounted = mount_window(launcher_view(&home), 1440.0, 900.0);
+        let cursor = iced::mouse::Cursor::Available(note);
+        let mut messages = mounted.send(
+            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)),
+            cursor,
+        );
+        messages.extend(mounted.send(
+            iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                iced::mouse::Button::Left,
+            )),
+            cursor,
+        ));
+        assert!(
+            !messages
+                .iter()
+                .any(|m| matches!(m, ViewMessage::Catalog(CatalogMessage::NetworkMenu(false)))),
+            "{:?}",
+            messages
+        );
+        // A press outside the menu still closes it.
+        let outside = iced::mouse::Cursor::Available(iced::Point::new(720.0, 700.0));
+        let messages = mounted.send(
+            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)),
+            outside,
+        );
+        assert!(messages
+            .iter()
+            .any(|m| matches!(m, ViewMessage::Catalog(CatalogMessage::NetworkMenu(false)))));
+    }
+
+    #[test]
+    fn leaving_the_launcher_closes_its_popovers() {
+        let mut home = home_with(&[("a", "Alpha")]);
+        catalog(&mut home, CatalogMessage::KeyHover(KeyPart::Button, true));
+        catalog(&mut home, CatalogMessage::NetworkMenu(true));
+        let _ = home.update(Message::View(ViewMessage::ShowCreateCube(true)));
+        assert!(!home.catalog.key_open());
+        assert!(!home.catalog.network_menu);
+        assert_eq!(home.catalog.key, KeyCard::default());
+    }
+
     #[test]
     fn the_key_peeks_on_hover_pins_on_click_and_shuts_until_the_pointer_leaves() {
         let mut home = home_with(&[("a", "Alpha")]);
@@ -1692,21 +1828,21 @@ mod tests {
         assert!(closed.has(&key_id()));
         assert!(!closed.contains("Top: network"));
 
-        catalog(&mut home, CatalogMessage::KeyHover(true));
+        catalog(&mut home, CatalogMessage::KeyHover(KeyPart::Button, true));
         assert_eq!(home.catalog.key.mode, KeyMode::Peek);
         assert!(
             home_tree("key-card", &home, WIDE, "dark", theme::Theme::dark())
                 .contains("Top: network")
         );
-        catalog(&mut home, CatalogMessage::KeyHover(false));
+        catalog(&mut home, CatalogMessage::KeyHover(KeyPart::Button, false));
         assert!(!home.catalog.key_open(), "a peek closes on hover-out");
 
-        catalog(&mut home, CatalogMessage::KeyHover(true));
+        catalog(&mut home, CatalogMessage::KeyHover(KeyPart::Button, true));
         catalog(&mut home, CatalogMessage::KeyToggle);
-        catalog(&mut home, CatalogMessage::KeyHover(false));
+        catalog(&mut home, CatalogMessage::KeyHover(KeyPart::Button, false));
         assert_eq!(home.catalog.key.mode, KeyMode::Pinned, "a click pins it");
 
-        catalog(&mut home, CatalogMessage::KeyHover(true));
+        catalog(&mut home, CatalogMessage::KeyHover(KeyPart::Button, true));
         catalog(&mut home, CatalogMessage::KeyToggle);
         assert_eq!(
             home.catalog.key.mode,
@@ -1714,8 +1850,8 @@ mod tests {
             "a second click shuts it"
         );
         assert!(!home.catalog.key_open());
-        catalog(&mut home, CatalogMessage::KeyHover(false));
-        catalog(&mut home, CatalogMessage::KeyHover(true));
+        catalog(&mut home, CatalogMessage::KeyHover(KeyPart::Button, false));
+        catalog(&mut home, CatalogMessage::KeyHover(KeyPart::Button, true));
         assert_eq!(
             home.catalog.key.mode,
             KeyMode::Peek,
@@ -1724,7 +1860,7 @@ mod tests {
 
         catalog(&mut home, CatalogMessage::KeyClose);
         assert_eq!(home.catalog.key.mode, KeyMode::Shut, "Escape shuts a peek");
-        catalog(&mut home, CatalogMessage::KeyHover(false));
+        catalog(&mut home, CatalogMessage::KeyHover(KeyPart::Button, false));
         catalog(&mut home, CatalogMessage::KeyToggle);
         catalog(&mut home, CatalogMessage::KeyClose);
         assert_eq!(

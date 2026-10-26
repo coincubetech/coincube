@@ -1947,6 +1947,7 @@ impl Home {
                 Task::none()
             }
             Message::View(ViewMessage::ShowCreateCube(show)) => {
+                self.catalog.dismiss_popovers();
                 if show {
                     self.pending_bitcoin_import = None;
                     // Opening the form picks the default afresh: whether the
@@ -1984,6 +1985,7 @@ impl Home {
                 Task::none()
             }
             Message::View(ViewMessage::ShowImportBitcoin) => {
+                self.catalog.dismiss_popovers();
                 if self.creating_cube
                     || !matches!(
                         self.state,
@@ -3347,6 +3349,7 @@ impl Home {
             }
 
             Message::View(ViewMessage::GoToSection(section)) => {
+                self.catalog.dismiss_popovers();
                 // Duress launch kill-switch backstop: a deep-linked or otherwise
                 // programmatic navigation to the Duress section while it's gated
                 // off (the nav hides the entry, so a click can't produce this)

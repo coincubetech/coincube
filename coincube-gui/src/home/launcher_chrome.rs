@@ -15,7 +15,7 @@ use coincube_ui::{
 };
 
 use super::{
-    launcher_catalog::{self, CatalogMessage, Projection},
+    launcher_catalog::{self, CatalogMessage, KeyPart, Projection},
     launcher_coin, launcher_scene, Home, HomeSection, ViewMessage,
 };
 use crate::{
@@ -562,8 +562,14 @@ fn key_button<'a>(open: bool) -> Element<'a, ViewMessage> {
     })
     .on_press(ViewMessage::Catalog(CatalogMessage::KeyToggle));
     mouse_area(button)
-        .on_enter(ViewMessage::Catalog(CatalogMessage::KeyHover(true)))
-        .on_exit(ViewMessage::Catalog(CatalogMessage::KeyHover(false)))
+        .on_enter(ViewMessage::Catalog(CatalogMessage::KeyHover(
+            KeyPart::Button,
+            true,
+        )))
+        .on_exit(ViewMessage::Catalog(CatalogMessage::KeyHover(
+            KeyPart::Button,
+            false,
+        )))
         .into()
 }
 
@@ -685,7 +691,7 @@ fn brand<'a, M: 'a>(tone: Ink) -> Element<'a, M> {
 
 /// `.menu`: 272px under the chip, one `.mi` row per listed network and the
 /// filter note. Only the shown network's Cubes are loaded, so only its row
-/// carries a count. A click anywhere else closes it.
+/// carries a count. A click outside it closes it.
 pub(super) fn network_layer<'a>(home: &Home, shown: usize) -> Option<Element<'a, ViewMessage>> {
     if !home.catalog.network_menu {
         return None;
@@ -795,7 +801,8 @@ pub(super) fn network_layer<'a>(home: &Home, shown: usize) -> Option<Element<'a,
                 .spacing(16)
                 .push(brand(Ink::Clear))
                 .push(Space::new().width(Length::Fixed(1.0)))
-                .push(mouse_area(menu)),
+                // Presses on the menu's own padding and note stay in it.
+                .push(iced::widget::opaque(menu)),
         )
         .padding([0.0, GUTTER]);
     Some(
@@ -820,8 +827,14 @@ pub(super) fn key_layer<'a>(home: &Home) -> Option<Element<'a, ViewMessage>> {
                 bottom: 8.0,
                 ..Padding::ZERO
             }))
-            .on_enter(ViewMessage::Catalog(CatalogMessage::KeyHover(true)))
-            .on_exit(ViewMessage::Catalog(CatalogMessage::KeyHover(false))),
+            .on_enter(ViewMessage::Catalog(CatalogMessage::KeyHover(
+                KeyPart::Card,
+                true,
+            )))
+            .on_exit(ViewMessage::Catalog(CatalogMessage::KeyHover(
+                KeyPart::Card,
+                false,
+            ))),
         )
         .width(Length::Fill)
         .height(Length::Fill)
@@ -846,8 +859,6 @@ pub(crate) struct ChromeSnapshot {
     /// `Some(hidden)` while the balances eye is shown.
     eye: Option<bool>,
     connect: Vec<(String, Ink, f32, bool)>,
-    create_label: &'static str,
-    import_label: &'static str,
     links: Vec<&'static str>,
     limit: Option<String>,
     key: bool,
@@ -908,8 +919,6 @@ pub(super) fn snapshot(home: &Home, projection: &Projection<'_>) -> ChromeSnapsh
             .balance_privacy
             .map(|chrome| chrome.privacy.masks_amounts()),
         connect,
-        create_label: "Create Cube",
-        import_label: "Import Bitcoin wallet",
         links,
         limit: at_limit.then(|| limit_text(projection)),
         key: projection.local_total > 0,
@@ -1054,8 +1063,8 @@ pub(crate) fn quiet_dock<'a, M: 'a>(chrome: &ChromeSnapshot) -> Element<'a, M> {
         .spacing(8)
         .align_y(Alignment::Center)
         .height(Length::Fill)
-        .push(action(PLUS, chrome.create_label))
-        .push(action(IMPORT, chrome.import_label));
+        .push(action(PLUS, "Create Cube"))
+        .push(action(IMPORT, "Import Bitcoin wallet"));
     for link in &chrome.links {
         row = row.push(
             Container::new(words(*link, 13.0, font::MEDIUM, Ink::Accent)).padding([4.0, 6.0]),
