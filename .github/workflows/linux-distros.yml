@@ -6,8 +6,10 @@ name: Linux distros
 #
 # Distros are picked per family: the oldest release still supported (where
 # the glibc floor bites) and the newest. Derivatives ride on their base —
-# Mint/Pop!_OS/Zorin/elementary on Ubuntu, MX on Debian, Rocky/RHEL/CentOS
-# Stream on AlmaLinux, Manjaro/EndeavourOS/CachyOS on Arch.
+# Mint/Pop!_OS/Zorin/elementary on Ubuntu, MX on Debian, Manjaro/EndeavourOS/
+# CachyOS on Arch. Fedora stands in for the Red Hat family; RHEL and its
+# rebuilds are left out as server distros (RHEL 9 lacks glibc 2.35 and
+# WebKitGTK 4.1, and RHEL 10 ships no Xvfb to test on).
 #
 # Not covered here, by design: Alpine (musl, cannot run a glibc binary at all),
 # NixOS (no /lib paths; use the repo's flake.nix), Wayland-only sessions,
@@ -119,8 +121,6 @@ jobs:
           - { name: "Debian 12 (MX 23)", image: "debian:12", family: apt }
           - { name: "Debian 13", image: "debian:13", family: apt }
           - { name: "Fedora newest", image: "fedora:latest", family: dnf }
-          - { name: "AlmaLinux 9 (RHEL 9, Rocky 9)", image: "almalinux:9", family: dnf }
-          - { name: "AlmaLinux 10 (RHEL 10, Rocky 10)", image: "almalinux:10", family: dnf }
           - { name: "Arch (Manjaro, EndeavourOS, CachyOS)", image: "archlinux:latest", family: pacman }
           - { name: "openSUSE Leap 16", image: "opensuse/leap:16.0", family: zypper }
           - { name: "openSUSE Tumbleweed", image: "opensuse/tumbleweed", family: zypper }

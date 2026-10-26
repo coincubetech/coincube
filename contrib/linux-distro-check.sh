@@ -74,14 +74,6 @@ install() {
     dnf)
         dnf install -y tar gzip || exit 1
         INSTALL="dnf install -y --setopt=install_weak_deps=False"
-        # RHEL-family: some libraries only exist in the EPEL/CRB add-on repos.
-        # Turn them on so we learn whether the app can run at all there; a
-        # user would have to do the same.
-        if [ -f /etc/almalinux-release ] || [ -f /etc/rocky-release ]; then
-            dnf install -y epel-release > /dev/null 2>&1 && command -v crb > /dev/null &&
-                crb enable > /dev/null 2>&1 &&
-                summary "- note: EPEL and CRB repositories enabled; users need these too"
-        fi
         install_each webkit2gtk4.1 dbus-libs systemd-libs ca-certificates
         x11_runtime libX11 libX11-xcb libXcursor libXi libxkbcommon-x11
         install_quiet xorg-x11-server-Xvfb xorg-x11-xauth dbus-daemon dbus-x11 \
