@@ -3409,8 +3409,12 @@ mod renewal_banner_tests {
                 &renderer,
                 &layout::Limits::new(iced::Size::ZERO, size),
             );
-            assert!(node.size().width <= size.width, "{name} overflows width");
-            assert!(node.size().height <= size.height, "{name} overflows height");
+            assert!(node.size().width <= size.width, "{} overflows width", name);
+            assert!(
+                node.size().height <= size.height,
+                "{} overflows height",
+                name
+            );
         }
     }
 
