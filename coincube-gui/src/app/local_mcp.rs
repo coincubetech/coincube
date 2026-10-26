@@ -680,15 +680,6 @@ impl Settings {
                 {
                     return None;
                 }
-                // The private bearer configuration is only revealed while its
-                // exact runtime grant is active in this unlocked session.
-                if !self
-                    .paired
-                    .iter()
-                    .any(|runtime| runtime.id == id && runtime.server.grant.active())
-                {
-                    return None;
-                }
                 let store = self.pairing_store.as_ref()?;
                 let client = store.clients().iter().find(|client| client.id == id)?;
                 let executable = std::env::current_exe()
