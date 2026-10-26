@@ -4772,6 +4772,15 @@ impl App {
         self.panels.connect.account.auth_epoch()
     }
 
+    /// Retained account state rendered by the GUI's account-wide Connect sheet.
+    pub(crate) fn connect_sheet_account(&self) -> &state::connect::ConnectAccountPanel {
+        &self.panels.connect.account
+    }
+
+    pub(crate) fn connect_sheet_account_mut(&mut self) -> &mut state::connect::ConnectAccountPanel {
+        &mut self.panels.connect.account
+    }
+
     /// True when this tab's ConnectAccountPanel either already holds an
     /// authenticated session or can pull one out of the shared keyring
     /// entry. Lets the tab-level OpenConnectSignIn handler short-circuit
@@ -16655,6 +16664,16 @@ pub(crate) mod claim_step1_tests {
             .unwrap(),
         );
         (app, wallet)
+    }
+
+    pub(crate) fn signed_in_connect_for_shell(app: &mut App) {
+        app.panels.connect.account.user = Some(crate::services::coincube::User {
+            id: 7,
+            email: "shell@example.invalid".into(),
+            email_verified: Some(true),
+        });
+        app.panels.connect.account.step = state::connect::ConnectFlowStep::Dashboard;
+        app.cache.connect_authenticated = true;
     }
 
     /// A completed imported wallet whose real preparation gate succeeds.

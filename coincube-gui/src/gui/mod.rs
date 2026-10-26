@@ -28,7 +28,13 @@ use crate::{
             BalancePrivacyChrome, Operation, PreferencesNotice, PreferencesOwner,
             PreferencesPageState, SaveOutcome, SaveRequest,
         },
-        view::preferences as preferences_view,
+        view::{
+            connect::{
+                ConnectSheetMessage, ConnectSheetPage, ConnectSheetSection, CLOSE_ID,
+                CONTENT_SCROLL_ID,
+            },
+            preferences as preferences_view,
+        },
     },
     dir::CoincubeDirectory,
     gui::cache::GlobalCache,
@@ -272,6 +278,7 @@ pub struct GUI {
     system_theme: Option<coincube_ui::theme::palette::ThemeMode>,
     system_reduces_motion: Option<bool>,
     preferences_sheet: Option<PreferencesSheet>,
+    connect_sheet: Option<ConnectSheet>,
     preferences: PreferencesOwner,
 }
 
@@ -300,6 +307,7 @@ pub enum Message {
     ToggleTheme,
     SystemTheme(iced::theme::Mode),
     PreferencesSheet(preferences_view::Message),
+    ConnectSheet(ConnectSheetMessage),
     Preferences(SaveRequest, Result<PreferencesReceipt, String>),
 }
 
@@ -535,6 +543,7 @@ impl GUI {
                 system_theme: None,
                 system_reduces_motion,
                 preferences_sheet: None,
+                connect_sheet: None,
                 preferences,
             },
             Task::batch(cmds),
@@ -635,6 +644,208 @@ impl GUI {
             }
         }
         Task::none()
+    }
+
+    fn close_connect_sheet(&mut self) -> Task<Message> {
+        let Some(sheet) = self.connect_sheet.take() else {
+            return Task::none();
+        };
+        if self.overlay_origin_is_current(&sheet.origin) {
+            if let Some(focus) = sheet.origin.focus {
+                return iced_runtime::task::widget(
+                    iced::advanced::widget::operation::focusable::focus(focus),
+                );
+            }
+        }
+        Task::none()
+    }
+
+    fn open_connect_sheet(
+        &mut self,
+        section: ConnectSheetSection,
+        focus: Option<iced::advanced::widget::Id>,
+    ) -> Task<Message> {
+        let Some(origin) = self.overlay_origin(focus) else {
+            return Task::none();
+        };
+        if self.connect_panel(&origin).is_none() {
+            return Task::none();
+        }
+        let initialize = self.connect_panel(&origin).is_some_and(|account| {
+            matches!(
+                &account.step,
+                crate::app::state::connect::ConnectFlowStep::CheckingSession
+            )
+        });
+        self.preferences_sheet = None;
+        self.connect_sheet = Some(ConnectSheet {
+            origin: origin.clone(),
+            page: ConnectSheetPage::Sections(section),
+        });
+        let focus =
+            iced_runtime::task::widget(iced::advanced::widget::operation::focusable::focus(
+                iced::advanced::widget::Id::new(CLOSE_ID),
+            ));
+        let load = self.load_connect_section(&origin, section);
+        if !initialize {
+            return Task::batch([focus, load]);
+        }
+        let inner = match origin.source {
+            tab::PreferencesSource::Home => tab::Message::Launch(home::Message::View(
+                home::ViewMessage::ConnectAccount(crate::app::view::ConnectAccountMessage::Init),
+            )),
+            tab::PreferencesSource::App(_) => {
+                tab::Message::Run(AppMessage::View(crate::app::view::Message::ConnectAccount(
+                    crate::app::view::ConnectAccountMessage::Init,
+                )))
+            }
+        };
+        Task::batch([
+            focus,
+            load,
+            Task::done(Message::Pane(
+                origin.pane,
+                pane::Message::tab(origin.tab_id, inner),
+            )),
+        ])
+    }
+
+    fn open_connect_sheet_from(
+        &mut self,
+        pane_id: pane_grid::Pane,
+        tab_id: usize,
+        section: ConnectSheetSection,
+        focus: Option<iced::advanced::widget::Id>,
+    ) -> Task<Message> {
+        let Some(origin) = self.overlay_origin(None) else {
+            return Task::none();
+        };
+        if origin.pane != pane_id || origin.tab_id != tab_id {
+            return Task::none();
+        }
+        self.open_connect_sheet(section, focus)
+    }
+
+    fn connect_sheet_message(&mut self, message: ConnectSheetMessage) -> Task<Message> {
+        let Some(sheet) = &self.connect_sheet else {
+            return Task::none();
+        };
+        if !self.overlay_origin_is_current(&sheet.origin) {
+            self.connect_sheet = None;
+            return Task::none();
+        }
+        match message {
+            ConnectSheetMessage::FocusAction(id) => {
+                iced_runtime::task::widget(iced::advanced::widget::operation::focusable::focus(id))
+            }
+            ConnectSheetMessage::Close => self.close_connect_sheet(),
+            ConnectSheetMessage::SelectSection(section) => {
+                let origin = sheet.origin.clone();
+                if let Some(sheet) = &mut self.connect_sheet {
+                    sheet.page = ConnectSheetPage::Sections(section);
+                }
+                self.load_connect_section(&origin, section)
+            }
+            ConnectSheetMessage::OpenAuthentication { create_account } => {
+                if let Some(sheet) = &mut self.connect_sheet {
+                    sheet.page = ConnectSheetPage::Authentication;
+                }
+                self.connect_sheet_message(ConnectSheetMessage::Account(if create_account {
+                    crate::app::view::ConnectAccountMessage::CreateAccount
+                } else {
+                    crate::app::view::ConnectAccountMessage::Init
+                }))
+            }
+            ConnectSheetMessage::Account(message) => {
+                let origin = sheet.origin.clone();
+                let plan_navigation = matches!(
+                    &message,
+                    crate::app::view::ConnectAccountMessage::OpenPlanBilling
+                        | crate::app::view::ConnectAccountMessage::ComparePlans(_)
+                        | crate::app::view::ConnectAccountMessage::RenewCurrentPlan
+                );
+                let inner = match origin.source {
+                    tab::PreferencesSource::Home => tab::Message::Launch(home::Message::View(
+                        home::ViewMessage::ConnectAccount(message),
+                    )),
+                    tab::PreferencesSource::App(_) => tab::Message::Run(AppMessage::View(
+                        crate::app::view::Message::ConnectAccount(message),
+                    )),
+                };
+                let task = self.update(Message::Pane(
+                    origin.pane,
+                    pane::Message::tab(origin.tab_id, inner),
+                ));
+                if plan_navigation && self.overlay_origin_is_current(&origin) {
+                    if let Some(sheet) = &mut self.connect_sheet {
+                        sheet.page = ConnectSheetPage::Sections(ConnectSheetSection::PlanBilling);
+                    }
+                }
+                task
+            }
+        }
+    }
+
+    fn load_connect_section(
+        &mut self,
+        origin: &OverlayOrigin,
+        section: ConnectSheetSection,
+    ) -> Task<Message> {
+        use crate::app::{menu::ConnectSubMenu, state::connect::account::load_security_data};
+        let Some(tab) = self
+            .panes
+            .get_mut(origin.pane)
+            .and_then(|pane| pane.tabs.iter_mut().find(|tab| tab.id == origin.tab_id))
+        else {
+            return Task::none();
+        };
+        let (task, app) = {
+            let (account, app) = match &mut tab.state {
+                tab::State::Home(home) => (&mut home.connect_account, false),
+                tab::State::App(app) => (app.connect_sheet_account_mut(), true),
+                _ => return Task::none(),
+            };
+            account.active_sub = match section {
+                ConnectSheetSection::Account | ConnectSheetSection::RecoveryServices => {
+                    ConnectSubMenu::Overview
+                }
+                ConnectSheetSection::PlanBilling => ConnectSubMenu::PlanBilling,
+                ConnectSheetSection::Contacts => ConnectSubMenu::Contacts,
+                ConnectSheetSection::DevicesSecurity => ConnectSubMenu::Security,
+            };
+            if !account.is_authenticated() {
+                return Task::none();
+            }
+            let task = match section {
+                ConnectSheetSection::Account | ConnectSheetSection::RecoveryServices => {
+                    account.reload_overview()
+                }
+                ConnectSheetSection::PlanBilling => Task::none(),
+                ConnectSheetSection::Contacts => account.reload_contacts(),
+                ConnectSheetSection::DevicesSecurity => {
+                    load_security_data(&account.client, account.session_generation())
+                }
+            };
+            (task, app)
+        };
+        let task = if app {
+            tab.emit_app_task(task)
+        } else {
+            task.map(|message| match message {
+                AppMessage::View(crate::app::view::Message::ConnectAccount(message)) => {
+                    tab::Message::Launch(home::Message::View(home::ViewMessage::ConnectAccount(
+                        message,
+                    )))
+                }
+                _ => {
+                    log::warn!("Unexpected account section load result in Launcher");
+                    tab::Message::Launch(home::Message::View(home::ViewMessage::Check))
+                }
+            })
+        };
+        let pane_id = origin.pane;
+        let tab_id = origin.tab_id;
+        task.map(move |message| Message::Pane(pane_id, pane::Message::tab(tab_id, message)))
     }
 
     fn preferences_sheet_message(&mut self, message: preferences_view::Message) -> Task<Message> {
@@ -740,6 +951,13 @@ impl GUI {
             .is_some_and(|sheet| !self.overlay_origin_is_current(&sheet.origin))
         {
             self.preferences_sheet = None;
+        }
+        if self
+            .connect_sheet
+            .as_ref()
+            .is_some_and(|sheet| !self.overlay_origin_is_current(&sheet.origin))
+        {
+            self.connect_sheet = None;
         }
         // Intercept before stripping AppAsync/ForkAsync so a queued eye press
         // from a closed or replaced Cube cannot mutate device preferences.
@@ -1282,6 +1500,13 @@ impl GUI {
                         action::focus_next_visible(preferences_view::CONTENT_SCROLL_ID)
                     };
                 }
+                if self.connect_sheet.is_some() {
+                    return if shift {
+                        action::focus_previous_visible(CONTENT_SCROLL_ID)
+                    } else {
+                        action::focus_next_visible(CONTENT_SCROLL_ID)
+                    };
+                }
                 log::debug!("Tab pressed!");
                 if shift {
                     action::focus_previous_visible(crate::app::view::nav::shell::MIDDLE_SCROLL_ID)
@@ -1292,6 +1517,9 @@ impl GUI {
             Message::KeyPressed(Key::Escape) => {
                 if self.preferences_sheet.is_some() {
                     return self.close_preferences_sheet();
+                }
+                if self.connect_sheet.is_some() {
+                    return self.close_connect_sheet();
                 }
                 let Some((pane_id, tab_id, generation, intent)) = self.focus.and_then(|pane_id| {
                     let pane = self.panes.get(pane_id)?;
@@ -1528,6 +1756,113 @@ impl GUI {
                 self.update(Message::ToggleTheme)
             }
             Message::Pane(pane_id, pane::Message::Tab(tab_id, inner))
+                if matches!(
+                    inner.as_ref(),
+                    tab::Message::Run(AppMessage::View(
+                        crate::app::view::Message::OpenConnectSignIn
+                    ))
+                ) && self.connect_overlay_eligible(pane_id) =>
+            {
+                let refresh = self.overlay_origin(None).is_some_and(|origin| {
+                    origin.pane == pane_id
+                        && origin.tab_id == tab_id
+                        && self.connect_panel(&origin).is_some_and(|account| {
+                            !account.is_authenticated() && !account.is_checking_session()
+                        })
+                });
+                let signed_in = self.overlay_origin(None).is_some_and(|origin| {
+                    self.connect_panel(&origin)
+                        .is_some_and(|account| account.is_authenticated())
+                });
+                let source_id = if signed_in {
+                    "tenshu.connect.account"
+                } else {
+                    "tenshu.connect.sign-in"
+                };
+                let open = self.open_connect_sheet_from(
+                    pane_id,
+                    tab_id,
+                    ConnectSheetSection::Account,
+                    Some(iced::advanced::widget::Id::new(source_id)),
+                );
+                if refresh {
+                    Task::batch([
+                        open,
+                        Task::done(Message::Pane(
+                            pane_id,
+                            pane::Message::tab(
+                                tab_id,
+                                tab::Message::Run(AppMessage::View(
+                                    crate::app::view::Message::ConnectAccount(
+                                        crate::app::view::ConnectAccountMessage::Init,
+                                    ),
+                                )),
+                            ),
+                        )),
+                    ])
+                } else {
+                    open
+                }
+            }
+            Message::Pane(pane_id, pane::Message::Tab(tab_id, inner))
+                if matches!(
+                    inner.as_ref(),
+                    tab::Message::Run(AppMessage::View(crate::app::view::Message::OpenPlanBilling))
+                ) && self.connect_overlay_eligible(pane_id) =>
+            {
+                self.open_connect_sheet_from(
+                    pane_id,
+                    tab_id,
+                    ConnectSheetSection::PlanBilling,
+                    None,
+                )
+            }
+            Message::Pane(pane_id, pane::Message::Tab(tab_id, inner))
+                if matches!(
+                    inner.as_ref(),
+                    tab::Message::Launch(home::Message::View(home::ViewMessage::GoToSection(
+                        home::HomeSection::Connect(
+                            crate::app::menu::ConnectSubMenu::Overview
+                                | crate::app::menu::ConnectSubMenu::PlanBilling
+                                | crate::app::menu::ConnectSubMenu::Security
+                                | crate::app::menu::ConnectSubMenu::Contacts
+                        )
+                    )))
+                ) =>
+            {
+                let tab::Message::Launch(home::Message::View(home::ViewMessage::GoToSection(
+                    home::HomeSection::Connect(sub),
+                ))) = *inner
+                else {
+                    unreachable!();
+                };
+                let section = match sub {
+                    crate::app::menu::ConnectSubMenu::Overview => ConnectSheetSection::Account,
+                    crate::app::menu::ConnectSubMenu::PlanBilling => {
+                        ConnectSheetSection::PlanBilling
+                    }
+                    crate::app::menu::ConnectSubMenu::Security => {
+                        ConnectSheetSection::DevicesSecurity
+                    }
+                    crate::app::menu::ConnectSubMenu::Contacts => ConnectSheetSection::Contacts,
+                    crate::app::menu::ConnectSubMenu::Duress => unreachable!(),
+                };
+                self.open_connect_sheet_from(pane_id, tab_id, section, None)
+            }
+            Message::Pane(pane_id, pane::Message::View(pane::ViewMessage::OpenConnectSignIn))
+                if self.connect_overlay_eligible(pane_id) =>
+            {
+                self.open_connect_sheet(
+                    ConnectSheetSection::Account,
+                    Some(iced::advanced::widget::Id::new("tenshu.connect.sign-in")),
+                )
+            }
+            Message::Pane(pane_id, pane::Message::View(pane::ViewMessage::OpenPlanBilling))
+                if self.connect_overlay_eligible(pane_id) =>
+            {
+                self.open_connect_sheet(ConnectSheetSection::PlanBilling, None)
+            }
+            Message::Pane(pane_id, pane::Message::Tab(tab_id, inner))
                 if matches!(inner.as_ref(), tab::Message::OpenAppPreferences(_)) =>
             {
                 let tab::Message::OpenAppPreferences(source) = *inner else {
@@ -1558,6 +1893,7 @@ impl GUI {
                     origin,
                     page: PreferencesPageState::default(),
                 });
+                self.connect_sheet = None;
                 iced_runtime::task::widget(iced::advanced::widget::operation::focusable::focus(
                     iced::advanced::widget::Id::new("tenshu.preferences.close"),
                 ))
@@ -2392,6 +2728,7 @@ impl GUI {
                 Task::none()
             }
             Message::PreferencesSheet(message) => self.preferences_sheet_message(message),
+            Message::ConnectSheet(message) => self.connect_sheet_message(message),
             Message::Tick => {
                 let system_reduces_motion =
                     crate::app::settings::system_accessibility::reduces_motion();
@@ -2596,6 +2933,15 @@ impl GUI {
                 return compose_overlay(background, foreground);
             }
         }
+        if let Some(sheet) = &self.connect_sheet {
+            if self.overlay_origin_is_current(&sheet.origin) {
+                if let Some(account) = self.connect_panel(&sheet.origin) {
+                    let foreground = crate::app::view::connect::connect_sheet(account, sheet.page)
+                        .map(Message::ConnectSheet);
+                    return compose_overlay(background, foreground);
+                }
+            }
+        }
         background
     }
 
@@ -2639,7 +2985,42 @@ struct PreferencesSheet {
     page: PreferencesPageState,
 }
 
+struct ConnectSheet {
+    origin: OverlayOrigin,
+    page: ConnectSheetPage,
+}
+
 impl GUI {
+    fn connect_overlay_eligible(&self, pane_id: pane_grid::Pane) -> bool {
+        self.visible_pane().is_some_and(|(id, pane)| {
+            id == pane_id
+                && pane
+                    .tabs
+                    .get(pane.focused_tab)
+                    .is_some_and(|tab| match &tab.state {
+                        tab::State::Home(_) => true,
+                        tab::State::App(app) => app.can_restore_connect_session(),
+                        _ => false,
+                    })
+        })
+    }
+
+    fn connect_panel(
+        &self,
+        origin: &OverlayOrigin,
+    ) -> Option<&crate::app::state::connect::ConnectAccountPanel> {
+        let tab = self
+            .panes
+            .get(origin.pane)?
+            .tabs
+            .iter()
+            .find(|tab| tab.id == origin.tab_id)?;
+        match &tab.state {
+            tab::State::Home(home) => Some(&home.connect_account),
+            tab::State::App(app) => Some(app.connect_sheet_account()),
+            _ => None,
+        }
+    }
     /// The pane `view` renders: the focused one, else the first.
     fn visible_pane(&self) -> Option<(pane_grid::Pane, &pane::Pane)> {
         self.panes
@@ -2786,6 +3167,7 @@ mod app_preferences_sheet_tests {
             system_theme: None,
             system_reduces_motion: None,
             preferences_sheet: None,
+            connect_sheet: None,
             preferences: PreferencesOwner::new(GlobalSettings::path(root), &receipt),
         }
     }
@@ -2847,6 +3229,193 @@ mod app_preferences_sheet_tests {
         drop(gui.update(Message::KeyPressed(Key::Escape)));
         assert!(gui.preferences_sheet.is_none());
         assert_eq!(gui.panes.get(pane_id).unwrap().tabs[0].id, tab_id);
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn connect_sheet_keeps_launcher_origin_and_closes_on_escape() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path = std::env::temp_dir().join(format!(
+            "tenshu-connect-sheet-origin-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        let root = CoincubeDirectory::new(path.clone());
+        let mut gui = launcher_gui(&root);
+        let pane_id = gui.focus.unwrap();
+        let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
+
+        drop(gui.update(Message::Pane(
+            pane_id,
+            pane::Message::tab(
+                tab_id,
+                tab::Message::Launch(home::Message::View(home::ViewMessage::GoToSection(
+                    home::HomeSection::Connect(crate::app::menu::ConnectSubMenu::PlanBilling),
+                ))),
+            ),
+        )));
+        let sheet = gui.connect_sheet.as_ref().expect("Connect sheet mounted");
+        assert_eq!(
+            sheet.page,
+            ConnectSheetPage::Sections(ConnectSheetSection::PlanBilling)
+        );
+        assert!(gui.overlay_origin_is_current(&sheet.origin));
+        assert_eq!(gui.panes.get(pane_id).unwrap().tabs[0].id, tab_id);
+        assert!(matches!(&gui.panes.get(pane_id).unwrap().tabs[0].state,
+            tab::State::Home(home) if !matches!(home.active_section,
+                home::HomeSection::Connect(_))));
+
+        drop(
+            gui.update(Message::ConnectSheet(ConnectSheetMessage::SelectSection(
+                ConnectSheetSection::Contacts,
+            ))),
+        );
+        assert_eq!(
+            gui.connect_sheet.as_ref().unwrap().page,
+            ConnectSheetPage::Sections(ConnectSheetSection::Contacts)
+        );
+        drop(gui.update(Message::ConnectSheet(
+            ConnectSheetMessage::OpenAuthentication {
+                create_account: true,
+            },
+        )));
+        assert_eq!(
+            gui.connect_sheet.as_ref().unwrap().page,
+            ConnectSheetPage::Authentication
+        );
+        assert!(matches!(
+            &gui.panes.get(pane_id).unwrap().tabs[0].state,
+            tab::State::Home(home) if matches!(home.connect_account.step,
+                crate::app::state::connect::ConnectFlowStep::Register { .. })
+        ));
+        drop(gui.update(Message::KeyPressed(Key::Escape)));
+        assert!(gui.connect_sheet.is_none());
+        assert_eq!(gui.panes.get(pane_id).unwrap().tabs[0].id, tab_id);
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn stale_connect_sheet_discards_queued_account_action() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path = std::env::temp_dir().join(format!(
+            "tenshu-connect-sheet-stale-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        let root = CoincubeDirectory::new(path.clone());
+        let mut gui = launcher_gui(&root);
+        let pane_id = gui.focus.unwrap();
+        let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
+        drop(gui.update(Message::Pane(
+            pane_id,
+            pane::Message::tab(
+                tab_id,
+                tab::Message::Launch(home::Message::View(home::ViewMessage::GoToSection(
+                    home::HomeSection::Connect(crate::app::menu::ConnectSubMenu::Overview),
+                ))),
+            ),
+        )));
+        assert!(gui.connect_sheet.is_some());
+        gui.panes.get_mut(pane_id).unwrap().tabs[0].state = pin_entry(&root);
+        assert_eq!(
+            gui.update(Message::ConnectSheet(ConnectSheetMessage::Account(
+                crate::app::view::ConnectAccountMessage::LogOut,
+            )))
+            .units(),
+            0,
+        );
+        assert!(gui.connect_sheet.is_none());
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn connect_sheet_plan_cta_and_sections_use_existing_account_loaders() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path = std::env::temp_dir().join(format!(
+            "tenshu-connect-sheet-routing-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        let root = CoincubeDirectory::new(path.clone());
+        let mut gui = launcher_gui(&root);
+        let pane_id = gui.focus.unwrap();
+        let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
+        let tab::State::Home(home) = &mut gui.panes.get_mut(pane_id).unwrap().tabs[0].state else {
+            unreachable!()
+        };
+        home.connect_account.user = Some(crate::services::coincube::User {
+            id: 7,
+            email: "shell@example.invalid".into(),
+            email_verified: Some(true),
+        });
+        home.connect_account.step = crate::app::state::connect::ConnectFlowStep::Dashboard;
+
+        drop(gui.update(Message::Pane(
+            pane_id,
+            pane::Message::tab(
+                tab_id,
+                tab::Message::Launch(home::Message::View(home::ViewMessage::GoToSection(
+                    home::HomeSection::Connect(crate::app::menu::ConnectSubMenu::Overview),
+                ))),
+            ),
+        )));
+        assert_eq!(
+            gui.connect_sheet.as_ref().unwrap().page,
+            ConnectSheetPage::Sections(ConnectSheetSection::Account)
+        );
+        drop(
+            gui.update(Message::ConnectSheet(ConnectSheetMessage::Account(
+                crate::app::view::ConnectAccountMessage::OpenPlanBilling,
+            ))),
+        );
+        assert_eq!(
+            gui.connect_sheet.as_ref().unwrap().page,
+            ConnectSheetPage::Sections(ConnectSheetSection::PlanBilling)
+        );
+        let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[0].state else {
+            unreachable!()
+        };
+        assert_eq!(
+            home.connect_account.active_sub,
+            crate::app::menu::ConnectSubMenu::PlanBilling
+        );
+
+        drop(
+            gui.update(Message::ConnectSheet(ConnectSheetMessage::SelectSection(
+                ConnectSheetSection::Contacts,
+            ))),
+        );
+        let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[0].state else {
+            unreachable!()
+        };
+        assert!(home.connect_account.contacts_state.loading);
+        assert_eq!(
+            home.connect_account.active_sub,
+            crate::app::menu::ConnectSubMenu::Contacts
+        );
+        assert!(
+            gui.update(Message::ConnectSheet(ConnectSheetMessage::SelectSection(
+                ConnectSheetSection::DevicesSecurity
+            ),))
+                .units()
+                > 0
+        );
+
         drop(gui);
         std::fs::remove_dir_all(path).ok();
     }
@@ -3037,6 +3606,7 @@ mod fork_auth_dispatch_tests {
             system_theme: None,
             system_reduces_motion: None,
             preferences_sheet: None,
+            connect_sheet: None,
             preferences: unresolved_test_preferences(),
         };
         drop(gui.update(Message::Pane(
@@ -3114,6 +3684,7 @@ mod fork_auth_dispatch_tests {
                     system_theme: None,
                     system_reduces_motion: None,
                     preferences_sheet: None,
+                    connect_sheet: None,
                     preferences: unresolved_test_preferences(),
                 };
                 drop(gui.update(Message::Pane(
@@ -3457,6 +4028,7 @@ mod fork_auth_dispatch_tests {
             system_theme: None,
             system_reduces_motion: None,
             preferences_sheet: None,
+            connect_sheet: None,
             preferences: unresolved_test_preferences(),
                     };
                     let mut cube = crate::app::settings::CubeSettings::new(
@@ -3587,6 +4159,7 @@ mod fork_auth_dispatch_tests {
                     system_theme: None,
                     system_reduces_motion: None,
                     preferences_sheet: None,
+                    connect_sheet: None,
                     preferences: unresolved_test_preferences(),
                 };
                 let account = |message| {
@@ -3763,6 +4336,7 @@ mod fork_auth_dispatch_tests {
                 system_theme: None,
                 system_reduces_motion: None,
                 preferences_sheet: None,
+                connect_sheet: None,
                 preferences: unresolved_test_preferences(),
             };
             let task = gui.update(Message::Pane(
@@ -3987,6 +4561,7 @@ mod fork_auth_revocation_tests {
                 system_theme: None,
                 system_reduces_motion: None,
                 preferences_sheet: None,
+                connect_sheet: None,
                 preferences: unresolved_test_preferences(),
             };
             let (home, home_startup) =
@@ -4163,6 +4738,7 @@ mod shared_adoption_generation_tests {
                 system_theme: None,
                 system_reduces_motion: None,
                 preferences_sheet: None,
+                connect_sheet: None,
                 preferences: unresolved_test_preferences(),
             };
             let init = || {
@@ -4334,6 +4910,72 @@ mod shell_escape_dispatch_tests {
     }
 
     #[test]
+    fn signed_in_cube_connect_entry_returns_to_same_cube() {
+        std::thread::Builder::new()
+            .name("gui-connect-cube-entry".into())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = app::session::test_guard();
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = runtime.enter();
+                let path = std::env::temp_dir()
+                    .join(format!("cube-connect-sheet-{}", uuid::Uuid::new_v4()));
+                std::fs::create_dir_all(&path).unwrap();
+                let (mut app, _) = app::claim_step1_tests::bitcoin_app(&path);
+                app::claim_step1_tests::signed_in_connect_for_shell(&mut app);
+                let (panes, pane_id) =
+                    pane_grid::State::new(pane::Pane::new_with_tab(tab::State::App(app)));
+                let mut gui = GUI {
+                    panes,
+                    focus: Some(pane_id),
+                    config: Config::new(CoincubeDirectory::new(path.clone()), None),
+                    window_id: None,
+                    window_init: None,
+                    window_config: None,
+                    global_cache: GlobalCache::default(),
+                    theme_mode: Default::default(),
+                    system_theme: None,
+                    system_reduces_motion: None,
+                    preferences_sheet: None,
+                    connect_sheet: None,
+                    preferences: unresolved_test_preferences(),
+                };
+                let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
+                drop(gui.view());
+                drop(gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::tab(
+                        tab_id,
+                        tab::Message::Run(AppMessage::View(view::Message::OpenConnectSignIn)),
+                    ),
+                )));
+                let sheet = gui.connect_sheet.as_ref().expect("Connect sheet opened");
+                assert_eq!(sheet.origin.tab_id, tab_id);
+                assert_eq!(sheet.origin.pane, pane_id);
+                assert_eq!(
+                    sheet.page,
+                    ConnectSheetPage::Sections(ConnectSheetSection::Account)
+                );
+                drop(gui.view());
+                drop(gui.update(Message::ConnectSheet(ConnectSheetMessage::Close)));
+                assert!(gui.connect_sheet.is_none());
+                assert!(matches!(
+                    &gui.panes.get(pane_id).unwrap().tabs[0].state,
+                    tab::State::App(_)
+                ));
+                assert_eq!(gui.panes.get(pane_id).unwrap().tabs[0].id, tab_id);
+                drop(gui);
+                std::fs::remove_dir_all(path).ok();
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
     fn real_gui_escape_dismisses_only_the_focused_app_shell() {
         std::thread::Builder::new()
             .name("gui-shell-escape".into())
@@ -4386,6 +5028,7 @@ mod shell_escape_dispatch_tests {
             system_theme: None,
             system_reduces_motion: None,
             preferences_sheet: None,
+            connect_sheet: None,
             preferences: unresolved_test_preferences(),
         };
         let route = |intent| {
@@ -4532,6 +5175,7 @@ mod lock_cube_dispatch_tests {
             system_theme: None,
             system_reduces_motion: None,
             preferences_sheet: None,
+            connect_sheet: None,
             preferences: unresolved_test_preferences(),
         };
         crate::app::session::open("orphaned", zeroize::Zeroizing::new("2468".into()));
@@ -4700,6 +5344,7 @@ mod lock_cube_dispatch_tests {
             system_theme: None,
             system_reduces_motion: None,
             preferences_sheet: None,
+            connect_sheet: None,
             preferences: unresolved_test_preferences(),
         };
         let destination = crate::app::settings::CubeSettings::new_with_raw_id(
@@ -4805,6 +5450,7 @@ mod lock_cube_dispatch_tests {
             system_theme: None,
             system_reduces_motion: None,
             preferences_sheet: None,
+            connect_sheet: None,
             preferences: unresolved_test_preferences(),
         };
         crate::app::session::open(same_cube_id.clone(), zeroize::Zeroizing::new("2468".into()));
@@ -4889,6 +5535,7 @@ mod lock_cube_dispatch_tests {
             system_theme: None,
             system_reduces_motion: None,
             preferences_sheet: None,
+            connect_sheet: None,
             preferences: unresolved_test_preferences(),
         };
         let resources = tab::ClaimResources {
@@ -5084,6 +5731,7 @@ impl GUI {
             system_theme: None,
             system_reduces_motion: None,
             preferences_sheet: None,
+            connect_sheet: None,
             preferences: unresolved_test_preferences(),
         }
     }
@@ -5105,6 +5753,7 @@ impl GUI {
             system_theme: None,
             system_reduces_motion: None,
             preferences_sheet: None,
+            connect_sheet: None,
             preferences: unresolved_test_preferences(),
         }
     }
@@ -5588,6 +6237,7 @@ mod claim_return_routing_tests {
                     system_theme: None,
                     system_reduces_motion: None,
                     preferences_sheet: None,
+                    connect_sheet: None,
                     preferences: unresolved_test_preferences(),
                 };
                 let source_id = match &gui.panes.get(target).unwrap().tabs[index].state {
@@ -6209,6 +6859,7 @@ mod single_open_lifecycle_tests {
             system_theme: None,
             system_reduces_motion: None,
             preferences_sheet: None,
+            connect_sheet: None,
             preferences: unresolved_test_preferences(),
                     };
                     if connect {

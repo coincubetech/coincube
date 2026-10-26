@@ -149,10 +149,18 @@ pub fn top_bar_with_privacy<'a>(
     .on_press(Message::OpenLauncher);
 
     let account: Element<'a, Message> = if ctx.connect_authenticated {
-        container(status("Signed in", true))
-            .padding([7, 11])
-            .style(theme::container::shell_chip)
-            .into()
+        container(
+            Action::new(
+                "tenshu.connect.account",
+                status("Signed in", true),
+                Message::FocusAction,
+            )
+            .padding([6, 11])
+            .style(theme::button::shell_nav)
+            .on_press(Message::OpenConnectSignIn),
+        )
+        .style(theme::container::shell_chip)
+        .into()
     } else {
         container(
             Action::new(
