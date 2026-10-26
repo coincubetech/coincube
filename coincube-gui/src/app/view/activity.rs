@@ -13,7 +13,7 @@ use iced::{
 };
 
 use crate::app::{
-    breez_liquid::assets::USDT_ASSET_ID_MAINNET,
+    breez_liquid::assets::{format_usdt_display, USDT_ASSET_ID_MAINNET},
     breez_spark::assets::format_token_display,
     cache::Cache,
     state::activity::{Activity, ActivityTarget},
@@ -396,20 +396,26 @@ impl Entry {
         let amount = match &payment.details {
             DomainPaymentDetails::LiquidAsset {
                 asset_id,
-                asset_info: Some(info),
+                asset_info,
                 ..
-            } => {
-                let ticker = if asset_id == USDT_ASSET_ID_MAINNET {
-                    "USDt"
-                } else {
-                    asset_id.as_str()
-                };
-                format!(
-                    "{} {}",
-                    format_token_display(info.amount_minor, u32::from(info.precision)),
-                    ticker
-                )
-            }
+            } => match asset_info {
+                Some(info) => {
+                    let ticker = if asset_id == USDT_ASSET_ID_MAINNET {
+                        "USDt"
+                    } else {
+                        asset_id.as_str()
+                    };
+                    format!(
+                        "{} {}",
+                        format_token_display(info.amount_minor, u32::from(info.precision)),
+                        ticker
+                    )
+                }
+                None if asset_id == USDT_ASSET_ID_MAINNET => {
+                    format!("{} USDt", format_usdt_display(payment.amount_sat))
+                }
+                None => format!("{} base units · {}", payment.amount_sat, asset_id),
+            },
             _ => format!("{} sats", payment.amount_sat),
         };
         let title = payment
@@ -479,6 +485,16 @@ fn vault_confirmation_detail(height: i32, tip: i32) -> String {
     } else {
         format!("Confirmations · {}", i64::from(tip) - i64::from(height) + 1)
     }
+}
+
+// The fixed columns and four gaps need 467px before the Details column.
+// Reserve 200px for Details when the 380px detail pane sits beside the list.
+const MIN_ACTIVITY_LIST_WIDTH: f32 = 70.0 + 75.0 + 200.0 + 190.0 + 100.0 + 4.0 * 8.0;
+const SELECTED_DETAIL_WIDTH: f32 = 380.0;
+const DETAIL_GAP: f32 = 16.0;
+
+fn detail_beside_list(width: f32) -> bool {
+    width >= MIN_ACTIVITY_LIST_WIDTH + SELECTED_DETAIL_WIDTH + DETAIL_GAP
 }
 
 pub fn render<'a>(activity: &'a Activity, cache: &'a Cache) -> Element<'a, Message> {
@@ -752,11 +768,11 @@ fn render_at_width<'a>(
             )),
         );
         let detail = container(detail).padding(20);
-        if width < 760.0 {
+        if !detail_beside_list(width) {
             column![main, detail.width(Length::Fill)].spacing(16).into()
         } else {
-            row![main, detail.width(Length::Fixed(380.0))]
-                .spacing(16)
+            row![main, detail.width(Length::Fixed(SELECTED_DETAIL_WIDTH))]
+                .spacing(DETAIL_GAP)
                 .into()
         }
     } else {
@@ -857,6 +873,33 @@ mod tests {
     }
 
     #[test]
+    fn liquid_asset_without_metadata_never_invents_sats() {
+        let mut payment = DomainPayment {
+            tx_id: Some("liquid-tx".into()),
+            destination: None,
+            timestamp: 1_760_000_000,
+            amount_sat: 500_000_000,
+            fees_sat: 0,
+            direction: DomainPaymentDirection::Receive,
+            status: DomainPaymentStatus::Complete,
+            details: DomainPaymentDetails::LiquidAsset {
+                asset_id: USDT_ASSET_ID_MAINNET.into(),
+                asset_info: None,
+                description: String::new(),
+                payer_note: None,
+            },
+        };
+        assert_eq!(Entry::liquid(payment.clone()).amount, "5.00 USDt");
+        if let DomainPaymentDetails::LiquidAsset { asset_id, .. } = &mut payment.details {
+            *asset_id = "unknown-asset-id".into();
+        }
+        assert_eq!(
+            Entry::liquid(payment).amount,
+            "500000000 base units · unknown-asset-id"
+        );
+    }
+
+    #[test]
     fn spark_rail_preserves_receive_and_send_direction() {
         let mut payment = spark_payment();
         payment.method = "spark".into();
@@ -902,5 +945,16 @@ mod tests {
             vault_confirmation_detail(800_000, 800_004),
             "Confirmations · 5"
         );
+    }
+
+    #[test]
+    fn selected_detail_stacks_until_list_and_pane_fit() {
+        // 1200px window: 248px sidebar and 8/10 dashboard content width.
+        let content_at_1200 = (1200.0 - 248.0) * 0.8;
+        assert!(!detail_beside_list(content_at_1200));
+        assert!(!detail_beside_list(1024.0));
+        assert!(detail_beside_list(
+            MIN_ACTIVITY_LIST_WIDTH + SELECTED_DETAIL_WIDTH + DETAIL_GAP
+        ));
     }
 }
