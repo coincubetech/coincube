@@ -1,94 +1,65 @@
-//! Reusable "spending policy timeline" diagram, composed entirely from
-//! in-app primitives (no image assets). Each [`PolicyRow`] renders as a
-//! labelled key box on the left and a timeline of spend windows on the
-//! right (a full-width green "CAN SPEND" bar, or a red "CAN'T SPEND
-//! (TIMELOCKED)" segment followed by a green "CAN SPEND" segment).
-//!
-//! Used by every wallet-type "Introduction" screen so all templates share
-//! one consistent, theme-aware diagram.
+//! Theme-aware policy timing diagram shared by all six Vault introductions.
+//! The wide composition keeps policy keys beside labelled spend windows; the
+//! compact composition stacks them so the timing labels remain readable.
 
-use iced::{widget::container, widget::Space, Alignment, Background, Border, Color, Length};
-
-use coincube_ui::{
-    color,
-    component::text::{caption, p2_regular, Text},
-    icon, theme,
-    widget::*,
+use iced::{
+    widget::{container, responsive, Space},
+    Alignment, Background, Border, Color, Length, Size,
 };
 
 use coincube_ui::theme::{palette::ThemeMode, Theme};
+use coincube_ui::{
+    color,
+    component::text::{caption, p2_regular, Text},
+    theme,
+    widget::*,
+};
 
 use crate::installer::message::Message;
 
-/// How a policy's spend window is timelocked in the diagram.
+/// Relative visual ordering only. Actual block delays are set in the next step.
 #[derive(Clone, Copy)]
 pub enum Timelock {
-    /// Always spendable — a single full-width "CAN SPEND" bar.
     None,
-    /// Timelocked: the red "CAN'T SPEND" segment spans `fraction` (0.0–1.0)
-    /// of the timeline before the green "CAN SPEND" segment. A larger
-    /// fraction pushes the spend window further right, showing a later
-    /// activation than paths with a smaller fraction.
     After(f32),
 }
 
-/// One spending policy shown as a row in the diagram.
+#[derive(Clone)]
 pub struct PolicyRow<'a> {
-    /// Caption above the key box, e.g. "Primary spending policy:".
     pub label: &'a str,
-    /// Numbered key badges (badge number, colour) shown inside the box.
     pub keys: Vec<(u32, Color)>,
-    /// Label inside the box, e.g. "2-of-3 multisig" or "Inheritance Key".
     pub box_label: &'a str,
-    /// When (relative to the timeline) this policy becomes spendable.
     pub timelock: Timelock,
 }
 
-/// Fixed width of the left-hand label/key-box column so every row's
-/// timeline starts at the same x-offset.
-const LABEL_W: f32 = 240.0;
-const BAR_H: f32 = 38.0;
-
-/// A translucent fill derived from a solid brand colour.
-fn tint(c: Color, a: f32) -> Color {
-    Color { a, ..c }
-}
-
-fn is_light(t: &Theme) -> bool {
-    matches!(t.mode, ThemeMode::Light)
-}
-
-/// Background of the whole diagram card — theme-aware.
-fn card_bg(t: &Theme) -> Color {
-    if is_light(t) {
+fn surface(t: &Theme) -> Color {
+    if matches!(t.mode, ThemeMode::Light) {
         color::LIGHT_CARD_BG
     } else {
         color::GREY_5
     }
 }
 
-/// Background of a key box / badge — theme-aware, distinct from the card.
-fn box_bg(t: &Theme) -> Color {
-    if is_light(t) {
+fn key_surface(t: &Theme) -> Color {
+    if matches!(t.mode, ThemeMode::Light) {
         color::LIGHT_SURFACE
     } else {
         color::GREY_6
     }
 }
 
-/// A small numbered circle in the key's colour.
-fn key_badge<'a>(n: u32, c: Color) -> Element<'a, Message> {
+fn badge<'a>(number: u32, key_color: Color) -> Element<'a, Message> {
     Container::new(
-        p2_regular(n.to_string())
-            .style(theme::text::adaptive(c))
+        p2_regular(number.to_string())
+            .style(theme::text::adaptive(key_color))
             .bold(),
     )
     .center_x(Length::Fixed(26.0))
     .center_y(Length::Fixed(26.0))
     .style(move |t| container::Style {
-        background: Some(Background::Color(box_bg(t))),
+        background: Some(Background::Color(key_surface(t))),
         border: Border {
-            color: theme::text::adapt_color(c, t),
+            color: theme::text::adapt_color(key_color, t),
             width: 1.5,
             radius: 13.0.into(),
         },
@@ -97,24 +68,24 @@ fn key_badge<'a>(n: u32, c: Color) -> Element<'a, Message> {
     .into()
 }
 
-/// The rounded box on the left of a row: key badges + a label.
-fn policy_box<'a>(keys: &[(u32, Color)], label: &'a str) -> Element<'a, Message> {
-    let badges = keys.iter().fold(
+fn policy_box<'a>(row: &PolicyRow<'a>) -> Element<'a, Message> {
+    let badges = row.keys.iter().fold(
         Row::new().spacing(4).align_y(Alignment::Center),
-        |row, (n, c)| row.push(key_badge(*n, *c)),
+        |items, (number, key_color)| items.push(badge(*number, *key_color)),
     );
     Container::new(
         Row::new()
             .align_y(Alignment::Center)
-            .spacing(12)
+            .spacing(8)
             .push(badges)
-            .push(p2_regular(label).bold()),
+            .push(p2_regular(row.box_label).bold()),
     )
-    .padding([8, 14])
+    .width(Length::Fill)
+    .padding([8, 10])
     .style(|t| container::Style {
-        background: Some(Background::Color(box_bg(t))),
+        background: Some(Background::Color(key_surface(t))),
         border: Border {
-            radius: 12.0.into(),
+            radius: 10.0.into(),
             ..Default::default()
         },
         ..Default::default()
@@ -122,131 +93,143 @@ fn policy_box<'a>(keys: &[(u32, Color)], label: &'a str) -> Element<'a, Message>
     .into()
 }
 
-/// A single spend-window pill: translucent fill + solid coloured label,
-/// with an optional trailing arrow.
-fn bar<'a>(label: &'a str, c: Color, arrow: bool, width: Length) -> Element<'a, Message> {
-    let mut content = Row::new()
-        .align_y(Alignment::Center)
-        .width(Length::Fill)
-        .push(Space::new().width(Length::Fill))
-        .push(p2_regular(label).style(theme::text::adaptive(c)).bold())
-        .push(Space::new().width(Length::Fill));
-    if arrow {
-        content = content.push(icon::arrow_right().style(theme::text::adaptive(c)));
-    }
-    Container::new(content)
-        .width(width)
-        .center_y(Length::Fixed(BAR_H))
-        .padding([0, 12])
-        .style(move |t| {
-            let ac = theme::text::adapt_color(c, t);
-            container::Style {
-                background: Some(Background::Color(tint(ac, 0.16))),
-                border: Border {
-                    color: tint(ac, 0.5),
-                    width: 1.0,
-                    radius: 8.0.into(),
-                },
-                ..Default::default()
-            }
-        })
-        .into()
+fn spend_bar<'a>(label: &'static str, bar_color: Color, width: Length) -> Element<'a, Message> {
+    Container::new(
+        Row::new()
+            .width(Length::Fill)
+            .align_y(Alignment::Center)
+            .push(Space::new().width(Length::Fill))
+            .push(
+                caption(label)
+                    .style(theme::text::adaptive(bar_color))
+                    .bold(),
+            )
+            .push(Space::new().width(Length::Fill)),
+    )
+    .width(width)
+    .center_y(Length::Fixed(38.0))
+    .padding([0, 7])
+    .style(move |t| {
+        let adapted = theme::text::adapt_color(bar_color, t);
+        container::Style {
+            background: Some(Background::Color(Color { a: 0.16, ..adapted })),
+            border: Border {
+                color: Color { a: 0.5, ..adapted },
+                width: 1.0,
+                radius: 8.0.into(),
+            },
+            ..Default::default()
+        }
+    })
+    .into()
 }
 
-fn policy_row<'a>(r: PolicyRow<'a>, label_w: f32) -> Element<'a, Message> {
-    let timeline: Element<Message> = match r.timelock {
-        Timelock::None => bar("CAN SPEND", color::GREEN, true, Length::Fill),
+fn spend_window<'a>(timelock: Timelock, compact: bool) -> Element<'a, Message> {
+    match timelock {
+        Timelock::None => spend_bar("CAN SPEND", color::GREEN, Length::Fill),
         Timelock::After(fraction) => {
-            // Split the timeline red:green by the timelock fraction. A larger
-            // fraction => the green spend window starts further right.
-            let red = ((fraction * 100.0).round() as u16).clamp(1, 99);
-            let green = 100 - red;
+            // The segments communicate relative activation order, not a block
+            // count. Keep both labels readable on the narrower wide layout.
+            let minimum = if compact { 45 } else { 60 };
+            let locked = ((fraction * 100.0).round() as u16).clamp(minimum, 75);
             Row::new()
-                .spacing(8)
+                .spacing(6)
                 .width(Length::Fill)
-                .push(bar(
+                .push(spend_bar(
                     "CAN'T SPEND (TIMELOCKED)",
                     color::RED,
-                    false,
-                    Length::FillPortion(red),
+                    Length::FillPortion(locked),
                 ))
-                .push(bar(
+                .push(spend_bar(
                     "CAN SPEND",
                     color::GREEN,
-                    true,
-                    Length::FillPortion(green),
+                    Length::FillPortion(100 - locked),
                 ))
                 .into()
         }
-    };
-
-    // Caption on its own line, then the key box and the timeline bars in a
-    // centred row so the bars line up horizontally with the key box.
-    Column::new()
-        .spacing(6)
-        .push(caption(r.label).style(theme::text::secondary))
-        .push(
-            Row::new()
-                .align_y(Alignment::Center)
-                .spacing(16)
-                .push(
-                    Container::new(policy_box(&r.keys, r.box_label)).width(Length::Fixed(label_w)),
-                )
-                .push(Container::new(timeline).width(Length::Fill)),
-        )
-        .into()
+    }
 }
 
-/// Render the full policy-timeline diagram for the given rows.
-pub fn policy_timeline<'a>(rows: Vec<PolicyRow<'a>>) -> Element<'a, Message> {
-    // Widen the key-box column when a box holds many badges (e.g. a 2-of-6
-    // path) so it doesn't overflow into the timeline. Diagrams with ≤3 keys
-    // keep the default width, so existing templates render unchanged.
-    let label_w = if rows.iter().any(|r| r.keys.len() > 3) {
-        360.0
+fn policy_row<'a>(row: PolicyRow<'a>, compact: bool, key_width: f32) -> Element<'a, Message> {
+    let keys = Column::new()
+        .spacing(6)
+        .push(caption(row.label).style(theme::text::secondary))
+        .push(policy_box(&row));
+    if compact {
+        Column::new()
+            .width(Length::Fill)
+            .spacing(8)
+            .push(keys)
+            .push(spend_window(row.timelock, true))
+            .into()
     } else {
-        LABEL_W
+        Row::new()
+            .width(Length::Fill)
+            .spacing(16)
+            .align_y(Alignment::End)
+            .push(Container::new(keys).width(Length::Fixed(key_width)))
+            .push(Container::new(spend_window(row.timelock, false)).width(Length::Fill))
+            .into()
+    }
+}
+
+fn diagram_content<'a>(rows: &[PolicyRow<'a>], available_width: f32) -> Element<'a, Message> {
+    let compact = available_width < 730.0;
+    let key_width = if rows.iter().any(|row| row.keys.len() > 3) {
+        310.0
+    } else {
+        240.0
     };
-
-    // Header: "Receipt of funds" over the timeline start, "After some time*
-    // of wallet inactivity" centred over the timelock boundary.
-    let header = Row::new()
-        .push(Space::new().width(Length::Fixed(label_w + 16.0)))
-        .push(
-            Row::new()
-                .width(Length::Fill)
-                .align_y(Alignment::Center)
-                .push(caption("Receipt of funds").style(theme::text::secondary))
-                .push(Space::new().width(Length::Fill))
-                .push(
-                    caption("After some time* of wallet inactivity").style(theme::text::secondary),
-                )
-                .push(Space::new().width(Length::Fill)),
-        );
-
-    let body = rows
-        .into_iter()
-        .fold(Column::new().spacing(20).push(header), |col, r| {
-            col.push(policy_row(r, label_w))
-        });
-
-    let body = body.push(
-        caption(
-            "*The time range (timelock) for the activation of keys can be configured in the next step.",
-        )
-        .style(theme::text::secondary),
+    let header: Element<'a, Message> = if compact {
+        Row::new()
+            .width(Length::Fill)
+            .push(caption("Receipt of funds").style(theme::text::secondary))
+            .push(Space::new().width(Length::Fill))
+            .push(caption("After inactivity").style(theme::text::secondary))
+            .into()
+    } else {
+        Row::new()
+            .width(Length::Fill)
+            .push(Space::new().width(Length::Fixed(key_width + 16.0)))
+            .push(
+                Row::new()
+                    .width(Length::Fill)
+                    .push(caption("Receipt of funds").style(theme::text::secondary))
+                    .push(Space::new().width(Length::Fill))
+                    .push(
+                        caption("After some time* of wallet inactivity")
+                            .style(theme::text::secondary),
+                    ),
+            )
+            .into()
+    };
+    let content = rows.iter().cloned().fold(
+        Column::new().width(Length::Fill).spacing(20).push(header),
+        |column, row| column.push(policy_row(row, compact, key_width)),
     );
-
-    Container::new(body)
-        .width(Length::Fill)
-        .padding(24)
-        .style(|t| container::Style {
-            background: Some(Background::Color(card_bg(t))),
-            border: Border {
-                radius: 20.0.into(),
-                ..Default::default()
-            },
+    Container::new(
+        content.push(
+            caption("*Recovery delays can be configured in the next step.")
+                .style(theme::text::secondary),
+        ),
+    )
+    .width(Length::Fill)
+    .padding(18)
+    .style(|t| container::Style {
+        background: Some(Background::Color(surface(t))),
+        border: Border {
+            radius: 16.0.into(),
             ..Default::default()
-        })
+        },
+        ..Default::default()
+    })
+    .into()
+}
+
+/// Horizontal policy/key column beside labelled timing bars at wide widths.
+/// At compact widths the same labelled bars remain visible below each policy.
+pub fn policy_timeline<'a>(rows: Vec<PolicyRow<'a>>) -> Element<'a, Message> {
+    responsive(move |size: Size| diagram_content(&rows, size.width))
+        .height(Length::Shrink)
         .into()
 }

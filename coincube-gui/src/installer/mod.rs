@@ -992,6 +992,7 @@ impl Installer {
                 }
             }
             Message::Clipboard(s) => clipboard::write(s),
+            Message::FocusAction(id) => iced::widget::operation::focus(id),
             Message::OpenUrl(url) => {
                 if let Err(e) = crate::browser::open_url(&url) {
                     tracing::error!("Error opening '{}': {}", url, e);

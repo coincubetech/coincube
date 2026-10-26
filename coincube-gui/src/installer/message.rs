@@ -62,6 +62,7 @@ pub enum Message {
         Result<Option<settings::WalletSettings>, Error>,
     ),
     CreateTaprootDescriptor(bool),
+    FocusAction(iced::advanced::widget::Id),
     SelectDescriptorTemplate(context::DescriptorTemplate),
     SelectBackend(SelectBackend),
     ImportRemoteWallet(ImportRemoteWallet),

@@ -1,5 +1,4 @@
 use iced::{
-    alignment,
     widget::{tooltip, Container, Space},
     Alignment, Length,
 };
@@ -8,7 +7,7 @@ use coincube_ui::{
     color,
     component::{
         button, collapse,
-        text::{h3, p1_regular, text, Text},
+        text::{text, Text},
     },
     icon, theme,
     widget::*,
@@ -20,7 +19,7 @@ use crate::installer::{
     view::{
         editor::{
             define_descriptor_advanced_settings, defined_key, path,
-            template::diagram::{policy_timeline, PolicyRow, Timelock},
+            template::diagram::{PolicyRow, Timelock},
             undefined_key,
         },
         layout,
@@ -29,44 +28,33 @@ use crate::installer::{
 
 const SAFETY_NET_DESCRIPTION: &str = "This adds a final recovery option containing keys from professional key agents.\n\nUse this option if you have been provided one or more Safety Net tokens.";
 
-pub fn custom_template_description(progress: (usize, usize)) -> Element<'static, Message> {
-    layout(
+pub fn custom_template_description(
+    progress: (usize, usize),
+    ui_instance: u64,
+    show_keychain_tip: bool,
+) -> Element<'static, Message> {
+    super::template_introduction(
         progress,
-        None,
-        "Introduction",
-        Column::new()
-            .align_x(Alignment::Start)
-            .push(h3("Build your own"))
-            .max_width(800.0)
-            .push(Container::new(
-                p1_regular("For this setup you will need to define your primary and recovery spending policies. For security reasons, we suggest you use a separate Hardware Wallet for each key belonging to them.")
-                .style(theme::text::secondary)
-                .align_x(alignment::Horizontal::Left)
-            ).align_x(alignment::Horizontal::Left).width(Length::Fill))
-            .push(Container::new(
-                p1_regular("The keys belonging to your primary policy can always spend. Those belonging to the recovery policies will be able to spend only after a defined time of wallet inactivity, allowing for secure recovery and advanced spending policies.")
-                .style(theme::text::secondary)
-                .align_x(alignment::Horizontal::Left)
-            ).align_x(alignment::Horizontal::Left).width(Length::Fill))
-            .push(policy_timeline(vec![
-                PolicyRow {
-                    label: "Primary spending policy:",
-                    keys: vec![(1, color::GREEN)],
-                    box_label: "Primary Keys",
-                    timelock: Timelock::None,
-                },
-                PolicyRow {
-                    label: "Recovery spending policy:",
-                    keys: vec![(2, color::ORANGE)],
-                    box_label: "Recovery Keys",
-                    timelock: Timelock::After(0.5),
-                },
-            ]))
-            .push(Row::new().push(Space::new().width(Length::Fill)).push(button::primary(None, "Next").width(Length::Fixed(200.0)).on_press(Message::Next)))
-            .push(Space::new().height(50.0))
-            .spacing(20),
-        true,
-        Some(Message::Previous),
+        ui_instance,
+        show_keychain_tip,
+        "Build your own",
+        "Define your primary and recovery spending policies.",
+        "Your primary policy can always spend. Each recovery option becomes available after its configured inactivity delay.",
+        "Choose separate signing devices where practical. You can define more recovery options in the next step.",
+        vec![
+            PolicyRow {
+                label: "Primary spending policy",
+                keys: vec![(1, color::GREEN)],
+                box_label: "Primary Keys",
+                timelock: Timelock::None,
+            },
+            PolicyRow {
+                label: "Recovery spending policy",
+                keys: vec![(2, color::ORANGE)],
+                box_label: "Recovery Keys",
+                timelock: Timelock::After(0.5),
+            },
+        ],
     )
 }
 
