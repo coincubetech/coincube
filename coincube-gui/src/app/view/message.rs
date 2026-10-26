@@ -2110,6 +2110,8 @@ pub enum ContactsMessage {
 /// Per-Cube Connect messages (Lightning Address, Avatar).
 #[derive(Debug, Clone)]
 pub enum ConnectCubeMessage {
+    /// Apply whole-tree focus for a keyboard-reachable Members action.
+    FocusAction(iced::advanced::widget::Id),
     LnUsernameChanged(String),
     LnUsernameChecked {
         available: bool,

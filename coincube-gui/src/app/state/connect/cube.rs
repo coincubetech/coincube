@@ -293,6 +293,10 @@ pub struct ConnectCubePanel {
 }
 
 impl ConnectCubePanel {
+    pub fn is_registering(&self) -> bool {
+        self.registering
+    }
+
     pub fn new(
         spark_client: Option<Arc<SparkClient>>,
         cube_uuid: String,
@@ -860,6 +864,7 @@ impl ConnectCubePanel {
 
     pub fn update_message(&mut self, msg: ConnectCubeMessage) -> iced::Task<Message> {
         match msg {
+            ConnectCubeMessage::FocusAction(id) => return iced::widget::operation::focus(id),
             ConnectCubeMessage::CubeRegistered { generation, result } => {
                 // Belongs to a session that has since ended — see
                 // `session_generation`. Drop it whole: it must not populate
