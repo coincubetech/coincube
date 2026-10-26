@@ -2900,7 +2900,12 @@ pub fn recovery_kit_restore<'a>(
                     // Raw `iced::widget::Button` because the labels are
                     // built from dynamic `String`s — `button::secondary`
                     // requires `&'static str`.
-                    let mut btn = Button::new(text::text(label))
+                    let row_text = text::text(label).style(if available {
+                        theme::text::primary
+                    } else {
+                        theme::text::secondary
+                    });
+                    let mut btn = Button::new(row_text)
                         .width(Length::Fill)
                         .padding([8, 16])
                         .style(theme::button::secondary);
