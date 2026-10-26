@@ -42,11 +42,11 @@ a{color:#f3821d}a:hover{color:#ffa54d}
 .tenshu a.tbtn{color:var(--ink)}
 .tbtn:hover{background:var(--hover)}
 .chips{margin-left:auto;display:flex;gap:8px;align-items:center}
-.chip{display:flex;align-items:center;gap:8px;height:32px;padding:0 6px 0 12px;border:1px solid var(--line);border-radius:16px;font-size:13px;white-space:nowrap}
+.chip{display:flex;align-items:center;gap:8px;height:32px;padding:0 6px 0 12px;border:1px solid var(--line);border-radius:8px;font-size:13px;white-space:nowrap}
 .chip .end{padding-right:6px}
 .st{display:inline-flex;align-items:center;gap:5px;font-weight:500}
 .ok{color:var(--good)}.warn{color:var(--warn)}.unk{color:var(--muted)}.bad{color:var(--bad)}
-.mini{height:24px;padding:0 10px;border-radius:12px;border:0;background:var(--accent);color:#1a1208;font-weight:600;font-size:12px;cursor:pointer}
+.mini{height:24px;padding:0 10px;border-radius:6px;border:0;background:var(--accent);color:#1a1208;font-weight:600;font-size:12px;cursor:pointer}
 .eye{width:32px;height:32px;display:grid;place-items:center;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}
 .eye:hover{background:var(--hover);color:var(--ink)}
 .lockq{display:flex;align-items:center;gap:8px;font-size:13px;white-space:nowrap}
@@ -113,7 +113,7 @@ a{color:#f3821d}a:hover{color:#ffa54d}
 .coin{position:relative;display:block;flex:none;width:40px;height:40px}.coin>img{position:absolute;left:1px;top:1px;width:34px;height:34px}.coin>svg{position:absolute;left:0;top:0}
 /* stablecoin rail picker */
 .rails{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.rr{display:flex;align-items:center;gap:10px;min-height:52px;padding:6px 12px 6px 8px;border:1px solid var(--line);border-radius:10px;background:var(--bg);cursor:pointer;text-align:left}
+.rr{display:flex;align-items:center;gap:10px;min-height:52px;padding:6px 12px 6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--bg);cursor:pointer;text-align:left}
 .rr[aria-pressed="true"]{border-color:var(--acc-ink);background:var(--selected)}
 .rr:disabled{cursor:not-allowed;opacity:.6}
 .rr .coin{transform:scale(.8);transform-origin:left center;margin-right:-8px}
@@ -138,13 +138,13 @@ a{color:#f3821d}a:hover{color:#ffa54d}
 .alert p{font-size:13px;color:var(--muted);margin-top:2px}
 .ffoot{display:flex;align-items:center;gap:12px;padding:16px 24px;border-top:1px solid var(--line)}
 .ffoot .hint{flex:1;font-size:13px;color:var(--muted);display:flex;align-items:center;gap:8px}
-.pill{height:40px;padding:0 22px;border-radius:20px;font-weight:600;font-size:14px;cursor:pointer;display:inline-flex;align-items:center;gap:8px;text-decoration:none;white-space:nowrap}
+.pill{height:40px;padding:0 22px;border-radius:8px;font-weight:600;font-size:14px;cursor:pointer;display:inline-flex;align-items:center;gap:8px;text-decoration:none;white-space:nowrap}
 .pill.fill{background:var(--accent);border:1px solid var(--accent);color:#1a1208}
 .pill.out{background:transparent;border:1px solid var(--acc-ink)}
 .tenshu .pill.out{color:var(--acc-ink)}
 .pill:disabled{opacity:.45;cursor:not-allowed}
 .btn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:var(--panel);cursor:pointer;font-weight:500;font-size:13px;white-space:nowrap}
-.btn.lg{height:44px;padding:0 16px;border-radius:10px}
+.btn.lg{height:44px;padding:0 16px;border-radius:8px}
 .spin{width:16px;height:16px;border:2px solid var(--line);border-top-color:var(--acc-ink);border-radius:50%;animation:sp .8s linear infinite;flex:none;display:inline-block}
 @keyframes sp{to{transform:rotate(360deg)}}
 /* aside */

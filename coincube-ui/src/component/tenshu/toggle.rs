@@ -151,7 +151,7 @@ impl<'a, M: Clone + 'static> From<Toggle<'a, M>> for Element<'a, M> {
                         bottom: 0.0,
                         left: 5.0,
                     })
-                    .focus_radius(radius::CHIP)
+                    .focus_radius(radius::TOGGLE)
                     .on_press_maybe(on_toggle)
                     .into()
             }

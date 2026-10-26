@@ -2414,7 +2414,7 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
                                 border: iced::Border {
                                     color: color::ORANGE,
                                     width: 1.0,
-                                    radius: 35.0.into(),
+                                    radius: 8.0.into(),
                                 },
                                 background: Some(iced::Background::Color(
                                     _t.colors.cards.simple.background,

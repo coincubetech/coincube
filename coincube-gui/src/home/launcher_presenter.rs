@@ -1019,7 +1019,7 @@ fn arrow_chevron<'a, M: 'a>(previous: bool, enabled: bool) -> Element<'a, M> {
     .into()
 }
 
-/// `.pgbtn`: a 44px round button with a muted ring and a soft drop shadow.
+/// `.pgbtn`: a 44px square-cornered button with a muted ring and a soft drop shadow.
 fn arrow_style(theme: &theme::Theme, enabled: bool, hovered: bool) -> iced_button::Style {
     let shell = theme.colors.shell;
     let alpha = if enabled { 1.0 } else { 0.3 };
@@ -1037,7 +1037,7 @@ fn arrow_style(theme: &theme::Theme, enabled: bool, hovered: bool) -> iced_butto
         border: iced::Border {
             color: fade(shell.muted),
             width: 1.0,
-            radius: 22.0.into(),
+            radius: 8.0.into(),
         },
         // `box-shadow: 0 6px 18px var(--shadow)`.
         shadow: iced::Shadow {

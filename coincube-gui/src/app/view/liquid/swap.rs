@@ -205,14 +205,14 @@ fn flip_button<'a>() -> Element<'a, LiquidSwapMessage> {
         LiquidSwapMessage::FocusAction,
     )
     .padding(0)
-    .focus_radius(20.0)
+    .focus_radius(8.0)
     .on_press(LiquidSwapMessage::FlipAssets)
     .style(|t: &theme::Theme, _| iced_button::Style {
         background: Some(Background::Color(t.colors.shell.background)),
         border: iced::Border {
             color: t.colors.shell.line,
             width: 1.0,
-            radius: 20.0.into(),
+            radius: 8.0.into(),
         },
         ..Default::default()
     })

@@ -196,7 +196,7 @@ pub(super) fn network_name(chain: ChainId) -> &'static str {
     }
 }
 
-/// `.chip`: 32px pill; `.chip.on` while a network narrows the Cubes shown.
+/// `.chip`: 32px, square-cornered; `.chip.on` while a network narrows the Cubes shown.
 fn chip_style(on: bool) -> impl Fn(&theme::Theme, iced_button::Status) -> iced_button::Style {
     move |theme, status| {
         let shell = theme.colors.shell;
@@ -216,7 +216,7 @@ fn chip_style(on: bool) -> impl Fn(&theme::Theme, iced_button::Status) -> iced_b
                     shell.line
                 },
                 width: 1.0,
-                radius: 16.0.into(),
+                radius: 8.0.into(),
             },
             ..Default::default()
         }

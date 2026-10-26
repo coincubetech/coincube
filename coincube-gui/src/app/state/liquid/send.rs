@@ -713,7 +713,13 @@ impl State for LiquidSend {
                 view::LiquidSendMessage::FocusAction(id) => {
                     return iced::widget::operation::focus(id.clone());
                 }
-                view::LiquidSendMessage::PresetAsset(asset) => {
+                view::LiquidSendMessage::PresetAsset(asset)
+                | view::LiquidSendMessage::SelectMasterAsset(asset) => {
+                    if matches!(msg, view::LiquidSendMessage::SelectMasterAsset(_))
+                        && self.from_asset == *asset
+                    {
+                        return Task::none();
+                    }
                     // Set both "You Send" and "They Receive" to the same asset
                     self.from_asset = *asset;
                     self.to_asset = *asset;
@@ -2722,6 +2728,34 @@ mod tests {
             view::LiquidSendMessage::SetReceiveTarget(SendAsset::Lbtc, ReceiveNetwork::Liquid),
         );
         assert!(!panel.receive_picker_open());
+    }
+
+    #[test]
+    fn reselecting_current_asset_keeps_typed_draft() {
+        let mut panel = panel();
+        panel.from_asset = SendAsset::Usdt;
+        panel.to_asset = SendAsset::Usdt;
+        panel.input.value = "1.50".to_owned();
+        panel.amount = Amount::from_sat(12345);
+        send(
+            &mut panel,
+            view::LiquidSendMessage::SelectMasterAsset(SendAsset::Usdt),
+        );
+        assert_eq!(panel.from_asset, SendAsset::Usdt);
+        assert_eq!(panel.to_asset, SendAsset::Usdt);
+        assert_eq!(panel.input.value, "1.50");
+        assert_eq!(panel.amount, Amount::from_sat(12345));
+    }
+
+    #[test]
+    fn overview_preset_still_starts_a_fresh_send() {
+        let mut panel = panel();
+        panel.input.value = "old destination".to_owned();
+        send(
+            &mut panel,
+            view::LiquidSendMessage::PresetAsset(SendAsset::Lbtc),
+        );
+        assert!(panel.input.value.is_empty());
     }
 
     fn liquid_input(address: &str) -> InputType {

@@ -27,10 +27,13 @@ pub mod radius {
     pub const MENU: f32 = 10.0;
     /// Wallet cards.
     pub const CARD: f32 = 16.0;
-    /// Status and account chips.
-    pub const CHIP: f32 = 16.0;
-    /// 36px pill actions.
-    pub const PILL: f32 = 18.0;
+    /// Status and account chips. Square like every other button since
+    /// canvas v122.
+    pub const CHIP: f32 = 8.0;
+    /// 36px Send/Receive actions (`.pill`). Square since canvas v122.
+    pub const PILL: f32 = 8.0;
+    /// The labelled pill toggle (`.tog`), which keeps its rounded track.
+    pub const TOGGLE: f32 = 16.0;
 }
 
 /// Control and row dimensions.
