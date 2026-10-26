@@ -13,6 +13,8 @@ use iced::{
 };
 
 use crate::app::{
+    breez_liquid::assets::USDT_ASSET_ID_MAINNET,
+    breez_spark::assets::format_token_display,
     cache::Cache,
     state::activity::{Activity, ActivityTarget},
     wallets::{
@@ -291,9 +293,7 @@ impl Entry {
 
     pub fn spark(payment: PaymentSummary) -> Self {
         let identifier = payment.id.clone();
-        let direction = if payment.method.eq_ignore_ascii_case("spark") {
-            DirectionFilter::Transfers
-        } else if payment.direction.eq_ignore_ascii_case("receive") {
+        let direction = if payment.direction.eq_ignore_ascii_case("receive") {
             DirectionFilter::Received
         } else {
             DirectionFilter::Sent
@@ -311,8 +311,8 @@ impl Entry {
         };
         let amount = if let Some(minor) = payment.token_amount {
             format!(
-                "{} {} base units",
-                minor,
+                "{} {}",
+                format_token_display(minor, payment.token_decimals.unwrap_or(0)),
                 payment.token_ticker.as_deref().unwrap_or("token")
             )
         } else {
@@ -398,7 +398,18 @@ impl Entry {
                 asset_id,
                 asset_info: Some(info),
                 ..
-            } => format!("{} asset base units · {}", info.amount_minor, asset_id),
+            } => {
+                let ticker = if asset_id == USDT_ASSET_ID_MAINNET {
+                    "USDt"
+                } else {
+                    asset_id.as_str()
+                };
+                format!(
+                    "{} {}",
+                    format_token_display(info.amount_minor, u32::from(info.precision)),
+                    ticker
+                )
+            }
             _ => format!("{} sats", payment.amount_sat),
         };
         let title = payment
@@ -451,6 +462,22 @@ impl Entry {
             identifier_label: "Swap address",
             signer_status: None,
         }
+    }
+}
+
+fn fee_detail(fee: &str, amounts_masked: bool) -> String {
+    if amounts_masked {
+        "Fee · ••••••".to_owned()
+    } else {
+        format!("Fee · {fee}")
+    }
+}
+
+fn vault_confirmation_detail(height: i32, tip: i32) -> String {
+    if tip <= 0 || tip < height {
+        "Confirmations · Unavailable".to_owned()
+    } else {
+        format!("Confirmations · {}", i64::from(tip) - i64::from(height) + 1)
     }
 }
 
@@ -697,12 +724,11 @@ fn render_at_width<'a>(
             )));
         }
         if let Some(fee) = &entry.fee {
-            detail = detail.push(text(format!("Fee · {fee}")));
+            detail = detail.push(text(fee_detail(fee, cache.balance_amounts_masked())));
         }
         if let ActivityTarget::Vault(tx) = &entry.target {
             if let Some(height) = tx.height {
-                let confirmations = (cache.blockheight() as i64 - height as i64 + 1).max(0);
-                detail = detail.push(text(format!("Confirmations · {confirmations}")));
+                detail = detail.push(text(vault_confirmation_detail(height, cache.blockheight())));
             }
         }
         if let Some(destination) = &entry.destination {
@@ -741,6 +767,7 @@ fn render_at_width<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::wallets::DomainLiquidAssetInfo;
 
     fn spark_payment() -> PaymentSummary {
         PaymentSummary {
@@ -798,5 +825,82 @@ mod tests {
         assert!(filters.includes(&row));
         filters.date_start = "2026-13-99".into();
         assert!(filters.dates().is_err());
+    }
+
+    #[test]
+    fn asset_amounts_use_source_precision() {
+        let mut spark = spark_payment();
+        spark.token_amount = Some(1_580_000);
+        spark.token_decimals = Some(6);
+        spark.token_ticker = Some("USDB".into());
+        assert_eq!(Entry::spark(spark).amount, "1.58 USDB");
+
+        let liquid = DomainPayment {
+            tx_id: Some("liquid-tx".into()),
+            destination: None,
+            timestamp: 1_760_000_000,
+            amount_sat: 0,
+            fees_sat: 0,
+            direction: DomainPaymentDirection::Receive,
+            status: DomainPaymentStatus::Complete,
+            details: DomainPaymentDetails::LiquidAsset {
+                asset_id: USDT_ASSET_ID_MAINNET.into(),
+                asset_info: Some(DomainLiquidAssetInfo {
+                    amount_minor: 500_000_000,
+                    precision: 8,
+                }),
+                description: String::new(),
+                payer_note: None,
+            },
+        };
+        assert_eq!(Entry::liquid(liquid).amount, "5.00 USDt");
+    }
+
+    #[test]
+    fn spark_rail_preserves_receive_and_send_direction() {
+        let mut payment = spark_payment();
+        payment.method = "spark".into();
+        payment.direction = "Receive".into();
+        let received = Entry::spark(payment.clone());
+        assert_eq!(received.direction, DirectionFilter::Received);
+        assert!(Filters {
+            direction: DirectionFilter::Received,
+            ..Default::default()
+        }
+        .includes(&received));
+        payment.direction = "Send".into();
+        let sent = Entry::spark(payment);
+        assert_eq!(sent.direction, DirectionFilter::Sent);
+        assert!(!Filters {
+            direction: DirectionFilter::Transfers,
+            ..Default::default()
+        }
+        .includes(&sent));
+    }
+
+    #[test]
+    fn fee_detail_respects_cube_amount_privacy() {
+        assert_eq!(fee_detail("123 sats", true), "Fee · ••••••");
+        assert_eq!(fee_detail("123 sats", false), "Fee · 123 sats");
+    }
+
+    #[test]
+    fn vault_confirmations_require_a_known_chain_tip() {
+        assert_eq!(
+            vault_confirmation_detail(800_000, 0),
+            "Confirmations · Unavailable"
+        );
+        assert_eq!(
+            vault_confirmation_detail(800_000, 799_999),
+            "Confirmations · Unavailable"
+        );
+        assert_eq!(
+            vault_confirmation_detail(800_000, 800_000),
+            "Confirmations · 1"
+        );
+        assert_eq!(
+            vault_confirmation_detail(800_000, 800_004),
+            "Confirmations · 5"
+        );
     }
 }
