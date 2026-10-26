@@ -385,7 +385,12 @@ fn remove_cube_at(
     invalidate_key: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<()> {
     match fs::symlink_metadata(&location.directory) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return invalidate_key(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            // A leftover keystore item has no registry to decrypt. Cube
+            // deletion must still work when the optional keystore is down.
+            let _ = invalidate_key();
+            return Ok(());
+        }
         Err(e) => return Err(e),
         Ok(_) => {}
     }
@@ -408,8 +413,10 @@ fn remove_cube_at(
         Err(e) => return Err(e),
     };
     fs::remove_dir_all(&location.directory)?;
-    // If this fails, the absent-directory branch retries key invalidation.
-    invalidate_key()
+    // Only the encrypted registry carries durable client authorization. Its
+    // removal must succeed; the now-inert wrapping key is best-effort cleanup.
+    let _ = invalidate_key();
+    Ok(())
 }
 
 #[cfg(test)]
@@ -428,15 +435,15 @@ mod tests {
         protect_new(&location.directory, true).unwrap();
         fs::write(location.directory.join("clients.enc"), b"partial").unwrap();
 
-        // A prior remove_dir_all may have removed owner.lock first. A keyring
-        // failure after directory removal is also retryable without creating
-        // or reading any real keystore entry in this synthetic test.
+        // A prior remove_dir_all may have removed owner.lock first. Once the
+        // directory is gone, a keystore failure cannot block Cube deletion.
+        // The callback avoids any real keystore entry in this synthetic test.
         let mut invalidations = 0;
-        assert!(remove_cube_at(&location, || {
+        remove_cube_at(&location, || {
             invalidations += 1;
             Err(io::Error::other("synthetic keyring failure"))
         })
-        .is_err());
+        .unwrap();
         assert!(!location.directory.exists());
         remove_cube_at(&location, || {
             invalidations += 1;
@@ -444,6 +451,19 @@ mod tests {
         })
         .unwrap();
         assert_eq!(invalidations, 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cube_without_pairings_deletes_when_keystore_is_unavailable() {
+        let root = std::env::temp_dir().join(format!("mcp-delete-empty-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let location = location(&root, "never-paired");
+        assert!(!location.directory.exists());
+        remove_cube_at(&location, || {
+            Err(io::Error::other("synthetic keystore unavailable"))
+        })
+        .unwrap();
         fs::remove_dir_all(root).unwrap();
     }
     fn fixture() -> (PathBuf, Store) {
