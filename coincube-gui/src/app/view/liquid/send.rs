@@ -10,7 +10,7 @@ use coincube_ui::{
     },
     icon::{self, receipt_icon},
     theme,
-    widget::Element,
+    widget::{action::Action, Element},
 };
 use iced::{
     widget::{button as iced_button, container, Column, Container, Row, Space},
@@ -64,6 +64,35 @@ pub struct LiquidSendFlowConfig<'a> {
     pub sent_quote: &'a coincube_ui::component::quote_display::Quote,
     pub sent_image_handle: &'a iced::widget::image::Handle,
 }
+
+fn send_payment_card_style(theme: &theme::Theme) -> container::Style {
+    let shell = &theme.colors.shell;
+    container::Style {
+        background: Some(Background::Color(shell.panel)),
+        text_color: Some(shell.ink),
+        border: iced::Border {
+            color: shell.line,
+            width: 1.0,
+            radius: 16.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+fn send_route_tile_style(theme: &theme::Theme) -> container::Style {
+    let shell = &theme.colors.shell;
+    container::Style {
+        background: Some(Background::Color(shell.background)),
+        border: iced::Border {
+            color: shell.line,
+            width: 1.0,
+            radius: 12.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+const CONTINUE_ACTION_ID: &str = "tenshu.liquid.send.continue";
 
 pub fn liquid_send_with_flow<'a>(config: LiquidSendFlowConfig<'a>) -> Element<'a, Message> {
     let base_content = match config.flow_state {
@@ -240,7 +269,7 @@ pub fn liquid_send_view<'a>(
 
         let card_content = Column::new()
             .spacing(6)
-            .push(text("YOU SEND").size(P2_SIZE).style(theme::text::secondary))
+            .push(text("You send").size(P2_SIZE).style(theme::text::secondary))
             .push(
                 Row::new()
                     .spacing(8)
@@ -258,25 +287,14 @@ pub fn liquid_send_view<'a>(
                     .size(P2_SIZE)
                     .style(theme::text::secondary),
             )
-            .push(
-                Container::new(text("LIQUID").size(11).color(color::ORANGE))
-                    .padding([2, 8])
-                    .style(|_: &theme::Theme| container::Style {
-                        border: iced::Border {
-                            color: color::ORANGE,
-                            width: 1.0,
-                            radius: 8.0.into(),
-                        },
-                        ..Default::default()
-                    }),
-            );
+            .push(p2_regular("Liquid network").style(theme::text::secondary));
 
         iced_button(
             Container::new(card_content)
-                .padding(16)
+                .padding(14)
                 .width(Length::Fill)
-                .height(Length::Fixed(160.0))
-                .style(theme::card::simple),
+                .height(Length::Fixed(132.0))
+                .style(send_route_tile_style),
         )
         .padding(0)
         .on_press(LiquidSendMessage::OpenSendPicker)
@@ -323,7 +341,7 @@ pub fn liquid_send_view<'a>(
         let card_content = Column::new()
             .spacing(6)
             .push(
-                text("THEY RECEIVE")
+                text("They receive")
                     .size(P2_SIZE)
                     .style(theme::text::secondary),
             )
@@ -339,29 +357,14 @@ pub fn liquid_send_view<'a>(
                             .style(theme::text::primary),
                     ),
             )
-            .push(
-                Container::new(
-                    text(network_label.to_uppercase())
-                        .size(11)
-                        .color(color::ORANGE),
-                )
-                .padding([2, 8])
-                .style(|_: &theme::Theme| container::Style {
-                    border: iced::Border {
-                        color: color::ORANGE,
-                        width: 1.0,
-                        radius: 8.0.into(),
-                    },
-                    ..Default::default()
-                }),
-            );
+            .push(p2_regular(network_label).style(theme::text::secondary));
 
         iced_button(
             Container::new(card_content)
-                .padding(16)
+                .padding(14)
                 .width(Length::Fill)
-                .height(Length::Fixed(160.0))
-                .style(theme::card::simple),
+                .height(Length::Fixed(132.0))
+                .style(send_route_tile_style),
         )
         .padding(0)
         .on_press(LiquidSendMessage::OpenReceivePicker)
@@ -390,8 +393,6 @@ pub fn liquid_send_view<'a>(
         .push(arrow)
         .push(Container::new(they_receive_card).width(Length::FillPortion(1)));
 
-    content = content.push(cards_row);
-
     // ── Address input ────────────────────────────────────────────────────────
     let hint_text = match (to_asset, receive_network) {
         (_, ReceiveNetwork::Lightning) => "Enter Lightning Invoice or Address",
@@ -415,48 +416,75 @@ pub fn liquid_send_view<'a>(
         input.valid && !input.value.trim().is_empty() && input_type.is_some()
     };
 
-    let input_section = Container::new(
+    // Match the bounded Send form used by Vault and Spark. The existing
+    // validation and Send message still decide when Liquid advances to its
+    // amount and review steps; this view only gives that action a readable
+    // label and places it after the destination in keyboard order.
+    let prepare = Action::new(
+        CONTINUE_ACTION_ID,
+        text("Continue to amount").size(P1_SIZE),
+        LiquidSendMessage::FocusAction,
+    )
+    .padding([10, 16])
+    .style(theme::button::primary)
+    .width(Length::Fixed(190.0))
+    .on_press_maybe(can_proceed.then_some(LiquidSendMessage::Send));
+    let payment_card = Container::new(
         Column::new()
-            .spacing(12)
-            .width(Length::Fill)
-            .push(h4_bold("Receiving address"))
             .push(
-                Row::new()
-                    .spacing(10)
-                    .align_y(Alignment::Center)
-                    .push(
+                Container::new(h4_bold("Payment details"))
+                    .padding([18, 24])
+                    .width(Length::Fill),
+            )
+            .push(iced::widget::rule::horizontal(1))
+            .push(
+                Container::new(cards_row)
+                    .padding([20, 24])
+                    .width(Length::Fill),
+            )
+            .push(iced::widget::rule::horizontal(1))
+            .push(
+                Container::new(
+                    Column::new().spacing(10).push(p1_bold("Destination")).push(
                         form::Form::new(hint_text, input, LiquidSendMessage::InputEdited)
                             .size(16)
-                            .padding(15),
-                    )
-                    .push(
-                        Container::new(
-                            iced::widget::button(
-                                Container::new(icon::arrow_right())
-                                    .width(Length::Fill)
-                                    .height(Length::Fill)
-                                    .align_x(Alignment::Center)
-                                    .align_y(Alignment::Center),
-                            )
-                            .on_press_maybe(if can_proceed {
-                                Some(LiquidSendMessage::Send)
-                            } else {
-                                None
-                            })
-                            .width(Length::Fixed(50.0))
-                            .height(Length::Fixed(50.0))
-                            .style(theme::button::primary),
-                        )
-                        .width(Length::Fixed(50.0))
-                        .height(Length::Fixed(50.0)),
+                            .padding(12),
                     ),
+                )
+                .padding([20, 24])
+                .width(Length::Fill),
+            )
+            .push(iced::widget::rule::horizontal(1))
+            .push(
+                Container::new(
+                    Row::new()
+                        .spacing(16)
+                        .align_y(Alignment::Center)
+                        .push(
+                            p2_regular(if input.value.trim().is_empty() {
+                                "Enter a destination to continue."
+                            } else if can_proceed {
+                                "Next, review the amount and fees."
+                            } else {
+                                "Check the destination before continuing."
+                            })
+                            .style(theme::text::secondary)
+                            .width(Length::Fill),
+                        )
+                        .push(prepare),
+                )
+                .padding([16, 24])
+                .width(Length::Fill),
             ),
     )
-    .padding(16)
     .width(Length::Fill)
-    .style(theme::card::simple);
+    .style(send_payment_card_style);
 
-    content = content.push(input_section);
+    content = content.push(
+        Container::new(payment_card)
+            .max_width(720)
+            .center_x(Length::Fill),
+    );
 
     // ── Last transactions ────────────────────────────────────────────────────
     content = content.push(Column::new().spacing(10).push(h4_bold("Last transactions")));
@@ -1872,6 +1900,60 @@ fn _old_send_asset_toggle(_current_asset: SendAsset) -> Element<'static, LiquidS
 mod privacy_tests {
     use super::*;
     use crate::app::view::shared::landing::capture;
+
+    #[test]
+    fn send_details_fit_compact_and_wide_themes_with_keyboard_continue() {
+        let input = form::Value {
+            value: "synthetic-destination".to_owned(),
+            warning: None,
+            valid: true,
+        };
+        let input_type = None;
+        let render = || {
+            liquid_send_view(
+                Amount::from_sat(123_456),
+                0,
+                SendAsset::Lbtc,
+                SendAsset::Usdt,
+                ReceiveNetwork::Ethereum,
+                None,
+                &[],
+                &input,
+                &input_type,
+                BitcoinDisplayUnit::Sats,
+                "",
+                false,
+                false,
+            )
+        };
+        for (width, height) in [(1024, 768), (1440, 900)] {
+            for (appearance, theme) in [
+                ("dark", theme::Theme::dark()),
+                ("light", theme::Theme::light()),
+            ] {
+                let mounted = capture::inspect(
+                    "liquid-send-details",
+                    render(),
+                    (width, height),
+                    appearance,
+                    theme,
+                );
+                assert!(mounted.contains("Payment details"));
+                assert!(mounted.contains("Destination"));
+                assert!(mounted.contains("Continue to amount"));
+                assert!(mounted.has_focus(iced::advanced::widget::Id::new(CONTINUE_ACTION_ID,)));
+            }
+        }
+        let messages = capture::activate(
+            render(),
+            iced::advanced::widget::Id::new(CONTINUE_ACTION_ID),
+            (1024, 768),
+            false,
+        );
+        assert!(messages
+            .iter()
+            .any(|message| matches!(message, LiquidSendMessage::Send)));
+    }
 
     #[test]
     fn send_passive_balances_and_recent_rows_follow_global_mask() {

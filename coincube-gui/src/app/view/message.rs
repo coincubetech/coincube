@@ -959,6 +959,7 @@ pub enum LiquidOverviewMessage {
 
 #[derive(Debug, Clone)]
 pub enum LiquidSendMessage {
+    FocusAction(iced::advanced::widget::Id),
     PresetAsset(crate::app::state::liquid::send::SendAsset),
     InputEdited(String),
     /// Carries (original_input, validation_result) so stale async results are discarded.
