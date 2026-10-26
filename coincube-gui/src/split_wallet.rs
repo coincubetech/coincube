@@ -1909,6 +1909,41 @@ mod tests {
         .has_focus(Id::new(SCAN_ACTION_ID)));
     }
 
+    #[test]
+    fn split_hardware_read_restores_focus_after_loaded_result() {
+        use crate::services::public_hardware_source::tests::{
+            add_fake_device, assert_focus_task, loaded_for_test, unique_temp_root,
+        };
+
+        let _guard = crate::app::session::test_guard();
+        let root = unique_temp_root("split-keyboard-read-return");
+        for succeeds in [true, false] {
+            let mut panel = SplitWalletPanel::new();
+            panel.set_targets(vec![target()]);
+            panel.source_form.select_source(Source::Hardware);
+            add_fake_device(panel.hardware_mut(), &root);
+            let reading = panel.update(
+                Message::Hardware(HardwareMessage::Read("dev-1".into())),
+                None,
+                0,
+            );
+            assert_focus_task(reading, view(&panel), Id::new("tenshu.hardware.account"));
+            let generation = panel.hardware_mut().generation_for_test();
+            let loaded = panel.update(
+                Message::Hardware(loaded_for_test(generation, succeeds)),
+                None,
+                0,
+            );
+            assert_focus_task(
+                loaded,
+                view(&panel),
+                Id::from("tenshu.hardware.read:5:dev-1".to_string()),
+            );
+            assert_eq!(panel.source_form.hardware_account().is_some(), succeeds);
+        }
+        let _ = std::fs::remove_dir(root);
+    }
+
     /// Check source-first layout and action dispatch at narrow and standard
     /// widths in both themes, including busy and failed states. Optional preview
     /// output uses the same layout that the bounds and input assertions inspect.

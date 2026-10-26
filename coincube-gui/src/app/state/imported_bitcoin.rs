@@ -3204,6 +3204,51 @@ mod tests {
         assert!(hardware.has_focus(Id::new("tenshu.hardware.account")));
     }
 
+    #[test]
+    fn imported_setup_hardware_read_restores_focus_after_loaded_result() {
+        use crate::services::public_hardware_source::tests::{
+            add_fake_device, assert_focus_task, loaded_for_test, unique_temp_root,
+        };
+        use crate::split_hardware::HardwareMessage;
+        use iced::advanced::widget::Id;
+
+        let root = unique_temp_root("import-keyboard-read-return");
+        for succeeds in [true, false] {
+            let directory = NetworkDirectory::new(root.join(format!("import-{succeeds}")));
+            let mut panel =
+                ImportedBitcoinPanel::new(directory, "keyboard".into(), BitcoinImport::pending());
+            panel.source.select_source(Source::Hardware);
+            add_fake_device(panel.source.hardware_mut(), &root);
+            let reading = panel.update_view(
+                ImportMessage::Source(wallet_source_form::Message::Hardware(
+                    HardwareMessage::Read("dev-1".into()),
+                )),
+                None,
+                0,
+            );
+            assert_focus_task(
+                reading,
+                panel.setup_view().map(Message::View),
+                Id::new("tenshu.hardware.account"),
+            );
+            let generation = panel.source.hardware_mut().generation_for_test();
+            let loaded = panel.update_view(
+                ImportMessage::Source(wallet_source_form::Message::Hardware(loaded_for_test(
+                    generation, succeeds,
+                ))),
+                None,
+                0,
+            );
+            assert_focus_task(
+                loaded,
+                panel.setup_view().map(Message::View),
+                Id::from("tenshu.hardware.read:5:dev-1".to_string()),
+            );
+            assert_eq!(panel.source.hardware_account().is_some(), succeeds);
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     use coincube_core::miniscript::bitcoin::{
         absolute::LockTime,
         bip32::{ChildNumber, DerivationPath, Xpriv, Xpub},

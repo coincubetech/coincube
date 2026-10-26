@@ -229,6 +229,20 @@ fn focus(id: Id) -> HardwareMessage {
     HardwareMessage::Focus(id)
 }
 
+const ACCOUNT_INPUT_ID: &str = "tenshu.hardware.account";
+
+fn read_action_id(device_id: &str) -> Id {
+    Id::from(format!(
+        "tenshu.hardware.read:{}:{}",
+        device_id.len(),
+        device_id
+    ))
+}
+
+fn focus_account() -> Task<HardwareMessage> {
+    iced::widget::operation::focus(Id::new(ACCOUNT_INPUT_ID))
+}
+
 #[derive(Debug, Clone)]
 pub enum HardwareStatus {
     Idle,
@@ -336,7 +350,14 @@ impl HardwareSource {
                     self.clear();
                     self.status = HardwareStatus::Failed(HardwareSourceError::Disconnected);
                 }
-                (task, gone)
+                (
+                    if gone {
+                        Task::batch([task, focus_account()])
+                    } else {
+                        task
+                    },
+                    gone,
+                )
             }
             HardwareMessage::PurposeSelected(purpose) => {
                 self.purpose = purpose;
@@ -354,30 +375,35 @@ impl HardwareSource {
                     Ok(account) => account,
                     Err(error) => {
                         self.status = HardwareStatus::Failed(error);
-                        return (Task::none(), true);
+                        return (focus_account(), true);
                     }
                 };
                 let Some((device, listed)) = self.supported(&id) else {
                     self.status = HardwareStatus::Failed(HardwareSourceError::Disconnected);
-                    return (Task::none(), true);
+                    return (focus_account(), true);
                 };
                 let generation = self.generation;
                 let purpose = self.purpose;
                 self.status = HardwareStatus::Reading(id.clone());
                 (
-                    Task::perform(
-                        read_account(device, id, listed, purpose, account),
-                        move |r| HardwareMessage::Loaded(r.map(Arc::new), generation),
-                    ),
+                    Task::batch([
+                        Task::perform(
+                            read_account(device, id, listed, purpose, account),
+                            move |r| HardwareMessage::Loaded(r.map(Arc::new), generation),
+                        ),
+                        focus_account(),
+                    ]),
                     true,
                 )
             }
             HardwareMessage::Loaded(result, generation) => {
-                if generation != self.generation
-                    || !matches!(self.status, HardwareStatus::Reading(_))
-                {
+                let HardwareStatus::Reading(device_id) = &self.status else {
+                    return (Task::none(), false);
+                };
+                if generation != self.generation {
                     return (Task::none(), false);
                 }
+                let device_id = device_id.clone();
                 self.status = match result {
                     Ok(account) if self.supported(&account.device_id).is_some() => {
                         HardwareStatus::Ready(account)
@@ -385,9 +411,19 @@ impl HardwareSource {
                     Ok(_) => HardwareStatus::Failed(HardwareSourceError::Disconnected),
                     Err(error) => HardwareStatus::Failed(error),
                 };
-                (Task::none(), true)
+                let focus_id = if self.supported(&device_id).is_some() {
+                    read_action_id(&device_id)
+                } else {
+                    Id::new(ACCOUNT_INPUT_ID)
+                };
+                (iced::widget::operation::focus(focus_id), true)
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn generation_for_test(&self) -> u64 {
+        self.generation
     }
 }
 
@@ -427,7 +463,7 @@ pub fn view(source: &HardwareSource) -> Element<'_, HardwareMessage> {
                 )
                 .push(
                     ActionButton::new(
-                        Id::from(format!("tenshu.hardware.read:{}:{}", id.len(), id)),
+                        read_action_id(id),
                         "Read account",
                         ActionKind::Secondary,
                         focus,
@@ -502,7 +538,7 @@ pub fn view(source: &HardwareSource) -> Element<'_, HardwareMessage> {
         .push(p1_bold("Account"))
         .push(
             text_input("0", &source.account)
-                .id("tenshu.hardware.account")
+                .id(ACCOUNT_INPUT_ID)
                 .on_input(HardwareMessage::AccountEdited)
                 .padding(10),
         )
@@ -621,6 +657,91 @@ pub(crate) mod tests {
         source
     }
 
+    pub(crate) fn loaded_for_test(generation: u64, succeeds: bool) -> HardwareMessage {
+        let result = if succeeds {
+            iced::futures::executor::block_on(read_account(
+                fake(Network::Bitcoin, None),
+                "dev-1".into(),
+                fingerprint(),
+                Purpose::Bip84,
+                0,
+            ))
+            .map(Arc::new)
+        } else {
+            Err(HardwareSourceError::Device)
+        };
+        HardwareMessage::Loaded(result, generation)
+    }
+
+    pub(crate) fn assert_focus_task<M: 'static>(
+        task: Task<M>,
+        mut element: Element<'_, M>,
+        expected: Id,
+    ) {
+        use iced::advanced::{
+            layout,
+            renderer::Headless,
+            widget::{operation, operation::focusable, Operation, Tree},
+            Layout,
+        };
+        use iced_runtime::futures::futures::StreamExt;
+
+        for bytes in coincube_ui::font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(bytes);
+        }
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(iced::Size::ZERO, iced::Size::new(760.0, 3000.0)),
+        );
+        let stream = iced_runtime::task::into_stream(task).expect("focus task");
+        let actions = iced::futures::executor::block_on(stream.collect::<Vec<_>>());
+        let mut applied = false;
+        for action in actions {
+            if let iced_runtime::Action::Widget(mut operation) = action {
+                applied = true;
+                loop {
+                    element.as_widget_mut().operate(
+                        &mut tree,
+                        Layout::new(&node),
+                        &renderer,
+                        &mut operation::black_box(operation.as_mut()),
+                    );
+                    match operation.finish() {
+                        operation::Outcome::Chain(next) => operation = next,
+                        operation::Outcome::None | operation::Outcome::Some(()) => break,
+                    }
+                }
+            }
+        }
+        assert!(applied, "expected a mounted focus operation");
+        let mut find: Box<dyn Operation<Id>> = Box::new(focusable::find_focused());
+        let found = loop {
+            element.as_widget_mut().operate(
+                &mut tree,
+                Layout::new(&node),
+                &renderer,
+                &mut operation::black_box(find.as_mut()),
+            );
+            match find.finish() {
+                operation::Outcome::None => break None,
+                operation::Outcome::Some(id) => break Some(id),
+                operation::Outcome::Chain(next) => find = next,
+            }
+        };
+        assert_eq!(found, Some(expected));
+    }
+
     #[test]
     fn hardware_source_actions_are_keyboard_operable_without_changing_read_semantics() {
         use crate::app::view::shared::landing::capture;
@@ -665,6 +786,48 @@ pub(crate) mod tests {
         }
         let (_, invalidated) = source.update(HardwareMessage::Focus(read_id));
         assert!(!invalidated, "focus must not clear account material");
+        let _ = fs::remove_dir(root);
+    }
+
+    #[test]
+    fn read_account_focus_returns_after_success_failure_and_disconnect() {
+        use crate::app::view::shared::landing::capture;
+
+        let root = temp_root();
+        let read_id = read_action_id("dev-1");
+        for outcome in ["success", "error", "disconnected"] {
+            let mut source = source_with(fake(Network::Bitcoin, None), &root);
+            let (reading_task, invalidated) = source.update(HardwareMessage::Read("dev-1".into()));
+            assert!(invalidated);
+            let reading = capture::inspect_full_window(
+                &format!("split-hardware-reading-{outcome}"),
+                view(&source),
+                (1024, 768),
+                "dark",
+                theme::Theme::dark(),
+            );
+            assert!(
+                !reading.has_focus(read_id.clone()),
+                "Read is disabled while reading"
+            );
+            assert_focus_task(reading_task, view(&source), Id::new(ACCOUNT_INPUT_ID));
+            let generation = source.generation_for_test();
+            if outcome == "disconnected" {
+                source.devices.as_mut().unwrap().list.clear();
+            }
+            let (loaded_task, invalidated) = source.update(loaded_for_test(
+                generation,
+                outcome == "success" || outcome == "disconnected",
+            ));
+            assert!(invalidated);
+            let expected = if outcome == "disconnected" {
+                Id::new(ACCOUNT_INPUT_ID)
+            } else {
+                read_id.clone()
+            };
+            assert_focus_task(loaded_task, view(&source), expected);
+            assert_eq!(source.account().is_some(), outcome == "success");
+        }
         let _ = fs::remove_dir(root);
     }
 
