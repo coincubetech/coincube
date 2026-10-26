@@ -138,20 +138,22 @@ fn book_reputation(order: &P2POrder) -> String {
     }
 }
 
-fn book_side_label(order_type: &OrderType) -> &'static str {
-    match order_type {
-        OrderType::Sell => "BUYING",
-        OrderType::Buy => "SELLING",
+fn book_side_label(order: &P2POrder) -> &'static str {
+    match (&order.order_type, order.is_mine) {
+        (OrderType::Buy, true) => "YOU ARE BUYING",
+        (OrderType::Sell, true) => "YOU ARE SELLING",
+        (OrderType::Sell, false) => "BUYING",
+        (OrderType::Buy, false) => "SELLING",
     }
 }
 
 /// A single keyboard-actionable order entry. The label describes the taker's
 /// action, while `order_type` remains the maker's side for selection/trading.
 pub fn order_card<'a>(order: &'a P2POrder, compact: bool) -> Element<'a, view::Message> {
-    let side = book_side_label(&order.order_type);
-    let side_style = match order.order_type {
-        OrderType::Sell => theme::text::success as fn(&_) -> _,
-        OrderType::Buy => theme::text::warning as fn(&_) -> _,
+    let side = book_side_label(order);
+    let side_style = match (&order.order_type, order.is_mine) {
+        (OrderType::Sell, false) | (OrderType::Buy, true) => theme::text::success as fn(&_) -> _,
+        (OrderType::Buy, false) | (OrderType::Sell, true) => theme::text::warning as fn(&_) -> _,
     };
     let payment = if order.payment_methods.is_empty() {
         "Unavailable".to_string()
@@ -585,8 +587,8 @@ mod book_tests {
 
     #[test]
     fn book_labels_taker_side_and_only_displays_known_values() {
-        let sell = order(OrderType::Sell);
-        assert_eq!(book_side_label(&sell.order_type), "BUYING");
+        let mut sell = order(OrderType::Sell);
+        assert_eq!(book_side_label(&sell), "BUYING");
         assert_eq!(book_amount(&sell), "50 – 200 EUR");
         assert_eq!(book_price(&sell), "Market +2%");
         assert_eq!(book_reputation(&sell), "No rating · 3 days");
@@ -594,8 +596,13 @@ mod book_tests {
         let mut buy = order(OrderType::Buy);
         buy.sats_amount = Some(450_000);
         buy.seller_rating = Some(4.8);
-        assert_eq!(book_side_label(&buy.order_type), "SELLING");
+        assert_eq!(book_side_label(&buy), "SELLING");
         assert_eq!(book_price(&buy), "Fixed · 450,000 sats");
         assert_eq!(book_reputation(&buy), "★ 4.8 · 3 days");
+
+        buy.is_mine = true;
+        assert_eq!(book_side_label(&buy), "YOU ARE BUYING");
+        sell.is_mine = true;
+        assert_eq!(book_side_label(&sell), "YOU ARE SELLING");
     }
 }
