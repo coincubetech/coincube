@@ -1646,7 +1646,8 @@ mod tests {
         use iced::advanced::{
             layout,
             renderer::Headless,
-            widget::{operation, operation::Scrollable, Layout, Operation, Tree},
+            widget::{operation, operation::Scrollable, Operation, Tree},
+            Layout,
         };
         use iced::{Rectangle, Size, Vector};
 
@@ -1731,7 +1732,7 @@ mod tests {
             probe
         };
         let before = inspect(&mut element, &mut tree);
-        fn pane<'p>(probe: &'p Probe, id: &str) -> &'p (Id, Rectangle, Rectangle, Vector) {
+        fn pane<'p>(probe: &'p Probe, id: &'static str) -> &'p (Id, Rectangle, Rectangle, Vector) {
             probe
                 .panes
                 .iter()
