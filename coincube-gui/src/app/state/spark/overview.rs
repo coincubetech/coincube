@@ -13,10 +13,7 @@ use std::sync::Arc;
 
 use coincube_core::miniscript::bitcoin::Amount;
 use coincube_spark_protocol::PaymentSummary;
-use coincube_ui::{
-    theme,
-    widget::{ColumnExt, Element},
-};
+use coincube_ui::widget::Element;
 use iced::Task;
 
 use crate::app::cache::Cache;
@@ -53,6 +50,7 @@ pub struct SparkOverview {
     /// `get_user_settings` RPC returns; `Some(true)` renders a
     /// "Stable" badge next to the balance in the overview.
     stable_balance_active: Option<bool>,
+    stable_balance_saving: bool,
 }
 
 impl SparkOverview {
@@ -64,30 +62,18 @@ impl SparkOverview {
             error: None,
             loading: false,
             stable_balance_active: None,
+            stable_balance_saving: false,
         }
     }
-}
 
-/// Resolve a preview action against the current snapshot, not its prior row
-/// position. A missing, empty, or duplicate bridge ID cannot open a payment.
-fn find_unique_recent<'a>(
-    recent: &'a [SparkRecentTransaction],
-    id: &str,
-) -> Option<&'a SparkRecentTransaction> {
-    if id.trim().is_empty() {
-        return None;
-    }
-    let mut matches = recent.iter().filter(|payment| payment.id == id);
-    let selected = matches.next()?;
-    matches.next().is_none().then_some(selected)
-}
-
-impl State for SparkOverview {
-    fn view<'a>(
+    /// Mount the shared Connect address form on the Spark landing without
+    /// copying account or address state into this panel.
+    pub fn view_with_address<'a>(
         &'a self,
         menu: &'a Menu,
         cache: &'a Cache,
-    ) -> Element<'a, crate::app::view::Message> {
+        address: Option<Element<'a, view::Message>>,
+    ) -> Element<'a, view::Message> {
         let fiat_converter: Option<FiatAmountConverter> =
             cache.fiat_price.as_ref().and_then(|p| p.try_into().ok());
 
@@ -119,33 +105,56 @@ impl State for SparkOverview {
         .render()
         .map(view::Message::SparkOverview);
 
-        let held_while_off = self.stable_balance_active == Some(false)
-            && self.snapshot.as_ref().is_some_and(|snapshot| {
-                snapshot
-                    .stable_balance
-                    .as_ref()
-                    .is_some_and(|balance| balance.balance > 0)
-            });
-        let content = iced::widget::Column::new()
-            .push(overview)
-            .push_maybe(held_while_off.then(|| {
-                view::shared::landing::landing_button(
-                    view::shared::landing::landing_control_id(
-                        &cache.cube_id,
-                        "Spark",
-                        "review-stable-balance",
-                    ),
-                    "Review Stable Balance",
-                    None,
-                    view::Message::FocusAction,
-                    Some(view::Message::Menu(Menu::Spark(SparkSubMenu::Settings(
-                        Some(crate::app::menu::SparkSettingsOption::General),
-                    )))),
-                    theme::button::secondary,
-                )
-            }));
+        let mut content = iced::widget::Column::new().push(overview);
+        if let Some(address) = address.filter(|_| self.backend.is_some()) {
+            content = content.push(view::spark::overview::spark_landing_context(
+                address,
+                self.stable_balance_active,
+                self.stable_balance_saving,
+                self.backend.is_some(),
+                &cache.cube_id,
+            ));
+        }
+        view::dashboard(menu, cache, content)
+    }
 
-        crate::app::view::dashboard(menu, cache, content)
+    /// A save result is routed through App even if the user left this panel.
+    pub fn finish_stable_balance_save(&mut self) {
+        self.stable_balance_saving = false;
+    }
+
+    /// One app-wide in-flight guard covers either Spark entry point. A fast
+    /// Settings → Overview route change cannot queue a second SDK mutation.
+    pub fn try_start_stable_balance_save(&mut self) -> bool {
+        if self.stable_balance_saving {
+            return false;
+        }
+        self.stable_balance_saving = true;
+        true
+    }
+}
+
+/// Resolve a preview action against the current snapshot, not its prior row
+/// position. A missing, empty, or duplicate bridge ID cannot open a payment.
+fn find_unique_recent<'a>(
+    recent: &'a [SparkRecentTransaction],
+    id: &str,
+) -> Option<&'a SparkRecentTransaction> {
+    if id.trim().is_empty() {
+        return None;
+    }
+    let mut matches = recent.iter().filter(|payment| payment.id == id);
+    let selected = matches.next()?;
+    matches.next().is_none().then_some(selected)
+}
+
+impl State for SparkOverview {
+    fn view<'a>(
+        &'a self,
+        menu: &'a Menu,
+        cache: &'a Cache,
+    ) -> Element<'a, crate::app::view::Message> {
+        self.view_with_address(menu, cache, None)
     }
 
     fn reload(
@@ -233,6 +242,16 @@ impl State for SparkOverview {
                 }
                 view::SparkOverviewMessage::StableBalanceLoaded(active) => {
                     self.stable_balance_active = Some(active);
+                }
+                view::SparkOverviewMessage::ToggleStableBalance(enabled) => {
+                    if self.backend.is_some()
+                        && !self.stable_balance_saving
+                        && self.stable_balance_active == Some(!enabled)
+                    {
+                        return Task::done(Message::View(view::Message::SparkSettings(
+                            view::SparkSettingsMessage::StableBalanceToggled(enabled),
+                        )));
+                    }
                 }
                 view::SparkOverviewMessage::SendBtc => {
                     return redirect(Menu::Spark(SparkSubMenu::Send));
@@ -416,6 +435,17 @@ fn parse_method(raw: &str) -> SparkPaymentMethod {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stable_balance_save_guard_survives_panel_navigation_until_settlement() {
+        let mut overview = SparkOverview::new(None);
+        assert!(overview.try_start_stable_balance_save());
+        // A second action can arrive from the other Spark page before the
+        // first bridge result. Only the first is admitted.
+        assert!(!overview.try_start_stable_balance_save());
+        overview.finish_stable_balance_save();
+        assert!(overview.try_start_stable_balance_save());
+    }
 
     fn payment(direction: &str, status: &str, method: &str, amount_sat: i64) -> PaymentSummary {
         PaymentSummary {

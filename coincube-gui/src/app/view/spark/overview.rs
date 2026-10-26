@@ -116,6 +116,69 @@ pub struct SparkOverviewView<'a> {
     pub mask_amounts: bool,
 }
 
+/// Context below Spark's recent activity. The address form is supplied by the
+/// Connect owner so its validation, confirmation, and account gate stay shared.
+pub fn spark_landing_context<'a>(
+    address: Element<'a, crate::app::view::Message>,
+    active: Option<bool>,
+    saving: bool,
+    available: bool,
+    cube_id: &str,
+) -> Element<'a, crate::app::view::Message> {
+    use crate::app::view::{Message, SparkOverviewMessage};
+
+    let status = match (available, active, saving) {
+        (false, _, _) => "Spark is unavailable",
+        (_, _, true) => "Saving…",
+        (_, Some(true), false) => "Stable Balance is ON",
+        (_, Some(false), false) => "Stable Balance is OFF",
+        (_, None, false) => "Stable Balance setting is unknown",
+    };
+    let next = active.map(|enabled| !enabled);
+    let button = landing_button(
+        landing_control_id(cube_id, "Spark", "stable-balance-toggle"),
+        if active == Some(true) {
+            "Turn off"
+        } else {
+            "Turn on"
+        },
+        None,
+        Message::FocusAction,
+        (available && !saving)
+            .then_some(next)
+            .flatten()
+            .map(|enabled| {
+                Message::SparkOverview(SparkOverviewMessage::ToggleStableBalance(enabled))
+            }),
+        landing_subtle_button_style,
+    );
+    let stable = Container::new(
+        Column::new()
+            .spacing(8)
+            .push(h4_bold("Stable Balance"))
+            .push(text("Keep a portion of your Bitcoin balance pegged to USD. Set per device; not restored with the seed. No guaranteed peg.")
+                .size(P2_SIZE).style(theme::text::secondary))
+            .push(
+                Row::new()
+                    .spacing(12)
+                    .align_y(Alignment::Center)
+                    .push(text(status).size(P2_SIZE))
+                    .push(iced::widget::Space::new().width(Length::Fill))
+                    .push(button),
+            ),
+    )
+    .padding(20)
+    .width(Length::Fill)
+    .style(crate::app::view::shared::landing::landing_card_style);
+
+    Column::new()
+        .spacing(16)
+        .padding([16, 16])
+        .push(address)
+        .push(stable)
+        .into()
+}
+
 impl<'a> SparkOverviewView<'a> {
     pub fn render(self) -> Element<'a, SparkOverviewMessage> {
         match &self.status {
@@ -542,6 +605,69 @@ fn placeholder<'a, T: Into<Element<'a, SparkOverviewMessage>>>(
 mod tests {
     use super::*;
     use crate::app::view::shared::landing::capture;
+    use crate::app::{
+        state::connect::ConnectCubePanel,
+        view::{self, spark::settings::lightning_address::lightning_address_ux},
+    };
+    use crate::services::coincube::LightningAddress;
+
+    #[test]
+    fn spark_landing_mounts_address_confirmation_and_stable_pending_states() {
+        let mut connect = ConnectCubePanel::new(
+            None,
+            "synthetic-cube".into(),
+            "Test Cube".into(),
+            "bitcoin".into(),
+            false,
+        );
+        connect.lightning_address = Some(LightningAddress {
+            lightning_address: Some("sats@coincube.io".into()),
+        });
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            for size in [(1024, 768), (1440, 900)] {
+                let address = lightning_address_ux(&connect).map(view::Message::ConnectCube);
+                let mounted = capture::inspect(
+                    "spark-context-ready",
+                    spark_landing_context(address, Some(true), false, true, "synthetic-cube"),
+                    size,
+                    appearance,
+                    theme,
+                );
+                assert!(mounted.contains("sats@coincube.io"));
+                assert!(mounted.contains("Stable Balance is ON"));
+                assert!(mounted.has_focus(landing_control_id(
+                    "synthetic-cube",
+                    "Spark",
+                    "stable-balance-toggle"
+                )));
+
+                connect.ln_editing = true;
+                connect.ln_username_input = "newname".into();
+                connect.ln_change_confirm_pending = Some("newname".into());
+                let modal = capture::inspect(
+                    "spark-context-address-confirm",
+                    spark_landing_context(
+                        lightning_address_ux(&connect).map(view::Message::ConnectCube),
+                        Some(true),
+                        true,
+                        true,
+                        "synthetic-cube",
+                    ),
+                    size,
+                    appearance,
+                    theme,
+                );
+                assert!(modal.contains("Change your Lightning Address?"));
+                assert!(modal.contains("Yes, change it"));
+                assert!(modal.contains("Saving…"));
+                connect.ln_editing = false;
+                connect.ln_change_confirm_pending = None;
+            }
+        }
+    }
 
     fn tx(
         id: &str,
