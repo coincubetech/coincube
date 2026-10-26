@@ -216,6 +216,8 @@ impl State for LiquidReceive {
         }
 
         let receive_view = view::liquid::liquid_receive_view(
+            &cache.cube_name,
+            cache.network,
             &self.receive_method,
             self.current_address(),
             self.current_qr_data(),
@@ -337,6 +339,12 @@ impl State for LiquidReceive {
 
         if let Message::View(view::Message::LiquidReceive(msg)) = message {
             match msg {
+                LiquidReceiveMessage::FocusAction(id) => {
+                    return iced::widget::operation::focus(id.clone());
+                }
+                LiquidReceiveMessage::BackToOverview => {
+                    return redirect(Menu::Liquid(LiquidSubMenu::Overview));
+                }
                 LiquidReceiveMessage::ToggleMethod(method) => {
                     if self.receive_method != method {
                         self.receive_method = method.clone();

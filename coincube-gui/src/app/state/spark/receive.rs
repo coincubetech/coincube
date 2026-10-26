@@ -234,6 +234,7 @@ impl State for SparkReceive {
                 claim_error: self.claim_error.as_deref(),
                 pending_deposit_confirmations: &self.pending_deposit_confirmations,
                 network: cache.network,
+                cube_name: &cache.cube_name,
                 received_amount_display: &self.received_amount_display,
                 received_celebration_context: &self.received_celebration_context,
                 received_quote: &self.received_quote,
