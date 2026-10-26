@@ -27,6 +27,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
+
+use coincube_core::signer::SignerError;
 
 use super::{CubeLocation, PinOutcome, UnlockError};
 
@@ -39,6 +42,79 @@ const LOCK_NAME: &str = "unlock-throttle.lock";
 pub enum PinAttempt {
     Locked(Duration),
     Classified(PinOutcome),
+}
+
+/// A permanent-seed export trial. `Words` is zeroizing from the moment it
+/// leaves the locked check; no duress outcome can carry a seed or seed blob.
+pub enum SeedExportAttempt {
+    Words(Zeroizing<Vec<String>>),
+    Duress,
+    Wrong(Duration),
+    Locked(Duration),
+}
+
+/// Share the ordinary Cube PIN's serialized throttle and duress policy across
+/// settings surfaces that can reveal the permanent master seed. The first
+/// verifier preserves the active session's correct-PIN fast path; on an
+/// incorrect PIN, `unlock_blocking` applies the existing seed/marker/keystore
+/// classification at full cost. Wrong and duress both take that path.
+///
+/// `validate` must re-read the exact Cube/chain/marker selection. It runs under
+/// the attempt lock before decryption and before a successful or wrong result
+/// is committed. A verified duress marker remains an emergency signal even if
+/// the selection changes while Argon2 is running, as in `classify_pin_scoped`.
+#[allow(dead_code)] // The settings callers are wired in the next checkpoint.
+pub fn classify_seed_export(
+    root: &Path,
+    loc: &CubeLocation,
+    pin: &str,
+    verify: impl FnOnce() -> Result<Vec<String>, SignerError>,
+    validate: impl Fn() -> Result<(), UnlockError>,
+) -> Result<SeedExportAttempt, String> {
+    with_locked_throttle(root, |state| {
+        let remaining = state.remaining_lockout(loc.cube_id);
+        if !remaining.is_zero() {
+            return Ok(SeedExportAttempt::Locked(remaining));
+        }
+        validate().map_err(|error| error.to_string())?;
+        match verify() {
+            Ok(words) => {
+                let words = Zeroizing::new(words);
+                validate().map_err(|error| error.to_string())?;
+                state.record_success(root, loc.cube_id);
+                Ok(SeedExportAttempt::Words(words))
+            }
+            Err(SignerError::InvalidPassword) => match super::unlock_blocking(loc, pin) {
+                Ok(PinOutcome::Duress) => {
+                    state.record_success(root, loc.cube_id);
+                    Ok(SeedExportAttempt::Duress)
+                }
+                Ok(PinOutcome::Wrong) => {
+                    validate().map_err(|error| error.to_string())?;
+                    let penalty = state.record_failure(root, loc.cube_id);
+                    Ok(SeedExportAttempt::Wrong(penalty))
+                }
+                // The session and disk disagreed, but the seed on disk opened.
+                // Return its words after the same fingerprint/selection check
+                // instead of treating a real PIN as an incorrect attempt.
+                Ok(PinOutcome::Unlock(signer)) => {
+                    let words = Zeroizing::new(
+                        signer
+                            .words()
+                            .iter()
+                            .map(|word| (*word).to_string())
+                            .collect(),
+                    );
+                    validate().map_err(|error| error.to_string())?;
+                    state.record_success(root, loc.cube_id);
+                    Ok(SeedExportAttempt::Words(words))
+                }
+                Err(error) => Err(error.to_string()),
+            },
+            Err(error) => Err(error.to_string()),
+        }
+    })
+    .map_err(|error| error.to_string())?
 }
 
 pub fn classify_pin(root: &Path, loc: &CubeLocation, pin: &str) -> Result<PinAttempt, UnlockError> {

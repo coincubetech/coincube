@@ -297,6 +297,14 @@ pub enum Message {
     /// "Duress Mode Activated" screen — WITHOUT wiping (remote activation can
     /// be accidental; only a local duress PIN wipes).
     DuressLockRemote,
+    /// A settings PIN trial matched this Cube's local duress marker. The tab
+    /// checks the originating App/Cube before invoking the same local wipe
+    /// orchestrator used by ordinary PIN unlock; no seed travels in this event.
+    DuressActivateLocal {
+        app: crate::app::cache::AppGeneration,
+        cube_id: String,
+        chain: crate::chain::ChainId,
+    },
     ToggleTheme,
     DismissReceivedCelebration,
     /// Answer to the one-time recovery-alerts consent prompt overlay
