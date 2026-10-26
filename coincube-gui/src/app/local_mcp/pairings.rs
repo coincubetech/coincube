@@ -44,6 +44,9 @@ impl Location {
     pub fn chain_matches(&self, chain: crate::chain::ChainId) -> bool {
         self.binding.chain == chain.dir_name()
     }
+    pub fn cube_matches(&self, cube: &str) -> bool {
+        self.binding.cube == cube
+    }
     pub fn new(datadir: &Path, chain: crate::chain::ChainId, cube: &str) -> io::Result<Self> {
         let root = datadir.canonicalize()?;
         let binding = Binding {
@@ -377,20 +380,41 @@ pub(super) fn descriptor_identity(wallet: &super::Wallet) -> String {
 
 pub(super) fn remove_cube(root: &Path, chain: crate::chain::ChainId, cube: &str) -> io::Result<()> {
     let location = Location::new(root, chain, cube)?;
-    if !location.exists() {
-        return Ok(());
+    remove_cube_at(&location, || location.invalidate_key())
+}
+
+fn remove_cube_at(
+    location: &Location,
+    invalidate_key: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    match fs::symlink_metadata(&location.directory) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            let _ = invalidate_key();
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+        Ok(_) => {}
     }
     check_private(&location.directory, true)?;
     if location.directory.canonicalize()? != location.directory {
         return Err(io::Error::other("pairing path redirected"));
     }
     let lock = location.directory.join("owner.lock");
-    check_private(&lock, false)?;
-    let owner = fs::OpenOptions::new().read(true).write(true).open(lock)?;
-    if !owner.try_lock_exclusive()? {
-        return Err(io::Error::other("paired Cube is open in another process"));
-    }
-    fs::remove_dir_all(&location.directory)
+    let _owner = match check_private(&lock, false) {
+        Ok(()) => {
+            let owner = fs::OpenOptions::new().read(true).write(true).open(lock)?;
+            if !owner.try_lock_exclusive()? {
+                return Err(io::Error::other("paired Cube is open in another process"));
+            }
+            Some(owner)
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
+    fs::remove_dir_all(&location.directory)?;
+    // The encrypted registry carries authorization. A leftover wrapping key is inert.
+    let _ = invalidate_key();
+    Ok(())
 }
 
 #[cfg(test)]
@@ -399,6 +423,19 @@ mod tests {
     fn location(root: &Path, cube: &str) -> Location {
         fs::create_dir_all(root.join("regtest")).unwrap();
         Location::new(root, crate::chain::ChainId::Regtest, cube).unwrap()
+    }
+    #[test]
+    fn cube_removal_recovers_from_partial_directory_and_key_deletion() {
+        let root = std::env::temp_dir().join(format!("mcp-delete-retry-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let location = location(&root, "retry");
+        fs::create_dir_all(&location.directory).unwrap();
+        protect_new(&location.directory, true).unwrap();
+        fs::write(location.directory.join("clients.enc"), b"partial").unwrap();
+        remove_cube_at(&location, || Err(io::Error::other("keystore unavailable"))).unwrap();
+        assert!(!location.directory.exists());
+        remove_cube_at(&location, || Err(io::Error::other("keystore unavailable"))).unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
     fn fixture() -> (PathBuf, Store) {
         let root = std::env::temp_dir().join(format!("mcp-add-recovery-{}", uuid::Uuid::new_v4()));
