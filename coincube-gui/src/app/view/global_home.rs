@@ -7,7 +7,7 @@ use coincube_ui::{
     component::{amount::*, button, form, spinner, text::*},
     icon::{
         arrow_down_up_icon, arrow_right, check_circle_icon, droplet_fill_icon, lightning_icon,
-        usd_icon, vault_icon, warning_icon,
+        recovery_icon, usd_icon, vault_icon, warning_icon,
     },
     theme,
     widget::*,
@@ -132,6 +132,7 @@ fn wallet_card<'a>(
     fiat_converter: Option<FiatAmountConverter>,
     balance_masked: bool,
     has_vault: bool,
+    show_recovery_path: bool,
     import_pending: bool,
     bitcoin_unit: coincube_ui::component::amount::BitcoinDisplayUnit,
     pending_vault_incoming: Option<PendingTransfer>,
@@ -353,14 +354,9 @@ fn wallet_card<'a>(
                 .spacing(8)
                 .align_y(Alignment::Center)
                 .push(coincube_ui::image::asset_network_logo::<Message>(
-                    "btc", "bitcoin", 40.0,
+                    "btc", "bitcoin", 32.0,
                 ))
-                .push(
-                    text("BTC")
-                        .size(P1_SIZE)
-                        .style(theme::text::secondary)
-                        .width(Length::Fixed(60.0)),
-                )
+                .push(text("BTC").size(P1_SIZE).bold().width(Length::Fixed(60.0)))
                 .push(if balance_masked {
                     Row::new().push(text("********").size(P1_SIZE))
                 } else if !loaded {
@@ -445,7 +441,7 @@ fn wallet_card<'a>(
                     .into()
             };
 
-            Column::new()
+            let content = Column::new()
                 .spacing(12)
                 .push(landing_button(
                     landing_control_id(cube_id, title, "open"),
@@ -456,7 +452,28 @@ fn wallet_card<'a>(
                     theme::button::transparent,
                 ))
                 .push(header)
-                .push(btc_row)
+                .push(btc_row);
+
+            // P-Overview keeps the recovery affordance on the Vault card.
+            // The prototype opens the Vault landing page, where the actual
+            // recovery state is explained; it does not jump into an operation.
+            if show_recovery_path {
+                content.push(
+                    Column::new()
+                        .spacing(10)
+                        .push(iced::widget::rule::horizontal(1))
+                        .push(landing_button(
+                            landing_control_id(cube_id, "Vault", "recovery-path"),
+                            "Recovery path",
+                            Some(recovery_icon().size(16)),
+                            Message::FocusAction,
+                            Some(Message::Menu(Menu::Vault(VaultSubMenu::Overview))),
+                            theme::button::link,
+                        )),
+                )
+            } else {
+                content
+            }
         }
     };
 
@@ -1859,12 +1876,12 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
                 .spacing(8)
                 .align_y(Alignment::Center)
                 .push(coincube_ui::image::asset_network_logo::<Message>(
-                    "lbtc", "liquid", 40.0,
+                    "lbtc", "liquid", 32.0,
                 ))
                 .push(
                     text("L-BTC")
                         .size(P1_SIZE)
-                        .style(theme::text::secondary)
+                        .bold()
                         .width(Length::Fixed(60.0)),
                 )
                 .push(if balance_masked {
@@ -1958,14 +1975,9 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
                 .spacing(8)
                 .align_y(Alignment::Center)
                 .push(coincube_ui::image::asset_network_logo::<Message>(
-                    "usdt", "liquid", 40.0,
+                    "usdt", "liquid", 32.0,
                 ))
-                .push(
-                    text("USDt")
-                        .size(P1_SIZE)
-                        .style(theme::text::secondary)
-                        .width(Length::Fixed(60.0)),
-                )
+                .push(text("USDt").size(P1_SIZE).bold().width(Length::Fixed(60.0)))
                 .push(if balance_masked {
                     Row::new().push(text("********").size(P1_SIZE))
                 } else if usdt_balance_error {
@@ -2136,14 +2148,9 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
             .spacing(8)
             .align_y(Alignment::Center)
             .push(coincube_ui::image::asset_network_logo::<Message>(
-                "btc", "spark", 40.0,
+                "btc", "spark", 32.0,
             ))
-            .push(
-                text("BTC")
-                    .size(P1_SIZE)
-                    .style(theme::text::secondary)
-                    .width(Length::Fixed(60.0)),
-            )
+            .push(text("BTC").size(P1_SIZE).bold().width(Length::Fixed(60.0)))
             .push(if balance_masked {
                 Row::new().push(text(AmountCell::masked().primary).size(P1_SIZE))
             } else if spark_balance_error && !spark_balance_loaded {
@@ -2317,6 +2324,7 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
             fiat_converter,
             balance_masked,
             has_vault || (has_imported_bitcoin && imported_installed),
+            has_vault,
             has_imported_bitcoin && !imported_installed,
             bitcoin_unit,
             pending_vault_incoming,
@@ -2408,8 +2416,9 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
 
     Container::new(
         Column::new()
-            .spacing(20)
+            .spacing(12)
             .push(total_balance_block)
+            .push(Space::new().height(Length::Fixed(20.0)))
             .push(
                 Row::new()
                     .spacing(0)
@@ -2910,6 +2919,88 @@ mod tests {
                     messages = messages
                 );
             }
+        }
+    }
+
+    #[test]
+    fn overview_vault_recovery_footer_routes_to_landing_and_respects_privacy() {
+        use crate::app::view::shared::landing::capture;
+
+        let fixture = ViewFixture::new();
+        let target = landing_control_id("test-cube", "Vault", "recovery-path");
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            for outer in [(1024, 768), (1440, 900)] {
+                let normal = capture::inspect(
+                    "overview-vault-recovery",
+                    global_home_view(fixture.config(0, None, None)),
+                    outer,
+                    appearance,
+                    theme,
+                );
+                assert!(normal.contains("Recovery path"));
+                assert!(normal.has_focus(target.clone()));
+
+                let mut masked = fixture.config(0, None, None);
+                masked.balance_masked = true;
+                let hidden = capture::inspect(
+                    "overview-vault-recovery-masked",
+                    global_home_view(masked),
+                    outer,
+                    appearance,
+                    theme,
+                );
+                assert!(hidden.contains("Recovery path"));
+                assert!(!hidden.contains("250,000"));
+                assert!(!hidden.contains("375,000"));
+
+                let mut imported_only = fixture.config(0, None, None);
+                imported_only.has_vault = false;
+                imported_only.has_imported_bitcoin = true;
+                imported_only.imported_installed = true;
+                let imported = capture::inspect(
+                    "overview-imported-without-vault",
+                    global_home_view(imported_only),
+                    outer,
+                    appearance,
+                    theme,
+                );
+                assert!(!imported.has_focus(target.clone()));
+            }
+
+            // A tall content-only frame exposes the below-fold footer for
+            // visual review while the standard compact and wide frames above
+            // continue to catch width overflow and privacy regressions.
+            let full_card = capture::inspect(
+                "overview-vault-recovery-full-card",
+                global_home_view(fixture.config(0, None, None)),
+                (1440, 1400),
+                appearance,
+                theme,
+            );
+            assert!(full_card.contains("Recovery path"));
+        }
+
+        for pointer in [false, true] {
+            let messages = capture::activate(
+                global_home_view(fixture.config(0, None, None)),
+                target.clone(),
+                // The footer is below the fold at the minimum window size;
+                // this viewport exposes it for the pointer probe.
+                if pointer { (1440, 1400) } else { (1024, 768) },
+                pointer,
+            );
+            let routes = messages
+                .iter()
+                .filter(|message| matches!(message, Message::Menu(_)))
+                .collect::<Vec<_>>();
+            assert_eq!(routes.len(), 1, "pointer={pointer}: {messages:?}");
+            assert!(matches!(
+                routes[0],
+                Message::Menu(Menu::Vault(VaultSubMenu::Overview))
+            ));
         }
     }
 
