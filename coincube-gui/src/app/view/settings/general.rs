@@ -263,12 +263,23 @@ fn recovery_section<'a>(
                 "back up your Cube Recovery Kit",
             ));
         } else if cache.current_cube_server_id.is_none() {
+            let registration_action = if cache.connect_authenticated {
+                button::primary(None, "Retry Cube connection")
+                    .on_press(Message::ConnectCube(ConnectCubeMessage::RetryRegistration))
+            } else {
+                button::primary(None, "Open Connect").on_press(Message::OpenConnectSwitchAccount)
+            };
             col = col.push(
                 card::simple(
                     Column::new()
-                        .spacing(4)
+                        .spacing(10)
                         .push(text("Recovery Kit unavailable").bold())
-                        .push(text("This Cube is not registered with Connect yet. Reconnect it before setting up or changing a Recovery Kit.").size(14)),
+                        .push(text(if cache.connect_authenticated {
+                            "This Cube is not registered with Connect yet. Retry its connection before setting up or changing a Recovery Kit."
+                        } else {
+                            "Open Connect to restore this account session and finish registering the Cube before setting up a Recovery Kit."
+                        }).size(14))
+                        .push(registration_action),
                 )
                 .width(Length::Fill),
             );
