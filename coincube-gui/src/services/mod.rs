@@ -14,7 +14,11 @@ pub mod foreign_psbt;
 pub mod foreign_scan;
 pub mod foreign_split_inventory;
 pub mod foreign_wallet_source;
-#[cfg(test)] // R15a compatibility proof; R15b wires the reviewed adapter into Send.
+// The signer API is staged behind the external inventory anchor/recovery gate.
+// Only owner-verified import removal calls it in production at this head.
+#[allow(dead_code)]
+pub(crate) mod imported_keys;
+#[cfg(test)]
 pub(crate) mod imported_signer;
 pub mod psbt_file;
 pub mod public_account_source;

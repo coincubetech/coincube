@@ -7,6 +7,7 @@ pub mod config;
 pub mod error;
 pub mod features;
 mod imported_kit_metadata;
+pub mod local_mcp;
 pub mod local_switch;
 pub mod menu;
 pub mod message;
@@ -1051,6 +1052,9 @@ fn load_fork_claim_panel(
 }
 
 pub struct App {
+    // Pairing records grow independently of the tab's by-value state. Keep them
+    // on the heap so debug GUI transitions fit the Windows test-thread stack.
+    local_mcp: Box<local_mcp::Settings>,
     cache: Cache,
     wallet: Option<Arc<Wallet>>,
     imported_kit_metadata: imported_kit_metadata::ImportedKitMetadata,
@@ -4003,6 +4007,7 @@ impl App {
             cache: cache_with_vault,
             daemon: Some(daemon),
             wallet: Some(wallet),
+            local_mcp: Default::default(),
             imported_kit_metadata: Default::default(),
             breez_client,
             fork_connect_client: None,
@@ -4245,6 +4250,7 @@ impl App {
                 cache,
                 daemon: None,
                 wallet: None,
+                local_mcp: Default::default(),
                 imported_kit_metadata: Default::default(),
                 breez_client: Some(breez_client),
                 fork_connect_client: None,
@@ -6414,7 +6420,9 @@ impl App {
                     // App::view; no section message is dispatched to the
                     // SettingsState. Side-effect loads (avatar fetch,
                     // members fetch) are kicked below.
-                    menu::CubeSettingsOption::Avatar | menu::CubeSettingsOption::Members => None,
+                    menu::CubeSettingsOption::AiAccess
+                    | menu::CubeSettingsOption::Avatar
+                    | menu::CubeSettingsOption::Members => None,
                 };
                 if let Some(section_msg) = section_msg {
                     // Fire even if daemon is None — the inner settings
@@ -6815,6 +6823,7 @@ impl App {
             imported.stop();
         }
         // Before the daemon that would carry a claim submission goes away.
+        self.local_mcp.revoke();
         self.revoke_claim();
         if self.daemon_backend().is_embedded() {
             if let Some(daemon) = &self.daemon {
@@ -7267,6 +7276,84 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        self.refresh_mcp_pairings();
+        if let Message::View(view::Message::LocalMcp(message)) = message {
+            let focus_after = match &message {
+                local_mcp::Message::RequestRevokePair(_) => Some(iced::advanced::widget::Id::from(
+                    "tenshu.ai-access.revoke.keep",
+                )),
+                local_mcp::Message::CancelRevokePair => {
+                    self.local_mcp.pending_revoke().map(|(_, id)| {
+                        iced::advanced::widget::Id::from(format!(
+                            "tenshu.ai-access.client.{id}.revoke"
+                        ))
+                    })
+                }
+                local_mcp::Message::RevokePair(id)
+                    if self
+                        .local_mcp
+                        .pending_revoke()
+                        .is_some_and(|(_, pending)| pending == id) =>
+                {
+                    Some(iced::advanced::widget::Id::from(
+                        if self.mcp_supported() || self.mcp_proposals_supported() {
+                            "tenshu.ai-access.enable"
+                        } else {
+                            view::nav::shell::CUBE_SWITCHER_ID
+                        },
+                    ))
+                }
+                _ => None,
+            };
+            let requested_revoke = matches!(&message, local_mcp::Message::RequestRevokePair(_));
+            #[cfg(feature = "mcp-transactions")]
+            if let local_mcp::Message::ReviewTransaction {
+                client_id,
+                draft_id,
+            } = &message
+            {
+                if self.mcp_supported()
+                    && self.cube_settings.network == crate::chain::ChainId::Regtest
+                {
+                    if let Some(wallet) = &self.wallet {
+                        if let Some(native) = self
+                            .local_mcp
+                            .prepared_transaction(client_id, draft_id, wallet)
+                        {
+                            if let Some(panel) = self.panels.current_mut() {
+                                panel.interrupt();
+                            }
+                            self.panels.create_spend = Some(CreateSpendPanel::from_mcp_prepared(
+                                wallet.clone(),
+                                native,
+                                self.cache.blockheight(),
+                            ));
+                            self.panels.current = Menu::Vault(menu::VaultSubMenu::Send);
+                        }
+                    }
+                }
+                return Task::none();
+            }
+            let supported = self.mcp_supported() || self.mcp_proposals_supported();
+            let config = self.local_mcp.update(
+                message,
+                self.wallet.clone(),
+                self.daemon.clone(),
+                supported,
+                &self.cube_settings.id,
+            );
+            self.refresh_mcp_pairings();
+            if let Some(id) = focus_after {
+                if !requested_revoke || self.local_mcp.pending_revoke().is_some() {
+                    return iced::widget::operation::focus(id);
+                }
+            }
+            return match config {
+                Some(config) => clipboard::write(config),
+                None => Task::none(),
+            };
+        }
+
         // Known metadata changes must not leave a previously healthy Kit
         // fingerprint visible if their subsequent settings reload fails.
         if matches!(
@@ -7274,6 +7361,9 @@ impl App {
             Message::SettingsSaved | Message::LoadWallet(_) | Message::WalletUpdated(_)
         ) {
             self.imported_kit_metadata.invalidate();
+        }
+        if matches!(&message, Message::LoadWallet(_) | Message::WalletUpdated(_)) {
+            self.local_mcp.revoke();
         }
         let task = self.update_dispatch(message);
         // Sync *after* dispatch: if this update just mutated
@@ -10117,6 +10207,7 @@ impl App {
             Message::View(view::Message::SparkSettings(
                 view::SparkSettingsMessage::StableBalanceSaved(Ok(enabled)),
             )) => {
+                self.panels.spark_overview.finish_stable_balance_save();
                 let record = self.record_spark_stable_balance(enabled);
                 let panel = self.panels.spark_settings.update(
                     self.daemon.clone(),
@@ -10125,7 +10216,40 @@ impl App {
                         view::SparkSettingsMessage::StableBalanceSaved(Ok(enabled)),
                     )),
                 );
-                return Task::batch([record, panel]);
+                return Task::batch([record, panel, self.panels.spark_overview.reload(None, None)]);
+            }
+            // Overview shares the same Settings save owner. Route both the
+            // request and failed settlement there even when Overview is active.
+            Message::View(view::Message::SparkSettings(
+                view::SparkSettingsMessage::StableBalanceToggled(enabled),
+            )) => {
+                if !self.panels.spark_overview.try_start_stable_balance_save() {
+                    return Task::none();
+                }
+                return self.panels.spark_settings.update(
+                    self.daemon.clone(),
+                    &self.cache,
+                    Message::View(view::Message::SparkSettings(
+                        view::SparkSettingsMessage::StableBalanceToggled(enabled),
+                    )),
+                );
+            }
+            Message::View(view::Message::SparkSettings(
+                view::SparkSettingsMessage::StableBalanceSaved(Err(err)),
+            )) => {
+                self.panels.spark_overview.finish_stable_balance_save();
+                let panel = self.panels.spark_settings.update(
+                    self.daemon.clone(),
+                    &self.cache,
+                    Message::View(view::Message::SparkSettings(
+                        view::SparkSettingsMessage::StableBalanceSaved(Err(err.clone())),
+                    )),
+                );
+                return Task::batch([
+                    panel,
+                    self.panels.spark_overview.reload(None, None),
+                    Task::done(Message::View(view::Message::ShowError(err))),
+                ]);
             }
             Message::View(view::Message::FlipDisplayMode) => {
                 if !self.cache.fiat_toggle_allowed() {
@@ -11035,6 +11159,7 @@ impl App {
             panel.set_backend(state::vault::claim::BackendState::Switching);
         }
         self.split_backend = state::vault::claim::BackendState::Switching;
+        self.local_mcp.revoke();
         self.revoke_claim();
         // Mark a switch in flight so subsequent sync probes / triggers don't
         // re-fire it before it completes (the config only changes on success).
@@ -11139,6 +11264,63 @@ impl App {
         }
     }
 
+    pub(crate) fn mcp_proposals_supported(&self) -> bool {
+        cfg!(feature = "mcp-proposals")
+            && self.cube_settings.network == crate::chain::ChainId::Regtest
+            && self.wallet.is_none()
+            && self.daemon.is_none()
+            && self.cube_settings.vault_wallet_id.is_none()
+            && self.cube_settings.bitcoin_import.is_none()
+            && !self.daemon_switch_in_progress
+            && session::generation_for(&self.cube_settings.id).is_some()
+    }
+
+    fn refresh_mcp_pairings(&mut self) {
+        let supported = self.mcp_supported();
+        let proposal_supported = self.mcp_proposals_supported();
+        self.local_mcp.ensure_pairings(local_mcp::PairingContext {
+            root: self.datadir.path(),
+            chain: self.cube_settings.network,
+            cube_id: &self.cube_settings.id,
+            wallet: self.wallet.clone(),
+            daemon: self.daemon.clone(),
+            supported,
+            proposal_supported,
+            #[cfg(feature = "mcp-transactions")]
+            last_poll_at_startup: self.cache.last_poll_at_startup,
+        });
+    }
+
+    #[cfg(feature = "mcp-proposals")]
+    pub(crate) fn take_mcp_proposal(
+        &mut self,
+        paired_client: Option<&str>,
+    ) -> Option<(local_mcp::Settings, crate::installer::proposal::Session)> {
+        if !self.mcp_proposals_supported() {
+            return None;
+        }
+        let proposal = match paired_client {
+            Some(id) => self
+                .local_mcp
+                .paired_proposal_session(&self.cube_settings.id, id)?,
+            None => self.local_mcp.proposal_session(&self.cube_settings.id)?,
+        };
+        Some((*std::mem::take(&mut self.local_mcp), proposal))
+    }
+
+    fn mcp_supported(&self) -> bool {
+        !self.cube_settings.network.is_blake2b()
+            && self
+                .wallet
+                .as_ref()
+                .is_some_and(|wallet| wallet.main_descriptor.as_vault().is_some())
+            && self
+                .daemon
+                .as_ref()
+                .is_some_and(|daemon| daemon.backend().is_embedded())
+            && !self.daemon_switch_in_progress
+    }
+
     fn received_celebration_view(&self) -> Element<'_, view::Message> {
         // The underlying amount remains available for a later explicit Show,
         // but an arrival must never reveal it while privacy is hidden or
@@ -11174,6 +11356,18 @@ impl App {
                 &self.cache,
                 self.received_celebration_view(),
             )
+        } else if matches!(
+            self.panels.current,
+            Menu::Cube(menu::CubeSubMenu::Settings(
+                menu::CubeSettingsOption::AiAccess
+            ))
+        ) {
+            view::dashboard(
+                &self.panels.current,
+                &self.cache,
+                self.local_mcp
+                    .view_for_cube(self.mcp_supported(), self.mcp_proposals_supported()),
+            )
         } else if let (Menu::Vault(menu::VaultSubMenu::Claim), Some(panel)) = (
             &self.panels.current,
             self.claim_pair_context
@@ -11205,6 +11399,35 @@ impl App {
                 &self.cache,
                 view::feature_unavailable_panel(reason),
             )
+        } else if matches!(
+            self.panels.current,
+            Menu::Spark(menu::SparkSubMenu::Overview)
+        ) {
+            // The Spark landing reuses the Connect-owned address form and its
+            // confirmation. No second address or auth state lives in Overview.
+            let address = if self.panels.connect.account.is_authenticated() {
+                view::spark::overview::spark_landing_address(&self.panels.connect.cube)
+            } else {
+                view::connect::sign_in_prompt::sign_in_prompt("claim a Lightning Address")
+            };
+            let confirmation = self
+                .panels
+                .connect
+                .account
+                .is_authenticated()
+                .then(|| {
+                    view::spark::settings::lightning_address::lightning_address_confirmation(
+                        &self.panels.connect.cube,
+                    )
+                })
+                .flatten()
+                .map(|dialog| dialog.map(view::Message::ConnectCube));
+            self.panels.spark_overview.view_with_address_overlay(
+                &self.panels.current,
+                &self.cache,
+                address,
+                confirmation,
+            )
         } else if let Some(content) = self.connect_settings_content() {
             // Connect-dependent settings sub-pages (Spark → Settings →
             // Lightning Address, Cube → Settings → Avatar / Members)
@@ -11220,12 +11443,30 @@ impl App {
                 .view(&self.panels.current, &self.cache)
         };
 
-        let content = if self.cache.network != bitcoin::Network::Bitcoin {
-            iced::widget::column![network_banner(self.cache.network), view.map(Message::View)]
-                .into()
+        let view: Element<'_, view::Message> = if self.cache.network != bitcoin::Network::Bitcoin {
+            iced::widget::column![network_banner(self.cache.network), view].into()
         } else {
-            view.map(Message::View)
+            view
         };
+        let view = if matches!(
+            self.panels.current,
+            Menu::Cube(menu::CubeSubMenu::Settings(
+                menu::CubeSettingsOption::AiAccess
+            ))
+        ) {
+            if let Some(dialog) = self.local_mcp.revoke_dialog() {
+                coincube_ui::widget::modal::Modal::new(view, dialog)
+                    .on_blur(Some(view::Message::LocalMcp(
+                        local_mcp::Message::CancelRevokePair,
+                    )))
+                    .into()
+            } else {
+                view
+            }
+        } else {
+            view
+        };
+        let content = view.map(Message::View);
 
         // Overlay toast at bottom if present
         let content: Element<'_, Message> = match self.errors.is_empty() {

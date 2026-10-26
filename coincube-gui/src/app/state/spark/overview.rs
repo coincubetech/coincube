@@ -13,16 +13,14 @@ use std::sync::Arc;
 
 use coincube_core::miniscript::bitcoin::Amount;
 use coincube_spark_protocol::PaymentSummary;
-use coincube_ui::{
-    theme,
-    widget::{ColumnExt, Element},
-};
+use coincube_ui::widget::Element;
 use iced::Task;
 
 use crate::app::cache::Cache;
 use crate::app::menu::{Menu, SparkSubMenu};
 use crate::app::message::Message;
 use crate::app::state::{redirect, State};
+use crate::app::view::spark::overview::SparkLandingAvailability;
 use crate::app::view::spark::{
     SparkOverviewView, SparkPaymentMethod, SparkRecentTransaction, SparkStatus,
 };
@@ -53,6 +51,7 @@ pub struct SparkOverview {
     /// `get_user_settings` RPC returns; `Some(true)` renders a
     /// "Stable" badge next to the balance in the overview.
     stable_balance_active: Option<bool>,
+    stable_balance_saving: bool,
 }
 
 impl SparkOverview {
@@ -64,30 +63,34 @@ impl SparkOverview {
             error: None,
             loading: false,
             stable_balance_active: None,
+            stable_balance_saving: false,
         }
     }
-}
 
-/// Resolve a preview action against the current snapshot, not its prior row
-/// position. A missing, empty, or duplicate bridge ID cannot open a payment.
-fn find_unique_recent<'a>(
-    recent: &'a [SparkRecentTransaction],
-    id: &str,
-) -> Option<&'a SparkRecentTransaction> {
-    if id.trim().is_empty() {
-        return None;
+    /// The backend handle can outlive a failed bridge refresh. Match the
+    /// Settings toggle's reachability gate while keeping the last successful
+    /// snapshot visible as stale portfolio context.
+    fn bridge_reachable(&self) -> bool {
+        self.landing_availability() == SparkLandingAvailability::Ready
     }
-    let mut matches = recent.iter().filter(|payment| payment.id == id);
-    let selected = matches.next()?;
-    matches.next().is_none().then_some(selected)
-}
 
-impl State for SparkOverview {
-    fn view<'a>(
+    fn landing_availability(&self) -> SparkLandingAvailability {
+        landing_availability(
+            self.backend.is_some(),
+            self.loading,
+            self.snapshot.is_some(),
+            self.error.is_some(),
+        )
+    }
+
+    /// Mount the shared Connect address form on the Spark landing without
+    /// copying account or address state into this panel.
+    pub fn view_with_address<'a>(
         &'a self,
         menu: &'a Menu,
         cache: &'a Cache,
-    ) -> Element<'a, crate::app::view::Message> {
+        address: Option<Element<'a, view::Message>>,
+    ) -> Element<'a, view::Message> {
         let fiat_converter: Option<FiatAmountConverter> =
             cache.fiat_price.as_ref().and_then(|p| p.try_into().ok());
 
@@ -119,33 +122,77 @@ impl State for SparkOverview {
         .render()
         .map(view::Message::SparkOverview);
 
-        let held_while_off = self.stable_balance_active == Some(false)
-            && self.snapshot.as_ref().is_some_and(|snapshot| {
-                snapshot
-                    .stable_balance
-                    .as_ref()
-                    .is_some_and(|balance| balance.balance > 0)
-            });
-        let content = iced::widget::Column::new()
-            .push(overview)
-            .push_maybe(held_while_off.then(|| {
-                view::shared::landing::landing_button(
-                    view::shared::landing::landing_control_id(
-                        &cache.cube_id,
-                        "Spark",
-                        "review-stable-balance",
-                    ),
-                    "Review Stable Balance",
-                    None,
-                    view::Message::FocusAction,
-                    Some(view::Message::Menu(Menu::Spark(SparkSubMenu::Settings(
-                        Some(crate::app::menu::SparkSettingsOption::General),
-                    )))),
-                    theme::button::secondary,
-                )
-            }));
+        let mut content = iced::widget::Column::new().push(overview);
+        if let Some(address) = address.filter(|_| self.backend.is_some()) {
+            content = content.push(view::spark::overview::spark_landing_context(
+                address,
+                self.stable_balance_active,
+                self.stable_balance_saving,
+                self.landing_availability(),
+                &cache.cube_id,
+            ));
+        }
+        view::dashboard(menu, cache, content)
+    }
 
-        crate::app::view::dashboard(menu, cache, content)
+    /// The address confirmation must cover the full Spark page, rather than
+    /// inherit the compact address row's bounds as its modal viewport.
+    pub fn view_with_address_overlay<'a>(
+        &'a self,
+        menu: &'a Menu,
+        cache: &'a Cache,
+        address: Element<'a, view::Message>,
+        confirmation: Option<Element<'a, view::Message>>,
+    ) -> Element<'a, view::Message> {
+        let page = self.view_with_address(menu, cache, Some(address));
+        if let Some(confirmation) = confirmation.filter(|_| self.backend.is_some()) {
+            coincube_ui::widget::modal::Modal::new(page, confirmation)
+                .on_blur(Some(view::Message::ConnectCube(
+                    view::ConnectCubeMessage::DismissChangeConfirmation,
+                )))
+                .into()
+        } else {
+            page
+        }
+    }
+
+    /// A save result is routed through App even if the user left this panel.
+    pub fn finish_stable_balance_save(&mut self) {
+        self.stable_balance_saving = false;
+    }
+
+    /// One app-wide in-flight guard covers either Spark entry point. A fast
+    /// Settings → Overview route change cannot queue a second SDK mutation.
+    pub fn try_start_stable_balance_save(&mut self) -> bool {
+        if self.stable_balance_saving {
+            return false;
+        }
+        self.stable_balance_saving = true;
+        true
+    }
+}
+
+/// Resolve a preview action against the current snapshot, not its prior row
+/// position. A missing, empty, or duplicate bridge ID cannot open a payment.
+fn find_unique_recent<'a>(
+    recent: &'a [SparkRecentTransaction],
+    id: &str,
+) -> Option<&'a SparkRecentTransaction> {
+    if id.trim().is_empty() {
+        return None;
+    }
+    let mut matches = recent.iter().filter(|payment| payment.id == id);
+    let selected = matches.next()?;
+    matches.next().is_none().then_some(selected)
+}
+
+impl State for SparkOverview {
+    fn view<'a>(
+        &'a self,
+        menu: &'a Menu,
+        cache: &'a Cache,
+    ) -> Element<'a, crate::app::view::Message> {
+        self.view_with_address(menu, cache, None)
     }
 
     fn reload(
@@ -234,6 +281,16 @@ impl State for SparkOverview {
                 view::SparkOverviewMessage::StableBalanceLoaded(active) => {
                     self.stable_balance_active = Some(active);
                 }
+                view::SparkOverviewMessage::ToggleStableBalance(enabled) => {
+                    if self.bridge_reachable()
+                        && !self.stable_balance_saving
+                        && self.stable_balance_active == Some(!enabled)
+                    {
+                        return Task::done(Message::View(view::Message::SparkSettings(
+                            view::SparkSettingsMessage::StableBalanceToggled(enabled),
+                        )));
+                    }
+                }
                 view::SparkOverviewMessage::SendBtc => {
                     return redirect(Menu::Spark(SparkSubMenu::Send));
                 }
@@ -268,6 +325,21 @@ impl State for SparkOverview {
 
     fn subscription(&self) -> iced::Subscription<Message> {
         iced::Subscription::none()
+    }
+}
+
+fn landing_availability(
+    backend_available: bool,
+    loading: bool,
+    snapshot_present: bool,
+    refresh_failed: bool,
+) -> SparkLandingAvailability {
+    if !backend_available || refresh_failed {
+        SparkLandingAvailability::Unavailable
+    } else if loading || !snapshot_present {
+        SparkLandingAvailability::Refreshing
+    } else {
+        SparkLandingAvailability::Ready
     }
 }
 
@@ -416,6 +488,17 @@ fn parse_method(raw: &str) -> SparkPaymentMethod {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stable_balance_save_guard_survives_panel_navigation_until_settlement() {
+        let mut overview = SparkOverview::new(None);
+        assert!(overview.try_start_stable_balance_save());
+        // A second action can arrive from the other Spark page before the
+        // first bridge result. Only the first is admitted.
+        assert!(!overview.try_start_stable_balance_save());
+        overview.finish_stable_balance_save();
+        assert!(overview.try_start_stable_balance_save());
+    }
 
     fn payment(direction: &str, status: &str, method: &str, amount_sat: i64) -> PaymentSummary {
         PaymentSummary {
@@ -626,5 +709,86 @@ mod tests {
         );
         assert_eq!(panel.recent_transactions.len(), 1);
         assert_eq!(panel.recent_transactions[0].id, "payment-1");
+    }
+
+    #[test]
+    fn retained_snapshot_after_bridge_error_does_not_enable_stable_balance() {
+        let mut panel = SparkOverview::new(None);
+        let availability_with_backend = |panel: &SparkOverview| {
+            landing_availability(
+                true,
+                panel.loading,
+                panel.snapshot.is_some(),
+                panel.error.is_some(),
+            )
+        };
+
+        let _ = panel.update(
+            None,
+            &Cache::default(),
+            Message::View(view::Message::SparkOverview(
+                view::SparkOverviewMessage::DataLoaded {
+                    balance: Amount::from_sat(42_000),
+                    stable_balance: None,
+                    recent_payments: vec![],
+                },
+            )),
+        );
+        let _ = panel.update(
+            None,
+            &Cache::default(),
+            Message::View(view::Message::SparkOverview(
+                view::SparkOverviewMessage::StableBalanceLoaded(false),
+            )),
+        );
+        assert_eq!(
+            availability_with_backend(&panel),
+            SparkLandingAvailability::Ready
+        );
+
+        panel.loading = true;
+        let refreshing = availability_with_backend(&panel);
+        assert_eq!(refreshing, SparkLandingAvailability::Refreshing);
+        assert_eq!(
+            view::spark::overview::stable_balance_status_text(
+                refreshing,
+                panel.stable_balance_active,
+                false
+            ),
+            Some("Refreshing…"),
+        );
+        let _ = panel.update(
+            None,
+            &Cache::default(),
+            Message::View(view::Message::SparkOverview(
+                view::SparkOverviewMessage::Error("bridge offline".to_string()),
+            )),
+        );
+        assert!(panel.snapshot.is_some());
+        assert_eq!(panel.stable_balance_active, Some(false));
+        let unavailable = availability_with_backend(&panel);
+        assert_eq!(unavailable, SparkLandingAvailability::Unavailable);
+        assert_eq!(
+            view::spark::overview::stable_balance_status_text(
+                unavailable,
+                panel.stable_balance_active,
+                false
+            ),
+            Some("Spark is unavailable"),
+        );
+
+        // A settings reply can arrive after the failed info refresh; it
+        // cannot make the stale snapshot actionable again.
+        let _ = panel.update(
+            None,
+            &Cache::default(),
+            Message::View(view::Message::SparkOverview(
+                view::SparkOverviewMessage::StableBalanceLoaded(true),
+            )),
+        );
+        assert_eq!(
+            availability_with_backend(&panel),
+            SparkLandingAvailability::Unavailable
+        );
     }
 }

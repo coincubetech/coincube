@@ -60,6 +60,8 @@ pub fn orange_outline(theme: &Theme, status: Status) -> Style {
     button(&theme.colors.buttons.orange_outline, status)
 }
 
+/// Bordered buttons take the Tenshu `.btn` corner (8px), not a pill: the
+/// artboards keep pills only for wallet actions such as Send and Receive.
 fn button(p: &Button, status: Status) -> Style {
     match status {
         Status::Active => Style {
@@ -67,7 +69,7 @@ fn button(p: &Button, status: Status) -> Style {
             text_color: p.active.text,
             border: if let Some(color) = p.active.border {
                 Border {
-                    radius: 25.0.into(),
+                    radius: super::tenshu::radius::CONTROL.into(),
                     width: 1.0,
                     color,
                 }
@@ -85,7 +87,7 @@ fn button(p: &Button, status: Status) -> Style {
                     text_color: pressed.text,
                     border: if let Some(color) = pressed.border {
                         Border {
-                            radius: 25.0.into(),
+                            radius: super::tenshu::radius::CONTROL.into(),
                             width: 1.0,
                             color,
                         }
@@ -105,7 +107,7 @@ fn button(p: &Button, status: Status) -> Style {
             text_color: p.hovered.text,
             border: if let Some(color) = p.hovered.border {
                 Border {
-                    radius: 25.0.into(),
+                    radius: super::tenshu::radius::CONTROL.into(),
                     width: 1.0,
                     color,
                 }
@@ -128,7 +130,7 @@ fn button(p: &Button, status: Status) -> Style {
                     },
                     border: if let Some(color) = disabled.border {
                         Border {
-                            radius: 25.0.into(),
+                            radius: super::tenshu::radius::CONTROL.into(),
                             width: 1.0,
                             color,
                         }

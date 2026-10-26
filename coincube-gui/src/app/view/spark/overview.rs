@@ -14,7 +14,7 @@ use crate::app::wallets::DomainPaymentStatus;
 use coincube_ui::component::text::Text;
 use coincube_ui::{
     color,
-    component::{amount::*, text::*},
+    component::{amount::*, button, text::*},
     icon::receipt_icon,
     theme,
     widget::*,
@@ -25,6 +25,7 @@ use iced::{
 };
 
 use crate::app::settings::display::DisplayMode;
+use crate::app::state::connect::ConnectCubePanel;
 use crate::app::state::spark::overview::SparkBalanceSnapshot;
 use crate::app::view::shared::activity_row::{
     activity_row, ActivityDirection, ActivityIdentity, ActivityRow,
@@ -33,8 +34,12 @@ use crate::app::view::shared::landing::{
     amount_cell, landing_balance_section, landing_button, landing_control_id,
     landing_subtle_button_style, AmountCell, AmountTier,
 };
+use crate::app::view::spark::settings::lightning_address::{
+    lightning_address_body, LN_ADDRESS_DOMAIN,
+};
 use crate::app::view::vault::fiat::FiatAmount;
 use crate::app::view::wallet_header::{wallet_header, HeaderVariant, SyncState, WalletHeaderProps};
+use crate::app::view::ConnectCubeMessage;
 use crate::app::view::{FiatAmountConverter, SparkOverviewMessage};
 
 /// High-level status of the Spark backend for the current cube.
@@ -48,6 +53,15 @@ pub enum SparkStatus {
     Connected(SparkBalanceSnapshot),
     /// Bridge returned an error response.
     Error(String),
+}
+
+/// Current bridge state for the contextual action. A routine refresh is
+/// distinct from a failed bridge even while both keep the action disabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SparkLandingAvailability {
+    Ready,
+    Refreshing,
+    Unavailable,
 }
 
 /// Which underlying Spark payment rail fulfilled a transaction. Drives
@@ -114,6 +128,144 @@ pub struct SparkOverviewView<'a> {
     pub btc_usd_price: Option<f64>,
     pub display_mode: DisplayMode,
     pub mask_amounts: bool,
+}
+
+/// Ready-address row for the Overview footprint. Editing, claiming and
+/// confirmation use the existing Connect-owned component unchanged.
+pub fn spark_landing_address<'a>(
+    state: &'a ConnectCubePanel,
+) -> Element<'a, crate::app::view::Message> {
+    let address = state
+        .lightning_address
+        .as_ref()
+        .and_then(|value| value.lightning_address.as_deref());
+    if state.ln_editing
+        || state.ln_change_confirm_pending.is_some()
+        || state.ln_reconcile_needs_reregister.is_some()
+        || address.is_none()
+    {
+        return lightning_address_body(state).map(crate::app::view::Message::ConnectCube);
+    }
+
+    let raw_address = address.expect("checked above");
+    let address = if raw_address.contains('@') {
+        raw_address.to_owned()
+    } else {
+        format!("{raw_address}{LN_ADDRESS_DOMAIN}")
+    };
+    let short_address = crate::utils::truncate_middle(&address, 15, 12);
+    let row: Element<'a, ConnectCubeMessage> = Container::new(
+        Row::new()
+            .spacing(12)
+            .align_y(Alignment::Center)
+            .push(
+                Column::new()
+                    .spacing(4)
+                    .width(Length::Fill)
+                    .push(h4_bold("Lightning Address"))
+                    .push(
+                        text("Receive to a readable address")
+                            .size(P2_SIZE)
+                            .style(theme::text::secondary),
+                    ),
+            )
+            .push(text(short_address).size(P2_SIZE))
+            .push(
+                button::secondary_compact_action(
+                    landing_control_id(&state.cube_uuid, "Spark", "ln-copy"),
+                    None,
+                    "Copy",
+                    ConnectCubeMessage::FocusAction,
+                )
+                .on_press(ConnectCubeMessage::CopyToClipboard(address)),
+            )
+            .push(
+                button::secondary_compact_action(
+                    landing_control_id(&state.cube_uuid, "Spark", "ln-change"),
+                    None,
+                    "Change",
+                    ConnectCubeMessage::FocusAction,
+                )
+                .on_press(ConnectCubeMessage::BeginEditLightningAddress),
+            ),
+    )
+    .padding(16)
+    .width(Length::Fill)
+    .style(crate::app::view::shared::landing::landing_card_style)
+    .into();
+    row.map(crate::app::view::Message::ConnectCube)
+}
+
+/// Context below Spark's recent activity. The address form is supplied by the
+/// Connect owner so its validation, confirmation, and account gate stay shared.
+pub fn spark_landing_context<'a>(
+    address: Element<'a, crate::app::view::Message>,
+    active: Option<bool>,
+    saving: bool,
+    availability: SparkLandingAvailability,
+    cube_id: &str,
+) -> Element<'a, crate::app::view::Message> {
+    use crate::app::view::{Message, SparkOverviewMessage};
+
+    let status = stable_balance_status_text(availability, active, saving);
+    let label = match active {
+        Some(true) => "Stable Balance · On on this device",
+        Some(false) => "Stable Balance · Off on this device",
+        None => "Stable Balance",
+    };
+    let toggle = coincube_ui::component::tenshu::toggle(
+        landing_control_id(cube_id, "Spark", "stable-balance-toggle"),
+        active.unwrap_or(false),
+        Message::FocusAction,
+    )
+    .on_toggle_maybe(
+        (availability == SparkLandingAvailability::Ready && !saving && active.is_some()).then_some(
+            |enabled| Message::SparkOverview(SparkOverviewMessage::ToggleStableBalance(enabled)),
+        ),
+    );
+    let stable = Container::new(
+        Column::new()
+            .spacing(8)
+            .push(
+                Row::new()
+                    .spacing(12)
+                    .align_y(Alignment::Center)
+                    .push(
+                        Column::new()
+                            .spacing(4)
+                            .width(Length::Fill)
+                            .push(h4_bold(label))
+                            .push(text("Keep a portion of your Bitcoin balance pegged to USD. Set per device; not restored with the seed. No guaranteed peg.")
+                                .size(P2_SIZE).style(theme::text::secondary)),
+                    )
+                    .push(toggle),
+            )
+            .push_maybe(status.map(|copy| text(copy).size(P2_SIZE).style(theme::text::secondary))),
+    )
+    .padding(20)
+    .width(Length::Fill)
+    .style(crate::app::view::shared::landing::landing_card_style);
+
+    Column::new()
+        .spacing(16)
+        .padding([16, 16])
+        .push(address)
+        .push(stable)
+        .into()
+}
+
+pub(crate) fn stable_balance_status_text(
+    availability: SparkLandingAvailability,
+    active: Option<bool>,
+    saving: bool,
+) -> Option<&'static str> {
+    match (availability, saving, active) {
+        (SparkLandingAvailability::Unavailable, _, _) => Some("Spark is unavailable"),
+        (_, true, _) => Some("Saving…"),
+        (SparkLandingAvailability::Refreshing, _, _) => Some("Refreshing…"),
+        (SparkLandingAvailability::Ready, _, None) => Some("Stable Balance setting is unknown"),
+        (SparkLandingAvailability::Ready, _, Some(_)) => None,
+    }
 }
 
 impl<'a> SparkOverviewView<'a> {
@@ -326,7 +478,7 @@ fn connected_view<'a>(
                 (stable_balance_active == Some(false)
                     && stable_balance.as_ref().is_some_and(|sb| sb.balance > 0))
                 .then(|| {
-                    text("USDB is held while Stable Balance is off. Review Spark settings.")
+                    text("USDB is held while Stable Balance is off. Use the toggle below.")
                         .size(P2_SIZE)
                         .style(theme::text::warning)
                 }),
@@ -542,6 +694,366 @@ fn placeholder<'a, T: Into<Element<'a, SparkOverviewMessage>>>(
 mod tests {
     use super::*;
     use crate::app::view::shared::landing::capture;
+    use crate::app::{
+        state::connect::ConnectCubePanel, view,
+        view::spark::settings::lightning_address::lightning_address_confirmation,
+    };
+    use crate::services::coincube::LightningAddress;
+
+    #[test]
+    fn spark_landing_mounts_address_confirmation_and_stable_pending_states() {
+        let mut connect = ConnectCubePanel::new(
+            None,
+            "synthetic-cube".into(),
+            "Test Cube".into(),
+            "bitcoin".into(),
+            false,
+        );
+        connect.lightning_address = Some(LightningAddress {
+            lightning_address: Some("sats@coincube.io".into()),
+        });
+        let snapshot = SparkBalanceSnapshot {
+            balance_sats: 25_053,
+            stable_balance: None,
+        };
+        for bytes in coincube_ui::font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .expect("font system")
+                .load_font(bytes);
+        }
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            for size in [(1024, 768), (1440, 900)] {
+                let address = spark_landing_address(&connect);
+                let mounted = capture::inspect(
+                    "spark-context-ready",
+                    Column::new()
+                        .push(
+                            synthetic_overview(
+                                SparkStatus::Connected(snapshot.clone()),
+                                &[],
+                                Some(true),
+                                None,
+                                None,
+                            )
+                            .map(view::Message::SparkOverview),
+                        )
+                        .push(spark_landing_context(
+                            address,
+                            Some(true),
+                            false,
+                            SparkLandingAvailability::Ready,
+                            "synthetic-cube",
+                        ))
+                        .into(),
+                    size,
+                    appearance,
+                    theme,
+                );
+                assert!(mounted.contains("sats@coincube.io"));
+                assert!(mounted.contains("Receive to a readable address"));
+                assert!(mounted.contains("Stable Balance · On on this device"));
+                assert!(mounted.has_focus(landing_control_id(
+                    "synthetic-cube",
+                    "Spark",
+                    "stable-balance-toggle"
+                )));
+                let section = capture::inspect(
+                    "spark-context-scrolled-section-on",
+                    spark_landing_context(
+                        spark_landing_address(&connect),
+                        Some(true),
+                        false,
+                        SparkLandingAvailability::Ready,
+                        "synthetic-cube",
+                    ),
+                    size,
+                    appearance,
+                    theme,
+                );
+                assert!(section.contains("Stable Balance · On on this device"));
+                assert!(section.contains("Receive to a readable address"));
+                let off_section = capture::inspect(
+                    "spark-context-scrolled-section-off",
+                    spark_landing_context(
+                        spark_landing_address(&connect),
+                        Some(false),
+                        false,
+                        SparkLandingAvailability::Ready,
+                        "synthetic-cube",
+                    ),
+                    size,
+                    appearance,
+                    theme,
+                );
+                assert!(off_section.contains("Stable Balance · Off on this device"));
+                for (availability, expected, scenario) in [
+                    (
+                        SparkLandingAvailability::Refreshing,
+                        "Refreshing…",
+                        "spark-context-scrolled-section-refreshing",
+                    ),
+                    (
+                        SparkLandingAvailability::Unavailable,
+                        "Spark is unavailable",
+                        "spark-context-scrolled-section-unavailable",
+                    ),
+                ] {
+                    let state = capture::inspect(
+                        scenario,
+                        spark_landing_context(
+                            spark_landing_address(&connect),
+                            Some(true),
+                            false,
+                            availability,
+                            "synthetic-cube",
+                        ),
+                        size,
+                        appearance,
+                        theme,
+                    );
+                    assert!(state.contains(expected));
+                    assert!(!state.has_focus(landing_control_id(
+                        "synthetic-cube",
+                        "Spark",
+                        "stable-balance-toggle"
+                    )));
+                }
+                for pointer in [false, true] {
+                    let emitted = capture::activate(
+                        spark_landing_context(
+                            spark_landing_address(&connect),
+                            Some(true),
+                            false,
+                            SparkLandingAvailability::Ready,
+                            "synthetic-cube",
+                        ),
+                        landing_control_id("synthetic-cube", "Spark", "stable-balance-toggle"),
+                        size,
+                        pointer,
+                    );
+                    assert!(emitted.iter().any(|message| matches!(
+                        message,
+                        view::Message::SparkOverview(SparkOverviewMessage::ToggleStableBalance(
+                            false
+                        ))
+                    )));
+                }
+                for control in ["ln-copy", "ln-change"] {
+                    assert!(mounted.has_focus(landing_control_id(
+                        "synthetic-cube",
+                        "Spark",
+                        control
+                    )));
+                }
+                for pointer in [false, true] {
+                    let emitted = capture::activate(
+                        spark_landing_address(&connect),
+                        landing_control_id("synthetic-cube", "Spark", "ln-change"),
+                        size,
+                        pointer,
+                    );
+                    assert!(emitted.iter().any(|message| matches!(
+                        message,
+                        view::Message::ConnectCube(ConnectCubeMessage::BeginEditLightningAddress)
+                    )));
+                }
+
+                connect.ln_editing = true;
+                connect.ln_username_input = "newname".into();
+                connect.ln_change_confirm_pending = Some("newname".into());
+                let editing = capture::inspect(
+                    "spark-context-address-editing",
+                    spark_landing_context(
+                        spark_landing_address(&connect),
+                        Some(true),
+                        true,
+                        SparkLandingAvailability::Ready,
+                        "synthetic-cube",
+                    ),
+                    size,
+                    appearance,
+                    theme,
+                );
+                assert!(editing.contains("Change your Lightning Address"));
+                assert!(editing.contains("Saving…"));
+                let confirmation = capture::inspect(
+                    "spark-context-address-confirmation",
+                    lightning_address_confirmation(&connect)
+                        .expect("pending address confirmation")
+                        .map(view::Message::ConnectCube),
+                    size,
+                    appearance,
+                    theme,
+                );
+                assert!(confirmation.contains("Change your Lightning Address?"));
+                assert!(confirmation.contains("Yes, change it"));
+                connect.ln_editing = false;
+                connect.ln_change_confirm_pending = None;
+            }
+        }
+    }
+
+    #[test]
+    fn address_confirmation_overlays_the_whole_spark_page() {
+        use iced::advanced::{layout, overlay, renderer::Headless, widget::Tree, Layout};
+        use iced::{Rectangle, Size, Vector};
+
+        for bytes in coincube_ui::font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .expect("font system")
+                .load_font(bytes);
+        }
+
+        let mut connect = ConnectCubePanel::new(
+            None,
+            "synthetic-cube".into(),
+            "Test Cube".into(),
+            "bitcoin".into(),
+            false,
+        );
+        connect.lightning_address = Some(LightningAddress {
+            lightning_address: Some("sats@coincube.io".into()),
+        });
+        connect.ln_editing = true;
+        connect.ln_change_confirm_pending = Some("newname".into());
+        let snapshot = SparkBalanceSnapshot {
+            balance_sats: 25_053,
+            stable_balance: None,
+        };
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            for (width, height) in [(1024, 768), (1440, 900)] {
+                let body = Column::new()
+                    .push(
+                        synthetic_overview(
+                            SparkStatus::Connected(snapshot.clone()),
+                            &[],
+                            Some(true),
+                            None,
+                            None,
+                        )
+                        .map(view::Message::SparkOverview),
+                    )
+                    .push(spark_landing_context(
+                        spark_landing_address(&connect),
+                        Some(true),
+                        false,
+                        SparkLandingAvailability::Ready,
+                        "synthetic-cube",
+                    ));
+                let page = iced::widget::scrollable(body)
+                    .width(Length::Fill)
+                    .height(Length::Fill);
+                let dialog = lightning_address_confirmation(&connect)
+                    .expect("pending change")
+                    .map(view::Message::ConnectCube);
+                let mut element: Element<'_, view::Message> =
+                    coincube_ui::widget::modal::Modal::new(page, dialog)
+                        .on_blur(Some(view::Message::ConnectCube(
+                            ConnectCubeMessage::DismissChangeConfirmation,
+                        )))
+                        .into();
+                let size = Size::new(width as f32, height as f32);
+                let viewport = Rectangle::with_size(size);
+                let mut renderer =
+                    iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+                        coincube_ui::font::REGULAR,
+                        iced::Pixels(14.0),
+                        Some("tiny-skia"),
+                    ))
+                    .expect("software renderer");
+                let mut tree = Tree::new(element.as_widget());
+                let node = element.as_widget_mut().layout(
+                    &mut tree,
+                    &renderer,
+                    &layout::Limits::new(Size::ZERO, size),
+                );
+                assert_eq!(node.size(), size, "modal base fills Spark page");
+
+                let mut modal = element
+                    .as_widget_mut()
+                    .overlay(
+                        &mut tree,
+                        Layout::new(&node),
+                        &renderer,
+                        &viewport,
+                        Vector::ZERO,
+                    )
+                    .map(overlay::Nested::new)
+                    .expect("address confirmation overlay");
+                let overlay_node = modal.layout(&renderer, size);
+                let dialog_bounds = overlay_node
+                    .children()
+                    .first()
+                    .expect("dialog layout")
+                    .bounds();
+                assert_eq!(overlay_node.size(), size, "whole-page scrim");
+                assert!(dialog_bounds.x >= 0.0 && dialog_bounds.y >= 0.0);
+                assert!(dialog_bounds.x + dialog_bounds.width <= size.width);
+                assert!(dialog_bounds.y + dialog_bounds.height <= size.height);
+                drop(modal);
+
+                if let Ok(directory) = std::env::var("R06A_CAPTURE_DIR") {
+                    std::fs::create_dir_all(&directory).expect("capture directory");
+                    iced::advanced::Renderer::reset(&mut renderer, viewport);
+                    let style = iced::advanced::renderer::Style {
+                        text_color: theme.colors.text.primary,
+                    };
+                    element.as_widget().draw(
+                        &tree,
+                        &mut renderer,
+                        &theme,
+                        &style,
+                        Layout::new(&node),
+                        iced::mouse::Cursor::Unavailable,
+                        &viewport,
+                    );
+                    if let Some(mut modal) = element
+                        .as_widget_mut()
+                        .overlay(
+                            &mut tree,
+                            Layout::new(&node),
+                            &renderer,
+                            &viewport,
+                            Vector::ZERO,
+                        )
+                        .map(overlay::Nested::new)
+                    {
+                        let overlay_node = modal.layout(&renderer, size);
+                        modal.draw(
+                            &mut renderer,
+                            &theme,
+                            &style,
+                            Layout::new(&overlay_node),
+                            iced::mouse::Cursor::Unavailable,
+                        );
+                    }
+                    let pixels = renderer.screenshot(
+                        Size::new(width, height),
+                        1.0,
+                        theme.colors.general.background,
+                    );
+                    image::save_buffer(
+                        std::path::Path::new(&directory).join(format!(
+                            "spark-address-modal-{appearance}-{width}x{height}-synthetic.png"
+                        )),
+                        &pixels,
+                        width,
+                        height,
+                        image::ColorType::Rgba8,
+                    )
+                    .expect("save modal capture");
+                }
+            }
+        }
+    }
 
     fn tx(
         id: &str,
@@ -819,6 +1331,7 @@ mod tests {
                 assert!(missing_quote.contains("2.50 USDB"));
                 assert!(missing_quote.contains("needs a BTC/USD quote"));
                 assert!(missing_quote.contains("held while Stable Balance is off"));
+                assert!(missing_quote.contains("Use the toggle below."));
                 assert!(missing_quote.contains("Last known balance"));
                 let unknown_setting = capture::inspect(
                     "spark-setting-unknown-loaded-empty",

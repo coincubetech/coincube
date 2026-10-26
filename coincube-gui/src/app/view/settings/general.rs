@@ -1,12 +1,14 @@
-use iced::widget::{pick_list, tooltip, Column, Row, Space, Toggler};
+use iced::widget::{mouse_area, Column, Container, Row, Space, Toggler};
 use iced::{Alignment, Length};
 
 use coincube_ui::color;
+use coincube_ui::component::tenshu::{
+    section, segment, segmented, select, setting_row, toggle, SegmentSize, Tone,
+};
 use coincube_ui::component::text::*;
-use coincube_ui::component::{button, card, tooltip_custom};
-use coincube_ui::icon;
+use coincube_ui::component::{button, card};
 use coincube_ui::theme;
-use coincube_ui::widget::{action::Action as FocusableAction, ColumnExt, Element};
+use coincube_ui::widget::{action::Action as FocusableAction, Element};
 
 use crate::app::cache;
 use crate::app::menu::{CubeSettingsOption, CubeSubMenu, Menu, SettingsOption, VaultSubMenu};
@@ -85,20 +87,16 @@ fn general_section<'a>(
             SettingsMessage::GeneralSection,
         ))
         .push(network_row(cache.chain()))
-        .push(text("Amounts & currency").size(20).bold())
-        .push(text("Bitcoin unit and fiat estimates are saved for this Cube. Changes take effect as you select them.").size(14))
-        .push(bitcoin_display_unit(new_unit_setting))
-        .push(display_mode_toggle(
+        .push(section("Amounts & currency"))
+        .push(amounts_and_currency(
+            new_unit_setting,
             cache.display_mode,
             cache.fiat_toggle_allowed(),
-        ))
-        .push(fiat_price(
             new_price_setting,
             currencies_list,
             cache.fiat_chain.is_blake2b(),
+            show_direction_badges,
         ))
-        .push(text("Direction badges · This device").size(16).bold())
-        .push(direction_badges_toggle(show_direction_badges))
         .push(text("Cube identity").size(20).bold())
         .push(
             card::simple(
@@ -1364,22 +1362,76 @@ fn network_row<'a>(network: crate::chain::ChainId) -> Element<'a, Message> {
     .into()
 }
 
+fn amounts_and_currency<'a>(
+    new_unit_setting: &'a UnitSetting,
+    display_mode: DisplayMode,
+    display_mode_allowed: bool,
+    new_price_setting: &'a PriceSetting,
+    currencies_list: &'a [Currency],
+    btcb2: bool,
+    show_direction_badges: bool,
+) -> Element<'a, Message> {
+    Column::new()
+        .spacing(0)
+        .width(Length::Fill)
+        .push(bitcoin_display_unit(new_unit_setting))
+        .push(display_mode_choice(display_mode, display_mode_allowed))
+        .push(fiat_price(new_price_setting, currencies_list, btcb2))
+        .push(direction_badges_toggle(show_direction_badges))
+        .into()
+}
+
 fn direction_badges_toggle<'a>(show: bool) -> Element<'a, Message> {
-    card::simple(
-        Row::new()
-            .spacing(20)
-            .align_y(Alignment::Center)
-            .push(text("Show direction badges on transactions:").bold())
-            .push(Space::new().width(Length::Fill))
-            .push(
-                Toggler::new(show)
-                    .on_toggle(|new_val| SettingsMessage::ToggleDirectionBadges(new_val).into())
-                    .width(50)
-                    .style(theme::toggler::orange),
-            ),
+    setting_row(
+        "Direction badges",
+        toggle("settings-direction-badges", show, Message::FocusAction)
+            .on_toggle(|value| SettingsMessage::ToggleDirectionBadges(value).into()),
     )
-    .width(Length::Fill)
+    .tag("This device")
+    .description("In and Out badges in Activity.")
+    .without_divider()
     .into()
+}
+
+/// The Settings artboard places a select's label in the left column. The
+/// reusable select draws its own clickable label above the field, so keep the
+/// same focus behavior here while retaining the two-column setting row.
+fn labeled_select_row<'a>(
+    label: &'static str,
+    description: Option<&'static str>,
+    select_id: &'static str,
+    enabled: bool,
+    control: Element<'a, Message>,
+) -> Element<'a, Message> {
+    let label_text = coincube_ui::component::tenshu::label(label);
+    let label: Element<'a, Message> = if enabled {
+        mouse_area(label_text)
+            .on_press(Message::FocusAction(iced::advanced::widget::Id::new(
+                select_id,
+            )))
+            .into()
+    } else {
+        label_text.into()
+    };
+    let mut left = Column::new().spacing(2).width(Length::Fill).push(label);
+    if let Some(description) = description {
+        left = left.push(text(description).size(13).style(theme::text::secondary));
+    }
+    let body = Row::new()
+        .spacing(24)
+        .align_y(Alignment::Center)
+        .push(left)
+        .push(Container::new(control).align_x(iced::alignment::Horizontal::Right));
+    Column::new()
+        .width(Length::Fill)
+        .push(Container::new(body).padding([12, 0]))
+        .push(
+            Container::new(Space::new())
+                .width(Length::Fill)
+                .height(Length::Fixed(1.0))
+                .style(theme::tenshu::control::divider),
+        )
+        .into()
 }
 
 fn recipient_identity_checks_toggle<'a>() -> Element<'a, Message> {
@@ -1397,54 +1449,63 @@ fn recipient_identity_checks_toggle<'a>() -> Element<'a, Message> {
     ).width(Length::Fill).into()
 }
 
-fn display_mode_toggle<'a>(current: DisplayMode, allowed: bool) -> Element<'a, Message> {
-    let toggle = Toggler::new(matches!(current, DisplayMode::BitcoinNative));
-    let toggle = if allowed {
-        toggle.on_toggle(|_| Message::FlipDisplayMode)
-    } else {
-        toggle
-    };
-    card::simple(
-        Row::new()
-            .spacing(20)
-            .align_y(Alignment::Center)
-            .push(text("Primary balance value:").bold())
-            .push(Space::new().width(Length::Fill))
-            .push(text("Fiat"))
-            .push(toggle.width(50).style(theme::toggler::orange))
-            .push(text("Bitcoin")),
+fn display_mode_choice<'a>(current: DisplayMode, allowed: bool) -> Element<'a, Message> {
+    setting_row(
+        "Primary amount",
+        segmented(
+            [
+                segment(
+                    "settings-primary-bitcoin",
+                    DisplayMode::BitcoinNative,
+                    "Bitcoin",
+                ),
+                segment("settings-primary-fiat", DisplayMode::FiatNative, "Fiat"),
+            ],
+            Some(current),
+            Message::FocusAction,
+        )
+        .size(SegmentSize::Compact)
+        .on_select_maybe(allowed.then_some({
+            move |selected| {
+                if selected == current {
+                    Message::FocusAction(iced::advanced::widget::Id::new(match selected {
+                        DisplayMode::BitcoinNative => "settings-primary-bitcoin",
+                        DisplayMode::FiatNative => "settings-primary-fiat",
+                    }))
+                } else {
+                    Message::FlipDisplayMode
+                }
+            }
+        })),
     )
-    .width(Length::Fill)
+    .description("Shown large.")
     .into()
 }
 
 pub fn bitcoin_display_unit<'a>(new_unit_setting: &'a UnitSetting) -> Element<'a, Message> {
-    card::simple(
-        Row::new()
-            .spacing(20)
-            .align_y(Alignment::Center)
-            .push(text("Bitcoin display unit:").bold())
-            .push(Space::new().width(Length::Fill))
-            .push(text("BTC"))
-            .push(
-                Toggler::new(matches!(
-                    new_unit_setting.display_unit,
-                    BitcoinDisplayUnit::Sats
-                ))
-                .on_toggle(|is_sats| {
-                    SettingsMessage::DisplayUnitChanged(if is_sats {
-                        BitcoinDisplayUnit::Sats
-                    } else {
-                        BitcoinDisplayUnit::BTC
-                    })
-                    .into()
-                })
-                .width(50)
-                .style(theme::toggler::orange),
-            )
-            .push(text("Sats")),
+    let current = new_unit_setting.display_unit;
+    setting_row(
+        "Bitcoin unit",
+        segmented(
+            [
+                segment("settings-unit-btc", BitcoinDisplayUnit::BTC, "BTC"),
+                segment("settings-unit-sats", BitcoinDisplayUnit::Sats, "Sats"),
+            ],
+            Some(current),
+            Message::FocusAction,
+        )
+        .size(SegmentSize::Compact)
+        .on_select(move |selected| {
+            if selected == current {
+                Message::FocusAction(iced::advanced::widget::Id::new(match selected {
+                    BitcoinDisplayUnit::BTC => "settings-unit-btc",
+                    BitcoinDisplayUnit::Sats => "settings-unit-sats",
+                }))
+            } else {
+                SettingsMessage::DisplayUnitChanged(selected).into()
+            }
+        }),
     )
-    .width(Length::Fill)
     .into()
 }
 
@@ -1453,78 +1514,72 @@ pub fn fiat_price<'a>(
     currencies_list: &'a [Currency],
     btcb2: bool,
 ) -> Element<'a, Message> {
-    card::simple(
-        Column::new()
-            .spacing(20)
-            .push(
-                Row::new()
-                    .spacing(10)
-                    .align_y(Alignment::Center)
-                    .push(text("Fiat price:").bold())
-                    .push(tooltip_custom(
-                        "Fiat price data is provided by third-party services. Availability and accuracy are not guaranteed.",
-                        icon::warning_icon().color(color::ORANGE),
-                        tooltip::Position::Bottom,
-                    ))
-                    .push(Space::new().width(Length::Fill))
-                    .push(
-                        Toggler::new(new_price_setting.is_enabled)
-                            .on_toggle(|new_selection| FiatMessage::Enable(new_selection).into())
-                            .width(50)
-                            .style(theme::toggler::orange),
-                    ),
+    let enabled = new_price_setting.is_enabled;
+    let source = if btcb2 {
+        crate::services::fiat::PriceSource::Coincube
+    } else {
+        new_price_setting.source
+    };
+    let sources = if btcb2 {
+        &ALL_PRICE_SOURCES[..1]
+    } else {
+        &ALL_PRICE_SOURCES[..]
+    };
+    let mut rows = Column::new()
+        .spacing(0)
+        .width(Length::Fill)
+        .push(setting_row(
+            "Fiat estimates",
+            toggle("settings-fiat-estimates", enabled, Message::FocusAction)
+                .on_toggle(|value| FiatMessage::Enable(value).into()),
+        )
+        .description("Approximate values beside Bitcoin amounts.")
+        .note(
+            "Fiat price data is provided by third-party services. Availability and accuracy are not guaranteed.",
+            Tone::Muted,
+        ))
+        .push(labeled_select_row(
+            "Currency",
+            None,
+            "settings-fiat-currency",
+            enabled,
+            select(
+                "settings-fiat-currency",
+                "Currency",
+                currencies_list.iter().copied().map(|currency| (currency, currency.to_string())),
+                Some(new_price_setting.currency),
+                Message::FocusAction,
             )
-            .push_maybe(
-                new_price_setting.is_enabled.then_some(
-                    Row::new()
-                        .spacing(20)
-                        .align_y(Alignment::Center)
-                        .push(text("Exchange rate source:").bold())
-                        .push(Space::new().width(Length::Fill))
-                        .push(
-                            pick_list(
-                                if btcb2 { &[crate::services::fiat::PriceSource::Coincube][..] } else { &ALL_PRICE_SOURCES[..] },
-                                Some(if btcb2 { crate::services::fiat::PriceSource::Coincube } else { new_price_setting.source }),
-                                |source| FiatMessage::SourceEdited(source).into(),
-                            )
-                            .style(theme::pick_list::primary)
-                            .padding(10),
-                        ),
-                ),
+            .hide_label()
+            .width(Length::Fixed(232.0))
+            .on_select_maybe(enabled.then_some(|currency| FiatMessage::CurrencyEdited(currency).into()))
+            .into(),
+        ))
+        .push(labeled_select_row(
+            "Exchange-rate source",
+            Some("Never changes a balance."),
+            "settings-fiat-source",
+            enabled,
+            select(
+                "settings-fiat-source",
+                "Exchange-rate source",
+                sources.iter().copied().map(|price_source| (price_source, price_source.to_string())),
+                Some(source),
+                Message::FocusAction,
             )
-            .push_maybe(
-                new_price_setting.is_enabled.then_some(
-                    Row::new()
-                        .spacing(20)
-                        .align_y(Alignment::Center)
-                        .push(text("Currency:").bold())
-                        .push(Space::new().width(Length::Fill))
-                        .push(
-                            pick_list(
-                                currencies_list,
-                                Some(new_price_setting.currency),
-                                |currency| FiatMessage::CurrencyEdited(currency).into(),
-                            )
-                            .style(theme::pick_list::primary)
-                            .padding(10),
-                        ),
-                ),
-            )
-            .push_maybe(
-                (if btcb2 { crate::services::fiat::PriceSource::Coincube } else { new_price_setting.source })
-                    .attribution()
-                    .filter(|_| new_price_setting.is_enabled)
-                    .map(|s| {
-                        Row::new()
-                            .spacing(20)
-                            .align_y(Alignment::Center)
-                            .push(Space::new().width(Length::Fill))
-                            .push(text(s))
-                    }),
-            ),
-    )
-    .width(Length::Fill)
-    .into()
+            .hide_label()
+            .width(Length::Fixed(232.0))
+            .on_select_maybe(enabled.then_some(|price_source| FiatMessage::SourceEdited(price_source).into()))
+            .into(),
+        ));
+    if let Some(attribution) = source.attribution().filter(|_| enabled) {
+        rows = rows.push(
+            Row::new()
+                .push(Space::new().width(Length::Fill))
+                .push(text(attribution).size(12).style(theme::text::secondary)),
+        );
+    }
+    rows.into()
 }
 
 /// Per-method descriptor drift verdict (per-method drift, PR 3). Each enabled
@@ -1628,6 +1683,195 @@ fn drift_warning_line(d: &DescriptorDrift) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct LabelBounds(Vec<(String, iced::Rectangle)>);
+
+    impl iced::advanced::widget::Operation for LabelBounds {
+        fn traverse(
+            &mut self,
+            operate: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation),
+        ) {
+            operate(self);
+        }
+
+        fn text(
+            &mut self,
+            _: Option<&iced::advanced::widget::Id>,
+            bounds: iced::Rectangle,
+            value: &str,
+        ) {
+            self.0.push((value.to_owned(), bounds));
+        }
+    }
+
+    #[test]
+    fn currency_and_source_labels_focus_only_enabled_selects() {
+        use iced::advanced::{layout, renderer::Headless, widget::Tree, Layout};
+        use iced::{mouse, Size};
+
+        for font in coincube_ui::font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(font);
+        }
+        let currencies = [Currency::USD, Currency::EUR];
+        for enabled in [true, false] {
+            let price = PriceSetting {
+                is_enabled: enabled,
+                ..PriceSetting::default()
+            };
+            for (label, target) in [
+                ("Currency", "settings-fiat-currency"),
+                ("Exchange-rate source", "settings-fiat-source"),
+            ] {
+                let renderer =
+                    iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+                        coincube_ui::font::REGULAR,
+                        iced::Pixels(16.0),
+                        Some("tiny-skia"),
+                    ))
+                    .unwrap();
+                let mut element = fiat_price(&price, &currencies, false);
+                let mut tree = Tree::new(element.as_widget());
+                let size = Size::new(652.0, 400.0);
+                let node = element.as_widget_mut().layout(
+                    &mut tree,
+                    &renderer,
+                    &layout::Limits::new(Size::ZERO, size),
+                );
+                let mut labels = LabelBounds::default();
+                element.as_widget_mut().operate(
+                    &mut tree,
+                    Layout::new(&node),
+                    &renderer,
+                    &mut labels,
+                );
+                let bounds = labels
+                    .0
+                    .iter()
+                    .find_map(|(text, bounds)| (text == label).then_some(*bounds))
+                    .expect("visible select label");
+                let mut messages = Vec::new();
+                for event in [
+                    iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                    iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+                ] {
+                    element.as_widget_mut().update(
+                        &mut tree,
+                        &event,
+                        Layout::new(&node),
+                        mouse::Cursor::Available(bounds.center()),
+                        &renderer,
+                        &mut iced::advanced::clipboard::Null,
+                        &mut iced::advanced::Shell::new(&mut messages),
+                        &iced::Rectangle::with_size(size),
+                    );
+                }
+                assert_eq!(
+                    messages.len(),
+                    usize::from(enabled),
+                    "{} enabled={}",
+                    label,
+                    enabled,
+                );
+                if enabled {
+                    assert!(matches!(
+                        messages.as_slice(),
+                        [Message::FocusAction(id)] if id == &iced::advanced::widget::Id::new(target)
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn amounts_and_currency_fits_both_themes_and_window_sizes() {
+        use crate::app::view::shared::landing::capture;
+        use iced::advanced::widget::Id;
+
+        let unit = UnitSetting::default();
+        let currencies = [Currency::USD, Currency::EUR];
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            for outer in [(1024, 768), (1440, 900)] {
+                for enabled in [true, false] {
+                    let price = PriceSetting {
+                        is_enabled: enabled,
+                        ..PriceSetting::default()
+                    };
+                    let content: Element<'_, Message> = Column::new()
+                        .spacing(20)
+                        .push(section("Amounts & currency"))
+                        .push(amounts_and_currency(
+                            &unit,
+                            DisplayMode::BitcoinNative,
+                            true,
+                            &price,
+                            &currencies,
+                            false,
+                            true,
+                        ))
+                        .into();
+                    let inspection = capture::inspect(
+                        if enabled {
+                            "r26-settings-amounts"
+                        } else {
+                            "r26-settings-amounts-fiat-off"
+                        },
+                        content,
+                        outer,
+                        appearance,
+                        theme,
+                    );
+                    for label in [
+                        "Bitcoin unit",
+                        "Primary amount",
+                        "Fiat estimates",
+                        "Currency",
+                        "Exchange-rate source",
+                        "Direction badges",
+                        "This device",
+                    ] {
+                        assert!(
+                            inspection.contains(label),
+                            "{} {:?}: {}",
+                            appearance,
+                            outer,
+                            label,
+                        );
+                    }
+                    for id in [
+                        "settings-unit-btc",
+                        "settings-primary-bitcoin",
+                        "settings-fiat-estimates",
+                        "settings-direction-badges",
+                    ] {
+                        assert!(
+                            inspection.has_focus(Id::new(id)),
+                            "{} {:?}: {}",
+                            appearance,
+                            outer,
+                            id,
+                        );
+                    }
+                    for id in ["settings-fiat-currency", "settings-fiat-source"] {
+                        assert_eq!(
+                            inspection.has_focus(Id::new(id)),
+                            enabled,
+                            "{} {:?}: {} enablement",
+                            appearance,
+                            outer,
+                            id,
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn unregistered_cube_uses_session_restore_without_wrong_account_handoff() {

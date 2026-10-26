@@ -114,6 +114,19 @@ fn balance_privacy_eye_change(
     }
 }
 
+/// The Launcher eye may only hide or show balances, and only while the tab
+/// that sent it still shows the Launcher. A queued press from a tab that
+/// has since opened a Cube is dropped, like a stale App eye.
+fn launcher_eye_is_current(
+    tab: Option<&tab::Tab>,
+    change: &crate::app::settings::preferences::PreferenceChange,
+) -> bool {
+    matches!(
+        change,
+        crate::app::settings::preferences::PreferenceChange::HideBalances(_)
+    ) && tab.is_some_and(|tab| matches!(tab.state, tab::State::Home(_)))
+}
+
 /// Home reload also reconciles fork and Split flow availability. Only feature
 /// edits may ask it to run that reconciliation.
 fn needs_global_settings_reload(
@@ -224,6 +237,10 @@ mod balance_privacy_eye_origin_tests {
         let mut tab = tab::Tab::new(1, tab::State::App(app));
         let generation = tab.app_generation_token().unwrap();
         let change = PreferenceChange::HideBalances(false);
+        assert!(
+            !launcher_eye_is_current(Some(&tab), &change),
+            "a Launcher eye event cannot write once an App owns the tab"
+        );
         let eye = || {
             tab::Message::AppAsync(
                 generation,
@@ -249,6 +266,15 @@ mod balance_privacy_eye_origin_tests {
         );
         drop(tab.update(tab::Message::LockCubeToLauncher));
         assert!(matches!(tab.state, tab::State::Home(_)));
+        assert!(
+            !launcher_eye_is_current(None, &change),
+            "a Launcher eye event for a closed tab is dropped"
+        );
+        assert!(launcher_eye_is_current(Some(&tab), &change));
+        assert!(
+            !launcher_eye_is_current(Some(&tab), &PreferenceChange::DeveloperMode(true)),
+            "the Launcher path writes only the hide-balances preference"
+        );
         assert_eq!(
             balance_privacy_eye_change(Some(&tab), &eye()),
             Some((change, false))
@@ -1029,6 +1055,13 @@ impl GUI {
             if let Some((change, current)) = balance_privacy_eye_change(tab, inner) {
                 return if current {
                     self.change_balance_privacy(change)
+                } else {
+                    Task::none()
+                };
+            }
+            if let tab::Message::HomeDevicePreference(change) = inner.as_ref() {
+                return if launcher_eye_is_current(tab, change) {
+                    self.change_balance_privacy(*change)
                 } else {
                     Task::none()
                 };
@@ -3050,10 +3083,12 @@ impl GUI {
                 if let Some(account) = self.connect_panel(&sheet.origin) {
                     let foreground = crate::app::view::connect::connect_sheet(account, sheet.page)
                         .map(Message::ConnectSheet);
+                    // P-Connect keeps the Launcher's top bar above the sheet;
+                    // over an open Cube (P-Connect-InCube) the sheet covers it.
                     return compose_overlay(
                         background,
                         foreground,
-                        matches!(sheet.origin.source, tab::PreferencesSource::App(_)),
+                        matches!(sheet.origin.source, tab::PreferencesSource::Home),
                     );
                 }
             }
