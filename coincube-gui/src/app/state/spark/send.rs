@@ -842,17 +842,19 @@ impl State for SparkSend {
         cache: &'a Cache,
     ) -> Element<'a, crate::app::view::Message> {
         let backend_available = self.backend.is_some();
-        let content = crate::app::view::dashboard(
+        let content = crate::app::view::dashboard_payment(
             menu,
             cache,
             SparkSendView {
                 backend_available,
+                cube_name: &cache.cube_name,
                 destination_input: &self.destination_input,
                 amount_input: &self.amount_input,
                 amount_set_by_invoice: self.invoice_amount_sat.is_some(),
                 phase: &self.phase,
                 recipient_identities: self.recipient_identities(),
                 recipient_mismatch: self.recipient_mismatch(),
+                recipient_checks_enabled: branta::enabled(),
                 sent_amount_display: &self.sent_amount_display,
                 sent_celebration_context: &self.sent_celebration_context,
                 sent_quote: &self.sent_quote,
@@ -1001,6 +1003,10 @@ impl State for SparkSend {
                 Task::none()
             }
             SparkSendMessage::SetReceiveTarget(target) => {
+                if self.receive_target == target {
+                    self.receive_picker_open = false;
+                    return Task::none();
+                }
                 // Switching what the recipient gets is a different payment —
                 // clear the destination/amount and any in-flight prepare.
                 self.receive_picker_open = false;
@@ -2671,6 +2677,21 @@ mod tests {
         assert!(panel.cross_chain_prepare.is_none());
         assert!(panel.cross_chain.is_none());
         assert!(matches!(panel.phase, SparkSendPhase::Idle));
+    }
+
+    #[test]
+    fn reselecting_current_bitcoin_target_keeps_typed_draft() {
+        let mut panel = SparkSend::new(None);
+        panel.receive_target = SparkSendTarget::Spark;
+        panel.destination_input = "sp1qtyped-destination".to_owned();
+        panel.amount_input = "12345".to_owned();
+        let _ = send(
+            &mut panel,
+            SparkSendMessage::SetReceiveTarget(SparkSendTarget::Spark),
+        );
+        assert_eq!(panel.receive_target, SparkSendTarget::Spark);
+        assert_eq!(panel.destination_input, "sp1qtyped-destination");
+        assert_eq!(panel.amount_input, "12345");
     }
 
     #[test]

@@ -303,8 +303,8 @@ pub(crate) mod capture {
         inspect_at_width(scenario, content, outer, appearance, theme, outer.0)
     }
 
-    /// Activity uses the wide dashboard body rather than the ordinary 8/10
-    /// content width. Match its measured shell width for layout captures.
+    /// Activity and payment forms use the wide dashboard body rather than the
+    /// ordinary 8/10 content width. Match its measured shell width in captures.
     pub fn inspect_wide_content<M: 'static>(
         scenario: &str,
         content: Element<'_, M>,

@@ -165,6 +165,25 @@ pub fn dashboard_activity<'a, T: Into<Element<'a, Message>>>(
     )
 }
 
+/// Full-width content area for the bounded Send and Receive forms. Their
+/// 680px form and 240px context rail sit together at 1440px and wrap at the
+/// 1024px minimum window size.
+pub fn dashboard_payment<'a, T: Into<Element<'a, Message>>>(
+    menu: &'a Menu,
+    cache: &'a Cache,
+    content: T,
+) -> Element<'a, Message> {
+    dashboard_with_info_layout(
+        menu,
+        cache,
+        content,
+        &cache.cube_name,
+        cache.avatar_handle.as_ref(),
+        cache.lightning_address.as_deref(),
+        true,
+    )
+}
+
 pub(crate) const ACTIVITY_HORIZONTAL_PADDING: f32 = 24.0;
 
 pub fn dashboard_with_info<'a, T: Into<Element<'a, Message>>>(

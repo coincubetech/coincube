@@ -11,6 +11,7 @@ use coincube_ui::{
     component::{
         amount::{BitcoinDisplayUnit, DisplayAmount},
         button,
+        tenshu::{segment, segmented},
         text::*,
     },
     icon,
@@ -34,6 +35,7 @@ use crate::app::view::{Message, SparkSendMessage};
 
 pub struct SparkSendView<'a> {
     pub backend_available: bool,
+    pub cube_name: &'a str,
     pub destination_input: &'a str,
     pub amount_input: &'a str,
     /// Whether `amount_input` was filled from the destination invoice rather
@@ -44,6 +46,7 @@ pub struct SparkSendView<'a> {
     pub phase: &'a SparkSendPhase,
     pub recipient_identities: &'a [crate::services::branta::RecipientIdentity],
     pub recipient_mismatch: bool,
+    pub recipient_checks_enabled: bool,
     pub theme_mode: theme::palette::ThemeMode,
     pub sent_amount_display: &'a str,
     pub sent_celebration_context: &'a str,
@@ -203,9 +206,15 @@ impl<'a> SparkSendView<'a> {
         let card = Container::new(
             Column::new()
                 .push(
-                    Container::new(h4_bold("Payment details"))
-                        .padding([18, 24])
-                        .width(Length::Fill),
+                    Container::new(
+                        Row::new()
+                            .spacing(12)
+                            .align_y(Alignment::Center)
+                            .push(h4_bold("Payment details").width(Length::Fill))
+                            .push(send_kind_selector(self.receive_target, self.network)),
+                    )
+                    .padding([16, 24])
+                    .width(Length::Fill),
                 )
                 .push(iced::widget::rule::horizontal(1))
                 .push(card_section(spark_send_cards(
@@ -257,8 +266,171 @@ impl<'a> SparkSendView<'a> {
             Message::SparkSend(SparkSendMessage::History),
         ));
 
-        content.into()
+        let network_name = match self.network {
+            Network::Bitcoin => "Bitcoin mainnet",
+            Network::Testnet => "Bitcoin testnet",
+            Network::Signet => "Bitcoin signet",
+            Network::Regtest => "Bitcoin regtest",
+            _ => "Bitcoin network",
+        };
+        let balance = if self.mask_amounts {
+            "••••••".to_owned()
+        } else {
+            format!(
+                "{} {}",
+                Amount::from_sat(self.balance_sats)
+                    .to_formatted_string_with_unit(self.bitcoin_unit),
+                if matches!(self.bitcoin_unit, BitcoinDisplayUnit::BTC) {
+                    "BTC"
+                } else {
+                    "SATS"
+                }
+            )
+        };
+        let header = Column::new()
+            .spacing(4)
+            .push(
+                iced::widget::button(
+                    text(format!("‹ Spark · {}", self.cube_name)).color(color::ORANGE),
+                )
+                .padding([2, 0])
+                .style(theme::button::transparent)
+                .on_press(Message::Menu(crate::app::menu::Menu::Spark(
+                    crate::app::menu::SparkSubMenu::Overview,
+                ))),
+            )
+            .push(h3("Send").bold())
+            .push(
+                p2_regular(format!("{} · {}", self.cube_name, network_name))
+                    .style(theme::text::secondary),
+            );
+        let reviewing = matches!(
+            self.phase,
+            SparkSendPhase::Prepared(_) | SparkSendPhase::Sending
+        );
+        let aside = Column::new()
+            .spacing(12)
+            .push(send_step("1", "Details", !reviewing))
+            .push(send_step("2", "Review", reviewing))
+            .push(send_step("3", "Sent", false))
+            .push(iced::widget::rule::horizontal(1))
+            .push(p2_regular("Available in Spark").style(theme::text::secondary))
+            .push(p1_bold(balance));
+        let page = Column::new().spacing(20).push(header).push(
+            Row::new()
+                .spacing(40)
+                .align_y(Alignment::Start)
+                .push(Container::new(content).width(Length::Fixed(680.0)))
+                .push(Container::new(aside).width(Length::Fixed(240.0)))
+                .wrap()
+                .vertical_spacing(20),
+        );
+        Container::new(Container::new(page).width(Length::Fill).max_width(960.0))
+            .center_x(Length::Fill)
+            .into()
     }
+}
+
+fn send_kind_selector(target: SparkSendTarget, network: Network) -> Element<'static, Message> {
+    let stablecoin = target.is_stablecoin();
+    segmented(
+        [
+            segment("spark-send-kind-bitcoin", false, "Bitcoin"),
+            segment(
+                "spark-send-kind-stablecoin",
+                true,
+                "Stablecoin (cross-chain)",
+            )
+            .enabled(cross_chain::supported_on(network)),
+        ],
+        Some(stablecoin),
+        Message::FocusAction,
+    )
+    .on_select(move |choice| {
+        Message::SparkSend(SparkSendMessage::SetReceiveTarget(if choice {
+            if stablecoin {
+                target
+            } else {
+                SparkSendTarget::Usdt
+            }
+        } else {
+            if stablecoin {
+                SparkSendTarget::Lightning
+            } else {
+                target
+            }
+        }))
+    })
+    .into()
+}
+
+fn recipient_status_row(
+    enabled: bool,
+    identities: &[crate::services::branta::RecipientIdentity],
+) -> Element<'static, Message> {
+    let status = if !enabled {
+        "Checks off".to_owned()
+    } else if let Some(identity) = identities.iter().find(|identity| identity.is_current()) {
+        format!("Verified · {}", identity.platform)
+    } else {
+        "Not identified".to_owned()
+    };
+    Column::new()
+        .spacing(4)
+        .push(
+            Row::new()
+                .spacing(12)
+                .align_y(Alignment::Center)
+                .push(p2_regular("Recipient identity (Branta)").width(Length::Fill))
+                .push(p2_bold(status)),
+        )
+        .push_maybe((!enabled).then(|| {
+            iced::widget::button(text("Turn on in Settings").color(color::ORANGE))
+                .padding([2, 0])
+                .style(theme::button::transparent)
+                .on_press(Message::Menu(crate::app::menu::Menu::Cube(
+                    crate::app::menu::CubeSubMenu::Settings(
+                        crate::app::menu::CubeSettingsOption::PaymentChecks,
+                    ),
+                )))
+        }))
+        .into()
+}
+
+fn send_step<'a>(number: &'static str, label: &'static str, active: bool) -> Element<'a, Message> {
+    Row::new()
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .push(
+            Container::new(
+                text(number)
+                    .size(P2_SIZE)
+                    .style(move |theme: &theme::Theme| iced::widget::text::Style {
+                        color: Some(if active {
+                            iced::color!(0x1a1208)
+                        } else {
+                            theme.colors.shell.muted
+                        }),
+                    }),
+            )
+            .center_x(Length::Fixed(24.0))
+            .center_y(Length::Fixed(24.0))
+            .style(move |theme: &theme::Theme| container::Style {
+                background: active.then_some(Background::Color(theme.colors.shell.accent)),
+                border: iced::Border {
+                    color: theme.colors.shell.line,
+                    width: 1.0,
+                    radius: 12.0.into(),
+                },
+                ..Default::default()
+            }),
+        )
+        .push(if active {
+            p1_bold(label)
+        } else {
+            p1_regular(label).style(theme::text::secondary)
+        })
+        .into()
 }
 
 fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
@@ -271,6 +443,7 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
     let bitcoin_unit = view.bitcoin_unit;
     let recipient_identities = view.recipient_identities;
     let recipient_mismatch = view.recipient_mismatch;
+    let recipient_checks_enabled = view.recipient_checks_enabled;
     let theme_mode = view.theme_mode;
     use crate::app::view::SparkSendMessage;
     use coincube_ui::component::amount::format_u64_as_string;
@@ -541,6 +714,10 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
                     .push(kv_row(
                         "Total",
                         format!("{} sats", ok.amount_sat.saturating_add(ok.fee_sat)),
+                    ))
+                    .push(recipient_status_row(
+                        recipient_checks_enabled,
+                        recipient_identities,
                     ))
                     .push_maybe(ok.method.starts_with("Spark").then(|| {
                         p2_regular(
@@ -1185,6 +1362,7 @@ mod tests {
     use crate::app::cache::Cache;
     use crate::app::menu::{Menu, SparkSubMenu};
     use crate::app::state::spark::send::{ReconcileOutcome, RetryGuard};
+    use crate::app::view::shared::landing::capture;
     use coincube_spark_protocol::{CrossChainQuote, CrossChainRoute, PrepareSendOk};
     use coincube_ui::component::quote_display::Quote;
     use coincube_ui::theme::palette::ThemeMode;
@@ -1208,6 +1386,51 @@ mod tests {
     const SYNTHETIC_HINT: &str = "Your bitcoin balance is 25,053 sats; the rest is converted \
                                   from your synthetic USDB at the time of sending.";
 
+    #[test]
+    fn master_bitcoin_reselection_preserves_the_selected_subrail_for_keyboard_and_pointer() {
+        for target in [
+            SparkSendTarget::Lightning,
+            SparkSendTarget::Spark,
+            SparkSendTarget::OnChain,
+        ] {
+            for pointer in [false, true] {
+                let messages = capture::activate(
+                    send_kind_selector(target, Network::Bitcoin),
+                    Id::new("spark-send-kind-bitcoin"),
+                    COMPACT,
+                    pointer,
+                );
+                assert!(messages.iter().any(|message| matches!(
+                    message,
+                    Message::SparkSend(SparkSendMessage::SetReceiveTarget(selected))
+                        if *selected == target
+                )));
+            }
+        }
+    }
+
+    #[test]
+    fn recipient_status_uses_only_current_identity_and_device_setting() {
+        let ticket = crate::services::branta::test_ticket(true);
+        let identity = crate::services::branta::test_identity(&ticket, "Example Coffee Co.");
+        let inspect = |enabled, identities: &[crate::services::branta::RecipientIdentity]| {
+            capture::inspect(
+                "spark-send-recipient-status",
+                recipient_status_row(enabled, identities),
+                (1024, 768),
+                "dark",
+                theme::Theme::dark(),
+            )
+        };
+        assert!(inspect(true, &[identity.clone()]).contains("Verified · Example Coffee Co."));
+        let off = inspect(false, &[identity.clone()]);
+        assert!(off.contains("Checks off"));
+        assert!(off.contains("Turn on in Settings"));
+        assert!(!off.contains("Verified"));
+        ticket.set_test_enabled(false);
+        assert!(inspect(true, &[identity]).contains("Not identified"));
+    }
+
     struct Fixture {
         backend_available: bool,
         destination: String,
@@ -1215,6 +1438,7 @@ mod tests {
         invoice_amount: bool,
         phase: SparkSendPhase,
         mismatch: bool,
+        recipient_checks_enabled: bool,
         mode: ThemeMode,
         unit: BitcoinDisplayUnit,
         hint: Option<String>,
@@ -1235,6 +1459,7 @@ mod tests {
                 invoice_amount: false,
                 phase,
                 mismatch: false,
+                recipient_checks_enabled: true,
                 mode: ThemeMode::Dark,
                 unit: BitcoinDisplayUnit::Sats,
                 hint: None,
@@ -1290,12 +1515,14 @@ mod tests {
         fn view(&self) -> SparkSendView<'_> {
             SparkSendView {
                 backend_available: self.backend_available,
+                cube_name: "Everyday",
                 destination_input: &self.destination,
                 amount_input: &self.amount,
                 amount_set_by_invoice: self.invoice_amount,
                 phase: &self.phase,
                 recipient_identities: &[],
                 recipient_mismatch: self.mismatch,
+                recipient_checks_enabled: self.recipient_checks_enabled,
                 theme_mode: self.mode,
                 sent_amount_display: "",
                 sent_celebration_context: "",
@@ -1342,7 +1569,7 @@ mod tests {
         cache: &'a Cache,
         picker_open: bool,
     ) -> Element<'a, Message> {
-        let content = crate::app::view::dashboard(menu, cache, fixture.view().render());
+        let content = crate::app::view::dashboard_payment(menu, cache, fixture.view().render());
         if picker_open {
             return coincube_ui::widget::modal::Modal::new(
                 content,
@@ -1876,7 +2103,10 @@ mod tests {
                     harness.assert_no_horizontal_overflow(&label);
                     let probe = harness.probe();
                     for expected in [
+                        "‹ Spark",
+                        "Send",
                         "Payment details",
+                        "Available in Spark",
                         "You send",
                         "They receive",
                         "Destination",
@@ -1909,6 +2139,9 @@ mod tests {
                         "{}: native destination input",
                         label
                     );
+                    for id in ["spark-send-kind-bitcoin", "spark-send-kind-stablecoin"] {
+                        assert!(probe.bounds(id).is_some(), "{}: missing {}", label, id);
+                    }
                     assert!(
                         probe.input_text(AMOUNT_INPUT_ID).is_some(),
                         "{}: native amount input",

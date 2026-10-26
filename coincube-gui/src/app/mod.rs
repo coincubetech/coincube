@@ -9981,6 +9981,12 @@ impl App {
                             }
                         })
                     });
+                self.panels.spark_receive.sync_lightning_address_qr(
+                    self.cache
+                        .connect_authenticated
+                        .then_some(self.cache.lightning_address.as_deref())
+                        .flatten(),
+                );
                 if let Some(p2p) = self.panels.p2p.as_mut() {
                     p2p.sync_lightning_address_from_cache(&self.cache);
                     // Keep the panel's server-P2P mirror current so its Mostro
@@ -10014,6 +10020,8 @@ impl App {
                     self.cache.connect_device_id = None;
                     self.cache.connect_email = None;
                     self.cache.has_connect_session = false;
+                    self.cache.lightning_address = None;
+                    self.panels.spark_receive.sync_lightning_address_qr(None);
                     self.cache.connect_stream_status = ConnectionStatus::Inactive;
                     // Drop the previous session's vault-monitoring config so
                     // it can't leak into the next account and so the
@@ -11080,6 +11088,8 @@ impl App {
         self.fork_connect_client = None;
         self.panels.connect.account.use_local_backend();
         self.cache.has_connect_session = false;
+        self.cache.lightning_address = None;
+        self.panels.spark_receive.sync_lightning_address_qr(None);
         self.cache.restorable_connect_session = false;
         self.cache.connect_authenticated = false;
         self.cache.connect_tokens = None;
@@ -11109,6 +11119,8 @@ impl App {
             self.fork_connect_client = None;
             self.panels.connect.revoke_admitted_client();
             self.cache.has_connect_session = false;
+            self.cache.lightning_address = None;
+            self.panels.spark_receive.sync_lightning_address_qr(None);
             self.cache.restorable_connect_session = false;
             self.cache.connect_authenticated = false;
             self.cache.connect_tokens = None;
