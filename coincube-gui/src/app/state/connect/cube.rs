@@ -349,6 +349,14 @@ impl ConnectCubePanel {
 
     /// Set the authenticated API client (called after account login).
     pub fn set_client(&mut self, client: CoincubeClient) {
+        // A different Connect session cannot inherit this Cube's registered
+        // row or Lightning address. clear_client also retires in-flight
+        // registration replies by advancing their generation.
+        if self.client.as_ref().is_some_and(|current| {
+            current.base_url != client.base_url || current.token() != client.token()
+        }) {
+            self.clear_client();
+        }
         self.client = Some(client);
     }
 
@@ -388,6 +396,9 @@ impl ConnectCubePanel {
     pub fn clear_client(&mut self) {
         self.client = None;
         self.server_cube_id = None;
+        // The key publication latch belongs to the server Cube row too. A
+        // replacement account (or server) must publish to its new row.
+        self.enc_pubkey_registered = false;
         // The latch means "already sent to *this* server cube row", so it dies
         // with the row id above. After signing in as a different account the
         // next registration names a different row, or none at all (the server
@@ -989,8 +1000,14 @@ impl ConnectCubePanel {
                 }
             }
 
-            ConnectCubeMessage::LightningAddressLoaded(ln_addr) => {
-                self.lightning_address = ln_addr;
+            ConnectCubeMessage::LightningAddressLoaded {
+                generation,
+                address,
+            } => {
+                if generation != self.session_generation {
+                    return iced::Task::none();
+                }
+                self.lightning_address = address;
             }
 
             ConnectCubeMessage::LnUsernameChanged(input) => {
@@ -1130,6 +1147,7 @@ impl ConnectCubePanel {
                 };
                 self.ln_claiming = true;
                 self.ln_claim_error = None;
+                let generation = self.session_generation;
                 let username = self.ln_username_input.clone();
                 let Some(cube_id) = self.api_cube_id() else {
                     self.ln_claiming = false;
@@ -1182,24 +1200,41 @@ impl ConnectCubePanel {
                             }
                         }
                     },
-                    |res| match res {
+                    move |res| match res {
                         Ok(ln_addr) => Message::View(view::Message::ConnectCube(
-                            ConnectCubeMessage::LightningAddressClaimed(ln_addr),
+                            ConnectCubeMessage::LightningAddressClaimed {
+                                generation,
+                                address: ln_addr,
+                            },
                         )),
-                        Err(e) => {
-                            Message::View(view::Message::ConnectCube(ConnectCubeMessage::Error(e)))
-                        }
+                        Err(error) => Message::View(view::Message::ConnectCube(
+                            ConnectCubeMessage::LightningAddressClaimFailed { generation, error },
+                        )),
                     },
                 );
             }
 
-            ConnectCubeMessage::LightningAddressClaimed(ln_addr) => {
+            ConnectCubeMessage::LightningAddressClaimed {
+                generation,
+                address,
+            } => {
+                if generation != self.session_generation {
+                    return iced::Task::none();
+                }
                 self.ln_claiming = false;
-                self.lightning_address = Some(ln_addr);
+                self.lightning_address = Some(address);
                 self.ln_username_input.clear();
                 self.ln_username_available = None;
                 self.ln_username_error = None;
                 self.ln_reconcile_needs_reregister = None;
+            }
+
+            ConnectCubeMessage::LightningAddressClaimFailed { generation, error } => {
+                if generation != self.session_generation {
+                    return iced::Task::none();
+                }
+                self.ln_claiming = false;
+                self.ln_claim_error = Some(error);
             }
 
             ConnectCubeMessage::BeginEditLightningAddress => {
@@ -1282,6 +1317,7 @@ impl ConnectCubePanel {
                 };
                 self.ln_changing = true;
                 self.ln_claim_error = None;
+                let generation = self.session_generation;
                 return iced::Task::perform(
                     async move {
                         // Step 1: server-side atomic username swap.
@@ -1348,15 +1384,24 @@ impl ConnectCubePanel {
 
                         LightningAddressChangeOutcome::Ok(new_addr)
                     },
-                    |outcome| {
+                    move |outcome| {
                         Message::View(view::Message::ConnectCube(
-                            ConnectCubeMessage::LightningAddressUpdated(outcome),
+                            ConnectCubeMessage::LightningAddressUpdated {
+                                generation,
+                                outcome,
+                            },
                         ))
                     },
                 );
             }
 
-            ConnectCubeMessage::LightningAddressUpdated(outcome) => {
+            ConnectCubeMessage::LightningAddressUpdated {
+                generation,
+                outcome,
+            } => {
+                if generation != self.session_generation {
+                    return iced::Task::none();
+                }
                 self.ln_changing = false;
                 match outcome {
                     LightningAddressChangeOutcome::Ok(addr) => {
@@ -2042,6 +2087,70 @@ mod tests {
         }
     }
 
+    #[test]
+    fn replacing_account_client_retires_old_address_before_new_cube_registration() {
+        let mut panel = panel();
+        panel.set_client(CoincubeClient::for_test("http://account-a.invalid"));
+        panel.server_cube_id = Some(42);
+        panel.lightning_address = Some(lightning("account-a@coincube.io"));
+        panel.cube_encryption_pubkey = Some("synthetic-device-pubkey".to_owned());
+        panel.enc_pubkey_registered = true;
+        let old_generation = panel.session_generation();
+
+        panel.set_client(CoincubeClient::for_test("http://account-b.invalid"));
+        assert!(panel.server_cube_id.is_none());
+        assert!(panel.lightning_address.is_none());
+        assert!(!panel.enc_pubkey_registered);
+        assert_ne!(panel.session_generation(), old_generation);
+
+        // A's delayed registration cannot repopulate the new account's view.
+        let _ = panel.update_message(ConnectCubeMessage::CubeRegistered {
+            generation: old_generation,
+            result: Ok(cube_response(Some("account-a@coincube.io"))),
+        });
+        assert!(panel.lightning_address.is_none());
+
+        let _ = panel.update_message(ConnectCubeMessage::LightningAddressClaimed {
+            generation: old_generation,
+            address: lightning("account-a@coincube.io"),
+        });
+        let _ = panel.update_message(ConnectCubeMessage::LightningAddressClaimFailed {
+            generation: old_generation,
+            error: "old account claim failed".to_owned(),
+        });
+        let _ = panel.update_message(ConnectCubeMessage::LightningAddressUpdated {
+            generation: old_generation,
+            outcome: LightningAddressChangeOutcome::Ok(lightning("account-a@coincube.io")),
+        });
+        let _ = panel.update_message(ConnectCubeMessage::LightningAddressUpdated {
+            generation: old_generation,
+            outcome: LightningAddressChangeOutcome::SdkSyncFailed {
+                addr: lightning("account-a@coincube.io"),
+                message: "old account".to_owned(),
+            },
+        });
+        let _ = panel.update_message(ConnectCubeMessage::LightningAddressLoaded {
+            generation: old_generation,
+            address: Some(lightning("account-a@coincube.io")),
+        });
+        assert!(panel.lightning_address.is_none());
+        assert!(panel.ln_reconcile_needs_reregister.is_none());
+        assert!(panel.ln_claim_error.is_none());
+
+        let _ = panel.update_message(ConnectCubeMessage::CubeRegistered {
+            generation: panel.session_generation(),
+            result: Ok(cube_response(Some("account-b@coincube.io"))),
+        });
+        assert!(panel.enc_pubkey_registered);
+        assert_eq!(
+            panel
+                .lightning_address
+                .as_ref()
+                .and_then(|value| value.lightning_address.as_deref()),
+            Some("account-b@coincube.io")
+        );
+    }
+
     fn avatar_variant(id: u64) -> AvatarVariant {
         AvatarVariant {
             id,
@@ -2513,25 +2622,28 @@ mod tests {
         assert!(!panel.ln_editing);
         assert!(panel.ln_username_input.is_empty());
 
-        let _ = panel.update_message(ConnectCubeMessage::LightningAddressUpdated(
-            LightningAddressChangeOutcome::ServerError("conflict".to_string()),
-        ));
+        let _ = panel.update_message(ConnectCubeMessage::LightningAddressUpdated {
+            generation: panel.session_generation(),
+            outcome: LightningAddressChangeOutcome::ServerError("conflict".to_string()),
+        });
         assert_eq!(panel.ln_claim_error.as_deref(), Some("conflict"));
 
-        let _ = panel.update_message(ConnectCubeMessage::LightningAddressUpdated(
-            LightningAddressChangeOutcome::SdkSyncFailed {
+        let _ = panel.update_message(ConnectCubeMessage::LightningAddressUpdated {
+            generation: panel.session_generation(),
+            outcome: LightningAddressChangeOutcome::SdkSyncFailed {
                 addr: lightning("new@example.com"),
                 message: "sdk failed".to_string(),
             },
-        ));
+        });
         assert_eq!(
             panel.ln_reconcile_needs_reregister.as_deref(),
             Some("sdk failed")
         );
 
-        let _ = panel.update_message(ConnectCubeMessage::LightningAddressUpdated(
-            LightningAddressChangeOutcome::Ok(lightning("ok@example.com")),
-        ));
+        let _ = panel.update_message(ConnectCubeMessage::LightningAddressUpdated {
+            generation: panel.session_generation(),
+            outcome: LightningAddressChangeOutcome::Ok(lightning("ok@example.com")),
+        });
         assert!(panel.ln_reconcile_needs_reregister.is_none());
         assert!(!panel.ln_editing);
     }

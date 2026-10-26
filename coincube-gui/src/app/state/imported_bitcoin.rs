@@ -2625,7 +2625,12 @@ impl ImportedBitcoinPanel {
         content.into()
     }
 
-    fn wallet_view(&self, mask_amounts: bool) -> Element<'_, view::Message> {
+    fn wallet_view<'a>(
+        &'a self,
+        mask_amounts: bool,
+        tools: &[(&'static str, Menu)],
+        cube_id: &str,
+    ) -> Element<'a, view::Message> {
         let ready = self.is_ready();
         let mut content = Column::new()
             .spacing(16)
@@ -2790,6 +2795,9 @@ impl ImportedBitcoinPanel {
         }
         if let Some(error) = &self.error {
             content = content.push(p1_regular(error).style(theme::text::error));
+        }
+        if ready && !tools.is_empty() {
+            content = content.push(view::vault::overview::vault_tools(cube_id, tools));
         }
         content.into()
     }
@@ -3077,13 +3085,24 @@ impl State for ImportedBitcoinPanel {
         let body = if self.import.active_attachment().is_none() {
             self.setup_view()
         } else if !self.is_ready() {
-            self.wallet_view(cache.balance_amounts_masked())
+            self.wallet_view(cache.balance_amounts_masked(), &[], &cache.cube_id)
         } else {
             match menu {
                 Menu::Vault(VaultSubMenu::Send) => self.send_view(false),
                 Menu::Vault(VaultSubMenu::PSBTs(_)) => self.send_view(true),
                 Menu::Vault(VaultSubMenu::Settings(option)) => self.settings_view(*option),
-                _ => self.wallet_view(cache.balance_amounts_masked()),
+                _ => {
+                    // This page serves Coin control itself, so a link to it
+                    // would only reload the page.
+                    let tools: Vec<_> =
+                        view::nav::vault::tools(&view::nav::NavContext::from_cache(cache))
+                            .into_iter()
+                            .filter(|(_, route)| {
+                                !matches!(route, Menu::Vault(VaultSubMenu::Coins(_)))
+                            })
+                            .collect();
+                    self.wallet_view(cache.balance_amounts_masked(), &tools, &cache.cube_id)
+                }
             }
         };
         view::dashboard(menu, cache, body)

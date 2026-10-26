@@ -187,6 +187,38 @@ fn failure_detail(message: &str) -> String {
     format!("{}…", truncated.trim_end())
 }
 
+/// The Vault's tools (coin control, PSBT proposals, recovery path, split
+/// coins), reached from the Vault page as on the canvas, not the sidebar.
+pub(crate) fn vault_tools<'a>(
+    cube_id: &str,
+    tools: &[(&'static str, Menu)],
+) -> Element<'a, Message> {
+    tools
+        .iter()
+        .fold(
+            Column::new().spacing(10).push(h4_bold("Tools")),
+            |column, (label, route)| {
+                column.push(
+                    Container::new(
+                        landing_button(
+                            landing_control_id(cube_id, "Vault", label),
+                            label,
+                            None,
+                            Message::FocusAction,
+                            Some(Message::Menu(route.clone())),
+                            theme::button::transparent_border,
+                        )
+                        .width(Length::Fill)
+                        .padding(15),
+                    )
+                    .width(Length::Fill)
+                    .style(theme::card::simple),
+                )
+            },
+        )
+        .into()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn vault_overview_view<'a>(
     balance: &'a bitcoin::Amount,
@@ -210,6 +242,7 @@ pub fn vault_overview_view<'a>(
     _show_direction_badges: bool,
     display_mode: DisplayMode,
     mask_amounts: bool,
+    tools: &[(&'static str, Menu)],
 ) -> Element<'a, Message> {
     // Show external-unconfirmed coins as part of the headline balance
     // (matching the Cube → Overview Vault card). The per-transaction
@@ -468,6 +501,7 @@ pub fn vault_overview_view<'a>(
             } else {
                 None
             })
+            .push_maybe((!tools.is_empty()).then(|| vault_tools(cube_id, tools)))
             .push(Space::new().height(Length::Fixed(40.0)))
             .spacing(20),
     )
@@ -889,6 +923,7 @@ mod capture_tests {
                 true,
                 DisplayMode::BitcoinNative,
                 true,
+                &[],
             ),
             (1024, 768),
             "dark",
@@ -897,6 +932,58 @@ mod capture_tests {
         assert!(mounted.contains("••••••"));
         assert!(!mounted.contains("12,345,678"));
         assert!(!mounted.contains("99,999,999,999"));
+    }
+
+    #[test]
+    fn vault_page_links_each_tool_it_is_given() {
+        let balance = bitcoin::Amount::from_sat(250_000);
+        let zero = bitcoin::Amount::ZERO;
+        let tools = [
+            ("Coin control", Menu::Vault(VaultSubMenu::Coins(None))),
+            ("PSBT proposals", Menu::Vault(VaultSubMenu::PSBTs(None))),
+            ("Recovery path", Menu::Vault(VaultSubMenu::Recovery)),
+            ("Split coins", Menu::Vault(VaultSubMenu::Claim)),
+        ];
+        let view = |tools: &[(&'static str, Menu)]| {
+            capture::inspect(
+                "vault-tools",
+                vault_overview_view(
+                    &balance,
+                    &zero,
+                    &None,
+                    None,
+                    &[],
+                    &[],
+                    "synthetic-cube",
+                    true,
+                    false,
+                    false,
+                    true,
+                    None,
+                    &SyncStatus::Synced,
+                    false,
+                    false,
+                    BitcoinDisplayUnit::Sats,
+                    None,
+                    None,
+                    true,
+                    DisplayMode::BitcoinNative,
+                    false,
+                    tools,
+                ),
+                (1024, 2000),
+                "dark",
+                theme::Theme::dark(),
+            )
+        };
+        let with = view(&tools);
+        assert!(with.contains("Tools"));
+        for (label, _) in &tools {
+            assert!(with.contains(label), "missing {:?}", label);
+            assert!(with.has_focus(landing_control_id("synthetic-cube", "Vault", label)));
+        }
+        let without = view(&[]);
+        assert!(!without.contains("Coin control"));
     }
 
     #[test]
@@ -939,6 +1026,7 @@ mod capture_tests {
                             true,
                             DisplayMode::BitcoinNative,
                             false,
+                            &[],
                         )
                     };
                 }

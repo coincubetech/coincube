@@ -5,6 +5,7 @@ use coincube_ui::{
     component::{
         amount::*,
         button, form,
+        tenshu::{segment, segmented},
         text::*,
         transaction::{TransactionDirection, TransactionListItem},
     },
@@ -97,13 +98,14 @@ fn send_route_action_style(
                 shell.line
             },
             width: 1.0,
-            radius: 12.0.into(),
+            radius: 8.0.into(),
         },
         ..Default::default()
     }
 }
 
 const CONTINUE_ACTION_ID: &str = "tenshu.liquid.send.continue";
+const BREADCRUMB_ACTION_ID: &str = "tenshu.liquid.send.breadcrumb";
 pub(crate) const SEND_ROUTE_ACTION_ID: &str = "tenshu.liquid.send.source-route";
 pub(crate) const RECEIVE_ROUTE_ACTION_ID: &str = "tenshu.liquid.send.destination-route";
 
@@ -148,7 +150,14 @@ pub fn liquid_send_with_flow<'a>(config: LiquidSendFlowConfig<'a>) -> Element<'a
             )
             .map(Message::LiquidSend);
 
-            let content = view::dashboard(config.menu, config.cache, send_view);
+            let send_page = send_page(
+                send_view,
+                config.cache,
+                config.btc_balance,
+                config.usdt_balance,
+                config.from_asset,
+            );
+            let content = view::dashboard_payment(config.menu, config.cache, send_page);
 
             // Show picker modals if open
             if config.send_picker_open {
@@ -258,6 +267,113 @@ pub fn liquid_send_with_flow<'a>(config: LiquidSendFlowConfig<'a>) -> Element<'a
     };
 
     base_content
+}
+
+fn send_page<'a>(
+    send_view: Element<'a, Message>,
+    cache: &'a Cache,
+    btc_balance: Amount,
+    usdt_balance: u64,
+    from_asset: SendAsset,
+) -> Element<'a, Message> {
+    let network_name = match cache.network {
+        coincube_core::miniscript::bitcoin::Network::Bitcoin => "Liquid network",
+        coincube_core::miniscript::bitcoin::Network::Testnet
+        | coincube_core::miniscript::bitcoin::Network::Signet
+        | coincube_core::miniscript::bitcoin::Network::Regtest => "Liquid test network",
+        _ => "Liquid network",
+    };
+    let balance = if cache.balance_amounts_masked() {
+        "••••••".to_owned()
+    } else {
+        match from_asset {
+            SendAsset::Lbtc => format!(
+                "{} {}",
+                btc_balance.to_formatted_string_with_unit(cache.bitcoin_unit),
+                cache.bitcoin_unit.label()
+            ),
+            SendAsset::Usdt => format!("{} USDt", format_usdt_display(usdt_balance)),
+        }
+    };
+    let header = Column::new()
+        .spacing(4)
+        .push(
+            Action::new(
+                BREADCRUMB_ACTION_ID,
+                text(format!("‹ Liquid · {}", cache.cube_name)).color(color::ORANGE),
+                |id| Message::LiquidSend(LiquidSendMessage::FocusAction(id)),
+            )
+            .padding([2, 0])
+            .style(theme::button::transparent)
+            .on_press(Message::Menu(Menu::Liquid(
+                crate::app::menu::LiquidSubMenu::Overview,
+            ))),
+        )
+        .push(h3("Send").bold())
+        .push(
+            p2_regular(format!("{} · {}", cache.cube_name, network_name))
+                .style(theme::text::secondary),
+        );
+    let aside = Column::new()
+        .spacing(12)
+        .push(liquid_send_step("1", "Details", true))
+        .push(liquid_send_step("2", "Review", false))
+        .push(liquid_send_step("3", "Sent", false))
+        .push(iced::widget::rule::horizontal(1))
+        .push(p2_regular("Available in Liquid").style(theme::text::secondary))
+        .push(p1_bold(balance));
+    let page = Column::new().spacing(20).push(header).push(
+        Row::new()
+            .spacing(40)
+            .align_y(Alignment::Start)
+            .push(Container::new(send_view).width(Length::Fixed(680.0)))
+            .push(Container::new(aside).width(Length::Fixed(240.0)))
+            .wrap()
+            .vertical_spacing(20),
+    );
+    Container::new(Container::new(page).width(Length::Fill).max_width(960.0))
+        .center_x(Length::Fill)
+        .into()
+}
+
+fn liquid_send_step<'a>(
+    number: &'static str,
+    label: &'static str,
+    active: bool,
+) -> Element<'a, Message> {
+    Row::new()
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .push(
+            Container::new(
+                text(number)
+                    .size(P2_SIZE)
+                    .style(move |theme: &theme::Theme| iced::widget::text::Style {
+                        color: Some(if active {
+                            iced::color!(0x1a1208)
+                        } else {
+                            theme.colors.shell.muted
+                        }),
+                    }),
+            )
+            .center_x(Length::Fixed(24.0))
+            .center_y(Length::Fixed(24.0))
+            .style(move |theme: &theme::Theme| container::Style {
+                background: active.then_some(Background::Color(theme.colors.shell.accent)),
+                border: iced::Border {
+                    color: theme.colors.shell.line,
+                    width: 1.0,
+                    radius: 12.0.into(),
+                },
+                ..Default::default()
+            }),
+        )
+        .push(if active {
+            p1_bold(label)
+        } else {
+            p1_regular(label).style(theme::text::secondary)
+        })
+        .into()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -443,9 +559,25 @@ pub fn liquid_send_view<'a>(
     let payment_card = Container::new(
         Column::new()
             .push(
-                Container::new(h4_bold("Payment details"))
-                    .padding([18, 24])
-                    .width(Length::Fill),
+                Container::new(
+                    Row::new()
+                        .spacing(12)
+                        .align_y(Alignment::Center)
+                        .push(h4_bold("Payment details").width(Length::Fill))
+                        .push(
+                            segmented(
+                                [
+                                    segment("liquid-send-kind-lbtc", SendAsset::Lbtc, "L-BTC"),
+                                    segment("liquid-send-kind-usdt", SendAsset::Usdt, "USDt"),
+                                ],
+                                Some(from_asset),
+                                LiquidSendMessage::FocusAction,
+                            )
+                            .on_select(LiquidSendMessage::SelectMasterAsset),
+                        ),
+                )
+                .padding([16, 24])
+                .width(Length::Fill),
             )
             .push(iced::widget::rule::horizontal(1))
             .push(
@@ -686,7 +818,7 @@ fn send_picker_action<'a>(
     Action::new(id, content, LiquidSendMessage::FocusAction)
         .width(Length::Fill)
         .padding([12, 16])
-        .focus_radius(12.0)
+        .focus_radius(8.0)
         .style(move |theme, status| {
             let shell = &theme.colors.shell;
             iced_button::Style {
@@ -703,7 +835,7 @@ fn send_picker_action<'a>(
                         shell.line
                     },
                     width: 1.0,
-                    radius: 12.0.into(),
+                    radius: 8.0.into(),
                 },
                 ..Default::default()
             }
@@ -1964,7 +2096,74 @@ fn _old_send_asset_toggle(_current_asset: SendAsset) -> Element<'static, LiquidS
 #[cfg(test)]
 mod privacy_tests {
     use super::*;
+    use crate::app::cache::Cache;
     use crate::app::view::shared::landing::capture;
+
+    #[test]
+    fn breadcrumb_navigates_to_liquid_overview_without_resetting_the_draft() {
+        let cache = Cache::default();
+        for pointer in [false, true] {
+            let messages = capture::activate(
+                send_page(
+                    Column::new().into(),
+                    &cache,
+                    Amount::ZERO,
+                    0,
+                    SendAsset::Lbtc,
+                ),
+                iced::advanced::widget::Id::new(BREADCRUMB_ACTION_ID),
+                (1024, 768),
+                pointer,
+            );
+            assert!(messages.iter().any(|message| matches!(
+                message,
+                Message::Menu(Menu::Liquid(crate::app::menu::LiquidSubMenu::Overview))
+            )));
+            assert!(!messages.iter().any(|message| matches!(
+                message,
+                Message::LiquidSend(LiquidSendMessage::BackToHome)
+            )));
+        }
+    }
+
+    #[test]
+    fn master_asset_reselection_uses_current_asset_for_keyboard_and_pointer() {
+        let input = form::Value::<String>::default();
+        let input_type = None;
+        for asset in [SendAsset::Lbtc, SendAsset::Usdt] {
+            let id = if asset == SendAsset::Lbtc {
+                "liquid-send-kind-lbtc"
+            } else {
+                "liquid-send-kind-usdt"
+            };
+            for pointer in [false, true] {
+                let messages = capture::activate(
+                    liquid_send_view(
+                        Amount::ZERO,
+                        0,
+                        asset,
+                        asset,
+                        ReceiveNetwork::Liquid,
+                        None,
+                        &[],
+                        &input,
+                        &input_type,
+                        BitcoinDisplayUnit::Sats,
+                        "",
+                        false,
+                        false,
+                    ),
+                    iced::advanced::widget::Id::new(id),
+                    (1024, 768),
+                    pointer,
+                );
+                assert!(messages.iter().any(|message| matches!(
+                    message,
+                    LiquidSendMessage::SelectMasterAsset(selected) if *selected == asset
+                )));
+            }
+        }
+    }
 
     #[test]
     fn send_details_fit_compact_and_wide_themes_with_keyboard_continue() {
@@ -2016,6 +2215,32 @@ mod privacy_tests {
                         unit.label()
                     )));
                     assert!(mounted.has_focus(iced::advanced::widget::Id::new(CONTINUE_ACTION_ID)));
+                    let cache = Cache {
+                        cube_name: "Everyday".to_owned(),
+                        network: coincube_core::miniscript::bitcoin::Network::Bitcoin,
+                        bitcoin_unit: unit,
+                        ..Default::default()
+                    };
+                    let payment_page = capture::inspect_wide_content(
+                        "liquid-send-payment-page",
+                        send_page(
+                            render(unit).map(Message::LiquidSend),
+                            &cache,
+                            Amount::from_sat(123_456),
+                            0,
+                            SendAsset::Lbtc,
+                        ),
+                        (width, height),
+                        appearance,
+                        theme,
+                        width - 248 - 48,
+                    );
+                    for label in ["‹ Liquid", "Send", "Payment details", "Available in Liquid"] {
+                        assert!(payment_page.contains(label));
+                    }
+                    for id in ["liquid-send-kind-lbtc", "liquid-send-kind-usdt"] {
+                        assert!(payment_page.has_focus(iced::advanced::widget::Id::new(id)));
+                    }
                     if width == 1440 {
                         let x = |label| {
                             mounted

@@ -38,6 +38,9 @@ pub struct SparkReceiveView<'a> {
     pub description_input: &'a str,
     pub phase: &'a SparkReceivePhase,
     pub qr_data: Option<&'a qr_code::Data>,
+    pub connect_signed_in: bool,
+    pub lightning_address: Option<&'a str>,
+    pub lightning_address_qr: Option<&'a qr_code::Data>,
     /// Phase 4f: list of pending on-chain deposits surfaced from the
     /// SDK's `list_unclaimed_deposits` RPC. Rendered as a dedicated
     /// card below the main phase body.
@@ -118,13 +121,13 @@ impl<'a> SparkReceiveView<'a> {
                         self.network,
                     )),
             )
-            .padding([16, 20]),
+            .padding([16, 24]),
         );
 
         if self.cross_network_selected.is_none() {
             form = form.push(iced::widget::rule::horizontal(1)).push(
                 Container::new(bitcoin_method_selector(self.method))
-                    .padding([18, 20])
+                    .padding([18, 24])
                     .width(Length::Fill),
             );
         }
@@ -135,7 +138,7 @@ impl<'a> SparkReceiveView<'a> {
                 self.method,
                 self.cross_network_selected,
             ))
-            .padding([18, 20]),
+            .padding([18, 24]),
         );
 
         if let Some(body) = self.sideshift_body {
@@ -143,88 +146,99 @@ impl<'a> SparkReceiveView<'a> {
             // inline here — the same slot the Bitcoin rail form would occupy.
             form = form
                 .push(iced::widget::rule::horizontal(1))
-                .push(Container::new(body).padding([18, 20]));
+                .push(Container::new(body).padding([18, 24]));
         } else {
-            // ── Bitcoin rail: method-specific inputs ──────────────────
-            let method_form: Element<'a, Message> = if self.method == SparkReceiveMethod::Bolt11 {
-                let amount = text_input("Amount in sats (optional)", self.amount_input)
+            if self.method == SparkReceiveMethod::LightningAddress {
+                form = form.push(iced::widget::rule::horizontal(1)).push(
+                    Container::new(lightning_address_body(
+                        self.connect_signed_in,
+                        self.lightning_address,
+                        self.lightning_address_qr,
+                    ))
+                    .padding([18, 24]),
+                );
+            } else {
+                // ── Bitcoin rail: method-specific inputs ──────────────────
+                let method_form: Element<'a, Message> = if self.method == SparkReceiveMethod::Bolt11
+                {
+                    let amount = text_input("Amount in sats (optional)", self.amount_input)
+                        .on_input(|v| {
+                            Message::SparkReceive(
+                                crate::app::view::SparkReceiveMessage::AmountInputChanged(v),
+                            )
+                        })
+                        .padding(10);
+
+                    let description = text_input(
+                        "Description shown to the payer (optional)",
+                        self.description_input,
+                    )
                     .on_input(|v| {
                         Message::SparkReceive(
-                            crate::app::view::SparkReceiveMessage::AmountInputChanged(v),
+                            crate::app::view::SparkReceiveMessage::DescriptionInputChanged(v),
                         )
                     })
                     .padding(10);
 
-                let description = text_input(
-                    "Description shown to the payer (optional)",
-                    self.description_input,
-                )
-                .on_input(|v| {
-                    Message::SparkReceive(
-                        crate::app::view::SparkReceiveMessage::DescriptionInputChanged(v),
+                    Container::new(
+                        Column::new()
+                            .spacing(10)
+                            .push(h4_bold("Invoice details"))
+                            .push(amount)
+                            .push(Space::new().height(Length::Fixed(6.0)))
+                            .push(description),
                     )
-                })
-                .padding(10);
+                    .padding(16)
+                    .style(theme::card::simple)
+                    .into()
+                } else if self.method == SparkReceiveMethod::OnchainBitcoin {
+                    // On-chain: nothing to configure. Explain the deposit
+                    // model so the user knows what to expect.
+                    Container::new(
+                        Column::new()
+                            .spacing(8)
+                            .push(h4_bold("Spark on-chain receive"))
+                            .push(p2_regular(format!(
+                                "Deposits become spendable after {} on-chain confirmations.",
+                                DEPOSIT_MATURITY_CONFIRMATIONS,
+                            ))),
+                    )
+                    .padding(16)
+                    .style(theme::card::simple)
+                    .into()
+                } else {
+                    // Spark: static, reusable, identity-bound address. No
+                    // amount/invoice form — mirrors the on-chain UX.
+                    Container::new(
+                        Column::new()
+                            .spacing(8)
+                            .push(h4_bold("Spark address"))
+                            .push(p2_regular(
+                                "Share this reusable address to receive Bitcoin on Spark.",
+                            )),
+                    )
+                    .padding(16)
+                    .style(theme::card::simple)
+                    .into()
+                };
+                if !matches!(self.phase, SparkReceivePhase::Generated(_)) {
+                    form = form
+                        .push(iced::widget::rule::horizontal(1))
+                        .push(Container::new(method_form).padding([18, 24]));
+                }
 
-                Container::new(
-                    Column::new()
-                        .spacing(10)
-                        .push(h4_bold("Invoice details"))
-                        .push(amount)
-                        .push(Space::new().height(Length::Fixed(6.0)))
-                        .push(description),
-                )
-                .padding(16)
-                .style(theme::card::simple)
-                .into()
-            } else if self.method == SparkReceiveMethod::OnchainBitcoin {
-                // On-chain: nothing to configure. Explain the deposit
-                // model so the user knows what to expect.
-                Container::new(
-                    Column::new()
-                        .spacing(8)
-                        .push(h4_bold("Spark on-chain receive"))
-                        .push(p2_regular(format!(
-                            "Spark uses a deposit-address model — send BTC to \
-                             the address below and Spark will notice the \
-                             incoming transaction automatically. The deposit \
-                             becomes spendable once it has {} on-chain \
-                             confirmations, at which point the SDK claims it \
-                             into your wallet.",
-                            DEPOSIT_MATURITY_CONFIRMATIONS,
-                        ))),
-                )
-                .padding(16)
-                .style(theme::card::simple)
-                .into()
-            } else {
-                // Spark: static, reusable, identity-bound address. No
-                // amount/invoice form — mirrors the on-chain UX.
-                Container::new(
-                    Column::new()
-                        .spacing(8)
-                        .push(h4_bold("Spark address"))
-                        .push(p2_regular(
-                            "This is a static, reusable Spark address bound to \
-                             this wallet's identity. Share it freely — anyone on \
-                             Spark can pay it directly. Spark-to-Spark transfers \
-                             settle instantly with a lower fee than Lightning or \
-                             on-chain, and the address is token-agnostic (it can \
-                             receive bitcoin or any Spark token).",
-                        )),
-                )
-                .padding(16)
-                .style(theme::card::simple)
-                .into()
-            };
-            form = form
-                .push(iced::widget::rule::horizontal(1))
-                .push(Container::new(method_form).padding([18, 20]));
-
-            // ── Phase-specific body ───────────────────────────────────
-            form = form
-                .push(iced::widget::rule::horizontal(1))
-                .push(Container::new(phase_body(self.phase, self.qr_data)).padding([18, 20]));
+                // ── Phase-specific body ───────────────────────────────────
+                form = form.push(iced::widget::rule::horizontal(1)).push(
+                    Container::new(phase_body(
+                        self.phase,
+                        self.qr_data,
+                        self.method,
+                        self.amount_input,
+                        self.description_input,
+                    ))
+                    .padding([18, 24]),
+                );
+            }
         }
 
         let wallet_name = format!("Spark · {}", self.cube_name);
@@ -271,20 +285,6 @@ impl<'a> SparkReceiveView<'a> {
             .push(p2_bold(balance))
             .push(iced::widget::rule::horizontal(1))
             .push(
-                p2_regular(match self.method {
-                    SparkReceiveMethod::Bolt11 => {
-                        "Lightning invoices can receive a payment once generated."
-                    }
-                    SparkReceiveMethod::Spark => {
-                        "Spark address transfers settle directly into this wallet."
-                    }
-                    SparkReceiveMethod::OnchainBitcoin => {
-                        "On-chain deposits become spendable after the required confirmations."
-                    }
-                })
-                .style(theme::text::secondary),
-            )
-            .push(
                 button::transparent_border(None, "See all in Activity").on_press(Message::Menu(
                     crate::app::menu::Menu::Spark(crate::app::menu::SparkSubMenu::Transactions(
                         None,
@@ -297,14 +297,14 @@ impl<'a> SparkReceiveView<'a> {
             .push(header)
             .push(
                 Row::new()
-                    .spacing(24)
+                    .spacing(40)
                     .align_y(Alignment::Start)
                     .push(
                         Container::new(form)
-                            .width(Length::Fixed(620.0))
+                            .width(Length::Fixed(680.0))
                             .style(payment_card_style),
                     )
-                    .push(Container::new(aside).width(Length::Fixed(190.0)))
+                    .push(Container::new(aside).width(Length::Fixed(240.0)))
                     .wrap()
                     .vertical_spacing(20),
             );
@@ -335,7 +335,9 @@ impl<'a> SparkReceiveView<'a> {
             Message::SparkReceive(SparkReceiveMessage::History),
         ));
 
-        content.into()
+        Container::new(Container::new(content).width(Length::Fill).max_width(960.0))
+            .center_x(Length::Fill)
+            .into()
     }
 }
 
@@ -384,41 +386,136 @@ fn receive_kind_selector(
 }
 
 fn bitcoin_method_selector(current: SparkReceiveMethod) -> Element<'static, Message> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum MethodChoice {
+        Invoice,
+        LightningAddress,
+        SparkAddress,
+        BitcoinDeposit,
+    }
+
+    let selected = match current {
+        SparkReceiveMethod::Bolt11 => MethodChoice::Invoice,
+        SparkReceiveMethod::LightningAddress => MethodChoice::LightningAddress,
+        SparkReceiveMethod::Spark => MethodChoice::SparkAddress,
+        SparkReceiveMethod::OnchainBitcoin => MethodChoice::BitcoinDeposit,
+    };
     let row = segmented(
         [
             segment(
                 "spark-receive-method-lightning",
-                SparkReceiveMethod::Bolt11,
+                MethodChoice::Invoice,
                 "Lightning invoice",
             ),
             segment(
+                "spark-receive-method-lightning-address",
+                MethodChoice::LightningAddress,
+                "Lightning address",
+            ),
+            segment(
                 "spark-receive-method-spark",
-                SparkReceiveMethod::Spark,
+                MethodChoice::SparkAddress,
                 "Spark address",
             ),
             segment(
                 "spark-receive-method-deposit",
-                SparkReceiveMethod::OnchainBitcoin,
-                "Bitcoin deposit",
+                MethodChoice::BitcoinDeposit,
+                "Bitcoin address · deposit",
             ),
         ],
-        Some(current),
+        Some(selected),
         Message::FocusAction,
     )
-    .on_select(|method| Message::SparkReceive(SparkReceiveMessage::SelectSenderRail(method)));
+    .on_select(|choice| match choice {
+        MethodChoice::Invoice => Message::SparkReceive(SparkReceiveMessage::SelectSenderRail(
+            SparkReceiveMethod::Bolt11,
+        )),
+        MethodChoice::LightningAddress => Message::SparkReceive(
+            SparkReceiveMessage::SelectSenderRail(SparkReceiveMethod::LightningAddress),
+        ),
+        MethodChoice::SparkAddress => Message::SparkReceive(SparkReceiveMessage::SelectSenderRail(
+            SparkReceiveMethod::Spark,
+        )),
+        MethodChoice::BitcoinDeposit => Message::SparkReceive(
+            SparkReceiveMessage::SelectSenderRail(SparkReceiveMethod::OnchainBitcoin),
+        ),
+    });
     Column::new()
         .spacing(8)
         .push(p1_bold("Method"))
         .push(row)
-        .push(
-            button::transparent_border(None, "Lightning address · manage in Spark settings")
-                .on_press(Message::Menu(crate::app::menu::Menu::Spark(
-                    crate::app::menu::SparkSubMenu::Settings(Some(
-                        crate::app::menu::SparkSettingsOption::LightningAddress,
-                    )),
-                ))),
-        )
         .into()
+}
+
+fn lightning_address_settings() -> Message {
+    Message::Menu(crate::app::menu::Menu::Spark(
+        crate::app::menu::SparkSubMenu::Settings(Some(
+            crate::app::menu::SparkSettingsOption::LightningAddress,
+        )),
+    ))
+}
+
+fn lightning_address_body<'a>(
+    signed_in: bool,
+    address: Option<&'a str>,
+    qr: Option<&'a qr_code::Data>,
+) -> Element<'a, Message> {
+    if !signed_in {
+        return Column::new()
+            .spacing(8)
+            .push(crate::app::view::connect::sign_in_prompt::sign_in_prompt(
+                "use your Lightning address",
+            ))
+            .push(p2_regular("Other methods work signed out."))
+            .into();
+    }
+    let Some(address) = address else {
+        return Column::new()
+            .spacing(12)
+            .push(h4_bold("Claim your Lightning address"))
+            .push(p2_regular("Receive Bitcoin with a readable address."))
+            .push(button::primary(None, "Claim in Settings").on_press(lightning_address_settings()))
+            .into();
+    };
+    let copy = Message::SparkReceive(SparkReceiveMessage::CopyPaymentRequest(address.to_owned()));
+    let details = Column::new()
+        .spacing(10)
+        .width(Length::Fill)
+        .push(p1_bold("Lightning address"))
+        .push(
+            Row::new()
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .push(text_input("", address).padding(10).width(Length::Fill))
+                .push(
+                    button::primary(None, "Copy")
+                        .on_press(copy)
+                        .width(Length::Fixed(80.0)),
+                ),
+        )
+        .push(p2_regular(
+            "Anyone can pay this address while this app is open and active.",
+        ))
+        .push(
+            button::transparent_border(None, "Change in Settings")
+                .on_press(lightning_address_settings()),
+        );
+    let ready: Element<'a, Message> = if let Some(qr) = qr {
+        Row::new()
+            .spacing(24)
+            .align_y(Alignment::Start)
+            .width(Length::Fill)
+            .push(QRCode::<theme::Theme>::new(qr).total_size(160))
+            .push(details)
+            .into()
+    } else {
+        Column::new()
+            .spacing(10)
+            .push(p2_regular("QR unavailable · copy the address instead."))
+            .push(details)
+            .into()
+    };
+    ready
 }
 
 fn payment_card_style(theme: &theme::Theme) -> container::Style {
@@ -587,6 +684,7 @@ fn short_error(err: &str) -> String {
 fn rail_display(method: SparkReceiveMethod) -> (&'static str, &'static str) {
     match method {
         SparkReceiveMethod::Bolt11 => ("lightning", "Lightning"),
+        SparkReceiveMethod::LightningAddress => ("lightning", "Lightning"),
         SparkReceiveMethod::OnchainBitcoin => ("bitcoin", "On-chain"),
         SparkReceiveMethod::Spark => ("spark", "Spark"),
     }
@@ -621,7 +719,7 @@ fn card_button_style(
                 color::TRANSPARENT
             },
             width: 1.0,
-            radius: 16.0.into(),
+            radius: 8.0.into(),
         },
         ..Default::default()
     }
@@ -809,14 +907,14 @@ fn spark_picker_row<'a>(
             .style(if is_selected {
                 picker_row_selected
             } else {
-                theme::card::simple
+                crate::app::view::shared::picker::picker_row_idle
             }),
     )
     .on_press(on_press)
     .style(|_: &theme::Theme, _| iced::widget::button::Style {
         background: Some(Background::Color(color::TRANSPARENT)),
         border: iced::Border {
-            radius: 12.0.into(),
+            radius: 8.0.into(),
             ..Default::default()
         },
         ..Default::default()
@@ -836,7 +934,7 @@ fn picker_row_selected(theme: &theme::Theme) -> container::Style {
         border: iced::Border {
             color: color::ORANGE,
             width: 1.0,
-            radius: 12.0.into(),
+            radius: 8.0.into(),
         },
         ..Default::default()
     }
@@ -895,6 +993,9 @@ pub fn sender_picker_modal<'a>(
 fn phase_body<'a>(
     phase: &'a SparkReceivePhase,
     qr_data: Option<&'a qr_code::Data>,
+    method: SparkReceiveMethod,
+    amount_input: &'a str,
+    description_input: &'a str,
 ) -> Element<'a, Message> {
     use crate::app::view::SparkReceiveMessage;
 
@@ -926,42 +1027,90 @@ fn phase_body<'a>(
             // typical BOLT11 / BTC address payloads this branch
             // should never fire in practice.
             let qr_block: Element<'_, Message> = if let Some(qr) = qr_data {
-                Container::new(QRCode::<coincube_ui::theme::Theme>::new(qr).cell_size(6))
+                Container::new(QRCode::<coincube_ui::theme::Theme>::new(qr).total_size(160))
                     .align_x(iced::alignment::Horizontal::Center)
-                    .width(Length::Fill)
                     .into()
             } else {
                 p2_regular("QR code unavailable for this payload.").into()
             };
 
             let payment_request = ok.payment_request.clone();
-            Container::new(
-                Column::new()
-                    .spacing(14)
-                    .align_x(Alignment::Center)
-                    .push(h4_bold("Payment request"))
+            let (label, guidance) = match method {
+                SparkReceiveMethod::Bolt11 => (
+                    "Lightning invoice",
+                    "Share this invoice to receive sats via Lightning.",
+                ),
+                SparkReceiveMethod::LightningAddress => (
+                    "Lightning address",
+                    "Anyone can pay this address while this app is open and active.",
+                ),
+                SparkReceiveMethod::Spark => (
+                    "Spark address",
+                    "Share this address to receive Bitcoin from another Spark wallet.",
+                ),
+                SparkReceiveMethod::OnchainBitcoin => (
+                    "Bitcoin deposit address",
+                    "Deposits arrive in Spark after on-chain confirmation.",
+                ),
+            };
+            let mut details = Column::new()
+                .spacing(10)
+                .width(Length::Fill)
+                .push(p1_bold(label))
+                .push(
+                    Row::new()
+                        .spacing(8)
+                        .align_y(Alignment::Center)
+                        .push(
+                            text_input("", &ok.payment_request)
+                                .padding(10)
+                                .width(Length::Fill),
+                        )
+                        .push(
+                            button::primary(None, "Copy")
+                                .on_press(Message::SparkReceive(
+                                    SparkReceiveMessage::CopyPaymentRequest(payment_request),
+                                ))
+                                .width(Length::Fixed(80.0)),
+                        ),
+                )
+                .push(p2_regular(guidance).style(theme::text::secondary));
+            if method == SparkReceiveMethod::Bolt11 {
+                details = details.push(kv_row(
+                    "Amount",
+                    if amount_input.trim().is_empty() {
+                        "Any amount".to_owned()
+                    } else {
+                        format!("{} sats", amount_input.trim())
+                    },
+                ));
+                if !description_input.is_empty() {
+                    details = details.push(kv_row("Description", description_input.to_owned()));
+                }
+            }
+            if ok.fee_sat > 0 {
+                details = details.push(kv_row("Fee", format!("{} sats", ok.fee_sat)));
+            }
+            let ready_body: Element<'_, Message> = if qr_data.is_some() {
+                Row::new()
+                    .spacing(24)
+                    .align_y(Alignment::Start)
+                    .width(Length::Fill)
                     .push(qr_block)
-                    .push(Space::new().height(Length::Fixed(6.0)))
-                    // Click-to-select text_input as a manual-copy
-                    // fallback when the button isn't enough.
-                    .push(text_input("", &ok.payment_request).padding(10))
-                    .push(
-                        Row::new()
-                            .spacing(10)
-                            .push(
-                                button::primary(None, "Copy")
-                                    .on_press(Message::SparkReceive(
-                                        SparkReceiveMessage::CopyPaymentRequest(payment_request),
-                                    ))
-                                    .width(Length::Fixed(120.0)),
-                            )
-                            .push(
-                                button::transparent_border(None, "Generate another")
-                                    .on_press(Message::SparkReceive(SparkReceiveMessage::Reset))
-                                    .width(Length::Fixed(180.0)),
-                            ),
-                    )
-                    .push(kv_row("Fee", format!("{} sats", ok.fee_sat))),
+                    .push(details)
+                    .into()
+            } else {
+                Column::new()
+                    .spacing(10)
+                    .push(qr_block)
+                    .push(details)
+                    .into()
+            };
+            Container::new(
+                Column::new().spacing(16).push(ready_body).push(
+                    button::transparent_border(None, "Generate another")
+                        .on_press(Message::SparkReceive(SparkReceiveMessage::Reset)),
+                ),
             )
             .padding(16)
             .style(theme::card::simple)
@@ -1023,7 +1172,12 @@ mod tests {
             "dark",
             theme::Theme::dark(),
         );
-        for label in ["Lightning invoice", "Spark address", "Bitcoin deposit"] {
+        for label in [
+            "Lightning invoice",
+            "Lightning address",
+            "Spark address",
+            "Bitcoin address · deposit",
+        ] {
             assert!(methods.contains(label));
         }
 
@@ -1041,6 +1195,7 @@ mod tests {
     fn active_bitcoin_kind_reselects_the_displayed_method() {
         for method in [
             SparkReceiveMethod::Bolt11,
+            SparkReceiveMethod::LightningAddress,
             SparkReceiveMethod::Spark,
             SparkReceiveMethod::OnchainBitcoin,
         ] {
@@ -1065,6 +1220,149 @@ mod tests {
     }
 
     #[test]
+    fn lightning_address_method_selects_inline_receive_state() {
+        for pointer in [false, true] {
+            let messages = capture::activate(
+                bitcoin_method_selector(SparkReceiveMethod::Bolt11),
+                iced::advanced::widget::Id::new("spark-receive-method-lightning-address"),
+                (1024, 768),
+                pointer,
+            );
+            assert!(messages.iter().any(|message| matches!(
+                message,
+                Message::SparkReceive(SparkReceiveMessage::SelectSenderRail(
+                    SparkReceiveMethod::LightningAddress
+                ))
+            )));
+        }
+    }
+
+    #[test]
+    fn lightning_address_ready_and_signed_out_views_are_account_gated() {
+        let address = "synthetic@coincube.io";
+        let qr = qr_code::Data::new(address).expect("synthetic address fits a QR code");
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            for outer in [(1024, 768), (1440, 900)] {
+                let ready = capture::inspect_wide_content(
+                    "spark-receive-lightning-address-ready",
+                    lightning_address_body(true, Some(address), Some(&qr)),
+                    outer,
+                    appearance,
+                    theme,
+                    outer.0 - 248 - 48,
+                );
+                for label in ["Lightning address", "Copy", "Change in Settings"] {
+                    assert!(
+                        ready.contains(label),
+                        "{} missing at {} {:?}",
+                        label,
+                        appearance,
+                        outer
+                    );
+                }
+                let ready_label = ready
+                    .text
+                    .iter()
+                    .find(|(label, _)| label == "Lightning address")
+                    .map(|(_, bounds)| *bounds)
+                    .expect("lightning address ready label");
+                assert!(
+                    ready_label.x > 180.0,
+                    "Lightning address details must sit beside the QR at {} {:?}: {:?}",
+                    appearance,
+                    outer,
+                    ready_label,
+                );
+                let signed_out = capture::inspect_wide_content(
+                    "spark-receive-lightning-address-signed-out",
+                    lightning_address_body(false, Some(address), Some(&qr)),
+                    outer,
+                    appearance,
+                    theme,
+                    outer.0 - 248 - 48,
+                );
+                assert!(signed_out.contains("Sign in to Connect"));
+                assert!(!signed_out.contains("Change in Settings"));
+                let unclaimed = capture::inspect_wide_content(
+                    "spark-receive-lightning-address-unclaimed",
+                    lightning_address_body(true, None, None),
+                    outer,
+                    appearance,
+                    theme,
+                    outer.0 - 248 - 48,
+                );
+                assert!(unclaimed.contains("Claim in Settings"));
+                assert!(!unclaimed.contains("Change in Settings"));
+            }
+        }
+    }
+
+    #[test]
+    fn generated_invoice_has_integrated_request_and_real_details() {
+        let request = "lnbc1syntheticreceive7q";
+        let phase = SparkReceivePhase::Generated(coincube_spark_protocol::ReceivePaymentOk {
+            payment_request: request.to_owned(),
+            fee_sat: 0,
+        });
+        let qr = qr_code::Data::new(request).expect("synthetic request fits a QR code");
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            for outer in [(1024, 768), (1440, 900)] {
+                let mounted = capture::inspect_wide_content(
+                    "spark-receive-ready",
+                    phase_body(
+                        &phase,
+                        Some(&qr),
+                        SparkReceiveMethod::Bolt11,
+                        "2500",
+                        "Dinner",
+                    ),
+                    outer,
+                    appearance,
+                    theme,
+                    outer.0 - 248 - 48,
+                );
+                for label in [
+                    "Lightning invoice",
+                    "Copy",
+                    "Amount",
+                    "2500 sats",
+                    "Description",
+                    "Dinner",
+                    "Generate another",
+                ] {
+                    assert!(
+                        mounted.contains(label),
+                        "{} missing at {} {:?}",
+                        label,
+                        appearance,
+                        outer
+                    );
+                }
+                assert!(!mounted.contains("Expires"));
+                let ready_label = mounted
+                    .text
+                    .iter()
+                    .find(|(label, _)| label == "Lightning invoice")
+                    .map(|(_, bounds)| *bounds)
+                    .expect("generated ready label");
+                assert!(
+                    ready_label.x > 180.0,
+                    "generated details must sit beside the QR at {} {:?}: {:?}",
+                    appearance,
+                    outer,
+                    ready_label,
+                );
+            }
+        }
+    }
+
+    #[test]
     fn receive_payment_hierarchy_and_focus_hold_at_compact_and_wide_sizes() {
         let deposits = Vec::new();
         let confirmations = HashMap::new();
@@ -1077,7 +1375,7 @@ mod tests {
             ("light", theme::Theme::light()),
         ] {
             for outer in [(1024, 768), (1440, 900)] {
-                let mounted = capture::inspect(
+                let mounted = capture::inspect_wide_content(
                     "spark-receive-payment-hierarchy",
                     SparkReceiveView {
                         backend_available: true,
@@ -1086,6 +1384,9 @@ mod tests {
                         description_input: "",
                         phase: &SparkReceivePhase::Idle,
                         qr_data: None,
+                        connect_signed_in: false,
+                        lightning_address: None,
+                        lightning_address_qr: None,
                         pending_deposits: &deposits,
                         claiming: None,
                         claim_error: None,
@@ -1108,6 +1409,7 @@ mod tests {
                     outer,
                     appearance,
                     theme,
+                    outer.0 - 248 - 48,
                 );
                 for label in [
                     "‹ Spark",
@@ -1116,7 +1418,7 @@ mod tests {
                     "Payment details",
                     "Receiving into",
                     "Method",
-                    "Bitcoin deposit",
+                    "Bitcoin address · deposit",
                 ] {
                     assert!(
                         mounted.contains(label),
@@ -1130,6 +1432,7 @@ mod tests {
                     "spark-receive-kind-bitcoin",
                     "spark-receive-kind-stablecoin",
                     "spark-receive-method-lightning",
+                    "spark-receive-method-lightning-address",
                     "spark-receive-method-spark",
                     "spark-receive-method-deposit",
                 ] {
@@ -1234,6 +1537,9 @@ mod tests {
                     description_input: "",
                     phase: &phase,
                     qr_data: None,
+                    connect_signed_in: false,
+                    lightning_address: None,
+                    lightning_address_qr: None,
                     pending_deposits: &deposits,
                     claiming: None,
                     claim_error: None,

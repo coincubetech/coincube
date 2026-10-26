@@ -154,7 +154,6 @@ pub enum Message {
     ToggleCubeSwitcher,
     AskCubeLock,
     CancelCubeLock,
-    ToggleVaultTools,
     /// A shared Action's pointer-down request. The App applies whole-tree
     /// focus so a captured sidebar click also blurs content controls.
     FocusAction(iced::advanced::widget::Id),
@@ -975,6 +974,9 @@ pub enum LiquidOverviewMessage {
 pub enum LiquidSendMessage {
     FocusAction(iced::advanced::widget::Id),
     PresetAsset(crate::app::state::liquid::send::SendAsset),
+    /// Asset choice within the current Send draft. Selecting the current
+    /// segment keeps the typed destination and amount.
+    SelectMasterAsset(crate::app::state::liquid::send::SendAsset),
     InputEdited(String),
     /// Carries (original_input, validation_result) so stale async results are discarded.
     InputValidated(String, Option<InputType>),
@@ -2153,8 +2155,18 @@ pub enum ConnectCubeMessage {
         version: u32,
     },
     ClaimLightningAddress,
-    LightningAddressClaimed(crate::services::coincube::LightningAddress),
-    LightningAddressLoaded(Option<crate::services::coincube::LightningAddress>),
+    LightningAddressClaimed {
+        generation: u64,
+        address: crate::services::coincube::LightningAddress,
+    },
+    LightningAddressClaimFailed {
+        generation: u64,
+        error: String,
+    },
+    LightningAddressLoaded {
+        generation: u64,
+        address: Option<crate::services::coincube::LightningAddress>,
+    },
     /// Flip the claimed-address card into the in-place edit form.
     BeginEditLightningAddress,
     /// Drop edit mode, clear the input, abort any pending availability check.
@@ -2171,7 +2183,10 @@ pub enum ConnectCubeMessage {
     /// server-committed-but-SDK-out-of-sync (the new address is
     /// confirmed in the API and the existing re-registration prompt
     /// is surfaced for the user to retry the SDK side).
-    LightningAddressUpdated(crate::app::state::connect::cube::LightningAddressChangeOutcome),
+    LightningAddressUpdated {
+        generation: u64,
+        outcome: crate::app::state::connect::cube::LightningAddressChangeOutcome,
+    },
     /// Terminal result of the manual SDK rebind retry kicked off by
     /// `RetryLightningAddressReregister`. `Ok` clears the
     /// re-registration prompt; `Err` keeps it surfaced with an

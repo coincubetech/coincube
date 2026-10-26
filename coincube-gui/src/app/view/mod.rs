@@ -165,6 +165,25 @@ pub fn dashboard_activity<'a, T: Into<Element<'a, Message>>>(
     )
 }
 
+/// Full-width content area for the bounded Send and Receive forms. Their
+/// 680px form and 240px context rail sit together at 1440px and wrap at the
+/// 1024px minimum window size.
+pub fn dashboard_payment<'a, T: Into<Element<'a, Message>>>(
+    menu: &'a Menu,
+    cache: &'a Cache,
+    content: T,
+) -> Element<'a, Message> {
+    dashboard_with_info_layout(
+        menu,
+        cache,
+        content,
+        &cache.cube_name,
+        cache.avatar_handle.as_ref(),
+        cache.lightning_address.as_deref(),
+        true,
+    )
+}
+
 pub(crate) const ACTIVITY_HORIZONTAL_PADDING: f32 = 24.0;
 
 pub fn dashboard_with_info<'a, T: Into<Element<'a, Message>>>(
@@ -276,31 +295,15 @@ fn dashboard_shell_with_info<'a>(
     // Cube that most needs it.
     let show_backup_warning = !cache.current_cube_backed_up;
     let nav_ctx = nav::NavContext {
-        has_vault: cache.has_vault,
-        has_imported_bitcoin: cache.has_imported_bitcoin,
-        has_p2p: cache.has_p2p,
-        network: cache.chain(),
-        p2p_test_coordinator: cache.p2p_test_coordinator,
-        marketplace_flags: cache.marketplace_flags,
-        liquid_gate: cache.liquid_gate,
-        btcb2_server_enabled: cache.btcb2_server_enabled,
-        btcb2_already_claimed: cache.btcb2_already_claimed,
-        btcb2_claim_resume: cache.btcb2_claim_resume,
         cube_name,
         lightning_address,
         avatar: avatar_handle,
-        theme_mode: cache.theme_mode,
-        connect_authenticated: cache.sidebar_connect_signed_in,
-        connect_email: cache.connect_email.as_deref(),
-        connect_stream_status: &cache.connect_stream_status,
+        ..nav::NavContext::from_cache(cache)
     };
 
     let shell_state = nav::shell::ShellState {
         switcher_open: cache.cube_switcher_open,
         lock_confirmation: cache.cube_lock_confirmation,
-        // Menu entry opens Tools in App::update. Honor an explicit close even
-        // while a Tools child remains selected; the content route is retained.
-        tools_open: cache.vault_tools_open,
         backup_attention: show_backup_warning,
     };
     Column::new()

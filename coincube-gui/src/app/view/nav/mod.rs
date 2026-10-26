@@ -304,7 +304,31 @@ pub struct NavContext<'a> {
     pub btcb2_claim_resume: bool,
 }
 
-impl NavContext<'_> {
+impl<'a> NavContext<'a> {
+    /// The navigation facts the App cache holds. Identity fields (name,
+    /// Lightning address, avatar) are left empty for the caller to fill.
+    pub fn from_cache(cache: &'a crate::app::cache::Cache) -> Self {
+        NavContext {
+            has_vault: cache.has_vault,
+            has_imported_bitcoin: cache.has_imported_bitcoin,
+            has_p2p: cache.has_p2p,
+            network: cache.chain(),
+            p2p_test_coordinator: cache.p2p_test_coordinator,
+            marketplace_flags: cache.marketplace_flags,
+            liquid_gate: cache.liquid_gate,
+            btcb2_server_enabled: cache.btcb2_server_enabled,
+            btcb2_already_claimed: cache.btcb2_already_claimed,
+            btcb2_claim_resume: cache.btcb2_claim_resume,
+            cube_name: "",
+            lightning_address: None,
+            avatar: None,
+            theme_mode: cache.theme_mode,
+            connect_authenticated: cache.sidebar_connect_signed_in,
+            connect_email: cache.connect_email.as_deref(),
+            connect_stream_status: &cache.connect_stream_status,
+        }
+    }
+
     /// This Cube as a candidate Bitcoin Blake2b claim source.
     pub fn claim_source_cube(&self) -> crate::app::features::ClaimSourceCube {
         crate::app::features::ClaimSourceCube {
@@ -476,7 +500,6 @@ mod shell_tests {
                     "Overview",
                     "Activity",
                     "Backup & protection",
-                    "Tools",
                     "Settings",
                 ] {
                     assert!(

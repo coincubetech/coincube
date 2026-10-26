@@ -6466,7 +6466,6 @@ mod shell_escape_dispatch_tests {
             )
         };
         for intent in [
-            view::Message::ToggleVaultTools,
             view::Message::ToggleCubeSwitcher,
             view::Message::AskCubeLock,
         ] {
@@ -6475,18 +6474,10 @@ mod shell_escape_dispatch_tests {
         let menu = gui.reviewer_app_mut(0).current_menu_for_test().clone();
         let shell = |gui: &mut GUI| {
             let cache = gui.reviewer_app_mut(0).cache();
-            (
-                cache.cube_lock_confirmation,
-                cache.cube_switcher_open,
-                cache.vault_tools_open,
-            )
+            (cache.cube_lock_confirmation, cache.cube_switcher_open)
         };
-        assert_eq!(shell(&mut gui), (true, true, true));
-        for expected in [
-            (false, true, true),
-            (false, false, true),
-            (false, false, false),
-        ] {
+        assert_eq!(shell(&mut gui), (true, true));
+        for expected in [(false, true), (false, false)] {
             let focus = gui.update(Message::KeyPressed(Key::Escape));
             assert!(
                 focus.units() > 0,
@@ -6510,11 +6501,11 @@ mod shell_escape_dispatch_tests {
             let tab::State::App(app) = &mut pane.tabs[0].state else {
                 unreachable!()
             };
-            app.cache_mut().vault_tools_open = true;
+            app.cache_mut().cube_switcher_open = true;
             pane.focused_tab = 1;
         }
         assert_eq!(gui.update(Message::KeyPressed(Key::Escape)).units(), 0);
-        assert!(gui.reviewer_app_mut(0).cache().vault_tools_open);
+        assert!(gui.reviewer_app_mut(0).cache().cube_switcher_open);
         assert_eq!(
             app::session::current_cube_id().as_deref(),
             Some(cube_id.as_str())

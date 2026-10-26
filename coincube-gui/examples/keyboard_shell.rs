@@ -8,7 +8,7 @@
 use coincube_gui::{
     app::{
         features::{LiquidGate, MarketplaceServerFlags},
-        menu::{CubeSubMenu, Menu, VaultSubMenu},
+        menu::{CubeSubMenu, Menu},
         view::{self, nav::shell, nav::split::ShellSplit, nav::NavContext},
         ConnectionStatus,
     },
@@ -110,23 +110,7 @@ impl Fixture {
                         self.last_action = "Lock review cancelled".to_owned();
                         iced::widget::operation::focus(shell::CUBE_LOCK_ID)
                     }
-                    view::Message::ToggleVaultTools => {
-                        self.shell.tools_open = !self.shell.tools_open;
-                        self.last_action = "Tools toggled".to_owned();
-                        iced::widget::operation::focus(shell::VAULT_TOOLS_ID)
-                    }
                     view::Message::Menu(menu) => {
-                        if matches!(
-                            menu,
-                            Menu::Vault(
-                                VaultSubMenu::Coins(_)
-                                    | VaultSubMenu::PSBTs(_)
-                                    | VaultSubMenu::Recovery
-                                    | VaultSubMenu::Claim
-                            )
-                        ) {
-                            self.shell.tools_open = true;
-                        }
                         self.last_action = format!("Route: {menu:?}");
                         self.menu = menu;
                         Task::none()

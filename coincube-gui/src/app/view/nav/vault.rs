@@ -101,6 +101,25 @@ pub fn items(ctx: &NavContext) -> Vec<SubItem> {
     items
 }
 
+/// The Vault's tools, which the canvas reaches from the Vault page rather
+/// than the sidebar: coin control, PSBT proposals, recovery path and split
+/// coins, each only where [`items`] offers its route.
+pub fn tools(ctx: &NavContext) -> Vec<(&'static str, Menu)> {
+    items(ctx)
+        .into_iter()
+        .filter_map(|item| {
+            let label = match &item.route {
+                Menu::Vault(VaultSubMenu::Coins(_)) => "Coin control",
+                Menu::Vault(VaultSubMenu::PSBTs(_)) => "PSBT proposals",
+                Menu::Vault(VaultSubMenu::Recovery) => "Recovery path",
+                Menu::Vault(VaultSubMenu::Claim) => "Split coins",
+                _ => return None,
+            };
+            Some((label, item.route))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,6 +153,43 @@ mod tests {
 
     fn labels(items: &[SubItem]) -> Vec<&str> {
         items.iter().map(|i| i.label).collect()
+    }
+
+    #[test]
+    fn vault_page_tools_follow_the_routes_the_vault_offers() {
+        let status = crate::app::ConnectionStatus::default();
+        let vault = ctx(&status, crate::chain::ChainId::Bitcoin, false, false);
+        let names = |context: &NavContext| -> Vec<&'static str> {
+            tools(context).into_iter().map(|(label, _)| label).collect()
+        };
+        assert_eq!(
+            names(&vault),
+            ["Coin control", "PSBT proposals", "Recovery path"]
+        );
+        assert_eq!(
+            tools(&vault)[0].1,
+            Menu::Vault(VaultSubMenu::Coins(None)),
+            "Coin control opens the coins route"
+        );
+        // Imported descriptors cannot use the inheritance recovery route.
+        let imported = NavContext {
+            has_vault: false,
+            has_imported_bitcoin: true,
+            ..vault
+        };
+        assert!(!names(&imported).contains(&"Recovery path"));
+        // Never Send, Receive, Transactions or Settings: those are not tools.
+        for (_, route) in tools(&vault) {
+            assert!(matches!(
+                route,
+                Menu::Vault(
+                    VaultSubMenu::Coins(_)
+                        | VaultSubMenu::PSBTs(_)
+                        | VaultSubMenu::Recovery
+                        | VaultSubMenu::Claim
+                )
+            ));
+        }
     }
 
     #[test]

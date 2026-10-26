@@ -162,6 +162,7 @@ impl State for VaultOverview {
                     cache.show_direction_badges,
                     cache.display_mode,
                     cache.balance_amounts_masked(),
+                    &view::nav::vault::tools(&view::nav::NavContext::from_cache(cache)),
                 ),
             )
         }

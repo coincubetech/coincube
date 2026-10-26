@@ -5489,7 +5489,6 @@ pub fn create_app_with_remote_backend(
             cube_encryption_key: None,
             cube_switcher_open: false,
             cube_lock_confirmation: false,
-            vault_tools_open: false,
             network,
             fiat_chain: cube_settings.network,
             btcb2_price_request: None,

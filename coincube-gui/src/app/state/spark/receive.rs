@@ -43,6 +43,7 @@ use super::sideshift_receive::SparkSideshiftReceiveFlow;
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum SparkReceiveMethod {
     Bolt11,
+    LightningAddress,
     OnchainBitcoin,
     Spark,
 }
@@ -51,6 +52,7 @@ impl SparkReceiveMethod {
     pub fn label(self) -> &'static str {
         match self {
             Self::Bolt11 => "Lightning (BOLT11)",
+            Self::LightningAddress => "Lightning address",
             Self::OnchainBitcoin => "On-chain Bitcoin",
             Self::Spark => "Spark",
         }
@@ -104,6 +106,8 @@ pub struct SparkReceive {
     /// screen, or when encoding failed (unlikely for BOLT11/BTC
     /// addresses but handled gracefully).
     pub qr_data: Option<qr_code::Data>,
+    /// QR for the Connect-owned address and the source value used to encode it.
+    lightning_address_qr: Option<(String, qr_code::Data)>,
     /// Phase 4f: pending on-chain deposits surfaced by the SDK's
     /// `list_unclaimed_deposits` RPC. Refreshed on panel reload and on
     /// every `Event::DepositsChanged`. The view renders this as a
@@ -156,6 +160,7 @@ impl SparkReceive {
             description_input: String::new(),
             phase: SparkReceivePhase::Idle,
             qr_data: None,
+            lightning_address_qr: None,
             pending_deposits: Vec::new(),
             claiming: None,
             claim_error: None,
@@ -175,6 +180,14 @@ impl SparkReceive {
 
     pub fn phase(&self) -> &SparkReceivePhase {
         &self.phase
+    }
+
+    pub fn sync_lightning_address_qr(&mut self, address: Option<&str>) {
+        self.lightning_address_qr = address.and_then(|address| {
+            qr_code::Data::new(address)
+                .ok()
+                .map(|qr| (address.to_owned(), qr))
+        });
     }
 
     /// The cross-network shift-status poll on its own, exposed so the app can
@@ -201,6 +214,10 @@ impl State for SparkReceive {
         cache: &'a Cache,
     ) -> Element<'a, crate::app::view::Message> {
         let backend_available = self.backend.is_some();
+        let connect_signed_in = cache.connect_authenticated;
+        let lightning_address = connect_signed_in
+            .then_some(cache.lightning_address.as_deref())
+            .flatten();
         // The cross-network (SideShift) flow renders *inline* below the two-card
         // selector — not as a takeover — so its refund/deposit steps sit on the
         // same page as the Bitcoin rail forms. Its messages route back through
@@ -219,7 +236,7 @@ impl State for SparkReceive {
             ),
             None => (None, None),
         };
-        let content = crate::app::view::dashboard(
+        let content = crate::app::view::dashboard_payment(
             menu,
             cache,
             SparkReceiveView {
@@ -229,6 +246,11 @@ impl State for SparkReceive {
                 description_input: &self.description_input,
                 phase: &self.phase,
                 qr_data: self.qr_data.as_ref(),
+                connect_signed_in,
+                lightning_address,
+                lightning_address_qr: self.lightning_address_qr.as_ref().and_then(
+                    |(source, qr)| (lightning_address == Some(source.as_str())).then_some(qr),
+                ),
                 pending_deposits: &self.pending_deposits,
                 claiming: self.claiming.as_ref(),
                 claim_error: self.claim_error.as_deref(),
@@ -384,6 +406,14 @@ impl State for SparkReceive {
                 // A Bitcoin rail: clear any cross-network flow, set the method,
                 // close the picker.
                 self.sender_picker_open = false;
+                if method == SparkReceiveMethod::LightningAddress {
+                    self.sync_lightning_address_qr(
+                        cache
+                            .connect_authenticated
+                            .then_some(cache.lightning_address.as_deref())
+                            .flatten(),
+                    );
+                }
                 if self.sideshift_flow.is_none() && self.method == method {
                     return Task::none();
                 }
@@ -427,6 +457,9 @@ impl State for SparkReceive {
                 Task::none()
             }
             SparkReceiveMessage::GenerateRequested => {
+                if self.method == SparkReceiveMethod::LightningAddress {
+                    return Task::none();
+                }
                 let Some(backend) = self.backend.clone() else {
                     self.phase =
                         SparkReceivePhase::Error("Spark backend is not available.".to_string());
@@ -484,6 +517,7 @@ impl State for SparkReceive {
                             }
                         })
                     }
+                    SparkReceiveMethod::LightningAddress => Task::none(),
                 }
             }
             SparkReceiveMessage::GenerateSucceeded(ok) => {
@@ -773,6 +807,12 @@ impl State for SparkReceive {
             }
             SparkReceiveMessage::History => redirect(Menu::Spark(SparkSubMenu::Transactions(None))),
             SparkReceiveMessage::CopyPaymentRequest(text) => {
+                if self.method == SparkReceiveMethod::LightningAddress
+                    && (!cache.connect_authenticated
+                        || cache.lightning_address.as_deref() != Some(text.as_str()))
+                {
+                    return Task::none();
+                }
                 // Pair the clipboard write with the global toast overlay so
                 // the button gives the same feedback as every other Copy in
                 // the app. The label names the rail the request belongs to —
@@ -781,6 +821,7 @@ impl State for SparkReceive {
                 // which one landed on the clipboard.
                 let label = match self.method {
                     SparkReceiveMethod::Bolt11 => "Copied Lightning invoice to clipboard",
+                    SparkReceiveMethod::LightningAddress => "Copied Lightning address to clipboard",
                     SparkReceiveMethod::OnchainBitcoin => "Copied Bitcoin address to clipboard",
                     SparkReceiveMethod::Spark => "Copied Spark address to clipboard",
                 };
@@ -942,10 +983,51 @@ mod tests {
     fn receive_method_labels_are_stable() {
         assert_eq!(SparkReceiveMethod::Bolt11.label(), "Lightning (BOLT11)");
         assert_eq!(
+            SparkReceiveMethod::LightningAddress.label(),
+            "Lightning address"
+        );
+        assert_eq!(
             SparkReceiveMethod::OnchainBitcoin.label(),
             "On-chain Bitcoin"
         );
         assert_eq!(SparkReceiveMethod::Spark.label(), "Spark");
+    }
+
+    #[test]
+    fn lightning_address_selection_uses_only_signed_in_current_mirror() {
+        let mut panel = SparkReceive::new(None);
+        let mut cache = Cache {
+            lightning_address: Some("synthetic@coincube.io".to_owned()),
+            has_connect_session: true,
+            ..Default::default()
+        };
+        update_with_cache(
+            &mut panel,
+            &cache,
+            SparkReceiveMessage::SelectSenderRail(SparkReceiveMethod::LightningAddress),
+        );
+        assert_eq!(panel.method, SparkReceiveMethod::LightningAddress);
+        assert!(panel.lightning_address_qr.is_none());
+        cache.connect_authenticated = true;
+        update_with_cache(
+            &mut panel,
+            &cache,
+            SparkReceiveMessage::SelectSenderRail(SparkReceiveMethod::LightningAddress),
+        );
+        assert_eq!(
+            panel
+                .lightning_address_qr
+                .as_ref()
+                .map(|(value, _)| value.as_str()),
+            Some("synthetic@coincube.io")
+        );
+        cache.connect_authenticated = false;
+        update_with_cache(
+            &mut panel,
+            &cache,
+            SparkReceiveMessage::SelectSenderRail(SparkReceiveMethod::LightningAddress),
+        );
+        assert!(panel.lightning_address_qr.is_none());
     }
 
     #[test]
