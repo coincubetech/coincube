@@ -1632,6 +1632,7 @@ impl Step for SaveSpend {
                 .into();
         };
         let content = view::vault::spend::spend_view(
+            psbt_state.action_scope(),
             menu,
             cache,
             &psbt_state.tx,

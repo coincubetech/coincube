@@ -39,6 +39,7 @@ use crate::{
 
 #[allow(clippy::too_many_arguments)]
 pub fn spend_view<'a>(
+    action_scope: u64,
     menu: &'a Menu,
     cache: &'a Cache,
     tx: &'a SpendTx,
@@ -86,6 +87,7 @@ pub fn spend_view<'a>(
                 ))
             })
             .push(psbt::spend_overview_view(
+                action_scope,
                 tx,
                 desc_info,
                 key_aliases,
