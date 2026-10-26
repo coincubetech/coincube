@@ -939,6 +939,13 @@ mod tests {
                 matches!(response,wire::Response::Transaction(v)if v.draft_id!=summary.draft_id)
             );
             restored.update(
+                Message::RequestRevokePair(client.id.clone()),
+                Some(wallet.clone()),
+                Some(service.daemon.clone()),
+                true,
+                "tx-fixture",
+            );
+            restored.update(
                 Message::RevokePair(client.id.clone()),
                 Some(wallet.clone()),
                 Some(service.daemon.clone()),
