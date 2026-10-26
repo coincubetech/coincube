@@ -39,12 +39,11 @@ use iced::{Alignment, Length, Task};
 
 use coincube_ui::{
     component::{
-        button,
         quote_display::{self, Quote, QuoteDisplayProps},
-        text::{h3, p1_regular, text},
+        text::{p1_regular, text},
     },
-    icon, theme,
-    widget::{action::Action, Column, Container, Element, Row},
+    theme,
+    widget::{action::Action, Column, Container, Element},
 };
 
 use coincube_core::miniscript::bitcoin::bip32::Fingerprint;
@@ -468,33 +467,21 @@ impl PasskeyUnlock {
         }
     }
 
+    /// The prototype's unlock `.fc` below its heading, with the passkey
+    /// as this Cube's only way in.
     fn unlock_controls(&self) -> Element<Message> {
-        let back_button = button::secondary(Some(icon::previous_icon()), "Back")
-            .width(Length::Fixed(150.0))
-            .on_press(Message::Back);
-
-        let header = Row::new()
-            .align_y(Alignment::Center)
-            .push(Container::new(back_button).center_x(Length::FillPortion(2)))
-            .push(Space::new().width(Length::FillPortion(8)))
-            .push(Space::new().width(Length::FillPortion(2)));
-
-        let mut content = Column::new()
-            .spacing(30)
-            .width(Length::Fill)
-            .align_x(Alignment::Center)
-            .push(h3(format!(
-                "Unlock {}",
-                crate::cube_display::name(&self.cube.name)
-            )));
-
+        use crate::home::launcher_presenter as face;
+        let mut fields = Column::new().push(Space::new().height(Length::Fixed(24.0)));
         match &self.phase {
             Phase::Authenticating => {
-                content = content
-                    .push(
-                        p1_regular("Confirm with Touch ID to unlock this Cube.")
-                            .style(theme::text::secondary),
-                    )
+                fields = fields
+                    .push(face::face_words(
+                        "Confirm with Touch ID to unlock this Cube.",
+                        13.0,
+                        coincube_ui::font::REGULAR,
+                        true,
+                    ))
+                    .push(Space::new().height(Length::Fixed(12.0)))
                     .push(crate::loading::loading_indicator(None));
             }
             Phase::Idle { error } => {
@@ -512,34 +499,37 @@ impl PasskeyUnlock {
                 // all, where macOS confirms with the login password or a nearby
                 // iPhone instead.
                 if let Some(error) = error {
-                    content = content.push(p1_regular(error.as_str()).style(theme::text::error));
+                    fields = fields
+                        .push(
+                            p1_regular(error.as_str())
+                                .size(12)
+                                .style(theme::text::error),
+                        )
+                        .push(Space::new().height(Length::Fixed(12.0)));
                 }
-                content = content.push(
+                fields = fields.push(
                     Action::new(
                         begin_button_id(),
-                        text("Unlock with passkey")
-                            .font(coincube_ui::font::MEDIUM)
-                            .align_x(Alignment::Center)
-                            .align_y(Alignment::Center),
+                        face::face_button_label("Unlock with passkey"),
                         Message::Focus,
                     )
-                    .style(theme::button::primary)
-                    .width(Length::Fixed(280.0))
+                    .height(Length::Fixed(36.0))
+                    .padding([0.0, 16.0])
+                    .style(face::face_primary_style)
                     .on_press(Message::Begin),
                 );
             }
             Phase::Opening => unreachable!("handled above"),
         }
-
-        Column::new()
-            .spacing(24)
-            .push(header)
-            .push(content)
-            .push(
-                p1_regular("Network checks run after your passkey is accepted.")
-                    .style(theme::text::secondary),
-            )
-            .into()
+        let cancel = iced::widget::button(face::face_link_label("Cancel"))
+            .padding([2.0, 4.0])
+            .style(face::face_link_style)
+            .on_press(Message::Back);
+        face::unlock_face_body(
+            fields.into(),
+            "Network checks run after your passkey is accepted.",
+            cancel.into(),
+        )
     }
 }
 

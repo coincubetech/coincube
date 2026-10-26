@@ -141,6 +141,8 @@ impl State {
 /// - `data/` — wallet databases (BDK, plus breez/spark per-Cube working data
 ///   under `data/<wallet_id>/`),
 /// - `mnemonics/` — the master seed phrases (the crown jewels),
+/// - `imported-local-keys/` — encrypted independent imported roots, public
+///   account inventory and operation tombstones,
 /// - `settings.json` — Cube metadata. (The PIN and duress-PIN hashes that used
 ///   to live here are gone; the duress *marker* now lives in `mnemonics/`, so
 ///   it is wiped by that entry.)
@@ -152,7 +154,13 @@ impl State {
 /// live outside any network directory. Re-checking existence each call makes
 /// this robust to an interrupted wipe: whatever remains is targeted again.
 fn duress_wipe_targets(root: &std::path::Path) -> Vec<std::path::PathBuf> {
-    const CUBE_MATERIAL: &[&str] = &["data", "mnemonics", "settings.json", "mcp-pairings"];
+    const CUBE_MATERIAL: &[&str] = &[
+        "data",
+        "mnemonics",
+        "imported-local-keys",
+        "settings.json",
+        "mcp-pairings",
+    ];
     let mut targets = Vec::new();
 
     // A duress wipe must never leave seeds or PIN hashes behind because a virus
@@ -525,6 +533,9 @@ pub enum Message {
     /// the tab switch, so this is bubbled up rather than handled here.
     OpenLauncher,
     OpenAppPreferences(PreferencesSource),
+    /// The Launcher eye's hide-balances intent. The GUI applies it only while
+    /// the sending tab is still showing the Launcher.
+    HomeDevicePreference(crate::app::settings::preferences::PreferenceChange),
     /// Explicitly lock the Cube and return to the Launcher in this tab.
     LockCubeToLauncher,
     /// Completion of an authenticated fork installer generation.
@@ -952,8 +963,10 @@ impl Tab {
         chrome: Option<crate::app::state::preferences::BalancePrivacyChrome>,
     ) {
         self.balance_privacy = chrome;
-        if let State::App(app) = &mut self.state {
-            app.cache_mut().balance_privacy = chrome;
+        match &mut self.state {
+            State::App(app) => app.cache_mut().balance_privacy = chrome,
+            State::Home(home) => home.balance_privacy = chrome,
+            _ => {}
         }
     }
 
@@ -966,7 +979,10 @@ impl Tab {
                 app.cache_mut().theme_mode = mode;
                 app.cache_mut().balance_privacy = self.balance_privacy;
             }
-            State::Home(home) => home.theme_mode = mode,
+            State::Home(home) => {
+                home.theme_mode = mode;
+                home.balance_privacy = self.balance_privacy;
+            }
             _ => {}
         }
     }
@@ -1922,6 +1938,9 @@ impl Tab {
                 }
                 home::Message::View(home::ViewMessage::OpenAppPreferences) => {
                     Task::done(Message::OpenAppPreferences(PreferencesSource::Home))
+                }
+                home::Message::View(home::ViewMessage::ChangeDevicePreference(change)) => {
+                    Task::done(Message::HomeDevicePreference(change))
                 }
                 home::Message::GlobalSettingsChanged => Task::done(Message::GlobalSettingsChanged),
                 home::Message::ConnectSignedInBubble => Task::done(Message::ConnectSignedIn),
@@ -4292,11 +4311,7 @@ impl Tab {
             && self.unlock_motion.is_some()
             && matches!(self.state, State::PinEntry(_) | State::PasskeyUnlock(_))
         {
-            Subscription::batch([
-                base,
-                iced::time::every(std::time::Duration::from_millis(16))
-                    .map(Message::UnlockMotionTick),
-            ])
+            Subscription::batch([base, iced::window::frames().map(Message::UnlockMotionTick)])
         } else {
             base
         }
@@ -5325,11 +5340,31 @@ mod duress_wipe_target_tests {
         let net = root.join("bitcoin");
         touch(&net.join("data").join("cube_a").join("wallet.db"));
         touch(&net.join("mnemonics").join("aabbccdd-master"));
+        touch(
+            &net.join("imported-local-keys")
+                .join("operation-a")
+                .join("record.key"),
+        );
         touch(&net.join("settings.json"));
         touch(&net.join("mcp-pairings").join("fixture").join("clients.enc"));
         touch(&net.join("connect.json"));
+        touch(&root.join("duress-state.json"));
         // A second network is covered too.
         touch(&root.join("testnet").join("mnemonics").join("seed"));
+        touch(
+            &root
+                .join("testnet")
+                .join("imported-local-keys")
+                .join("operation-b")
+                .join("manifest.json"),
+        );
+        touch(
+            &root
+                .join("testnet")
+                .join("mcp-pairings")
+                .join("fixture")
+                .join("clients.enc"),
+        );
         // bitcoind (root-level, not a network dir): the blockchain is preserved,
         // but inbound-over-Tor identifying material (Tor data + onion key) is
         // obliterated — see Decision 4.
@@ -5363,6 +5398,10 @@ mod duress_wipe_target_tests {
             "mnemonics/ (seeds) must be wiped"
         );
         assert!(
+            targets.contains(&net.join("imported-local-keys")),
+            "imported independent keys and inventory must be wiped"
+        );
+        assert!(
             targets.contains(&net.join("settings.json")),
             "settings.json (PIN hashes) must be wiped"
         );
@@ -5370,10 +5409,22 @@ mod duress_wipe_target_tests {
             targets.contains(&root.join("testnet").join("mnemonics")),
             "every network's seeds must be wiped"
         );
+        assert!(
+            targets.contains(&root.join("testnet").join("imported-local-keys")),
+            "every network's imported keys must be wiped"
+        );
+        assert!(
+            targets.contains(&root.join("testnet").join("mcp-pairings")),
+            "every network's client authorization must be wiped"
+        );
         // Cached Connect auth is preserved.
         assert!(
             !targets.iter().any(|t| t.ends_with("connect.json")),
             "connect.json (cached auth) must survive"
+        );
+        assert!(
+            !targets.iter().any(|t| t.ends_with("duress-state.json")),
+            "root-level duress state must survive for activation recovery"
         );
         // The blockchain is preserved (expensive to re-sync, not sensitive)...
         assert!(
@@ -5421,6 +5472,14 @@ mod duress_wipe_target_tests {
         assert!(
             !targets.contains(&net.join("mnemonics")),
             "absent mnemonics/ must not be targeted"
+        );
+        assert!(
+            !targets.contains(&net.join("imported-local-keys")),
+            "absent imported-local-keys/ must not be targeted"
+        );
+        assert!(
+            !targets.contains(&net.join("mcp-pairings")),
+            "absent mcp-pairings/ must not be targeted"
         );
         assert!(
             !targets.contains(&net.join("settings.json")),
@@ -5513,6 +5572,8 @@ mod migration_warning_tests {
             connect: String::new(),
             wallets: "Not yet known",
             peers: Vec::new(),
+            pages: 1,
+            chrome: Default::default(),
         });
         let datadir = match &tab.state {
             State::Home(home) => home.datadir_path.clone(),

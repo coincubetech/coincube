@@ -454,7 +454,6 @@ fn switcher_menu<'a>(ctx: &NavContext<'a>, state: ShellState) -> Element<'a, Mes
                         )
                         .padding([6, 12])
                         .style(theme::button::primary)
-                        .focus_radius(25.0)
                         .on_press(Message::LockCubeToLauncher)
                     )
                     .id("cube-lock-confirm"),

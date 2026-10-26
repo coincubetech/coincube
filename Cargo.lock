@@ -2072,6 +2072,7 @@ dependencies = [
  "rcgen",
  "reqwest 0.12.18",
  "reqwest-sse",
+ "resvg",
  "rfd",
  "ring 0.17.14",
  "rust-ini",
