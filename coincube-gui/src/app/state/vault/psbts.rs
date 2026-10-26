@@ -261,7 +261,7 @@ mod tests {
                 "dark",
                 theme::Theme::dark(),
             );
-            assert!(mounted.contains("PSBTs"));
+            assert!(mounted.contains("PSBT proposals"));
             assert_eq!(mounted.contains(&raw_spend), !masked);
             if let Some(fee) = &fee {
                 assert_eq!(mounted.contains(fee), !masked);
