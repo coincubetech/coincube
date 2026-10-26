@@ -19,6 +19,9 @@ pub mod state;
 // Admission contract for the later cross-Cube Transfer UI. No payment route uses it yet.
 #[allow(dead_code)]
 mod transfer_destination;
+// Private B-side verification and read-only Vault backend attachment. No UI route uses it.
+#[allow(dead_code)]
+mod transfer_destination_loader;
 mod unswept_notice;
 pub mod view;
 pub mod wallet;

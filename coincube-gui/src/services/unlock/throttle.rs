@@ -25,9 +25,64 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 
+use super::{CubeLocation, PinOutcome, UnlockError};
+
 const FILE_NAME: &str = "unlock-throttle.json";
+const LOCK_NAME: &str = "unlock-throttle.lock";
+
+/// One serialized PIN trial, shared by normal Cube open and a temporary
+/// destination unlock. The lock covers the persisted check, seed/duress trial,
+/// and outcome write, including attempts made by another app process.
+pub enum PinAttempt {
+    Locked(Duration),
+    Classified(PinOutcome),
+}
+
+pub fn classify_pin(root: &Path, loc: &CubeLocation, pin: &str) -> Result<PinAttempt, UnlockError> {
+    classify_pin_with(root, loc.cube_id, || super::unlock_blocking(loc, pin))
+}
+
+fn classify_pin_with(
+    root: &Path,
+    cube_id: &str,
+    verify: impl FnOnce() -> Result<PinOutcome, UnlockError>,
+) -> Result<PinAttempt, UnlockError> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(root.join(LOCK_NAME))
+        .map_err(|e| UnlockError::Io(e.to_string()))?;
+    file.lock_exclusive()
+        .map_err(|e| UnlockError::Io(e.to_string()))?;
+
+    let mut state = ThrottleState::load(root);
+    let remaining = state.remaining_lockout(cube_id);
+    let answer = if remaining.is_zero() {
+        match verify() {
+            Ok(PinOutcome::Unlock(signer)) => {
+                state.record_success(root, cube_id);
+                Ok(PinAttempt::Classified(PinOutcome::Unlock(signer)))
+            }
+            Ok(PinOutcome::Duress) => {
+                state.record_success(root, cube_id);
+                Ok(PinAttempt::Classified(PinOutcome::Duress))
+            }
+            Ok(PinOutcome::Wrong) => {
+                state.record_failure(root, cube_id);
+                Ok(PinAttempt::Classified(PinOutcome::Wrong))
+            }
+            Err(error) => Err(error),
+        }
+    } else {
+        Ok(PinAttempt::Locked(remaining))
+    };
+    let _ = FileExt::unlock(&file);
+    answer
+}
 
 /// Delay after the Nth consecutive failure: 0, 0, 1s, 2s, 4s, 8s… capped.
 ///
@@ -64,6 +119,14 @@ fn path(root: &Path) -> PathBuf {
 }
 
 impl ThrottleState {
+    /// The last attempt's full penalty, before wall-clock expiry. The PIN UI
+    /// shows the same message it did when it recorded that attempt itself.
+    pub fn current_penalty(&self, cube_id: &str) -> Duration {
+        self.failures
+            .get(cube_id)
+            .map(|entry| penalty_for(entry.consecutive_failures))
+            .unwrap_or(Duration::ZERO)
+    }
     /// Load, mapping a missing file to the empty state.
     ///
     /// A **corrupt** file also maps to empty rather than erroring. That is the
@@ -151,6 +214,7 @@ pub fn lockout_message(remaining: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
 
     fn remaining_at_last_failure(state: &ThrottleState, cube_id: &str) -> Duration {
         let last_failure_unix = state
@@ -171,6 +235,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn concurrent_pin_trials_share_one_persisted_counter() {
+        let root = tmp("concurrent-attempts");
+        let barrier = Arc::new(Barrier::new(3));
+        let handles: Vec<_> = (0..3)
+            .map(|_| {
+                let root = root.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    classify_pin_with(&root, "cube-a", || Ok(PinOutcome::Wrong)).unwrap()
+                })
+            })
+            .collect();
+        barrier.wait();
+        for handle in handles {
+            assert!(matches!(
+                handle.join().unwrap(),
+                PinAttempt::Classified(PinOutcome::Wrong)
+            ));
+        }
+        let state = ThrottleState::load(&root);
+        assert_eq!(state.failures["cube-a"].consecutive_failures, 3);
+        assert!(matches!(
+            classify_pin_with(&root, "cube-a", || panic!("locked trial must not decrypt")).unwrap(),
+            PinAttempt::Locked(_)
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn duress_clears_the_counter_and_operational_error_does_not_charge_it() {
+        let root = tmp("equivalent-outcomes");
+        for _ in 0..2 {
+            assert!(matches!(
+                classify_pin_with(&root, "cube-a", || Ok(PinOutcome::Wrong)).unwrap(),
+                PinAttempt::Classified(PinOutcome::Wrong)
+            ));
+        }
+        let error = classify_pin_with(&root, "cube-a", || Err(UnlockError::NoPinConfigured));
+        assert!(matches!(error, Err(UnlockError::NoPinConfigured)));
+        assert_eq!(
+            ThrottleState::load(&root).failures["cube-a"].consecutive_failures,
+            2
+        );
+        assert!(matches!(
+            classify_pin_with(&root, "cube-a", || Ok(PinOutcome::Duress)).unwrap(),
+            PinAttempt::Classified(PinOutcome::Duress)
+        ));
+        assert!(!ThrottleState::load(&root).failures.contains_key("cube-a"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
