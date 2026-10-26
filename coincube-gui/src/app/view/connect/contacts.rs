@@ -15,7 +15,11 @@ use crate::{
     services::coincube::{ContactRole, Invite, ReceivedInvite},
 };
 
-use super::{card_style, format_date};
+use super::{
+    action_ink, card_style, centred, format_date, group_title, horizontal_rule, lead, row_tag,
+    ruled_list, sheet_button, sheet_button_style, sheet_title, tenshu_text, ActionKind,
+};
+use coincube_ui::font;
 
 /// Top-level contacts dispatcher.
 pub fn contacts_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMessage> {
@@ -34,28 +38,39 @@ fn contacts_list_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAc
     let cs = &state.contacts_state;
 
     let header = Row::new()
+        .push(sheet_title("Contacts").width(Length::Fill))
         .push(
-            Column::new()
-                .push(text::h4_bold("Contacts").style(theme::text::primary))
-                .push(
-                    text::p2_regular("People you trust with recovery alerts or Vault invitations.")
-                        .style(theme::text::secondary),
-                )
-                .spacing(2),
-        )
-        .push(iced::widget::Space::new().width(Length::Fill))
-        .push(
-            button::primary(None, "Add contact")
-                .on_press(ConnectAccountMessage::Contacts(
-                    ContactsMessage::ShowInviteForm,
-                ))
-                .width(Length::Shrink),
+            iced::widget::button(centred(
+                Row::new()
+                    .push(
+                        plus_icon()
+                            .size(16)
+                            .style(action_ink(ActionKind::Secondary)),
+                    )
+                    .push(
+                        iced::widget::text("Add contact")
+                            .size(14)
+                            .font(font::MEDIUM)
+                            .style(action_ink(ActionKind::Secondary)),
+                    )
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+            ))
+            .height(Length::Fixed(36.0))
+            .padding([0, 16])
+            .style(|theme, status| sheet_button_style(theme, status, ActionKind::Secondary))
+            .on_press(ConnectAccountMessage::Contacts(
+                ContactsMessage::ShowInviteForm,
+            )),
         )
         .align_y(Alignment::Center);
 
     let mut col = Column::new()
         .push(header)
-        .push(iced::widget::Space::new().height(Length::Fixed(15.0)))
+        .push(lead(
+            "People you trust with recovery alerts or Vault invitations. Roles are verified by Connect.",
+        ))
+        .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
         .spacing(0)
         .width(Length::Fill);
 
@@ -96,7 +111,7 @@ fn contacts_list_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAc
     let received: &[ReceivedInvite] = cs.received_invites.as_deref().unwrap_or_default();
 
     if !received.is_empty() {
-        col = col.push(text::p1_bold("Received Invites").style(theme::text::primary));
+        col = col.push(group_title("Received invites"));
         col = col.push(iced::widget::Space::new().height(Length::Fixed(8.0)));
 
         for invite in received {
@@ -117,7 +132,7 @@ fn contacts_list_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAc
         .collect();
 
     if !pending.is_empty() {
-        col = col.push(text::p1_bold("Pending Invites").style(theme::text::primary));
+        col = col.push(group_title("Pending invites"));
         col = col.push(iced::widget::Space::new().height(Length::Fixed(8.0)));
 
         for invite in &pending {
@@ -133,34 +148,22 @@ fn contacts_list_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAc
     // the invite, not "No contacts yet".
     let contacts = cs.contacts.as_deref().unwrap_or_default();
     if contacts.is_empty() && pending.is_empty() && received.is_empty() {
-        // Empty state
-        col = col.push(
-            container(
-                Column::new()
-                    .push(person_icon().size(40).color(color::GREY_3))
-                    .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
-                    .push(text::p1_bold("No contacts yet").style(theme::text::primary))
-                    .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
-                    .push(
-                            text::p2_regular("Add someone you trust. Connect will verify their role before they can join a Vault.")
-                                .style(theme::text::secondary),
-                    )
-                    .push(iced::widget::Space::new().height(Length::Fixed(16.0)))
-                    .push(button::primary(None, "Add contact").on_press(
-                        ConnectAccountMessage::Contacts(ContactsMessage::ShowInviteForm),
-                    ))
-                    .align_x(Alignment::Center)
-                    .padding(24)
-                    .spacing(0),
+        // Empty state (`.empty`); the header keeps the one Add contact action.
+        col = col
+            .push(horizontal_rule())
+            .push(
+                container(
+                    Column::new()
+                        .push(group_title("No contacts yet"))
+                        .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
+                        .push(lead("Add someone you trust. They can receive recovery alerts or Vault invitations once Connect verifies their role.")),
+                )
+                .padding([28, 0])
+                .width(Length::Fill),
             )
-            .style(card_style)
-            .width(Length::Fill),
-        );
+            .push(horizontal_rule());
     } else if !contacts.is_empty() {
-        col = col.push(text::p1_bold("Contacts").style(theme::text::primary));
-        col = col.push(iced::widget::Space::new().height(Length::Fixed(8.0)));
-
-        for contact in contacts {
+        col = col.push(ruled_list(contacts.iter().map(|contact| {
             // Contact responses with no linked user are rare (backend
             // marks the field `omitempty`) — render a placeholder and
             // still list them so the user can revoke/clean up.
@@ -169,50 +172,16 @@ fn contacts_list_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAc
                 .as_ref()
                 .map(|u| u.email.as_str())
                 .unwrap_or("unknown contact");
-            let first_char = email
-                .chars()
-                .next()
-                .unwrap_or('?')
-                .to_uppercase()
-                .to_string();
-            let role_label = contact.role.to_string();
-
-            let row = Row::new()
-                .push(
-                    container(text::p1_bold(first_char).color(color::WHITE))
-                        .width(Length::Fixed(36.0))
-                        .height(Length::Fixed(36.0))
-                        .center_x(Length::Fixed(36.0))
-                        .center_y(Length::Fixed(36.0))
-                        .style(|_t| container::Style {
-                            background: Some(iced::Background::Color(color::ORANGE)),
-                            border: iced::Border {
-                                radius: 18.0.into(),
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        }),
-                )
-                .push(iced::widget::Space::new().width(Length::Fixed(12.0)))
-                .push(
-                    Column::new()
-                        .push(text::p1_regular(email).style(theme::text::primary))
-                        .push(text::p2_regular(role_label).color(role_color(&contact.role)))
-                        .spacing(2),
-                )
-                .push(iced::widget::Space::new().width(Length::Fill))
-                .align_y(Alignment::Center);
-
-            let btn = iced::widget::button(container(row).padding(12).width(Length::Fill))
-                .style(theme::button::transparent)
-                .on_press(ConnectAccountMessage::Contacts(
-                    ContactsMessage::ShowDetail(contact.id),
+            Row::new()
+                .push(tenshu_text::label(email).width(Length::Fill))
+                .push(row_tag(contact.role.to_string(), false))
+                .push(sheet_button("Edit", ActionKind::Secondary, true).on_press(
+                    ConnectAccountMessage::Contacts(ContactsMessage::ShowDetail(contact.id)),
                 ))
-                .width(Length::Fill);
-
-            col = col.push(container(btn).style(card_style).width(Length::Fill));
-            col = col.push(iced::widget::Space::new().height(Length::Fixed(6.0)));
-        }
+                .spacing(16)
+                .align_y(Alignment::Center)
+                .into()
+        })));
     }
 
     col.into()

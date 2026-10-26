@@ -308,7 +308,6 @@ fn prepare_action<'a>(can_proceed: bool, generating: bool) -> Element<'a, Messag
     };
     Action::new(PREPARE_ID, content, Message::FocusAction)
         .padding([10, 22])
-        .focus_radius(20.0)
         .style(style)
         .on_press_maybe(
             (can_proceed && !generating)
