@@ -8,9 +8,10 @@ use coincube_ui::{
     font, icon, theme,
     widget::{action::Action, Column, Element},
 };
+#[allow(deprecated)]
 use iced::{
     advanced::widget::Id,
-    widget::{column, container, pick_list, row, rule, text_input, Space},
+    widget::{column, component, container, pick_list, row, rule, text_input, Component, Space},
     Alignment, Length,
 };
 
@@ -616,7 +617,7 @@ fn status_text_style(theme: &theme::Theme, status: StatusFilter) -> iced::widget
     iced::widget::text::Style { color: Some(color) }
 }
 
-fn detail_line<'a>(label: &'static str, value: String) -> Element<'a, Message> {
+fn detail_line<'a, M: 'a>(label: &'static str, value: String) -> Element<'a, M> {
     Column::new()
         .spacing(8)
         .push(rule::horizontal(1))
@@ -634,6 +635,94 @@ fn detail_line<'a>(label: &'static str, value: String) -> Element<'a, Message> {
             .spacing(8),
         )
         .into()
+}
+
+/// The ordinary Iced button used by the shared Collapse component does not
+/// register a keyboard focus target. Activity's completed PSBT disclosure
+/// keeps its own view state so Tab, Enter, and Space work without app state.
+struct PsbtDisclosure {
+    entry_id: String,
+    status: String,
+    required: usize,
+    collected: usize,
+}
+
+#[derive(Clone)]
+enum PsbtDisclosureEvent {
+    Focus(Id),
+    Toggle,
+}
+
+#[allow(deprecated)]
+impl Component<Message, theme::Theme, iced::Renderer> for PsbtDisclosure {
+    type State = Option<(String, bool)>;
+    type Event = PsbtDisclosureEvent;
+
+    fn update(&mut self, state: &mut Self::State, event: Self::Event) -> Option<Message> {
+        match event {
+            PsbtDisclosureEvent::Focus(id) => Some(Message::FocusAction(id)),
+            PsbtDisclosureEvent::Toggle => {
+                let expanded = state
+                    .as_ref()
+                    .is_some_and(|(id, expanded)| id == &self.entry_id && *expanded);
+                *state = Some((self.entry_id.clone(), !expanded));
+                None
+            }
+        }
+    }
+
+    fn view(&self, state: &Self::State) -> Element<'_, Self::Event> {
+        let expanded = state
+            .as_ref()
+            .is_some_and(|(id, expanded)| id == &self.entry_id && *expanded);
+        let header = Action::new(
+            Id::from("tenshu.activity.detail.psbt.disclosure"),
+            row![
+                if expanded {
+                    icon::collapse_icon()
+                } else {
+                    icon::collapsed_icon()
+                },
+                h4_bold("PSBT and signers").width(Length::Fill),
+                text(&self.status).size(12).style(theme::text::secondary),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+            PsbtDisclosureEvent::Focus,
+        )
+        .style(theme::button::transparent_border)
+        .padding([8, 0])
+        .width(Length::Fill)
+        .on_press(PsbtDisclosureEvent::Toggle);
+        let mut content = Column::new().spacing(8).push(header);
+        if expanded {
+            content = content
+                .push(detail_line(
+                    "Required",
+                    format!("{} signatures", self.required),
+                ))
+                .push(detail_line(
+                    "Collected",
+                    format!("{} signatures", self.collected),
+                ));
+        }
+        content.into()
+    }
+}
+
+#[allow(deprecated)]
+fn completed_psbt_disclosure<'a>(
+    entry_id: &str,
+    status: &str,
+    required: usize,
+    collected: usize,
+) -> Element<'a, Message> {
+    component(PsbtDisclosure {
+        entry_id: entry_id.to_owned(),
+        status: status.to_owned(),
+        required,
+        collected,
+    })
 }
 
 fn short_identifier(identifier: &str) -> String {
@@ -1052,18 +1141,19 @@ fn render_at_width<'a>(
                     ),
             );
         }
-        if let Some(signer_status) = entry.signer_status.as_ref().filter(|_| !needs_signatures) {
-            detail = detail.push(
-                Column::new()
-                    .spacing(8)
-                    .push(rule::horizontal(1))
-                    .push(h4_bold("PSBT and signers"))
-                    .push(
-                        text(signer_status.clone())
-                            .size(12)
-                            .style(theme::text::secondary),
-                    ),
-            );
+        if let (Some(signer_status), ActivityTarget::Psbt(tx)) = (
+            entry.signer_status.as_ref().filter(|_| !needs_signatures),
+            &entry.target,
+        ) {
+            let path = tx.sigs.primary_path();
+            detail = detail
+                .push(rule::horizontal(1))
+                .push(completed_psbt_disclosure(
+                    &entry.id,
+                    signer_status,
+                    path.threshold,
+                    path.sigs_count,
+                ));
         }
         detail = detail.push(
             Action::new(
@@ -1527,6 +1617,41 @@ mod tests {
         let close = position(Id::from("tenshu.activity.detail.close")).expect("detail mounted");
         let next = position(row_focus_id(&next_id)).expect("next row mounted");
         assert!(selected < close && close < next);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn completed_psbt_disclosure_is_keyboard_focusable_and_resets_per_selection() {
+        let mut disclosure = PsbtDisclosure {
+            entry_id: "psbt-a".into(),
+            status: "Ready for review · 2 of 2 signatures".into(),
+            required: 2,
+            collected: 2,
+        };
+        let mut state = None;
+        let inspect = |disclosure: &PsbtDisclosure, state: &Option<(String, bool)>| {
+            capture::inspect_wide_content(
+                "r09-activity-completed-psbt-disclosure",
+                disclosure.view(state),
+                (1024, 768),
+                "dark",
+                coincube_ui::theme::Theme::dark(),
+                768,
+            )
+        };
+        let collapsed = inspect(&disclosure, &state);
+        assert!(collapsed.has_focus(Id::from("tenshu.activity.detail.psbt.disclosure")));
+        assert!(collapsed.contains("PSBT and signers"));
+        assert!(!collapsed.contains("Required"));
+        assert!(!collapsed.contains("Continue signing"));
+        assert!(disclosure
+            .update(&mut state, PsbtDisclosureEvent::Toggle)
+            .is_none());
+        let expanded = inspect(&disclosure, &state);
+        assert!(expanded.contains("Required"));
+        assert!(expanded.contains("Collected"));
+        disclosure.entry_id = "psbt-b".into();
+        assert!(!inspect(&disclosure, &state).contains("Required"));
     }
 
     #[test]
