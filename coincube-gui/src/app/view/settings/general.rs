@@ -62,7 +62,8 @@ pub fn settings_content_section<'a>(
     }
 }
 
-/// General tab: app/display preferences only.
+/// Cube display preferences. Each control keeps its existing persistence path:
+/// Cube amount settings save per Cube, while direction badges save per device.
 fn general_section<'a>(
     menu: &'a Menu,
     cache: &'a cache::Cache,
@@ -73,24 +74,49 @@ fn general_section<'a>(
 ) -> Element<'a, Message> {
     let col = Column::new()
         .spacing(20)
-        .push(super::header("General", SettingsMessage::GeneralSection))
-        .push(network_row(cache.network))
+        .push(super::header(
+            "Display & appearance",
+            SettingsMessage::GeneralSection,
+        ))
+        .push(network_row(cache.chain()))
+        .push(text("Amounts & currency").size(20).bold())
+        .push(text("Bitcoin unit and fiat estimates are saved for this Cube. Changes take effect as you select them.").size(14))
         .push(bitcoin_display_unit(new_unit_setting))
         .push(display_mode_toggle(
             cache.display_mode,
             cache.fiat_toggle_allowed(),
         ))
-        .push(direction_badges_toggle(show_direction_badges))
+        .push(fiat_price(
+            new_price_setting,
+            currencies_list,
+            cache.fiat_chain.is_blake2b(),
+        ))
+        .push(text("Cube identity").size(20).bold())
+        .push(
+            card::simple(
+                Row::new()
+                    .spacing(20)
+                    .align_y(Alignment::Center)
+                    .push(text("Cube name").bold())
+                    .push(Space::new().width(Length::Fill))
+                    .push(text(if cache.cube_name.is_empty() {
+                        "Name unavailable"
+                    } else {
+                        cache.cube_name.as_str()
+                    })),
+            )
+            .width(Length::Fill),
+        )
         .push(
             button::secondary(None, "Manage Cube avatar").on_press(Message::Menu(Menu::Cube(
                 CubeSubMenu::Settings(CubeSettingsOption::Avatar),
             ))),
         )
-        .push(fiat_price(
-            new_price_setting,
-            currencies_list,
-            cache.fiat_chain.is_blake2b(),
-        ));
+        .push(text("Preview and confirm avatar changes in the Cube identity flow.").size(14))
+        .push(text("Application appearance").size(20).bold())
+        .push(direction_badges_toggle(show_direction_badges))
+        .push(text("Direction badges and the preferences below apply on this device.").size(14))
+        .push(button::secondary(None, "Open App preferences").on_press(Message::OpenAppPreferences));
 
     dashboard(menu, cache, col)
 }
@@ -108,7 +134,8 @@ fn payment_checks_section<'a>(menu: &'a Menu, cache: &'a cache::Cache) -> Elemen
             .push(p2_regular(
                 "Payment checks currently apply to all Cubes on this device.",
             ))
-            .push(recipient_identity_checks_toggle()),
+            .push(recipient_identity_checks_toggle())
+            .push(text("A check never guarantees who the recipient is. Unverifiable recipients appear as not verified.").size(14)),
     )
 }
 
@@ -180,7 +207,10 @@ fn data_exports_section<'a>(menu: &'a Menu, cache: &'a cache::Cache) -> Element<
                 SettingsMessage::DataExportsSection,
             ))
             .push(recovery_row)
-            .push(vault_row),
+            .push(vault_row)
+            .push(
+                text("Exported records do not replace your seed phrase or Recovery Kit.").size(14),
+            ),
     )
 }
 
@@ -209,16 +239,22 @@ fn recovery_section<'a>(
 
     let mut col = Column::new()
         .spacing(20)
-        .push(super::header("Recovery", SettingsMessage::RecoverySection))
+        .push(super::header(
+            "Backup & protection",
+            SettingsMessage::RecoverySection,
+        ))
         .push(cache.unswept_recovery_notice().map(text))
+        .push(text("Backup readiness").size(20).bold())
         .push(backup_master_seed_card(cache.current_cube_backed_up));
+
+    col = col.push(text("Backup methods").size(20).bold());
 
     // Connect-hosted Recovery Kit card. Render only when the outer
     // SettingsState had a `RecoveryKit` on hand — i.e. when the downcasting
     // wrapper invoked `view_with_recovery_kit`. Falling back to no-card when
     // `None` keeps the trait-based `view` callers harmless.
     if let Some(rk) = recovery_kit {
-        if !cache.connect_authenticated {
+        if !cache.connect_authenticated && !cache.has_connect_session {
             // The Recovery Kit lives in the Connect account, so it needs sign-in
             // first. Reuse the shared Connect sign-in prompt (same card + "Sign
             // In" → `OpenConnectSignIn` button used by Avatar / Members) rather
@@ -226,6 +262,16 @@ fn recovery_section<'a>(
             col = col.push(crate::app::view::connect::sign_in_prompt::sign_in_prompt(
                 "back up your Cube Recovery Kit",
             ));
+        } else if cache.current_cube_server_id.is_none() {
+            col = col.push(
+                card::simple(
+                    Column::new()
+                        .spacing(4)
+                        .push(text("Recovery Kit unavailable").bold())
+                        .push(text("This Cube is not registered with Connect yet. Reconnect it before setting up or changing a Recovery Kit.").size(14)),
+                )
+                .width(Length::Fill),
+            );
         } else {
             // W12 drift, per method (PR 3): compare the live descriptor
             // fingerprint (refreshed every App tick) against each method's
@@ -249,11 +295,27 @@ fn recovery_section<'a>(
                 cache.has_vault || cache.has_imported_bitcoin,
                 rk.status.as_ref(),
                 rk.status_loading,
+                rk.status_stale,
                 drift,
                 cache.has_imported_bitcoin && cache.current_descriptor_fingerprint.is_none(),
             ));
         }
     }
+
+    col = col
+        .push(text("Vault recovery path").size(20).bold())
+        .push(text("Recovery path spending is separate from backup. A backup never unlocks the recovery path.").size(14))
+        .push(text(if cache.has_vault {
+            "Review the Vault's recovery spending path and timelocks in its tools."
+        } else {
+            "No Vault recovery path applies to this Cube."
+        }).size(14))
+        .push(
+            button::secondary(None, "Open recovery path")
+                .on_press_maybe(cache.has_vault.then_some(Message::Menu(Menu::Vault(
+                    VaultSubMenu::Recovery,
+                )))),
+        );
 
     // Vault Recovery Alerts card (Estate Notifications — PR 2). Same threading
     // discipline as the Recovery Kit card above.
@@ -647,15 +709,15 @@ fn escrow_copy(tier: Option<EscrowTier>) -> &'static str {
 fn backup_master_seed_card<'a>(backed_up: bool) -> Element<'a, Message> {
     let (title, subtitle, button_label) = if backed_up {
         (
-            "Master Seed Phrase Backed Up",
-            "You've already recorded your recovery phrase. You can view it again if needed.",
-            "View Again",
+            "Seed phrase confirmed",
+            "The three-word check was saved for this Cube. This does not confirm a Connect Recovery Kit or a Vault recovery path.",
+            "Reveal seed phrase…",
         )
     } else {
         (
-            "Backup Master Seed Phrase",
-            "Write down your 12-word recovery phrase as a backup. This is the only way to recover your Cube if you forget your PIN and do not have a Recovery Kit.",
-            "Start Backup",
+            "Backup not confirmed",
+            "Write down the 12-word phrase offline, then complete the three-word check. This opens the authenticated reveal flow.",
+            "Confirm seed phrase backup",
         )
     };
     card::simple(
@@ -672,7 +734,7 @@ fn backup_master_seed_card<'a>(backed_up: bool) -> Element<'a, Message> {
             .push(
                 button::secondary(None, button_label)
                     .padding([8, 16])
-                    .width(Length::Fixed(160.0))
+                    .width(Length::Shrink)
                     .on_press(SettingsMessage::BackupMasterSeed(BackupWalletMessage::Start).into()),
             ),
     )
@@ -987,23 +1049,22 @@ fn password_gap_cta(
 /// enabled-but-incomplete method drops to the "Finish backing up" state,
 /// naming each gap (password first) with the CTA pointed at the first gap.
 /// `status_present` distinguishes "loaded, no methods" (Create) from "not
-/// loaded yet" (loading / sign-in copy — mnemonic only, matching prior copy).
+/// loaded yet" (pending or unavailable service status).
 fn recovery_kit_card_state(
     overview: &BackupOverview,
     has_vault: bool,
     loading: bool,
     status_present: bool,
 ) -> CardState {
-    // Not loaded yet — a loading / sign-in line. The passkey card used to show
-    // its Create copy here instead; with one Create state for both shapes there
-    // is nothing left to special-case.
+    // The outer view reaches this card only with an authenticated session.
+    // Missing status is pending or failed, not proof that no kit exists.
     if !status_present {
         return CardState {
             title: "Cube Recovery Kit",
             subtitle: if loading {
                 "Checking your Connect account…".to_string()
             } else {
-                "Sign in to Connect to back up your Cube Recovery Kit.".to_string()
+                "Recovery Kit status is unavailable. Refresh before making changes.".to_string()
             },
             primary_label: "Create Recovery Kit",
             primary_mode: RecoveryKitMode::Create,
@@ -1093,6 +1154,7 @@ fn recovery_kit_card<'a>(
     has_vault: bool,
     status: Option<&RecoveryKitStatus>,
     loading: bool,
+    stale: bool,
     drift: DescriptorDrift,
     imported_state_unknown: bool,
 ) -> Element<'a, Message> {
@@ -1111,7 +1173,20 @@ fn recovery_kit_card<'a>(
     // (per-method drift, PR 3). Each method is judged independently, so a
     // keychain-only kit can now drift (unlike PR 1, which kept drift
     // password-scoped); re-sealing one method clears only its warning.
-    let (subtitle, primary_label, primary_mode) = if imported_state_unknown {
+    let (subtitle, primary_label, primary_mode) = if loading {
+        (
+            "Checking the current Recovery Kit status…".to_string(),
+            primary_label,
+            primary_mode,
+        )
+    } else if stale && status.is_some() {
+        (
+            "Showing the last known Recovery Kit state. Reconnect and refresh before changing it."
+                .to_string(),
+            primary_label,
+            primary_mode,
+        )
+    } else if imported_state_unknown {
         (
             "Connect and refresh this Bitcoin wallet before checking or updating its Recovery Kit."
                 .to_string(),
@@ -1130,15 +1205,25 @@ fn recovery_kit_card<'a>(
 
     // Render with Remove button when any method is enabled.
     let has_kit = overview.any_enabled();
-    let mut actions = Row::new().spacing(10).align_y(Alignment::Center).push(
-        button::primary(None, primary_label)
-            .padding([8, 16])
-            .width(Length::Fixed(220.0))
-            .on_press_maybe((!imported_state_unknown).then_some(
-                SettingsMessage::RecoveryKit(RecoveryKitMessage::Start(primary_mode)).into(),
-            )),
-    );
-    if has_kit {
+    let mut actions = Row::new().spacing(10).align_y(Alignment::Center);
+    if status.is_none() || stale {
+        actions = actions.push(
+            button::secondary(None, "Refresh status")
+                .on_press_maybe((!loading).then_some(
+                    SettingsMessage::RecoveryKit(RecoveryKitMessage::LoadStatus).into(),
+                )),
+        );
+    } else {
+        actions = actions.push(
+            button::primary(None, primary_label)
+                .padding([8, 16])
+                .width(Length::Fixed(220.0))
+                .on_press_maybe((!imported_state_unknown && !loading).then_some(
+                    SettingsMessage::RecoveryKit(RecoveryKitMessage::Start(primary_mode)).into(),
+                )),
+        );
+    }
+    if has_kit && !stale && !loading {
         actions = actions.push(
             button::secondary(None, "Remove")
                 .padding([8, 16])
@@ -1156,7 +1241,8 @@ fn recovery_kit_card<'a>(
         .spacing(4)
         .width(Length::Fill)
         .push(text(title).bold())
-        .push(text(subtitle).size(14));
+        .push(text(subtitle).size(14))
+        .push(text("Encrypted on this device before upload to Connect. A Recovery Kit is separate from the offline seed phrase and may also include the Vault descriptor.").size(14));
     if password_present || keychain_present {
         let mut pills = pill_row("Protected by:");
         if password_present {
@@ -1213,7 +1299,7 @@ fn recovery_kit_card<'a>(
     .into()
 }
 
-fn network_row<'a>(network: coincube_core::miniscript::bitcoin::Network) -> Element<'a, Message> {
+fn network_row<'a>(network: crate::chain::ChainId) -> Element<'a, Message> {
     let label = crate::app::features::net_label(network);
     card::simple(
         Row::new()
@@ -2098,15 +2184,15 @@ mod tests {
         assert_eq!(s.primary_mode, RecoveryKitMode::Create);
     }
 
-    // ---- not-loaded-yet (status None) preserves prior copy ----
+    // ---- unavailable status never implies a missing kit ----
 
     #[test]
-    fn not_loaded_shows_loading_or_signin() {
+    fn not_loaded_shows_loading_or_unavailable() {
         let loading = recovery_kit_card_state(&backup_overview(None), true, true, false);
         assert_eq!(loading.title, "Cube Recovery Kit");
         assert!(loading.subtitle.contains("Checking"));
         let idle = recovery_kit_card_state(&backup_overview(None), true, false, false);
-        assert!(idle.subtitle.contains("Sign in"));
+        assert!(idle.subtitle.contains("status is unavailable"));
     }
 
     // ---- later_timestamp comparison ----

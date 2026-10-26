@@ -396,6 +396,9 @@ pub struct RecoveryKit {
     /// True while a `LoadStatus` round-trip is in flight. Card can
     /// show a skeleton while this is set.
     pub status_loading: bool,
+    /// A failed refresh leaves the last response visible for context, but it
+    /// must not be presented as current or used to start a mutation.
+    pub status_stale: bool,
     /// Wizard state; `None` when the card is visible.
     pub flow: RecoveryKitState,
     /// PIN widget — separate from `backup_pin` so the two flows can
@@ -423,6 +426,7 @@ impl RecoveryKit {
         Self {
             status: None,
             status_loading: false,
+            status_stale: false,
             flow: RecoveryKitState::None,
             pin: PinInput::new(),
             nudge_on_next_status_load: false,
@@ -502,6 +506,7 @@ pub fn update_with_imported(
             match res {
                 Ok(Some(s)) => {
                     rk.status = Some(s);
+                    rk.status_stale = false;
                 }
                 Ok(None) => {
                     // 404 — no kit on the server; render card in
@@ -515,6 +520,7 @@ pub fn update_with_imported(
                         updated_at: None,
                         owner_self: None,
                     });
+                    rk.status_stale = false;
                 }
                 Err(e) => {
                     tracing::warn!("get_recovery_kit_status failed: {}", e);
@@ -524,6 +530,7 @@ pub fn update_with_imported(
                     // flag — we don't want to defer the toast
                     // indefinitely because of a transient error.
                     rk.nudge_on_next_status_load = false;
+                    rk.status_stale = true;
                     return Task::done(Message::View(view::Message::ShowError(kit_toast(
                         "Couldn't load your Recovery Kit",
                         "Check your internet connection and try again.",
@@ -2459,6 +2466,26 @@ fn clear_recovery_kit_state(cache: &Cache, local_cube_id: &str) -> Task<Message>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_status_refresh_marks_cached_kit_stale() {
+        let mut kit = RecoveryKit::new();
+        kit.status = Some(status_complete());
+        kit.status_loading = true;
+        let _ = update(
+            &mut kit,
+            RecoveryKitMessage::StatusLoaded(Err("offline".into())),
+            &Cache::default(),
+            "fixture-cube",
+            SeedSource::Mnemonic,
+            None,
+            None,
+            None,
+        );
+        assert!(!kit.status_loading);
+        assert!(kit.status_stale);
+        assert!(kit.status.is_some());
+    }
 
     fn imported_test_descriptor() -> ImportedWalletDescriptor {
         use coincube_core::miniscript::bitcoin::{

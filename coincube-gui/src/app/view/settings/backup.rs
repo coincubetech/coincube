@@ -368,7 +368,7 @@ pub fn verification_view<'a, M: Clone + 'a>(
     saving: bool,
     on: fn(BackupWalletMessage) -> M,
 ) -> Element<'a, M> {
-    let all_filled = word_inputs.iter().all(|w| !w.is_empty());
+    let all_filled = word_inputs.iter().all(|w| !w.trim().is_empty());
 
     let mut content = Column::new().spacing(20).width(Length::Fill);
 
