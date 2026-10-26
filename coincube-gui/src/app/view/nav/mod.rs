@@ -649,17 +649,7 @@ mod shell_tests {
                 if let Ok(directory) = std::env::var("SIDEBAR_PREVIEW_DIR") {
                     redraw(&mut element, &mut tree, &node, &renderer, size);
                     std::fs::create_dir_all(&directory).unwrap();
-                    element.as_widget().draw(
-                        &tree,
-                        &mut renderer,
-                        &theme,
-                        &iced::advanced::renderer::Style {
-                            text_color: theme.colors.shell.ink,
-                        },
-                        Layout::new(&node),
-                        iced::mouse::Cursor::Unavailable,
-                        &iced::Rectangle::with_size(size),
-                    );
+                    shell::test_draw(&mut element, &mut tree, &node, &mut renderer, &theme, size);
                     let pixels = renderer.screenshot(
                         iced::Size::new(1024, 768),
                         1.0,
@@ -745,16 +735,15 @@ mod shell_tests {
                         iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
                         iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left),
                     ] {
-                        element.as_widget_mut().update(
+                        messages.extend(shell::test_send(
+                            &mut element,
                             &mut tree,
-                            &iced::Event::Mouse(event),
-                            Layout::new(&node),
-                            cursor,
+                            &node,
                             &renderer,
-                            &mut iced::advanced::clipboard::Null,
-                            &mut iced::advanced::Shell::new(&mut messages),
-                            &iced::Rectangle::with_size(size),
-                        );
+                            &iced::Event::Mouse(event),
+                            cursor,
+                            size,
+                        ));
                     }
                     let activated = matches!(
                         (expected, messages.as_slice()),
@@ -783,17 +772,7 @@ mod shell_tests {
                 if let Ok(directory) = std::env::var("SIDEBAR_PREVIEW_DIR") {
                     redraw(&mut element, &mut tree, &node, &renderer, size);
                     std::fs::create_dir_all(&directory).unwrap();
-                    element.as_widget().draw(
-                        &tree,
-                        &mut renderer,
-                        &theme,
-                        &iced::advanced::renderer::Style {
-                            text_color: theme.colors.shell.ink,
-                        },
-                        Layout::new(&node),
-                        iced::mouse::Cursor::Unavailable,
-                        &iced::Rectangle::with_size(size),
-                    );
+                    shell::test_draw(&mut element, &mut tree, &node, &mut renderer, &theme, size);
                     let pixels = renderer.screenshot(
                         iced::Size::new(1024, 768),
                         1.0,

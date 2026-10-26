@@ -61,7 +61,7 @@ use coincube_core::signer::{MasterSigner, MASTER_SEED_LABEL};
 mod launcher_capture;
 mod launcher_catalog;
 mod launcher_chrome;
-mod launcher_coin;
+pub(crate) mod launcher_coin;
 mod launcher_gpu;
 pub(crate) mod launcher_presenter;
 pub(crate) mod launcher_scene;
@@ -520,6 +520,10 @@ pub struct Home {
     pub(crate) balance_privacy: Option<crate::app::state::preferences::BalancePrivacyChrome>,
     /// Last native accessibility observation used by Follow system motion.
     system_reduces_motion: Option<bool>,
+    /// A Liquid wallet exists on this device (the sunset gate's local half),
+    /// probed when the Cube list loads so the Launcher can list Liquid
+    /// without touching the disk on every frame.
+    liquid_on_disk: bool,
     /// Whether the user has chosen to create a passkey-derived Cube (no PIN).
     passkey_mode: bool,
     /// A registered passkey credential awaiting the creation-backup step. See
@@ -682,6 +686,7 @@ impl Home {
                 theme_mode: GlobalSettings::load_theme_mode(&GlobalSettings::path(&datadir_path)),
                 balance_privacy: None,
                 system_reduces_motion,
+                liquid_on_disk: false,
                 // Recomputed whenever the Create Cube form opens — see
                 // `Home::default_passkey_mode`. A freshly constructed `Home`
                 // has no Connect session, so this is PIN.
@@ -3031,6 +3036,12 @@ impl Home {
                             .retain(|rc| !local_ids.contains(rc.uuid.as_str()));
                     }
                     self.state = state;
+                    self.liquid_on_disk = matches!(self.state, State::Cubes { .. })
+                        && !self.network.is_blake2b()
+                        && crate::app::breez_liquid::local_state_exists(
+                            self.datadir_path.path(),
+                            self.network.bitcoin_network(),
+                        );
                     if let (Some(id), State::Cubes { cubes, .. }) =
                         (&self.open_created_import_cube, &self.state)
                     {
