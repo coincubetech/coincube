@@ -18,6 +18,15 @@ use iced::{
 
 use super::shell;
 
+pub(crate) fn sidebar_width_for_window(width: f32) -> f32 {
+    if width <= 1100.0 {
+        shell::COMPACT_WIDTH
+    } else {
+        shell::FULL_WIDTH
+    }
+    .min(width)
+}
+
 pub struct ShellSplit<'a> {
     children: [Element<'a, Message>; 2],
 }
@@ -50,12 +59,7 @@ impl Widget<Message, theme::Theme, iced::Renderer> for ShellSplit<'_> {
         limits: &layout::Limits,
     ) -> layout::Node {
         let size = limits.resolve(Length::Fill, Length::Fill, limits.max());
-        let sidebar_width = if size.width <= 1100.0 {
-            shell::COMPACT_WIDTH
-        } else {
-            shell::FULL_WIDTH
-        }
-        .min(size.width);
+        let sidebar_width = sidebar_width_for_window(size.width);
         let content_width = size.width - sidebar_width;
         let sidebar_size = Size::new(sidebar_width, size.height);
         let content_size = Size::new(content_width, size.height);

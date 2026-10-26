@@ -147,6 +147,26 @@ pub fn dashboard<'a, T: Into<Element<'a, Message>>>(
     )
 }
 
+/// Activity needs the shell's full content area for its transaction list and
+/// 420px detail pane at the standard 1440px viewport.
+pub fn dashboard_activity<'a, T: Into<Element<'a, Message>>>(
+    menu: &'a Menu,
+    cache: &'a Cache,
+    content: T,
+) -> Element<'a, Message> {
+    dashboard_with_info_layout(
+        menu,
+        cache,
+        content,
+        &cache.cube_name,
+        cache.avatar_handle.as_ref(),
+        cache.lightning_address.as_deref(),
+        true,
+    )
+}
+
+pub(crate) const ACTIVITY_HORIZONTAL_PADDING: f32 = 24.0;
+
 pub fn dashboard_with_info<'a, T: Into<Element<'a, Message>>>(
     menu: &'a Menu,
     cache: &'a Cache,
@@ -155,30 +175,62 @@ pub fn dashboard_with_info<'a, T: Into<Element<'a, Message>>>(
     avatar_handle: Option<&'a iced::widget::image::Handle>,
     lightning_address: Option<&'a str>,
 ) -> Element<'a, Message> {
+    dashboard_with_info_layout(
+        menu,
+        cache,
+        content,
+        cube_name,
+        avatar_handle,
+        lightning_address,
+        false,
+    )
+}
+
+fn dashboard_with_info_layout<'a, T: Into<Element<'a, Message>>>(
+    menu: &'a Menu,
+    cache: &'a Cache,
+    content: T,
+    cube_name: &'a str,
+    avatar_handle: Option<&'a iced::widget::image::Handle>,
+    lightning_address: Option<&'a str>,
+    wide: bool,
+) -> Element<'a, Message> {
+    let body = Column::new()
+        .push(Space::new().height(Length::Fixed(30.0)))
+        .push_maybe(settings::frame::in_content_navigation(menu, cache))
+        .push(content.into())
+        // Symmetric bottom breathing room so the last element of any
+        // screen does not sit flush against the viewport edge.
+        .push(Space::new().height(Length::Fixed(30.0)))
+        .width(if wide {
+            Length::Fill
+        } else {
+            Length::FillPortion(8)
+        })
+        .max_width(1500);
+    let body: Element<'_, Message> = if wide {
+        row![
+            Space::new().width(Length::Fixed(ACTIVITY_HORIZONTAL_PADDING)),
+            body,
+            Space::new().width(Length::Fixed(ACTIVITY_HORIZONTAL_PADDING))
+        ]
+        .into()
+    } else {
+        row![
+            Space::new().width(Length::FillPortion(1)),
+            body,
+            Space::new().width(Length::FillPortion(1))
+        ]
+        .into()
+    };
     let content_column: Element<'_, Message> = Column::new()
         .push(warn(None))
         .push_maybe(cache.spark_notice.as_ref().map(spark_notice_banner))
         .push(
-            Container::new(
-                scrollable(row!(
-                    Space::new().width(Length::FillPortion(1)),
-                    Column::new()
-                        .push(Space::new().height(Length::Fixed(30.0)))
-                        .push_maybe(settings::frame::in_content_navigation(menu, cache))
-                        .push(content.into())
-                        // Symmetric bottom breathing room so the last element
-                        // of any screen doesn't sit flush against the viewport
-                        // edge when the content fills the height.
-                        .push(Space::new().height(Length::Fixed(30.0)))
-                        .width(Length::FillPortion(8))
-                        .max_width(1500),
-                    Space::new().width(Length::FillPortion(1)),
-                ))
-                .on_scroll(|w| Message::Scroll(w.absolute_offset().y)),
-            )
-            .center_x(Length::Fill)
-            .style(theme::container::background)
-            .height(Length::Fill),
+            Container::new(scrollable(body).on_scroll(|w| Message::Scroll(w.absolute_offset().y)))
+                .center_x(Length::Fill)
+                .style(theme::container::background)
+                .height(Length::Fill),
         )
         .width(Length::Fill)
         .into();

@@ -488,9 +488,9 @@ fn vault_confirmation_detail(height: i32, tip: i32) -> String {
 }
 
 // The fixed columns and four gaps need 467px before the Details column.
-// Reserve 200px for Details when the 380px detail pane sits beside the list.
+// Reserve 200px for Details when the 420px detail pane sits beside the list.
 const MIN_ACTIVITY_LIST_WIDTH: f32 = 70.0 + 75.0 + 200.0 + 190.0 + 100.0 + 4.0 * 8.0;
-const SELECTED_DETAIL_WIDTH: f32 = 380.0;
+const SELECTED_DETAIL_WIDTH: f32 = 420.0;
 const DETAIL_GAP: f32 = 16.0;
 
 fn detail_beside_list(width: f32) -> bool {
@@ -949,10 +949,22 @@ mod tests {
 
     #[test]
     fn selected_detail_stacks_until_list_and_pane_fit() {
-        // 1200px window: 248px sidebar and 8/10 dashboard content width.
-        let content_at_1200 = (1200.0 - 248.0) * 0.8;
-        assert!(!detail_beside_list(content_at_1200));
-        assert!(!detail_beside_list(1024.0));
+        // The Activity route uses the full shell content with 24px gutters.
+        let activity_content = |viewport: f32| {
+            viewport
+                - super::super::nav::split::sidebar_width_for_window(viewport)
+                - 2.0 * super::super::ACTIVITY_HORIZONTAL_PADDING
+        };
+        assert_eq!(activity_content(1024.0), 768.0);
+        assert_eq!(activity_content(1200.0), 904.0);
+        assert_eq!(activity_content(1440.0), 1144.0);
+        assert!(!detail_beside_list(activity_content(1024.0)));
+        assert!(!detail_beside_list(activity_content(1200.0)));
+        assert!(detail_beside_list(activity_content(1440.0)));
+        assert!(
+            activity_content(1440.0) - SELECTED_DETAIL_WIDTH - DETAIL_GAP
+                >= MIN_ACTIVITY_LIST_WIDTH
+        );
         assert!(detail_beside_list(
             MIN_ACTIVITY_LIST_WIDTH + SELECTED_DETAIL_WIDTH + DETAIL_GAP
         ));

@@ -225,7 +225,7 @@ impl State for Activity {
         menu: &'a Menu,
         cache: &'a Cache,
     ) -> coincube_ui::widget::Element<'a, view::Message> {
-        view::dashboard(menu, cache, view::activity::render(self, cache))
+        view::dashboard_activity(menu, cache, view::activity::render(self, cache))
     }
 
     fn update(
