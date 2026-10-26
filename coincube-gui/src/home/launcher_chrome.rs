@@ -477,6 +477,7 @@ pub(super) fn top_bar<'a>(
             background: Some(iced::Background::Color(theme.colors.shell.line)),
             ..Default::default()
         });
+    let open = home.app_preferences_open;
     let preferences = Action::new(
         launcher_catalog::settings_id(),
         Container::new(
@@ -484,14 +485,19 @@ pub(super) fn top_bar<'a>(
                 .spacing(8)
                 .align_y(Alignment::Center)
                 .push(glyph(SLIDERS, 16.0, body(quiet)))
-                .push(words("App preferences", 13.0, font::REGULAR, body(quiet))),
+                .push(words(
+                    "App preferences",
+                    13.0,
+                    if open { font::MEDIUM } else { font::REGULAR },
+                    body(quiet),
+                )),
         )
         .center_y(Length::Fill),
         focus,
     )
     .height(Length::Fixed(32.0))
     .padding([0.0, 10.0])
-    .style(|theme, status| bar_button(theme, status, false))
+    .style(move |theme, status| bar_button(theme, status, open))
     .on_press(ViewMessage::OpenAppPreferences);
     Container::new(
         Row::new()

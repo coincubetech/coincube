@@ -465,3 +465,27 @@ pub fn question_circle_icon<'a>() -> Text<'a> {
 pub fn x_circle_icon<'a>() -> Text<'a> {
     bootstrap_icon('\u{F623}')
 }
+
+pub fn circle_half_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F288}')
+}
+
+pub fn code_slash_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F2C6}')
+}
+
+pub fn activity_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F66B}')
+}
+
+pub fn folder_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F3D7}')
+}
+
+pub fn copy_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F759}')
+}
+
+pub fn list_ul_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F478}')
+}

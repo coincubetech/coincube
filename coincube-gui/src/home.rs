@@ -529,6 +529,9 @@ pub struct Home {
     pub theme_mode: coincube_ui::theme::palette::ThemeMode,
     /// The GUI's accepted balance-privacy receipt for the Launcher's eye.
     pub(crate) balance_privacy: Option<crate::app::state::preferences::BalancePrivacyChrome>,
+    /// App preferences is open over this Launcher; its top-bar entry shows
+    /// the current state (`.tbtn.on`). Set by the GUI that owns the sheet.
+    pub(crate) app_preferences_open: bool,
     /// Last native accessibility observation used by Follow system motion.
     system_reduces_motion: Option<bool>,
     /// Whether the user has chosen to create a passkey-derived Cube (no PIN).
@@ -696,6 +699,7 @@ impl Home {
                 active_section: HomeSection::Cubes,
                 theme_mode: GlobalSettings::load_theme_mode(&GlobalSettings::path(&datadir_path)),
                 balance_privacy: None,
+                app_preferences_open: false,
                 system_reduces_motion,
                 // Recomputed whenever the Create Cube form opens — see
                 // `Home::default_passkey_mode`. A freshly constructed `Home`
