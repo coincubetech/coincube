@@ -146,6 +146,27 @@ impl Mounted {
         self.run(focusable::focus::<()>(Id::new(id)));
     }
 
+    /// Focus as a keyboard user arrives: after a key press, so the ring
+    /// shows even if an earlier cell on this thread was clicked.
+    fn keyboard_focus(&mut self, id: &'static str) {
+        let tab = keyboard::Key::Named(keyboard::key::Named::Tab);
+        self.event(
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key: tab.clone(),
+                modified_key: tab,
+                physical_key: keyboard::key::Physical::Unidentified(
+                    keyboard::key::NativeCode::Unidentified,
+                ),
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::empty(),
+                text: None,
+                repeat: false,
+            }),
+            mouse::Cursor::Unavailable,
+        );
+        self.focus(id);
+    }
+
     fn focused(&mut self) -> Option<Id> {
         self.run(focusable::find_focused())
     }
@@ -953,7 +974,7 @@ fn render_cell(variant: Variant, state: CellState, theme: &Theme) -> (Vec<u8>, R
     let cursor = match state {
         CellState::Active | CellState::Disabled => mouse::Cursor::Unavailable,
         CellState::Focused => {
-            mounted.focus("cell");
+            mounted.keyboard_focus("cell");
             mouse::Cursor::Unavailable
         }
         CellState::Hover => over,

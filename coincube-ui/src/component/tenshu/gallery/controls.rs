@@ -840,7 +840,7 @@ fn render_control(
     let cursor = match state {
         CellState::Active | CellState::Disabled => mouse::Cursor::Unavailable,
         CellState::Focused => {
-            mounted.focus("cell");
+            mounted.keyboard_focus("cell");
             mouse::Cursor::Unavailable
         }
         CellState::Hover => over,
