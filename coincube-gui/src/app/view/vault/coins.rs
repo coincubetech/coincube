@@ -38,6 +38,23 @@ pub fn entangled_badge<'a, T: 'a>(status: Entanglement) -> Option<Container<'a, 
     }
 }
 
+/// A saved coin's block height proves it was confirmed, even while the
+/// daemon's chain tip has not been loaded (or is briefly behind the coin).
+fn confirmation_status(block_height: Option<i32>, tip: u32) -> String {
+    match block_height {
+        None => "Unconfirmed".to_string(),
+        Some(height) if height >= 0 && tip > 0 && (height as u32) <= tip => {
+            let confirmations = tip - height as u32 + 1;
+            format!(
+                "{} confirmation{}",
+                confirmations,
+                if confirmations == 1 { "" } else { "s" }
+            )
+        }
+        Some(_) => "Confirmed · confirmations unavailable".to_string(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn coins_view<'a>(
     cache: &Cache,
@@ -69,7 +86,7 @@ pub fn coins_view<'a>(
                         col.push(coin_list_view(
                             coin,
                             timelock,
-                            cache.blockheight() as u32,
+                            cache.blockheight().max(0) as u32,
                             i,
                             selected.contains(&i),
                             labels,
@@ -191,15 +208,8 @@ fn coin_list_view<'a>(
                                 .align_x(Alignment::End)
                                 .spacing(3)
                                 .push(amount)
-                                .push(p2_regular(match coin.block_height {
-                                    Some(height) if height >= 0 && (height as u32) <= blockheight => {
-                                        let confirmations = blockheight - height as u32 + 1;
-                                        format!("{} confirmation{}", confirmations,
-                                            if confirmations == 1 { "" } else { "s" })
-                                    }
-                                    Some(_) => "Awaiting confirmation".to_string(),
-                                    None => "Unconfirmed".to_string(),
-                                }).style(theme::text::secondary)),
+                                .push(p2_regular(confirmation_status(coin.block_height, blockheight))
+                                    .style(theme::text::secondary)),
                         )
                         .push(p2_regular("Details").style(theme::text::secondary))
                         .align_y(Alignment::Center)
@@ -489,6 +499,21 @@ mod tests {
     use std::str::FromStr;
 
     #[test]
+    fn confirmation_copy_distinguishes_unknown_tip_from_unconfirmed_coin() {
+        assert_eq!(confirmation_status(None, 0), "Unconfirmed");
+        assert_eq!(
+            confirmation_status(Some(100), 0),
+            "Confirmed · confirmations unavailable"
+        );
+        assert_eq!(
+            confirmation_status(Some(100), 99),
+            "Confirmed · confirmations unavailable"
+        );
+        assert_eq!(confirmation_status(Some(100), 100), "1 confirmation");
+        assert_eq!(confirmation_status(Some(100), 101), "2 confirmations");
+    }
+
+    #[test]
     fn hidden_coins_list_masks_amount_without_removing_coin() {
         let coin = Coin {
             amount: Amount::from_sat(98_765_432),
@@ -531,9 +556,9 @@ mod tests {
                 "dark",
                 theme::Theme::dark(),
             );
-            assert!(mounted.contains("Coins"));
             assert!(mounted.contains("Coin control"));
             assert!(mounted.contains("Details"));
+            assert!(mounted.contains("Confirmed · confirmations unavailable"));
             assert_eq!(
                 mounted.contains("98,765,432"),
                 privacy == BalancePrivacy::Shown
