@@ -5209,12 +5209,16 @@ impl Home {
     }
 
     pub fn view(&self) -> Element<Message> {
+        self.view_with_privacy(true)
+    }
+
+    pub fn view_with_privacy(&self, mask_amounts: bool) -> Element<Message> {
         // The visible Launcher List has its own compact chrome and owns its
         // body scrolling. Every other Home screen keeps the legacy frame.
         let layout: Element<Message> = if launcher_catalog::catalog_visible(self) {
             launcher_catalog::launcher_view(self).map(Message::View)
         } else {
-            self.legacy_frame()
+            self.legacy_frame(mask_amounts)
         };
 
         let layout = if self.network != ChainId::Bitcoin && !self.network.is_blake2b() {
@@ -5363,7 +5367,7 @@ impl Home {
 
     /// Home's frame for every screen except the visible Launcher List: the
     /// 190px sidebar beside the scrolling section body.
-    fn legacy_frame(&self) -> Element<Message> {
+    fn legacy_frame(&self, mask_amounts: bool) -> Element<Message> {
         let unavailable = self.chain_availability(self.network);
         let unavailable_content = unavailable.reason().map(|reason| {
             Column::new()
@@ -5528,7 +5532,7 @@ impl Home {
             recover_vault::view(&self.recover_vault)
                 .map(|msg| Message::View(ViewMessage::RecoverVault(msg)))
         } else if matches!(self.active_section, HomeSection::SplitWallet) {
-            split_wallet::view(&self.split_wallet)
+            split_wallet::view_with_privacy(&self.split_wallet, mask_amounts)
                 .map(|msg| Message::View(ViewMessage::SplitWallet(msg)))
         } else {
             unavailable_content.unwrap_or(content)

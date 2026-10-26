@@ -719,12 +719,20 @@ fn scan_error_copy(error: ScanError) -> String {
 /// identity stays read-only; scan, cancel and continuation actions follow the
 /// panel's current state.
 pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
+    view_with_privacy(panel, true)
+}
+
+pub fn view_with_privacy(panel: &SplitWalletPanel, mask_amounts: bool) -> Element<'_, Message> {
     let coin_amount = |count: usize, sats: u64| {
         format!(
             "{} UTXO{}, {} sats",
             count,
             if count == 1 { "" } else { "s" },
-            format_u64_as_string(sats, ",")
+            if mask_amounts {
+                "••••".to_string()
+            } else {
+                format_u64_as_string(sats, ",")
+            }
         )
     };
     let result_row = |label: &'static str, value: String| {
@@ -836,7 +844,7 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
                 summary.coins,
                 if summary.coins == 1 { "" } else { "s" },
                 summary.confirmed,
-                format_u64_as_string(summary.sats, ",")
+                if mask_amounts { "••••".to_string() } else { format_u64_as_string(summary.sats, ",") }
             )))
             .push(card::simple(
                 Column::new()
@@ -897,7 +905,7 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
                 summary.coins,
                 if summary.coins == 1 { "" } else { "s" },
                 summary.confirmed,
-                format_u64_as_string(summary.sats, ",")
+                if mask_amounts { "••••".to_string() } else { format_u64_as_string(summary.sats, ",") }
             )))
             .push(card::simple(Column::new()
                 .spacing(12)
@@ -1163,6 +1171,38 @@ mod tests {
         ];
         for (name, status, can_continue) in states {
             panel.status = status;
+            if let Status::Complete(summary) = &panel.status {
+                use crate::app::state::preferences::BalancePrivacy;
+                let amount = format_u64_as_string(summary.sats, ",");
+                for privacy in [
+                    BalancePrivacy::Unresolved,
+                    BalancePrivacy::Hidden,
+                    BalancePrivacy::HiddenLocally,
+                    BalancePrivacy::Shown,
+                    BalancePrivacy::Hidden,
+                ] {
+                    let mounted = capture::inspect_full_window(
+                        &format!("foreign-split-{name}-privacy-{privacy:?}"),
+                        view_with_privacy(&panel, privacy.masks_amounts()),
+                        (1024, 768),
+                        "dark",
+                        theme::Theme::dark(),
+                    );
+                    assert_eq!(
+                        mounted.contains(&format!("{amount} sats")),
+                        !privacy.masks_amounts()
+                    );
+                    assert_eq!(
+                        mounted.contains("Continue to destination Cube"),
+                        can_continue
+                    );
+                    assert!(mounted.contains("Unspent on both chains (splittable)"));
+                    if privacy.masks_amounts() {
+                        assert!(mounted.contains("•••• sats"));
+                        assert!(!mounted.contains("1,000,000 sats"));
+                    }
+                }
+            }
             assert_eq!(
                 matches!(&panel.status, Status::Complete(summary) if summary.reviewable()),
                 can_continue,
@@ -1175,7 +1215,7 @@ mod tests {
                 ] {
                     let mounted = capture::inspect_full_window(
                         &format!("foreign-split-{name}"),
-                        view(&panel),
+                        view_with_privacy(&panel, false),
                         size,
                         appearance,
                         palette,
@@ -1337,6 +1377,38 @@ mod tests {
         ];
         for (name, status, can_continue) in states {
             panel.status = status;
+            if let Status::Complete(summary) = &panel.status {
+                use crate::app::state::preferences::BalancePrivacy;
+                let amount = format_u64_as_string(summary.sats, ",");
+                for privacy in [
+                    BalancePrivacy::Unresolved,
+                    BalancePrivacy::Hidden,
+                    BalancePrivacy::HiddenLocally,
+                    BalancePrivacy::Shown,
+                    BalancePrivacy::Hidden,
+                ] {
+                    let mounted = capture::inspect_full_window(
+                        &format!("imported-claim-{name}-privacy-{privacy:?}"),
+                        view_with_privacy(&panel, privacy.masks_amounts()),
+                        (520, 768),
+                        "light",
+                        theme::Theme::light(),
+                    );
+                    assert_eq!(
+                        mounted.contains(&format!("{amount} sats")),
+                        !privacy.masks_amounts()
+                    );
+                    assert_eq!(
+                        mounted.contains("Continue to destination Cube"),
+                        can_continue
+                    );
+                    assert!(mounted.contains("Unspent on both chains (splittable)"));
+                    if privacy.masks_amounts() {
+                        assert!(mounted.contains("•••• sats"));
+                        assert!(!mounted.contains("1,000,000 sats"));
+                    }
+                }
+            }
             assert_eq!(
                 matches!(&panel.status, Status::Complete(summary) if summary.reviewable() && summary.inventory.splittable > 0),
                 can_continue,
@@ -1349,7 +1421,7 @@ mod tests {
                 ] {
                     let mounted = capture::inspect_full_window(
                         &format!("imported-claim-{name}"),
-                        view(&panel),
+                        view_with_privacy(&panel, false),
                         size,
                         appearance,
                         palette,

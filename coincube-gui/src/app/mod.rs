@@ -11221,8 +11221,15 @@ impl App {
             iced::widget::Stack::new()
                 .push(content)
                 .push(iced::widget::opaque(
-                    split_review_overlay(intent, target, address, *sweep, *economics)
-                        .map(Message::View),
+                    split_review_overlay(
+                        intent,
+                        target,
+                        address,
+                        *sweep,
+                        *economics,
+                        self.cache.balance_amounts_masked(),
+                    )
+                    .map(Message::View),
                 ))
                 .into()
         } else {
@@ -11269,6 +11276,7 @@ fn split_review_overlay<'a>(
     address: &'a str,
     sweep: crate::services::foreign_psbt::SweepInputs,
     _economics: Option<crate::services::foreign_psbt::SweepEconomics>,
+    mask_amounts: bool,
 ) -> Element<'a, view::Message> {
     use coincube_ui::component::text::*;
     use coincube_ui::component::{button, card};
@@ -11296,7 +11304,7 @@ fn split_review_overlay<'a>(
         )))
         .push(p1_regular(format!(
             "Shared total: {} sats",
-            sweep.total.to_sat()
+            if mask_amounts { "••••".to_string() } else { sweep.total.to_sat().to_string() }
         )));
     let review = review
         .push(Space::new().height(Length::Fixed(4.0)))
@@ -14378,6 +14386,61 @@ pub(crate) mod tests {
             },
             economics: None,
         });
+    }
+
+    #[test]
+    fn split_review_masks_only_passive_shared_total() {
+        use crate::app::state::preferences::{BalancePrivacy, BalancePrivacyChrome};
+        use crate::app::view::shared::landing::capture;
+
+        let _guard = crate::app::session::test_guard();
+        let root =
+            std::env::temp_dir().join(format!("split-review-privacy-{}", uuid::Uuid::new_v4()));
+        let mut app = start_split_app(&root, Some(true));
+        let intent = start_split_intent(&app, START_SOURCE);
+        start_split_review(&mut app, intent);
+        for privacy in [
+            None,
+            Some(BalancePrivacy::Unresolved),
+            Some(BalancePrivacy::Hidden),
+            Some(BalancePrivacy::HiddenLocally),
+            Some(BalancePrivacy::Shown),
+            Some(BalancePrivacy::Hidden),
+        ] {
+            app.cache.balance_privacy = privacy.map(|privacy| BalancePrivacyChrome {
+                privacy,
+                busy: false,
+                interactive: privacy == BalancePrivacy::Shown,
+            });
+            let masked = app.cache.balance_amounts_masked();
+            let Some(SplitHandoff::Review {
+                intent,
+                target,
+                address,
+                sweep,
+                economics,
+            }) = app.split_handoff.as_ref()
+            else {
+                panic!("review fixture");
+            };
+            for (appearance, palette) in [
+                ("dark", coincube_ui::theme::Theme::dark()),
+                ("light", coincube_ui::theme::Theme::light()),
+            ] {
+                let mounted = capture::inspect_full_window(
+                    &format!("split-review-privacy-{privacy:?}"),
+                    split_review_overlay(intent, target, address, *sweep, *economics, masked),
+                    (1024, 768),
+                    appearance,
+                    palette,
+                );
+                assert!(mounted.contains("1 confirmed shared pre-fork coin(s)"));
+                assert!(mounted.contains("Start split"));
+                assert_eq!(mounted.contains("Shared total: 10000 sats"), !masked);
+                assert_eq!(mounted.contains("Shared total: •••• sats"), masked);
+            }
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// The errors a task shows, run to completion.
