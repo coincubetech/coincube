@@ -166,6 +166,9 @@ jobs:
 
           tar tzf "$stage.tar.gz" | grep -q "^$stage/coincube-spark-bridge$" \
             || { echo "coincube-spark-bridge missing from $stage.tar.gz"; tar tzf "$stage.tar.gz"; exit 1; }
+          tar tzf "$stage.tar.gz" | grep -q "^$stage/tenshu-mcp$" \
+            || { echo "tenshu-mcp missing from $stage.tar.gz"; tar tzf "$stage.tar.gz"; exit 1; }
+          python3 contrib/check_mcp_binary.py "./$stage/tenshu-mcp"
 
           # It execs and answers on the protocol — no API key, no mnemonic and
           # no network; stdin EOF ends the run.

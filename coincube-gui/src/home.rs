@@ -7150,10 +7150,9 @@ impl DeleteCubeModal {
 
                 // Pairings are authorization material scoped to this Cube.
                 // Remove them before deleting its wallet and settings.
-                if let Err(error) = crate::app::local_mcp::remove_cube_pairings(
-                    &self.datadir_root,
-                    &self.cube,
-                ) {
+                if let Err(error) =
+                    crate::app::local_mcp::remove_cube_pairings(&self.datadir_root, &self.cube)
+                {
                     self.warning = Some(DeleteError::Settings(
                         settings::SettingsError::WritingFile(error.to_string()),
                     ));

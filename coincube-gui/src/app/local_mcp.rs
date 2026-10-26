@@ -12,8 +12,6 @@ use std::sync::Arc;
 #[cfg(any(unix, windows))]
 use std::time::Duration;
 mod pairings;
-#[cfg(feature = "mcp-transactions")]
-pub(crate) mod transactions;
 
 /// Remove only the selected Cube's pairing files, never its keystore/seed.
 pub(crate) fn remove_cube_pairings(
@@ -178,7 +176,8 @@ impl Settings {
                             .load(std::sync::atomic::Ordering::Relaxed))
                     )),
                     button("Copy private client configuration").on_press_maybe(
-                        (!self.pairing_poisoned).then(|| msg(Message::CopyPair(client.id.clone())))
+                        (!self.pairing_poisoned && available)
+                            .then(|| msg(Message::CopyPair(client.id.clone())))
                     ),
                     button("Revoke this client")
                         .on_press(msg(Message::RevokePair(client.id.clone()))),
@@ -586,6 +585,10 @@ impl Settings {
             Some(Ok(_)) => {
                 self.pairing_error = None;
                 self.client_name.clear();
+                // Every new client must receive its own explicit wallet and
+                // capability choices; the previous grant is not a template.
+                self.wallet_allowed = false;
+                self.capabilities = [false; 3];
             }
         }
     }
@@ -605,6 +608,9 @@ impl Settings {
             Message::ReviewTransaction { .. } => return None,
             Message::Enable(value) => {
                 self.revoke();
+                self.wallet_allowed = false;
+                self.capabilities = [false; 3];
+                self.client_name.clear();
                 self.enabled = value && cfg!(any(unix, windows));
                 if let Some(store) = &mut self.pairing_store {
                     if store.set_enabled(self.enabled).is_err() {
@@ -668,6 +674,15 @@ impl Settings {
             }
             Message::CopyPair(id) => {
                 if self.pairing_poisoned {
+                    return None;
+                }
+                // The private bearer configuration is only revealed while its
+                // exact runtime grant is active in this unlocked session.
+                if !self
+                    .paired
+                    .iter()
+                    .any(|runtime| runtime.id == id && runtime.server.grant.active())
+                {
                     return None;
                 }
                 let store = self.pairing_store.as_ref()?;
@@ -1349,6 +1364,103 @@ mod tests {
     }
 
     #[test]
+    fn successful_pair_requires_fresh_scope_for_next_client() {
+        let mut settings = Settings {
+            enabled: true,
+            wallet_allowed: true,
+            capabilities: [true, false, true],
+            client_name: "first client".into(),
+            ..Settings::default()
+        };
+        settings.finish_pairing(Some(Ok("synthetic-id".into())));
+        assert!(settings.client_name.is_empty());
+        assert!(!settings.wallet_allowed);
+        assert_eq!(settings.capabilities, [false; 3]);
+
+        settings.client_name = "second client".into();
+        assert!(!settings.wallet_allowed && !settings.capabilities.iter().any(|v| *v));
+    }
+
+    #[test]
+    #[ignore = "synthetic content-only capture; set R06A_CAPTURE_DIR for PNGs"]
+    fn ai_access_synthetic_content_states_fit_and_disclose_scope() {
+        use crate::app::view::shared::landing::capture;
+        use coincube_ui::theme;
+        let _guard = super::super::session::test_guard();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _enter = runtime.enter();
+        let (root, wallet, daemon) = fixture();
+        let cube = "mcp-visual-synthetic";
+        let chain = wallet.chain;
+        std::fs::create_dir_all(root.join(chain.dir_name())).unwrap();
+        let location = pairings::Location::new(&root, chain, cube).unwrap();
+        super::super::session::open_without_pin(cube);
+
+        let empty = Settings::default();
+        let mut paired = Settings {
+            enabled: true,
+            pairing_location: Some(location.clone()),
+            pairing_store: Some(
+                pairings::Store::open(location, zeroize::Zeroizing::new([51; 32]), true).unwrap(),
+            ),
+            ..Settings::default()
+        };
+        for message in [
+            Message::ClientName("Synthetic local client".into()),
+            Message::Wallet(true),
+            Message::Capability(0, true),
+            Message::Pair,
+        ] {
+            paired.update(
+                message,
+                Some(wallet.clone()),
+                Some(daemon.clone()),
+                true,
+                cube,
+            );
+        }
+        paired.ensure_pairings(PairingContext {
+            root: &root,
+            chain,
+            cube_id: cube,
+            wallet: Some(wallet.clone()),
+            daemon: Some(daemon.clone()),
+            supported: true,
+            proposal_supported: false,
+        });
+        assert_eq!(paired.paired.len(), 1);
+        let render = |scenario: &str, settings: &Settings| {
+            for (size, appearance, palette) in [
+                ((1024, 768), "dark", theme::Theme::dark()),
+                ((1024, 768), "light", theme::Theme::light()),
+                ((1440, 900), "dark", theme::Theme::dark()),
+                ((1440, 900), "light", theme::Theme::light()),
+            ] {
+                let inspection = capture::inspect(
+                    scenario,
+                    settings.view_for_cube(true, false),
+                    size,
+                    appearance,
+                    palette,
+                );
+                assert!(inspection.contains("Today · Experimental local Vault reads"));
+                assert!(inspection.contains("Your AI provider may receive financial information"));
+                assert!(!inspection.contains("TENSHU_MCP_CREDENTIAL"));
+            }
+        };
+        render("r23-empty", &empty);
+        render("r23-paired", &paired);
+        paired.revoke();
+        super::super::session::close();
+        render("r23-locked", &paired);
+        drop(paired);
+        runtime.block_on(daemon.stop()).unwrap();
+        drop(daemon);
+        drop(wallet);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn persistent_pairings_resume_after_lock_restart_and_revoke_independently() {
         use serde_json::Value;
         let _guard = super::super::session::test_guard();
@@ -1452,7 +1564,7 @@ mod tests {
             );
             for message in [
                 Message::ClientName("History client".into()),
-                Message::Capability(0, false),
+                Message::Wallet(true),
                 Message::Capability(1, true),
                 Message::Pair,
             ] {
@@ -1484,6 +1596,18 @@ mod tests {
                 wire::Error::AccessDenied
             );
             super::super::session::close();
+            assert!(
+                settings
+                    .update(
+                        Message::CopyPair(first.clone()),
+                        None,
+                        None,
+                        true,
+                        "mcp-paired-fixture"
+                    )
+                    .is_none(),
+                "locked Cube must not reveal a private client configuration"
+            );
             assert_eq!(
                 wire::ipc::call(
                     &wire::pairing::resolve(&path).unwrap(),
@@ -1652,14 +1776,11 @@ mod tests {
             let tools = discovered["tools"].as_array().unwrap();
             let names: std::collections::BTreeSet<_> = tools.iter()
                 .map(|tool| tool["name"].as_str().unwrap()).collect();
-            assert_eq!(tools.len(), 10);
+            assert_eq!(tools.len(), 5);
             assert_eq!(names, std::collections::BTreeSet::from([
                 "tenshu_get_capabilities", "tenshu_list_wallets",
                 "tenshu_get_wallet_summary", "tenshu_get_transactions",
-                "tenshu_get_wallet_policy_summary", "tenshu_prepare_wallet_proposal",
-                "tenshu_get_wallet_proposal", "tenshu_prepare_wallet_creation",
-                "tenshu_prepare_transaction",
-                "tenshu_get_prepared_transaction",
+                "tenshu_get_wallet_policy_summary",
             ]));
             let call = |id, name: &str, arguments: Value| json!({"jsonrpc":"2.0", "id":id, "method":"tools/call", "params":{"name":name,"arguments":arguments}});
             let listed = response(&mut stdin, &mut stdout, call(3, "tenshu_list_wallets", json!({}))).await;
@@ -1674,25 +1795,6 @@ mod tests {
             let denied = response(&mut stdin, &mut stdout, call(7, "tenshu_get_wallet_summary", json!({"wallet_id":"another-wallet"}))).await;
             assert_eq!(denied["isError"], true);
             assert_eq!(denied["structuredContent"]["error"]["code"], "access_denied");
-            let setup_denied = response(&mut stdin, &mut stdout, call(10, "tenshu_prepare_wallet_creation", json!({
-                "request_id":"read-grant-must-not-prepare",
-                "topology":{
-                    "primary":{"threshold":3,"key_count":5},
-                    "recovery":{"quorum":{"threshold":2,"key_count":3},"relative_delay_blocks":144}
-                },
-                "keys":{"primary":vec!["unverified";5],"recovery":vec!["unverified";3]}
-            }))).await;
-            assert_eq!(setup_denied["isError"], true);
-            assert_eq!(setup_denied["structuredContent"], json!({"error":{"code":"access_denied"}}));
-            let transaction_denied = response(&mut stdin, &mut stdout, call(11, "tenshu_prepare_transaction", json!({
-                "wallet_id": id, "request_id": "read-grant-must-not-prepare",
-                "recipients": [{"address": "bcrt1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqdku202", "amount_sats": 10000}],
-                "fee_rate_sat_vb": 2, "max_fee_sats": 1000
-            }))).await;
-            assert_eq!(transaction_denied["isError"], true);
-            assert_eq!(transaction_denied["structuredContent"], json!({"error":{"code":"access_denied"}}));
-            let draft_denied = response(&mut stdin, &mut stdout, call(12, "tenshu_get_prepared_transaction", json!({"wallet_id": id, "draft_id": "foreign"}))).await;
-            assert_eq!(draft_denied["structuredContent"], json!({"error":{"code":"access_denied"}}));
             super::super::session::close();
             let locked = response(&mut stdin, &mut stdout, call(8, "tenshu_get_wallet_summary", json!({"wallet_id":id}))).await;
             assert_eq!(locked["structuredContent"]["error"]["code"], "access_denied");

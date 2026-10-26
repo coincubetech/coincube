@@ -321,9 +321,9 @@ mod tests {
     #[test]
     fn cube_settings_exposes_read_only_ai_access_route() {
         let menu = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::AiAccess));
-        assert!(section_routes(&menu, &Cache::default()).iter().any(|choice| {
-            choice.label == "AI access" && choice.selected && choice.enabled
-        }));
+        assert!(section_routes(&menu, &Cache::default())
+            .iter()
+            .any(|choice| { choice.label == "AI access" && choice.selected && choice.enabled }));
     }
 
     #[test]

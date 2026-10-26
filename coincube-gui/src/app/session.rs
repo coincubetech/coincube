@@ -53,6 +53,8 @@ use zeroize::Zeroizing;
 use crate::app::settings::CubeSettings;
 
 struct Session {
+    /// Non-secret identity for the current unlock lifetime.
+    generation: u64,
     /// The Cube this PIN belongs to. Checked on read so a stale session from a
     /// previously-open Cube can never hand its PIN to a different one.
     cube_id: String,
@@ -124,6 +126,7 @@ fn open_inner(cube_id: String, pin: Option<Zeroizing<String>>) {
         .filter(|s| s.cube_id == cube_id)
         .and_then(|s| s.signer);
     *guard = Some(Session {
+        generation: next_generation(),
         cube_id,
         pin,
         signer,
@@ -145,6 +148,7 @@ pub fn store_unlocked_signer(cube_id: &str, fingerprint: Fingerprint, signer: Ma
         // holding just the signer. `open` will fill in the PIN and preserve it.
         _ => {
             *guard = Some(Session {
+                generation: next_generation(),
                 cube_id: cube_id.to_string(),
                 // No PIN yet, and possibly never — a passkey Cube stores its
                 // signer here and never calls `open`. `None`, not `""`.
@@ -304,6 +308,36 @@ pub fn current_pin() -> Option<Zeroizing<String>> {
     lock_session().as_ref().and_then(|s| s.pin.clone())
 }
 
+fn next_generation() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Non-secret lifetime identity for scoped read grants. Reopening even the
+/// same Cube invalidates the previous generation.
+pub fn generation_for(cube_id: &str) -> Option<u64> {
+    lock_session()
+        .as_ref()
+        .filter(|s| s.cube_id == cube_id)
+        .map(|s| s.generation)
+}
+
+/// Serialize a short native pairing admission with lock/close/reopen.
+/// The callback must not call any session API.
+pub(crate) fn admit_generation<T>(
+    cube_id: &str,
+    generation: u64,
+    admit: impl FnOnce() -> Option<T>,
+) -> Option<T> {
+    let session = lock_session();
+    let current = session.as_ref()?;
+    if current.cube_id != cube_id || current.generation != generation {
+        return None;
+    }
+    admit()
+}
+
 /// Id of the currently open Cube, if any.
 pub fn current_cube_id() -> Option<String> {
     lock_session().as_ref().map(|s| s.cube_id.clone())
@@ -379,6 +413,36 @@ mod tests {
         assert!(pin_for("other-synthetic-cube").is_some());
         close_cube("other-synthetic-cube");
         assert!(!is_open());
+    }
+
+    #[test]
+    fn stale_generation_cannot_admit_after_lock_or_same_cube_reopen() {
+        let _guard = test_guard();
+        close();
+        open_without_pin("mcp-synthetic-cube");
+        let first = generation_for("mcp-synthetic-cube").unwrap();
+        assert_eq!(
+            admit_generation("mcp-synthetic-cube", first, || Some(7)),
+            Some(7)
+        );
+        close_cube("mcp-synthetic-cube");
+        assert_eq!(generation_for("mcp-synthetic-cube"), None);
+        assert_eq!(
+            admit_generation("mcp-synthetic-cube", first, || Some(7)),
+            None
+        );
+        open_without_pin("mcp-synthetic-cube");
+        let second = generation_for("mcp-synthetic-cube").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            admit_generation("mcp-synthetic-cube", first, || Some(7)),
+            None
+        );
+        assert_eq!(
+            admit_generation("mcp-synthetic-cube", second, || Some(9)),
+            Some(9)
+        );
+        close();
     }
 
     // These share one process-global, so they run under a mutex of their own

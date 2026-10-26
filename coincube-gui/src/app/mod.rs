@@ -7,6 +7,10 @@ pub mod config;
 pub mod error;
 pub mod features;
 mod imported_kit_metadata;
+// R23a ports only read/pair behavior. The pinned source also contains R24/R25
+// cfg branches, but this GUI manifest defines neither feature, including under
+// --all-features. Keep the exception local until those slices are reviewed.
+#[allow(unexpected_cfgs)]
 pub mod local_mcp;
 pub mod local_switch;
 pub mod menu;

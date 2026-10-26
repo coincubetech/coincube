@@ -5,8 +5,13 @@ pub mod connect;
 mod database;
 pub mod datadir;
 mod jsonrpc;
+#[cfg(feature = "test-utils")]
+pub mod mcp_test_fixture;
 pub mod poison_broadcast;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
+// The synthetic MCP fixture needs DummyBitcoind from this established test
+// module. Other test helpers are unused when linked as a dependency of GUI tests.
+#[cfg_attr(all(feature = "test-utils", not(test)), allow(dead_code))]
 mod testutils;
 
 pub use bdk_electrum::electrum_client;
