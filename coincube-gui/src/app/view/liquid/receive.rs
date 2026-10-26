@@ -1756,7 +1756,10 @@ mod privacy_tests {
                     .expect("ready card label");
                 assert!(
                     ready_label.x > 180.0,
-                    "ready details must sit beside the QR at {appearance} {outer:?}: {ready_label:?}"
+                    "ready details must sit beside the QR at {} {:?}: {:?}",
+                    appearance,
+                    outer,
+                    ready_label,
                 );
             }
         }

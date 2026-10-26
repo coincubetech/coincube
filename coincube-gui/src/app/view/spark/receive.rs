@@ -1271,7 +1271,10 @@ mod tests {
                     .expect("lightning address ready label");
                 assert!(
                     ready_label.x > 180.0,
-                    "Lightning address details must sit beside the QR at {appearance} {outer:?}: {ready_label:?}"
+                    "Lightning address details must sit beside the QR at {} {:?}: {:?}",
+                    appearance,
+                    outer,
+                    ready_label,
                 );
                 let signed_out = capture::inspect_wide_content(
                     "spark-receive-lightning-address-signed-out",
@@ -1350,7 +1353,10 @@ mod tests {
                     .expect("generated ready label");
                 assert!(
                     ready_label.x > 180.0,
-                    "generated details must sit beside the QR at {appearance} {outer:?}: {ready_label:?}"
+                    "generated details must sit beside the QR at {} {:?}: {:?}",
+                    appearance,
+                    outer,
+                    ready_label,
                 );
             }
         }
