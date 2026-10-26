@@ -13,7 +13,7 @@ use coincube_ui::{
     widget::*,
 };
 use iced::{
-    widget::{container, QRCode},
+    widget::{container, scrollable, QRCode},
     Alignment, Length,
 };
 
@@ -136,6 +136,162 @@ pub fn connect_account_panel<'a>(
         .push(text::h5_regular(" | CONNECT").color(color::GREY_3))
         .align_y(Alignment::Center);
 
+    let body = connect_account_body(acct);
+
+    let is_auth_step = !matches!(
+        acct.step,
+        ConnectFlowStep::Dashboard | ConnectFlowStep::DuressRecovery { .. }
+    );
+    let col_align = if is_auth_step {
+        Alignment::Center
+    } else {
+        Alignment::Start
+    };
+
+    Column::new()
+        .push(header)
+        .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
+        .push(body)
+        .spacing(0)
+        .align_x(col_align)
+        .width(Length::Fill)
+        .into()
+}
+
+/// Intents owned by the shell that mounts the Connect sheet. The account panel
+/// continues to own authentication, billing and security operations; the shell
+/// owns the origin, section route and Close lifecycle.
+#[derive(Debug, Clone)]
+pub enum ConnectSheetMessage {
+    Account(ConnectAccountMessage),
+    SelectSection(ConnectSheetSection),
+    Close,
+}
+
+/// The five account-wide sections shown in the Connect sheet. Recovery
+/// services has its own section here without changing the older Home menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectSheetSection {
+    Account,
+    PlanBilling,
+    Contacts,
+    DevicesSecurity,
+    RecoveryServices,
+}
+
+/// Connect's content inside an origin-preserving sheet. The caller draws the
+/// retained Launcher or Cube behind it and routes Close to that exact origin.
+/// This view never creates another account state or signs out on Close.
+pub fn connect_sheet<'a>(
+    acct: &'a ConnectAccountPanel,
+    active_section: ConnectSheetSection,
+) -> Element<'a, ConnectSheetMessage> {
+    let blocked = acct.requires_authenticated_reopen();
+    let signed_in = matches!(acct.step, ConnectFlowStep::Dashboard) && !blocked;
+    let title = if signed_in {
+        "Connect account"
+    } else {
+        "Connect"
+    };
+    let identity = acct.user.as_ref().map(|user| user.email.as_str());
+    let mut heading = Row::new()
+        .push(text::h4_bold(title).style(theme::text::primary))
+        .spacing(16)
+        .align_y(Alignment::Center)
+        .width(Length::Fill);
+    if let Some(email) = identity {
+        heading = heading.push(
+            text::p2_regular(email)
+                .style(theme::text::secondary)
+                .width(Length::Fill),
+        );
+    } else {
+        heading = heading.push(iced::widget::Space::new().width(Length::Fill));
+    }
+    heading = heading.push(button::secondary(None, "Close").on_press(ConnectSheetMessage::Close));
+
+    let content: Element<ConnectAccountMessage> = if blocked {
+        text::p1_regular("Connect authorization ended. Close and reopen this Cube through authenticated Connect startup to reconnect.").into()
+    } else if signed_in {
+        match active_section {
+            ConnectSheetSection::Account => overview_ux(acct),
+            ConnectSheetSection::PlanBilling => plan_billing_ux(acct),
+            ConnectSheetSection::Contacts => contacts::contacts_ux(acct),
+            ConnectSheetSection::DevicesSecurity => security_ux(acct),
+            ConnectSheetSection::RecoveryServices => recovery_services_ux(acct),
+        }
+    } else {
+        connect_account_body(acct)
+    };
+    let content: Element<ConnectSheetMessage> = if signed_in {
+        let mut column = Column::new().spacing(12);
+        if let Some(error) = acct.error.as_ref() {
+            column = column.push(account_error_card(error));
+        }
+        column.push(content).into()
+    } else {
+        content
+    }
+    .map(ConnectSheetMessage::Account);
+    let body: Element<ConnectSheetMessage> = if signed_in {
+        let sections = [
+            ("Account", ConnectSheetSection::Account),
+            ("Plan & billing", ConnectSheetSection::PlanBilling),
+            ("Contacts", ConnectSheetSection::Contacts),
+            ("Devices & security", ConnectSheetSection::DevicesSecurity),
+            ("Recovery services", ConnectSheetSection::RecoveryServices),
+        ];
+        let mut navigation = Column::new().spacing(8).width(Length::Fixed(210.0));
+        for (label, section) in sections {
+            let selected = section == active_section;
+            let control = if selected {
+                button::primary(None, label)
+            } else {
+                button::secondary(None, label)
+            };
+            navigation =
+                navigation.push(control.on_press(ConnectSheetMessage::SelectSection(section)));
+        }
+        navigation = navigation.push(
+            text::p2_regular(
+                "Account-wide. Each Cube's service connection is in its own Settings.",
+            )
+            .style(theme::text::secondary),
+        );
+        container(
+            Row::new()
+                .push(navigation)
+                .push(scrollable(content).width(Length::Fill).height(Length::Fill))
+                .spacing(24)
+                .height(Length::Fill),
+        )
+        .padding(16)
+        .height(Length::Fill)
+        .into()
+    } else {
+        container(scrollable(content).width(Length::Fill).height(Length::Fill))
+            .max_width(600)
+            .center_x(Length::Fill)
+            .height(Length::Fill)
+            .padding(16)
+            .into()
+    };
+
+    container(
+        Column::new()
+            .push(container(heading).padding(20))
+            .push(body)
+            .spacing(0)
+            .height(Length::Fill),
+    )
+    .padding(12)
+    .max_width(if signed_in { 1040 } else { 600 })
+    .height(Length::Fill)
+    .style(card_style)
+    .into()
+}
+
+fn connect_account_body<'a>(acct: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMessage> {
     let body: Element<ConnectAccountMessage> = match &acct.step {
         ConnectFlowStep::CheckingSession => Column::new()
             .push(text::p1_regular("Loading…").color(color::GREY_3))
@@ -179,8 +335,6 @@ pub fn connect_account_panel<'a>(
     };
 
     let mut col = Column::new()
-        .push(header)
-        .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
         .spacing(0)
         .align_x(col_align)
         .width(Length::Fill);
@@ -3142,6 +3296,69 @@ mod renewal_banner_tests {
             .as_widget_mut()
             .operate(&mut tree, Layout::new(&node), renderer, &mut labels);
         labels.0
+    }
+
+    #[tokio::test]
+    async fn connect_sheet_fits_compact_window_in_auth_and_account_sections() {
+        use iced::advanced::{layout, renderer::Headless, widget::Tree};
+
+        let renderer = <iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer for Connect sheet");
+        let size = iced::Size::new(1000.0, 712.0);
+        let mut account = ConnectAccountPanel::new();
+
+        for (name, step, section) in [
+            (
+                "sign-in",
+                ConnectFlowStep::Login {
+                    email: String::new(),
+                    loading: false,
+                },
+                ConnectSheetSection::Account,
+            ),
+            (
+                "sign-up",
+                ConnectFlowStep::Register {
+                    email: String::new(),
+                    loading: false,
+                },
+                ConnectSheetSection::Account,
+            ),
+            (
+                "plan",
+                ConnectFlowStep::Dashboard,
+                ConnectSheetSection::PlanBilling,
+            ),
+            (
+                "security",
+                ConnectFlowStep::Dashboard,
+                ConnectSheetSection::DevicesSecurity,
+            ),
+            (
+                "recovery",
+                ConnectFlowStep::Dashboard,
+                ConnectSheetSection::RecoveryServices,
+            ),
+        ] {
+            account.step = step;
+            if matches!(account.step, ConnectFlowStep::Dashboard) {
+                account.user = Some(user());
+            }
+            let mut element = connect_sheet(&account, section);
+            let mut tree = Tree::new(element.as_widget());
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(iced::Size::ZERO, size),
+            );
+            assert!(node.size().width <= size.width, "{name} overflows width");
+            assert!(node.size().height <= size.height, "{name} overflows height");
+        }
     }
 
     fn plan(tier: PlanTier, status: PlanStatus, renewal_at: Option<&str>) -> ConnectPlan {
