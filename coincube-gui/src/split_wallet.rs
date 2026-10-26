@@ -454,6 +454,9 @@ impl SplitWalletPanel {
                 if self.imported_source.is_some() {
                     return Task::none();
                 }
+                if self.selected_target_id() == Some(target.id.as_str()) {
+                    return Task::none();
+                }
                 if self
                     .targets
                     .iter()
@@ -565,11 +568,13 @@ impl SplitWalletPanel {
                     }
                 }
                 let reviewable = matches!(&self.status, Status::Complete(summary) if summary.reviewable() && (self.imported_source.is_none() || summary.inventory.splittable > 0));
-                focus_task(if reviewable {
-                    CONTINUE_ACTION_ID
-                } else {
-                    SCAN_ACTION_ID
-                })
+                crate::services::public_hardware_source::focus_if_unfocused(Id::new(
+                    if reviewable {
+                        CONTINUE_ACTION_ID
+                    } else {
+                        SCAN_ACTION_ID
+                    },
+                ))
             }
             Message::Continue => Task::none(),
         }
@@ -1927,7 +1932,11 @@ mod tests {
                 None,
                 0,
             );
-            assert_focus_task(reading, view(&panel), Id::new("tenshu.hardware.account"));
+            assert_focus_task(
+                reading,
+                view(&panel),
+                Id::new("tenshu.hardware.purpose.bip84"),
+            );
             let generation = panel.hardware_mut().generation_for_test();
             let loaded = panel.update(
                 Message::Hardware(loaded_for_test(generation, succeeds)),
@@ -1942,6 +1951,54 @@ mod tests {
             assert_eq!(panel.source_form.hardware_account().is_some(), succeeds);
         }
         let _ = std::fs::remove_dir(root);
+    }
+
+    #[test]
+    fn scan_completion_preserves_focus_in_another_tab_and_ignores_stale_result() {
+        use crate::services::public_hardware_source::tests::{
+            assert_focus_task, assert_focus_task_from,
+        };
+
+        let _guard = crate::app::session::test_guard();
+        let mut panel = SplitWalletPanel::new();
+        panel.set_targets(vec![target()]);
+        let generation = panel.generation;
+        let result = panel.update(
+            Message::Scanned(Err("failed".into()), generation, 0),
+            None,
+            0,
+        );
+        let other = Id::new("other-tab.pin");
+        assert_focus_task_from(
+            result,
+            iced::widget::text_input("PIN", "")
+                .id(other.clone())
+                .on_input(Message::ExternalEdited)
+                .into(),
+            Some(other.clone()),
+            other.clone(),
+        );
+
+        let mounted = panel.update(
+            Message::Scanned(Err("failed".into()), generation, 0),
+            None,
+            0,
+        );
+        assert_focus_task(mounted, view(&panel), Id::new(SCAN_ACTION_ID));
+        let stale = panel.update(
+            Message::Scanned(Err("stale".into()), generation.wrapping_sub(1), 0),
+            None,
+            0,
+        );
+        assert_focus_task_from(
+            stale,
+            iced::widget::text_input("PIN", "")
+                .id(other.clone())
+                .on_input(Message::ExternalEdited)
+                .into(),
+            Some(other.clone()),
+            other,
+        );
     }
 
     /// Check source-first layout and action dispatch at narrow and standard
@@ -2994,9 +3051,50 @@ mod tests {
         );
 
         assert!(matches!(panel.status(), Status::Complete(_)));
-        // The state machine intentionally has no authorize/sign/broadcast
-        // state. A completed discovery can only be invalidated back to Editing.
+        // The state machine intentionally has no authorize/sign/broadcast state.
+        // Re-activating the selected target keeps the completed evidence.
         let _ = panel.update(Message::TargetSelected(target()), None, 9);
+        assert!(matches!(panel.status(), Status::Complete(_)));
+        let other = TargetCube {
+            id: "cube-2".into(),
+            name: "Other Vault".into(),
+        };
+        panel.targets.push(other.clone());
+        let _ = panel.update(Message::TargetSelected(other), None, 9);
         assert_eq!(panel.status(), &Status::Editing);
+    }
+
+    #[test]
+    fn choosing_current_hardware_purpose_keeps_completed_scan_and_ready_account() {
+        let _guard = crate::app::session::test_guard();
+        let mut panel = SplitWalletPanel::new();
+        panel.set_targets(vec![target()]);
+        panel.source_form.select_source(Source::Hardware);
+        panel.hardware_mut().ready_for_test(hardware_account());
+        let generation = panel.generation;
+        let _ = panel.update(
+            Message::Scanned(Ok(completed_evidence(generation)), generation, 0),
+            None,
+            0,
+        );
+        assert!(matches!(panel.status(), Status::Complete(_)));
+        let _ = panel.update(
+            Message::Hardware(HardwareMessage::PurposeSelected(
+                split_hardware::Purpose::Bip84,
+            )),
+            None,
+            0,
+        );
+        assert!(matches!(panel.status(), Status::Complete(_)));
+        assert!(panel.source_form.hardware_account().is_some());
+        let _ = panel.update(
+            Message::Hardware(HardwareMessage::PurposeSelected(
+                split_hardware::Purpose::Bip49,
+            )),
+            None,
+            0,
+        );
+        assert_eq!(panel.status(), &Status::Editing);
+        assert!(panel.source_form.hardware_account().is_none());
     }
 }

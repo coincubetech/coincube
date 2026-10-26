@@ -3229,7 +3229,7 @@ mod tests {
             assert_focus_task(
                 reading,
                 panel.setup_view().map(Message::View),
-                Id::new("tenshu.hardware.account"),
+                Id::new("tenshu.hardware.purpose.bip84"),
             );
             let generation = panel.source.hardware_mut().generation_for_test();
             let loaded = panel.update_view(
@@ -3245,6 +3245,24 @@ mod tests {
                 Id::from("tenshu.hardware.read:5:dev-1".to_string()),
             );
             assert_eq!(panel.source.hardware_account().is_some(), succeeds);
+            if succeeds {
+                let _ = panel.update_view(
+                    ImportMessage::Source(wallet_source_form::Message::Hardware(
+                        HardwareMessage::PurposeSelected(crate::split_hardware::Purpose::Bip84),
+                    )),
+                    None,
+                    0,
+                );
+                assert!(panel.source.hardware_account().is_some());
+                let _ = panel.update_view(
+                    ImportMessage::Source(wallet_source_form::Message::Hardware(
+                        HardwareMessage::PurposeSelected(crate::split_hardware::Purpose::Bip49),
+                    )),
+                    None,
+                    0,
+                );
+                assert!(panel.source.hardware_account().is_none());
+            }
         }
         let _ = std::fs::remove_dir_all(root);
     }
