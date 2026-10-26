@@ -518,11 +518,11 @@ fn detail_beside_list(width: f32) -> bool {
 fn day_heading(day: Option<NaiveDate>, today: NaiveDate) -> String {
     match day {
         None => "Pending".to_owned(),
-        Some(day) if day == today => format!("Today · {}", day.format("%a %e %b %Y")),
+        Some(day) if day == today => format!("Today · {}", day.format("%a %-d %b %Y")),
         Some(day) if day == today.pred_opt().unwrap_or(today) => {
-            format!("Yesterday · {}", day.format("%a %e %b %Y"))
+            format!("Yesterday · {}", day.format("%a %-d %b %Y"))
         }
-        Some(day) => day.format("%a %e %b %Y").to_string(),
+        Some(day) => day.format("%a %-d %b %Y").to_string(),
     }
 }
 
@@ -637,7 +637,7 @@ fn render_at_width<'a>(
                 } else {
                     &cache.cube_name
                 },
-                cache.network
+                super::nav::shell::network_label(cache.chain())
             ))
             .style(coincube_ui::theme::text::secondary),
         )
@@ -794,7 +794,7 @@ fn render_at_width<'a>(
                     h3(entry.title.clone()).width(Length::Fill),
                     Action::new(
                         Id::from("tenshu.activity.detail.close"),
-                        text("×"),
+                        text("× Close"),
                         Message::FocusAction,
                     )
                     .style(coincube_ui::theme::button::transparent_border)
@@ -837,7 +837,7 @@ fn render_at_width<'a>(
         {
             detail = detail.push(text(format!(
                 "Date · {}",
-                time.with_timezone(&Local).format("%b %e, %Y %H:%M %Z")
+                time.with_timezone(&Local).format("%b %-d, %Y %H:%M %Z")
             )));
         }
         if let Some(fee) = &entry.fee {
@@ -907,6 +907,7 @@ mod tests {
     use super::*;
     use crate::app::wallets::DomainLiquidAssetInfo;
     use crate::app::{state::State, view::shared::landing::capture};
+    use crate::chain::ChainId;
 
     fn spark_payment() -> PaymentSummary {
         PaymentSummary {
@@ -1096,8 +1097,21 @@ mod tests {
     }
 
     #[test]
+    fn activity_dates_do_not_pad_single_digit_days() {
+        let today = NaiveDate::from_ymd_opt(2025, 10, 9).unwrap();
+        let yesterday = today.pred_opt().unwrap();
+        assert_eq!(day_heading(Some(today), today), "Today · Thu 9 Oct 2025");
+        assert_eq!(
+            day_heading(Some(yesterday), today),
+            "Yesterday · Wed 8 Oct 2025"
+        );
+    }
+
+    #[test]
     fn activity_rows_mount_at_compact_and_wide_widths_in_both_themes() {
-        let cache = Cache::default();
+        let mut cache = Cache::default();
+        // Both chains share Bitcoin address encoding, so Activity must use the Cube chain.
+        cache.fiat_chain = ChainId::BitcoinBlake2b;
         let mut activity = Activity::new(None, None);
         let payment = spark_payment();
         let id = Entry::spark(payment.clone()).id;
@@ -1127,7 +1141,9 @@ mod tests {
                     );
                     assert!(mounted.contains("Coffee"));
                     assert!(mounted.contains("Failed"));
+                    assert!(mounted.contains("Cube · Bitcoin Blake2b mainnet"));
                     assert!(mounted.has_focus(row_focus_id(&id)));
+                    assert_eq!(mounted.contains("× Close"), selected);
                     assert_eq!(
                         mounted.contains("Open wallet details and actions"),
                         selected
