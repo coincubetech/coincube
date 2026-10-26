@@ -149,8 +149,18 @@ impl ReceiveRequest {
 /// Lightning route is admitted by this first contract; those need separate
 /// amount, expiry and payment-hash checks before exposure.
 pub(crate) struct ReceiveArtifact {
-    pub(crate) request: ReceiveRequest,
-    pub(crate) address: Address,
+    request: ReceiveRequest,
+    address: Address,
+}
+
+impl ReceiveArtifact {
+    pub(crate) fn request(&self) -> &ReceiveRequest {
+        &self.request
+    }
+
+    pub(crate) fn address(&self) -> &Address {
+        &self.address
+    }
 }
 
 /// Opaque result reserved for a restricted destination backend that has
@@ -490,8 +500,8 @@ mod tests {
                 synthetic_proof(&request, &mainnet),
             )
             .unwrap();
-        assert_eq!(accepted.request, request);
-        assert_eq!(accepted.address.to_string(), mainnet);
+        assert_eq!(accepted.request(), &request);
+        assert_eq!(accepted.address().to_string(), mainnet);
     }
 
     #[test]
