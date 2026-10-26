@@ -261,7 +261,7 @@ fn pairing_card(settings: &Settings) -> Ui<'_> {
             ][index];
             body = body.push(selection(
                 id,
-                label,
+                *label,
                 settings.capabilities[index],
                 Message::Capability(index, !settings.capabilities[index]),
             ));
