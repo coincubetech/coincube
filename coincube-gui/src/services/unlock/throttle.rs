@@ -22,12 +22,16 @@
 //! It is deliberately **not** inside a Cube's data directory either: a duress
 //! wipe takes those, and a wipe must not hand the attacker a fresh counter.
 
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
@@ -259,6 +263,33 @@ pub fn classify_pin(root: &Path, loc: &CubeLocation, pin: &str) -> Result<PinAtt
     classify_pin_scoped(root, loc, pin, || Ok(()))
 }
 
+/// PIN-only checks outside the normal unlock path require the regular PIN.
+/// A duress marker is a failed trial here, not a successful unlock or an
+/// emergency wipe. Charge it without disclosing which wrong PIN was entered.
+pub fn classify_regular_pin(
+    root: &Path,
+    loc: &CubeLocation,
+    pin: &str,
+) -> Result<PinAttempt, UnlockError> {
+    classify_regular_pin_with(root, loc.cube_id, || super::unlock_blocking(loc, pin))
+}
+
+fn classify_regular_pin_with(
+    root: &Path,
+    cube_id: &str,
+    verify: impl FnOnce() -> Result<PinOutcome, UnlockError>,
+) -> Result<PinAttempt, UnlockError> {
+    classify_pin_with_guard(
+        root,
+        cube_id,
+        || match verify()? {
+            PinOutcome::Duress => Ok(PinOutcome::Wrong),
+            other => Ok(other),
+        },
+        || Ok(()),
+    )
+}
+
 /// The fork keeps its PIN-only seed trial and Connect admission in the caller.
 /// It still shares the Cube-ID counter with Bitcoin and seed-export trials.
 pub fn classify_connect_fork(
@@ -446,7 +477,7 @@ impl ThrottleState {
         let Ok(bytes) = serde_json::to_vec_pretty(self) else {
             return;
         };
-        if let Err(e) = std::fs::write(path(root), bytes) {
+        if let Err(e) = write_atomically(root, &bytes, || Ok(())) {
             tracing::debug!("could not persist the unlock throttle: {e}");
         }
     }
@@ -488,6 +519,35 @@ impl ThrottleState {
             self.save(root);
         }
     }
+}
+
+fn write_atomically(
+    root: &Path,
+    bytes: &[u8],
+    before_commit: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    struct PendingFile(PathBuf);
+    impl Drop for PendingFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    let pending = PendingFile(root.join(format!(".unlock-throttle-{}.tmp", uuid::Uuid::new_v4())));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(&pending.0)?;
+    file.write_all(bytes)?;
+    file.flush()?;
+    file.sync_all()?;
+    drop(file);
+    before_commit()?;
+    std::fs::rename(&pending.0, path(root))?;
+    #[cfg(unix)]
+    std::fs::File::open(root)?.sync_all()?;
+    Ok(())
 }
 
 /// 1s, 2s, 4s, 8s… after the free attempts, capped at [`MAX_DELAY`].
@@ -864,6 +924,49 @@ mod tests {
             PinAttempt::Classified(PinOutcome::Duress)
         ));
         assert!(!ThrottleState::load(&root).failures.contains_key("cube-a"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn delete_cube_duress_is_charged_as_wrong_and_lockout_precedes_decryption() {
+        let root = tmp("delete-duress");
+        for _ in 0..3 {
+            assert!(matches!(
+                classify_regular_pin_with(&root, "cube-a", || Ok(PinOutcome::Duress)).unwrap(),
+                PinAttempt::Classified(PinOutcome::Wrong)
+            ));
+        }
+        assert_eq!(
+            ThrottleState::load(&root).failures["cube-a"].consecutive_failures,
+            3
+        );
+        assert!(matches!(
+            classify_regular_pin_with(&root, "cube-a", || panic!("locked PIN must not decrypt"))
+                .unwrap(),
+            PinAttempt::Locked(_)
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn interrupted_counter_replacement_keeps_previous_state() {
+        let root = tmp("interrupted-save");
+        let mut state = ThrottleState::default();
+        state.record_failure(&root, "cube-a");
+        let original = std::fs::read(path(&root)).unwrap();
+        let mut updated = state.clone();
+        updated
+            .failures
+            .get_mut("cube-a")
+            .unwrap()
+            .consecutive_failures = 20;
+        let bytes = serde_json::to_vec(&updated).unwrap();
+        assert!(write_atomically(&root, &bytes, || Err(io::Error::other("interrupted"))).is_err());
+        assert_eq!(std::fs::read(path(&root)).unwrap(), original);
+        assert_eq!(ThrottleState::load(&root), state);
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        write_atomically(&root, &bytes, || Ok(())).unwrap();
+        assert_eq!(ThrottleState::load(&root), updated);
         std::fs::remove_dir_all(root).unwrap();
     }
 

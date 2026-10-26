@@ -1744,7 +1744,8 @@ pub(crate) const DURESS_NO_CUBES_MSG: &str =
 /// Cube whose settings had drifted. It is also slower — one ~831 ms Argon2 pass
 /// per Cube — which is why this is **blocking** and callers must run it on a
 /// blocking pool. Enrollment is a wizard step behind a spinner; paying a second
-/// or two once, to be certain, is the right trade.
+/// or two once, to be certain, is the right trade. Each trial now shares that
+/// Cube's unlock delay; enrollment cannot become an alternate PIN oracle.
 ///
 /// Run this BEFORE any server enrollment: Connect tiers enroll server-side
 /// first, so checking the (deterministic, user-entered) collision only in the
@@ -1754,7 +1755,7 @@ pub(crate) fn duress_pin_collision_check_blocking(
     root: &std::path::Path,
     duress_pin: &str,
 ) -> Result<(), String> {
-    use crate::services::unlock::{self, PinOutcome};
+    use crate::services::unlock::{self, throttle::PinAttempt, PinOutcome};
 
     // Identity and runtime preflight over every Cube first: a dormant-chain
     // Cube must refuse here, before the wizard enrolls anything server-side,
@@ -1769,12 +1770,17 @@ pub(crate) fn duress_pin_collision_check_blocking(
         for cube in &entry.settings.cubes {
             total_cubes += 1;
             let loc = unlock::CubeLocation::new(root, cube);
-            match unlock::unlock_blocking(&loc, duress_pin) {
-                Ok(PinOutcome::Unlock(_)) => return Err(DURESS_PIN_COLLIDES_MSG.to_string()),
+            match unlock::throttle::classify_regular_pin(root, &loc, duress_pin) {
+                Ok(PinAttempt::Classified(PinOutcome::Unlock(_))) => {
+                    return Err(DURESS_PIN_COLLIDES_MSG.to_string())
+                }
                 // Already this Cube's duress PIN (a re-enrolment with the same
                 // value), or simply wrong. Neither is a collision with a real
                 // unlock PIN.
-                Ok(PinOutcome::Duress) | Ok(PinOutcome::Wrong) => {}
+                Ok(PinAttempt::Classified(PinOutcome::Duress | PinOutcome::Wrong)) => {}
+                Ok(PinAttempt::Locked(remaining)) => {
+                    return Err(unlock::throttle::lockout_message(remaining))
+                }
                 // A Cube with no local seed can't collide. A keystore problem
                 // means we can't be sure — and "can't be sure" must not become
                 // "probably fine" on a path whose failure mode is an
@@ -2277,12 +2283,13 @@ pub(crate) fn duress_step_up_method_blocking(
 ///
 /// `Ok` only when a Cube's regular PIN matches. `Err` on an empty PIN, a
 /// mismatch, no Cubes, no PIN-protected Cube on this device, or when settings
-/// can't be read.
+/// can't be read. Each candidate is charged to every PIN Cube it actually
+/// tests; a locked Cube is skipped so another Cube's valid PIN can still pass.
 pub(crate) fn verify_regular_cube_pin_blocking(
     root: &std::path::Path,
     pin: &str,
 ) -> Result<(), String> {
-    use crate::services::unlock::{self, PinOutcome};
+    use crate::services::unlock::{self, throttle::PinAttempt, PinOutcome};
 
     if pin.is_empty() {
         return Err("Enter your Cube unlock PIN to continue.".to_string());
@@ -2292,6 +2299,7 @@ pub(crate) fn verify_regular_cube_pin_blocking(
         return Err(DURESS_NO_CUBES_MSG.to_string());
     }
     let mut any_pin = false;
+    let mut shortest_lockout: Option<std::time::Duration> = None;
     for network_dir in &network_dirs {
         let settings = crate::app::settings::Settings::from_file(network_dir)
             .map_err(|e| format!("Couldn't read your Cube settings to verify your PIN: {e}"))?;
@@ -2303,11 +2311,15 @@ pub(crate) fn verify_regular_cube_pin_blocking(
                 continue;
             }
             any_pin = true;
-            match unlock::unlock_blocking(&loc, pin) {
-                Ok(PinOutcome::Unlock(_)) => return Ok(()),
+            match unlock::throttle::classify_regular_pin(root, &loc, pin) {
+                Ok(PinAttempt::Classified(PinOutcome::Unlock(_))) => return Ok(()),
                 // The duress PIN must not satisfy a step-up, and must not
                 // reveal that it was recognised either.
-                Ok(PinOutcome::Duress) | Ok(PinOutcome::Wrong) => {}
+                Ok(PinAttempt::Classified(PinOutcome::Duress | PinOutcome::Wrong)) => {}
+                Ok(PinAttempt::Locked(remaining)) => {
+                    shortest_lockout =
+                        Some(shortest_lockout.map_or(remaining, |current| current.min(remaining)));
+                }
                 Err(unlock::UnlockError::NoPinConfigured) => {}
                 // A keystore failure is not a wrong PIN (I7); surface it as
                 // itself rather than letting it read as a bad entry.
@@ -2323,6 +2335,9 @@ pub(crate) fn verify_regular_cube_pin_blocking(
         // install, no seed restored) would be holding. Distinct from a wrong
         // PIN, because the user can't fix it by typing a different one.
         return Err(DURESS_STEP_UP_NO_PIN_MSG.to_string());
+    }
+    if let Some(remaining) = shortest_lockout {
+        return Err(unlock::throttle::lockout_message(remaining));
     }
     Err(DURESS_STEP_UP_BAD_PIN_MSG.to_string())
 }
@@ -11227,6 +11242,9 @@ impl App {
             .and_then(|la| la.lightning_address.as_ref())
             .is_some();
         match &self.panels.current {
+            Menu::Cube(menu::CubeSubMenu::Settings(menu::CubeSettingsOption::AiAccess)) => {
+                Some(self.local_mcp.view_for_cube(self.mcp_supported(), false))
+            }
             Menu::Spark(menu::SparkSubMenu::Settings(Some(
                 menu::SparkSettingsOption::LightningAddress,
             ))) => Some(if authenticated {
@@ -16285,6 +16303,15 @@ pub(crate) mod tests {
             "{}",
             describe_tree(root.path())
         );
+        // Enrollment cannot become a fresh oracle after Cube A's ordinary
+        // unlock counter has imposed a delay, even for its real PIN.
+        let mut throttle = crate::services::unlock::throttle::ThrottleState::load(root.path());
+        for _ in 0..5 {
+            throttle.record_failure(root.path(), "cube-a");
+        }
+        assert!(duress_pin_collision_check_blocking(root.path(), "1234")
+            .unwrap_err()
+            .contains("Too many incorrect PINs"));
     }
 
     /// Arm duress on `cube` exactly as enrollment does: mint an unpredictable
@@ -16347,6 +16374,13 @@ pub(crate) mod tests {
             verify_regular_cube_pin_blocking(root.path(), "0000").unwrap_err(),
             DURESS_STEP_UP_BAD_PIN_MSG
         );
+        let mut throttle = crate::services::unlock::throttle::ThrottleState::load(root.path());
+        for _ in 0..5 {
+            throttle.record_failure(root.path(), "cube-a");
+        }
+        assert!(verify_regular_cube_pin_blocking(root.path(), "1234")
+            .unwrap_err()
+            .contains("Too many incorrect PINs"));
     }
 
     /// With no PIN-protected Cube on the device there is nothing to check the

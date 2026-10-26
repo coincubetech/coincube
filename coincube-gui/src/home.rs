@@ -7168,8 +7168,21 @@ impl DeleteCubeModal {
                     let pin = self.pin_input.value();
                     let loc =
                         crate::services::unlock::CubeLocation::new(&self.datadir_root, &self.cube);
-                    match crate::services::unlock::unlock_blocking(&loc, &pin) {
-                        Ok(crate::services::unlock::PinOutcome::Unlock(_)) => {}
+                    match crate::services::unlock::throttle::classify_regular_pin(
+                        &self.datadir_root,
+                        &loc,
+                        &pin,
+                    ) {
+                        Ok(crate::services::unlock::throttle::PinAttempt::Classified(
+                            crate::services::unlock::PinOutcome::Unlock(_),
+                        )) => {}
+                        Ok(crate::services::unlock::throttle::PinAttempt::Locked(remaining)) => {
+                            self.pin_error = Some(
+                                crate::services::unlock::throttle::lockout_message(remaining),
+                            );
+                            self.pin_input.clear();
+                            return Task::none();
+                        }
                         // A duress PIN must not delete the Cube here — that
                         // would be a quieter, unlogged wipe than the duress
                         // path itself, and would confirm to an observer that

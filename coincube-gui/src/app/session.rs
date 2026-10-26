@@ -435,6 +435,36 @@ mod tests {
         assert!(!is_open());
     }
 
+    #[test]
+    fn stale_generation_cannot_admit_after_lock_or_same_cube_reopen() {
+        let _guard = test_guard();
+        close();
+        open_without_pin("mcp-synthetic-cube");
+        let first = generation_for("mcp-synthetic-cube").unwrap();
+        assert_eq!(
+            admit_generation("mcp-synthetic-cube", first, || Some(7)),
+            Some(7)
+        );
+        close_cube("mcp-synthetic-cube");
+        assert_eq!(generation_for("mcp-synthetic-cube"), None);
+        assert_eq!(
+            admit_generation("mcp-synthetic-cube", first, || Some(7)),
+            None
+        );
+        open_without_pin("mcp-synthetic-cube");
+        let second = generation_for("mcp-synthetic-cube").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            admit_generation("mcp-synthetic-cube", first, || Some(7)),
+            None
+        );
+        assert_eq!(
+            admit_generation("mcp-synthetic-cube", second, || Some(9)),
+            Some(9)
+        );
+        close();
+    }
+
     // These share one process-global, so they run under a mutex of their own
     // rather than being allowed to interleave.
     fn guard() -> std::sync::MutexGuard<'static, ()> {
