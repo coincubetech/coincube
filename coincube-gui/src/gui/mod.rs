@@ -25,7 +25,7 @@ use crate::{
         message::{FiatMessage as AppFiatMessage, Message as AppMessage},
         settings::global::{GlobalSettings, PreferencesReceipt, WindowConfig},
         state::preferences::{
-            BalancePrivacyChrome, Operation, PreferencesNotice, PreferencesOwner,
+            BalancePrivacyChrome, BeginSaveError, Operation, PreferencesNotice, PreferencesOwner,
             PreferencesPageState, SaveOutcome, SaveRequest,
         },
         view::{
@@ -551,10 +551,11 @@ impl GUI {
     }
 
     fn privacy_chrome_for(preferences: &PreferencesOwner) -> BalancePrivacyChrome {
+        let user_change_busy = preferences.is_busy() && !preferences.is_background_refreshing();
         BalancePrivacyChrome {
             privacy: preferences.privacy(),
-            busy: preferences.is_busy(),
-            interactive: preferences.accepted().is_some() && !preferences.is_busy(),
+            busy: user_change_busy,
+            interactive: preferences.accepted().is_some() && !user_change_busy,
         }
     }
 
@@ -608,6 +609,9 @@ impl GUI {
     fn preferences_view_model(&self) -> preferences_view::ViewModel<'_> {
         let accepted = self.preferences.accepted();
         let notice = self.preferences.notice();
+        let user_change_busy =
+            self.preferences.is_busy() && !self.preferences.is_background_refreshing();
+        let pending_operation = self.preferences.pending_operation();
         preferences_view::ViewModel {
             saved: accepted.map(|value| value.preferences),
             effective: accepted.map(|value| {
@@ -618,11 +622,11 @@ impl GUI {
             system_theme: self.system_theme,
             system_reduces_motion: self.system_reduces_motion,
             cubes_renderer_available: true,
-            saving: self.preferences.is_busy(),
+            saving: matches!(pending_operation, Some(Operation::Save(_))),
             balance_privacy: self.preferences.privacy(),
-            balance_privacy_interactive: !self.preferences.is_busy(),
+            balance_privacy_interactive: !user_change_busy,
             durability_unconfirmed: matches!(notice, PreferencesNotice::SavedUnconfirmed),
-            loading: self.preferences.is_busy() && accepted.is_none(),
+            loading: user_change_busy && matches!(pending_operation, Some(Operation::Initialize)),
             load_error: matches!(notice, PreferencesNotice::LoadFailed)
                 .then_some("The device settings could not be loaded."),
             save_error: matches!(notice, PreferencesNotice::SaveFailed)
@@ -954,6 +958,10 @@ impl GUI {
                 self.publish_balance_privacy();
                 self.run_preferences(request)
             }
+            Err(BeginSaveError::Queued) => {
+                self.publish_balance_privacy();
+                Task::none()
+            }
             Err(_) => Task::none(),
         }
     }
@@ -962,11 +970,17 @@ impl GUI {
         &mut self,
         change: crate::app::settings::preferences::PreferenceChange,
     ) -> Task<Message> {
-        let Ok(request) = self.preferences.begin_save(change) else {
-            return Task::none();
-        };
-        self.publish_balance_privacy();
-        self.run_preferences(request)
+        match self.preferences.begin_save(change) {
+            Ok(request) => {
+                self.publish_balance_privacy();
+                self.run_preferences(request)
+            }
+            Err(BeginSaveError::Queued) => {
+                self.publish_balance_privacy();
+                Task::none()
+            }
+            Err(_) => Task::none(),
+        }
     }
 
     fn run_preferences(&self, request: SaveRequest) -> Task<Message> {
@@ -2782,6 +2796,7 @@ impl GUI {
                     SaveOutcome::Applied(_)
                 );
                 self.publish_balance_privacy();
+                let mut tasks = Vec::new();
                 if applied {
                     let after = self
                         .preferences
@@ -2794,10 +2809,14 @@ impl GUI {
                         self.refresh_all_launcher_modes();
                     }
                     if needs_global_settings_reload(before, after) {
-                        return self.reload_all_global_settings();
+                        tasks.push(self.reload_all_global_settings());
                     }
                 }
-                Task::none()
+                if let Some(next) = self.preferences.begin_next_queued_save() {
+                    self.publish_balance_privacy();
+                    tasks.push(self.run_preferences(next));
+                }
+                Task::batch(tasks)
             }
             Message::ToggleTheme => {
                 use crate::app::settings::preferences::{PreferenceChange, ThemePreference};
@@ -3325,6 +3344,82 @@ mod app_preferences_sheet_tests {
             connect_sheet: None,
             preferences: PreferencesOwner::new(GlobalSettings::path(root), &receipt),
         }
+    }
+
+    #[test]
+    fn background_refresh_does_not_move_preferences_or_disable_controls() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path = std::env::temp_dir().join(format!(
+            "tenshu-preferences-refresh-presentation-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        let root = CoincubeDirectory::new(path.clone());
+        let mut gui = launcher_gui(&root);
+        fn inspect(
+            scenario: &str,
+            model: preferences_view::ViewModel<'_>,
+        ) -> crate::app::view::shared::landing::capture::Inspection {
+            let page = PreferencesPageState::default();
+            crate::app::view::shared::landing::capture::inspect_full_window(
+                scenario,
+                preferences_view::view(&page, model),
+                (1024, 768),
+                "dark",
+                coincube_ui::theme::Theme::dark(),
+            )
+        }
+
+        let baseline_model = gui.preferences_view_model();
+        assert!(!baseline_model.saving);
+        assert!(baseline_model.balance_privacy_interactive);
+        let baseline = inspect("preferences-idle", baseline_model);
+
+        std::thread::sleep(Duration::from_millis(1100));
+        let refresh = gui.preferences.begin_refresh_if_due().unwrap();
+        assert!(gui.preferences.is_busy());
+        assert!(gui.preferences.is_background_refreshing());
+        let pending_model = gui.preferences_view_model();
+        assert!(!pending_model.saving);
+        assert!(pending_model.balance_privacy_interactive);
+        let pending = inspect("preferences-background-refresh", pending_model);
+        assert_eq!(baseline.text, pending.text);
+        assert!(!pending.contains("Saving device preferences"));
+
+        // A click during the read is retained, then becomes the only visible
+        // save once the read finishes on the same ordered lane.
+        drop(gui.change_preference(PreferenceChange::DeveloperMode(true)));
+        assert!(gui.preferences.is_background_refreshing());
+        let receipt = GlobalSettings::load_or_initialize_preferences(&root).unwrap();
+        let next = gui.update(Message::Preferences(refresh, Ok(receipt)));
+        assert!(next.units() > 0);
+        assert!(!gui.preferences.is_background_refreshing());
+        let saving_model = gui.preferences_view_model();
+        assert!(saving_model.saving);
+        assert!(!saving_model.balance_privacy_interactive);
+        let saving = inspect("preferences-explicit-save", saving_model);
+        assert!(saving.contains("Saving device preferences"));
+
+        drop(next);
+        gui.preferences = unresolved_test_preferences();
+        let _hide = gui
+            .preferences
+            .begin_save(PreferenceChange::HideBalances(true))
+            .unwrap();
+        let unresolved_save = gui.preferences_view_model();
+        assert!(unresolved_save.saving);
+        assert!(!unresolved_save.loading);
+        assert!(!unresolved_save.balance_privacy_interactive);
+        assert_eq!(
+            unresolved_save.balance_privacy,
+            crate::app::state::preferences::BalancePrivacy::HiddenLocally
+        );
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
     }
 
     fn pin_entry(root: &CoincubeDirectory) -> tab::State {
