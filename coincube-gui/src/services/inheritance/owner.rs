@@ -94,6 +94,7 @@ pub async fn enroll_escrow(
         descriptor_json,
         seed_json,
         || false,
+        || true,
     )
     .await
 }
@@ -101,7 +102,7 @@ pub async fn enroll_escrow(
 /// Full-Cube PIN flow variant. Cancellation is checked after the awaited
 /// keyholder fetch and immediately before the escrow PUT. Once that PUT starts,
 /// monitoring must still be enabled to preserve escrow ⟹ heartbeat.
-pub async fn enroll_escrow_cancelable<F>(
+pub async fn enroll_escrow_cancelable<F, A>(
     client: &CoincubeClient,
     server_cube_id: u64,
     cube_enc_key: Option<&CubeEncryptionKey>,
@@ -109,9 +110,11 @@ pub async fn enroll_escrow_cancelable<F>(
     descriptor_json: Vec<u8>,
     seed_json: Option<Zeroizing<Vec<u8>>>,
     should_cancel: F,
+    start_upload: A,
 ) -> Result<VaultMonitoringStatus, OwnerEscrowError>
 where
     F: Fn() -> bool + Send + Sync,
+    A: Fn() -> bool + Send + Sync,
 {
     if should_cancel() {
         return Err(OwnerEscrowError::Cancelled);
@@ -131,7 +134,9 @@ where
         &descriptor_json,
         seed_json.as_ref().map(|s| s.as_slice()),
     )?;
-    if should_cancel() {
+    // The caller atomically elects upload or cancellation here. A cancel that
+    // wins first refuses the PUT; once upload wins, monitoring must complete.
+    if should_cancel() || !start_upload() {
         return Err(OwnerEscrowError::Cancelled);
     }
 
@@ -301,6 +306,7 @@ mod tests {
             b"descriptor".to_vec(),
             Some(Zeroizing::new(b"synthetic-seed".to_vec())),
             || checks.fetch_add(1, Ordering::AcqRel) > 0,
+            || true,
         )
         .await;
         assert!(matches!(result, Err(OwnerEscrowError::Cancelled)));

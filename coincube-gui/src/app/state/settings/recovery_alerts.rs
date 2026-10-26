@@ -679,6 +679,11 @@ pub fn update(
                         descriptor_json,
                         Some(seed_json),
                         || cancelled.load(Ordering::Acquire),
+                        || {
+                            cancelled
+                                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                                .is_ok()
+                        },
                     )
                     .await
                     .map_err(|e| e.to_string())

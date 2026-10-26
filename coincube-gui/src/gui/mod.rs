@@ -212,6 +212,69 @@ mod seed_export_duress_gui_tests {
         drop(gui);
         std::fs::remove_dir_all(path).ok();
     }
+
+    #[test]
+    fn verified_duress_from_last_closed_tab_installs_emergency_target() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let _guard = crate::app::session::test_guard();
+        let path =
+            std::env::temp_dir().join(format!("seed-export-no-tab-{}", uuid::Uuid::new_v4()));
+        let (app, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+        let root = app.datadir().clone();
+        let proof = crate::services::unlock::throttle::verified_seed_export_duress_for_test(
+            path.clone(),
+            app.cube_settings().id.clone(),
+            app.cube_settings().network,
+            app.cache().app_generation,
+        );
+        let (home, startup) = home::Home::new_for_chain(root, None);
+        drop(startup);
+        let mut gui = GUI::reviewer_app_home_gui(app, home);
+        let pane_id = gui.focus.unwrap();
+        let generation = gui.panes.get(pane_id).unwrap().tabs[0]
+            .app_generation_token()
+            .unwrap();
+        let (release, delayed) = tokio::sync::oneshot::channel();
+        let pending = Task::perform(async move { delayed.await.unwrap() }, move |proof| {
+            Message::Pane(
+                pane_id,
+                pane::Message::tab(
+                    1,
+                    tab::Message::AppAsync(
+                        generation,
+                        Box::new(tab::Message::Run(AppMessage::View(
+                            crate::app::view::Message::DuressActivateLocal(proof),
+                        ))),
+                    ),
+                ),
+            )
+        });
+        let pane = gui.panes.get_mut(pane_id).unwrap();
+        pane.close_tab(1);
+        pane.close_tab(0);
+        assert!(pane.tabs.is_empty());
+        release.send(proof).unwrap();
+        let delivered = runtime.block_on(async {
+            let mut stream = iced_runtime::task::into_stream(pending).unwrap();
+            while let Some(action) = stream.next().await {
+                if let iced_runtime::Action::Output(message) = action {
+                    return message;
+                }
+            }
+            panic!("pending duress task did not deliver")
+        });
+        drop(gui.update(delivered));
+        let pane = gui.panes.get(pane_id).unwrap();
+        assert_eq!(pane.tabs.len(), 1);
+        assert!(matches!(pane.tabs[0].state, tab::State::DuressActive(_)));
+        assert!(!crate::app::session::is_open());
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
 }
 
 use iced::window::Id;
@@ -595,7 +658,7 @@ impl GUI {
         tab_id: usize,
         proof: crate::services::unlock::throttle::VerifiedSeedExportDuress,
     ) -> Task<Message> {
-        let (root, cube_id, _chain, _app) = proof.origin();
+        let (root, cube_id, chain, _app) = proof.origin();
         if cube_id.is_empty()
             || !crate::chain::same_path(root, self.config.coincube_directory.path())
         {
@@ -611,13 +674,39 @@ impl GUI {
                 pane::Message::tab(tab_id, tab::Message::LocalDuress(proof)),
             ));
         }
-        let target = self
+        let mut target = self
             .panes
             .iter()
             .find_map(|(id, pane)| pane.tabs.first().map(|tab| (*id, tab.id)));
-        let Some((target_pane, target_tab)) = target else {
-            return Task::none();
-        };
+        if target.is_none() {
+            // Pane::remove_tab can leave a live GUI with no tabs. Build an
+            // emergency-only target from the verified proof's root; no App or
+            // signer is reconstructed just to deliver the wipe completion.
+            let datadir = CoincubeDirectory::new(root.to_path_buf());
+            let state = tab::State::DuressActive(
+                crate::app::view::duress::active_screen::DuressActiveScreen::with_context(
+                    datadir,
+                    Some(chain.bitcoin_network()),
+                ),
+            );
+            if let Some(pane) = self.panes.get_mut(pane_id) {
+                let emergency_id = usize::MAX;
+                pane.tabs.push(tab::Tab::new(emergency_id, state));
+                pane.focused_tab = pane.tabs.len() - 1;
+                target = Some((pane_id, emergency_id));
+            } else if let Some((other_id, pane)) = self.panes.iter_mut().next() {
+                let emergency_id = usize::MAX;
+                pane.tabs.push(tab::Tab::new(emergency_id, state));
+                pane.focused_tab = pane.tabs.len() - 1;
+                target = Some((*other_id, emergency_id));
+            } else {
+                let (panes, new_pane) = pane_grid::State::new(pane::Pane::new_with_tab(state));
+                self.panes = panes;
+                self.focus = Some(new_pane);
+                target = Some((new_pane, 1));
+            }
+        }
+        let (target_pane, target_tab) = target.expect("emergency target was installed");
         let task = self
             .panes
             .get_mut(target_pane)
