@@ -39,6 +39,52 @@ use crate::services::claim_observation::http::{AncestryTimingReport, FundingProo
 use iced::{futures::SinkExt, Task};
 use tokio::sync::watch;
 
+/// A Claim result can replace the control that held focus. Restore a safe
+/// control only while this Claim stage is still mounted and no newer focus
+/// (including one in another tab or sheet) has taken its place.
+fn restore_claim_focus(target: &'static str) -> Task<Message> {
+    use iced::advanced::widget::{
+        operation::{focusable, Outcome},
+        Id, Operation,
+    };
+
+    struct Restore {
+        target: Id,
+        mounted: bool,
+        focused: bool,
+    }
+
+    impl Operation<()> for Restore {
+        fn focusable(
+            &mut self,
+            id: Option<&Id>,
+            _bounds: iced::Rectangle,
+            state: &mut dyn focusable::Focusable,
+        ) {
+            self.mounted |= id == Some(&self.target);
+            self.focused |= state.is_focused();
+        }
+
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<()>)) {
+            operate(self);
+        }
+
+        fn finish(&self) -> Outcome<()> {
+            if self.mounted && !self.focused {
+                Outcome::Chain(Box::new(focusable::focus(self.target.clone())))
+            } else {
+                Outcome::None
+            }
+        }
+    }
+
+    iced_runtime::task::effect(iced_runtime::Action::widget(Restore {
+        target: Id::new(target),
+        mounted: false,
+        focused: false,
+    }))
+}
+
 use coincube_core::{
     chain::ChainId,
     claim::{self, Assessment, ForkTransactionPresence, Policy},
@@ -889,6 +935,8 @@ pub struct ClaimStep1Panel {
     funding_review: Option<view::vault::ancestry_coins::VerifiedCoinPairReview>,
     prepared_pair: Option<Box<PreparedClaimPair>>,
     funding_checking: bool,
+    /// Only a direct CheckFunding intent should return focus on completion.
+    funding_focus_return: bool,
     funding_proofs: [FundingProofStatus; 2],
     funding_timing: Vec<AncestryTimingReport>,
     funding_attempt: Option<FundingAttemptTiming>,
@@ -955,6 +1003,7 @@ impl ClaimStep1Panel {
             funding_review: None,
             prepared_pair: None,
             funding_checking: false,
+            funding_focus_return: false,
             funding_proofs: [FundingProofStatus::Pending; 2],
             funding_timing: Vec::new(),
             funding_attempt: None,
@@ -1257,6 +1306,7 @@ impl ClaimStep1Panel {
             self.funding_inline_error = false;
             self.prepared_pair = None;
             self.funding_checking = false;
+            self.funding_focus_return = false;
         }
         if self.building.take().is_some() {
             self.pre.checking = false;
@@ -2000,6 +2050,7 @@ impl ClaimStep1Panel {
         let fork_binding = self.fork_daemon.clone();
         let directory = journal_directory(&self.datadir, &self.wallet);
         self.funding_checking = true;
+        self.funding_focus_return = false;
         self.last_full_check = Some(Instant::now());
         self.funding_status = Some("Verifying both deposits and their ancestry…".into());
         self.funding_error = None;
@@ -3675,6 +3726,7 @@ impl ClaimStep1Panel {
                 self.paired_sign_seq = self.paired_sign_seq.wrapping_add(1);
                 self.paired_signing_pending = false;
                 self.funding_checking = false;
+                self.funding_focus_return = false;
                 self.funding_status = None;
                 self.deposit_status = None;
                 self.deposit_details_override = None;
@@ -3739,13 +3791,16 @@ impl ClaimStep1Panel {
                 }
                 let recovery = recovery.clone();
                 match result {
-                    Ok(review) => self.stage = Stage::PairedBitcoinReview(recovery, review),
+                    Ok(review) => {
+                        self.stage = Stage::PairedBitcoinReview(recovery, review);
+                        restore_claim_focus("tenshu.claim.bitcoin.back")
+                    }
                     Err(reason) => {
                         self.restart_error = Some(reason);
                         self.stage = Stage::PairedRecovery(recovery);
+                        restore_claim_focus("tenshu.claim.recovery.close")
                     }
                 }
-                Task::none()
             }
             ClaimEvent::PairedBitcoinSubmitted(seq, generation, revocations, result) => {
                 if seq != self.paired_broadcast_seq {
@@ -3787,13 +3842,16 @@ impl ClaimStep1Panel {
                 }
                 let recovery = recovery.clone();
                 match result {
-                    Ok(review) => self.stage = Stage::PairedForkReview(recovery, review),
+                    Ok(review) => {
+                        self.stage = Stage::PairedForkReview(recovery, review);
+                        restore_claim_focus("tenshu.claim.btcb2.back")
+                    }
                     Err(reason) => {
                         self.restart_error = Some(reason);
                         self.stage = Stage::PairedRecovery(recovery);
+                        restore_claim_focus("tenshu.claim.recovery.close")
                     }
                 }
-                Task::none()
             }
             ClaimEvent::PairedForkSubmitted(seq, generation, revocations, result) => {
                 if seq != self.paired_broadcast_seq {
@@ -3874,10 +3932,13 @@ impl ClaimStep1Panel {
                     return Task::none();
                 }
                 match result.and_then(|()| self.install_paired_signing()) {
-                    Ok(()) => Task::none(),
+                    Ok(()) => restore_claim_focus("tenshu.claim.pair.tab.bitcoin"),
                     Err(error) => {
                         self.funding_error = Some(error.clone());
-                        Task::done(Message::View(view::Message::ShowError(error)))
+                        Task::batch([
+                            Task::done(Message::View(view::Message::ShowError(error))),
+                            restore_claim_focus("tenshu.claim.funding.addresses"),
+                        ])
                     }
                 }
             }
@@ -3969,6 +4030,7 @@ impl ClaimStep1Panel {
                 if seq != self.check_seq || !matches!(self.stage, Stage::FundingDeposits(_)) {
                     return Task::none();
                 }
+                let restore_focus = std::mem::take(&mut self.funding_focus_return);
                 self.funding_task = None;
                 self.funding_checking = false;
                 // Space automatic retries from the completed scan. A slow
@@ -4000,7 +4062,11 @@ impl ClaimStep1Panel {
                         "The paired BTCB2 Cube changed during the deposit check. Reopen it and check both deposits again."
                             .into(),
                     );
-                    return Task::none();
+                    return if restore_focus {
+                        restore_claim_focus("tenshu.claim.funding.retry")
+                    } else {
+                        Task::none()
+                    };
                 }
                 self.funding_review = result
                     .as_ref()
@@ -4036,19 +4102,31 @@ impl ClaimStep1Panel {
                         self.funding_error = Some(reason);
                     }
                 }
-                if proof_complete {
-                    Task::perform(
-                        async { tokio::time::sleep(std::time::Duration::from_secs(30)).await },
-                        move |()| {
-                            Message::Claim(ClaimEvent::FundingProofExpired(
-                                seq,
-                                generation,
-                                revocations,
-                            ))
-                        },
-                    )
+                let focus = if restore_focus {
+                    restore_claim_focus(if self.funding_error.is_some() {
+                        "tenshu.claim.funding.retry"
+                    } else {
+                        "tenshu.claim.funding.addresses"
+                    })
                 } else {
                     Task::none()
+                };
+                if proof_complete {
+                    Task::batch([
+                        focus,
+                        Task::perform(
+                            async { tokio::time::sleep(std::time::Duration::from_secs(30)).await },
+                            move |()| {
+                                Message::Claim(ClaimEvent::FundingProofExpired(
+                                    seq,
+                                    generation,
+                                    revocations,
+                                ))
+                            },
+                        ),
+                    ])
+                } else {
+                    focus
                 }
             }
             ClaimEvent::FundingProofExpired(seq, generation, revocations) => {
@@ -4753,6 +4831,7 @@ impl State for ClaimStep1Panel {
                         Some(daemon) => {
                             let task = self.check_funding(daemon);
                             if self.funding_checking {
+                                self.funding_focus_return = true;
                                 Task::batch([
                                     task,
                                     Task::done(Message::View(view::Message::FocusAction(

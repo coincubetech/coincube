@@ -9,6 +9,365 @@ use coincube_core::{
 };
 use std::{str::FromStr, sync::Mutex};
 
+fn mounted_focus_after(
+    task: Task<Message>,
+    target_present: bool,
+    initially_focused: Option<&'static str>,
+    target: &'static str,
+) -> Option<iced::advanced::widget::Id> {
+    use iced::advanced::{
+        layout,
+        renderer::Headless,
+        widget::{operation, operation::focusable, Operation, Tree},
+        Layout,
+    };
+    use iced::futures::StreamExt;
+
+    for bytes in coincube_ui::font::load() {
+        iced::advanced::graphics::text::font_system()
+            .write()
+            .unwrap()
+            .load_font(bytes);
+    }
+    let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+        coincube_ui::font::REGULAR,
+        iced::Pixels(16.0),
+        Some("tiny-skia"),
+    ))
+    .unwrap();
+    let control = |id| {
+        coincube_ui::component::button::secondary_action(
+            id,
+            None,
+            "Control",
+            view::Message::FocusAction,
+        )
+        .on_press(view::Message::Claim(view::ClaimMessage::Refresh))
+    };
+    let mut column = iced::widget::Column::new()
+        .push(control("unrelated.focus"))
+        .push(
+            iced::widget::text_input("Search", "")
+                .id(iced::advanced::widget::Id::new("unrelated.input"))
+                .on_input(|_| view::Message::Claim(view::ClaimMessage::Refresh)),
+        );
+    if target_present {
+        column = column.push(control(target));
+    }
+    let mut element: Element<'_, view::Message> = column.into();
+    let mut tree = Tree::new(element.as_widget());
+    let node = element.as_widget_mut().layout(
+        &mut tree,
+        &renderer,
+        &layout::Limits::new(iced::Size::ZERO, iced::Size::new(760.0, 600.0)),
+    );
+    let mut apply = |mut op: Box<dyn Operation<()>>| loop {
+        element.as_widget_mut().operate(
+            &mut tree,
+            Layout::new(&node),
+            &renderer,
+            &mut operation::black_box(op.as_mut()),
+        );
+        match op.finish() {
+            operation::Outcome::Chain(next) => op = next,
+            operation::Outcome::None | operation::Outcome::Some(_) => break,
+        }
+    };
+    if let Some(id) = initially_focused {
+        apply(Box::new(focusable::focus(iced::advanced::widget::Id::new(
+            id,
+        ))));
+    }
+    if let Some(mut stream) = iced_runtime::task::into_stream(task) {
+        while let Some(action) = iced::futures::executor::block_on(stream.next()) {
+            if let iced_runtime::Action::Widget(op) = action {
+                apply(op);
+                break;
+            }
+        }
+    }
+    let mut found: Box<dyn Operation<iced::advanced::widget::Id>> =
+        Box::new(focusable::find_focused());
+    loop {
+        element.as_widget_mut().operate(
+            &mut tree,
+            Layout::new(&node),
+            &renderer,
+            &mut operation::black_box(found.as_mut()),
+        );
+        match found.finish() {
+            operation::Outcome::Some(id) => return Some(id),
+            operation::Outcome::None => return None,
+            operation::Outcome::Chain(next) => found = next,
+        }
+    }
+}
+
+#[test]
+fn async_claim_focus_returns_only_to_mounted_safe_controls_when_no_other_surface_owns_focus() {
+    use iced::advanced::widget::Id;
+    for target in [
+        "tenshu.claim.bitcoin.back",
+        "tenshu.claim.btcb2.back",
+        "tenshu.claim.recovery.close",
+        "tenshu.claim.pair.tab.bitcoin",
+        "tenshu.claim.funding.addresses",
+        "tenshu.claim.funding.retry",
+    ] {
+        assert_eq!(
+            mounted_focus_after(restore_claim_focus(target), true, None, target),
+            Some(Id::new(target))
+        );
+        assert_eq!(
+            mounted_focus_after(
+                restore_claim_focus(target),
+                true,
+                Some("unrelated.focus"),
+                target
+            ),
+            Some(Id::new("unrelated.focus"))
+        );
+        assert_eq!(
+            mounted_focus_after(
+                restore_claim_focus(target),
+                true,
+                Some("unrelated.input"),
+                target
+            ),
+            Some(Id::new("unrelated.input"))
+        );
+        assert_eq!(
+            mounted_focus_after(restore_claim_focus(target), false, None, target),
+            None
+        );
+        assert_eq!(
+            mounted_focus_after(
+                restore_claim_focus(target),
+                false,
+                Some("unrelated.focus"),
+                target
+            ),
+            Some(Id::new("unrelated.focus"))
+        );
+    }
+}
+
+fn recovery_for_focus_test() -> PairedClaimRecovery {
+    PairedClaimRecovery {
+        bitcoin_unattempted: true,
+        fork_ready_for_review: true,
+        bitcoin_txid: None,
+        fork_txid: None,
+        bitcoin_output: None,
+        fork_output: None,
+        bitcoin_status: "No broadcast attempt recorded.".into(),
+        fork_status: "No broadcast attempt recorded.".into(),
+    }
+}
+
+#[test]
+fn paired_review_results_restore_back_or_close_after_the_pending_control_disappears() {
+    use iced::advanced::widget::Id;
+    let (bitcoin, fork, _) = crate::services::claim_pair_signing::tests::fixture();
+    let review = InitialPairReviewSnapshot {
+        bitcoin: bitcoin.psbt().unsigned_tx.clone(),
+        fork: fork.psbt().unsigned_tx.clone(),
+        bitcoin_fee_sats: 100,
+        fork_fee_sats: 100,
+    };
+    for fork_side in [false, true] {
+        for succeeds in [false, true] {
+            let mut p = panel(SINGLE_WSH);
+            p.connect = Some(ConnectSession {
+                client: CoincubeClient::new(),
+                account: "account".into(),
+            });
+            p.paired_broadcast_seq = 1;
+            p.stage = if fork_side {
+                Stage::PairedForkReviewing(recovery_for_focus_test())
+            } else {
+                Stage::PairedBitcoinReviewing(recovery_for_focus_test())
+            };
+            let outcome = if succeeds {
+                Ok(review.clone())
+            } else {
+                Err("review failed".into())
+            };
+            let task = p.apply(if fork_side {
+                ClaimEvent::PairedForkReviewed(1, 1, 0, outcome)
+            } else {
+                ClaimEvent::PairedBitcoinReviewed(1, 1, 0, outcome)
+            });
+            let target = match (fork_side, succeeds) {
+                (false, true) => "tenshu.claim.bitcoin.back",
+                (true, true) => "tenshu.claim.btcb2.back",
+                (_, false) => "tenshu.claim.recovery.close",
+            };
+            assert_eq!(
+                mounted_focus_after(task, true, None, target),
+                Some(Id::new(target))
+            );
+        }
+    }
+}
+
+#[test]
+fn direct_funding_result_restores_safe_control_but_passive_and_stale_results_do_not() {
+    use iced::advanced::widget::Id;
+    let progress = || ClaimDepositProgress {
+        bitcoin_candidate: false,
+        btcb2_candidate: false,
+        both_verified: false,
+        review: None,
+        prepared: None,
+    };
+    for (direct, fails) in [(true, false), (true, true), (false, false), (false, true)] {
+        let mut p = panel(SINGLE_WSH);
+        p.connect = Some(ConnectSession {
+            client: CoincubeClient::new(),
+            account: "account".into(),
+        });
+        p.stage = Stage::FundingDeposits(claim_workflow::CheckedClaimFundingAddresses {
+            bitcoin_deposit: "btc".into(),
+            btcb2_deposit: "btcb2".into(),
+            bitcoin_minimum_sats: 1,
+            btcb2_minimum_sats: 1,
+            bitcoin_rate_sat_vb: 1,
+            btcb2_rate_sat_vb: 1,
+        });
+        p.check_seq = 1;
+        p.funding_checking = true;
+        p.funding_focus_return = direct;
+        let result = if fails {
+            Err("scan failed".into())
+        } else {
+            Ok(progress())
+        };
+        let task = p.apply(ClaimEvent::FundingChecked(1, 1, 0, result));
+        let target = if fails {
+            "tenshu.claim.funding.retry"
+        } else {
+            "tenshu.claim.funding.addresses"
+        };
+        assert_eq!(
+            mounted_focus_after(task, true, None, target),
+            direct.then(|| Id::new(target))
+        );
+        assert!(!p.funding_focus_return);
+    }
+    let mut p = panel(SINGLE_WSH);
+    p.funding_focus_return = true;
+    let stale = p.apply(ClaimEvent::FundingChecked(99, 1, 0, Ok(progress())));
+    assert_eq!(
+        mounted_focus_after(stale, true, None, "tenshu.claim.funding.addresses"),
+        None
+    );
+}
+
+#[test]
+fn paired_sign_preparation_returns_focus_to_pair_tab_or_deposit_toggle() {
+    use crate::app::view::vault::ancestry_coins::{CoinPairReview, VerifiedCoinPairReview};
+    use iced::advanced::widget::Id;
+
+    for fails in [false, true] {
+        let (bitcoin, fork, _) = crate::services::claim_pair_signing::tests::fixture();
+        let bitcoin_funding = bitcoin.poison_input();
+        let fork_funding = fork
+            .psbt()
+            .unsigned_tx
+            .input
+            .iter()
+            .map(|input| input.previous_output)
+            .find(|input| !bitcoin.claimed_prevouts().contains(input))
+            .unwrap();
+        let coins = CoinPairReview::from_psbts(
+            bitcoin.psbt(),
+            fork.psbt(),
+            bitcoin.claimed_prevouts(),
+            bitcoin_funding,
+            fork_funding,
+        )
+        .unwrap();
+        let block = coincube_core::claim::BlockRef {
+            height: 100,
+            hash: BlockHash::from_byte_array([1; 32]),
+        };
+        let tip = coincube_core::claim::BlockRef {
+            height: 105,
+            hash: BlockHash::from_byte_array([2; 32]),
+        };
+        let mut p = panel(SINGLE_WSH);
+        let daemon: Arc<dyn Daemon + Send + Sync> = Arc::new(Recording::default());
+        let fork_wallet = Arc::new(
+            Wallet::new(if fails {
+                wallet(MULTI_WSH).main_descriptor.clone()
+            } else {
+                p.wallet.main_descriptor.clone()
+            })
+            .with_chain(ChainId::BitcoinBlake2b),
+        );
+        let (_sender, receiver) = watch::channel(1);
+        p.bind_fork_daemon(Some(ClaimForkBinding::new(&daemon, &fork_wallet, receiver)));
+        p.connect = Some(ConnectSession {
+            client: CoincubeClient::new(),
+            account: "account".into(),
+        });
+        p.stage = Stage::FundingDeposits(claim_workflow::CheckedClaimFundingAddresses {
+            bitcoin_deposit: "btc".into(),
+            btcb2_deposit: "btcb2".into(),
+            bitcoin_minimum_sats: 1,
+            btcb2_minimum_sats: 1,
+            bitcoin_rate_sat_vb: 5,
+            btcb2_rate_sat_vb: 5,
+        });
+        p.prepared_pair = Some(Box::new(PreparedClaimPair {
+            bitcoin,
+            fork,
+            bitcoin_funding,
+            fork_funding,
+            bitcoin_rate_vb: 5,
+            fork_rate_vb: 5,
+        }));
+        p.funding_review =
+            Some(VerifiedCoinPairReview::new(coins, block, tip, block, tip).unwrap());
+        let review = p.funding_review.take().unwrap();
+        let prepared = p.prepared_pair.take();
+        p.check_seq = 6;
+        p.funding_checking = true;
+        p.funding_focus_return = true;
+        let verified = p.apply(ClaimEvent::FundingChecked(
+            6,
+            1,
+            0,
+            Ok(ClaimDepositProgress {
+                bitcoin_candidate: true,
+                btcb2_candidate: true,
+                both_verified: true,
+                review: Some(review),
+                prepared,
+            }),
+        ));
+        assert!(p.funding_review().is_some());
+        assert_eq!(
+            mounted_focus_after(verified, true, None, "tenshu.claim.funding.addresses"),
+            Some(Id::new("tenshu.claim.funding.addresses"))
+        );
+        p.paired_signing_pending = true;
+        p.paired_sign_seq = 7;
+        let task = p.apply(ClaimEvent::PairedSigningPrepared(7, 1, 0, Ok(())));
+        let target = if fails {
+            "tenshu.claim.funding.addresses"
+        } else {
+            "tenshu.claim.pair.tab.bitcoin"
+        };
+        assert_eq!(
+            mounted_focus_after(task, true, None, target),
+            Some(Id::new(target))
+        );
+        assert_eq!(matches!(p.stage, Stage::FundingDeposits(_)), fails);
+    }
+}
+
 #[test]
 fn deposit_arrival_does_not_authorize_verification_before_six_confirmations() {
     let mut funds = AddressFunds {
