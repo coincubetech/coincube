@@ -31,13 +31,64 @@ use std::{
     convert::TryFrom,
     fmt,
     path::PathBuf,
-    sync::{Arc, Weak},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Weak,
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::services::claim_observation::http::{AncestryTimingReport, FundingProofStatus};
 use iced::{futures::SinkExt, Task};
 use tokio::sync::watch;
+
+/// A Claim result can replace the control that held focus. Restore a safe
+/// control only while this Claim stage is still mounted and no newer focus
+/// (including one in another tab or sheet) has taken its place.
+fn restore_claim_focus(target: iced::advanced::widget::Id) -> Task<Message> {
+    use iced::advanced::widget::{
+        operation::{focusable, Outcome},
+        Id, Operation,
+    };
+
+    struct Restore {
+        target: Id,
+        mounted: bool,
+        focused: bool,
+    }
+
+    impl Operation<()> for Restore {
+        fn focusable(
+            &mut self,
+            id: Option<&Id>,
+            _bounds: iced::Rectangle,
+            state: &mut dyn focusable::Focusable,
+        ) {
+            self.mounted |= id == Some(&self.target);
+            self.focused |= state.is_focused();
+        }
+
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<()>)) {
+            operate(self);
+        }
+
+        fn finish(&self) -> Outcome<()> {
+            if self.mounted && !self.focused {
+                Outcome::Chain(Box::new(focusable::focus(self.target.clone())))
+            } else {
+                Outcome::None
+            }
+        }
+    }
+
+    iced_runtime::task::effect(iced_runtime::Action::widget(Restore {
+        target,
+        mounted: false,
+        focused: false,
+    }))
+}
+
+static NEXT_CLAIM_ACTION_SCOPE: AtomicU64 = AtomicU64::new(1);
 
 use coincube_core::{
     chain::ChainId,
@@ -869,6 +920,8 @@ pub enum StageView<'a> {
 }
 
 pub struct ClaimStep1Panel {
+    /// In-memory widget identity, unique across concurrently open Claim tabs.
+    action_scope: u64,
     wallet: Arc<Wallet>,
     datadir: CoincubeDirectory,
     bitcoin_cube: String,
@@ -889,6 +942,8 @@ pub struct ClaimStep1Panel {
     funding_review: Option<view::vault::ancestry_coins::VerifiedCoinPairReview>,
     prepared_pair: Option<Box<PreparedClaimPair>>,
     funding_checking: bool,
+    /// Only a direct CheckFunding intent should return focus on completion.
+    funding_focus_return: bool,
     funding_proofs: [FundingProofStatus; 2],
     funding_timing: Vec<AncestryTimingReport>,
     funding_attempt: Option<FundingAttemptTiming>,
@@ -937,6 +992,7 @@ impl ClaimStep1Panel {
             journal_directory(&datadir, &wallet).join("intent.json"),
         ), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
         let mut panel = Self {
+            action_scope: NEXT_CLAIM_ACTION_SCOPE.fetch_add(1, Ordering::Relaxed),
             wallet,
             datadir,
             bitcoin_cube,
@@ -955,6 +1011,7 @@ impl ClaimStep1Panel {
             funding_review: None,
             prepared_pair: None,
             funding_checking: false,
+            funding_focus_return: false,
             funding_proofs: [FundingProofStatus::Pending; 2],
             funding_timing: Vec::new(),
             funding_attempt: None,
@@ -983,6 +1040,12 @@ impl ClaimStep1Panel {
         };
         panel.refresh_static_preconditions();
         panel
+    }
+
+    /// Keep a semantic Claim action name stable for this panel while making
+    /// the mounted widget distinct from the same action in another Cube tab.
+    pub(crate) fn action_id(&self, name: &'static str) -> iced::advanced::widget::Id {
+        iced::advanced::widget::Id::from(format!("{name}.panel.{}", self.action_scope))
     }
 
     /// Replace the fee-rate source (tests: a fixed rate, no network).
@@ -1257,6 +1320,7 @@ impl ClaimStep1Panel {
             self.funding_inline_error = false;
             self.prepared_pair = None;
             self.funding_checking = false;
+            self.funding_focus_return = false;
         }
         if self.building.take().is_some() {
             self.pre.checking = false;
@@ -2000,6 +2064,7 @@ impl ClaimStep1Panel {
         let fork_binding = self.fork_daemon.clone();
         let directory = journal_directory(&self.datadir, &self.wallet);
         self.funding_checking = true;
+        self.funding_focus_return = false;
         self.last_full_check = Some(Instant::now());
         self.funding_status = Some("Verifying both deposits and their ancestry…".into());
         self.funding_error = None;
@@ -3675,6 +3740,7 @@ impl ClaimStep1Panel {
                 self.paired_sign_seq = self.paired_sign_seq.wrapping_add(1);
                 self.paired_signing_pending = false;
                 self.funding_checking = false;
+                self.funding_focus_return = false;
                 self.funding_status = None;
                 self.deposit_status = None;
                 self.deposit_details_override = None;
@@ -3739,13 +3805,16 @@ impl ClaimStep1Panel {
                 }
                 let recovery = recovery.clone();
                 match result {
-                    Ok(review) => self.stage = Stage::PairedBitcoinReview(recovery, review),
+                    Ok(review) => {
+                        self.stage = Stage::PairedBitcoinReview(recovery, review);
+                        restore_claim_focus(self.action_id("tenshu.claim.bitcoin.back"))
+                    }
                     Err(reason) => {
                         self.restart_error = Some(reason);
                         self.stage = Stage::PairedRecovery(recovery);
+                        restore_claim_focus(self.action_id("tenshu.claim.recovery.close"))
                     }
                 }
-                Task::none()
             }
             ClaimEvent::PairedBitcoinSubmitted(seq, generation, revocations, result) => {
                 if seq != self.paired_broadcast_seq {
@@ -3787,13 +3856,16 @@ impl ClaimStep1Panel {
                 }
                 let recovery = recovery.clone();
                 match result {
-                    Ok(review) => self.stage = Stage::PairedForkReview(recovery, review),
+                    Ok(review) => {
+                        self.stage = Stage::PairedForkReview(recovery, review);
+                        restore_claim_focus(self.action_id("tenshu.claim.btcb2.back"))
+                    }
                     Err(reason) => {
                         self.restart_error = Some(reason);
                         self.stage = Stage::PairedRecovery(recovery);
+                        restore_claim_focus(self.action_id("tenshu.claim.recovery.close"))
                     }
                 }
-                Task::none()
             }
             ClaimEvent::PairedForkSubmitted(seq, generation, revocations, result) => {
                 if seq != self.paired_broadcast_seq {
@@ -3874,10 +3946,13 @@ impl ClaimStep1Panel {
                     return Task::none();
                 }
                 match result.and_then(|()| self.install_paired_signing()) {
-                    Ok(()) => Task::none(),
+                    Ok(()) => restore_claim_focus(self.action_id("tenshu.claim.pair.tab.bitcoin")),
                     Err(error) => {
                         self.funding_error = Some(error.clone());
-                        Task::done(Message::View(view::Message::ShowError(error)))
+                        Task::batch([
+                            Task::done(Message::View(view::Message::ShowError(error))),
+                            restore_claim_focus(self.action_id("tenshu.claim.funding.addresses")),
+                        ])
                     }
                 }
             }
@@ -3969,6 +4044,7 @@ impl ClaimStep1Panel {
                 if seq != self.check_seq || !matches!(self.stage, Stage::FundingDeposits(_)) {
                     return Task::none();
                 }
+                let restore_focus = std::mem::take(&mut self.funding_focus_return);
                 self.funding_task = None;
                 self.funding_checking = false;
                 // Space automatic retries from the completed scan. A slow
@@ -4000,7 +4076,11 @@ impl ClaimStep1Panel {
                         "The paired BTCB2 Cube changed during the deposit check. Reopen it and check both deposits again."
                             .into(),
                     );
-                    return Task::none();
+                    return if restore_focus {
+                        restore_claim_focus(self.action_id("tenshu.claim.funding.retry"))
+                    } else {
+                        Task::none()
+                    };
                 }
                 self.funding_review = result
                     .as_ref()
@@ -4036,19 +4116,31 @@ impl ClaimStep1Panel {
                         self.funding_error = Some(reason);
                     }
                 }
-                if proof_complete {
-                    Task::perform(
-                        async { tokio::time::sleep(std::time::Duration::from_secs(30)).await },
-                        move |()| {
-                            Message::Claim(ClaimEvent::FundingProofExpired(
-                                seq,
-                                generation,
-                                revocations,
-                            ))
-                        },
-                    )
+                let focus = if restore_focus {
+                    restore_claim_focus(self.action_id(if self.funding_error.is_some() {
+                        "tenshu.claim.funding.retry"
+                    } else {
+                        "tenshu.claim.funding.addresses"
+                    }))
                 } else {
                     Task::none()
+                };
+                if proof_complete {
+                    Task::batch([
+                        focus,
+                        Task::perform(
+                            async { tokio::time::sleep(std::time::Duration::from_secs(30)).await },
+                            move |()| {
+                                Message::Claim(ClaimEvent::FundingProofExpired(
+                                    seq,
+                                    generation,
+                                    revocations,
+                                ))
+                            },
+                        ),
+                    ])
+                } else {
+                    focus
                 }
             }
             ClaimEvent::FundingProofExpired(seq, generation, revocations) => {
@@ -4673,14 +4765,30 @@ impl State for ClaimStep1Panel {
                 match intent {
                     view::ClaimMessage::ToggleSetupDetails => {
                         self.setup_details_expanded = !self.setup_details_expanded;
-                        Task::none()
+                        Task::done(Message::View(view::Message::FocusAction(
+                            iced::advanced::widget::Id::new("tenshu.claim.setup.details"),
+                        )))
                     }
                     view::ClaimMessage::ToggleDepositDetails => {
                         self.deposit_details_override = Some(!self.deposit_details_expanded());
-                        Task::none()
+                        Task::done(Message::View(view::Message::FocusAction(
+                            self.action_id("tenshu.claim.funding.addresses"),
+                        )))
                     }
                     view::ClaimMessage::ReviewPairedBitcoin => match daemon {
-                        Some(daemon) => self.review_paired_bitcoin(daemon),
+                        Some(daemon) => {
+                            let task = self.review_paired_bitcoin(daemon);
+                            if matches!(self.stage, Stage::PairedBitcoinReviewing(_)) {
+                                Task::batch([
+                                    task,
+                                    Task::done(Message::View(view::Message::FocusAction(
+                                        self.action_id("tenshu.claim.recovery.close"),
+                                    ))),
+                                ])
+                            } else {
+                                task
+                            }
+                        }
                         None => node_unavailable(),
                     },
                     view::ClaimMessage::ConfirmPairedBitcoin => match daemon {
@@ -4690,11 +4798,26 @@ impl State for ClaimStep1Panel {
                     view::ClaimMessage::BackPairedBitcoin => {
                         if let Stage::PairedBitcoinReview(recovery, _) = &self.stage {
                             self.stage = Stage::PairedRecovery(recovery.clone());
+                            return Task::done(Message::View(view::Message::FocusAction(
+                                self.action_id("tenshu.claim.recovery.close"),
+                            )));
                         }
                         Task::none()
                     }
                     view::ClaimMessage::ReviewPairedFork => match daemon {
-                        Some(daemon) => self.review_paired_fork(daemon),
+                        Some(daemon) => {
+                            let task = self.review_paired_fork(daemon);
+                            if matches!(self.stage, Stage::PairedForkReviewing(_)) {
+                                Task::batch([
+                                    task,
+                                    Task::done(Message::View(view::Message::FocusAction(
+                                        self.action_id("tenshu.claim.recovery.close"),
+                                    ))),
+                                ])
+                            } else {
+                                task
+                            }
+                        }
                         None => node_unavailable(),
                     },
                     view::ClaimMessage::ConfirmPairedFork => match daemon {
@@ -4704,6 +4827,9 @@ impl State for ClaimStep1Panel {
                     view::ClaimMessage::BackPairedFork => {
                         if let Stage::PairedForkReview(recovery, _) = &self.stage {
                             self.stage = Stage::PairedRecovery(recovery.clone());
+                            return Task::done(Message::View(view::Message::FocusAction(
+                                self.action_id("tenshu.claim.recovery.close"),
+                            )));
                         }
                         Task::none()
                     }
@@ -4712,7 +4838,22 @@ impl State for ClaimStep1Panel {
                         None => node_unavailable(),
                     },
                     view::ClaimMessage::CheckFunding => match daemon {
-                        Some(daemon) => self.check_funding(daemon),
+                        Some(daemon) => {
+                            let task = self.check_funding(daemon);
+                            if self.funding_checking {
+                                self.funding_focus_return = true;
+                                Task::batch([
+                                    task,
+                                    Task::done(Message::View(view::Message::FocusAction(
+                                        iced::advanced::widget::Id::new(
+                                            "tenshu.claim.funding.pause-checks",
+                                        ),
+                                    ))),
+                                ])
+                            } else {
+                                task
+                            }
+                        }
                         None => node_unavailable(),
                     },
                     view::ClaimMessage::CopyVerificationReport => self
@@ -4725,18 +4866,36 @@ impl State for ClaimStep1Panel {
                         })
                         .unwrap_or_else(Task::none),
                     view::ClaimMessage::SignPair => match daemon {
-                        Some(daemon) => self.request_paired_signing(daemon),
+                        Some(daemon) => {
+                            let task = self.request_paired_signing(daemon);
+                            if self.paired_signing_pending {
+                                Task::batch([
+                                    task,
+                                    Task::done(Message::View(view::Message::FocusAction(
+                                        self.action_id("tenshu.claim.funding.addresses"),
+                                    ))),
+                                ])
+                            } else {
+                                task
+                            }
+                        }
                         None => node_unavailable(),
                     },
                     view::ClaimMessage::ShowPairBitcoin => {
                         if let Stage::PairedSign { active, .. } = &mut self.stage {
                             *active = ChainId::Bitcoin;
+                            return Task::done(Message::View(view::Message::FocusAction(
+                                self.action_id("tenshu.claim.pair.tab.bitcoin"),
+                            )));
                         }
                         Task::none()
                     }
                     view::ClaimMessage::ShowPairBtcb2 => {
                         if let Stage::PairedSign { active, .. } = &mut self.stage {
                             *active = ChainId::BitcoinBlake2b;
+                            return Task::done(Message::View(view::Message::FocusAction(
+                                self.action_id("tenshu.claim.pair.tab.btcb2"),
+                            )));
                         }
                         Task::none()
                     }
@@ -4785,7 +4944,17 @@ impl State for ClaimStep1Panel {
                     },
                     view::ClaimMessage::Cancel => {
                         self.cancel();
-                        Task::none()
+                        if matches!(self.stage, Stage::Preconditions) {
+                            Task::done(Message::View(view::Message::FocusAction(
+                                iced::advanced::widget::Id::new(if self.can_sign_or_submit() {
+                                    "tenshu.claim.setup.recheck"
+                                } else {
+                                    "tenshu.claim.setup.load"
+                                }),
+                            )))
+                        } else {
+                            Task::none()
+                        }
                     }
                 }
             }
