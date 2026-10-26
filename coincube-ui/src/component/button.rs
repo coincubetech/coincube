@@ -4,7 +4,9 @@ use super::text::text;
 use crate::component::spinner;
 use crate::font::MEDIUM;
 use crate::theme;
+use crate::widget::action::Action;
 use crate::widget::{Button, Container, Text};
+use iced::advanced::widget::Id;
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{button, container, row};
 
@@ -48,6 +50,48 @@ pub fn primary<'a, T: 'a>(icon: Option<Text<'a>>, t: &'static str) -> Button<'a,
             .align_x(iced::Alignment::Center),
     ))
     .style(theme::button::primary)
+}
+
+/// The legacy primary appearance with Action's keyboard and focus behavior.
+pub fn primary_action<'a, T: Clone + 'static>(
+    id: impl Into<Id>,
+    icon: Option<Text<'a>>,
+    label: &'static str,
+    focus_intent: fn(Id) -> T,
+) -> Action<'a, T> {
+    Action::new(
+        id,
+        content(
+            icon,
+            text(label).font(MEDIUM).align_y(iced::Alignment::Center),
+        ),
+        focus_intent,
+    )
+    .style(theme::button::primary)
+}
+
+/// The legacy secondary appearance with Action's keyboard and focus behavior.
+pub fn secondary_action<'a, T: Clone + 'static>(
+    id: impl Into<Id>,
+    icon: Option<Text<'a>>,
+    label: &'static str,
+    focus_intent: fn(Id) -> T,
+) -> Action<'a, T> {
+    Action::new(
+        id,
+        content(icon, text(label).align_y(iced::Alignment::Center)),
+        focus_intent,
+    )
+    .style(theme::button::secondary)
+}
+
+pub fn secondary_compact_action<'a, T: Clone + 'static>(
+    id: impl Into<Id>,
+    icon: Option<Text<'a>>,
+    label: &'static str,
+    focus_intent: fn(Id) -> T,
+) -> Action<'a, T> {
+    secondary_action(id, icon, label, focus_intent).width(iced::Length::Shrink)
 }
 
 /// Compact primary button - shrinks to content, centered (for action buttons)

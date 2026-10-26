@@ -4673,14 +4673,32 @@ impl State for ClaimStep1Panel {
                 match intent {
                     view::ClaimMessage::ToggleSetupDetails => {
                         self.setup_details_expanded = !self.setup_details_expanded;
-                        Task::none()
+                        Task::done(Message::View(view::Message::FocusAction(
+                            iced::advanced::widget::Id::new("tenshu.claim.setup.details"),
+                        )))
                     }
                     view::ClaimMessage::ToggleDepositDetails => {
                         self.deposit_details_override = Some(!self.deposit_details_expanded());
-                        Task::none()
+                        Task::done(Message::View(view::Message::FocusAction(
+                            iced::advanced::widget::Id::new("tenshu.claim.funding.addresses"),
+                        )))
                     }
                     view::ClaimMessage::ReviewPairedBitcoin => match daemon {
-                        Some(daemon) => self.review_paired_bitcoin(daemon),
+                        Some(daemon) => {
+                            let task = self.review_paired_bitcoin(daemon);
+                            if matches!(self.stage, Stage::PairedBitcoinReviewing(_)) {
+                                Task::batch([
+                                    task,
+                                    Task::done(Message::View(view::Message::FocusAction(
+                                        iced::advanced::widget::Id::new(
+                                            "tenshu.claim.recovery.close",
+                                        ),
+                                    ))),
+                                ])
+                            } else {
+                                task
+                            }
+                        }
                         None => node_unavailable(),
                     },
                     view::ClaimMessage::ConfirmPairedBitcoin => match daemon {
@@ -4690,11 +4708,28 @@ impl State for ClaimStep1Panel {
                     view::ClaimMessage::BackPairedBitcoin => {
                         if let Stage::PairedBitcoinReview(recovery, _) = &self.stage {
                             self.stage = Stage::PairedRecovery(recovery.clone());
+                            return Task::done(Message::View(view::Message::FocusAction(
+                                iced::advanced::widget::Id::new("tenshu.claim.recovery.close"),
+                            )));
                         }
                         Task::none()
                     }
                     view::ClaimMessage::ReviewPairedFork => match daemon {
-                        Some(daemon) => self.review_paired_fork(daemon),
+                        Some(daemon) => {
+                            let task = self.review_paired_fork(daemon);
+                            if matches!(self.stage, Stage::PairedForkReviewing(_)) {
+                                Task::batch([
+                                    task,
+                                    Task::done(Message::View(view::Message::FocusAction(
+                                        iced::advanced::widget::Id::new(
+                                            "tenshu.claim.recovery.close",
+                                        ),
+                                    ))),
+                                ])
+                            } else {
+                                task
+                            }
+                        }
                         None => node_unavailable(),
                     },
                     view::ClaimMessage::ConfirmPairedFork => match daemon {
@@ -4704,6 +4739,9 @@ impl State for ClaimStep1Panel {
                     view::ClaimMessage::BackPairedFork => {
                         if let Stage::PairedForkReview(recovery, _) = &self.stage {
                             self.stage = Stage::PairedRecovery(recovery.clone());
+                            return Task::done(Message::View(view::Message::FocusAction(
+                                iced::advanced::widget::Id::new("tenshu.claim.recovery.close"),
+                            )));
                         }
                         Task::none()
                     }
@@ -4712,7 +4750,21 @@ impl State for ClaimStep1Panel {
                         None => node_unavailable(),
                     },
                     view::ClaimMessage::CheckFunding => match daemon {
-                        Some(daemon) => self.check_funding(daemon),
+                        Some(daemon) => {
+                            let task = self.check_funding(daemon);
+                            if self.funding_checking {
+                                Task::batch([
+                                    task,
+                                    Task::done(Message::View(view::Message::FocusAction(
+                                        iced::advanced::widget::Id::new(
+                                            "tenshu.claim.funding.pause-checks",
+                                        ),
+                                    ))),
+                                ])
+                            } else {
+                                task
+                            }
+                        }
                         None => node_unavailable(),
                     },
                     view::ClaimMessage::CopyVerificationReport => self
@@ -4725,18 +4777,38 @@ impl State for ClaimStep1Panel {
                         })
                         .unwrap_or_else(Task::none),
                     view::ClaimMessage::SignPair => match daemon {
-                        Some(daemon) => self.request_paired_signing(daemon),
+                        Some(daemon) => {
+                            let task = self.request_paired_signing(daemon);
+                            if self.paired_signing_pending {
+                                Task::batch([
+                                    task,
+                                    Task::done(Message::View(view::Message::FocusAction(
+                                        iced::advanced::widget::Id::new(
+                                            "tenshu.claim.funding.addresses",
+                                        ),
+                                    ))),
+                                ])
+                            } else {
+                                task
+                            }
+                        }
                         None => node_unavailable(),
                     },
                     view::ClaimMessage::ShowPairBitcoin => {
                         if let Stage::PairedSign { active, .. } = &mut self.stage {
                             *active = ChainId::Bitcoin;
+                            return Task::done(Message::View(view::Message::FocusAction(
+                                iced::advanced::widget::Id::new("tenshu.claim.pair.tab.bitcoin"),
+                            )));
                         }
                         Task::none()
                     }
                     view::ClaimMessage::ShowPairBtcb2 => {
                         if let Stage::PairedSign { active, .. } = &mut self.stage {
                             *active = ChainId::BitcoinBlake2b;
+                            return Task::done(Message::View(view::Message::FocusAction(
+                                iced::advanced::widget::Id::new("tenshu.claim.pair.tab.btcb2"),
+                            )));
                         }
                         Task::none()
                     }
@@ -4785,7 +4857,17 @@ impl State for ClaimStep1Panel {
                     },
                     view::ClaimMessage::Cancel => {
                         self.cancel();
-                        Task::none()
+                        if matches!(self.stage, Stage::Preconditions) {
+                            Task::done(Message::View(view::Message::FocusAction(
+                                iced::advanced::widget::Id::new(if self.can_sign_or_submit() {
+                                    "tenshu.claim.setup.recheck"
+                                } else {
+                                    "tenshu.claim.setup.load"
+                                }),
+                            )))
+                        } else {
+                            Task::none()
+                        }
                     }
                 }
             }

@@ -6677,9 +6677,10 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
             assert!(
                 matches!(
                     messages.as_slice(),
-                    [crate::app::view::Message::Claim(
-                        crate::app::view::ClaimMessage::Recheck
-                    )]
+                    [
+                        crate::app::view::Message::FocusAction(id),
+                        crate::app::view::Message::Claim(crate::app::view::ClaimMessage::Recheck)
+                    ] if id == &iced::advanced::widget::Id::new("tenshu.claim.setup.load")
                 ),
                 "Missing recovery action for {}: {:?}",
                 scenario,

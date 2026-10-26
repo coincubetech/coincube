@@ -15,7 +15,7 @@ use coincube_core::{
 use coincube_ui::{
     component::{amount::*, button, card, text::*},
     icon, theme,
-    widget::{ColumnExt, Element, RowExt},
+    widget::{action::Action, ColumnExt, Element, RowExt, Text as UiText},
 };
 
 use crate::{
@@ -43,6 +43,30 @@ use crate::{
 
 const TITLE: &str = "Claim Bitcoin Blake2b";
 
+fn primary<'a>(
+    id: &'static str,
+    icon: Option<UiText<'a>>,
+    label: &'static str,
+) -> Action<'a, Message> {
+    button::primary_action(id, icon, label, Message::FocusAction)
+}
+
+fn secondary<'a>(
+    id: &'static str,
+    icon: Option<UiText<'a>>,
+    label: &'static str,
+) -> Action<'a, Message> {
+    button::secondary_action(id, icon, label, Message::FocusAction)
+}
+
+fn secondary_compact<'a>(
+    id: &'static str,
+    icon: Option<UiText<'a>>,
+    label: &'static str,
+) -> Action<'a, Message> {
+    button::secondary_compact_action(id, icon, label, Message::FocusAction)
+}
+
 pub fn view<'a>(
     menu: &'a Menu,
     cache: &'a Cache,
@@ -63,7 +87,7 @@ pub fn view<'a>(
                         p1_regular("Loading your deposit addresses…").style(theme::text::secondary),
                     )
                     .push(
-                        button::secondary_compact(None, "Pause")
+                        secondary_compact("tenshu.claim.funding.pause", None, "Pause")
                             .on_press(Message::Claim(ClaimMessage::Cancel)),
                     ),
             ),
@@ -114,7 +138,8 @@ pub fn view<'a>(
                     .push(p1_regular(recovery.fork_status.clone()))
                     .push_maybe(error.map(|message| card::warning(message.to_string())))
                     .push(
-                        button::secondary(
+                        secondary(
+                            "tenshu.claim.recovery.refresh",
                             None,
                             if checking {
                                 "Checking both chains…"
@@ -130,7 +155,12 @@ pub fn view<'a>(
                         (crate::services::claim_ancestry_gate::authorization().is_some()
                             && recovery.bitcoin_unattempted)
                             .then(|| {
-                                button::primary(None, "Review Bitcoin broadcast").on_press_maybe(
+                                primary(
+                                    "tenshu.claim.recovery.review.bitcoin",
+                                    None,
+                                    "Review Bitcoin broadcast",
+                                )
+                                .on_press_maybe(
                                     (!checking).then_some(Message::Claim(
                                         ClaimMessage::ReviewPairedBitcoin,
                                     )),
@@ -141,14 +171,19 @@ pub fn view<'a>(
                         (crate::services::claim_ancestry_gate::authorization().is_some()
                             && recovery.fork_ready_for_review)
                             .then(|| {
-                                button::primary(None, "Review BTCB2 broadcast").on_press_maybe(
+                                primary(
+                                    "tenshu.claim.recovery.review.btcb2",
+                                    None,
+                                    "Review BTCB2 broadcast",
+                                )
+                                .on_press_maybe(
                                     (!checking)
                                         .then_some(Message::Claim(ClaimMessage::ReviewPairedFork)),
                                 )
                             }),
                     )
                     .push(
-                        button::secondary(None, "Close")
+                        secondary("tenshu.claim.recovery.close", None, "Close")
                             .on_press(Message::Claim(ClaimMessage::Cancel)),
                     ),
             ),
@@ -176,8 +211,8 @@ pub fn view<'a>(
                     p2_regular(format!("{} sats to {}", output.amount_sats, output.destination))
                 }))
                 .push_maybe(outputs.is_none().then(|| card::warning("Cannot display both signed destinations. Review again before broadcasting.".to_string())))
-                .push(button::secondary(None, "Back").on_press(Message::Claim(ClaimMessage::BackPairedBitcoin)))
-                .push_maybe(outputs.is_some().then(|| button::primary(None, "Broadcast Transaction").on_press(Message::Claim(ClaimMessage::ConfirmPairedBitcoin))))
+                .push(secondary("tenshu.claim.bitcoin.back", None, "Back").on_press(Message::Claim(ClaimMessage::BackPairedBitcoin)))
+                .push_maybe(outputs.is_some().then(|| primary("tenshu.claim.bitcoin.broadcast", None, "Broadcast Transaction").on_press(Message::Claim(ClaimMessage::ConfirmPairedBitcoin))))
             )
         }),
         StageView::PairedBitcoinSubmitting => dashboard(
@@ -215,8 +250,8 @@ pub fn view<'a>(
                     p2_regular(format!("{} sats to {}", output.amount_sats, output.destination))
                 }))
                 .push_maybe(outputs.is_none().then(|| card::warning("Cannot display both signed destinations. Review again before broadcasting.".to_string())))
-                .push(button::secondary(None, "Back").on_press(Message::Claim(ClaimMessage::BackPairedFork)))
-                .push_maybe(outputs.is_some().then(|| button::primary(None, "Broadcast Transaction").on_press(Message::Claim(ClaimMessage::ConfirmPairedFork))))
+                .push(secondary("tenshu.claim.btcb2.back", None, "Back").on_press(Message::Claim(ClaimMessage::BackPairedFork)))
+                .push_maybe(outputs.is_some().then(|| primary("tenshu.claim.btcb2.broadcast", None, "Broadcast Transaction").on_press(Message::Claim(ClaimMessage::ConfirmPairedFork))))
             )
         }),
         StageView::PairedForkSubmitting => dashboard(
@@ -250,7 +285,7 @@ pub fn view<'a>(
                 .spacing(20)
                 .push(header("Checking the Claim inputs before signing…"))
                 .push(
-                    button::secondary(None, "Cancel")
+                    secondary("tenshu.claim.checking.cancel", None, "Cancel")
                         .on_press(Message::Claim(ClaimMessage::Cancel)),
                 ),
         ),
@@ -267,7 +302,8 @@ pub fn view<'a>(
                 .push(header("Recorded claim"))
                 .push(p1_regular("This claim remains recorded on this device."))
                 .push(
-                    button::secondary(None, "Close").on_press(Message::Claim(ClaimMessage::Cancel)),
+                    secondary("tenshu.claim.recorded.close", None, "Close")
+                        .on_press(Message::Claim(ClaimMessage::Cancel)),
                 ),
         ),
         StageView::Review {
@@ -397,16 +433,24 @@ fn funding_view<'a>(
             ((panel.funding_error().is_some() || panel.funding_proof_needs_retry())
                 && !panel.funding_checking())
             .then(|| {
-                button::secondary_compact(Some(icon::reload_icon()), "Retry verification")
-                    .on_press(Message::Claim(ClaimMessage::CheckFunding))
+                secondary_compact(
+                    "tenshu.claim.funding.retry",
+                    Some(icon::reload_icon()),
+                    "Retry verification",
+                )
+                .on_press(Message::Claim(ClaimMessage::CheckFunding))
             }),
         )
         .push_maybe(panel.verification_report().map(|_| {
-            button::secondary_compact(None, "Copy verification report")
-                .on_press(Message::Claim(ClaimMessage::CopyVerificationReport))
+            secondary_compact(
+                "tenshu.claim.funding.report",
+                None,
+                "Copy verification report",
+            )
+            .on_press(Message::Claim(ClaimMessage::CopyVerificationReport))
         }))
         .push_maybe((!verified).then(|| {
-            button::secondary_compact(None, "Pause checks")
+            secondary_compact("tenshu.claim.funding.pause-checks", None, "Pause checks")
                 .on_press(Message::Claim(ClaimMessage::Cancel))
         }));
     let deposits = Column::new().spacing(12)
@@ -430,7 +474,7 @@ fn funding_view<'a>(
         body
             .push_maybe((!signing_available).then(|| card::warning(
                 "Split signing is disabled for this launch. Restart Tenshu with --enable-btcb2-split to enable live testing.".into())))
-            .push(button::primary(None, if panel.paired_signing_pending() { "Checking transactions…" } else { "Review and sign" })
+            .push(primary("tenshu.claim.funding.review-sign", None, if panel.paired_signing_pending() { "Checking transactions…" } else { "Review and sign" })
                 .on_press_maybe((signing_available && !panel.paired_signing_pending() && !panel.funding_checking()).then_some(Message::Claim(ClaimMessage::SignPair)))
                 .width(Length::Fixed(240.0)))
             .into()
@@ -519,11 +563,15 @@ fn row<'a>(label: &'static str, value: impl Into<Element<'a, Message>>) -> Eleme
         .into()
 }
 
-fn return_address_row<'a>(address: String) -> Element<'a, Message> {
-    address_row(address, "Copied return address to clipboard")
+fn return_address_row<'a>(address: String, id: &'static str) -> Element<'a, Message> {
+    address_row(address, "Copied return address to clipboard", id)
 }
 
-fn address_row<'a>(address: String, notice: &'static str) -> Element<'a, Message> {
+fn address_row<'a>(
+    address: String,
+    notice: &'static str,
+    id: &'static str,
+) -> Element<'a, Message> {
     Row::new()
         .spacing(10)
         .align_y(Alignment::Center)
@@ -539,7 +587,7 @@ fn address_row<'a>(address: String, notice: &'static str) -> Element<'a, Message
             .max_width(750.0),
         )
         .push(
-            button::secondary_compact(None, "Copy address")
+            secondary_compact(id, None, "Copy address")
                 .on_press(Message::CopyWithToast(address, notice.to_string())),
         )
         .into()
@@ -599,6 +647,7 @@ fn deposit_status_view<'a>(
             address_row(
                 addresses.bitcoin_deposit.clone(),
                 "Copied Bitcoin deposit address to clipboard",
+                "tenshu.claim.funding.copy.bitcoin",
             )
         }))
         .push(match review {
@@ -628,6 +677,7 @@ fn deposit_status_view<'a>(
             address_row(
                 addresses.btcb2_deposit.clone(),
                 "Copied BTCB2 deposit address to clipboard",
+                "tenshu.claim.funding.copy.btcb2",
             )
         }))
         .push(match review {
@@ -651,7 +701,7 @@ fn deposit_status_view<'a>(
         .spacing(12)
         .push(p1_bold("Deposit addresses"))
         .push(p1_regular("Send BTC to the Bitcoin address and BTCB2 to the Blake2b address. Keep both Cubes open under the same Connect account.").style(theme::text::secondary))
-        .push(button::secondary_compact(Some(if expanded { icon::collapsed_icon() } else { icon::collapse_icon() }),
+        .push(secondary_compact("tenshu.claim.funding.addresses", Some(if expanded { icon::collapsed_icon() } else { icon::collapse_icon() }),
             if expanded { "Hide deposit addresses" } else { "Deposit addresses" })
             .on_press(Message::Claim(ClaimMessage::ToggleDepositDetails)))
         .push_maybe(expanded.then_some(bitcoin))
@@ -979,8 +1029,8 @@ fn preconditions_view<'a>(
                     .style(theme::text::secondary)
                 }))
                 .push({
-                    button::secondary_compact(
-                        Some(icon::reload_icon()),
+                    secondary_compact(
+                        "tenshu.claim.setup.load", Some(icon::reload_icon()),
                         if panel.can_prepare_funding() {
                             if panel.funding_error().is_some() {
                                 "Retry loading deposits"
@@ -1000,8 +1050,8 @@ fn preconditions_view<'a>(
                     )))
                 })
                 .push(
-                    button::secondary_compact(
-                        Some(if panel.setup_details_expanded() {
+                    secondary_compact(
+                        "tenshu.claim.setup.details", Some(if panel.setup_details_expanded() {
                             icon::collapsed_icon()
                         } else {
                             icon::collapse_icon()
@@ -1027,20 +1077,26 @@ fn preconditions_view<'a>(
             .spacing(15)
             .push(card::warning(reason))
             .push_maybe(retry.then(|| {
-                button::secondary(Some(icon::reload_icon()), "Check again").on_press_maybe(
-                    (!pre.checking).then_some(Message::Claim(ClaimMessage::Recheck)),
+                secondary(
+                    "tenshu.claim.setup.recheck",
+                    Some(icon::reload_icon()),
+                    "Check again",
                 )
+                .on_press_maybe((!pre.checking).then_some(Message::Claim(ClaimMessage::Recheck)))
             }))
             .into(),
         None => Row::new()
             .spacing(15)
             .push(
-                button::secondary(Some(icon::reload_icon()), "Check again").on_press_maybe(
-                    (!pre.checking).then_some(Message::Claim(ClaimMessage::Recheck)),
-                ),
+                secondary(
+                    "tenshu.claim.setup.recheck",
+                    Some(icon::reload_icon()),
+                    "Check again",
+                )
+                .on_press_maybe((!pre.checking).then_some(Message::Claim(ClaimMessage::Recheck))),
             )
             .push(
-                button::primary(None, "Build the transaction")
+                primary("tenshu.claim.setup.build", None, "Build the transaction")
                     .on_press_maybe(
                         panel
                             .can_build()
@@ -1154,7 +1210,10 @@ fn plan_view<'a>(
         Ok(address) => {
             summary = summary
                 .push(p1_regular("Return address").bold())
-                .push(return_address_row(address.clone()))
+                .push(return_address_row(
+                    address.clone(),
+                    "tenshu.claim.plan.copy-return",
+                ))
                 .push(
                     Row::new()
                         .spacing(10)
@@ -1248,12 +1307,12 @@ fn plan_view<'a>(
                 .spacing(20)
                 .push(Space::new().width(Length::Fill))
                 .push(
-                    button::secondary(None, "Cancel")
+                    secondary("tenshu.claim.plan.cancel", None, "Cancel")
                         .on_press(Message::Claim(ClaimMessage::Cancel))
                         .width(Length::Fixed(150.0)),
                 )
                 .push(
-                    button::primary(None, "Sign")
+                    primary("tenshu.claim.plan.sign", None, "Sign")
                         .on_press_maybe((panel.can_sign_or_submit() && return_address.is_ok() && matches!(coin_review, Some(Ok(_)))).then_some(Message::Claim(ClaimMessage::Sign)))
                         .width(Length::Fixed(150.0)),
                 ),
@@ -1336,8 +1395,8 @@ fn paired_sign_view<'a>(
             .push(p1_regular("Sign both transfers with this Vault’s normal keys. You will review each broadcast separately."))
             .push_maybe(shared_count.map(|count| p1_regular(format!("Each transfer includes {count} shared coin{} and one verified chain-specific deposit.", if count == 1 { "" } else { "s" })).style(theme::text::secondary)))
             .push(Row::new().spacing(10)
-                .push(button::secondary(None, "Bitcoin transaction").on_press(Message::Claim(ClaimMessage::ShowPairBitcoin)))
-                .push(button::secondary(None, "Bitcoin Blake2b transaction").on_press(Message::Claim(ClaimMessage::ShowPairBtcb2))))
+                .push(secondary("tenshu.claim.pair.tab.bitcoin", None, "Bitcoin transaction").on_press(Message::Claim(ClaimMessage::ShowPairBitcoin)))
+                .push(secondary("tenshu.claim.pair.tab.btcb2", None, "Bitcoin Blake2b transaction").on_press(Message::Claim(ClaimMessage::ShowPairBtcb2))))
             .push(p1_bold(if active == coincube_core::chain::ChainId::Bitcoin {
                 "Bitcoin — return to this Vault"
             } else {
@@ -1368,6 +1427,7 @@ fn paired_sign_view<'a>(
         | Message::ShowToast(_, _)
         | Message::Clipboard(_)
         | Message::CopyWithToast(_, _)
+        | Message::FocusAction(_)
         | Message::OpenUrl(_) => message,
         other => Message::ClaimPairedSigner(session, active, Box::new(other)),
     })
@@ -1420,7 +1480,7 @@ fn review_view<'a>(
                     .spacing(10)
                     .push(row("Back to this Vault", p1_regular(format_amount(*amount, cache))))
                     .push(p1_regular("Return address").bold())
-                    .push(return_address_row(address.clone())),
+                    .push(return_address_row(address.clone(), "tenshu.claim.review.copy-return")),
                 _ => Column::new().push(card::warning(
                     "Cannot display the return address for this transaction. Review again before submitting.".to_string(),
                 )),
@@ -1462,12 +1522,16 @@ fn review_view<'a>(
             .into(),
     };
     let mut actions = Row::new().spacing(15).push(
-        button::secondary(Some(icon::reload_icon()), "Review again")
-            .on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::Refresh))),
+        secondary(
+            "tenshu.claim.review.refresh",
+            Some(icon::reload_icon()),
+            "Review again",
+        )
+        .on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::Refresh))),
     );
     if can_broadcast {
         actions = actions.push(
-            button::primary(None, "Broadcast")
+            primary("tenshu.claim.review.broadcast", None, "Broadcast")
                 .on_press_maybe(
                     (!busy && destination_valid).then_some(Message::Claim(ClaimMessage::Confirm)),
                 )
@@ -1600,7 +1664,7 @@ fn track_view<'a>(
         )
         .push(
             Row::new().spacing(15).push(
-                button::secondary(Some(icon::reload_icon()), "Read again")
+                secondary("tenshu.claim.track.refresh", Some(icon::reload_icon()), "Read again")
                     .on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::Refresh))),
             ),
         )
@@ -1612,23 +1676,23 @@ fn track_view<'a>(
                 .push(row("Witness ID", p2_regular(snapshot.wtxid.to_string())))
                 .push(row("Fee", p2_regular(format!("{} sats", snapshot.fee_sats))))
                 .push(row("Previous attempts", p2_regular(attempts.to_string())))
-                .push(button::primary(None, "Confirm resend of original transaction").on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::ConfirmResubmission))))
+                .push(primary("tenshu.claim.track.confirm-resend", None, "Confirm resend of original transaction").on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::ConfirmResubmission))))
         }))
         .push_maybe((!has_resubmission && reconfirmation.is_none() && matches!(status, Some(Status::Observation(Assessment::Reorged | Assessment::WaitingForConfirmation)))).then(|| {
-            button::secondary(None, "Review resend of original transaction").on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::ReviewResubmission)))
+            secondary("tenshu.claim.track.review-resend", None, "Review resend of original transaction").on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::ReviewResubmission)))
         }))
         .push_maybe(reconfirmation.map(|inclusion| {
             Column::new().spacing(10)
                 .push(p1_regular("The same Bitcoin transaction has confirmed in a different block. Acknowledging this keeps its submission history and checks its confirmation depth again."))
                 .push(row("Previous block", p2_regular(format!("{} — {}", inclusion.previous.height, inclusion.previous.hash))))
                 .push(row("New block", p2_regular(format!("{} — {}", inclusion.confirmed.height, inclusion.confirmed.hash))))
-                .push(button::primary(None, "Acknowledge new confirmation").on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::ConfirmReconfirmation))))
+                .push(primary("tenshu.claim.track.confirm-reconfirmation", None, "Acknowledge new confirmation").on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::ConfirmReconfirmation))))
         }))
         .push_maybe(can_review_reconfirmation(status, has_resubmission, reconfirmation.is_some()).then(|| {
-            button::secondary(None, "Review new confirmation").on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::ReviewReconfirmation)))
+            secondary("tenshu.claim.track.review-reconfirmation", None, "Review new confirmation").on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::ReviewReconfirmation)))
         }))
         .push(
-            button::primary(None, "Continue in Bitcoin Blake2b")
+            primary("tenshu.claim.track.continue", None, "Continue in Bitcoin Blake2b")
                 .on_press_maybe(can_continue.then_some(Message::ContinueForkClaim)),
         )
         .push(Space::new().height(Length::Fixed(10.0)))
@@ -1641,6 +1705,218 @@ mod tests {
     use crate::app::state::preferences::{BalancePrivacy, BalancePrivacyChrome};
     use crate::app::view::shared::landing::capture;
     use crate::app::view::vault::ancestry_coins::{CoinPairReview, CoinRow};
+
+    #[test]
+    fn mounted_track_actions_tab_activate_once_and_skip_disabled_continue() {
+        use iced::advanced::{
+            layout,
+            renderer::Headless,
+            widget::{operation, operation::focusable, Id, Operation, Tree},
+            Layout, Shell,
+        };
+        use iced::{keyboard, mouse, Event, Rectangle, Size};
+
+        for bytes in coincube_ui::font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(bytes);
+        }
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            14.into(),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let txid = "00".repeat(32).parse().unwrap();
+        let content = |can_continue| {
+            track_view(
+                Outcome::Recorded { txid },
+                None,
+                None,
+                false,
+                None,
+                can_continue,
+                (None, None),
+            )
+        };
+        let mut element = content(false);
+        let mut tree = Tree::new(element.as_widget());
+        let size = Size::new(1024.0, 768.0);
+        let mut node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        let operate = |element: &mut Element<'_, Message>,
+                       tree: &mut Tree,
+                       node: &layout::Node,
+                       operation: Box<dyn Operation<()>>| {
+            let mut operation = operation;
+            loop {
+                element.as_widget_mut().operate(
+                    tree,
+                    Layout::new(node),
+                    &renderer,
+                    &mut operation::black_box(operation.as_mut()),
+                );
+                match operation.finish() {
+                    operation::Outcome::Chain(next) => operation = next,
+                    _ => break,
+                }
+            }
+        };
+        let focused = |element: &mut Element<'_, Message>, tree: &mut Tree, node: &layout::Node| {
+            let mut operation: Box<dyn Operation<Id>> = Box::new(focusable::find_focused());
+            loop {
+                element.as_widget_mut().operate(
+                    tree,
+                    Layout::new(node),
+                    &renderer,
+                    &mut operation::black_box(operation.as_mut()),
+                );
+                match operation.finish() {
+                    operation::Outcome::Some(id) => return Some(id),
+                    operation::Outcome::None => return None,
+                    operation::Outcome::Chain(next) => operation = next,
+                }
+            }
+        };
+        let key = |named, repeat, pressed| {
+            let key = keyboard::Key::Named(named);
+            let physical_key =
+                keyboard::key::Physical::Unidentified(keyboard::key::NativeCode::Unidentified);
+            let location = keyboard::Location::Standard;
+            let modifiers = keyboard::Modifiers::empty();
+            if pressed {
+                Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: key.clone(),
+                    modified_key: key,
+                    physical_key,
+                    location,
+                    modifiers,
+                    text: None,
+                    repeat,
+                })
+            } else {
+                Event::Keyboard(keyboard::Event::KeyReleased {
+                    key: key.clone(),
+                    modified_key: key,
+                    physical_key,
+                    location,
+                    modifiers,
+                })
+            }
+        };
+        let send =
+            |element: &mut Element<'_, Message>, tree: &mut Tree, node: &layout::Node, event| {
+                let mut messages = Vec::new();
+                element.as_widget_mut().update(
+                    tree,
+                    &event,
+                    Layout::new(node),
+                    mouse::Cursor::Unavailable,
+                    &renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut Shell::new(&mut messages),
+                    &Rectangle::with_size(size),
+                );
+                messages
+            };
+
+        operate(
+            &mut element,
+            &mut tree,
+            &node,
+            Box::new(focusable::focus_next::<()>()),
+        );
+        assert_eq!(
+            focused(&mut element, &mut tree, &node),
+            Some(Id::new("tenshu.claim.track.refresh"))
+        );
+        assert!(matches!(
+            send(
+                &mut element,
+                &mut tree,
+                &node,
+                key(keyboard::key::Named::Enter, false, true)
+            )
+            .as_slice(),
+            [Message::Claim(ClaimMessage::Refresh)]
+        ));
+        assert!(send(
+            &mut element,
+            &mut tree,
+            &node,
+            key(keyboard::key::Named::Enter, true, true)
+        )
+        .is_empty());
+        send(
+            &mut element,
+            &mut tree,
+            &node,
+            key(keyboard::key::Named::Enter, false, false),
+        );
+        assert!(matches!(
+            send(
+                &mut element,
+                &mut tree,
+                &node,
+                key(keyboard::key::Named::Space, false, true)
+            )
+            .as_slice(),
+            [Message::Claim(ClaimMessage::Refresh)]
+        ));
+        send(
+            &mut element,
+            &mut tree,
+            &node,
+            key(keyboard::key::Named::Space, false, false),
+        );
+        operate(
+            &mut element,
+            &mut tree,
+            &node,
+            Box::new(focusable::focus_next::<()>()),
+        );
+        assert_eq!(focused(&mut element, &mut tree, &node), None);
+
+        element = content(true);
+        tree.diff(element.as_widget());
+        node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        operate(
+            &mut element,
+            &mut tree,
+            &node,
+            Box::new(focusable::focus::<()>(Id::new(
+                "tenshu.claim.track.refresh",
+            ))),
+        );
+        operate(
+            &mut element,
+            &mut tree,
+            &node,
+            Box::new(focusable::focus_next::<()>()),
+        );
+        assert_eq!(
+            focused(&mut element, &mut tree, &node),
+            Some(Id::new("tenshu.claim.track.continue"))
+        );
+        assert!(matches!(
+            send(
+                &mut element,
+                &mut tree,
+                &node,
+                key(keyboard::key::Named::Enter, false, true)
+            )
+            .as_slice(),
+            [Message::ContinueForkClaim]
+        ));
+    }
 
     #[test]
     fn mounted_live_claim_pages_show_checks_addresses_and_actions() {
