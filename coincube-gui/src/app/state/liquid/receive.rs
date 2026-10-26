@@ -240,7 +240,7 @@ impl State for LiquidReceive {
         )
         .map(view::Message::LiquidReceive);
 
-        let content = view::dashboard(menu, cache, receive_view);
+        let content = view::dashboard_payment(menu, cache, receive_view);
 
         // Show picker modals if open
         if self.receive_picker_open {
