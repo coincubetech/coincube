@@ -39,7 +39,8 @@ and storage identity. Disabling AI access pauses the clients. Revoke each client
 individually; to change scope, revoke and pair again. The list says whether the
 runtime is available, not whether a host is continuously connected. A failed
 durable revoke is shown as an error and does not claim success. Cube deletion
-removes its pairing material before wallet deletion.
+removes its pairing material before wallet deletion. Duress wipe also removes
+pairing files on this device.
 
 ## Build and verify
 
