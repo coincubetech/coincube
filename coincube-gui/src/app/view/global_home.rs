@@ -6,11 +6,11 @@ use coincube_ui::{
     color,
     component::{amount::*, button, form, spinner, text::*},
     icon::{
-        arrow_down_up_icon, arrow_right, check_circle_icon, droplet_fill_icon, lightning_icon,
-        recovery_icon, usd_icon, vault_icon, warning_icon,
+        arrow_down_up_icon, arrow_right, check_circle_icon, clock_icon, droplet_fill_icon,
+        lightning_icon, usd_icon, vault_icon, warning_icon,
     },
     theme,
-    widget::*,
+    widget::{action::Action, *},
 };
 use iced::{
     widget::{Button, Column, Space, Stack},
@@ -462,14 +462,27 @@ fn wallet_card<'a>(
                     Column::new()
                         .spacing(10)
                         .push(iced::widget::rule::horizontal(1))
-                        .push(landing_button(
-                            landing_control_id(cube_id, "Vault", "recovery-path"),
-                            "Recovery path",
-                            Some(recovery_icon().size(16)),
-                            Message::FocusAction,
-                            Some(Message::Menu(Menu::Vault(VaultSubMenu::Overview))),
-                            theme::button::link,
-                        )),
+                        .push(
+                            Action::new(
+                                landing_control_id(cube_id, "Vault", "recovery-path"),
+                                Container::new(
+                                    Row::new()
+                                        .spacing(6)
+                                        .align_y(Alignment::Center)
+                                        .push(clock_icon().size(16))
+                                        .push(text("Recovery path").size(P1_SIZE).bold())
+                                        .push(arrow_right().size(14)),
+                                )
+                                .padding(4),
+                                Message::FocusAction,
+                            )
+                            .style(|t, status| {
+                                let mut style = theme::button::link(t, status);
+                                style.text_color = t.colors.shell.accent_ink;
+                                style
+                            })
+                            .on_press(Message::Menu(Menu::Vault(VaultSubMenu::Overview))),
+                        ),
                 )
             } else {
                 content
