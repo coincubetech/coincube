@@ -47,6 +47,8 @@ pub struct SparkSendView<'a> {
     pub recipient_identities: &'a [crate::services::branta::RecipientIdentity],
     pub recipient_mismatch: bool,
     pub recipient_checks_enabled: bool,
+    /// Whether this exact destination has a Branta lookup path during Prepare.
+    pub recipient_lookup_eligible: bool,
     pub theme_mode: theme::palette::ThemeMode,
     pub sent_amount_display: &'a str,
     pub sent_celebration_context: &'a str,
@@ -444,6 +446,7 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
     let recipient_identities = view.recipient_identities;
     let recipient_mismatch = view.recipient_mismatch;
     let recipient_checks_enabled = view.recipient_checks_enabled;
+    let recipient_lookup_eligible = view.recipient_lookup_eligible;
     let theme_mode = view.theme_mode;
     use crate::app::view::SparkSendMessage;
     use coincube_ui::component::amount::format_u64_as_string;
@@ -715,10 +718,9 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
                         "Total",
                         format!("{} sats", ok.amount_sat.saturating_add(ok.fee_sat)),
                     ))
-                    .push(recipient_status_row(
-                        recipient_checks_enabled,
-                        recipient_identities,
-                    ))
+                    .push_maybe(recipient_lookup_eligible.then(|| {
+                        recipient_status_row(recipient_checks_enabled, recipient_identities)
+                    }))
                     .push_maybe(ok.method.starts_with("Spark").then(|| {
                         p2_regular(
                             "Spark transfer — instant, lower fee than Lightning or on-chain.",
@@ -1432,6 +1434,35 @@ mod tests {
         assert!(inspect(true, &[identity]).contains("Not identified"));
     }
 
+    #[test]
+    fn prepared_recipient_status_is_hidden_without_a_lookup_eligible_request() {
+        let mut eligible = Fixture::ordinary_prepared();
+        eligible.recipient_checks_enabled = false;
+        let render = |fixture: &Fixture| {
+            capture::inspect(
+                "spark-send-recipient-eligibility",
+                fixture.view().render(),
+                (1024, 768),
+                "dark",
+                theme::Theme::dark(),
+            )
+        };
+        assert!(render(&eligible).contains("Checks off"));
+
+        let mut unsupported = Fixture::ordinary_prepared();
+        unsupported.target = SparkSendTarget::Spark;
+        unsupported.destination = "spark1synthetic-destination".to_owned();
+        unsupported.recipient_lookup_eligible = false;
+        unsupported.recipient_checks_enabled = false;
+        if let SparkSendPhase::Prepared(ok) = &mut unsupported.phase {
+            ok.method = "SparkAddress".to_owned();
+        }
+        let mounted = render(&unsupported);
+        assert!(mounted.contains("Spark transfer"));
+        assert!(!mounted.contains("Recipient identity"));
+        assert!(!mounted.contains("Checks off"));
+    }
+
     struct Fixture {
         backend_available: bool,
         destination: String,
@@ -1440,6 +1471,7 @@ mod tests {
         phase: SparkSendPhase,
         mismatch: bool,
         recipient_checks_enabled: bool,
+        recipient_lookup_eligible: bool,
         mode: ThemeMode,
         unit: BitcoinDisplayUnit,
         hint: Option<String>,
@@ -1461,6 +1493,7 @@ mod tests {
                 phase,
                 mismatch: false,
                 recipient_checks_enabled: true,
+                recipient_lookup_eligible: false,
                 mode: ThemeMode::Dark,
                 unit: BitcoinDisplayUnit::Sats,
                 hint: None,
@@ -1486,6 +1519,7 @@ mod tests {
             fixture.destination = SYNTHETIC_INVOICE.to_string();
             fixture.amount = "30000".to_string();
             fixture.hint = Some(SYNTHETIC_HINT.to_string());
+            fixture.recipient_lookup_eligible = true;
             fixture
         }
 
@@ -1494,6 +1528,7 @@ mod tests {
             fixture.destination = SYNTHETIC_INVOICE.to_string();
             fixture.amount = "1500".to_string();
             fixture.invoice_amount = true;
+            fixture.recipient_lookup_eligible = true;
             fixture
         }
 
@@ -1505,6 +1540,7 @@ mod tests {
             let mut fixture = Self::filled(cross_chain_prepared());
             fixture.destination = SYNTHETIC_CROSS_CHAIN_ADDRESS.to_string();
             fixture.target = SparkSendTarget::Usdc;
+            fixture.recipient_lookup_eligible = false;
             fixture
         }
 
@@ -1524,6 +1560,7 @@ mod tests {
                 recipient_identities: &[],
                 recipient_mismatch: self.mismatch,
                 recipient_checks_enabled: self.recipient_checks_enabled,
+                recipient_lookup_eligible: self.recipient_lookup_eligible,
                 theme_mode: self.mode,
                 sent_amount_display: "",
                 sent_celebration_context: "",

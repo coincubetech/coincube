@@ -105,6 +105,7 @@ fn send_route_action_style(
 }
 
 const CONTINUE_ACTION_ID: &str = "tenshu.liquid.send.continue";
+const BREADCRUMB_ACTION_ID: &str = "tenshu.liquid.send.breadcrumb";
 pub(crate) const SEND_ROUTE_ACTION_ID: &str = "tenshu.liquid.send.source-route";
 pub(crate) const RECEIVE_ROUTE_ACTION_ID: &str = "tenshu.liquid.send.destination-route";
 
@@ -297,10 +298,16 @@ fn send_page<'a>(
     let header = Column::new()
         .spacing(4)
         .push(
-            iced_button(text(format!("‹ Liquid · {}", cache.cube_name)).color(color::ORANGE))
-                .padding([2, 0])
-                .style(theme::button::transparent)
-                .on_press(Message::LiquidSend(LiquidSendMessage::BackToHome)),
+            Action::new(
+                BREADCRUMB_ACTION_ID,
+                text(format!("‹ Liquid · {}", cache.cube_name)).color(color::ORANGE),
+                |id| Message::LiquidSend(LiquidSendMessage::FocusAction(id)),
+            )
+            .padding([2, 0])
+            .style(theme::button::transparent)
+            .on_press(Message::Menu(Menu::Liquid(
+                crate::app::menu::LiquidSubMenu::Overview,
+            ))),
         )
         .push(h3("Send").bold())
         .push(
@@ -2091,6 +2098,33 @@ mod privacy_tests {
     use super::*;
     use crate::app::cache::Cache;
     use crate::app::view::shared::landing::capture;
+
+    #[test]
+    fn breadcrumb_navigates_to_liquid_overview_without_resetting_the_draft() {
+        let cache = Cache::default();
+        for pointer in [false, true] {
+            let messages = capture::activate(
+                send_page(
+                    Column::new().into(),
+                    &cache,
+                    Amount::ZERO,
+                    0,
+                    SendAsset::Lbtc,
+                ),
+                iced::advanced::widget::Id::new(BREADCRUMB_ACTION_ID),
+                (1024, 768),
+                pointer,
+            );
+            assert!(messages.iter().any(|message| matches!(
+                message,
+                Message::Menu(Menu::Liquid(crate::app::menu::LiquidSubMenu::Overview))
+            )));
+            assert!(!messages.iter().any(|message| matches!(
+                message,
+                Message::LiquidSend(LiquidSendMessage::BackToHome)
+            )));
+        }
+    }
 
     #[test]
     fn master_asset_reselection_uses_current_asset_for_keyboard_and_pointer() {

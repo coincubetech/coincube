@@ -396,6 +396,9 @@ impl ConnectCubePanel {
     pub fn clear_client(&mut self) {
         self.client = None;
         self.server_cube_id = None;
+        // The key publication latch belongs to the server Cube row too. A
+        // replacement account (or server) must publish to its new row.
+        self.enc_pubkey_registered = false;
         // The latch means "already sent to *this* server cube row", so it dies
         // with the row id above. After signing in as a different account the
         // next registration names a different row, or none at all (the server
@@ -2090,11 +2093,14 @@ mod tests {
         panel.set_client(CoincubeClient::for_test("http://account-a.invalid"));
         panel.server_cube_id = Some(42);
         panel.lightning_address = Some(lightning("account-a@coincube.io"));
+        panel.cube_encryption_pubkey = Some("synthetic-device-pubkey".to_owned());
+        panel.enc_pubkey_registered = true;
         let old_generation = panel.session_generation();
 
         panel.set_client(CoincubeClient::for_test("http://account-b.invalid"));
         assert!(panel.server_cube_id.is_none());
         assert!(panel.lightning_address.is_none());
+        assert!(!panel.enc_pubkey_registered);
         assert_ne!(panel.session_generation(), old_generation);
 
         // A's delayed registration cannot repopulate the new account's view.
@@ -2135,6 +2141,7 @@ mod tests {
             generation: panel.session_generation(),
             result: Ok(cube_response(Some("account-b@coincube.io"))),
         });
+        assert!(panel.enc_pubkey_registered);
         assert_eq!(
             panel
                 .lightning_address

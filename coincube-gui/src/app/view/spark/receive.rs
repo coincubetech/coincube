@@ -502,12 +502,11 @@ fn lightning_address_body<'a>(
         );
     let ready: Element<'a, Message> = if let Some(qr) = qr {
         Row::new()
-            .spacing(16)
-            .align_y(Alignment::Center)
+            .spacing(24)
+            .align_y(Alignment::Start)
+            .width(Length::Fill)
             .push(QRCode::<theme::Theme>::new(qr).total_size(160))
             .push(details)
-            .wrap()
-            .vertical_spacing(16)
             .into()
     } else {
         Column::new()
@@ -1092,22 +1091,26 @@ fn phase_body<'a>(
             if ok.fee_sat > 0 {
                 details = details.push(kv_row("Fee", format!("{} sats", ok.fee_sat)));
             }
-            Container::new(
+            let ready_body: Element<'_, Message> = if qr_data.is_some() {
+                Row::new()
+                    .spacing(24)
+                    .align_y(Alignment::Start)
+                    .width(Length::Fill)
+                    .push(qr_block)
+                    .push(details)
+                    .into()
+            } else {
                 Column::new()
-                    .spacing(16)
-                    .push(
-                        Row::new()
-                            .spacing(16)
-                            .align_y(Alignment::Center)
-                            .push(qr_block)
-                            .push(details)
-                            .wrap()
-                            .vertical_spacing(16),
-                    )
-                    .push(
-                        button::transparent_border(None, "Generate another")
-                            .on_press(Message::SparkReceive(SparkReceiveMessage::Reset)),
-                    ),
+                    .spacing(10)
+                    .push(qr_block)
+                    .push(details)
+                    .into()
+            };
+            Container::new(
+                Column::new().spacing(16).push(ready_body).push(
+                    button::transparent_border(None, "Generate another")
+                        .on_press(Message::SparkReceive(SparkReceiveMessage::Reset)),
+                ),
             )
             .padding(16)
             .style(theme::card::simple)
@@ -1260,6 +1263,16 @@ mod tests {
                         outer
                     );
                 }
+                let ready_label = ready
+                    .text
+                    .iter()
+                    .find(|(label, _)| label == "Lightning address")
+                    .map(|(_, bounds)| *bounds)
+                    .expect("lightning address ready label");
+                assert!(
+                    ready_label.x > 180.0,
+                    "Lightning address details must sit beside the QR at {appearance} {outer:?}: {ready_label:?}"
+                );
                 let signed_out = capture::inspect_wide_content(
                     "spark-receive-lightning-address-signed-out",
                     lightning_address_body(false, Some(address), Some(&qr)),
@@ -1329,6 +1342,16 @@ mod tests {
                     );
                 }
                 assert!(!mounted.contains("Expires"));
+                let ready_label = mounted
+                    .text
+                    .iter()
+                    .find(|(label, _)| label == "Lightning invoice")
+                    .map(|(_, bounds)| *bounds)
+                    .expect("generated ready label");
+                assert!(
+                    ready_label.x > 180.0,
+                    "generated details must sit beside the QR at {appearance} {outer:?}: {ready_label:?}"
+                );
             }
         }
     }

@@ -93,12 +93,12 @@ pub fn liquid_receive_view<'a>(
                     lightning_limits,
                     loading,
                 ))
-                .padding([0, 20]),
+                .padding([0, 24]),
             );
         }
         ReceiveMethod::Usdt => {
             content = content.push(
-                Container::new(usdt_input_fields(usdt_amount_input, loading)).padding([0, 20]),
+                Container::new(usdt_input_fields(usdt_amount_input, loading)).padding([0, 24]),
             );
         }
         _ => {
@@ -112,13 +112,13 @@ pub fn liquid_receive_view<'a>(
                 if *receive_method == ReceiveMethod::OnChain && onchain_limits.is_none() {
                     content = content.push(
                         Container::new(onchain_warning_box(onchain_limits, bitcoin_unit))
-                            .padding([0, 20]),
+                            .padding([0, 24]),
                     );
                     content = content.push(crate::loading::loading_indicator(Some(
                         "Fetching swap limits",
                     )));
                 } else {
-                    content = content.push(Container::new(generate_button()).padding([0, 20]));
+                    content = content.push(Container::new(generate_button()).padding([0, 24]));
                 }
             }
         }
@@ -215,23 +215,22 @@ pub fn liquid_receive_view<'a>(
 
         let ready_body: Element<'_, LiquidReceiveMessage> = if let Some(qr) = qr_data {
             Row::new()
-                .spacing(16)
-                .align_y(Alignment::Center)
+                .spacing(24)
+                .align_y(Alignment::Start)
+                .width(Length::Fill)
                 .push(QRCode::<coincube_ui::theme::Theme>::new(qr).total_size(160))
                 .push(details)
-                .wrap()
-                .vertical_spacing(16)
                 .into()
         } else {
             details.into()
         };
 
-        content = content.push(Container::new(card::simple(ready_body)).padding([0, 20]));
+        content = content.push(Container::new(card::simple(ready_body)).padding([0, 24]));
 
         // OnChain warning box
         if *receive_method == ReceiveMethod::OnChain {
             content = content.push(
-                Container::new(onchain_warning_box(onchain_limits, bitcoin_unit)).padding([0, 20]),
+                Container::new(onchain_warning_box(onchain_limits, bitcoin_unit)).padding([0, 24]),
             );
         }
     }
@@ -1748,6 +1747,17 @@ mod privacy_tests {
                 assert!(mounted.contains("Copy"));
                 assert!(mounted.contains("Enlarge QR"));
                 assert!(!mounted.contains("QR unavailable"));
+                let ready_label = mounted
+                    .text
+                    .iter()
+                    .filter(|(label, _)| label == "Liquid address")
+                    .max_by(|(_, a), (_, b)| a.y.total_cmp(&b.y))
+                    .map(|(_, bounds)| *bounds)
+                    .expect("ready card label");
+                assert!(
+                    ready_label.x > 180.0,
+                    "ready details must sit beside the QR at {appearance} {outer:?}: {ready_label:?}"
+                );
             }
         }
     }

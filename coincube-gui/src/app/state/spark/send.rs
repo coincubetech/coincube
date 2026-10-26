@@ -855,6 +855,11 @@ impl State for SparkSend {
                 recipient_identities: self.recipient_identities(),
                 recipient_mismatch: self.recipient_mismatch(),
                 recipient_checks_enabled: branta::enabled(),
+                recipient_lookup_eligible: recipient_lookup_request(
+                    self.receive_target,
+                    &self.destination_input,
+                )
+                .is_some(),
                 sent_amount_display: &self.sent_amount_display,
                 sent_celebration_context: &self.sent_celebration_context,
                 sent_quote: &self.sent_quote,
