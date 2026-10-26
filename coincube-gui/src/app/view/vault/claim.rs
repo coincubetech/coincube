@@ -1881,13 +1881,6 @@ mod tests {
         );
         assert_eq!(focused(&mut element, &mut tree, &node), None);
 
-        element = content(true);
-        tree.diff(element.as_widget());
-        node = element.as_widget_mut().layout(
-            &mut tree,
-            &renderer,
-            &layout::Limits::new(Size::ZERO, size),
-        );
         operate(
             &mut element,
             &mut tree,
@@ -1895,6 +1888,19 @@ mod tests {
             Box::new(focusable::focus::<()>(Id::new(
                 "tenshu.claim.track.refresh",
             ))),
+        );
+
+        element = content(true);
+        tree.diff(element.as_widget());
+        node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        assert_eq!(
+            focused(&mut element, &mut tree, &node),
+            Some(Id::new("tenshu.claim.track.refresh")),
+            "Refresh retains focus when Continue becomes available",
         );
         operate(
             &mut element,
