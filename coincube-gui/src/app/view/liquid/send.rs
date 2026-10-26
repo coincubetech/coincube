@@ -255,8 +255,9 @@ pub fn liquid_send_view<'a>(
         } else {
             match from_asset {
                 SendAsset::Lbtc => format!(
-                    "Balance: {}",
-                    btc_balance.to_formatted_string_with_unit(bitcoin_unit)
+                    "Balance: {} {}",
+                    btc_balance.to_formatted_string_with_unit(bitcoin_unit),
+                    bitcoin_unit.label()
                 ),
                 SendAsset::Usdt => format!("Balance: {} USDt", format_usdt_display(usdt_balance)),
             }
@@ -1909,7 +1910,7 @@ mod privacy_tests {
             valid: true,
         };
         let input_type = None;
-        let render = || {
+        let render = |unit| {
             liquid_send_view(
                 Amount::from_sat(123_456),
                 0,
@@ -1920,32 +1921,42 @@ mod privacy_tests {
                 &[],
                 &input,
                 &input_type,
-                BitcoinDisplayUnit::Sats,
+                unit,
                 "",
                 false,
                 false,
             )
         };
-        for (width, height) in [(1024, 768), (1440, 900)] {
-            for (appearance, theme) in [
-                ("dark", theme::Theme::dark()),
-                ("light", theme::Theme::light()),
-            ] {
-                let mounted = capture::inspect(
-                    "liquid-send-details",
-                    render(),
-                    (width, height),
-                    appearance,
-                    theme,
-                );
-                assert!(mounted.contains("Payment details"));
-                assert!(mounted.contains("Destination"));
-                assert!(mounted.contains("Continue to amount"));
-                assert!(mounted.has_focus(iced::advanced::widget::Id::new(CONTINUE_ACTION_ID,)));
+        for unit in [BitcoinDisplayUnit::Sats, BitcoinDisplayUnit::BTC] {
+            for (width, height) in [(1024, 768), (1440, 900)] {
+                for (appearance, theme) in [
+                    ("dark", theme::Theme::dark()),
+                    ("light", theme::Theme::light()),
+                ] {
+                    let mounted = capture::inspect(
+                        match unit {
+                            BitcoinDisplayUnit::Sats => "liquid-send-sats-details",
+                            BitcoinDisplayUnit::BTC => "liquid-send-btc-details",
+                        },
+                        render(unit),
+                        (width, height),
+                        appearance,
+                        theme,
+                    );
+                    assert!(mounted.contains("Payment details"));
+                    assert!(mounted.contains("Destination"));
+                    assert!(mounted.contains("Continue to amount"));
+                    assert!(mounted.contains(&format!(
+                        "Balance: {} {}",
+                        Amount::from_sat(123_456).to_formatted_string_with_unit(unit),
+                        unit.label()
+                    )));
+                    assert!(mounted.has_focus(iced::advanced::widget::Id::new(CONTINUE_ACTION_ID)));
+                }
             }
         }
         let messages = capture::activate(
-            render(),
+            render(BitcoinDisplayUnit::Sats),
             iced::advanced::widget::Id::new(CONTINUE_ACTION_ID),
             (1024, 768),
             false,
