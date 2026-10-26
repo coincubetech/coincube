@@ -787,3 +787,20 @@ While exporting, two regressions of mine surfaced. (1) Removing the cross-tab li
 **Robert:** the text under Strict mode in Payment checks needs cleanup.
 
 **Cause and fix:** four Settings rows that align to the top used the class `top`, which is also the top bar's class, so those rows were forced to the top bar's 56 px height and panel background and their descriptions spilled over the next text. The modifier is now `atop`. Strict mode and the other three rows now grow with their text. For Codex: nothing to carry over beyond rows that size to their content.
+
+## Square buttons everywhere (2026-10-26, canvas v122)
+
+**Robert:** the new design still has some rounded buttons; make every button match the newer, more square design (the "Confirm seed phrase" button).
+
+**Applied:**
+- **Radius rule.** Every button now uses the square corner of `.btn`: 8 px, or 6 px for controls under about 30 px tall, like `.tbtn`. This covers:
+  - the Send and Receive pills;
+  - the top-bar account, service and App preferences chips, and the Launcher's Network chip;
+  - filter, scope and choice chips;
+  - Buy/Sell modes and recipient rows;
+  - small inline actions (Sign in, Reconnect, advisories);
+  - the Launcher page arrows, the swap and info icon buttons, and step buttons.
+- **Unchanged, because they are not buttons:** toggles and switches, inputs, avatars, coin marks, step and page dots, status badges, cards, menus and dialogs.
+
+**For Codex:** in `coincube-ui`, `radius::PILL` and `radius::CHIP` are now 8. A new `radius::TOGGLE` (16) keeps the labelled pill toggle's shape. The remaining hand-rolled round buttons in the GUI are squared too.
+

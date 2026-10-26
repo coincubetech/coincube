@@ -718,6 +718,47 @@ fn geometry_matches_the_v113_artboards() {
 }
 
 #[test]
+fn every_button_shape_is_square_cornered() {
+    // Canvas v122: buttons use `.btn`'s 8px corner at most; no pills.
+    let theme = Theme::dark();
+    for shape in [
+        ActionShape::Pill,
+        ActionShape::Compact,
+        ActionShape::Chip,
+        ActionShape::Icon,
+    ] {
+        for kind in [
+            ActionKind::Primary,
+            ActionKind::Secondary,
+            ActionKind::Quiet,
+            ActionKind::Destructive,
+        ] {
+            for status in [Status::Active, Status::Hovered, Status::Pressed, Status::Disabled] {
+                let corner = button_style::action(&theme, status, kind, shape)
+                    .border
+                    .radius
+                    .top_left;
+                assert!(
+                    corner <= tokens::radius::CONTROL,
+                    "{:?} {:?} {:?} has a {}px corner",
+                    shape,
+                    kind,
+                    status,
+                    corner
+                );
+            }
+        }
+    }
+    let chip = tokens::chip::chip(&theme).border.radius.top_left;
+    assert!(chip <= tokens::radius::CONTROL, "status chip {}px", chip);
+    let choice = tokens::control::choice_chip(&theme, Status::Active, false)
+        .border
+        .radius
+        .top_left;
+    assert!(choice <= tokens::radius::CONTROL, "choice chip {}px", choice);
+}
+
+#[test]
 fn plex_digits_keep_amount_widths_stable() {
     let width = |value: &'static str| {
         let mut mounted = Mounted::new(

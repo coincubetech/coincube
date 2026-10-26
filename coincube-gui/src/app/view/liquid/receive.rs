@@ -336,7 +336,7 @@ pub fn liquid_receive_view<'a>(
                     border: iced::Border {
                         color: color::ORANGE,
                         width: 1.5,
-                        radius: 20.0.into(),
+                        radius: 8.0.into(),
                     },
                     ..Default::default()
                 },
@@ -345,7 +345,7 @@ pub fn liquid_receive_view<'a>(
                 background: Some(Background::Color(color::TRANSPARENT)),
                 text_color: color::ORANGE,
                 border: iced::Border {
-                    radius: 20.0.into(),
+                    radius: 8.0.into(),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -584,7 +584,7 @@ fn method_toggle(current_method: &ReceiveMethod) -> Element<LiquidReceiveMessage
                         color::GREY_2
                     },
                     border: iced::Border {
-                        radius: 50.0.into(),
+                        radius: 6.0.into(),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -598,7 +598,7 @@ fn method_toggle(current_method: &ReceiveMethod) -> Element<LiquidReceiveMessage
                 color::TRANSPARENT
             })),
             border: iced::Border {
-                radius: 50.0.into(),
+                radius: 6.0.into(),
                 color: if lightning_liquid {
                     color::ORANGE
                 } else {
@@ -651,7 +651,7 @@ fn method_toggle(current_method: &ReceiveMethod) -> Element<LiquidReceiveMessage
                         color::GREY_2
                     },
                     border: iced::Border {
-                        radius: 50.0.into(),
+                        radius: 6.0.into(),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -665,7 +665,7 @@ fn method_toggle(current_method: &ReceiveMethod) -> Element<LiquidReceiveMessage
                 color::TRANSPARENT
             })),
             border: iced::Border {
-                radius: 50.0.into(),
+                radius: 6.0.into(),
                 color: if onchain_liquid {
                     color::ORANGE
                 } else {
@@ -719,7 +719,7 @@ fn method_toggle(current_method: &ReceiveMethod) -> Element<LiquidReceiveMessage
                         color::GREY_2
                     },
                     border: iced::Border {
-                        radius: 50.0.into(),
+                        radius: 6.0.into(),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -733,7 +733,7 @@ fn method_toggle(current_method: &ReceiveMethod) -> Element<LiquidReceiveMessage
                 color::TRANSPARENT
             })),
             border: iced::Border {
-                radius: 50.0.into(),
+                radius: 6.0.into(),
                 color: if liquid_active {
                     color::ORANGE
                 } else {
@@ -787,7 +787,7 @@ fn method_toggle(current_method: &ReceiveMethod) -> Element<LiquidReceiveMessage
                         color::GREY_2
                     },
                     border: iced::Border {
-                        radius: 50.0.into(),
+                        radius: 6.0.into(),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -801,7 +801,7 @@ fn method_toggle(current_method: &ReceiveMethod) -> Element<LiquidReceiveMessage
                 color::TRANSPARENT
             })),
             border: iced::Border {
-                radius: 50.0.into(),
+                radius: 6.0.into(),
                 color: if usdt_active {
                     color::ORANGE
                 } else {
@@ -826,7 +826,7 @@ fn method_toggle(current_method: &ReceiveMethod) -> Element<LiquidReceiveMessage
         background: Some(Background::Color(iced::color!(0x202020))),
         border: iced::Border {
             color: iced::color!(0x202020),
-            radius: 50.0.into(),
+            radius: 10.0.into(),
             width: 2.0,
         },
         ..Default::default()
