@@ -1179,6 +1179,7 @@ pub(super) fn marks(cube: &crate::app::settings::CubeSettings) -> CubeMarks {
         network: cube.network,
         vault: wallet == super::launcher_presenter::WalletFaceMark::Vault,
         imported_bitcoin: wallet == super::launcher_presenter::WalletFaceMark::ImportedBitcoin,
+        spark: crate::app::features::spark(cube.network).is_available(),
         passkey: cube.is_passkey_cube(),
         backup_confirmed: cube.backed_up || cube.has_recovery_kit(),
     }
@@ -1191,11 +1192,23 @@ mod tests {
     use crate::home::launcher_scene::DESIGN_STAGE_HEIGHT;
 
     #[test]
+    fn spark_is_marked_on_every_cube_whose_network_supports_it() {
+        let cube = |chain| {
+            crate::app::settings::CubeSettings::new_with_raw_id("c".into(), "C".into(), chain)
+        };
+        assert!(marks(&cube(ChainId::Bitcoin)).spark);
+        assert!(marks(&cube(ChainId::Regtest)).spark);
+        assert!(!marks(&cube(ChainId::Testnet4)).spark);
+        assert!(!marks(&cube(ChainId::Signet)).spark);
+    }
+
+    #[test]
     fn rest_faces_are_rasterized_once_with_a_full_mip_chain() {
         let marks = CubeMarks {
             network: ChainId::Bitcoin,
             vault: true,
             imported_bitcoin: false,
+            spark: false,
             passkey: false,
             backup_confirmed: true,
         };
@@ -1261,6 +1274,7 @@ mod tests {
             network: ChainId::Bitcoin,
             vault: false,
             imported_bitcoin: false,
+            spark: false,
             passkey: false,
             backup_confirmed: false,
         };

@@ -63,6 +63,8 @@ pub(crate) struct CubeMarks {
     pub network: ChainId,
     pub vault: bool,
     pub imported_bitcoin: bool,
+    /// Spark comes with every Cube on a network it supports.
+    pub spark: bool,
     pub passkey: bool,
     pub backup_confirmed: bool,
 }
@@ -641,6 +643,7 @@ fn xml_text(value: &str) -> String {
 const SHIELD: &str = "M12 3l7 3v5.5c0 4.3-3 7.6-7 9.5-4-1.9-7-5.2-7-9.5V6z";
 const IMPORTED: &str = "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M10 7.5v9m0-9h3c2.4 0 2.4 4 0 4h-3m0 0h3.6c2.6 0 2.6 4.5 0 4.5H10M11.5 6v1.5m0 9V18";
 const LOCKED: &str = "M7 11h10v9H7zM9 11V8a3 3 0 0 1 6 0v3";
+const SPARK: &str = "M13 3L5 13.5h6L10 21l8-10.5h-6z";
 const PASSKEY: &str = "M9 5a4 4 0 1 0 0 8a4 4 0 1 0 0-8M12 11.5l7 7m-3-3 2.5-2.5m-.5 5 2.5-2.5";
 const CHECK: &str = "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M8.5 12.2l2.4 2.4 4.6-5.1";
 
@@ -703,15 +706,18 @@ pub(super) fn rest_face_svg(face: Face, marks: CubeMarks, light: bool) -> Option
             svg.push_str("</g>");
         }
         Face::Left => {
-            // `.lc`: centered row of `.wi` marks (.25s, gap .04s). Spark and
-            // Liquid inventories are unknown before unlock, so only persisted
-            // Vault or imported Bitcoin facts receive a mark.
+            // `.lc`: centered row of `.wi` marks (.25s, gap .04s), in the
+            // prototype's Vault, Spark order. Spark is known without an
+            // unlock: every Cube on a network that supports it has one.
             let mut paths = Vec::new();
             if marks.vault {
                 paths.push(SHIELD);
             }
             if marks.imported_bitcoin {
                 paths.push(IMPORTED);
+            }
+            if marks.spark {
+                paths.push(SPARK);
             }
             if paths.is_empty() {
                 return None;
@@ -998,6 +1004,7 @@ mod tests {
             network: ChainId::Testnet4,
             vault: true,
             imported_bitcoin: false,
+            spark: false,
             passkey: false,
             backup_confirmed: true,
         };
@@ -1005,9 +1012,26 @@ mod tests {
         assert!(top.contains("rotate(45 "));
         assert!(top.contains(">Testnet4</text>"));
         assert!(top.contains("data:image/png;base64,"));
-        assert!(rest_face_svg(Face::Left, marks, false)
+        let left = rest_face_svg(Face::Left, marks, false).unwrap();
+        assert!(left.contains(SHIELD) && !left.contains(SPARK));
+        let spark = rest_face_svg(
+            Face::Left,
+            CubeMarks {
+                spark: true,
+                ..marks
+            },
+            false,
+        )
+        .unwrap();
+        assert!(spark.find(SHIELD) < spark.find(SPARK), "Vault, then Spark");
+        let spark_only = CubeMarks {
+            vault: false,
+            spark: true,
+            ..marks
+        };
+        assert!(rest_face_svg(Face::Left, spark_only, false)
             .unwrap()
-            .contains(SHIELD));
+            .contains(SPARK));
         let right = rest_face_svg(Face::Right, marks, true).unwrap();
         assert!(right.contains(LOCKED) && right.contains(CHECK));
         let unmarked = CubeMarks {
