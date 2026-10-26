@@ -45,6 +45,24 @@ pub fn classify_pin(root: &Path, loc: &CubeLocation, pin: &str) -> Result<PinAtt
     classify_pin_scoped(root, loc, pin, || Ok(()))
 }
 
+/// The fork keeps its PIN-only seed trial and Connect admission in the caller.
+/// It still shares the Cube-ID counter with Bitcoin and seed-export trials.
+pub fn classify_connect_fork(
+    root: &Path,
+    loc: &CubeLocation,
+    pin: &str,
+) -> Result<PinAttempt, UnlockError> {
+    classify_connect_fork_with(root, loc.cube_id, || super::unlock_connect_fork(loc, pin))
+}
+
+fn classify_connect_fork_with(
+    root: &Path,
+    cube_id: &str,
+    verify: impl FnOnce() -> Result<PinOutcome, UnlockError>,
+) -> Result<PinAttempt, UnlockError> {
+    classify_pin_with_guard(root, cube_id, verify, || Ok(()))
+}
+
 /// The destination variant rechecks selected Cube metadata under the same
 /// attempt lock, before and after decryption. A rotated duress marker cannot
 /// turn a pending attempt into an ordinary wrong-PIN charge.
@@ -372,6 +390,46 @@ mod tests {
             ThrottleState::load(&root).failures["cube-a"].consecutive_failures,
             3
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bitcoin_and_fork_trials_share_one_atomic_cube_counter() {
+        let root = tmp("cross-chain-fork");
+        let barrier = Arc::new(Barrier::new(4));
+        let handles: Vec<_> = (0..3)
+            .map(|i| {
+                let root = root.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let attempt = if i == 0 {
+                        // Fork seed decryption remains distinct, but trial and
+                        // counter update must use the same lock as Bitcoin.
+                        classify_connect_fork_with(&root, "shared-cube", || Ok(PinOutcome::Wrong))
+                    } else {
+                        classify_pin_with(&root, "shared-cube", || Ok(PinOutcome::Wrong))
+                    }
+                    .unwrap();
+                    assert!(matches!(attempt, PinAttempt::Classified(PinOutcome::Wrong)));
+                })
+            })
+            .collect();
+        barrier.wait();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        assert_eq!(
+            ThrottleState::load(&root).failures["shared-cube"].consecutive_failures,
+            3
+        );
+        assert!(matches!(
+            classify_connect_fork_with(&root, "shared-cube", || {
+                panic!("lockout must refuse before fork seed decryption")
+            })
+            .unwrap(),
+            PinAttempt::Locked(_)
+        ));
         std::fs::remove_dir_all(root).unwrap();
     }
 
