@@ -96,6 +96,9 @@ argon2 = { version = "0.5", features = ["std"] }
 
 # Used for managing internal bitcoind
 base64 = "0.22"
+# Rasterizes Launcher face art once per content for the GPU floor. Same
+# version and features iced already builds for its SVG widget.
+resvg = "0.45"
 bitcoin_hashes = "0.16"
 reqwest = { version = "0.12.18", default-features = false, features = [
 	"json",

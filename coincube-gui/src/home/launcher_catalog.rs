@@ -123,8 +123,7 @@ pub(crate) struct LauncherScenePeer {
     pub key: CubeCatalogKey,
     pub name: String,
     pub status: &'static str,
-    pub glyph_dark: String,
-    pub glyph_light: String,
+    pub marks: super::launcher_scene::CubeMarks,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -335,8 +334,7 @@ impl Home {
                 } else {
                     "Unavailable on this network"
                 },
-                glyph_dark: super::launcher_presenter::cube_glyph_source(row.cube, false),
-                glyph_light: super::launcher_presenter::cube_glyph_source(row.cube, true),
+                marks: super::launcher_gpu::marks(row.cube),
             })
             .collect::<Vec<_>>();
         if peers.get(selected_slot)?.key != selected.key {
@@ -410,8 +408,15 @@ impl Home {
                 Task::none()
             }
             CatalogMessage::ClearSelection => {
-                self.catalog.selected = None;
-                self.catalog.motion = None;
+                // Back spins the Cube to rest and brightens its peers, as the
+                // prototype's `toBrowse` reverses the same transitions.
+                let returning = self.catalog.selected.take();
+                self.catalog.motion = returning
+                    .filter(|_| {
+                        self.catalog.mode == LauncherMode::Cubes
+                            && project(self).floor_eligible(self.catalog.mode)
+                    })
+                    .map(super::launcher_scene::Motion::returning);
                 self.catalog.open_from_floor = false;
                 Task::none()
             }
@@ -4148,10 +4153,11 @@ mod tests {
         assert_eq!(scene.selected_slot, 1);
         assert_eq!(scene.peers.len(), 4);
         assert_eq!(scene.peers[scene.selected_slot].name, "Cube 5");
+        // Peers carry only persisted face marks, never a rendered name.
         assert!(scene
             .peers
             .iter()
-            .all(|peer| !peer.glyph_dark.contains("Cube 5")));
+            .all(|peer| peer.marks.network == ChainId::Bitcoin));
         assert!(home.floor_open_matches_current_cube(&cube));
 
         // A queued Run still names the same ID after a reload, but its

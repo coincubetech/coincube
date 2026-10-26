@@ -4288,11 +4288,7 @@ impl Tab {
             && self.unlock_motion.is_some()
             && matches!(self.state, State::PinEntry(_) | State::PasskeyUnlock(_))
         {
-            Subscription::batch([
-                base,
-                iced::time::every(std::time::Duration::from_millis(16))
-                    .map(Message::UnlockMotionTick),
-            ])
+            Subscription::batch([base, iced::window::frames().map(Message::UnlockMotionTick)])
         } else {
             base
         }

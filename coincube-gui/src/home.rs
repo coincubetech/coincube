@@ -54,8 +54,11 @@ use crate::{
 };
 use coincube_core::signer::{MasterSigner, MASTER_SEED_LABEL};
 
+#[cfg(test)]
+mod launcher_capture;
 mod launcher_catalog;
 mod launcher_coin;
+mod launcher_gpu;
 pub(crate) mod launcher_presenter;
 pub(crate) mod launcher_scene;
 pub(crate) use launcher_catalog::LauncherSceneContext;
@@ -1144,7 +1147,7 @@ impl Home {
                 if self.catalog.motion.is_some() {
                     return Subscription::batch([
                         paging,
-                        iced::time::every(std::time::Duration::from_millis(16)).map(|now| {
+                        iced::window::frames().map(|now| {
                             Message::View(ViewMessage::Catalog(
                                 launcher_catalog::CatalogMessage::MotionTick(now),
                             ))
@@ -1155,7 +1158,7 @@ impl Home {
             }
         }
         if foreground && self.catalog.motion.is_some() && launcher_catalog::catalog_visible(self) {
-            return iced::time::every(std::time::Duration::from_millis(16)).map(|now| {
+            return iced::window::frames().map(|now| {
                 Message::View(ViewMessage::Catalog(
                     launcher_catalog::CatalogMessage::MotionTick(now),
                 ))

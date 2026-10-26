@@ -1,6 +1,13 @@
-//! The native Launcher's bounded spin. SVG keeps the projected Cube in the
-//! same Iced scene as the floor; readable controls are ordinary widgets laid
-//! over its square face once the turn ends.
+//! The Launcher floor as the prototype's CSS 3D scene, evaluated natively.
+//!
+//! `design-review/canvas/P-Launcher.dc.html` places every Cube in its own
+//! `.scene` (`perspective: 1100px`) and animates one transform list,
+//! `translate3d(dx, dy, 0) scale(k) rotateX(a) rotateY(b)`, together with
+//! the scene's `perspective-origin`. This module reproduces that math exactly:
+//! the same face transforms, the same per-function interpolation and easing,
+//! the same perspective divide about a moving origin, and the same 2D scene
+//! dimming. [`super::launcher_gpu`] rasterizes the result on the GPU with
+//! perspective-correct face art, inset borders and blurred shadows.
 
 use std::{
     fmt::Write,
@@ -10,19 +17,35 @@ use std::{
 use super::{launcher_coin, CubeCatalogKey};
 use crate::chain::{ChainId, ChainIdExt};
 
+/// `.cube { transition: transform 820ms var(--spin) }`.
 pub(super) const TURN: Duration = Duration::from_millis(820);
-const HANDOFF: Duration = Duration::from_millis(160);
-const PEERS: Duration = Duration::from_millis(500);
-const REST_SIZE: f32 = 152.0;
-// The static floor glyph uses these same projected faces at a smaller SVG
-// coordinate scale. Its 224px viewport restores the design's 152px Cube.
-pub(super) const REST_GLYPH_WIDTH: f32 = 224.0;
-pub(super) const REST_GLYPH_HEIGHT: f32 = 272.0;
-const GLYPH_SCALE: f32 = 126.0 / REST_GLYPH_WIDTH;
-const FACE_SIZE: f32 = 420.0;
-const CAMERA_DISTANCE: f32 = 1100.0;
-// Perspective projection of the front plane is exactly 420 logical pixels.
-const FOCUSED_SIZE: f32 = FACE_SIZE * CAMERA_DISTANCE / (CAMERA_DISTANCE + FACE_SIZE / 2.0);
+/// `.cb.handoff .cube { transition-delay: 160ms }`.
+pub(super) const HANDOFF: Duration = Duration::from_millis(160);
+/// `.scene { transition: opacity 500ms, transform 500ms }` and `.shadow`.
+pub(super) const PEERS: Duration = Duration::from_millis(500);
+/// `T.s`: one Cube size, four Cubes per page.
+pub(super) const REST_SIZE: f32 = 152.0;
+/// `.scene { perspective: 1100px }`.
+pub(super) const PERSPECTIVE: f32 = 1100.0;
+/// The details and unlock faces project to this many pixels on screen.
+pub(super) const FACE_SIZE: f32 = 420.0;
+/// `.f { border: 1.5px }`, in face-local CSS pixels.
+const BORDER: f32 = 1.5;
+
+/// The prototype's 1440 x 900 board: stage below the 64px bar, 742px tall.
+#[cfg(test)]
+pub(super) const DESIGN_STAGE_WIDTH: f32 = 1440.0;
+pub(super) const DESIGN_STAGE_HEIGHT: f32 = 742.0;
+/// `T.slot`, `.rows.big .row { gap }`, `.rows.big { padding-top }`.
+pub(super) const SLOT: f32 = 232.0;
+pub(super) const SLOT_GAP: f32 = 40.0;
+pub(super) const SLOT_HEIGHT: f32 = 344.0;
+pub(super) const ROWS_TOP: f32 = 168.0;
+/// Spin target: face center at stage (720, 392).
+pub(super) const TARGET_Y: f32 = 392.0;
+/// `.floor { top: 40% }` with `clip-path: polygon(14% 0, 86% 0, 100% 100%, 0 100%)`.
+pub(super) const FLOOR_TOP: f32 = 0.40;
+pub(super) const FLOOR_INSET: f32 = 0.14;
 
 #[derive(Clone, Copy)]
 pub(super) struct FaceText<'a> {
@@ -31,68 +54,200 @@ pub(super) struct FaceText<'a> {
     pub connect: &'a str,
     pub wallets: &'a str,
     pub passkey: bool,
+}
+
+/// Persisted facts drawn on a resting Cube. Nothing here needs an unlock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct CubeMarks {
+    pub network: ChainId,
     pub vault: bool,
     pub imported_bitcoin: bool,
+    pub passkey: bool,
     pub backup_confirmed: bool,
+}
+
+/// Which `.cb` phase the timeline describes. Every Cube on a page reads the
+/// same timeline, so the 500ms dimming and 160ms handoff stay synchronized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Kind {
+    /// Browse -> details on `selected`, or a handoff from `previous`.
+    Select { previous: Option<CubeCatalogKey> },
+    /// Details -> browse: the Cube spins back and the peers brighten.
+    Return { key: CubeCatalogKey },
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct Motion {
-    pub previous: Option<CubeCatalogKey>,
+    kind: Kind,
     started: Instant,
 }
 
 impl Motion {
     pub fn new(previous: Option<CubeCatalogKey>) -> Self {
+        Self::at(previous, Instant::now())
+    }
+
+    pub fn at(previous: Option<CubeCatalogKey>, started: Instant) -> Self {
         Self {
-            previous,
-            started: Instant::now(),
+            kind: Kind::Select { previous },
+            started,
+        }
+    }
+
+    pub fn returning(key: CubeCatalogKey) -> Self {
+        Self::returning_at(key, Instant::now())
+    }
+
+    pub fn returning_at(key: CubeCatalogKey, started: Instant) -> Self {
+        Self {
+            kind: Kind::Return { key },
+            started,
+        }
+    }
+
+    /// The outgoing Cube of a handoff, still on the floor while it turns back.
+    pub fn previous(&self) -> Option<&CubeCatalogKey> {
+        match &self.kind {
+            Kind::Select { previous } => previous.as_ref(),
+            Kind::Return { .. } => None,
+        }
+    }
+
+    /// The Cube returning to rest after its details closed.
+    pub fn returning_key(&self) -> Option<&CubeCatalogKey> {
+        match &self.kind {
+            Kind::Return { key } => Some(key),
+            Kind::Select { .. } => None,
         }
     }
 
     pub fn done(&self, now: Instant) -> bool {
-        now.saturating_duration_since(self.started)
-            >= TURN
-                + if self.previous.is_some() {
-                    HANDOFF
-                } else {
-                    Duration::ZERO
-                }
-    }
-
-    pub fn progress(&self, now: Instant) -> f32 {
-        let elapsed = now.saturating_duration_since(self.started);
-        let delay = if self.previous.is_some() {
-            HANDOFF
-        } else {
-            Duration::ZERO
+        let delay = match &self.kind {
+            Kind::Select {
+                previous: Some(_), ..
+            } => HANDOFF,
+            _ => Duration::ZERO,
         };
-        ease(elapsed.saturating_sub(delay).as_secs_f32() / TURN.as_secs_f32())
+        now.saturating_duration_since(self.started) >= (TURN + delay).max(PEERS)
     }
 
-    pub fn outgoing_progress(&self, now: Instant) -> f32 {
-        1.0 - ease(now.saturating_duration_since(self.started).as_secs_f32() / TURN.as_secs_f32())
+    fn elapsed(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(self.started)
     }
 
-    pub fn peer_opacity(&self, now: Instant) -> f32 {
-        if self.previous.is_some() {
-            return 0.4;
+    /// The pose of one Cube on the page at `now`.
+    pub fn pose(
+        &self,
+        key: &CubeCatalogKey,
+        selected: Option<&CubeCatalogKey>,
+        now: Instant,
+    ) -> Pose {
+        let t = self.elapsed(now);
+        let turn =
+            |delay: Duration| ease(t.saturating_sub(delay).as_secs_f32() / TURN.as_secs_f32());
+        let fade = ease(t.as_secs_f32() / PEERS.as_secs_f32());
+        match &self.kind {
+            Kind::Select { previous } => {
+                if selected == Some(key) {
+                    let handoff = previous.is_some();
+                    Pose {
+                        spin: turn(if handoff { HANDOFF } else { Duration::ZERO }),
+                        second: 0.0,
+                        // A handoff target was dimmed; a browse selection was not.
+                        dim: if handoff { 1.0 - fade } else { 0.0 },
+                        shadow: 1.0 - fade,
+                    }
+                } else if previous.as_ref() == Some(key) {
+                    Pose {
+                        spin: 1.0 - turn(Duration::ZERO),
+                        second: 0.0,
+                        dim: fade,
+                        shadow: fade,
+                    }
+                } else {
+                    Pose {
+                        dim: if previous.is_some() { 1.0 } else { fade },
+                        ..Pose::REST
+                    }
+                }
+            }
+            Kind::Return { key: returning } => {
+                if returning == key {
+                    Pose {
+                        spin: 1.0 - turn(Duration::ZERO),
+                        second: 0.0,
+                        dim: 0.0,
+                        shadow: fade,
+                    }
+                } else {
+                    Pose {
+                        dim: 1.0 - fade,
+                        ..Pose::REST
+                    }
+                }
+            }
         }
-        let t = (now.saturating_duration_since(self.started).as_secs_f32() / PEERS.as_secs_f32())
-            .clamp(0.0, 1.0);
-        1.0 - 0.6 * ease(t)
     }
 }
 
-// cubic-bezier(.22, 1, .36, 1), inverted from x to y so timing matches CSS.
-fn ease(t: f32) -> f32 {
+/// The settled pose of a Cube when no motion is running.
+pub(super) fn settled_pose(key: &CubeCatalogKey, selected: Option<&CubeCatalogKey>) -> Pose {
+    match selected {
+        Some(selected) if selected == key => Pose::DETAILS,
+        Some(_) => Pose::DIMMED,
+        None => Pose::REST,
+    }
+}
+
+/// One Cube's animated inputs. `spin` drives the shared transform list from
+/// the resting pose (0) to the centered details face (1). `second` turns that
+/// face on to the unlock face (yaw 180 -> 270). `dim` and `shadow` follow the
+/// 500ms `.cb.dim .scene` and `.cb.active .shadow` transitions.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct Pose {
+    pub spin: f32,
+    pub second: f32,
+    pub dim: f32,
+    pub shadow: f32,
+}
+
+impl Pose {
+    pub const REST: Self = Self {
+        spin: 0.0,
+        second: 0.0,
+        dim: 0.0,
+        shadow: 1.0,
+    };
+    pub const DETAILS: Self = Self {
+        spin: 1.0,
+        second: 0.0,
+        dim: 0.0,
+        shadow: 0.0,
+    };
+    pub const DIMMED: Self = Self {
+        spin: 0.0,
+        second: 0.0,
+        dim: 1.0,
+        shadow: 1.0,
+    };
+
+    pub fn unlock(second: f32) -> Self {
+        Self {
+            second: second.clamp(0.0, 1.0),
+            ..Self::DETAILS
+        }
+    }
+}
+
+/// `cubic-bezier(0.22, 1, 0.36, 1)`, inverted from x to y like CSS.
+pub(super) fn ease(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     if t == 0.0 || t == 1.0 {
         return t;
     }
     let mut lo: f32 = 0.0;
     let mut hi: f32 = 1.0;
-    for _ in 0..16 {
+    for _ in 0..24 {
         let u = (lo + hi) * 0.5;
         let x = 3.0 * (1.0 - u).powi(2) * u * 0.22 + 3.0 * (1.0 - u) * u * u * 0.36 + u.powi(3);
         if x < t {
@@ -105,7 +260,95 @@ fn ease(t: f32) -> f32 {
     3.0 * (1.0 - u).powi(2) * u + 3.0 * (1.0 - u) * u * u + u.powi(3)
 }
 
-#[derive(Clone, Copy)]
+pub(super) fn second_turn_progress(started: Instant, now: Instant) -> f32 {
+    ease(now.saturating_duration_since(started).as_secs_f32() / TURN.as_secs_f32())
+}
+
+/// Stage geometry for a width. The prototype only defines the 1440px board;
+/// narrower windows scale the row and Cube uniformly so four Cubes still fit,
+/// while the focused face stays 420px whenever the stage is tall enough.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct Layout {
+    pub width: f32,
+    pub height: f32,
+    pub scale: f32,
+    /// A lone unlock Cube sits at the center of its own screen.
+    centered: bool,
+}
+
+impl Layout {
+    pub fn new(width: f32, height: f32) -> Self {
+        let row = 4.0 * SLOT + 3.0 * SLOT_GAP;
+        let scale = ((width - 96.0) / row)
+            .min(height / DESIGN_STAGE_HEIGHT)
+            .clamp(0.6, 1.0);
+        Self {
+            width,
+            height,
+            scale,
+            centered: false,
+        }
+    }
+
+    /// One Cube, already turned to its face, centered in the whole area.
+    pub fn centered(width: f32, height: f32) -> Self {
+        Self {
+            centered: true,
+            ..Self::new(width, height)
+        }
+    }
+
+    pub fn size(&self) -> f32 {
+        REST_SIZE * self.scale
+    }
+
+    pub fn slot(&self) -> f32 {
+        SLOT * self.scale
+    }
+
+    pub fn gap(&self) -> f32 {
+        SLOT_GAP * self.scale
+    }
+
+    pub fn rows_top(&self) -> f32 {
+        ROWS_TOP * self.scale
+    }
+
+    /// `.cb` width x height for the labels and hit areas laid over the scene.
+    pub fn slot_height(&self) -> f32 {
+        SLOT_HEIGHT * self.scale
+    }
+
+    /// Rest center of the scene's Cube for slot `index` of `count`.
+    pub fn rest_center(&self, index: usize, count: usize) -> (f32, f32) {
+        let count = count.max(1) as f32;
+        let row = count * self.slot() + (count - 1.0) * self.gap();
+        let x0 = (self.width - row) / 2.0;
+        let s = self.size();
+        (
+            x0 + index as f32 * (self.slot() + self.gap()) + self.slot() / 2.0,
+            self.rows_top() + 8.0 * self.scale + 1.72 * s * 0.475,
+        )
+    }
+
+    /// Where the details face is centered.
+    pub fn target(&self) -> (f32, f32) {
+        if self.centered {
+            return (self.width / 2.0, self.height / 2.0);
+        }
+        (
+            self.width / 2.0,
+            TARGET_Y * self.height / DESIGN_STAGE_HEIGHT,
+        )
+    }
+
+    /// The face size on screen at the target, bounded by the stage height.
+    pub fn face(&self) -> f32 {
+        FACE_SIZE.min(self.height - 48.0).max(200.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 struct Vec3 {
     x: f32,
     y: f32,
@@ -117,342 +360,272 @@ impl Vec3 {
         Self { x, y, z }
     }
 
-    fn turn(self, pitch: f32, yaw: f32) -> Self {
-        let (sx, cx) = pitch.sin_cos();
-        let (sy, cy) = yaw.sin_cos();
-        // CSS `rotateX(-35deg) rotateY(45deg)` applies Y first. Coordinates
-        // here have Y upward, hence the positive pitch below.
-        let x = self.x * cy + self.z * sy;
-        let z = -self.x * sy + self.z * cy;
-        Self::new(x, self.y * cx - z * sx, self.y * sx + z * cx)
+    /// CSS `rotateX(a)` in its y-down frame.
+    fn rotate_x(self, a: f32) -> Self {
+        let (s, c) = a.sin_cos();
+        Self::new(self.x, self.y * c - self.z * s, self.y * s + self.z * c)
+    }
+
+    /// CSS `rotateY(a)` in its y-down frame.
+    fn rotate_y(self, a: f32) -> Self {
+        let (s, c) = a.sin_cos();
+        Self::new(self.x * c + self.z * s, self.y, -self.x * s + self.z * c)
     }
 }
 
-fn projected_face(
-    face: &Face,
-    size: f32,
-    pitch: f32,
-    yaw: f32,
-    cx: f32,
-    cy: f32,
-) -> [(f32, f32); 4] {
-    face.points.map(|point| {
-        let point = point.turn(pitch, yaw);
-        let depth = CAMERA_DISTANCE / (CAMERA_DISTANCE - point.z * size);
-        (cx + point.x * size * depth, cy - point.y * size * depth)
-    })
+/// The five authored faces. `points` are the face element's own corners
+/// (top-left, top-right, bottom-right, bottom-left) after its face transform,
+/// in units of the Cube edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum Face {
+    /// `.f.t`: `rotateX(90deg) translateZ(s/2)`, network coin.
+    Top,
+    /// `.f.l`: `rotateY(-90deg) translateZ(s/2)`, wallet marks.
+    Left,
+    /// `.f.r`: `translateZ(s/2)`, lock and backup badge.
+    Right,
+    /// `.f.bl`: `rotateY(180deg) translateZ(s/2)`, details.
+    BackLeft,
+    /// `.f.br`: `rotateY(90deg) translateZ(s/2)`, unlock.
+    BackRight,
 }
 
-pub(super) fn rest_glyph_face(index: usize) -> [(f32, f32); 4] {
-    projected_face(
-        &FACES[index],
-        REST_SIZE,
-        35.0_f32.to_radians(),
-        45.0_f32.to_radians(),
-        0.0,
-        0.0,
-    )
-    .map(|(x, y)| (90.0 + x * GLYPH_SCALE, 76.4 + y * GLYPH_SCALE))
-}
+impl Face {
+    pub const ALL: [Face; 5] = [
+        Face::Top,
+        Face::Left,
+        Face::Right,
+        Face::BackLeft,
+        Face::BackRight,
+    ];
 
-pub(super) fn polygon_points(points: [(f32, f32); 4]) -> String {
-    points
-        .iter()
-        .map(|(x, y)| format!("{x:.2},{y:.2}"))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-pub(super) fn edge_color(network: ChainId) -> &'static str {
-    if network.is_blake2b() {
-        "#d4a62a"
-    } else if matches!(network, ChainId::Bitcoin) {
-        "#f3821d"
-    } else {
-        "#b9bbb5"
-    }
-}
-
-// Draw the same persisted-state icons on the floor and throughout the turn.
-// These coordinates are authored in the resting glyph's SVG space.
-pub(super) fn rest_side_marks(
-    index: usize,
-    vault: bool,
-    imported_bitcoin: bool,
-    passkey: bool,
-    backup_confirmed: bool,
-    light: bool,
-) -> String {
-    let ink = if light { "#30302d" } else { "#ecebe6" };
-    let mut marks = match index {
-        2 if vault => r##"<path d="M58 73 67 77V87c0 7-5 12-9 14-4-2-9-7-9-14V77Z" fill="none" stroke="{ink}" stroke-width="2" stroke-linejoin="round"/>"##.to_owned(),
-        2 if imported_bitcoin => r##"<circle cx="58" cy="85" r="12" fill="none" stroke="{ink}" stroke-width="2"/><path d="M58 78v14m-4-11h7c4 0 4 4 0 4h-7m0 0h8c4 0 4 4 0 4h-8" fill="none" stroke="{ink}" stroke-width="2"/>"##.to_owned(),
-        0 | 3 if passkey => r##"<circle cx="117" cy="82" r="6" fill="none" stroke="{ink}" stroke-width="2"/><path d="m122 86 12 12m-5-5 4-4m-1 7 4-4" fill="none" stroke="{ink}" stroke-width="2" stroke-linecap="round"/>"##.to_owned(),
-        0 | 3 => r##"<path d="M116 83v-6a7 7 0 0 1 14 0v6m-17 0h20v18h-20z" fill="none" stroke="{ink}" stroke-width="2" stroke-linejoin="round"/><circle cx="123" cy="91" r="1.5" fill="{ink}"/>"##.to_owned(),
-        _ => String::new(),
-    };
-    if matches!(index, 0 | 3) && backup_confirmed {
-        marks.push_str(r##"<circle cx="137" cy="64" r="9" fill="none" stroke="{ink}" stroke-width="1.5"/><path d="m133 64 3 3 5-6" fill="none" stroke="{ink}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"##);
-    }
-    marks.replace("{ink}", ink)
-}
-
-struct Face {
-    points: [Vec3; 4],
-    normal: Vec3,
-    shade: &'static str,
-}
-
-const FACES: [Face; 6] = [
-    Face {
-        points: [
-            Vec3::new(-0.5, -0.5, 0.5),
-            Vec3::new(0.5, -0.5, 0.5),
-            Vec3::new(0.5, 0.5, 0.5),
-            Vec3::new(-0.5, 0.5, 0.5),
-        ],
-        normal: Vec3::new(0.0, 0.0, 1.0),
-        shade: "front",
-    },
-    Face {
-        points: [
-            Vec3::new(0.5, -0.5, -0.5),
-            Vec3::new(-0.5, -0.5, -0.5),
-            Vec3::new(-0.5, 0.5, -0.5),
-            Vec3::new(0.5, 0.5, -0.5),
-        ],
-        normal: Vec3::new(0.0, 0.0, -1.0),
-        shade: "panel",
-    },
-    Face {
-        points: [
-            Vec3::new(-0.5, -0.5, -0.5),
-            Vec3::new(-0.5, -0.5, 0.5),
-            Vec3::new(-0.5, 0.5, 0.5),
-            Vec3::new(-0.5, 0.5, -0.5),
-        ],
-        normal: Vec3::new(-1.0, 0.0, 0.0),
-        shade: "left",
-    },
-    Face {
-        points: [
-            Vec3::new(0.5, -0.5, 0.5),
-            Vec3::new(0.5, -0.5, -0.5),
-            Vec3::new(0.5, 0.5, -0.5),
-            Vec3::new(0.5, 0.5, 0.5),
-        ],
-        normal: Vec3::new(1.0, 0.0, 0.0),
-        shade: "panel",
-    },
-    Face {
-        points: [
-            Vec3::new(-0.5, 0.5, 0.5),
-            Vec3::new(0.5, 0.5, 0.5),
-            Vec3::new(0.5, 0.5, -0.5),
-            Vec3::new(-0.5, 0.5, -0.5),
-        ],
-        normal: Vec3::new(0.0, 1.0, 0.0),
-        shade: "top",
-    },
-    Face {
-        points: [
-            Vec3::new(-0.5, -0.5, -0.5),
-            Vec3::new(0.5, -0.5, -0.5),
-            Vec3::new(0.5, -0.5, 0.5),
-            Vec3::new(-0.5, -0.5, 0.5),
-        ],
-        normal: Vec3::new(0.0, -1.0, 0.0),
-        shade: "left",
-    },
-];
-
-// Camera position, chain colors and optional face text are independent inputs
-// to the authored projection. Keeping them explicit makes its motion auditable.
-#[allow(clippy::too_many_arguments)]
-fn paint_cube(
-    svg: &mut String,
-    cx: f32,
-    cy: f32,
-    progress: f32,
-    network: ChainId,
-    light: bool,
-    target_yaw: f32,
-    text: Option<FaceText<'_>>,
-) {
-    let size = REST_SIZE + (FOCUSED_SIZE - REST_SIZE) * progress;
-    let pitch = 35.0_f32.to_radians() * (1.0 - progress);
-    let yaw = (45.0 + (target_yaw - 45.0) * progress).to_radians();
-    let edge = edge_color(network);
-    let colors = if light {
-        ["#c9c1b2", "#e6e0d5", "#d6cfc2", "#e6e0d5"]
-    } else {
-        ["#262724", "#2a2b28", "#2e2f2c", "#41423e"]
-    };
-    let mut faces = Vec::with_capacity(3);
-    for (index, face) in FACES.iter().enumerate() {
-        if face.normal.turn(pitch, yaw).z <= 0.001 {
-            continue;
+    fn corner(self, local: Vec3) -> Vec3 {
+        let pushed = Vec3::new(local.x, local.y, local.z + 0.5);
+        match self {
+            Face::Top => pushed.rotate_x(90.0_f32.to_radians()),
+            Face::Left => pushed.rotate_y((-90.0_f32).to_radians()),
+            Face::Right => pushed,
+            Face::BackLeft => pushed.rotate_y(180.0_f32.to_radians()),
+            Face::BackRight => pushed.rotate_y(90.0_f32.to_radians()),
         }
-        let depth = face
-            .points
-            .iter()
-            .map(|point| point.turn(pitch, yaw).z)
+    }
+
+    fn corners(self) -> [Vec3; 4] {
+        [
+            Vec3::new(-0.5, -0.5, 0.0),
+            Vec3::new(0.5, -0.5, 0.0),
+            Vec3::new(0.5, 0.5, 0.0),
+            Vec3::new(-0.5, 0.5, 0.0),
+        ]
+        .map(|p| self.corner(p))
+    }
+}
+
+/// A projected face: screen corners (TL, TR, BR, BL) and the homogeneous
+/// `w = (d - z) / d` of each, so the GPU interpolates face art in 3D.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct ProjectedFace {
+    pub face: Face,
+    pub corners: [(f32, f32); 4],
+    pub w: [f32; 4],
+    /// The face edge on screen, for the border width and art resolution.
+    pub size: f32,
+}
+
+impl ProjectedFace {
+    pub fn area(&self) -> f32 {
+        let p = self.corners;
+        (0..4)
+            .map(|i| p[i].0 * p[(i + 1) % 4].1 - p[(i + 1) % 4].0 * p[i].1)
             .sum::<f32>()
-            / 4.0;
-        faces.push((depth, index, face.shade));
-    }
-    faces.sort_by(|a, b| a.0.total_cmp(&b.0));
-    // The floor shadow belongs to this same moving Cube. Only its shadow
-    // fades as the face comes forward; the Cube's marks stay on the geometry.
-    let shadow_opacity = (1.0 - progress).clamp(0.0, 1.0) * 0.35;
-    let shadow = if light { "#4d463b" } else { "#080908" };
-    let _ = write!(svg, "<ellipse cx=\"{cx:.2}\" cy=\"{:.2}\" rx=\"60\" ry=\"10\" fill=\"{shadow}\" opacity=\"{shadow_opacity:.3}\"/>", cy + 95.0);
-    for (_, index, shade) in faces {
-        let color = match shade {
-            "front" => colors[0],
-            "panel" => colors[1],
-            "left" => colors[2],
-            _ => colors[3],
-        };
-        let _ = write!(svg, "<polygon points=\"");
-        let projected = projected_face(&FACES[index], size, pitch, yaw, cx, cy);
-        for (x, y) in projected {
-            let _ = write!(svg, "{x:.2},{y:.2} ");
-        }
-        let dash = if matches!(network, ChainId::Bitcoin | ChainId::BitcoinBlake2b) {
-            ""
-        } else {
-            " stroke-dasharray=\"6 4\""
-        };
-        let _ = write!(
-            svg,
-            "\" fill=\"{color}\" stroke=\"{edge}\" stroke-width=\"2\"{dash}/>"
-        );
-        if let Some(text) = text {
-            paint_face_marks(svg, index, projected, size, network, light, text);
-        }
-        if index == 1 && progress > 0.5 {
-            if let Some(text) = text {
-                paint_face_text(svg, projected, network, light, text);
-            }
-        }
-        if index == 3 && target_yaw > 180.0 {
-            if let Some(text) = text {
-                paint_unlock_text(svg, projected, light, text);
-            }
-        }
+            * 0.5
     }
 }
 
-fn paint_face_marks(
-    svg: &mut String,
-    index: usize,
-    p: [(f32, f32); 4],
-    size: f32,
-    network: ChainId,
-    light: bool,
-    text: FaceText<'_>,
-) {
-    if !matches!(index, 0 | 2 | 3 | 4) {
-        return;
-    }
-    // A projected face becomes almost edge-on during the turn. A fixed-size
-    // badge placed at its center would then float outside the geometry.
-    // Skip subpixel faces and clip every remaining mark to its own polygon.
-    let area = (0..4)
-        .map(|i| p[i].0 * p[(i + 1) % 4].1 - p[(i + 1) % 4].0 * p[i].1)
-        .sum::<f32>()
-        .abs()
-        * 0.5;
-    if area < 16.0 {
-        return;
-    }
-    let marks = if index == 4 {
-        top_coin_markup(p, size, network, light)
-    } else {
-        let glyph = rest_side_marks(
-            index,
-            text.vault,
-            text.imported_bitcoin,
-            text.passkey,
-            text.backup_confirmed,
-            light,
-        );
-        if glyph.is_empty() {
-            return;
-        }
-        // Map the authored resting face into the current projected face. This
-        // gives the first motion frame identical marks and preserves their
-        // placement as the face turns, including on the second unlock side.
-        let reference = rest_glyph_face(if index == 3 { 0 } else { index });
-        let (ux, uy) = (
-            reference[2].0 - reference[3].0,
-            reference[2].1 - reference[3].1,
-        );
-        let (vx, vy) = (
-            reference[0].0 - reference[3].0,
-            reference[0].1 - reference[3].1,
-        );
-        let determinant = ux * vy - uy * vx;
-        let (tx, ty) = (p[2].0 - p[3].0, p[2].1 - p[3].1);
-        let (sx, sy) = (p[0].0 - p[3].0, p[0].1 - p[3].1);
-        let a = (tx * vy - sx * uy) / determinant;
-        let b = (ty * vy - sy * uy) / determinant;
-        let c = (sx * ux - tx * vx) / determinant;
-        let d = (sy * ux - ty * vx) / determinant;
-        let e = p[3].0 - a * reference[3].0 - c * reference[3].1;
-        let f = p[3].1 - b * reference[3].0 - d * reference[3].1;
-        format!("<g transform=\"matrix({a:.5} {b:.5} {c:.5} {d:.5} {e:.2} {f:.2})\">{glyph}</g>")
-    };
-    if marks.is_empty() {
-        return;
-    }
-    // `svg.len()` grows after every face, including an outgoing Cube. It
-    // gives each clip a distinct ID without global state or unstable output.
-    let clip = format!("launcher-face-{index}-{}", svg.len());
-    let _ = write!(
-        svg,
-        "<defs><clipPath id=\"{clip}\" clipPathUnits=\"userSpaceOnUse\"><polygon points=\""
-    );
-    for (x, y) in p {
-        let _ = write!(svg, "{x:.2},{y:.2} ");
-    }
-    let _ = write!(
-        svg,
-        "\"/></clipPath></defs><g clip-path=\"url(#{clip})\">{marks}</g>"
-    );
+/// The 2D scene that surrounds the 3D Cube: its shadow and the dimming
+/// transform, both in stage pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct SceneFrame {
+    pub opacity: f32,
+    pub shadow_center: (f32, f32),
+    pub shadow_radii: (f32, f32),
+    pub shadow_sigma: f32,
+    pub shadow_opacity: f32,
 }
 
-fn top_coin_markup(p: [(f32, f32); 4], size: f32, network: ChainId, light: bool) -> String {
-    // The prototype rotates `.tc` locally by 45 degrees before the top face
-    // is projected. This keeps the coin upright on the resting diamond.
-    let tl = p[3];
-    let tr = p[2];
-    let bl = p[0];
-    let a = (tr.0 - tl.0) / size;
-    let b = (tr.1 - tl.1) / size;
-    let c = (bl.0 - tl.0) / size;
-    let d = (bl.1 - tl.1) / size;
-    let ink = if light { "#30302d" } else { "#ecebe6" };
-    format!(
-        "<g transform=\"matrix({a:.5} {b:.5} {c:.5} {d:.5} {:.2} {:.2})\" color=\"{ink}\"><g transform=\"rotate(45 {:.2} {:.2})\">{}</g></g>",
-        tl.0,
-        tl.1,
-        size / 2.0,
-        size / 2.0,
-        launcher_coin::fragment(
-            network,
-            size * 0.33,
-            size * 0.33,
-            size * 0.34,
-            1.5,
-            size * 0.018,
+/// Evaluate `.scene` and `.cube` styles for one Cube.
+pub(super) fn project(
+    layout: &Layout,
+    rest: (f32, f32),
+    pose: Pose,
+) -> (SceneFrame, Vec<ProjectedFace>) {
+    let s = layout.size();
+    let (tx, ty) = layout.target();
+    let face = layout.face();
+    // translate3d(dx, dy, 0) scale(k). CSS `scale(k)` is two-dimensional:
+    // it never stretches z, so the zoomed face still sits only s/2 in front
+    // of the cube center. The prototype solved k as if z scaled, which makes
+    // its face settle near 379px; the documented target, and the 1:1 live
+    // controls laid over it, are 420px, so k is solved for that with the
+    // same 2D-scale depth.
+    let k_end = face * (PERSPECTIVE - s / 2.0) / PERSPECTIVE / s;
+    let p = pose.spin.clamp(0.0, 1.0);
+    let dx = (tx - rest.0) * p;
+    let dy = (ty - rest.1) * p;
+    let k = 1.0 + (k_end - 1.0) * p;
+    let pitch = (-35.0_f32 * (1.0 - p)).to_radians();
+    let yaw = (45.0 + (180.0 + 90.0 * pose.second - 45.0) * p).to_radians();
+    // perspective-origin moves from the scene center (cube center + .043s)
+    // to the translated cube center with the same easing and delay.
+    let origin = (rest.0 + dx, rest.1 + 0.043 * s * (1.0 - p) + dy);
+    // `.cb.dim .scene { opacity: .4; transform: scale(.92) }` about the
+    // scene's own center, after the perspective projection is flattened.
+    let dim = pose.dim.clamp(0.0, 1.0);
+    let scene_scale = 1.0 - 0.08 * dim;
+    let scene_center = (rest.0, rest.1 + 0.043 * s);
+    let dimmed = |(x, y): (f32, f32)| {
+        (
+            scene_center.0 + (x - scene_center.0) * scene_scale,
+            scene_center.1 + (y - scene_center.1) * scene_scale,
         )
+    };
+    let center = (rest.0 + dx, rest.1 + dy);
+    let mut faces = Vec::with_capacity(3);
+    for which in Face::ALL {
+        let mut corners = [(0.0, 0.0); 4];
+        let mut w = [1.0; 4];
+        for (i, point) in which.corners().iter().copied().enumerate() {
+            let q = point.rotate_y(yaw).rotate_x(pitch);
+            let (qx, qy, qz) = (center.0 + q.x * s * k, center.1 + q.y * s * k, q.z * s);
+            let depth = (PERSPECTIVE - qz) / PERSPECTIVE;
+            corners[i] = dimmed((
+                origin.0 + (qx - origin.0) / depth,
+                origin.1 + (qy - origin.1) / depth,
+            ));
+            w[i] = depth;
+        }
+        let projected = ProjectedFace {
+            face: which,
+            corners,
+            w,
+            size: s * k * scene_scale,
+        };
+        // `backface-visibility: hidden`.
+        if projected.area() > 0.5 {
+            faces.push(projected);
+        }
+    }
+    let shadow = |v: f32| v * scene_scale;
+    let frame = SceneFrame {
+        opacity: 1.0 - 0.6 * dim,
+        shadow_center: dimmed((rest.0 + 0.058 * s, rest.1 + 0.525 * s)),
+        shadow_radii: (shadow(0.725 * s), shadow(0.31 * s)),
+        shadow_sigma: shadow(0.055 * s),
+        shadow_opacity: pose.shadow.clamp(0.0, 1.0),
+    };
+    (frame, faces)
+}
+
+/// The screen rectangle a posed Cube covers, for keeping labels that the
+/// prototype's lead and outgoing Cubes would paint over out of view.
+pub(super) fn bounds(layout: &Layout, rest: (f32, f32), pose: Pose) -> (f32, f32, f32, f32) {
+    let (_, faces) = project(layout, rest, pose);
+    faces.iter().flat_map(|f| f.corners).fold(
+        (f32::MAX, f32::MAX, f32::MIN, f32::MIN),
+        |(x0, y0, x1, y1), (x, y)| (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
     )
 }
 
-pub(super) fn rest_glyph_coin(network: ChainId, light: bool) -> String {
-    top_coin_markup(rest_glyph_face(4), REST_SIZE * GLYPH_SCALE, network, light)
+/// The label strip at the foot of slot `index`.
+pub(super) fn label_rect(layout: &Layout, index: usize, count: usize) -> (f32, f32, f32, f32) {
+    let (cx, _) = layout.rest_center(index, count);
+    let bottom = layout.rows_top() + layout.slot_height() - 10.0;
+    (
+        cx - layout.slot() / 2.0,
+        bottom - 40.0,
+        cx + layout.slot() / 2.0,
+        bottom,
+    )
+}
+
+pub(super) fn overlaps(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> bool {
+    a.0 < b.2 && b.0 < a.2 && a.1 < b.3 && b.1 < a.3
+}
+
+/// Face colors and edges from the prototype tokens, as sRGB bytes. The GPU
+/// blends them in sRGB space so they match the browser's compositing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct Palette {
+    pub background: [u8; 3],
+    pub floor: [u8; 3],
+    pub floor_rule: [u8; 3],
+    pub shadow: [u8; 4],
+    pub ink: [u8; 3],
+    pub top: [u8; 3],
+    pub left: [u8; 3],
+    pub right: [u8; 3],
+    pub back: [u8; 3],
+}
+
+impl Palette {
+    pub fn new(light: bool) -> Self {
+        if light {
+            Self {
+                background: [0xfa, 0xf9, 0xf6],
+                floor: [0xef, 0xeb, 0xe3],
+                floor_rule: [0xe0, 0xd9, 0xcd],
+                shadow: [70, 52, 30, 77],
+                ink: [0x20, 0x20, 0x20],
+                top: [0xe6, 0xe0, 0xd5],
+                left: [0xd6, 0xcf, 0xc2],
+                right: [0xc9, 0xc1, 0xb2],
+                back: [0xe6, 0xe0, 0xd5],
+            }
+        } else {
+            Self {
+                background: [0x16, 0x17, 0x16],
+                floor: [0x1b, 0x1c, 0x1a],
+                floor_rule: [0x2b, 0x2c, 0x29],
+                shadow: [0, 0, 0, 153],
+                ink: [0xf5, 0xf0, 0xe8],
+                top: [0x41, 0x42, 0x3e],
+                left: [0x2e, 0x2f, 0x2c],
+                right: [0x26, 0x27, 0x24],
+                back: [0x2a, 0x2b, 0x28],
+            }
+        }
+    }
+
+    pub fn face(&self, face: Face) -> [u8; 3] {
+        match face {
+            Face::Top => self.top,
+            Face::Left => self.left,
+            Face::Right => self.right,
+            Face::BackLeft | Face::BackRight => self.back,
+        }
+    }
+}
+
+/// `--edge-btc`, `--edge-b2b`, `--edge-test`: the network family hue at 60%.
+pub(super) fn edge(network: ChainId, light: bool) -> [u8; 4] {
+    if network.is_blake2b() && !launcher_coin::is_test_network(network) {
+        [212, 166, 42, 153]
+    } else if matches!(network, ChainId::Bitcoin) {
+        [243, 130, 29, 153]
+    } else if light {
+        [87, 90, 84, 153]
+    } else {
+        [185, 187, 181, 153]
+    }
+}
+
+/// The border in face-local pixels: 1.5px of an `s`-pixel face.
+pub(super) fn border_fraction(edge_px: f32) -> f32 {
+    BORDER / edge_px
+}
+
+fn hex([r, g, b]: [u8; 3]) -> String {
+    format!("#{r:02x}{g:02x}{b:02x}")
 }
 
 fn xml_text(value: &str) -> String {
@@ -463,183 +636,225 @@ fn xml_text(value: &str) -> String {
         .replace('"', "&quot;")
 }
 
-fn paint_face_text(
-    svg: &mut String,
-    p: [(f32, f32); 4],
-    network: ChainId,
-    light: bool,
-    text: FaceText<'_>,
-) {
-    // The projected back plane supplies an affine approximation while it
-    // turns. At rest the live Iced controls replace this snapshot exactly.
-    let tl = p[3];
-    let tr = p[2];
-    let bl = p[0];
-    let a = (tr.0 - tl.0) / FACE_SIZE;
-    let b = (tr.1 - tl.1) / FACE_SIZE;
-    let c = (bl.0 - tl.0) / FACE_SIZE;
-    let d = (bl.1 - tl.1) / FACE_SIZE;
-    let ink = if light { "#202020" } else { "#f5f0e8" };
-    let muted = if light { "#575a54" } else { "#b9bbb5" };
-    let name: String = text.name.chars().take(25).collect();
-    let _ = write!(svg, "<g transform=\"matrix({a:.5} {b:.5} {c:.5} {d:.5} {:.2} {:.2})\" font-family=\"sans-serif\" fill=\"{ink}\">", tl.0, tl.1);
+const SHIELD: &str = "M12 3l7 3v5.5c0 4.3-3 7.6-7 9.5-4-1.9-7-5.2-7-9.5V6z";
+const IMPORTED: &str = "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M10 7.5v9m0-9h3c2.4 0 2.4 4 0 4h-3m0 0h3.6c2.6 0 2.6 4.5 0 4.5H10M11.5 6v1.5m0 9V18";
+const LOCKED: &str = "M7 11h10v9H7zM9 11V8a3 3 0 0 1 6 0v3";
+const PASSKEY: &str = "M9 5a4 4 0 1 0 0 8a4 4 0 1 0 0-8M12 11.5l7 7m-3-3 2.5-2.5m-.5 5 2.5-2.5";
+const CHECK: &str = "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M8.5 12.2l2.4 2.4 4.6-5.1";
+
+fn icon(svg: &mut String, path: &str, x: f32, y: f32, size: f32, ink: &str) {
+    let k = size / 24.0;
     let _ = write!(
         svg,
-        "<text x=\"28\" y=\"51\" font-size=\"20\" font-weight=\"600\">{}</text>",
+        "<g transform=\"translate({x:.3} {y:.3}) scale({k:.5})\"><path d=\"{path}\" fill=\"none\" stroke=\"{ink}\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></g>"
+    );
+}
+
+/// Content of a resting face in its own CSS pixels (`0 0 s s`). Faces have
+/// no background here: the GPU paints the face color and border under it.
+pub(super) fn rest_face_svg(face: Face, marks: CubeMarks, light: bool) -> Option<String> {
+    let s = REST_SIZE;
+    let ink = hex(Palette::new(light).ink);
+    let mut svg = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {s} {s}\" width=\"{s}\" height=\"{s}\" color=\"{ink}\">"
+    );
+    match face {
+        Face::Top => {
+            // `.tc { transform: rotate(45deg) }`: coin, then the test tag.
+            let coin = s * 0.34;
+            let tag = launcher_coin::is_test_network(marks.network).then(|| marks.network.label());
+            let font = s * 0.095;
+            let tag_h = font * 1.2 + 2.0;
+            let column = coin + tag.map_or(0.0, |_| s * 0.04 + tag_h);
+            let top = (s - column) / 2.0;
+            let _ = write!(
+                svg,
+                "<g transform=\"rotate(45 {:.2} {:.2})\">",
+                s / 2.0,
+                s / 2.0
+            );
+            svg.push_str(&launcher_coin::fragment(
+                marks.network,
+                (s - coin) / 2.0,
+                top,
+                coin,
+                1.5,
+                s * 0.018,
+            ));
+            if let Some(tag) = tag {
+                let width = tag.chars().count() as f32 * font * 0.56 + font * 0.7;
+                let y = top + coin + s * 0.04;
+                let edge = edge(marks.network, light);
+                let _ = write!(
+                    svg,
+                    "<rect x=\"{:.2}\" y=\"{y:.2}\" width=\"{width:.2}\" height=\"{tag_h:.2}\" rx=\"{:.2}\" fill=\"none\" stroke=\"rgb({},{},{})\" stroke-opacity=\"0.6\" stroke-dasharray=\"2 2\"/><text x=\"{:.2}\" y=\"{:.2}\" font-family=\"IBM Plex Sans\" font-weight=\"600\" font-size=\"{font:.2}\" text-anchor=\"middle\" fill=\"{ink}\">{}</text>",
+                    (s - width) / 2.0,
+                    font * 0.3,
+                    edge[0],
+                    edge[1],
+                    edge[2],
+                    s / 2.0,
+                    y + 1.0 + font * 0.95,
+                    xml_text(tag)
+                );
+            }
+            svg.push_str("</g>");
+        }
+        Face::Left => {
+            // `.lc`: centered row of `.wi` marks (.25s, gap .04s). Spark and
+            // Liquid inventories are unknown before unlock, so only persisted
+            // Vault or imported Bitcoin facts receive a mark.
+            let mut paths = Vec::new();
+            if marks.vault {
+                paths.push(SHIELD);
+            }
+            if marks.imported_bitcoin {
+                paths.push(IMPORTED);
+            }
+            if paths.is_empty() {
+                return None;
+            }
+            let size = s * 0.25;
+            let gap = s * 0.04;
+            let row = paths.len() as f32 * size + (paths.len() - 1) as f32 * gap;
+            for (i, path) in paths.into_iter().enumerate() {
+                icon(
+                    &mut svg,
+                    path,
+                    (s - row) / 2.0 + i as f32 * (size + gap),
+                    (s - size) / 2.0,
+                    size,
+                    &ink,
+                );
+            }
+        }
+        Face::Right => {
+            // `.rc`: `.pad` (.36s) and the `.bdg` (.21s, margin-top -.03s).
+            let pad = s * 0.36;
+            let badge = s * 0.21;
+            let gap = s * 0.02;
+            let row = if marks.backup_confirmed {
+                pad + gap + badge
+            } else {
+                pad
+            };
+            let x = (s - row) / 2.0;
+            let y = (s - pad) / 2.0;
+            icon(
+                &mut svg,
+                if marks.passkey { PASSKEY } else { LOCKED },
+                x,
+                y,
+                pad,
+                &ink,
+            );
+            if marks.backup_confirmed {
+                icon(&mut svg, CHECK, x + pad + gap, y - s * 0.03, badge, &ink);
+            }
+        }
+        Face::BackLeft | Face::BackRight => return None,
+    }
+    svg.push_str("</svg>");
+    Some(svg)
+}
+
+/// A snapshot of the live details panel laid out in the prototype's 420px
+/// `.fc` box. It rides the turning face; the real Iced controls replace it
+/// as soon as the face is square to the camera.
+pub(super) fn details_svg(network: ChainId, light: bool, text: FaceText<'_>) -> String {
+    let palette = Palette::new(light);
+    let ink = hex(palette.ink);
+    let muted = if light { "#575a54" } else { "#b9bbb5" };
+    let line = if light { "#c4beb4" } else { "#424242" };
+    let mut svg = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 420 420\" width=\"420\" height=\"420\" font-family=\"IBM Plex Sans\" color=\"{ink}\">"
+    );
+    let initial: String = text
+        .name
+        .chars()
+        .find(|c| c.is_alphanumeric())
+        .map(|c| c.to_uppercase().collect())
+        .unwrap_or_else(|| "?".into());
+    let name: String = text.name.chars().take(26).collect();
+    let _ = write!(
+        svg,
+        "<circle cx=\"45\" cy=\"45\" r=\"16.5\" fill=\"{}\" stroke=\"{line}\"/><text x=\"45\" y=\"50\" text-anchor=\"middle\" font-size=\"14\" font-weight=\"600\" fill=\"{ink}\">{}</text><text x=\"72\" y=\"51\" font-size=\"18\" font-weight=\"600\" fill=\"{ink}\">{}</text>",
+        if light { "#ffffff" } else { "#202020" },
+        xml_text(&initial),
         xml_text(&name)
     );
     let _ = write!(
         svg,
-        "<g color=\"{ink}\">{}</g><text x=\"52\" y=\"79\" font-size=\"14\" fill=\"{muted}\">{}</text>",
-        launcher_coin::fragment(network, 28.0, 64.0, 18.0, 1.0, 1.5),
+        "<text x=\"28\" y=\"91\" font-size=\"13\" fill=\"{muted}\">Network ·</text>{}<text x=\"113\" y=\"91\" font-size=\"13\" fill=\"{ink}\">{}</text><path d=\"M28 108H392\" stroke=\"{line}\"/>",
+        launcher_coin::fragment(network, 90.0, 77.0, 18.0, 1.0, 1.5),
         xml_text(network.label())
     );
-    let _ = write!(
-        svg,
-        "<path d=\"M28 105H392\" stroke=\"{muted}\" stroke-width=\"1\"/>"
-    );
     for (y, label, value) in [
-        (137, "Lock", "State unknown"),
-        (171, "Backup", text.backup),
-        (205, "Connect", text.connect),
-        (239, "Wallets", text.wallets),
+        (140, "Lock", "State unknown"),
+        (172, "Backup", text.backup),
+        (204, "Connect", text.connect),
+        (236, "Wallets", text.wallets),
     ] {
-        let value: String = value.chars().take(28).collect();
-        let _ = write!(svg, "<text x=\"28\" y=\"{y}\" font-size=\"13\" fill=\"{muted}\">{label}</text><text x=\"111\" y=\"{y}\" font-size=\"14\" fill=\"{ink}\">{}</text>", xml_text(&value));
-    }
-    svg.push_str("</g>");
-}
-
-fn paint_unlock_text(svg: &mut String, p: [(f32, f32); 4], light: bool, text: FaceText<'_>) {
-    let tl = p[3];
-    let tr = p[2];
-    let bl = p[0];
-    let a = (tr.0 - tl.0) / FACE_SIZE;
-    let b = (tr.1 - tl.1) / FACE_SIZE;
-    let c = (bl.0 - tl.0) / FACE_SIZE;
-    let d = (bl.1 - tl.1) / FACE_SIZE;
-    let ink = if light { "#202020" } else { "#f5f0e8" };
-    let muted = if light { "#575a54" } else { "#b9bbb5" };
-    let name: String = text.name.chars().take(20).collect();
-    let _ = write!(svg, "<g transform=\"matrix({a:.5} {b:.5} {c:.5} {d:.5} {:.2} {:.2})\" font-family=\"sans-serif\" fill=\"{ink}\">", tl.0, tl.1);
-    let _ = write!(
-        svg,
-        "<text x=\"28\" y=\"54\" font-size=\"20\" font-weight=\"600\">Open {}</text>",
-        xml_text(&name)
-    );
-    if text.passkey {
-        let _ = write!(svg, "<text x=\"28\" y=\"133\" font-size=\"14\" fill=\"{muted}\">Confirm with your passkey</text><rect x=\"28\" y=\"164\" width=\"214\" height=\"38\" rx=\"6\" fill=\"#f3821d\"/><text x=\"43\" y=\"190\" font-size=\"14\" fill=\"#201407\">Unlock with passkey</text>");
-    } else {
+        let value: String = value.chars().take(34).collect();
         let _ = write!(
             svg,
-            "<text x=\"28\" y=\"130\" font-size=\"14\" fill=\"{muted}\">PIN</text>"
+            "<text x=\"28\" y=\"{y}\" font-size=\"13\" fill=\"{muted}\">{label}</text><text x=\"112\" y=\"{y}\" font-size=\"14\" fill=\"{ink}\">{}</text>",
+            xml_text(&value)
         );
-        for x in [28, 86, 144, 202] {
-            let _ = write!(svg, "<rect x=\"{x}\" y=\"147\" width=\"48\" height=\"48\" rx=\"7\" fill=\"none\" stroke=\"{muted}\"/>");
+    }
+    let bad = if light { "#8f2e1d" } else { "#ffad9b" };
+    let _ = write!(
+        svg,
+        "<rect x=\"28\" y=\"330\" width=\"66\" height=\"30\" rx=\"6\" fill=\"#f3821d\"/><text x=\"61\" y=\"350\" text-anchor=\"middle\" font-size=\"13\" font-weight=\"600\" fill=\"#201407\">Open</text><text x=\"118\" y=\"350\" font-size=\"13\" font-weight=\"600\" fill=\"{}\">Back</text>",
+        if light { "#a14d00" } else { "#f59a45" }
+    );
+    if !network.is_blake2b() {
+        let _ = write!(
+            svg,
+            "<rect x=\"168.5\" y=\"330.5\" width=\"78\" height=\"29\" rx=\"6\" fill=\"none\" stroke=\"{bad}\"/><text x=\"207.5\" y=\"350\" text-anchor=\"middle\" font-size=\"13\" font-weight=\"600\" fill=\"{bad}\">Delete…</text>"
+        );
+    }
+    let _ = write!(
+        svg,
+        "<text x=\"28\" y=\"386\" font-size=\"12\" fill=\"{muted}\">Next step · {}</text></svg>",
+        if text.passkey {
+            "Passkey prompt"
+        } else {
+            "PIN prompt"
         }
-        let _ = write!(svg, "<rect x=\"28\" y=\"226\" width=\"108\" height=\"38\" rx=\"6\" fill=\"#f3821d\"/><text x=\"44\" y=\"251\" font-size=\"14\" fill=\"#201407\">Unlock</text>");
-    }
-    svg.push_str("</g>");
+    );
+    svg
 }
 
-// The two concurrent Cube poses and scene dimensions mirror the prototype's
-// projection inputs; grouping them would obscure the handoff equations.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn source(
-    width: f32,
-    height: f32,
-    start: (f32, f32),
-    target_y: f32,
-    network: ChainId,
-    text: FaceText<'_>,
-    light: bool,
-    progress: f32,
-    outgoing: Option<((f32, f32), ChainId, FaceText<'_>, f32)>,
-) -> String {
+/// The unlock face as the PIN or passkey screen lays it out.
+pub(super) fn unlock_svg(network: ChainId, light: bool, name: &str, passkey: bool) -> String {
+    let muted = if light { "#575a54" } else { "#b9bbb5" };
+    let line = if light { "#c4beb4" } else { "#424242" };
+    let name: String = name.chars().take(22).collect();
     let mut svg = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {width:.2} {height:.2}\">"
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 420 420\" width=\"420\" height=\"420\" font-family=\"IBM Plex Sans\"><text x=\"28\" y=\"41\" font-size=\"13\" fill=\"{muted}\">Open {} · {}</text>",
+        xml_text(&name),
+        xml_text(network.label())
     );
-    if let Some((previous_start, previous_network, previous_text, previous_progress)) = outgoing {
-        let x = previous_start.0 + (width * 0.5 - previous_start.0) * previous_progress;
-        let y = previous_start.1 + (target_y - previous_start.1) * previous_progress;
-        paint_cube(
-            &mut svg,
-            x,
-            y,
-            previous_progress,
-            previous_network,
-            light,
-            180.0,
-            Some(previous_text),
+    if passkey {
+        let _ = write!(
+            svg,
+            "<text x=\"28\" y=\"128\" font-size=\"14\" fill=\"{muted}\">Confirm with your passkey</text><rect x=\"28\" y=\"152\" width=\"200\" height=\"36\" rx=\"6\" fill=\"#f3821d\"/><text x=\"128\" y=\"175\" text-anchor=\"middle\" font-size=\"13\" font-weight=\"600\" fill=\"#201407\">Unlock with passkey</text>"
+        );
+    } else {
+        // `PinInput::view`: four rounded digit boxes and the reveal toggle.
+        for i in 0..4 {
+            let _ = write!(
+                svg,
+                "<rect x=\"{}\" y=\"57\" width=\"60\" height=\"68\" rx=\"18\" fill=\"none\" stroke=\"{line}\"/>",
+                28 + i * 75
+            );
+        }
+        let _ = write!(
+            svg,
+            "<circle cx=\"348\" cy=\"91\" r=\"25\" fill=\"#f3821d\"/><g transform=\"translate(340 83) scale(0.67)\"><path d=\"M1.5 12S5 5.5 12 5.5 22.5 12 22.5 12 19 18.5 12 18.5 1.5 12 1.5 12z\" fill=\"none\" stroke=\"#201407\" stroke-width=\"2\"/><circle cx=\"12\" cy=\"12\" r=\"3\" fill=\"#201407\"/></g>"
         );
     }
-    let x = start.0 + (width * 0.5 - start.0) * progress;
-    let y = start.1 + (target_y - start.1) * progress;
-    paint_cube(&mut svg, x, y, progress, network, light, 180.0, Some(text));
-    svg.push_str("</svg>");
-    svg
-}
-
-/// The second hidden face faces the camera while the real PIN or passkey
-/// controls sit in its square. The existing unlock reducers retain authority.
-pub(super) fn unlock_source(network: ChainId, light: bool) -> String {
-    let mut svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 420 420\">".to_owned();
-    paint_cube(&mut svg, 210.0, 210.0, 1.0, network, light, 270.0, None);
-    svg.push_str("</svg>");
-    svg
-}
-
-pub(super) fn second_turn_progress(started: Instant, now: Instant) -> f32 {
-    ease(now.saturating_duration_since(started).as_secs_f32() / TURN.as_secs_f32())
-}
-
-/// The details back face leaves the camera as the adjacent unlock face arrives.
-/// The PIN/passkey controls mount as soon as this bounded turn completes.
-pub(super) fn second_turn_source(
-    network: ChainId,
-    light: bool,
-    text: FaceText<'_>,
-    progress: f32,
-) -> String {
-    let mut svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 420 420\">".to_owned();
-    paint_cube(
-        &mut svg,
-        210.0,
-        210.0,
-        1.0,
-        network,
-        light,
-        180.0 + 90.0 * progress.clamp(0.0, 1.0),
-        Some(text),
-    );
-    svg.push_str("</svg>");
-    svg
-}
-
-/// Same camera and final center as the selected Launcher floor Cube. The
-/// square unlock controls are separate native widgets over the final face.
-pub(super) fn second_turn_on_floor_source(
-    width: f32,
-    height: f32,
-    target_y: f32,
-    network: ChainId,
-    light: bool,
-    text: FaceText<'_>,
-    progress: f32,
-) -> String {
-    let mut svg = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {width:.2} {height:.2}\">"
-    );
-    paint_cube(
-        &mut svg,
-        width * 0.5,
-        target_y,
-        1.0,
-        network,
-        light,
-        180.0 + 90.0 * progress.clamp(0.0, 1.0),
-        Some(text),
-    );
     svg.push_str("</svg>");
     svg
 }
@@ -648,222 +863,161 @@ pub(super) fn second_turn_on_floor_source(
 mod tests {
     use super::*;
 
-    #[test]
-    fn selected_face_has_exact_projected_size_and_bounded_motion() {
-        let projected = FOCUSED_SIZE * CAMERA_DISTANCE / (CAMERA_DISTANCE - FOCUSED_SIZE / 2.0);
-        assert!((projected - FACE_SIZE).abs() < 0.01);
-        let motion = Motion::new(None);
-        assert!(motion.progress(motion.started) < 0.001);
-        assert!(motion.done(motion.started + TURN));
-        assert!((motion.progress(motion.started + TURN) - 1.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn static_glyph_and_first_motion_frame_share_projected_faces_and_coin_basis() {
-        let pitch = 35.0_f32.to_radians();
-        let yaw = 45.0_f32.to_radians();
-        for index in [0, 2, 4] {
-            let moving = projected_face(&FACES[index], REST_SIZE, pitch, yaw, 500.0, 265.0);
-            let resting = rest_glyph_face(index);
-            for (a, b) in resting.iter().zip(moving) {
-                assert!((a.0 - (90.0 + (b.0 - 500.0) * GLYPH_SCALE)).abs() < 0.01);
-                assert!((a.1 - (76.4 + (b.1 - 265.0) * GLYPH_SCALE)).abs() < 0.01);
-            }
-        }
-        let top = rest_glyph_face(4);
-        let rendered_width = (top[1].0 - top[3].0) * REST_GLYPH_WIDTH / 126.0;
-        assert!((rendered_width - 224.0).abs() < 2.0);
-        assert!((top[1].0 + top[3].0 - 180.0).abs() < 0.01);
-
-        let moving_top = projected_face(&FACES[4], REST_SIZE, pitch, yaw, 500.0, 265.0);
-        let moving_coin = top_coin_markup(moving_top, REST_SIZE, ChainId::Bitcoin, false);
-        let resting_coin = rest_glyph_coin(ChainId::Bitcoin, false);
-        let basis = |markup: &str| {
-            markup
-                .split_once("matrix(")
-                .unwrap()
-                .1
-                .split_once(')')
-                .unwrap()
-                .0
-                .split_whitespace()
-                .take(4)
-                .map(str::parse::<f32>)
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap()
-        };
-        for (a, b) in basis(&resting_coin).into_iter().zip(basis(&moving_coin)) {
-            assert!((a - b).abs() < 0.00002, "coin basis snaps at motion start");
-        }
-        assert!(resting_coin.contains("rotate(45 "));
-        assert!(moving_coin.contains("rotate(45 "));
-    }
-
-    #[test]
-    fn handoff_reverses_the_old_cube_before_the_new_cube_turns() {
-        let motion = Motion::new(Some(CubeCatalogKey {
+    fn key(id: &str) -> CubeCatalogKey {
+        CubeCatalogKey {
             chain: ChainId::Bitcoin,
-            cube_id: "old".into(),
-        }));
-        assert_eq!(motion.progress(motion.started + HANDOFF / 2), 0.0);
-        assert!(motion.outgoing_progress(motion.started + HANDOFF / 2) < 1.0);
-        assert_eq!(motion.peer_opacity(motion.started), 0.4);
-        assert!(!motion.done(motion.started + TURN));
-        assert!(motion.done(motion.started + TURN + HANDOFF));
+            cube_id: id.into(),
+        }
+    }
+
+    fn visible(faces: &[ProjectedFace]) -> Vec<Face> {
+        faces.iter().map(|f| f.face).collect()
     }
 
     #[test]
-    fn turning_details_face_escapes_cube_names_and_unlock_uses_next_face() {
-        let details = source(
-            1000.0,
-            740.0,
-            (250.0, 265.0),
-            340.0,
+    fn resting_pose_shows_top_left_and_right_like_css() {
+        let layout = Layout::new(DESIGN_STAGE_WIDTH, DESIGN_STAGE_HEIGHT);
+        let rest = layout.rest_center(0, 4);
+        let (_, faces) = project(&layout, rest, Pose::REST);
+        assert_eq!(visible(&faces), vec![Face::Top, Face::Left, Face::Right]);
+        let top = faces.iter().find(|f| f.face == Face::Top).unwrap();
+        // rotateX(-35deg) rotateY(45deg): a diamond whose near corner is
+        // lower than its far corner, centered on the Cube.
+        let ys: Vec<f32> = top.corners.iter().map(|c| c.1).collect();
+        assert!(ys.iter().all(|y| *y < rest.1));
+        let left = top.corners.iter().map(|c| c.0).fold(f32::MAX, f32::min);
+        let right = top.corners.iter().map(|c| c.0).fold(f32::MIN, f32::max);
+        assert!(((left + right) / 2.0 - rest.0).abs() < 0.5);
+        let _ = (left, right);
+        // The prototype's 152px Cube renders about 224px wide at rest: the
+        // side corners sit off the z = 0 plane after rotateX(-35deg).
+        let xs: Vec<f32> = faces
+            .iter()
+            .flat_map(|f| f.corners.iter().map(|c| c.0))
+            .collect();
+        let width = xs.iter().cloned().fold(f32::MIN, f32::max)
+            - xs.iter().cloned().fold(f32::MAX, f32::min);
+        assert!((width - 224.0).abs() < 4.0, "{}", width);
+    }
+
+    #[test]
+    fn details_and_unlock_faces_are_square_420px_on_the_optical_axis() {
+        let layout = Layout::new(DESIGN_STAGE_WIDTH, DESIGN_STAGE_HEIGHT);
+        let rest = layout.rest_center(3, 4);
+        for (pose, face) in [
+            (Pose::DETAILS, Face::BackLeft),
+            (Pose::unlock(1.0), Face::BackRight),
+        ] {
+            let (frame, faces) = project(&layout, rest, pose);
+            assert_eq!(visible(&faces), vec![face]);
+            let c = faces[0].corners;
+            assert!((c[1].0 - c[0].0 - FACE_SIZE).abs() < 0.05);
+            assert!((c[3].1 - c[0].1 - FACE_SIZE).abs() < 0.05);
+            assert!((c[0].0 - (720.0 - 210.0)).abs() < 0.05);
+            assert!((c[0].1 - (392.0 - 210.0)).abs() < 0.05);
+            assert_eq!(frame.shadow_opacity, 0.0);
+        }
+    }
+
+    #[test]
+    fn spin_uses_css_easing_handoff_delay_and_peer_dimming() {
+        // x(u) = 0.5 at u = 0.66, where y(u) = 0.961.
+        assert!((ease(0.5) - 0.961).abs() < 0.002, "{}", ease(0.5));
+        let start = Instant::now();
+        let a = key("a");
+        let b = key("b");
+        let c = key("c");
+        let select = Motion::at(None, start);
+        let mid = start + TURN / 2;
+        assert!((select.pose(&a, Some(&a), mid).spin - ease(0.5)).abs() < 1e-6);
+        let peer = select.pose(&b, Some(&a), start + PEERS);
+        assert_eq!(peer.dim, 1.0);
+        assert!(!select.done(start + TURN - Duration::from_millis(1)));
+        assert!(select.done(start + TURN));
+
+        let handoff = Motion::at(Some(a.clone()), start);
+        let incoming = handoff.pose(&b, Some(&b), start + HANDOFF / 2);
+        assert_eq!(incoming.spin, 0.0, "incoming waits 160ms");
+        assert!(incoming.dim < 1.0, "incoming brightens at once");
+        let outgoing = handoff.pose(&a, Some(&b), start + HANDOFF / 2);
+        assert!(outgoing.spin < 1.0 && outgoing.dim > 0.0);
+        assert_eq!(handoff.pose(&c, Some(&b), start).dim, 1.0);
+        assert!(!handoff.done(start + TURN));
+        assert!(handoff.done(start + TURN + HANDOFF));
+
+        let back = Motion::returning_at(a.clone(), start);
+        assert!((back.pose(&a, None, mid).spin - (1.0 - ease(0.5))).abs() < 1e-6);
+        assert_eq!(back.pose(&b, None, start + PEERS).dim, 0.0);
+        assert_eq!(settled_pose(&b, Some(&a)), Pose::DIMMED);
+    }
+
+    #[test]
+    fn dimmed_scene_scales_about_its_center_and_fades_as_a_group() {
+        let layout = Layout::new(DESIGN_STAGE_WIDTH, DESIGN_STAGE_HEIGHT);
+        let rest = layout.rest_center(1, 4);
+        let (lit, a) = project(&layout, rest, Pose::REST);
+        let (dim, b) = project(&layout, rest, Pose::DIMMED);
+        assert_eq!(lit.opacity, 1.0);
+        assert!((dim.opacity - 0.4).abs() < 1e-6);
+        assert!((b[0].size / a[0].size - 0.92).abs() < 1e-4);
+    }
+
+    #[test]
+    fn narrow_windows_keep_four_cubes_inside_the_stage() {
+        let layout = Layout::new(1024.0, 600.0);
+        let first = layout.rest_center(0, 4);
+        let last = layout.rest_center(3, 4);
+        let half = layout.size() * 0.75;
+        assert!(first.0 - half >= 0.0 && last.0 + half <= 1024.0);
+        let (_, faces) = project(&layout, last, Pose::DETAILS);
+        let c = faces[0].corners;
+        assert!(c[0].1 >= 0.0 && c[3].1 <= 600.0);
+    }
+
+    #[test]
+    fn face_art_escapes_names_and_follows_persisted_marks() {
+        let marks = CubeMarks {
+            network: ChainId::Testnet4,
+            vault: true,
+            imported_bitcoin: false,
+            passkey: false,
+            backup_confirmed: true,
+        };
+        let top = rest_face_svg(Face::Top, marks, false).unwrap();
+        assert!(top.contains("rotate(45 "));
+        assert!(top.contains(">Testnet4</text>"));
+        assert!(top.contains("data:image/png;base64,"));
+        assert!(rest_face_svg(Face::Left, marks, false)
+            .unwrap()
+            .contains(SHIELD));
+        let right = rest_face_svg(Face::Right, marks, true).unwrap();
+        assert!(right.contains(LOCKED) && right.contains(CHECK));
+        let unmarked = CubeMarks {
+            vault: false,
+            backup_confirmed: false,
+            passkey: true,
+            network: ChainId::Bitcoin,
+            ..marks
+        };
+        assert!(rest_face_svg(Face::Left, unmarked, false).is_none());
+        let right = rest_face_svg(Face::Right, unmarked, false).unwrap();
+        assert!(right.contains(PASSKEY) && !right.contains(CHECK));
+        assert!(!rest_face_svg(Face::Top, unmarked, false)
+            .unwrap()
+            .contains("<text"));
+        let details = details_svg(
             ChainId::Bitcoin,
+            false,
             FaceText {
                 name: "Alice & <Bob>",
                 backup: "Recorded",
                 connect: "Signed in",
                 wallets: "Vault",
                 passkey: false,
-                vault: true,
-                imported_bitcoin: false,
-                backup_confirmed: false,
             },
-            false,
-            1.0,
-            None,
         );
         assert!(details.contains("Alice &amp; &lt;Bob&gt;"));
         assert!(!details.contains("Alice & <Bob>"));
-        assert!(details.contains("Recorded"));
-        // The turn starts with the same marked, shadowed Cube as the floor.
-        let resting = source(
-            1000.0,
-            740.0,
-            (250.0, 265.0),
-            340.0,
-            ChainId::Bitcoin,
-            FaceText {
-                name: "Alice",
-                backup: "Confirmed",
-                connect: "Signed in",
-                wallets: "Vault",
-                passkey: false,
-                vault: true,
-                imported_bitcoin: false,
-                backup_confirmed: true,
-            },
-            false,
-            0.0,
-            None,
-        );
-        assert!(resting.contains("<ellipse"));
-        assert!(resting.contains("opacity=\"0.350\""));
-        assert!(resting.contains("M58 73 67 77V87"));
-        assert!(resting.contains("M116 83v-6a7"));
-        assert!(resting.contains("m133 64 3 3 5-6"));
-        assert!(resting.contains("stroke=\"#ecebe6\""));
-        assert!(details.contains("opacity=\"0.000\""));
-        let unlock = unlock_source(ChainId::Bitcoin, false);
-        assert!(unlock.contains("viewBox=\"0 0 420 420\""));
-        assert!(!unlock.contains("Alice"));
-        let started = Instant::now();
-        assert_eq!(second_turn_progress(started, started), 0.0);
-        assert_eq!(second_turn_progress(started, started + TURN), 1.0);
-        let half = second_turn_progress(started, started + TURN / 2);
-        assert!(half > 0.0 && half < 1.0);
-        let face = FaceText {
-            name: "Alice & <Bob>",
-            backup: "Recorded",
-            connect: "Signed in",
-            wallets: "Vault",
-            passkey: false,
-            vault: true,
-            imported_bitcoin: false,
-            backup_confirmed: false,
-        };
-        assert!(second_turn_source(ChainId::Bitcoin, false, face, 0.0)
-            .contains("Alice &amp; &lt;Bob&gt;"));
-        let turned = second_turn_source(ChainId::Bitcoin, false, face, 1.0);
-        assert!(turned.contains("Open Alice &amp; &lt;Bob&gt;"));
-        assert!(turned.contains(">PIN</text>"));
-    }
-
-    #[test]
-    fn face_marks_clip_to_the_projected_face_near_edge_on() {
-        let face = FaceText {
-            name: "Alice",
-            backup: "Confirmed",
-            connect: "Signed in",
-            wallets: "Vault",
-            passkey: false,
-            vault: true,
-            imported_bitcoin: false,
-            backup_confirmed: true,
-        };
-        // A face collapsing to a subpixel sliver emits no freestanding mark.
-        let mut sliver = String::new();
-        paint_face_marks(
-            &mut sliver,
-            2,
-            [(100.0, 0.0), (100.01, 0.0), (100.01, 200.0), (100.0, 200.0)],
-            REST_SIZE,
-            ChainId::Bitcoin,
-            false,
-            face,
-        );
-        assert!(sliver.is_empty());
-
-        // Just before the 180° details pose, the visible wallet face is
-        // narrow. Its mark must be inside that face's unique SVG clip.
-        let near_edge = source(
-            1000.0,
-            740.0,
-            (250.0, 265.0),
-            340.0,
-            ChainId::Bitcoin,
-            face,
-            false,
-            (179.0 - 45.0) / 135.0,
-            None,
-        );
-        let mark_at = near_edge
-            .find("M58 73 67 77V87")
-            .expect("wallet mark at 179°");
-        let group_at = near_edge[..mark_at].rfind("<g clip-path=").unwrap();
-        assert!(near_edge[group_at..mark_at].contains("url(#launcher-face-2-"));
-        assert!(near_edge[mark_at..].contains("</g>"));
-        assert!(near_edge.contains("clipPathUnits=\"userSpaceOnUse\""));
-    }
-
-    #[test]
-    fn projected_top_coin_uses_face_transform_and_clip_for_test_network() {
-        let face = FaceText {
-            name: "Test",
-            backup: "Unknown",
-            connect: "Offline",
-            wallets: "Unknown",
-            passkey: false,
-            vault: false,
-            imported_bitcoin: false,
-            backup_confirmed: false,
-        };
-        let svg = source(
-            1000.0,
-            740.0,
-            (250.0, 265.0),
-            340.0,
-            ChainId::Testnet4,
-            face,
-            false,
-            0.0,
-            None,
-        );
-        let coin_at = svg.find("data:image/png;base64,").expect("coin image");
-        let clip_at = svg[..coin_at].rfind("<g clip-path=").expect("face clip");
-        assert!(svg[clip_at..coin_at].contains("matrix("));
-        assert!(svg[clip_at..coin_at].contains("stroke-dasharray=\"2.5 2.5\""));
-        assert!(svg[coin_at..].contains("opacity=\"0.6\""));
+        assert!(unlock_svg(ChainId::Bitcoin, false, "A<B", false).contains("Open A&lt;B"));
     }
 }
