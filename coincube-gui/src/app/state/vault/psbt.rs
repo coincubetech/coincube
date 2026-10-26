@@ -5609,6 +5609,147 @@ mod tests {
             );
         }
 
+        fn pending_focus_state(psbt: Psbt) -> PsbtState {
+            let f = fixture();
+            let tx = SpendTx::new(
+                None,
+                psbt,
+                Vec::new(),
+                &f.descriptor,
+                &secp256k1::Secp256k1::new(),
+                Network::Bitcoin,
+            );
+            let mut state = PsbtState::new(wallet_with_hot_signer(&f), tx, true);
+            // The synthetic fixture omits its Coin; see the Cancel test above.
+            state.tx.status = SpendStatus::Pending;
+            state
+        }
+
+        fn focus_daemon() -> Arc<dyn Daemon + Sync + Send> {
+            Arc::new(crate::daemon::client::Coincubed::new(
+                MockDaemon::new(vec![]).run(),
+            ))
+        }
+
+        fn picker_close_id(state: &PsbtState) -> iced::advanced::widget::Id {
+            match &state.modal {
+                Some(PsbtModal::Sign(sign)) if sign.display_modal => {
+                    view::vault::psbt::action_id(sign.action_scope, "picker.close")
+                }
+                _ => panic!("the signer picker is not displayed"),
+            }
+        }
+
+        #[test]
+        fn opening_the_picker_through_update_focuses_its_close_action() {
+            let mut state = pending_focus_state(fixture().psbt);
+            let task = state.update(
+                focus_daemon(),
+                &Cache::default(),
+                Message::View(view::Message::Spend(view::SpendTxMessage::Sign)),
+            );
+            let close = picker_close_id(&state);
+            assert_ne!(close, state.action_id("overview.sign"));
+            assert_eq!(
+                focus_after_restore(task, close.clone(), true, false),
+                Some(close)
+            );
+        }
+
+        #[test]
+        fn a_direct_signer_through_update_keeps_focus_in_the_open_picker() {
+            let mut state = pending_focus_state(fixture().psbt);
+            let cache = Cache::default();
+            let _ = state.update(
+                focus_daemon(),
+                &cache,
+                Message::View(view::Message::Spend(view::SpendTxMessage::Sign)),
+            );
+            let task = state.update(
+                focus_daemon(),
+                &cache,
+                Message::View(view::Message::Spend(
+                    view::SpendTxMessage::SelectMasterSigner,
+                )),
+            );
+            assert!(state.signer_focus_return);
+            let close = picker_close_id(&state);
+            assert_eq!(
+                focus_after_restore(task, close.clone(), true, false),
+                Some(close)
+            );
+        }
+
+        #[test]
+        fn a_keychain_signer_without_connect_focuses_the_unavailable_connect_action() {
+            let mut state = pending_focus_state(fixture().psbt);
+            let cache = Cache::default();
+            let _ = state.update(
+                focus_daemon(),
+                &cache,
+                Message::View(view::Message::Spend(view::SpendTxMessage::Sign)),
+            );
+            let task = state.update(
+                focus_daemon(),
+                &cache,
+                Message::View(view::Message::Spend(
+                    view::SpendTxMessage::RequestFromEveryone,
+                )),
+            );
+            assert!(matches!(
+                state.modal,
+                Some(PsbtModal::KeychainUnavailable(_))
+            ));
+            // The handoff replaces the picker; it never returns to the overview.
+            assert!(!state.signer_focus_return);
+            let connect = state.action_id("keychain-unavailable.connect");
+            assert_eq!(
+                focus_after_restore(task, connect.clone(), true, false),
+                Some(connect)
+            );
+        }
+
+        #[test]
+        fn the_picker_closing_after_signing_through_update_focuses_the_overview() {
+            let f = fixture();
+            let mut state = pending_focus_state(f.psbt.clone());
+            let cache = Cache::default();
+            let _ = state.update(
+                focus_daemon(),
+                &cache,
+                Message::View(view::Message::Spend(view::SpendTxMessage::Sign)),
+            );
+            let _ = state.update(
+                focus_daemon(),
+                &cache,
+                Message::View(view::Message::Spend(
+                    view::SpendTxMessage::SelectMasterSigner,
+                )),
+            );
+            assert!(state.signer_focus_return);
+
+            // A signature merge that does not satisfy the path leaves the
+            // picker open and never initiates a restore.
+            state.tx.psbt = unified(&f.psbt, &f.signers[0]);
+            let task = state.update(focus_daemon(), &cache, Message::Reconcile);
+            let close = picker_close_id(&state);
+            assert_eq!(focus_after_restore(task, close, false, false), None);
+            assert!(state.signer_focus_return);
+
+            // The satisfying merge closes the picker and returns to Broadcast.
+            state.tx.psbt = unified(&state.tx.psbt, &f.signers[1]);
+            let task = state.update(focus_daemon(), &cache, Message::Reconcile);
+            assert!(state.modal.is_none());
+            assert!(!state.signer_focus_return);
+            assert!(state.broadcast_ready(&cache));
+            let broadcast = state.action_id("overview.broadcast");
+            assert_eq!(state.overview_focus_id(&cache), broadcast);
+            assert_eq!(
+                focus_after_restore(task, broadcast.clone(), true, false),
+                Some(broadcast)
+            );
+        }
+
         /// `#276` I13 through the state: a legacy-only spend of a deposit
         /// Connect has confirmed on Bitcoin is not broadcastable — not through
         /// the handler's gate, not through the view's button, and not after
