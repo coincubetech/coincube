@@ -1205,20 +1205,31 @@ mod tests {
     }
 
     #[test]
-    fn selecting_current_method_keeps_live_invoice() {
-        let mut panel = SparkReceive::new(None);
-        update(
-            &mut panel,
-            SparkReceiveMessage::GenerateSucceeded(receive_ok("lnbc1invoice")),
-        );
+    fn selecting_current_bitcoin_kind_keeps_generated_request_and_qr() {
+        for (method, request) in [
+            (SparkReceiveMethod::Bolt11, "lnbc1invoice"),
+            (SparkReceiveMethod::Spark, "sp1qaddress"),
+            (SparkReceiveMethod::OnchainBitcoin, "bc1qaddress"),
+        ] {
+            let mut panel = SparkReceive::new(None);
+            panel.method = method;
+            update(
+                &mut panel,
+                SparkReceiveMessage::GenerateSucceeded(receive_ok(request)),
+            );
+            assert!(panel.qr_data.is_some());
 
-        update(
-            &mut panel,
-            SparkReceiveMessage::SelectSenderRail(SparkReceiveMethod::Bolt11),
-        );
+            update(&mut panel, SparkReceiveMessage::SelectSenderRail(method));
 
-        assert!(matches!(panel.phase(), SparkReceivePhase::Generated(_)));
-        assert_eq!(panel.displayed_invoice.as_deref(), Some("lnbc1invoice"));
+            assert_eq!(panel.method, method);
+            assert!(
+                matches!(panel.phase(), SparkReceivePhase::Generated(ok) if ok.payment_request == request)
+            );
+            assert!(panel.qr_data.is_some());
+            if method == SparkReceiveMethod::Bolt11 {
+                assert_eq!(panel.displayed_invoice.as_deref(), Some(request));
+            }
+        }
     }
 
     #[test]

@@ -115,6 +115,7 @@ impl<'a> SparkReceiveView<'a> {
 
         content = content.push(receive_kind_selector(
             self.cross_network_selected.is_some(),
+            self.method,
             self.network,
         ));
 
@@ -244,7 +245,21 @@ impl<'a> SparkReceiveView<'a> {
     }
 }
 
-fn receive_kind_selector(stablecoin: bool, network: Network) -> Element<'static, Message> {
+fn bitcoin_kind_target(stablecoin: bool, method: SparkReceiveMethod) -> SparkReceiveMethod {
+    // The Bitcoin kind is already selected for every native receive method.
+    // Only a return from the cross-network flow needs a default method.
+    if stablecoin {
+        SparkReceiveMethod::Bolt11
+    } else {
+        method
+    }
+}
+
+fn receive_kind_selector(
+    stablecoin: bool,
+    method: SparkReceiveMethod,
+    network: Network,
+) -> Element<'static, Message> {
     let mut stable = button::secondary(
         None,
         if stablecoin {
@@ -262,9 +277,9 @@ fn receive_kind_selector(stablecoin: bool, network: Network) -> Element<'static,
         .push(p2_bold("Receive"))
         .push(
             button::secondary(None, if stablecoin { "Bitcoin" } else { "Bitcoin ✓" }).on_press(
-                Message::SparkReceive(SparkReceiveMessage::SelectSenderRail(
-                    SparkReceiveMethod::Bolt11,
-                )),
+                Message::SparkReceive(SparkReceiveMessage::SelectSenderRail(bitcoin_kind_target(
+                    stablecoin, method,
+                ))),
             ),
         )
         .push(stable);
@@ -905,12 +920,27 @@ mod tests {
 
         let regtest = capture::inspect(
             "spark-receive-regtest",
-            receive_kind_selector(false, Network::Regtest),
+            receive_kind_selector(false, SparkReceiveMethod::Bolt11, Network::Regtest),
             (1024, 768),
             "light",
             theme::Theme::light(),
         );
         assert!(regtest.contains("Stablecoin deposits require Bitcoin mainnet"));
+    }
+
+    #[test]
+    fn active_bitcoin_kind_reselects_the_displayed_method() {
+        for method in [
+            SparkReceiveMethod::Bolt11,
+            SparkReceiveMethod::Spark,
+            SparkReceiveMethod::OnchainBitcoin,
+        ] {
+            assert_eq!(bitcoin_kind_target(false, method), method);
+        }
+        assert_eq!(
+            bitcoin_kind_target(true, SparkReceiveMethod::OnchainBitcoin),
+            SparkReceiveMethod::Bolt11,
+        );
     }
 
     #[test]
