@@ -2365,15 +2365,29 @@ mod tests {
             assert!(tree.has(&details_open_id(&key("a"))));
             assert!(tree.contains("Lock state unknown"));
             assert!(tree.contains("Status unknown"));
+            // The presenter draws these rows: the network is a coin mark and
+            // label in both layouts, and the compact List folds Wallets and
+            // Backup into one caption that the wide table splits into columns.
             let mounted_row = tree.bounds(&select_id(&key("a")));
-            let labeled_network_in_row = tree.text.iter().any(|(value, bounds)| {
-                value.contains("Network: Bitcoin")
-                    && bounds.x >= mounted_row.x
+            let in_row = |bounds: &iced::Rectangle| {
+                bounds.x >= mounted_row.x
                     && bounds.x < mounted_row.x + mounted_row.width
                     && bounds.y >= mounted_row.y
                     && bounds.y < mounted_row.y + mounted_row.height
+            };
+            let network_in_row = tree
+                .text
+                .iter()
+                .any(|(value, bounds)| value == "Bitcoin" && in_row(bounds));
+            assert!(
+                network_in_row,
+                "network label outside the row at {:?}",
+                size
+            );
+            let folded_facts_in_row = tree.text.iter().any(|(value, bounds)| {
+                value.starts_with("Wallets: ") && value.contains(" · Backup: ") && in_row(bounds)
             });
-            assert_eq!(labeled_network_in_row, !table);
+            assert_eq!(folded_facts_in_row, !table, "at {:?}", size);
 
             let width = size.0 as f32 - 2.0 * GUTTER;
             let bounds = focus_bounds(layout(&project(&home), width), width);
