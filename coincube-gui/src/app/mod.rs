@@ -16,6 +16,9 @@ pub mod session;
 pub mod settings;
 pub mod split_intent;
 pub mod state;
+// Admission contract for the later cross-Cube Transfer UI. No payment route uses it yet.
+#[allow(dead_code)]
+mod transfer_destination;
 mod unswept_notice;
 pub mod view;
 pub mod wallet;
@@ -1073,6 +1076,9 @@ pub struct App {
     pending_claim: bool,
     fork_claim_handoff: Option<claim_intent::ForkHandoff>,
     claim_pair_context: Option<Box<claim_pair_context::ClaimPairContext>>,
+    /// Private destination capability for a future cross-Cube Transfer. The
+    /// source App remains the sole public session and owns its teardown.
+    transfer_destination: Option<Box<transfer_destination::TransferDestinationOwner>>,
     fork_claim_requested: bool,
     loading_fork_claim: Option<u64>,
     /// Exact foreign-wallet discovery evidence consumed from Home. This state
@@ -3965,6 +3971,7 @@ impl App {
             fork_claim_requested,
             fork_claim_handoff,
             claim_pair_context: None,
+            transfer_destination: None,
             loading_fork_claim: None,
             split_handoff: split_intent.map(SplitHandoff::Waiting),
             split_handoff_generation: 0,
@@ -4207,6 +4214,7 @@ impl App {
                 pending_claim: false,
                 fork_claim_handoff: None,
                 claim_pair_context: None,
+                transfer_destination: None,
                 fork_claim_requested: false,
                 loading_fork_claim: None,
                 split_handoff: None,
@@ -6782,6 +6790,9 @@ impl App {
 
     pub fn stop(&mut self) {
         info!("Close requested");
+        if let Some(mut destination) = self.transfer_destination.take() {
+            destination.revoke();
+        }
         if let Some(imported) = &mut self.panels.imported_bitcoin {
             imported.stop();
         }
