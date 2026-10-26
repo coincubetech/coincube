@@ -2,10 +2,12 @@
 //! Neither a signer nor a PRF result enters an Iced message or the global
 //! session. This module cannot sign, construct a source spend, or broadcast.
 
+use std::path::Path;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
+use std::time::Duration;
 
 use coincube_core::miniscript::bitcoin::{bip32::Fingerprint, Network};
 use coincube_core::signer::MasterSigner;
@@ -20,7 +22,7 @@ use super::{
 };
 use crate::{
     chain::ChainId,
-    daemon::{client, Daemon},
+    daemon::{client, embedded::EmbeddedDaemon, Daemon},
     dir::CoincubeDirectory,
     services::unlock::{self, throttle::PinAttempt, PinOutcome},
 };
@@ -34,7 +36,7 @@ pub(crate) enum Refusal {
     BackendUnavailable,
     WrongCredential,
     Duress,
-    Locked,
+    Locked(Duration),
 }
 
 /// One exact local catalog snapshot. Re-read before and after every async
@@ -221,7 +223,7 @@ impl ScopedDestination {
         }
         self.pin_attempt = None;
         match result.verdict? {
-            PinVerdict::Locked => Err(Refusal::Locked),
+            PinVerdict::Locked(remaining) => Err(Refusal::Locked(remaining)),
             PinVerdict::Wrong => Err(Refusal::WrongCredential),
             PinVerdict::Duress => {
                 self.revoke();
@@ -371,7 +373,7 @@ enum PinVerdict {
     Unlock,
     Duress,
     Wrong,
-    Locked,
+    Locked(Duration),
 }
 
 pub(crate) struct PinRequest {
@@ -407,7 +409,7 @@ impl PinRequest {
             };
             match unlock::throttle::classify_pin_scoped(self.root.path(), &loc, &self.pin, validate)
             {
-                Ok(PinAttempt::Locked(_)) => Ok(PinVerdict::Locked),
+                Ok(PinAttempt::Locked(remaining)) => Ok(PinVerdict::Locked(remaining)),
                 Ok(PinAttempt::Classified(PinOutcome::Wrong)) => Ok(PinVerdict::Wrong),
                 Ok(PinAttempt::Classified(PinOutcome::Duress)) => Ok(PinVerdict::Duress),
                 Ok(PinAttempt::Classified(PinOutcome::Unlock(signer))) => {
@@ -463,8 +465,9 @@ impl BackendRequest {
         if !same_selection(&self.cube, &current) {
             return Err(Refusal::IdentityChanged);
         }
-        // This restricted path attaches to an already running, wallet-scoped
-        // local backend. It does not start a daemon or share the source socket.
+        // This restricted path uses B's own wallet-scoped config. An external
+        // B daemon is only attached; an ordinary embedded B daemon is owned
+        // here and stopped when this operation ends. Never use A's socket.
         let data_dir = self
             .root
             .network_directory(ChainId::Bitcoin)
@@ -481,9 +484,7 @@ impl BackendRequest {
             return Err(Refusal::IdentityChanged);
         }
         let socket = data_dir.coincubed_rpc_socket_path();
-        let daemon: Arc<dyn Daemon + Send + Sync> = Arc::new(client::Coincubed::new(
-            client::jsonrpc::JsonRPCClient::new(socket),
-        ));
+        let (daemon, lease) = destination_daemon(&socket, &config).await?;
         let info = daemon
             .get_info()
             .await
@@ -516,14 +517,84 @@ impl BackendRequest {
         Ok(BoundBackend {
             wallet_id: self.wallet_id,
             _daemon: daemon,
-            _lease: BackendLease(None),
+            _lease: lease,
         })
     }
 }
 
-/// An attached external service is dropped, never sent `stop`. No daemon is
-/// spawned by this restricted path; future owned resources require an explicit
-/// close implementation before they can be placed in the owner.
+async fn destination_daemon(
+    socket: &Path,
+    config: &Config,
+) -> Result<(Arc<dyn Daemon + Send + Sync>, BackendLease), Refusal> {
+    // A present socket is treated as externally owned. If it is stale or
+    // broken, refuse rather than launching a second daemon against that DB.
+    if socket.exists() {
+        return Ok((
+            Arc::new(client::Coincubed::new(client::jsonrpc::JsonRPCClient::new(
+                socket.to_path_buf(),
+            ))),
+            BackendLease(None),
+        ));
+    }
+    let runtime = tokio::runtime::Handle::try_current().ok();
+    let config = config.clone();
+    // The owned guard is constructed inside the blocking task. If the async
+    // caller cancels before receiving its result, dropping the result still
+    // stops the daemon instead of leaking its poller.
+    let owned = tokio::task::spawn_blocking(move || {
+        EmbeddedDaemon::start(config)
+            .map(|daemon| OwnedEmbeddedDestination {
+                daemon: Arc::new(daemon),
+                runtime,
+            })
+            .map_err(|_| Refusal::BackendUnavailable)
+    })
+    .await
+    .map_err(|_| Refusal::BackendUnavailable)??;
+    let daemon: Arc<dyn Daemon + Send + Sync> = owned.daemon.clone();
+    Ok((daemon, BackendLease(Some(Box::new(owned)))))
+}
+
+struct OwnedEmbeddedDestination {
+    daemon: Arc<EmbeddedDaemon>,
+    runtime: Option<tokio::runtime::Handle>,
+}
+
+impl OwnedDestinationResource for OwnedEmbeddedDestination {
+    fn close(self: Box<Self>) {
+        drop(self);
+    }
+}
+
+impl Drop for OwnedEmbeddedDestination {
+    fn drop(&mut self) {
+        let daemon = Arc::clone(&self.daemon);
+        let runtime = self.runtime.clone();
+        let result = std::thread::spawn(move || match runtime {
+            Some(handle) => handle
+                .block_on(async { daemon.stop().await })
+                .map_err(|error| error.to_string()),
+            None => match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(handle) => handle
+                    .block_on(async { daemon.stop().await })
+                    .map_err(|error| error.to_string()),
+                Err(error) => Err(error.to_string()),
+            },
+        })
+        .join();
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::error!("Destination daemon stop failed: {error}"),
+            Err(_) => tracing::error!("Destination daemon stop panicked"),
+        }
+    }
+}
+
+/// Attached external services are dropped without `stop`; locally started B
+/// daemons carry a guard that stops them at the operation boundary.
 pub(crate) struct BoundBackend {
     wallet_id: WalletId,
     _daemon: Arc<dyn Daemon + Send + Sync>,
@@ -537,8 +608,8 @@ impl Drop for BackendLease {
         if let Some(resource) = self.0.take() {
             resource.close();
         }
-        // The JSON-RPC client merely attached to an external process. Dropping
-        // its Arc closes our handle and never invokes Daemon::stop.
+        // A JSON-RPC client has no resource guard; dropping its Arc never
+        // invokes Daemon::stop on the external process.
     }
 }
 
@@ -752,6 +823,32 @@ mod tests {
         );
         assert!(super::super::session::unlocked_signer("source", source_fp).is_some());
         assert!(super::super::session::unlocked_signer("destination", destination_fp).is_none());
+
+        let mut throttle = unlock::throttle::ThrottleState::load(&root_path);
+        for _ in 0..6 {
+            throttle.record_failure(&root_path, "destination");
+        }
+        let mut locked_destination = ScopedDestination::new(
+            root.clone(),
+            source.clone(),
+            "destination",
+            wallet_id.clone(),
+        )
+        .unwrap();
+        let locked = locked_destination
+            .begin_pin(&source, Zeroizing::new("1234".into()))
+            .unwrap()
+            .run();
+        let remaining = match &locked.verdict {
+            Ok(PinVerdict::Locked(remaining)) => *remaining,
+            other => panic!("expected lockout, got {:?}", other),
+        };
+        assert!(!remaining.is_zero());
+        assert_eq!(
+            locked_destination.accept_pin(&source, locked),
+            Err(Refusal::Locked(remaining))
+        );
+        unlock::throttle::ThrottleState::load(&root_path).record_success(&root_path, "destination");
 
         let mut duress_destination =
             ScopedDestination::new(root.clone(), source.clone(), "destination", wallet_id).unwrap();
