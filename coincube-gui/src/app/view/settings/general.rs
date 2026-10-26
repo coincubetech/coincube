@@ -1,4 +1,4 @@
-use iced::widget::{Column, Row, Space, Toggler};
+use iced::widget::{mouse_area, Column, Container, Row, Space, Toggler};
 use iced::{Alignment, Length};
 
 use coincube_ui::color;
@@ -1393,6 +1393,47 @@ fn direction_badges_toggle<'a>(show: bool) -> Element<'a, Message> {
     .into()
 }
 
+/// The Settings artboard places a select's label in the left column. The
+/// reusable select draws its own clickable label above the field, so keep the
+/// same focus behavior here while retaining the two-column setting row.
+fn labeled_select_row<'a>(
+    label: &'static str,
+    description: Option<&'static str>,
+    select_id: &'static str,
+    enabled: bool,
+    control: Element<'a, Message>,
+) -> Element<'a, Message> {
+    let label_text = coincube_ui::component::tenshu::label(label);
+    let label: Element<'a, Message> = if enabled {
+        mouse_area(label_text)
+            .on_press(Message::FocusAction(iced::advanced::widget::Id::new(
+                select_id,
+            )))
+            .into()
+    } else {
+        label_text.into()
+    };
+    let mut left = Column::new().spacing(2).width(Length::Fill).push(label);
+    if let Some(description) = description {
+        left = left.push(text(description).size(13).style(theme::text::secondary));
+    }
+    let body = Row::new()
+        .spacing(24)
+        .align_y(Alignment::Center)
+        .push(left)
+        .push(Container::new(control).align_x(iced::alignment::Horizontal::Right));
+    Column::new()
+        .width(Length::Fill)
+        .push(Container::new(body).padding([12, 0]))
+        .push(
+            Container::new(Space::new())
+                .width(Length::Fill)
+                .height(Length::Fixed(1.0))
+                .style(theme::tenshu::control::divider),
+        )
+        .into()
+}
+
 fn recipient_identity_checks_toggle<'a>() -> Element<'a, Message> {
     card::simple(
         Column::new().spacing(10)
@@ -1497,8 +1538,11 @@ pub fn fiat_price<'a>(
             "Fiat price data is provided by third-party services. Availability and accuracy are not guaranteed.",
             Tone::Muted,
         ))
-        .push(setting_row(
+        .push(labeled_select_row(
             "Currency",
+            None,
+            "settings-fiat-currency",
+            enabled,
             select(
                 "settings-fiat-currency",
                 "Currency",
@@ -1508,10 +1552,14 @@ pub fn fiat_price<'a>(
             )
             .hide_label()
             .width(Length::Fixed(232.0))
-            .on_select_maybe(enabled.then_some(|currency| FiatMessage::CurrencyEdited(currency).into())),
+            .on_select_maybe(enabled.then_some(|currency| FiatMessage::CurrencyEdited(currency).into()))
+            .into(),
         ))
-        .push(setting_row(
+        .push(labeled_select_row(
             "Exchange-rate source",
+            Some("Never changes a balance."),
+            "settings-fiat-source",
+            enabled,
             select(
                 "settings-fiat-source",
                 "Exchange-rate source",
@@ -1521,9 +1569,9 @@ pub fn fiat_price<'a>(
             )
             .hide_label()
             .width(Length::Fixed(232.0))
-            .on_select_maybe(enabled.then_some(|price_source| FiatMessage::SourceEdited(price_source).into())),
-        )
-        .description("Never changes a balance."));
+            .on_select_maybe(enabled.then_some(|price_source| FiatMessage::SourceEdited(price_source).into()))
+            .into(),
+        ));
     if let Some(attribution) = source.attribution().filter(|_| enabled) {
         rows = rows.push(
             Row::new()
@@ -1635,6 +1683,108 @@ fn drift_warning_line(d: &DescriptorDrift) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct LabelBounds(Vec<(String, iced::Rectangle)>);
+
+    impl iced::advanced::widget::Operation for LabelBounds {
+        fn traverse(
+            &mut self,
+            operate: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation),
+        ) {
+            operate(self);
+        }
+
+        fn text(
+            &mut self,
+            _: Option<&iced::advanced::widget::Id>,
+            bounds: iced::Rectangle,
+            value: &str,
+        ) {
+            self.0.push((value.to_owned(), bounds));
+        }
+    }
+
+    #[test]
+    fn currency_and_source_labels_focus_only_enabled_selects() {
+        use iced::advanced::{layout, renderer::Headless, widget::Tree, Layout};
+        use iced::{mouse, Size};
+
+        for font in coincube_ui::font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(font);
+        }
+        let currencies = [Currency::USD, Currency::EUR];
+        for enabled in [true, false] {
+            let price = PriceSetting {
+                is_enabled: enabled,
+                ..PriceSetting::default()
+            };
+            for (label, target) in [
+                ("Currency", "settings-fiat-currency"),
+                ("Exchange-rate source", "settings-fiat-source"),
+            ] {
+                let renderer =
+                    iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+                        coincube_ui::font::REGULAR,
+                        iced::Pixels(16.0),
+                        Some("tiny-skia"),
+                    ))
+                    .unwrap();
+                let mut element = fiat_price(&price, &currencies, false);
+                let mut tree = Tree::new(element.as_widget());
+                let size = Size::new(652.0, 400.0);
+                let node = element.as_widget_mut().layout(
+                    &mut tree,
+                    &renderer,
+                    &layout::Limits::new(Size::ZERO, size),
+                );
+                let mut labels = LabelBounds::default();
+                element.as_widget_mut().operate(
+                    &mut tree,
+                    Layout::new(&node),
+                    &renderer,
+                    &mut labels,
+                );
+                let bounds = labels
+                    .0
+                    .iter()
+                    .find_map(|(text, bounds)| (text == label).then_some(*bounds))
+                    .expect("visible select label");
+                let mut messages = Vec::new();
+                for event in [
+                    iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                    iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+                ] {
+                    element.as_widget_mut().update(
+                        &mut tree,
+                        &event,
+                        Layout::new(&node),
+                        mouse::Cursor::Available(bounds.center()),
+                        &renderer,
+                        &mut iced::advanced::clipboard::Null,
+                        &mut iced::advanced::Shell::new(&mut messages),
+                        &iced::Rectangle::with_size(size),
+                    );
+                }
+                assert_eq!(
+                    messages.len(),
+                    usize::from(enabled),
+                    "{} enabled={}",
+                    label,
+                    enabled,
+                );
+                if enabled {
+                    assert!(matches!(
+                        messages.as_slice(),
+                        [Message::FocusAction(id)] if id == &iced::advanced::widget::Id::new(target)
+                    ));
+                }
+            }
+        }
+    }
 
     #[test]
     fn amounts_and_currency_fits_both_themes_and_window_sizes() {
