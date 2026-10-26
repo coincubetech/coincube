@@ -3149,6 +3149,54 @@ mod app_preferences_sheet_tests {
     use super::*;
     use crate::app::settings::preferences::{LauncherStyle, MotionPreference, PreferenceChange};
 
+    #[test]
+    fn settings_restore_intent_stays_in_cube_without_opening_account_sheet() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path =
+            std::env::temp_dir().join(format!("settings-restore-route-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        let root = CoincubeDirectory::new(path.clone());
+        let (app, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+        let pane = pane::Pane::new_with_tab(tab::State::App(app));
+        let (panes, pane_id) = pane_grid::State::new(pane);
+        let mut gui = GUI {
+            panes,
+            focus: Some(pane_id),
+            config: Config::new(root, None),
+            window_id: None,
+            window_init: None,
+            window_config: None,
+            global_cache: GlobalCache::default(),
+            theme_mode: Default::default(),
+            system_theme: None,
+            system_reduces_motion: None,
+            preferences_sheet: None,
+            connect_sheet: None,
+            preferences: unresolved_test_preferences(),
+        };
+        let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
+        drop(gui.update(Message::Pane(
+            pane_id,
+            pane::Message::tab(
+                tab_id,
+                tab::Message::Run(AppMessage::View(crate::app::view::Message::ConnectAccount(
+                    crate::app::view::ConnectAccountMessage::Init,
+                ))),
+            ),
+        )));
+        let pane = gui.panes.get(pane_id).unwrap();
+        assert_eq!(pane.tabs.len(), 1);
+        assert!(matches!(pane.tabs[0].state, tab::State::App(_)));
+        assert_eq!(gui.focus, Some(pane_id));
+        assert!(gui.connect_sheet.is_none());
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
     fn launcher_gui(root: &CoincubeDirectory) -> GUI {
         let (home, startup) = home::Home::new_for_chain(root.clone(), None);
         drop(startup);

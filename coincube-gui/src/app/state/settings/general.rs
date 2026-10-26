@@ -966,6 +966,7 @@ pub struct GeneralSettingsState {
     new_unit_setting: UnitSetting,
     currencies: Vec<Currency>,
     show_direction_badges: bool,
+    saved: bool,
     error: Option<Error>,
     /// Master seed backup flow state.
     pub backup_state: BackupSeedState,
@@ -1004,6 +1005,7 @@ impl GeneralSettingsState {
             new_unit_setting: unit_setting,
             currencies: Vec::new(),
             show_direction_badges,
+            saved: false,
             error: None,
             backup_state: BackupSeedState::None,
             backup_pin: PinInput::new(),
@@ -1549,6 +1551,7 @@ impl GeneralSettingsState {
             &self.new_unit_setting,
             &self.currencies,
             self.show_direction_badges,
+            self.saved,
             &self.backup_state,
             &self.backup_pin,
             self.backup_mnemonic.as_deref().map(|v| v.as_slice()),
@@ -1572,6 +1575,7 @@ impl State for GeneralSettingsState {
             &self.new_unit_setting,
             &self.currencies,
             self.show_direction_badges,
+            self.saved,
             &self.backup_state,
             &self.backup_pin,
             self.backup_mnemonic.as_deref().map(|v| v.as_slice()),
@@ -1600,6 +1604,16 @@ impl State for GeneralSettingsState {
         cache: &Cache,
         message: Message,
     ) -> Task<Message> {
+        if matches!(
+            &message,
+            Message::Fiat(FiatMessage::SaveChanges)
+                | Message::View(view::Message::Settings(
+                    view::SettingsMessage::DisplayUnitChanged(_)
+                        | view::SettingsMessage::ToggleDirectionBadges(_)
+                ))
+        ) {
+            self.saved = false;
+        }
         match message {
             Message::Fiat(FiatMessage::SaveChanges) => {
                 self.error = None;
@@ -1622,6 +1636,7 @@ impl State for GeneralSettingsState {
                 )
             }
             Message::SettingsSaved => {
+                self.saved = true;
                 tracing::info!("GeneralSettingsState: SettingsSaved received");
                 self.error = None;
                 // Reload unit setting from disk to sync toggle state with what was saved
@@ -1665,6 +1680,7 @@ impl State for GeneralSettingsState {
                 Task::none()
             }
             Message::SettingsSaveFailed(e) => {
+                self.saved = false;
                 let err_msg = crate::user_error::report(&e);
                 self.error = Some(e);
                 // Show error in global toast

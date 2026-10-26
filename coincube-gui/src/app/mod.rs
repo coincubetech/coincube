@@ -3947,6 +3947,7 @@ impl App {
         // keychain-unavailable modal offers "Sign with Connect" rather than a
         // "Sign in to Connect" that would no-op.
         cache_with_vault.has_connect_session = connect_auth_arc.is_some();
+        cache_with_vault.restorable_connect_session = panels.connect.account.has_stored_session();
         cache_with_vault.p2p_test_coordinator = panels
             .p2p
             .as_ref()
@@ -9611,6 +9612,7 @@ impl App {
                     self.panels.connect.account.use_local_backend();
                 }
                 let was_authenticated = self.cache.connect_authenticated;
+                let previous_server_cube_id = self.panels.connect.cube.server_cube_id;
                 let explicit_logout = matches!(
                     &msg,
                     Message::View(view::Message::ConnectAccount(
@@ -9656,6 +9658,18 @@ impl App {
                     .connect
                     .update(self.daemon.clone(), &self.cache, msg);
                 self.cache.connect_authenticated = self.panels.connect.account.is_authenticated();
+                self.cache.restorable_connect_session =
+                    self.panels.connect.account.has_stored_session();
+                let refresh_recovery_kit = if self.panels.connect.account.is_authenticated()
+                    && self.panels.connect.cube.server_cube_id.is_some()
+                    && (!was_authenticated || previous_server_cube_id.is_none())
+                {
+                    Task::done(Message::View(view::Message::Settings(
+                        view::SettingsMessage::RecoveryKit(view::RecoveryKitMessage::LoadStatus),
+                    )))
+                } else {
+                    Task::none()
+                };
                 if let Some(bound) = &self.fork_connect_client {
                     let current = self.panels.connect.account.authenticated_client();
                     let changed = current.as_ref().is_some_and(|current| {
@@ -9857,6 +9871,7 @@ impl App {
                     )));
                     return Task::batch([
                         task,
+                        refresh_recovery_kit,
                         persist_grant,
                         pending_claim,
                         pending_split,
@@ -9868,6 +9883,7 @@ impl App {
                 }
                 return Task::batch([
                     task,
+                    refresh_recovery_kit,
                     persist_grant,
                     pending_claim,
                     pending_split,
@@ -10025,11 +10041,9 @@ impl App {
                         })
                         .await
                     },
-                    |res| {
-                        if let Err(e) = res {
-                            tracing::warn!("Failed to persist display_mode: {}", e);
-                        }
-                        Message::Tick
+                    |res| match res {
+                        Ok(()) => Message::SettingsSaved,
+                        Err(e) => Message::SettingsSaveFailed(e.into()),
                     },
                 );
             }
@@ -10855,6 +10869,7 @@ impl App {
         self.fork_connect_client = None;
         self.panels.connect.account.use_local_backend();
         self.cache.has_connect_session = false;
+        self.cache.restorable_connect_session = false;
         self.cache.connect_authenticated = false;
         self.cache.connect_tokens = None;
         self.cache.connect_email = None;
@@ -10883,6 +10898,7 @@ impl App {
             self.fork_connect_client = None;
             self.panels.connect.revoke_admitted_client();
             self.cache.has_connect_session = false;
+            self.cache.restorable_connect_session = false;
             self.cache.connect_authenticated = false;
             self.cache.connect_tokens = None;
             self.cache.connect_email = None;

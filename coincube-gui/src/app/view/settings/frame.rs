@@ -184,7 +184,7 @@ pub fn in_content_navigation(menu: &Menu, cache: &Cache) -> Option<Element<'stat
     let scopes = route_choices(menu, cache);
     let sections = section_routes(menu, cache);
     let context = match scope {
-        RouteScope::Cube => "Applies to this Cube. Device preferences stay on this computer.",
+        RouteScope::Cube => "Applies to this Cube.",
         RouteScope::Vault => "Applies to this Vault in the current Cube.",
         RouteScope::Spark => "Applies to this Cube's Spark wallet.",
     };
@@ -206,6 +206,7 @@ pub fn in_content_navigation(menu: &Menu, cache: &Cache) -> Option<Element<'stat
             }
             content.push(rule::horizontal(1)).into()
         })
+        .height(Length::Shrink)
         .into(),
     )
 }

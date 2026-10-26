@@ -33,6 +33,7 @@ pub fn settings_content_section<'a>(
     new_unit_setting: &'a UnitSetting,
     currencies_list: &'a [Currency],
     show_direction_badges: bool,
+    saved: bool,
     backup_state: &'a crate::app::state::settings::general::BackupSeedState,
     backup_pin: &'a crate::pin_input::PinInput,
     backup_mnemonic: Option<&'a [String]>,
@@ -47,6 +48,7 @@ pub fn settings_content_section<'a>(
             new_unit_setting,
             currencies_list,
             show_direction_badges,
+            saved,
         ),
         SettingsSection::PaymentChecks => payment_checks_section(menu, cache),
         SettingsSection::DataExports => data_exports_section(menu, cache),
@@ -71,8 +73,9 @@ fn general_section<'a>(
     new_unit_setting: &'a UnitSetting,
     currencies_list: &'a [Currency],
     show_direction_badges: bool,
+    saved: bool,
 ) -> Element<'a, Message> {
-    let col = Column::new()
+    let mut col = Column::new()
         .spacing(20)
         .push(super::header(
             "Display & appearance",
@@ -91,6 +94,8 @@ fn general_section<'a>(
             currencies_list,
             cache.fiat_chain.is_blake2b(),
         ))
+        .push(text("Direction badges · This device").size(16).bold())
+        .push(direction_badges_toggle(show_direction_badges))
         .push(text("Cube identity").size(20).bold())
         .push(
             card::simple(
@@ -107,16 +112,16 @@ fn general_section<'a>(
             )
             .width(Length::Fill),
         )
+        .push(button::secondary(None, "Rename Cube in Launcher").on_press(Message::OpenLauncher))
         .push(
             button::secondary(None, "Manage Cube avatar").on_press(Message::Menu(Menu::Cube(
                 CubeSubMenu::Settings(CubeSettingsOption::Avatar),
             ))),
         )
-        .push(text("Preview and confirm avatar changes in the Cube identity flow.").size(14))
-        .push(text("Application appearance").size(20).bold())
-        .push(direction_badges_toggle(show_direction_badges))
-        .push(text("Direction badges and the preferences below apply on this device.").size(14))
-        .push(button::secondary(None, "Open App preferences").on_press(Message::OpenAppPreferences));
+        .push(text("Preview and confirm avatar changes in the Cube identity flow.").size(14));
+    if saved {
+        col = col.push(text("Saved").size(14));
+    }
 
     dashboard(menu, cache, col)
 }
@@ -254,7 +259,7 @@ fn recovery_section<'a>(
     // wrapper invoked `view_with_recovery_kit`. Falling back to no-card when
     // `None` keeps the trait-based `view` callers harmless.
     if let Some(rk) = recovery_kit {
-        if !cache.connect_authenticated && !cache.has_connect_session {
+        if !cache.connect_authenticated && !cache.restorable_connect_session {
             // The Recovery Kit lives in the Connect account, so it needs sign-in
             // first. Reuse the shared Connect sign-in prompt (same card + "Sign
             // In" → `OpenConnectSignIn` button used by Avatar / Members) rather
@@ -313,14 +318,14 @@ fn recovery_section<'a>(
         .push(text(if cache.has_vault {
             "Review the Vault's recovery spending path and timelocks in its tools."
         } else {
-            "No Vault recovery path applies to this Cube."
-        }).size(14))
-        .push(
+            "Not applicable — this Cube has no Vault."
+        }).size(14));
+    if cache.has_vault {
+        col = col.push(
             button::secondary(None, "Open recovery path")
-                .on_press_maybe(cache.has_vault.then_some(Message::Menu(Menu::Vault(
-                    VaultSubMenu::Recovery,
-                )))),
+                .on_press(Message::Menu(Menu::Vault(VaultSubMenu::Recovery))),
         );
+    }
 
     // Vault Recovery Alerts card (Estate Notifications — PR 2). Same threading
     // discipline as the Recovery Kit card above.
@@ -331,10 +336,8 @@ fn recovery_section<'a>(
     dashboard(menu, cache, col)
 }
 
-/// A stored session can authenticate this Cube tab through `OpenConnectSignIn`:
-/// the tab sends `ConnectAccount(Init)`, whose authenticated result registers
-/// the Cube. `OpenConnectSwitchAccount` skips that refresh and is only for an
-/// already authenticated user who needs a different account.
+/// Refresh this Cube tab's Connect panel directly. The shell's sign-in intent
+/// opens an account-wide sheet and may navigate to Launcher instead.
 fn unregistered_cube_action(cache: &cache::Cache) -> Option<(&'static str, Message)> {
     if cache.current_cube_server_id.is_some() {
         None
@@ -343,8 +346,11 @@ fn unregistered_cube_action(cache: &cache::Cache) -> Option<(&'static str, Messa
             "Retry Cube connection",
             Message::ConnectCube(ConnectCubeMessage::RetryRegistration),
         ))
-    } else if cache.has_connect_session {
-        Some(("Restore Connect session", Message::OpenConnectSignIn))
+    } else if cache.restorable_connect_session {
+        Some((
+            "Restore Connect session",
+            Message::ConnectAccount(ConnectAccountMessage::Init),
+        ))
     } else {
         None
     }
@@ -1605,16 +1611,19 @@ mod tests {
     #[test]
     fn unregistered_cube_uses_session_restore_without_wrong_account_handoff() {
         let restored_session = cache::Cache {
-            has_connect_session: true,
+            restorable_connect_session: true,
             ..cache::Cache::default()
         };
         let (label, route) = unregistered_cube_action(&restored_session).unwrap();
         assert_eq!(label, "Restore Connect session");
-        assert!(matches!(route, Message::OpenConnectSignIn));
+        assert!(matches!(
+            route,
+            Message::ConnectAccount(ConnectAccountMessage::Init)
+        ));
 
         let authenticated = cache::Cache {
             connect_authenticated: true,
-            has_connect_session: true,
+            restorable_connect_session: true,
             ..cache::Cache::default()
         };
         let (label, route) = unregistered_cube_action(&authenticated).unwrap();

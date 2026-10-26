@@ -1137,6 +1137,7 @@ pub async fn load_application(
         // Local-daemon launch has no Connect session until the user signs in
         // via the Connect tab; `App::new` flips this on if it restores one.
         has_connect_session: false,
+        restorable_connect_session: false,
         has_vault: !wallet.is_imported(),
         has_imported_bitcoin: wallet.is_imported(),
         cube_name: config.cube_settings.name.clone(),
