@@ -302,14 +302,21 @@ impl PsbtState {
     }
 
     fn overview_focus_id(&self, cache: &Cache) -> iced::advanced::widget::Id {
+        if self.tx.status != SpendStatus::Pending {
+            return self.action_id("overview.copy-txid");
+        }
         let sign = match &self.replay {
             None => !self.broadcast_ready(cache),
             Some(review) => !review.signatures_complete(&self.entangled_inputs(cache)),
         };
         self.action_id(if sign {
             "overview.sign"
-        } else {
+        } else if self.broadcast_ready(cache) {
             "overview.broadcast"
+        } else {
+            // Replay acknowledgement, a recheck, or a Claim can leave
+            // Broadcast visible but disabled. Copy Tx ID remains enabled.
+            "overview.copy-txid"
         })
     }
 
@@ -4875,6 +4882,7 @@ mod tests {
     /// The Bitcoin Blake2b side of the same entry points.
     mod blake2b_paths {
         use super::super::*;
+        use super::focus_after_restore;
         use crate::app::state::vault::{
             replay::{ReplayStatus, UnknownReason},
             test_support::unified::{fixture, legacy, signer, unified},
@@ -5541,6 +5549,64 @@ mod tests {
             let _ = state.reconcile_and_maybe_close(&Cache::default());
             assert!(!state.replay.as_ref().unwrap().acknowledged());
             assert!(!state.broadcast_ready(&Cache::default()));
+        }
+
+        #[test]
+        fn closing_picker_with_complete_replay_signatures_focuses_enabled_copy_action() {
+            let f = fixture();
+            let wallet = wallet_with_hot_signer(&f);
+            let tx = SpendTx::new(
+                None,
+                legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]),
+                Vec::new(),
+                &f.descriptor,
+                &secp256k1::Secp256k1::new(),
+                Network::Bitcoin,
+            );
+            let mut state = PsbtState::new(wallet, tx, true);
+            // The synthetic fixture omits its Coin, so SpendTx otherwise
+            // classifies it as Deprecated and hides both signing actions.
+            state.tx.status = SpendStatus::Pending;
+            let cache = Cache::default();
+            assert!(state
+                .replay
+                .as_ref()
+                .unwrap()
+                .signatures_complete(&state.entangled_inputs(&cache)));
+            assert!(!state.broadcast_ready(&cache));
+
+            state.modal = Some(PsbtModal::Sign(SignModal::new(
+                state.tx.signers(),
+                state.wallet.clone(),
+                cache.datadir_path.clone(),
+                cache.network,
+                state.saved,
+                state.tx.recovery_timelock(),
+                None,
+                false,
+            )));
+            let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
+                crate::daemon::client::Coincubed::new(MockDaemon::new(vec![]).run()),
+            );
+            let task = state.update(
+                daemon,
+                &cache,
+                Message::View(view::Message::Spend(view::SpendTxMessage::Cancel)),
+            );
+            assert!(state.modal.is_none());
+            let copy = state.action_id("overview.copy-txid");
+            assert_eq!(state.overview_focus_id(&cache), copy);
+            assert_eq!(
+                focus_after_restore(task, copy.clone(), true, false),
+                Some(copy)
+            );
+
+            state.replay.as_mut().unwrap().set_acknowledged(true);
+            assert!(state.broadcast_ready(&cache));
+            assert_eq!(
+                state.overview_focus_id(&cache),
+                state.action_id("overview.broadcast")
+            );
         }
 
         /// `#276` I13 through the state: a legacy-only spend of a deposit
