@@ -1216,6 +1216,26 @@ pub fn wallet_settings<'a>(
                 .size(P1_SIZE)
                 .padding(10),
             )
+            .push(
+                Row::new()
+                    .spacing(10)
+                    .align_y(Alignment::Center)
+                    .push(caption("Save changes before leaving this page."))
+                    .push(Space::new().width(Length::Fill))
+                    .push(if updated {
+                        Some(text("Names saved").style(theme::text::success))
+                    } else {
+                        None
+                    })
+                    .push(if processing {
+                        button::secondary(None, "Saving names…")
+                    } else if wallet_alias.valid {
+                        button::secondary(None, "Save names")
+                            .on_press(Message::Settings(SettingsMessage::Save))
+                    } else {
+                        button::secondary(None, "Save names")
+                    }),
+            )
             .push(text(format!("Network: {}", cache.network)))
             .push(text(format!(
                 "{}: {}",

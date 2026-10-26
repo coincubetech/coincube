@@ -263,11 +263,11 @@ fn waiting_body<'a>(
     let mut offer_col = Column::new()
         .spacing(10)
         .align_x(Alignment::Center)
-        .push(text("Confirm the same phone on both screens").bold())
+        .push(text("Scan with the selected Keychain phone").bold())
         .push(countdown_label)
         .push(text(scan_guidance))
         .push(
-            text("The offer is short-lived. Pairing does not transfer a key from this computer.")
+            text("The phone and Tenshu verify pairing automatically. Pairing does not transfer a private key from this computer.")
                 .style(theme::text::secondary),
         );
     if let Some(qr) = qr.filter(|_| remaining > 0) {

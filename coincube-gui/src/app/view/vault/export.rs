@@ -48,7 +48,7 @@ pub fn export_modal<'a, Message: From<ImportExportMessage> + Clone + 'static>(
             ImportExportState::Init => "".to_string(),
             ImportExportState::ChoosePath => "Choose a location in the system file dialog…".into(),
             ImportExportState::Path(_) => "".into(),
-            ImportExportState::Started => "Preparing the wallet file…".into(),
+            ImportExportState::Started => "Starting the import or export…".into(),
             ImportExportState::Progress(p) => format!("Progress: {}%", p.round()),
             ImportExportState::TimedOut => "The operation timed out. No completion was recorded; review the destination before trying again.".into(),
             ImportExportState::Aborted => "Operation canceled. Check the destination before trying again.".into(),
