@@ -293,6 +293,10 @@ pub struct ConnectCubePanel {
 }
 
 impl ConnectCubePanel {
+    pub fn is_registering(&self) -> bool {
+        self.registering
+    }
+
     pub fn new(
         spark_client: Option<Arc<SparkClient>>,
         cube_uuid: String,
@@ -860,6 +864,7 @@ impl ConnectCubePanel {
 
     pub fn update_message(&mut self, msg: ConnectCubeMessage) -> iced::Task<Message> {
         match msg {
+            ConnectCubeMessage::FocusAction(id) => return iced::widget::operation::focus(id),
             ConnectCubeMessage::CubeRegistered { generation, result } => {
                 // Belongs to a session that has since ended — see
                 // `session_generation`. Drop it whole: it must not populate
@@ -1567,6 +1572,16 @@ impl ConnectCubePanel {
             },
 
             ConnectCubeMessage::RetryRegistration => {
+                if self.registering {
+                    return iced::Task::none();
+                }
+                if self.client.is_none() {
+                    // A restored connect.json session may have registered
+                    // through App::EnsureConnectReady without a panel client.
+                    // Keep the failure visible while that path retries from
+                    // the cached tokens; it clears on CubeRegistered success.
+                    return iced::Task::done(Message::EnsureConnectReady);
+                }
                 self.registration_error = None;
                 return self.register_cube();
             }
@@ -2229,6 +2244,28 @@ mod tests {
             iced_runtime::task::into_stream(panel.register_cube()).is_some(),
             "the next trigger after a failure must be allowed to retry"
         );
+    }
+
+    #[test]
+    fn retry_registration_without_panel_client_uses_external_path_and_keeps_error() {
+        use iced_runtime::futures::futures::{executor::block_on, StreamExt};
+
+        let mut panel = panel();
+        panel.registration_error = Some("register failed".into());
+        let task = panel.update_message(ConnectCubeMessage::RetryRegistration);
+        assert_eq!(panel.registration_error.as_deref(), Some("register failed"));
+        let mut stream = iced_runtime::task::into_stream(task).expect("external retry emitted");
+        assert!(matches!(
+            block_on(stream.next()),
+            Some(iced_runtime::Action::Output(Message::EnsureConnectReady))
+        ));
+
+        panel.registering = true;
+        assert!(iced_runtime::task::into_stream(
+            panel.update_message(ConnectCubeMessage::RetryRegistration)
+        )
+        .is_none());
+        assert_eq!(panel.registration_error.as_deref(), Some("register failed"));
     }
 
     /// Signing out mid-registration must not strand the next account. Nothing

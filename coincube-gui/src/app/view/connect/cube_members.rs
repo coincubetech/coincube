@@ -6,12 +6,12 @@
 
 use coincube_ui::{
     color,
-    component::{button, text, tooltip},
+    component::{tenshu::action::ActionButton, text, tooltip},
     icon::*,
-    theme,
+    theme::{self, tenshu::button::ActionKind},
     widget::*,
 };
-use iced::{widget::container, Alignment, Length};
+use iced::{advanced::widget::Id, widget::container, Alignment, Length};
 
 use crate::{
     app::{
@@ -22,6 +22,52 @@ use crate::{
 };
 
 use super::{card_style, format_date};
+
+pub(crate) const REMOVE_CONFLICT_DISMISS_ID: &str = "members.remove-conflict.dismiss";
+pub(crate) const ERROR_DISMISS_ID: &str = "members.dismiss-error";
+fn action_id(name: &str) -> Id {
+    Id::from(format!("members.{name}"))
+}
+pub(crate) fn refresh_action_id() -> Id {
+    action_id("refresh")
+}
+pub(crate) fn add_action_id() -> Id {
+    action_id("add")
+}
+pub(crate) fn revoke_action_id(id: u64) -> Id {
+    action_id(&format!("revoke.{id}"))
+}
+pub(crate) fn remove_action_id(id: u64) -> Id {
+    action_id(&format!("remove.{id}"))
+}
+fn action<'a>(
+    id: Id,
+    label: &'a str,
+    kind: ActionKind,
+    message: Option<ConnectCubeMessage>,
+) -> Element<'a, ConnectCubeMessage> {
+    ActionButton::new(id, label, kind, ConnectCubeMessage::FocusAction)
+        .compact()
+        .on_press_maybe(message)
+        .into()
+}
+
+fn row_action<'a>(
+    id: Id,
+    label: &'a str,
+    message: ConnectCubeMessage,
+) -> Element<'a, ConnectCubeMessage> {
+    ActionButton::new(
+        id,
+        label,
+        ActionKind::Secondary,
+        ConnectCubeMessage::FocusAction,
+    )
+    .compact()
+    .width(Length::Fixed(90.0))
+    .on_press(message)
+    .into()
+}
 
 /// Top-level Members view. Composes the invite form, member list, and
 /// pending-invite list. Dialogs (error banner, stranded-vault conflict) are
@@ -49,15 +95,14 @@ pub fn cube_members_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCu
                 .spacing(2),
         )
         .push(iced::widget::Space::new().width(Length::Fill))
-        .push(
-            button::secondary(None, "Refresh")
-                .on_press_maybe(
-                    (ready && !panel.loading).then_some(ConnectCubeMessage::Members(
-                        ConnectCubeMembersMessage::Reload,
-                    )),
-                )
-                .width(Length::Shrink),
-        )
+        .push(action(
+            refresh_action_id(),
+            "Refresh",
+            ActionKind::Secondary,
+            (ready && !panel.loading).then_some(ConnectCubeMessage::Members(
+                ConnectCubeMembersMessage::Reload,
+            )),
+        ))
         .align_y(Alignment::Center);
 
     let mut col = Column::new()
@@ -72,15 +117,27 @@ pub fn cube_members_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCu
         let reason = if state.owned_by_other_account {
             "This Cube is registered to a different Connect account."
         } else if state.registration_error.is_some() {
-            "This Cube could not be registered with Connect. Try again after registration succeeds."
+            "Connect couldn't register this Cube. Retry, or check your Connect account if it keeps failing."
         } else if state.client.is_none() {
             "Sign in to Connect to manage this Cube's members."
         } else {
             "Not ready — the Cube is still registering."
         };
+        let mut not_ready = Column::new().push(text::p1_regular(reason)).spacing(12);
+        if state.registration_error.is_some()
+            && !state.owned_by_other_account
+            && !state.is_registering()
+        {
+            not_ready = not_ready.push(action(
+                action_id("retry-registration"),
+                "Retry",
+                ActionKind::Secondary,
+                Some(ConnectCubeMessage::RetryRegistration),
+            ));
+        }
         return col
             .push(
-                container(text::p1_regular(reason))
+                container(not_ready)
                     .padding(20)
                     .style(card_style)
                     .width(Length::Fill),
@@ -154,13 +211,7 @@ pub fn cube_members_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCu
 fn invite_form<'a>(
     panel: &'a crate::app::state::connect::ConnectCubeMembersState,
 ) -> Element<'a, ConnectCubeMessage> {
-    let email = panel.invite_email.trim();
-    let email_valid = email_address::EmailAddress::parse_with_options(
-        email,
-        email_address::Options::default().with_required_tld(),
-    )
-    .is_ok();
-    let can_submit = email_valid && !email.is_empty() && !panel.invite_sending;
+    let can_submit = !panel.invite_sending;
 
     let submit: Element<ConnectCubeMessage> = if panel.invite_sending {
         iced::widget::button(
@@ -173,12 +224,14 @@ fn invite_form<'a>(
         .style(theme::button::primary)
         .into()
     } else {
-        button::primary(None, "Add Member")
-            .on_press_maybe(can_submit.then_some(ConnectCubeMessage::Members(
+        action(
+            add_action_id(),
+            "Add Member",
+            ActionKind::Primary,
+            can_submit.then_some(ConnectCubeMessage::Members(
                 ConnectCubeMembersMessage::SubmitInvite,
-            )))
-            .width(Length::Shrink)
-            .into()
+            )),
+        )
     };
 
     let input = TextInput::new("email@example.com", &panel.invite_email)
@@ -206,6 +259,11 @@ fn invite_form<'a>(
         )
         .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
         .push(row)
+        .push_maybe(
+            panel
+                .invite_email_invalid
+                .then(|| text::p2_regular("Please enter a valid email address").color(color::RED)),
+        )
         .spacing(0)
         .width(Length::Fill)
         .into()
@@ -270,12 +328,15 @@ fn member_card<'a>(
     }
     let info = info
         .push(text::p2_regular(format!("Joined {}", joined)).color(color::GREY_3))
-        .spacing(2);
+        .spacing(2)
+        .width(Length::Fill);
 
     let member_id = member.id;
-    let remove_btn = button::secondary(None, "Remove").on_press(ConnectCubeMessage::Members(
-        ConnectCubeMembersMessage::RemoveMember(member_id),
-    ));
+    let remove_btn = row_action(
+        remove_action_id(member_id),
+        "Remove",
+        ConnectCubeMessage::Members(ConnectCubeMembersMessage::RemoveMember(member_id)),
+    );
 
     Column::new()
         .push(
@@ -283,7 +344,7 @@ fn member_card<'a>(
                 .push(avatar)
                 .push(iced::widget::Space::new().width(Length::Fixed(12.0)))
                 .push(info)
-                .push(iced::widget::Space::new().width(Length::Fill))
+                .push(iced::widget::Space::new().width(Length::Fixed(12.0)))
                 .push(remove_btn)
                 .align_y(Alignment::Center)
                 .padding([12, 0]),
@@ -305,18 +366,17 @@ fn pending_invite_card<'a>(invite: &'a CubeInviteSummary) -> Element<'a, Connect
                 .push(expiry_elem)
                 .align_y(Alignment::Center),
         )
-        .spacing(2);
+        .spacing(2)
+        .width(Length::Fill);
 
     let invite_id = invite.id;
-    let mut row = Row::new()
-        .push(info)
-        .push(iced::widget::Space::new().width(Length::Fill));
+    let mut row = Row::new().push(info);
     if invite.status == "pending" {
-        row = row.push(
-            button::secondary(None, "Revoke").on_press(ConnectCubeMessage::Members(
-                ConnectCubeMembersMessage::RevokeInvite(invite_id),
-            )),
-        );
+        row = row.push(row_action(
+            revoke_action_id(invite_id),
+            "Revoke",
+            ConnectCubeMessage::Members(ConnectCubeMembersMessage::RevokeInvite(invite_id)),
+        ));
     }
 
     Column::new()
@@ -357,14 +417,14 @@ fn error_banner<'a>(err: &str) -> Element<'a, ConnectCubeMessage> {
         Row::new()
             .push(text::p2_regular(err.to_string()).color(color::RED))
             .push(iced::widget::Space::new().width(Length::Fill))
-            .push(
-                iced::widget::button(cross_icon().color(color::GREY_3))
-                    .padding([6, 8])
-                    .style(theme::button::transparent)
-                    .on_press(ConnectCubeMessage::Members(
-                        ConnectCubeMembersMessage::DismissError,
-                    )),
-            )
+            .push(action(
+                Id::new(ERROR_DISMISS_ID),
+                "Dismiss",
+                ActionKind::Quiet,
+                Some(ConnectCubeMessage::Members(
+                    ConnectCubeMembersMessage::DismissError,
+                )),
+            ))
             .align_y(Alignment::Center)
             .padding(12),
     )
@@ -396,10 +456,13 @@ fn remove_conflict_banner<'a>(msg: &str) -> Element<'a, ConnectCubeMessage> {
             .push(
                 Row::new()
                     .push(iced::widget::Space::new().width(Length::Fill))
-                    .push(button::secondary(None, "Dismiss").on_press(
-                        ConnectCubeMessage::Members(
+                    .push(action(
+                        Id::new(REMOVE_CONFLICT_DISMISS_ID),
+                        "Dismiss",
+                        ActionKind::Secondary,
+                        Some(ConnectCubeMessage::Members(
                             ConnectCubeMembersMessage::DismissRemoveConflict,
-                        ),
+                        )),
                     )),
             )
             .padding(16)
@@ -468,5 +531,125 @@ fn expiry_element<'a>(expires_at: &str) -> Element<'a, ConnectCubeMessage> {
         d => text::p2_regular(format!("Expires in {} days", d))
             .color(color::GREY_3)
             .into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::view::shared::landing::capture;
+    use crate::services::coincube::CubeMemberUser;
+
+    fn synthetic_rows<'a>(
+        panel: &'a crate::app::state::connect::ConnectCubeMembersState,
+        invite: &'a CubeInviteSummary,
+        member: &'a CubeMember,
+    ) -> Element<'a, ConnectCubeMessage> {
+        Column::new()
+            .push(action(
+                refresh_action_id(),
+                "Refresh",
+                ActionKind::Secondary,
+                Some(ConnectCubeMessage::Members(
+                    ConnectCubeMembersMessage::Reload,
+                )),
+            ))
+            .push(invite_form(panel))
+            .push(pending_invite_card(invite))
+            .push(member_card(member, None))
+            .push(error_banner("Network unavailable"))
+            .push(remove_conflict_banner("Keys are signing an active Vault"))
+            .spacing(12)
+            .width(Length::Fill)
+            .into()
+    }
+
+    #[test]
+    fn synthetic_members_actions_fit_and_mount_in_both_themes() {
+        let mut panel = crate::app::state::connect::ConnectCubeMembersState::new();
+        panel.invite_email = "jordan@example".into();
+        panel.invite_email_invalid = true;
+        let invite = CubeInviteSummary {
+            id: 13,
+            cube_id: 1,
+            email: "jordan@example.test".into(),
+            status: "pending".into(),
+            expires_at: (chrono::Utc::now() + chrono::Duration::days(6)).to_rfc3339(),
+            created_at: "2026-10-26T00:00:00Z".into(),
+        };
+        let member = CubeMember {
+            id: 17,
+            user_id: 4,
+            user: CubeMemberUser {
+                email: "morgan.with-a-long-household-address@family-office.example.test".into(),
+            },
+            joined_at: "2026-10-18T00:00:00Z".into(),
+        };
+        for size in [(1024, 768), (1440, 900)] {
+            for (appearance, theme) in [
+                ("dark", theme::Theme::dark()),
+                ("light", theme::Theme::light()),
+            ] {
+                let mounted = capture::inspect(
+                    "members-first-release",
+                    synthetic_rows(&panel, &invite, &member),
+                    size,
+                    appearance,
+                    theme,
+                );
+                assert!(mounted.contains("Please enter a valid email address"));
+                for id in [
+                    refresh_action_id(),
+                    add_action_id(),
+                    revoke_action_id(invite.id),
+                    remove_action_id(member.id),
+                    Id::new(ERROR_DISMISS_ID),
+                    Id::new(REMOVE_CONFLICT_DISMISS_ID),
+                ] {
+                    assert!(mounted.has_focus(id));
+                }
+            }
+        }
+        let keyboard = capture::activate(
+            synthetic_rows(&panel, &invite, &member),
+            remove_action_id(member.id),
+            (1024, 768),
+            false,
+        );
+        assert!(keyboard.iter().any(|msg| matches!(
+            msg,
+            ConnectCubeMessage::Members(ConnectCubeMembersMessage::RemoveMember(17))
+        )));
+    }
+
+    #[test]
+    fn failed_registration_exposes_keyboard_retry_without_raw_error() {
+        let mut state = ConnectCubePanel::new(
+            None,
+            "synthetic-cube".into(),
+            "Household".into(),
+            "mainnet".into(),
+            true,
+        );
+        state.registration_error = Some("internal server detail".into());
+        let mounted = capture::inspect(
+            "members-registration-failed",
+            cube_members_ux(&state),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(mounted.contains("Connect couldn't register this Cube"));
+        assert!(!mounted.contains("internal server detail"));
+        assert!(mounted.has_focus(action_id("retry-registration")));
+        let keyboard = capture::activate(
+            cube_members_ux(&state),
+            action_id("retry-registration"),
+            (1024, 768),
+            false,
+        );
+        assert!(keyboard
+            .iter()
+            .any(|msg| matches!(msg, ConnectCubeMessage::RetryRegistration)));
     }
 }
