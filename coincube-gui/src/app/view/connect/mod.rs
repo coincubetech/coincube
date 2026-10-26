@@ -2081,7 +2081,7 @@ fn plan_selection_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectA
                 style.border = iced::Border {
                     color: color::ORANGE,
                     width: 1.0,
-                    radius: 25.0.into(),
+                    ..style.border
                 };
                 style
             });

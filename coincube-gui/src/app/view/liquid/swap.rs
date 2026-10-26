@@ -499,7 +499,6 @@ fn input_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMess
         LiquidSwapMessage::FocusAction,
     )
     .padding([10, 16])
-    .focus_radius(25.0)
     .style(theme::button::primary)
     .width(Length::Fixed(240.0))
     .on_press_maybe(
