@@ -135,9 +135,10 @@ fn open_inner(cube_id: String, pin: Option<Zeroizing<String>>) {
 
 /// Hand the session the signer that verifying the PIN just produced.
 ///
-/// Called from the unlock's blocking task. It goes here rather than through an
-/// iced message because messages must be `Clone` and are cloned freely — every
-/// copy would be another master seed on the heap.
+/// Called when the live PIN screen accepts its matching unlock result. The
+/// blocking classifier keeps the signer in a private slot until then. It
+/// cannot travel through an iced message: messages are cloned freely and
+/// every copy would be another master seed on the heap.
 pub fn store_unlocked_signer(cube_id: &str, fingerprint: Fingerprint, signer: MasterSigner) {
     let mut guard = lock_session();
     match guard.as_mut() {
@@ -432,6 +433,36 @@ mod tests {
         assert!(pin_for("other-synthetic-cube").is_some());
         close_cube("other-synthetic-cube");
         assert!(!is_open());
+    }
+
+    #[test]
+    fn stale_generation_cannot_admit_after_lock_or_same_cube_reopen() {
+        let _guard = test_guard();
+        close();
+        open_without_pin("mcp-synthetic-cube");
+        let first = generation_for("mcp-synthetic-cube").unwrap();
+        assert_eq!(
+            admit_generation("mcp-synthetic-cube", first, || Some(7)),
+            Some(7)
+        );
+        close_cube("mcp-synthetic-cube");
+        assert_eq!(generation_for("mcp-synthetic-cube"), None);
+        assert_eq!(
+            admit_generation("mcp-synthetic-cube", first, || Some(7)),
+            None
+        );
+        open_without_pin("mcp-synthetic-cube");
+        let second = generation_for("mcp-synthetic-cube").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            admit_generation("mcp-synthetic-cube", first, || Some(7)),
+            None
+        );
+        assert_eq!(
+            admit_generation("mcp-synthetic-cube", second, || Some(9)),
+            Some(9)
+        );
+        close();
     }
 
     // These share one process-global, so they run under a mutex of their own

@@ -419,6 +419,9 @@ pub enum Message {
     /// An App callback is valid only for the App generation that emitted it.
     /// A retained Launcher tab can otherwise reuse this tab ID after Lock.
     AppAsync(u64, Box<Message>),
+    /// A verified settings duress marker survives an App generation change.
+    /// The proof is one-use and bound to the original data root/Cube.
+    LocalDuress(crate::services::unlock::throttle::VerifiedSeedExportDuress),
     ForkAsync(u64, Box<Message>),
     ForkTaskFinished(u64, u64),
     Launch(home::Message),
@@ -846,6 +849,14 @@ pub struct Tab {
     /// before the Cube is up waits here.
     pending_unlock_warnings: Vec<String>,
     app_generation: u64,
+    seed_export_origins: Vec<(
+        crate::app::cache::AppGeneration,
+        std::path::PathBuf,
+        String,
+        crate::chain::ChainId,
+    )>,
+    pending_seed_export_trials: usize,
+    closed_seed_export_origin: Option<usize>,
     claim_open: Option<home::ClaimOpenIntent>,
     fork_session_generation: u64,
     fork_save_task: Option<iced::task::Handle>,
@@ -906,6 +917,9 @@ impl Tab {
             unlock_floor: None,
             pending_unlock_warnings: Vec::new(),
             app_generation: 0,
+            seed_export_origins: Vec::new(),
+            pending_seed_export_trials: 0,
+            closed_seed_export_origin: None,
             claim_open: None,
             fork_session_generation: 0,
             fork_save_task: None,
@@ -1305,6 +1319,32 @@ impl Tab {
         matches!(self.state, State::App(_)).then_some(self.app_generation)
     }
 
+    pub(crate) fn pending_seed_export_trials(&self) -> usize {
+        self.pending_seed_export_trials
+    }
+
+    pub(crate) fn finish_stale_seed_export_trial(&mut self) {
+        self.pending_seed_export_trials = self.pending_seed_export_trials.saturating_sub(1);
+    }
+
+    pub(crate) fn hold_closed_seed_export_trials(&mut self, origin: usize, count: usize) {
+        self.closed_seed_export_origin = Some(origin);
+        self.pending_seed_export_trials = count;
+    }
+
+    pub(crate) fn finish_closed_seed_export_trial(&mut self, origin: usize) -> Option<bool> {
+        if self.closed_seed_export_origin != Some(origin) || self.pending_seed_export_trials == 0 {
+            return None;
+        }
+        self.pending_seed_export_trials -= 1;
+        Some(self.pending_seed_export_trials == 0)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_seed_export_trial_pending_for_test(&mut self) {
+        self.pending_seed_export_trials += 1;
+    }
+
     pub(crate) fn preferences_source(&self) -> Option<PreferencesSource> {
         match &self.state {
             State::Home(_) => Some(PreferencesSource::Home),
@@ -1427,7 +1467,26 @@ impl Tab {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        if let State::App(app) = &self.state {
+            let origin = app.cache().app_generation;
+            if !self
+                .seed_export_origins
+                .iter()
+                .any(|(known, _, _, _)| *known == origin)
+            {
+                self.seed_export_origins.push((
+                    origin,
+                    app.datadir().path().to_path_buf(),
+                    app.cube_settings().id.clone(),
+                    app.cube_settings().network,
+                ));
+            }
+        }
         let message = match message {
+            Message::LocalDuress(proof) => return self.activate_verified_seed_export_duress(proof),
+            Message::Run(app::Message::View(app::view::Message::DuressActivateLocal(proof))) => {
+                return self.activate_verified_seed_export_duress(proof);
+            }
             Message::UnlockMotionTick(now) => {
                 if self.unlock_motion.is_some_and(|started| {
                     home::launcher_presenter::unlock_turn_progress(started, now) >= 1.0
@@ -1464,10 +1523,40 @@ impl Tab {
         ) {
             return Task::done(message);
         }
+        let preserve_seed_export_trial = matches!(
+            &message,
+            Message::Run(app::Message::View(app::view::Message::Settings(
+                app::view::SettingsMessage::BackupMasterSeed(
+                    app::view::BackupWalletMessage::VerifyPin
+                ) | app::view::SettingsMessage::RecoveryKit(
+                    app::view::RecoveryKitMessage::VerifyPin
+                ) | app::view::SettingsMessage::RecoveryAlerts(
+                    app::view::RecoveryAlertsMessage::ConfirmFullCube
+                )
+            )))
+        );
+        if matches!(
+            &message,
+            Message::Run(app::Message::View(app::view::Message::Settings(
+                app::view::SettingsMessage::BackupMasterSeed(
+                    app::view::BackupWalletMessage::PinVerifiedAttempt(..)
+                ) | app::view::SettingsMessage::RecoveryKit(
+                    app::view::RecoveryKitMessage::PinVerifiedAttempt(..)
+                ) | app::view::SettingsMessage::RecoveryAlerts(
+                    app::view::RecoveryAlertsMessage::FullCubePinReady(..)
+                        | app::view::RecoveryAlertsMessage::FullCubePinFailed(..)
+                )
+            )))
+        ) {
+            self.pending_seed_export_trials = self.pending_seed_export_trials.saturating_sub(1);
+        }
         let was_app = matches!(&self.state, State::App(_));
         let was_fork_app =
             matches!(&self.state, State::App(app) if app.cube_settings().network.is_blake2b());
         let mut result = self.update_inner(message);
+        if preserve_seed_export_trial && result.units() > 0 {
+            self.pending_seed_export_trials += 1;
+        }
         if !matches!(self.state, State::PinEntry(_) | State::PasskeyUnlock(_))
             || matches!(&self.state, State::PinEntry(pin) if pin.is_loading())
             || matches!(&self.state, State::PasskeyUnlock(passkey) if passkey.is_opening())
@@ -1513,7 +1602,15 @@ impl Tab {
             }
         }
         if matches!(&self.state, State::App(app) if app.cube_settings().network.is_blake2b()) {
-            self.guard_fork_task(result)
+            if preserve_seed_export_trial {
+                // A confirmed duress marker is an emergency even when this
+                // fork App is cancelled while Argon2 is running. Ordinary
+                // words/JSON still pass through ForkAsync's stale fence.
+                let generation = self.fork_session_generation;
+                result.map(move |message| Message::ForkAsync(generation, Box::new(message)))
+            } else {
+                self.guard_fork_task(result)
+            }
         } else {
             if was_fork_app {
                 self.fork_session_generation = self.fork_session_generation.wrapping_add(1);
@@ -1529,6 +1626,102 @@ impl Tab {
                 result
             }
         }
+    }
+
+    fn activate_verified_seed_export_duress(
+        &mut self,
+        proof: crate::services::unlock::throttle::VerifiedSeedExportDuress,
+    ) -> Task<Message> {
+        let (origin_root, origin_cube, origin_chain, origin_app) = proof.origin();
+        if !self
+            .seed_export_origins
+            .iter()
+            .any(|(app, root, cube, chain)| {
+                *app == origin_app
+                    && crate::chain::same_path(root, origin_root)
+                    && cube == origin_cube
+                    && *chain == origin_chain
+            })
+        {
+            return Task::none();
+        }
+        self.activate_trusted_seed_export_duress(proof)
+    }
+
+    /// The originating tab can be closed while its PIN task finishes. GUI
+    /// checks the private proof against its own data directory before handing
+    /// it to a surviving tab; that tab has no historical App origin to match.
+    pub(super) fn activate_unhosted_seed_export_duress(
+        &mut self,
+        proof: crate::services::unlock::throttle::VerifiedSeedExportDuress,
+    ) -> Task<Message> {
+        self.activate_trusted_seed_export_duress(proof)
+    }
+
+    fn activate_trusted_seed_export_duress(
+        &mut self,
+        proof: crate::services::unlock::throttle::VerifiedSeedExportDuress,
+    ) -> Task<Message> {
+        let Some((root, cube_id, chain, _app, account_id)) = proof.claim() else {
+            return Task::none();
+        };
+        if !root.is_absolute() || cube_id.is_empty() {
+            return Task::none();
+        }
+        self.activate_local_duress(root, chain, account_id)
+    }
+
+    /// The unlock classifier itself minted this one-use proof. Its captured
+    /// Cube survives a Back, closed tab, or another PinEntry at the same id.
+    pub(super) fn activate_verified_unlock_duress(
+        &mut self,
+        proof: crate::pin_entry::VerifiedUnlockDuress,
+    ) -> Task<Message> {
+        let Some((root, cube_id, chain, account_id)) = proof.claim() else {
+            return Task::none();
+        };
+        if !root.is_absolute() || cube_id.is_empty() {
+            return Task::none();
+        }
+        self.activate_local_duress(root, chain, account_id)
+    }
+
+    fn activate_local_duress(
+        &mut self,
+        root: std::path::PathBuf,
+        chain: crate::chain::ChainId,
+        account_id: Option<String>,
+    ) -> Task<Message> {
+        let datadir = CoincubeDirectory::new(root.clone());
+        let network = chain.bitcoin_network();
+        // Drop the current App, any in-flight seed reveal, and any different
+        // Cube session before the local wipe. A restored Cube can have no
+        // process session; verified marker evidence is sufficient.
+        self.stop();
+        self.state = State::DuressActive(
+            crate::app::view::duress::active_screen::DuressActiveScreen::with_context(
+                datadir.clone(),
+                Some(network),
+            ),
+        );
+        self.seed_export_origins.clear();
+        self.pending_seed_export_trials = 0;
+        crate::app::session::close();
+        Task::perform(
+            async move {
+                run_local_duress_activation(&root, account_id).await;
+                let queue_pending = crate::services::duress::queue::DuressQueue::new(&root)
+                    .is_empty()
+                    .map(|empty| !empty)
+                    .unwrap_or(false);
+                (datadir, network, queue_pending)
+            },
+            |(datadir, network, queue_pending)| Message::DuressActivated {
+                datadir,
+                network,
+                queue_pending,
+            },
+        )
     }
 
     fn update_inner(&mut self, message: Message) -> Task<Message> {
@@ -3367,6 +3560,16 @@ impl Tab {
                                 return command.map(Message::Load);
                             }
 
+                            let Some(signer) = pin_entry.take_bitcoin_signer() else {
+                                pin_entry.fail_open(
+                                    "Unlock this Cube again to recover its verified signer".into(),
+                                );
+                                return Task::none();
+                            };
+                            let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::signing_only();
+                            let fingerprint = signer.fingerprint(&secp);
+                            app::session::store_unlocked_signer(&cube.id, fingerprint, signer);
+
                             // ALWAYS load BreezClient (Liquid wallet) with PIN first
                             let config_clone = config.clone();
                             let datadir_clone = datadir.clone();
@@ -3867,10 +4070,9 @@ impl Tab {
                     // network). It is async (spawns the POST), so drive it from a
                     // Task rather than re-inlining the sequence here. `account_id`
                     // is the explicitly-threaded enrolled Connect account, `None`
-                    // for sovereign (Task A.1). The PinEntry is already showing
-                    // its neutral loading screen, so no Cube data is visible
-                    // during the brief gap; we lock into the cryptic screen the
-                    // instant activation returns (the wipe completes within it).
+                    // for sovereign (Task A.1). Enter the cryptic screen now;
+                    // GUI seals sibling surfaces before this returned Task can
+                    // be polled, even if activation later stalls.
                     let network = pin_entry.cube().network.bitcoin_network();
                     let datadir = match &pin_entry.on_success {
                         crate::pin_entry::PinEntrySuccess::LoadApp { datadir, .. } => {
@@ -3886,6 +4088,12 @@ impl Tab {
                     // No Cube was ever opened on this path, so the only thing
                     // being cleared is whatever a previous unlock left behind.
                     crate::app::session::close();
+                    self.state = State::DuressActive(
+                        crate::app::view::duress::active_screen::DuressActiveScreen::with_context(
+                            datadir.clone(),
+                            Some(network),
+                        ),
+                    );
                     Task::perform(
                         async move {
                             let root = datadir.path().to_path_buf();
@@ -7859,6 +8067,81 @@ mod layout_tests {
             std::mem::size_of::<crate::loader::Loader>(),
             std::mem::size_of::<crate::app::App>(),
         );
+    }
+}
+
+#[cfg(test)]
+mod seed_export_duress_routing_tests {
+    use super::*;
+
+    #[test]
+    fn cancelled_or_switched_export_still_activates_verified_duress_without_session() {
+        let _guard = app::session::test_guard();
+        app::session::close();
+        let root = std::env::temp_dir().join(format!("seed-duress-tab-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let directory = CoincubeDirectory::new(root.clone());
+        let (home, startup) = home::Home::new_for_chain(directory, None);
+        drop(startup);
+        let mut tab = Tab::new(1, State::Home(home));
+        let app_generation = app::cache::AppGeneration::next();
+        tab.seed_export_origins.push((
+            app_generation,
+            root.clone(),
+            "verified-cube".into(),
+            crate::chain::ChainId::Bitcoin,
+        ));
+        let proof = crate::services::unlock::throttle::verified_seed_export_duress_for_test(
+            root.clone(),
+            "verified-cube".into(),
+            crate::chain::ChainId::Bitcoin,
+            app_generation,
+        );
+        drop(tab.update(Message::LocalDuress(proof)));
+        assert!(matches!(tab.state, State::DuressActive(_)));
+        assert!(!app::session::is_open());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unrelated_or_replayed_proof_cannot_activate_or_clear_another_session() {
+        let _guard = app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("seed-duress-other-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (home, startup) = home::Home::new_for_chain(CoincubeDirectory::new(root.clone()), None);
+        drop(startup);
+        let mut tab = Tab::new(1, State::Home(home));
+        let app_generation = app::cache::AppGeneration::next();
+        tab.seed_export_origins.push((
+            app_generation,
+            root.clone(),
+            "expected".into(),
+            crate::chain::ChainId::Bitcoin,
+        ));
+        app::session::open("other-cube", zeroize::Zeroizing::new("2468".into()));
+        let forged = crate::services::unlock::throttle::verified_seed_export_duress_for_test(
+            root.clone(),
+            "unrelated".into(),
+            crate::chain::ChainId::Bitcoin,
+            app_generation,
+        );
+        assert_eq!(tab.update(Message::LocalDuress(forged)).units(), 0);
+        assert!(matches!(tab.state, State::Home(_)));
+        assert_eq!(
+            app::session::current_cube_id().as_deref(),
+            Some("other-cube")
+        );
+        let proof = crate::services::unlock::throttle::verified_seed_export_duress_for_test(
+            root.clone(),
+            "expected".into(),
+            crate::chain::ChainId::Bitcoin,
+            app_generation,
+        );
+        drop(tab.update(Message::LocalDuress(proof.clone())));
+        assert!(matches!(tab.state, State::DuressActive(_)));
+        assert!(!app::session::is_open());
+        assert_eq!(tab.update(Message::LocalDuress(proof)).units(), 0);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 

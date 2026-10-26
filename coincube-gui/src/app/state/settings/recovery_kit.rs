@@ -66,6 +66,63 @@ pub struct ImportedBackupSource {
     pub daemon: Arc<dyn Daemon + Send + Sync>,
 }
 
+#[cfg(test)]
+mod seed_export_duress_tests {
+    use super::*;
+
+    #[test]
+    fn cancelled_kit_rejects_late_seed_words() {
+        let cache = Cache::default();
+        let mut kit = RecoveryKit::new();
+        let attempt = crate::app::cache::AppGeneration::next();
+        kit.flow = RecoveryKitState::PinEntry {
+            mode: RecoveryKitMode::Create,
+            error: None,
+        };
+        kit.pin_attempt = Some(attempt);
+        kit.pin.digits = ["9".into(), "9".into(), "9".into(), "9".into()];
+        let run = |kit: &mut RecoveryKit, message| {
+            update_with_imported(
+                kit,
+                message,
+                &cache,
+                "destination",
+                SeedSource::Mnemonic,
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+        drop(run(&mut kit, RecoveryKitMessage::Cancel));
+        drop(run(
+            &mut kit,
+            RecoveryKitMessage::PinVerifiedAttempt(
+                attempt,
+                Ok(Zeroizing::new(vec!["abandon".into(); 12])),
+            ),
+        ));
+        assert!(matches!(kit.flow, RecoveryKitState::None));
+        assert!(kit.pin_attempt.is_none());
+        assert_eq!(kit.pin.value().as_str(), "");
+    }
+
+    #[test]
+    fn kit_second_submit_cannot_start_another_pin_trial() {
+        let cache = Cache::default();
+        let mut kit = RecoveryKit::new();
+        let attempt = crate::app::cache::AppGeneration::next();
+        kit.flow = RecoveryKitState::PinEntry {
+            mode: RecoveryKitMode::Create,
+            error: None,
+        };
+        kit.pin_attempt = Some(attempt);
+        kit.pin.digits = ["1".into(), "2".into(), "3".into(), "4".into()];
+        assert_eq!(verify_pin(&mut kit, &cache, "destination").units(), 0);
+        assert_eq!(kit.pin_attempt, Some(attempt));
+    }
+}
+
 impl ImportedBackupSource {
     async fn snapshot(&self, cube_uuid: &str) -> Result<ImportedDescriptorBlob, String> {
         let info = self.daemon.get_info().await.map_err(|e| e.to_string())?;
@@ -406,6 +463,7 @@ pub struct RecoveryKit {
     /// they won't be, but keeping them isolated avoids accidental
     /// coupling).
     pub pin: PinInput,
+    pin_attempt: Option<crate::app::cache::AppGeneration>,
     /// One-shot flag: when the next `StatusLoaded` message resolves
     /// (regardless of which code path fired the corresponding
     /// `LoadStatus`), emit the post-vault-creation nudge toast iff
@@ -429,6 +487,7 @@ impl RecoveryKit {
             status_stale: false,
             flow: RecoveryKitState::None,
             pin: PinInput::new(),
+            pin_attempt: None,
             nudge_on_next_status_load: false,
             also_phone_seal: false,
         }
@@ -439,6 +498,7 @@ impl RecoveryKit {
     pub fn reset_flow(&mut self) {
         self.flow = RecoveryKitState::None;
         self.pin.clear();
+        self.pin_attempt = None;
         self.also_phone_seal = false;
     }
 }
@@ -599,6 +659,7 @@ pub fn update_with_imported(
 
         RecoveryKitMessage::Start(mode) => {
             rk.pin.clear();
+            rk.pin_attempt = None;
             if let Some(error) =
                 imported_backup_source_error(cache, local_cube_id, imported.as_ref())
             {
@@ -703,8 +764,28 @@ pub fn update_with_imported(
 
         RecoveryKitMessage::VerifyPin => verify_pin(rk, cache, local_cube_id),
 
+        RecoveryKitMessage::PinVerifiedAttempt(attempt, result) => {
+            if rk.pin_attempt != Some(attempt)
+                || !matches!(rk.flow, RecoveryKitState::PinEntry { .. })
+            {
+                return Task::none();
+            }
+            update_with_imported(
+                rk,
+                RecoveryKitMessage::PinVerified(result),
+                cache,
+                local_cube_id,
+                seed_source,
+                client,
+                server_cube_id,
+                wallet,
+                imported,
+            )
+        }
+
         RecoveryKitMessage::PinVerified(res) => {
             rk.pin.clear();
+            rk.pin_attempt = None;
             // Both unlock shapes land here. `PasskeyReauth` has no input to
             // restore on failure, so it is tracked separately below.
             let (mode, from_passkey) = match &rk.flow {
@@ -1130,6 +1211,9 @@ fn load_status(
 }
 
 fn verify_pin(rk: &mut RecoveryKit, cache: &Cache, local_cube_id: &str) -> Task<Message> {
+    if rk.pin_attempt.is_some() {
+        return Task::none();
+    }
     let mode = match &rk.flow {
         RecoveryKitState::PinEntry { mode, .. } => *mode,
         _ => return Task::none(),
@@ -1180,6 +1264,9 @@ fn verify_pin(rk: &mut RecoveryKit, cache: &Cache, local_cube_id: &str) -> Task<
     // second route to the same permanent secret, so guesses accumulate against
     // the shared per-Cube unlock counter rather than starting fresh here.
     let throttle_root = datadir.clone();
+    let attempt = crate::app::cache::AppGeneration::next();
+    rk.pin_attempt = Some(attempt);
+    let app_generation = cache.app_generation;
     Task::perform(
         async move {
             // Wrap the decrypted mnemonic in `Zeroizing` at the
@@ -1197,9 +1284,11 @@ fn verify_pin(rk: &mut RecoveryKit, cache: &Cache, local_cube_id: &str) -> Task<
                 // authenticated when a session can answer, the seed file's GCM
                 // tag when it cannot. The cheap `verify_pin` hash that used to
                 // gate this is gone (I1).
-                crate::services::unlock::throttle::classify_verification(
+                crate::services::unlock::throttle::classify_seed_export_cube(
                     &throttle_root,
-                    &cube_id,
+                    &cube,
+                    app_generation,
+                    &pin,
                     || {
                         super::general::load_mnemonic_words(
                             &datadir,
@@ -1208,18 +1297,42 @@ fn verify_pin(rk: &mut RecoveryKit, cache: &Cache, local_cube_id: &str) -> Task<
                             &pin,
                             &cube_id,
                         )
-                        .map(Zeroizing::new)
                     },
-                    super::general::is_wrong_pin,
                 )
-                .unwrap_or_else(|e| Err(e.to_string()))
             })
             .await
             .map_err(|e| format!("PIN verification task failed: {}", e))?
         },
-        |res| {
+        move |res| {
+            let outcome = match res {
+                Ok(crate::services::unlock::throttle::SeedExportCubeAttempt::Words(words)) => {
+                    RecoveryKitMessage::PinVerifiedAttempt(attempt, Ok(words))
+                }
+                Ok(crate::services::unlock::throttle::SeedExportCubeAttempt::Duress(proof)) => {
+                    return Message::View(view::Message::DuressActivateLocal(proof));
+                }
+                Ok(crate::services::unlock::throttle::SeedExportCubeAttempt::Wrong(penalty)) => {
+                    RecoveryKitMessage::PinVerifiedAttempt(
+                        attempt,
+                        Err(if penalty.is_zero() {
+                            "Incorrect PIN. Please try again.".into()
+                        } else {
+                            crate::services::unlock::throttle::lockout_message(penalty)
+                        }),
+                    )
+                }
+                Ok(crate::services::unlock::throttle::SeedExportCubeAttempt::Locked(remaining)) => {
+                    RecoveryKitMessage::PinVerifiedAttempt(
+                        attempt,
+                        Err(crate::services::unlock::throttle::lockout_message(
+                            remaining,
+                        )),
+                    )
+                }
+                Err(error) => RecoveryKitMessage::PinVerifiedAttempt(attempt, Err(error)),
+            };
             Message::View(view::Message::Settings(view::SettingsMessage::RecoveryKit(
-                RecoveryKitMessage::PinVerified(res),
+                outcome,
             )))
         },
     )
