@@ -1248,7 +1248,7 @@ mod tests {
                     lightning_address_body(true, Some(address), Some(&qr)),
                     outer,
                     appearance,
-                    theme.clone(),
+                    theme,
                     outer.0 - 248 - 48,
                 );
                 for label in ["Lightning address", "Copy", "Change in Settings"] {
@@ -1265,7 +1265,7 @@ mod tests {
                     lightning_address_body(false, Some(address), Some(&qr)),
                     outer,
                     appearance,
-                    theme.clone(),
+                    theme,
                     outer.0 - 248 - 48,
                 );
                 assert!(signed_out.contains("Sign in to Connect"));

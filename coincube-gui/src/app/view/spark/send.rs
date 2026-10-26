@@ -1422,8 +1422,9 @@ mod tests {
                 theme::Theme::dark(),
             )
         };
-        assert!(inspect(true, &[identity.clone()]).contains("Verified · Example Coffee Co."));
-        let off = inspect(false, &[identity.clone()]);
+        assert!(inspect(true, std::slice::from_ref(&identity))
+            .contains("Verified · Example Coffee Co."));
+        let off = inspect(false, std::slice::from_ref(&identity));
         assert!(off.contains("Checks off"));
         assert!(off.contains("Turn on in Settings"));
         assert!(!off.contains("Verified"));

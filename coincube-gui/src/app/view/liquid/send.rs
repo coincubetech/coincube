@@ -2170,7 +2170,7 @@ mod privacy_tests {
                         render(unit),
                         (width, height),
                         appearance,
-                        theme.clone(),
+                        theme,
                     );
                     assert!(mounted.contains("Payment details"));
                     assert!(mounted.contains("Destination"));
