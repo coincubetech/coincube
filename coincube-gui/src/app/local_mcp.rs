@@ -3,15 +3,16 @@ use super::{view, wallet::Wallet};
 use crate::daemon::Daemon;
 #[cfg(any(unix, windows))]
 use coincube_mcp as wire;
-use coincube_ui::{
-    component::text::{h3, text},
-    widget::Element,
-};
+#[cfg(feature = "mcp-proposals")]
+use coincube_ui::component::text::{h3, text};
+use coincube_ui::widget::Element;
+#[cfg(feature = "mcp-proposals")]
 use iced::widget::{button, checkbox, column, text_input};
 use std::sync::Arc;
 #[cfg(any(unix, windows))]
 use std::time::Duration;
 mod pairings;
+mod presentation;
 #[cfg(feature = "mcp-transactions")]
 pub(crate) mod transactions;
 
@@ -79,6 +80,7 @@ pub enum Message {
     },
     /// Revoke one stored client; ordinary locks never perform this action.
     RevokePair(String),
+    /// Show the durable-pairing revocation decision before changing storage.
     RequestRevokePair(String),
     CancelRevokePair,
     /// Copy a stable private configuration for a stored client.
@@ -135,6 +137,7 @@ pub(crate) struct PairingContext<'a> {
     pub last_poll_at_startup: Option<u32>,
 }
 impl Settings {
+    #[cfg(feature = "mcp-proposals")]
     fn enable_action(&self) -> Element<'_, view::Message> {
         coincube_ui::widget::action::Action::new(
             "tenshu.ai-access.enable",
@@ -160,44 +163,8 @@ impl Settings {
     }
 
     pub(crate) fn revoke_dialog(&self) -> Option<Element<'_, view::Message>> {
-        use coincube_ui::{font, theme, widget::action::Action};
-        use iced::{Background, Border, Length};
         let (name, id) = self.pending_revoke()?;
-        let action = |target, label, message, kind| {
-            Action::new(
-                target,
-                iced::widget::text(label).size(13).font(font::MEDIUM),
-                view::Message::FocusAction,
-            )
-            .padding([8, 12])
-            .focus_radius(8.0)
-            .style(move |theme, status| {
-                theme::tenshu::button::action(
-                    theme,
-                    status,
-                    kind,
-                    theme::tenshu::button::ActionShape::Compact,
-                )
-            })
-            .on_press(view::Message::LocalMcp(message))
-        };
-        Some(iced::widget::container(iced::widget::column![
-            iced::widget::text("Revoke this client's access?").size(16).font(font::SEMIBOLD),
-            iced::widget::text(format!("{name} will lose access immediately. Pairing again creates a new private configuration.")).size(13),
-            iced::widget::text("Information already read may remain with the AI provider. Revocation cannot erase retained data.").size(13),
-            iced::widget::row![
-                action("tenshu.ai-access.revoke.keep", "Keep paired", Message::CancelRevokePair, theme::tenshu::button::ActionKind::Secondary),
-                action("tenshu.ai-access.revoke.confirm", "Revoke access", Message::RevokePair(id.to_owned()), theme::tenshu::button::ActionKind::Destructive),
-            ].spacing(8),
-        ].spacing(14))
-        .width(Length::Fixed(460.0))
-        .padding(22)
-        .style(|theme: &theme::Theme| iced::widget::container::Style {
-            text_color: Some(theme.colors.shell.ink),
-            background: Some(Background::Color(theme.colors.shell.panel)),
-            border: Border { color: theme.colors.shell.line, width: 1.0, radius: 12.0.into() },
-            ..Default::default()
-        }).into())
+        Some(presentation::revoke_confirmation(name, id))
     }
 
     fn clear_pairing_selection(&mut self) {
@@ -214,105 +181,9 @@ impl Settings {
         }
     }
 
+    #[cfg(feature = "mcp-proposals")]
     fn paired_clients_view(&self) -> Element<'_, view::Message> {
-        let msg = |m| view::Message::LocalMcp(m);
-        let mut content = column![h3("Paired clients"), text("Copy each client's private configuration once. Keep it out of chat and protect it like a password. A stolen configuration can impersonate that client until you revoke it. Labels are for your reference, not verified app identities.")].spacing(16);
-        if let Some(error) = self.pairing_error {
-            content = content.push(text(error));
-        }
-        let Some(store) = &self.pairing_store else {
-            return content.push(text("No persistent client is paired.")).into();
-        };
-        for client in store.clients() {
-            let runtime = self.paired.iter().find(|runtime| runtime.id == client.id);
-            let available = runtime.is_some_and(|v| v.server.grant.active());
-            let scope = match &client.scope {
-                pairings::Scope::Read { capabilities, .. } => {
-                    ["Balances", "Confirmed history", "Policy summary"]
-                        .iter()
-                        .copied()
-                        .zip(capabilities)
-                        .filter_map(|(name, allowed)| allowed.then_some(name))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                }
-                pairings::Scope::TransactionPreparation { .. } => "Unsigned Regtest transaction preparation only; native review and user signing required".into(),
-                pairings::Scope::Proposal => "Regtest wallet proposals only".into(),
-                pairings::Scope::WalletCreation => {
-                    "Regtest wallet preparation with public keys; native creation approval required"
-                        .into()
-                }
-            };
-            content = content.push(
-                column![
-                    text(format!("{} · Paired until revoked", client.name)),
-                    text(format!("This Cube · {scope}")),
-                    text(if !self.enabled {
-                        "Paused"
-                    } else if available {
-                        "Available while this Cube is unlocked"
-                    } else {
-                        "Unavailable for the current wallet or session"
-                    }),
-                    text(format!(
-                        "Successful operations this session: {}",
-                        runtime.map_or(0, |v| v
-                            .server
-                            .grant
-                            .successful_calls
-                            .load(std::sync::atomic::Ordering::Relaxed))
-                    )),
-                    coincube_ui::widget::action::Action::new(
-                        format!("tenshu.ai-access.client.{}.copy", client.id),
-                        iced::widget::text("Copy private client configuration"),
-                        view::Message::FocusAction,
-                    )
-                    .on_press_maybe(
-                        (available && !self.pairing_poisoned)
-                            .then(|| msg(Message::CopyPair(client.id.clone())))
-                    ),
-                    coincube_ui::widget::action::Action::new(
-                        format!("tenshu.ai-access.client.{}.revoke", client.id),
-                        iced::widget::text("Revoke this client"),
-                        view::Message::FocusAction,
-                    )
-                    .on_press(msg(Message::RequestRevokePair(client.id.clone()))),
-                ]
-                .spacing(8),
-            );
-            #[cfg(feature = "mcp-transactions")]
-            if let Some(service) = runtime
-                .filter(|_| available)
-                .and_then(|v| v.transactions.as_ref())
-            {
-                for draft in service.summaries() {
-                    content = content.push(text(format!("Unsigned transaction: {} sats to {} recipient(s), fee {} sats. Review every address and amount before signing.", draft.amount_sats, draft.recipients.len(), draft.fee_sats)))
-                        .push(button("Review prepared transaction in Tenshu").on_press(msg(Message::ReviewTransaction { client_id: client.id.clone(), draft_id: draft.draft_id })));
-                }
-            }
-            #[cfg(feature = "mcp-proposals")]
-            if let Some(proposal) = runtime
-                .filter(|_| available)
-                .and_then(|v| v.proposals.as_ref())
-                .and_then(|s| s.pending().ok())
-                .flatten()
-            {
-                let keys_ready = runtime
-                    .and_then(|v| v.proposals.as_ref())
-                    .is_some_and(|store| {
-                        store
-                            .creation_input(&proposal.proposal_id)
-                            .ok()
-                            .flatten()
-                            .is_some()
-                    });
-                content = content.push(text(format!("{}: 3-of-5 primary, recovery {}-of-{} after {} blocks. {}", client.name,
-                    proposal.topology.recovery.quorum.threshold, proposal.topology.recovery.quorum.key_count, proposal.topology.recovery.relative_delay_blocks,
-                    if keys_ready { "Public keys and descriptor validated. Device ownership and backups still require your verification." } else { "Keys are not yet selected." })))
-                    .push(button(if keys_ready { "Review prepared wallet in Tenshu" } else { "Review proposal and select keys in Tenshu" }).on_press(msg(Message::ReviewPairedProposal(client.id.clone()))));
-            }
-        }
-        content.into()
+        presentation::paired_clients(self)
     }
     /// Stop the server and clear its approved display label synchronously.
     pub fn revoke(&mut self) {
@@ -682,6 +553,19 @@ impl Settings {
             Some(Ok(_)) => {
                 self.pairing_error = None;
                 self.client_name.clear();
+                // Every new client must receive its own explicit wallet and
+                // capability choices; the previous grant is not a template.
+                self.wallet_allowed = false;
+                self.capabilities = [false; 3];
+                #[cfg(feature = "mcp-transactions")]
+                {
+                    self.transactions_allowed = false;
+                }
+                #[cfg(feature = "mcp-proposals")]
+                {
+                    self.proposals_allowed = false;
+                    self.creation_allowed = false;
+                }
             }
         }
     }
@@ -987,101 +871,13 @@ impl Settings {
         supported: bool,
         proposal_supported: bool,
     ) -> Element<'_, view::Message> {
-        let message = |m| view::Message::LocalMcp(m);
         #[cfg(feature = "mcp-proposals")]
         if proposal_supported {
             return self.proposal_view();
         }
         #[cfg(not(feature = "mcp-proposals"))]
         let _ = proposal_supported;
-        let mut content = column![
-            h3("AI access"),
-            text("Connect a local AI client to this Cube's Vault. Your AI provider may receive financial information. Only enable access for a client you trust."),
-            text(if cfg!(feature = "mcp-transactions") && self.pairing_location.as_ref().is_some_and(|v| v.chain_matches(crate::chain::ChainId::Regtest)) { "Choose read access or separately scoped unsigned transaction preparation. No keys, signing or broadcast through MCP. Pairing remains trusted until revoked; access pauses on lock/close and resumes after ordinary unlock. Unsigned drafts end with the session." } else { "Read-only. No keys, signing, payments or wallet changes. Paired clients remain trusted until revoked. Wallet access pauses on lock or close and resumes after ordinary unlock." }),
-        ].spacing(16);
-        if !cfg!(any(unix, windows)) || !supported {
-            return content.push(text("MCP currently supports Bitcoin Vaults on macOS, Linux and Windows. This wallet is unavailable for MCP.")).into();
-        }
-        content = content.push(self.enable_action());
-        if self.enabled {
-            content = content
-                .push(
-                    text_input("Client label (for your reference)", &self.client_name)
-                        .on_input(move |v| message(Message::ClientName(v))),
-                )
-                .push(
-                    checkbox(self.wallet_allowed)
-                        .label("Allow this client to access this Cube's Vault")
-                        .on_toggle(move |v| message(Message::Wallet(v))),
-                );
-            for (i, label) in [
-                "Read balances",
-                "Read confirmed transaction history",
-                "Read spending policy summary",
-            ]
-            .iter()
-            .copied()
-            .enumerate()
-            {
-                content = content.push(
-                    checkbox(self.capabilities[i])
-                        .label(label)
-                        .on_toggle(move |v| message(Message::Capability(i, v))),
-                );
-            }
-            #[cfg(feature = "mcp-transactions")]
-            if self
-                .pairing_location
-                .as_ref()
-                .is_some_and(|v| v.chain_matches(crate::chain::ChainId::Regtest))
-            {
-                content = content.push(checkbox(self.transactions_allowed)
-                    .label("Prepare unsigned Regtest transactions (separate from wallet reads)")
-                    .on_toggle(move |v| message(Message::Transactions(v))))
-                    .push(text("Exact satoshi recipients and explicit fee limits only. The PSBT stays in Tenshu; review recipient addresses, amounts, fees and change before signing. Up to 8 construction attempts per client and unlock, including failed engine attempts. No self-send, recovery selection or fiat conversion."));
-            }
-            content = content.push(
-                button("Pair client until revoked").on_press_maybe(
-                    (self.wallet_allowed
-                        && (self.capabilities.iter().any(|v| *v) || self.transaction_selection())
-                        && !self.client_name.trim().is_empty())
-                    .then(|| message(Message::Pair)),
-                ),
-            );
-            #[cfg(any(unix, windows))]
-            if let Some(server) = &self.server {
-                let calls = server
-                    .grant
-                    .successful_calls
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                content = content
-                    .push(text(format!(
-                        "Client: {} · {} · successful reads: {}",
-                        self.approved_name,
-                        if server.grant.active() {
-                            "Authorized"
-                        } else {
-                            "Inactive — approve again"
-                        },
-                        calls
-                    )))
-                    .push(button("Revoke access now").on_press(message(Message::Revoke)));
-                if server.grant.active() {
-                    content = content.push(button("Copy private client configuration").on_press(message(Message::CopyConfig)))
-                        .push(text("Paste into your MCP client's local configuration, then clear the clipboard. It contains a temporary access credential: do not paste it into a chat. Restart the client after replacing a grant. See docs/mcp/README.md."));
-                }
-            } else if self
-                .pairing_store
-                .as_ref()
-                .is_none_or(|s| s.clients().is_empty())
-            {
-                content = content.push(text("No client is authorized."));
-            }
-        }
-        if self.failed {
-            content = content.push(text("Could not start local MCP. No access was granted."));
-        }
-        content.push(self.paired_clients_view()).into()
+        presentation::view_for_cube(self, supported)
     }
 }
 
@@ -1404,7 +1200,7 @@ mod tests {
     }
 
     #[test]
-    fn ai_access_revoke_dialog_is_mounted_over_dashboard_and_confines_focus() {
+    fn ai_access_revoke_dialog_retains_merged_safety_focus() {
         use crate::app::menu::{CubeSettingsOption, CubeSubMenu, Menu};
         use coincube_ui::{font, theme, widget::Renderer};
         use iced::advanced::{
@@ -1776,6 +1572,581 @@ mod tests {
     }
 
     #[test]
+    fn successful_pair_requires_fresh_scope_for_next_client() {
+        let mut settings = Settings {
+            enabled: true,
+            wallet_allowed: true,
+            capabilities: [true, false, true],
+            #[cfg(feature = "mcp-transactions")]
+            transactions_allowed: true,
+            #[cfg(feature = "mcp-proposals")]
+            creation_allowed: true,
+            client_name: "first client".into(),
+            ..Settings::default()
+        };
+        settings.finish_pairing(Some(Ok("synthetic-id".into())));
+        assert!(settings.client_name.is_empty());
+        assert!(!settings.wallet_allowed);
+        assert_eq!(settings.capabilities, [false; 3]);
+        #[cfg(feature = "mcp-transactions")]
+        assert!(!settings.transactions_allowed);
+        #[cfg(feature = "mcp-proposals")]
+        assert!(!settings.creation_allowed);
+
+        settings.client_name = "second client".into();
+        assert!(!settings.wallet_allowed && !settings.capabilities.iter().any(|v| *v));
+    }
+
+    #[test]
+    #[ignore = "synthetic content-only capture; set R06A_CAPTURE_DIR for PNGs"]
+    fn ai_access_synthetic_content_states_fit_and_disclose_scope() {
+        use crate::app::view::shared::landing::capture;
+        use coincube_ui::theme;
+        let _guard = super::super::session::test_guard();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _enter = runtime.enter();
+        let (root, wallet, daemon) = fixture();
+        let cube = "mcp-visual-synthetic";
+        let chain = wallet.chain;
+        std::fs::create_dir_all(root.join(chain.dir_name())).unwrap();
+        let location = pairings::Location::new(&root, chain, cube).unwrap();
+        super::super::session::open_without_pin(cube);
+
+        let empty = Settings::default();
+        let mut paired = Settings {
+            enabled: true,
+            pairing_location: Some(location.clone()),
+            pairing_store: Some(
+                pairings::Store::open(location, zeroize::Zeroizing::new([51; 32]), true).unwrap(),
+            ),
+            ..Settings::default()
+        };
+        for message in [
+            Message::ClientName("Synthetic local client".into()),
+            Message::Wallet(true),
+            Message::Capability(0, true),
+            Message::Pair,
+        ] {
+            paired.update(
+                message,
+                Some(wallet.clone()),
+                Some(daemon.clone()),
+                true,
+                cube,
+            );
+        }
+        paired.ensure_pairings(PairingContext {
+            root: &root,
+            chain,
+            cube_id: cube,
+            wallet: Some(wallet.clone()),
+            daemon: Some(daemon.clone()),
+            supported: true,
+            proposal_supported: false,
+            #[cfg(feature = "mcp-transactions")]
+            last_poll_at_startup: None,
+        });
+        assert_eq!(paired.paired.len(), 1);
+        let render = |scenario: &str, settings: &Settings| {
+            for (size, appearance, palette) in [
+                ((1024, 768), "dark", theme::Theme::dark()),
+                ((1024, 768), "light", theme::Theme::light()),
+                ((1440, 900), "dark", theme::Theme::dark()),
+                ((1440, 900), "light", theme::Theme::light()),
+            ] {
+                let inspection = capture::inspect(
+                    scenario,
+                    settings.view_for_cube(true, false),
+                    size,
+                    appearance,
+                    palette,
+                );
+                assert!(inspection.contains("Today · Persistent per-client read access"));
+                assert!(inspection.contains("Your AI provider may receive financial information"));
+                assert!(inspection.contains("Guided pairing · Planned"));
+                assert!(!inspection.contains("TENSHU_MCP_CREDENTIAL"));
+            }
+        };
+        render("r23-empty", &empty);
+        let empty_focus = capture::inspect(
+            "r23-empty-focus",
+            empty.view_for_cube(true, false),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(empty_focus
+            .focus
+            .iter()
+            .any(|(id, _)| { id == &iced::advanced::widget::Id::from("tenshu.ai-access.enable") }));
+        for key in [
+            iced::keyboard::key::Named::Enter,
+            iced::keyboard::key::Named::Space,
+        ] {
+            let emitted = capture::activate_with_key(
+                empty.view_for_cube(true, false),
+                iced::advanced::widget::Id::from("tenshu.ai-access.enable"),
+                (1024, 768),
+                false,
+                key,
+            );
+            assert!(emitted
+                .iter()
+                .any(|intent| matches!(intent, view::Message::LocalMcp(Message::Enable(true)))));
+        }
+        render("r23-paired", &paired);
+        let paired_focus = capture::inspect(
+            "r23-paired-focus",
+            paired.view_for_cube(true, false),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        for id in [
+            "tenshu.ai-access.enable",
+            "tenshu.ai-access.wallet",
+            "tenshu.ai-access.permission.balances",
+            "tenshu.ai-access.permission.history",
+            "tenshu.ai-access.permission.policy",
+        ] {
+            assert!(paired_focus
+                .focus
+                .iter()
+                .any(|(focus_id, _)| focus_id == &iced::advanced::widget::Id::from(id)));
+        }
+        let client_id = paired.pairing_store.as_ref().unwrap().clients()[0]
+            .id
+            .clone();
+        let copy_id =
+            iced::advanced::widget::Id::from(format!("tenshu.ai-access.client.{client_id}.copy"));
+        let revoke_id =
+            iced::advanced::widget::Id::from(format!("tenshu.ai-access.client.{client_id}.revoke"));
+        for key in [
+            iced::keyboard::key::Named::Enter,
+            iced::keyboard::key::Named::Space,
+        ] {
+            let emitted = capture::activate_with_key(
+                paired.view_for_cube(true, false),
+                copy_id.clone(),
+                (1024, 768),
+                false,
+                key,
+            );
+            assert!(emitted.iter().any(|intent| matches!(intent,
+                view::Message::LocalMcp(Message::CopyPair(id)) if id == &client_id
+            )));
+        }
+        let emitted = capture::activate(
+            paired.view_for_cube(true, false),
+            revoke_id.clone(),
+            (1024, 768),
+            true,
+        );
+        assert!(emitted.iter().any(|intent| matches!(intent,
+            view::Message::LocalMcp(Message::RequestRevokePair(id)) if id == &client_id
+        )));
+        for (id, expected) in [
+            ("tenshu.ai-access.enable", Message::Enable(false)),
+            ("tenshu.ai-access.wallet", Message::Wallet(true)),
+            (
+                "tenshu.ai-access.permission.balances",
+                Message::Capability(0, true),
+            ),
+            (
+                "tenshu.ai-access.permission.history",
+                Message::Capability(1, true),
+            ),
+            (
+                "tenshu.ai-access.permission.policy",
+                Message::Capability(2, true),
+            ),
+        ] {
+            for key in [
+                iced::keyboard::key::Named::Enter,
+                iced::keyboard::key::Named::Space,
+            ] {
+                let emitted = capture::activate_with_key(
+                    paired.view_for_cube(true, false),
+                    iced::advanced::widget::Id::from(id),
+                    (1024, 768),
+                    false,
+                    key,
+                );
+                assert!(emitted.iter().any(|intent| matches!(intent,
+                    view::Message::LocalMcp(actual) if match (actual, &expected) {
+                        (Message::Enable(actual), Message::Enable(expected)) => actual == expected,
+                        (Message::Wallet(actual), Message::Wallet(expected)) => actual == expected,
+                        (Message::Capability(actual_index, actual_value), Message::Capability(expected_index, expected_value)) => actual_index == expected_index && actual_value == expected_value,
+                        _ => false,
+                    }
+                )), "{} should respond to {:?}", id, key);
+            }
+        }
+        paired.wallet_allowed = true;
+        paired.capabilities[0] = true;
+        paired.client_name = "Next synthetic client".into();
+        for key in [
+            iced::keyboard::key::Named::Enter,
+            iced::keyboard::key::Named::Space,
+        ] {
+            let emitted = capture::activate_with_key(
+                paired.view_for_cube(true, false),
+                iced::advanced::widget::Id::from("tenshu.ai-access.pair"),
+                (1024, 768),
+                false,
+                key,
+            );
+            assert!(emitted
+                .iter()
+                .any(|intent| matches!(intent, view::Message::LocalMcp(Message::Pair))));
+        }
+        let original_count = paired.pairing_store.as_ref().unwrap().clients().len();
+        paired.update(
+            Message::RequestRevokePair(client_id.clone()),
+            None,
+            None,
+            true,
+            cube,
+        );
+        assert_eq!(
+            paired.pairing_store.as_ref().unwrap().clients().len(),
+            original_count
+        );
+        for (size, appearance, palette) in [
+            ((1024, 768), "dark", theme::Theme::dark()),
+            ((1024, 768), "light", theme::Theme::light()),
+            ((1440, 900), "dark", theme::Theme::dark()),
+            ((1440, 900), "light", theme::Theme::light()),
+        ] {
+            let inspection = capture::inspect(
+                "r23-revoke-confirm",
+                presentation::revoke_confirmation("Synthetic local client", &client_id),
+                size,
+                appearance,
+                palette,
+            );
+            assert!(inspection.contains("Revoke this client's access?"));
+            assert!(inspection.contains("Information already read may remain"));
+        }
+        for (id, expected) in [
+            ("tenshu.ai-access.revoke.keep", false),
+            ("tenshu.ai-access.revoke.confirm", true),
+        ] {
+            for key in [
+                iced::keyboard::key::Named::Enter,
+                iced::keyboard::key::Named::Space,
+            ] {
+                let emitted = capture::activate_with_key(
+                    presentation::revoke_confirmation("Synthetic local client", &client_id),
+                    iced::advanced::widget::Id::from(id),
+                    (1024, 768),
+                    false,
+                    key,
+                );
+                assert!(
+                    emitted.iter().any(|intent| matches!(intent,
+                        view::Message::LocalMcp(Message::RevokePair(_)) if expected
+                    ) || matches!(intent,
+                        view::Message::LocalMcp(Message::CancelRevokePair) if !expected
+                    )),
+                    "{} should respond to {:?}",
+                    id,
+                    key
+                );
+            }
+        }
+        paired.update(Message::CancelRevokePair, None, None, true, cube);
+        assert!(paired.revoke_confirmation.is_none());
+        assert_eq!(
+            paired.pairing_store.as_ref().unwrap().clients().len(),
+            original_count
+        );
+        paired.update(
+            Message::RevokePair(client_id.clone()),
+            None,
+            None,
+            true,
+            cube,
+        );
+        assert_eq!(
+            paired.pairing_store.as_ref().unwrap().clients().len(),
+            original_count
+        );
+        paired.revoke();
+        super::super::session::close();
+        render("r23-locked", &paired);
+        let locked = capture::inspect(
+            "r23-locked-focus",
+            paired.view_for_cube(true, false),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(!locked.focus.iter().any(|(id, _)| id == &copy_id));
+        assert!(locked.focus.iter().any(|(id, _)| id == &revoke_id));
+        paired.update(
+            Message::RequestRevokePair(client_id.clone()),
+            None,
+            None,
+            true,
+            cube,
+        );
+        assert_eq!(
+            paired.revoke_confirmation.as_deref(),
+            Some(client_id.as_str())
+        );
+        paired.update(Message::RevokePair(client_id), None, None, true, cube);
+        assert!(paired.pairing_store.as_ref().unwrap().clients().is_empty());
+        drop(paired);
+        runtime.block_on(daemon.stop()).unwrap();
+        drop(daemon);
+        drop(wallet);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ai_access_revoke_dialog_is_mounted_over_dashboard_and_confines_focus() {
+        use crate::app::menu::{CubeSettingsOption, CubeSubMenu, Menu};
+        use coincube_ui::{font, theme, widget::Renderer};
+        use iced::advanced::{
+            renderer::Headless,
+            widget::{operation, operation::focusable, operation::Focusable, Id, Operation},
+        };
+        use iced::{keyboard, mouse, Event, Rectangle, Size};
+        use iced_runtime::user_interface::{Cache as UiCache, UserInterface};
+
+        #[derive(Default)]
+        struct Probe {
+            text: Vec<(String, Rectangle)>,
+            focus: Vec<(Id, Rectangle)>,
+        }
+        impl Operation for Probe {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn text(&mut self, _: Option<&Id>, bounds: Rectangle, value: &str) {
+                self.text.push((value.to_owned(), bounds));
+            }
+            fn focusable(&mut self, id: Option<&Id>, bounds: Rectangle, _: &mut dyn Focusable) {
+                if let Some(id) = id {
+                    self.focus.push((id.clone(), bounds));
+                }
+            }
+        }
+        fn focused(
+            ui: &mut UserInterface<'_, super::super::Message, theme::Theme, Renderer>,
+            renderer: &Renderer,
+        ) -> Option<Id> {
+            use std::sync::{Arc, Mutex};
+            let result = Arc::new(Mutex::new(None));
+            let output = Arc::clone(&result);
+            let mut op: Box<dyn Operation<()>> =
+                Box::new(operation::map(focusable::find_focused(), move |value| {
+                    *output.lock().unwrap() = Some(value)
+                }));
+            loop {
+                ui.operate(renderer, &mut operation::black_box(op.as_mut()));
+                match op.finish() {
+                    operation::Outcome::None | operation::Outcome::Some(()) => break,
+                    operation::Outcome::Chain(next) => op = next,
+                }
+            }
+            drop(op);
+            Arc::try_unwrap(result).unwrap().into_inner().unwrap()
+        }
+        fn apply(
+            ui: &mut UserInterface<'_, super::super::Message, theme::Theme, Renderer>,
+            renderer: &Renderer,
+            operation: impl Operation<()> + 'static,
+        ) {
+            let mut operation: Box<dyn Operation<()>> = Box::new(operation);
+            loop {
+                ui.operate(renderer, &mut operation::black_box(operation.as_mut()));
+                match operation.finish() {
+                    operation::Outcome::None | operation::Outcome::Some(()) => break,
+                    operation::Outcome::Chain(next) => operation = next,
+                }
+            }
+        }
+        fn apply_task(
+            ui: &mut UserInterface<'_, super::super::Message, theme::Theme, Renderer>,
+            renderer: &Renderer,
+            task: iced::Task<super::super::Message>,
+        ) {
+            use iced::futures::StreamExt;
+            let stream = iced_runtime::task::into_stream(task).expect("focus task stream");
+            let actions = iced::futures::executor::block_on(stream.collect::<Vec<_>>());
+            for action in actions {
+                if let iced_runtime::Action::Widget(mut operation) = action {
+                    loop {
+                        ui.operate(renderer, &mut operation::black_box(operation.as_mut()));
+                        match operation.finish() {
+                            operation::Outcome::None | operation::Outcome::Some(()) => break,
+                            operation::Outcome::Chain(next) => operation = next,
+                        }
+                    }
+                }
+            }
+        }
+        fn escape() -> Event {
+            let key = keyboard::Key::Named(keyboard::key::Named::Escape);
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key: key.clone(),
+                modified_key: key,
+                physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Escape),
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::empty(),
+                text: None,
+                repeat: false,
+            })
+        }
+
+        let _guard = super::super::session::test_guard();
+        let root = std::env::temp_dir().join(format!("mcp-modal-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("bitcoin")).unwrap();
+        let (mut app, wallet) = super::super::claim_step1_tests::bitcoin_app(&root);
+        let location = pairings::Location::new(&root, wallet.chain, &app.cube_settings.id).unwrap();
+        let mut store =
+            pairings::Store::open(location.clone(), zeroize::Zeroizing::new([51; 32]), true)
+                .unwrap();
+        let id = store
+            .add(
+                "Synthetic local client".into(),
+                pairings::Scope::Read {
+                    wallet: wallet.id().to_string(),
+                    descriptor: pairings::descriptor_identity(&wallet),
+                    opaque: "synthetic-opaque".into(),
+                    capabilities: [true, false, false],
+                },
+            )
+            .unwrap();
+        app.local_mcp.enabled = true;
+        app.local_mcp.pairing_location = Some(location);
+        app.local_mcp.pairing_store = Some(store);
+        app.local_mcp.revoke_confirmation = Some(id.clone());
+        app.panels.current = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::AiAccess));
+        app.show_recovery_alerts_prompt = false;
+
+        for (width, height) in [(1024.0, 768.0), (1440.0, 900.0)] {
+            for bytes in font::load() {
+                iced::advanced::graphics::text::font_system()
+                    .write()
+                    .unwrap()
+                    .load_font(bytes);
+            }
+            let mut renderer = iced::futures::executor::block_on(<Renderer as Headless>::new(
+                font::REGULAR,
+                16.into(),
+                Some("tiny-skia"),
+            ))
+            .unwrap();
+            let mut ui = UserInterface::build(
+                app.view(),
+                Size::new(width, height),
+                UiCache::new(),
+                &mut renderer,
+            );
+            let mut probe = Probe::default();
+            ui.operate(&renderer, &mut operation::black_box(&mut probe));
+            let title = probe
+                .text
+                .iter()
+                .find(|(text, _)| text == "Revoke this client's access?")
+                .expect("mounted revoke dialog title")
+                .1;
+            assert!(title.y >= 0.0 && title.y + title.height <= height);
+            for target in [
+                "tenshu.ai-access.revoke.keep",
+                "tenshu.ai-access.revoke.confirm",
+            ] {
+                let (_, bounds) = probe
+                    .focus
+                    .iter()
+                    .find(|(id, _)| id == &Id::from(target))
+                    .expect("mounted dialog action");
+                assert!(bounds.y >= 0.0 && bounds.y + bounds.height <= height);
+            }
+            assert_eq!(
+                probe.focus.len(),
+                2,
+                "shell controls must be outside Tab order"
+            );
+            apply(&mut ui, &renderer, focusable::focus_next::<()>());
+            assert_eq!(
+                focused(&mut ui, &renderer),
+                Some(Id::from("tenshu.ai-access.revoke.keep"))
+            );
+            let mut messages = Vec::new();
+            ui.update(
+                &[escape()],
+                mouse::Cursor::Unavailable,
+                &mut renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut messages,
+            );
+            assert!(messages.iter().any(|message| matches!(
+                message,
+                super::super::Message::View(view::Message::LocalMcp(Message::CancelRevokePair))
+            )));
+        }
+        let mut renderer = iced::futures::executor::block_on(<Renderer as Headless>::new(
+            font::REGULAR,
+            16.into(),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let cancel = app.update(super::super::Message::View(view::Message::LocalMcp(
+            Message::CancelRevokePair,
+        )));
+        let mut ui = UserInterface::build(
+            app.view(),
+            Size::new(1024.0, 768.0),
+            UiCache::new(),
+            &mut renderer,
+        );
+        apply_task(&mut ui, &renderer, cancel);
+        assert_eq!(
+            focused(&mut ui, &renderer),
+            Some(Id::from(format!("tenshu.ai-access.client.{id}.revoke")))
+        );
+        drop(ui);
+
+        let request = app.update(super::super::Message::View(view::Message::LocalMcp(
+            Message::RequestRevokePair(id.clone()),
+        )));
+        let mut ui = UserInterface::build(
+            app.view(),
+            Size::new(1024.0, 768.0),
+            UiCache::new(),
+            &mut renderer,
+        );
+        apply_task(&mut ui, &renderer, request);
+        assert_eq!(
+            focused(&mut ui, &renderer),
+            Some(Id::from("tenshu.ai-access.revoke.keep"))
+        );
+        drop(ui);
+
+        let confirm = app.update(super::super::Message::View(view::Message::LocalMcp(
+            Message::RevokePair(id),
+        )));
+        let mut ui = UserInterface::build(
+            app.view(),
+            Size::new(1024.0, 768.0),
+            UiCache::new(),
+            &mut renderer,
+        );
+        apply_task(&mut ui, &renderer, confirm);
+        assert_eq!(
+            focused(&mut ui, &renderer),
+            Some(Id::from("tenshu.ai-access.enable"))
+        );
+        drop(ui);
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn persistent_pairings_resume_after_lock_restart_and_revoke_independently() {
         use serde_json::Value;
         let _guard = super::super::session::test_guard();
@@ -1912,15 +2283,18 @@ mod tests {
                 wire::Error::AccessDenied
             );
             super::super::session::close();
-            assert!(settings
-                .update(
-                    Message::CopyPair(first.clone()),
-                    None,
-                    None,
-                    true,
-                    "mcp-paired-fixture"
-                )
-                .is_none());
+            assert!(
+                settings
+                    .update(
+                        Message::CopyPair(first.clone()),
+                        None,
+                        None,
+                        true,
+                        "mcp-paired-fixture"
+                    )
+                    .is_none(),
+                "locked Cube must not reveal a private client configuration"
+            );
             assert_eq!(
                 wire::ipc::call(
                     &wire::pairing::resolve(&path).unwrap(),

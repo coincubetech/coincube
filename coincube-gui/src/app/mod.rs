@@ -11227,6 +11227,9 @@ impl App {
             .and_then(|la| la.lightning_address.as_ref())
             .is_some();
         match &self.panels.current {
+            Menu::Cube(menu::CubeSubMenu::Settings(menu::CubeSettingsOption::AiAccess)) => {
+                Some(self.local_mcp.view_for_cube(self.mcp_supported(), false))
+            }
             Menu::Spark(menu::SparkSubMenu::Settings(Some(
                 menu::SparkSettingsOption::LightningAddress,
             ))) => Some(if authenticated {
