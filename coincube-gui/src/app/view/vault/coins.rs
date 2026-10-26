@@ -289,15 +289,35 @@ fn coin_list_view<'a>(
                             Row::new()
                                 .spacing(8)
                                 .align_y(Alignment::Center)
-                                .push(p2_regular("Status:").style(theme::text::secondary))
-                                .push_maybe(status)
-                                .push(p2_regular("Chains:").style(theme::text::secondary))
-                                .push_maybe(replay)
-                                .push(if entangled.is_none() && !verified_deposit {
-                                    p2_regular("Bitcoin").style(theme::text::secondary)
-                                } else {
-                                    p2_regular("")
-                                }),
+                                .push(
+                                    Container::new(
+                                        Row::new()
+                                            .spacing(8)
+                                            .align_y(Alignment::Center)
+                                            .push(
+                                                p2_regular("Status:").style(theme::text::secondary),
+                                            )
+                                            .push_maybe(status),
+                                    )
+                                    .width(Length::FillPortion(1)),
+                                )
+                                .push(
+                                    Container::new(
+                                        Row::new()
+                                            .spacing(8)
+                                            .align_y(Alignment::Center)
+                                            .push(
+                                                p2_regular("Chains:").style(theme::text::secondary),
+                                            )
+                                            .push_maybe(replay)
+                                            .push(if entangled.is_none() && !verified_deposit {
+                                                p2_regular("Bitcoin").style(theme::text::secondary)
+                                            } else {
+                                                p2_regular("")
+                                            }),
+                                    )
+                                    .width(Length::FillPortion(1)),
+                                ),
                         ),
                 )
                 .style(theme::button::transparent_border)
