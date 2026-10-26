@@ -62,6 +62,10 @@ fn recovery_timing_known(coin: &Coin, tip: u32) -> bool {
             .is_some_and(|height| height >= 0 && (height as u32) <= tip)
 }
 
+const AMOUNT_COLUMN_WIDTH: f32 = 160.0;
+const CONFIRMATIONS_COLUMN_WIDTH: f32 = 130.0;
+const DETAILS_COLUMN_WIDTH: f32 = 85.0;
+
 fn coin_label(coin: &Coin, labels: &HashMap<String, String>) -> String {
     let outpoint = coin.outpoint.to_string();
     let txid = coin.outpoint.txid.to_string();
@@ -75,14 +79,14 @@ fn coin_label(coin: &Coin, labels: &HashMap<String, String>) -> String {
 }
 
 fn short_address(address: &str) -> String {
-    if address.chars().count() <= 22 {
+    if address.chars().count() <= 15 {
         address.to_string()
     } else {
-        let start: String = address.chars().take(12).collect();
+        let start: String = address.chars().take(5).collect();
         let end: String = address
             .chars()
             .rev()
-            .take(6)
+            .take(4)
             .collect::<String>()
             .chars()
             .rev()
@@ -98,7 +102,7 @@ fn coin_table_header<'a>() -> Container<'a, Message> {
             .align_y(Alignment::Center)
             .push(
                 Container::new(p2_regular("Amount").bold().style(theme::text::secondary))
-                    .width(Length::FillPortion(2)),
+                    .width(Length::Fixed(AMOUNT_COLUMN_WIDTH)),
             )
             .push(
                 Container::new(
@@ -106,19 +110,19 @@ fn coin_table_header<'a>() -> Container<'a, Message> {
                         .bold()
                         .style(theme::text::secondary),
                 )
-                .width(Length::FillPortion(2)),
+                .width(Length::Fixed(CONFIRMATIONS_COLUMN_WIDTH)),
             )
             .push(
                 Container::new(p2_regular("Label").bold().style(theme::text::secondary))
-                    .width(Length::FillPortion(2)),
+                    .width(Length::FillPortion(1)),
             )
             .push(
                 Container::new(p2_regular("Address").bold().style(theme::text::secondary))
-                    .width(Length::FillPortion(2)),
+                    .width(Length::FillPortion(1)),
             )
             .push(
                 Container::new(p2_regular("Details").bold().style(theme::text::secondary))
-                    .width(Length::Fixed(85.0)),
+                    .width(Length::Fixed(DETAILS_COLUMN_WIDTH)),
             ),
     )
     .padding(14)
@@ -139,9 +143,11 @@ pub fn coins_view<'a>(
     Column::new()
         .push(Container::new(h3("Coin control").bold()).width(Length::Fill))
         .push(
-            p1_regular(
-                "Inspect coin balances, labels, confirmations, replay status and recovery timing.",
-            )
+            p1_regular(if blake2b {
+                "Inspect coin balances, labels, confirmations, replay status and recovery timing."
+            } else {
+                "Inspect coin balances, labels, confirmations and recovery timing."
+            })
             .style(theme::text::secondary),
         )
         .push(coins.is_empty().then(|| {
@@ -251,7 +257,10 @@ fn coin_list_view<'a>(
                             Row::new()
                                 .spacing(12)
                                 .align_y(Alignment::Center)
-                                .push(Container::new(amount).width(Length::FillPortion(2)))
+                                .push(
+                                    Container::new(amount)
+                                        .width(Length::Fixed(AMOUNT_COLUMN_WIDTH)),
+                                )
                                 .push(
                                     Container::new(
                                         p2_regular(confirmation_status(
@@ -260,18 +269,22 @@ fn coin_list_view<'a>(
                                         ))
                                         .style(theme::text::secondary),
                                     )
-                                    .width(Length::FillPortion(2)),
+                                    .width(Length::Fixed(CONFIRMATIONS_COLUMN_WIDTH)),
                                 )
                                 .push(
-                                    Container::new(p1_regular(coin_label(coin, labels)))
-                                        .width(Length::FillPortion(2)),
+                                    Container::new(
+                                        p1_regular(coin_label(coin, labels))
+                                            .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+                                    )
+                                    .width(Length::FillPortion(1)),
                                 )
                                 .push(
                                     Container::new(
                                         p2_regular(short_address(&address))
-                                            .style(theme::text::secondary),
+                                            .style(theme::text::secondary)
+                                            .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
                                     )
-                                    .width(Length::FillPortion(2)),
+                                    .width(Length::FillPortion(1)),
                                 )
                                 .push(
                                     Container::new(
@@ -282,7 +295,7 @@ fn coin_list_view<'a>(
                                         })
                                         .style(theme::text::secondary),
                                     )
-                                    .width(Length::Fixed(85.0)),
+                                    .width(Length::Fixed(DETAILS_COLUMN_WIDTH)),
                                 ),
                         )
                         .push(
@@ -681,6 +694,7 @@ mod tests {
                 theme::Theme::dark(),
             );
             assert!(mounted.contains("Coin control"));
+            assert!(!mounted.contains("replay status and recovery timing"));
             assert!(mounted.contains("Confirmations"));
             assert!(mounted.contains("Address"));
             assert!(mounted.contains("Status:"));
@@ -710,7 +724,7 @@ mod tests {
         assert_eq!(coin_label(&coin, &labels), "Reserve");
         assert_eq!(
             short_address("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"),
-            "bc1qw508d6qe…v8f3t4"
+            "bc1qw…f3t4"
         );
     }
 
@@ -742,7 +756,53 @@ mod tests {
                 theme,
             );
             assert!(mounted.contains("Details ▾"));
-            assert!(mounted.contains("bc1qw508d6qe…v8f3t4"));
+            assert!(mounted.contains("bc1qw…f3t4"));
+        }
+    }
+
+    #[test]
+    fn unmasked_large_amounts_fit_compact_coin_rows_in_sats_and_btc() {
+        let mut one_btc = confirmed_coin(100);
+        one_btc.amount = Amount::from_sat(100_000_000);
+        let mut twenty_one_btc = confirmed_coin(101);
+        twenty_one_btc.amount = Amount::from_sat(2_100_000_000);
+        twenty_one_btc.outpoint.vout = 1;
+        let coins = [one_btc, twenty_one_btc];
+        let cache = Cache {
+            balance_privacy: Some(BalancePrivacyChrome {
+                privacy: BalancePrivacy::Shown,
+                busy: false,
+                interactive: false,
+            }),
+            ..Default::default()
+        };
+        for unit in [BitcoinDisplayUnit::Sats, BitcoinDisplayUnit::BTC] {
+            for (appearance, theme) in [
+                ("dark", theme::Theme::dark()),
+                ("light", theme::Theme::light()),
+            ] {
+                let scenario = format!("vault-coin-unmasked-{}", unit);
+                let mounted = capture::inspect(
+                    &scenario,
+                    coins_view(
+                        &cache,
+                        &coins,
+                        None,
+                        &[],
+                        &HashMap::new(),
+                        &HashMap::new(),
+                        unit,
+                        false,
+                    ),
+                    (1024, 768),
+                    appearance,
+                    theme,
+                );
+                assert!(!mounted.contains("••••••"));
+                assert!(mounted.contains(unit.label()));
+                assert!(mounted.contains("bc1qw…f3t4"));
+                assert!(mounted.contains("Details ▾"));
+            }
         }
     }
 
@@ -793,6 +853,28 @@ mod tests {
         );
         assert!(long_label.contains("Long reserve label"));
         assert!(long_label.contains("Details ▾"));
+
+        labels.insert(
+            coins[0].outpoint.to_string(),
+            "TreasuryReserveDepositWithoutSpacesForCompactWidths".into(),
+        );
+        let unbroken_label = capture::inspect(
+            "vault-coin-unbroken-label",
+            coins_view(
+                &cache,
+                &coins,
+                None,
+                &[],
+                &labels,
+                &HashMap::new(),
+                BitcoinDisplayUnit::Sats,
+                false,
+            ),
+            (1024, 768),
+            "light",
+            theme::Theme::light(),
+        );
+        assert!(unbroken_label.contains("TreasuryReserveDepositWithoutSpacesForCompactWidths"));
     }
 
     #[test]
@@ -835,6 +917,7 @@ mod tests {
                 theme::Theme::light(),
             );
             assert!(mounted.contains(expected));
+            assert!(mounted.contains("replay status and recovery timing"));
             assert!(mounted.contains("Recovery timing unavailable"));
             assert!(mounted.contains("Hide details"));
         }
