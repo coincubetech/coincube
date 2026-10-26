@@ -269,12 +269,12 @@ pub fn import_wallet_or_descriptor<'a>(
     layout(
         progress,
         email,
-        "Import or restore a wallet",
+        "Add an existing wallet",
         Column::new()
             .spacing(24)
-            .push(h4_bold("Choose a source"))
+            .push(h4_bold("Choose a wallet source"))
             .push(p2_regular(
-                "Continue with a wallet on this account, a shared invitation, or a descriptor file.",
+                "Use a wallet on this account, a shared invitation, or a public descriptor. To restore a Cube from its Recovery Kit, use the Cube restore path.",
             ))
             .push(error.map(|e| card::error("Something wrong happened", e.to_string())))
             .push(card_wallets)
@@ -351,10 +351,10 @@ pub fn import_descriptor<'a>(
     layout(
         progress,
         email,
-        "Import a wallet descriptor",
+        "Import a public wallet descriptor",
         Column::new()
             .push(p2_regular(
-                "A public descriptor restores wallet visibility. It does not add signing keys to this Cube.",
+                "This step reads a public descriptor or backup. It does not add signing keys. You can enter the wallet's recovery words in the next step or skip that step if its keys are held elsewhere.",
             ))
             .push(
                 Column::new()
@@ -2769,29 +2769,32 @@ pub fn recovery_kit_restore<'a>(
         }
     };
 
-    let (step, step_title, step_detail) = match phase {
+    let (step_label, step_title, step_detail) = match phase {
         RestorePhase::Email | RestorePhase::OtpEntry => (
-            1,
+            "RECOVERY KIT · STEP 1 OF 3",
             "Sign in to Connect",
             "Verify the account that holds this Cube's Recovery Kit.",
         ),
         RestorePhase::LoadingCubes | RestorePhase::CubePicker { .. } => (
-            2,
+            "RECOVERY KIT · STEP 2 OF 3",
             "Choose a Cube",
-            "Only Cubes on the current network with the required backup are available.",
+            match scope {
+                crate::installer::step::RestoreScope::Full => "Cubes on this network are listed. Only kits with a Master Seed can be selected for Cube recovery.",
+                crate::installer::step::RestoreScope::DescriptorOnly => "Cubes on this network are listed. Only kits with a wallet descriptor can be selected.",
+            },
         ),
         RestorePhase::PasswordEntry { .. } | RestorePhase::Decrypting { .. } => (
-            3,
+            "RECOVERY KIT · STEP 3 OF 3",
             "Open the Recovery Kit",
             "The recovery password decrypts the backup on this device.",
         ),
         RestorePhase::Ready { .. } => (
-            4,
+            "RECOVERY KIT · READY",
             "Continue restoring",
-            "Your Recovery Kit was decrypted. The installer will finish the remaining steps.",
+            "Your Recovery Kit was decrypted. Continue with the remaining installer steps.",
         ),
         RestorePhase::Error { .. } => (
-            0,
+            "RECOVERY KIT · NEEDS ATTENTION",
             "Recovery needs attention",
             "Review the error below, then retry the existing restore flow.",
         ),
@@ -2800,19 +2803,7 @@ pub fn recovery_kit_restore<'a>(
         .spacing(20)
         .width(Length::Fill)
         .max_width(700)
-        .push(
-            p2_regular(if step == 0 {
-                "RESTORE"
-            } else {
-                match step {
-                    1 => "RESTORE · STEP 1 OF 4",
-                    2 => "RESTORE · STEP 2 OF 4",
-                    3 => "RESTORE · STEP 3 OF 4",
-                    _ => "RESTORE · STEP 4 OF 4",
-                }
-            })
-            .style(theme::text::secondary),
-        )
+        .push(p2_regular(step_label).style(theme::text::secondary))
         .push(h4_bold(step_title))
         .push(p2_regular(step_detail).style(theme::text::secondary));
 
