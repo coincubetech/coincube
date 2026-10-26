@@ -538,10 +538,6 @@ fn render_at_width<'a>(
     width: f32,
 ) -> Element<'a, Message> {
     let entries = activity.entries();
-    let selected = activity
-        .selected_id
-        .as_ref()
-        .and_then(|id| entries.iter().find(|entry| &entry.id == id));
     let count = activity.filters.count();
     let compact = width < 900.0;
     let wallet = pick_list(
@@ -609,6 +605,7 @@ fn render_at_width<'a>(
                     if count == 1 { "filter" } else { "filters" }
                 )),
                 button::secondary(None, "Clear filters")
+                    .width(Length::Shrink)
                     .on_press(Message::Activity(ActivityMessage::Clear))
             ]
             .spacing(8),
@@ -623,6 +620,12 @@ fn render_at_width<'a>(
                 && activity.filters.includes(entry)
         })
         .collect();
+    // A retained selection may be outside the current filter or the complete
+    // history window. Only a row in the visible feed may own detail actions.
+    let selected = activity
+        .selected_id
+        .as_ref()
+        .and_then(|id| visible.iter().copied().find(|entry| &entry.id == id));
     let mut heading = Column::new()
         .spacing(8)
         .push(h3("Activity"))
@@ -1131,6 +1134,74 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn detail_actions_follow_the_visible_row_across_filter_changes() {
+        let cache = Cache::default();
+        let mut activity = Activity::new(None, None);
+        let payment = spark_payment();
+        let id = Entry::spark(payment.clone()).id;
+        drop(activity.update(
+            None,
+            &cache,
+            crate::app::message::Message::ActivitySparkLoaded(0, Ok((vec![payment], false))),
+        ));
+        let apply = |activity: &mut Activity, event| {
+            drop(activity.update(
+                None,
+                &cache,
+                crate::app::message::Message::View(Message::Activity(event)),
+            ));
+        };
+        apply(&mut activity, ActivityMessage::Select(id.clone()));
+        for (exclude, restore) in [
+            (
+                ActivityMessage::Wallet(WalletFilter::Vault),
+                ActivityMessage::Wallet(WalletFilter::All),
+            ),
+            (
+                ActivityMessage::Direction(DirectionFilter::Received),
+                ActivityMessage::Direction(DirectionFilter::All),
+            ),
+            (
+                ActivityMessage::Status(StatusFilter::Confirmed),
+                ActivityMessage::Status(StatusFilter::All),
+            ),
+            (
+                ActivityMessage::DateRange("2026-01-01 to 2026-12-31".into()),
+                ActivityMessage::DateRange(String::new()),
+            ),
+            (
+                ActivityMessage::Search("another payment".into()),
+                ActivityMessage::Search(String::new()),
+            ),
+        ] {
+            apply(&mut activity, exclude);
+            let filtered = capture::inspect_wide_content(
+                "r09-activity-filtered-detail",
+                render_at_width(&activity, &cache, 1144.0),
+                (1440, 900),
+                "dark",
+                coincube_ui::theme::Theme::dark(),
+                1144,
+            );
+            assert!(!filtered.has_focus(row_focus_id(&id)));
+            assert!(!filtered.contains("Open wallet details and actions"));
+            assert_eq!(activity.selected_id.as_deref(), Some(id.as_str()));
+
+            apply(&mut activity, restore);
+            let restored = capture::inspect_wide_content(
+                "r09-activity-restored-detail",
+                render_at_width(&activity, &cache, 1144.0),
+                (1440, 900),
+                "dark",
+                coincube_ui::theme::Theme::dark(),
+                1144,
+            );
+            assert!(restored.has_focus(row_focus_id(&id)));
+            assert!(restored.contains("Open wallet details and actions"));
         }
     }
 }
