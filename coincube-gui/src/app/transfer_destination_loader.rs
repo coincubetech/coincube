@@ -29,6 +29,7 @@ use crate::{
 pub(crate) enum Refusal {
     Stale,
     Unsupported,
+    SameWallet,
     IdentityChanged,
     BackendUnavailable,
     WrongCredential,
@@ -72,6 +73,7 @@ fn same_selection(expected: &CubeSettings, current: &CubeSettings) -> bool {
         && expected.vault_wallet_id == current.vault_wallet_id
         && expected.vault_fingerprint == current.vault_fingerprint
         && expected.master_signer_fingerprint == current.master_signer_fingerprint
+        && expected.duress_slot_file == current.duress_slot_file
         && expected
             .passkey_metadata
             .as_ref()
@@ -100,6 +102,7 @@ pub(crate) struct ScopedDestination {
     cube: CubeSettings,
     wallet_id: WalletId,
     generation: AppGeneration,
+    pin_attempt: Option<AppGeneration>,
     cancelled: Arc<AtomicBool>,
     pin_busy: Arc<AtomicBool>,
     pin_signer: Arc<Mutex<Option<MasterSigner>>>,
@@ -118,9 +121,12 @@ impl ScopedDestination {
     ) -> Result<Self, Refusal> {
         if source.cube_id == destination_cube_id
             || source.chain != ChainId::Bitcoin
-            || !matches!(source.wallet, WalletIdentity::Vault(_))
+            || !matches!(&source.wallet, WalletIdentity::Vault(_))
         {
             return Err(Refusal::Unsupported);
+        }
+        if source.wallet == WalletIdentity::Vault(wallet_id.clone()) {
+            return Err(Refusal::SameWallet);
         }
         let (cube, _) = selected(&root, destination_cube_id, &wallet_id)?;
         Ok(Self {
@@ -129,6 +135,7 @@ impl ScopedDestination {
             cube,
             wallet_id,
             generation: AppGeneration::next(),
+            pin_attempt: None,
             cancelled: Arc::new(AtomicBool::new(false)),
             pin_busy: Arc::new(AtomicBool::new(false)),
             pin_signer: Arc::new(Mutex::new(None)),
@@ -163,7 +170,7 @@ impl ScopedDestination {
     /// The returned job is `Send` and runs on the blocking pool. Its result
     /// carries a verdict only; the signer stays in this flow's private slot.
     pub(crate) fn begin_pin(
-        &self,
+        &mut self,
         source: &Source,
         pin: Zeroizing<String>,
     ) -> Result<PinRequest, Refusal> {
@@ -178,11 +185,17 @@ impl ScopedDestination {
         {
             return Err(Refusal::Stale);
         }
+        let generation = AppGeneration::next();
+        self.pin_attempt = Some(generation);
+        if let Ok(mut slot) = self.pin_signer.lock() {
+            *slot = None;
+        }
         Ok(PinRequest {
             root: self.root.clone(),
             cube: self.cube.clone(),
+            wallet_id: self.wallet_id.clone(),
             pin,
-            generation: self.generation,
+            generation,
             cancelled: Arc::clone(&self.cancelled),
             busy: Arc::clone(&self.pin_busy),
             signer_slot: Arc::clone(&self.pin_signer),
@@ -196,13 +209,14 @@ impl ScopedDestination {
             self.revoke();
             return Err(Refusal::Duress);
         }
+        if self.pin_attempt != Some(result.generation) {
+            return Err(Refusal::Stale);
+        }
         if let Err(error) = self.current(source) {
             self.revoke();
             return Err(error);
         }
-        if result.generation != self.generation {
-            return Err(Refusal::Stale);
-        }
+        self.pin_attempt = None;
         match result.verdict? {
             PinVerdict::Locked => Err(Refusal::Locked),
             PinVerdict::Wrong => Err(Refusal::WrongCredential),
@@ -328,6 +342,7 @@ impl ScopedDestination {
 
     pub(crate) fn revoke(&mut self) {
         self.cancelled.store(true, Ordering::Release);
+        self.pin_attempt = None;
         self.verified = false;
         if let Ok(mut slot) = self.pin_signer.lock() {
             *slot = None;
@@ -359,6 +374,7 @@ enum PinVerdict {
 pub(crate) struct PinRequest {
     root: CoincubeDirectory,
     cube: CubeSettings,
+    wallet_id: WalletId,
     pin: Zeroizing<String>,
     generation: AppGeneration,
     cancelled: Arc<AtomicBool>,
@@ -372,7 +388,22 @@ impl PinRequest {
             Err(Refusal::Stale)
         } else {
             let loc = unlock::CubeLocation::new(self.root.path(), &self.cube);
-            match unlock::throttle::classify_pin(self.root.path(), &loc, &self.pin) {
+            let metadata_changed = std::cell::Cell::new(false);
+            let validate = || {
+                let (current, _) =
+                    selected(&self.root, &self.cube.id, &self.wallet_id).map_err(|_| {
+                        metadata_changed.set(true);
+                        unlock::UnlockError::Io("Destination Cube changed".into())
+                    })?;
+                if same_selection(&self.cube, &current) && !self.cancelled.load(Ordering::Acquire) {
+                    Ok(())
+                } else {
+                    metadata_changed.set(true);
+                    Err(unlock::UnlockError::Io("Destination Cube changed".into()))
+                }
+            };
+            match unlock::throttle::classify_pin_scoped(self.root.path(), &loc, &self.pin, validate)
+            {
                 Ok(PinAttempt::Locked(_)) => Ok(PinVerdict::Locked),
                 Ok(PinAttempt::Classified(PinOutcome::Wrong)) => Ok(PinVerdict::Wrong),
                 Ok(PinAttempt::Classified(PinOutcome::Duress)) => Ok(PinVerdict::Duress),
@@ -385,6 +416,7 @@ impl PinRequest {
                         _ => Err(Refusal::Stale),
                     }
                 }
+                Err(_) if metadata_changed.get() => Err(Refusal::IdentityChanged),
                 Err(_) => Err(Refusal::BackendUnavailable),
             }
         };
@@ -562,6 +594,22 @@ mod tests {
         changed = selected.clone();
         changed.network = ChainId::Testnet;
         assert!(!same_selection(&selected, &changed));
+        changed = selected.clone();
+        changed.duress_slot_file = Some("rotated-marker".into());
+        assert!(!same_selection(&selected, &changed));
+    }
+
+    #[test]
+    fn another_cube_with_the_source_wallet_is_not_a_destination() {
+        let source = source();
+        let WalletIdentity::Vault(wallet_id) = source.wallet.clone() else {
+            unreachable!();
+        };
+        let root = CoincubeDirectory::new(std::env::temp_dir().join("unused-r16-alias"));
+        assert!(matches!(
+            ScopedDestination::new(root, source, "different-cube-id", wallet_id),
+            Err(Refusal::SameWallet)
+        ));
     }
 
     struct CountClose(Arc<AtomicUsize>);
@@ -598,6 +646,7 @@ mod tests {
                 "Destination".into(),
                 ChainId::Bitcoin,
             ),
+            wallet_id: WalletId::new("destination".into(), Some(1)),
             pin: Zeroizing::new("1234".into()),
             generation: AppGeneration::next(),
             cancelled,
@@ -626,6 +675,7 @@ mod tests {
             ),
             wallet_id: WalletId::new("destination".into(), Some(1)),
             generation: AppGeneration::next(),
+            pin_attempt: None,
             cancelled: Arc::clone(&cancelled),
             pin_busy: Arc::new(AtomicBool::new(false)),
             pin_signer: Arc::new(Mutex::new(None)),
@@ -640,6 +690,38 @@ mod tests {
         };
         assert_eq!(owner.accept_pin(&changed, result), Err(Refusal::Duress));
         assert!(cancelled.load(Ordering::Acquire));
+        assert!(!owner.verified);
+    }
+
+    #[test]
+    fn older_pin_trial_cannot_admit_a_later_result_in_the_same_operation() {
+        let original = source();
+        let newer = AppGeneration::next();
+        let mut owner = ScopedDestination {
+            root: CoincubeDirectory::new(std::env::temp_dir().join("unused-r16-pin-nonce")),
+            source: original.clone(),
+            cube: CubeSettings::new_with_raw_id(
+                "destination".into(),
+                "Destination".into(),
+                ChainId::Bitcoin,
+            ),
+            wallet_id: WalletId::new("destination".into(), Some(1)),
+            generation: AppGeneration::next(),
+            pin_attempt: Some(newer),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            pin_busy: Arc::new(AtomicBool::new(false)),
+            pin_signer: Arc::new(Mutex::new(None)),
+            verified: false,
+            #[cfg(target_os = "macos")]
+            ceremony: None,
+            backend: None,
+        };
+        let old = PinCheck {
+            generation: AppGeneration::next(),
+            verdict: Ok(PinVerdict::Unlock),
+        };
+        assert_eq!(owner.accept_pin(&original, old), Err(Refusal::Stale));
+        assert_eq!(owner.pin_attempt, Some(newer));
         assert!(!owner.verified);
     }
 }

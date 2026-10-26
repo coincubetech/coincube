@@ -42,7 +42,24 @@ pub enum PinAttempt {
 }
 
 pub fn classify_pin(root: &Path, loc: &CubeLocation, pin: &str) -> Result<PinAttempt, UnlockError> {
-    classify_pin_with(root, loc.cube_id, || super::unlock_blocking(loc, pin))
+    classify_pin_scoped(root, loc, pin, || Ok(()))
+}
+
+/// The destination variant rechecks selected Cube metadata under the same
+/// attempt lock, before and after decryption. A rotated duress marker cannot
+/// turn a pending attempt into an ordinary wrong-PIN charge.
+pub fn classify_pin_scoped(
+    root: &Path,
+    loc: &CubeLocation,
+    pin: &str,
+    validate: impl Fn() -> Result<(), UnlockError>,
+) -> Result<PinAttempt, UnlockError> {
+    classify_pin_with_guard(
+        root,
+        loc.cube_id,
+        || super::unlock_blocking(loc, pin),
+        validate,
+    )
 }
 
 fn classify_pin_with(
@@ -50,20 +67,24 @@ fn classify_pin_with(
     cube_id: &str,
     verify: impl FnOnce() -> Result<PinOutcome, UnlockError>,
 ) -> Result<PinAttempt, UnlockError> {
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .open(root.join(LOCK_NAME))
-        .map_err(|e| UnlockError::Io(e.to_string()))?;
-    file.lock_exclusive()
-        .map_err(|e| UnlockError::Io(e.to_string()))?;
+    classify_pin_with_guard(root, cube_id, verify, || Ok(()))
+}
 
-    let mut state = ThrottleState::load(root);
-    let remaining = state.remaining_lockout(cube_id);
-    let answer = if remaining.is_zero() {
+fn classify_pin_with_guard(
+    root: &Path,
+    cube_id: &str,
+    verify: impl FnOnce() -> Result<PinOutcome, UnlockError>,
+    validate: impl Fn() -> Result<(), UnlockError>,
+) -> Result<PinAttempt, UnlockError> {
+    with_locked_throttle(root, |state| {
+        let remaining = state.remaining_lockout(cube_id);
+        if !remaining.is_zero() {
+            return Ok(PinAttempt::Locked(remaining));
+        }
+        validate()?;
         match verify() {
             Ok(PinOutcome::Unlock(signer)) => {
+                validate()?;
                 state.record_success(root, cube_id);
                 Ok(PinAttempt::Classified(PinOutcome::Unlock(signer)))
             }
@@ -72,16 +93,64 @@ fn classify_pin_with(
                 Ok(PinAttempt::Classified(PinOutcome::Duress))
             }
             Ok(PinOutcome::Wrong) => {
+                validate()?;
                 state.record_failure(root, cube_id);
                 Ok(PinAttempt::Classified(PinOutcome::Wrong))
             }
             Err(error) => Err(error),
         }
-    } else {
-        Ok(PinAttempt::Locked(remaining))
-    };
+    })?
+}
+
+/// Shared backup/recovery PIN door. The mnemonic stays in the caller's
+/// zeroizing result; only wrong-password errors spend a throttle attempt.
+pub fn classify_verification<T, E: std::fmt::Display>(
+    root: &Path,
+    cube_id: &str,
+    verify: impl FnOnce() -> Result<T, E>,
+    is_wrong: impl FnOnce(&E) -> bool,
+) -> Result<Result<T, String>, UnlockError> {
+    with_locked_throttle(root, |state| {
+        let remaining = state.remaining_lockout(cube_id);
+        if !remaining.is_zero() {
+            return Err(lockout_message(remaining));
+        }
+        match verify() {
+            Ok(value) => {
+                state.record_success(root, cube_id);
+                Ok(value)
+            }
+            Err(error) if !is_wrong(&error) => Err(error.to_string()),
+            Err(_) => {
+                let penalty = state.record_failure(root, cube_id);
+                Err(if penalty.is_zero() {
+                    "Incorrect PIN. Please try again.".to_string()
+                } else {
+                    lockout_message(penalty)
+                })
+            }
+        }
+    })
+}
+
+fn with_locked_throttle<T>(
+    root: &Path,
+    action: impl FnOnce(&mut ThrottleState) -> T,
+) -> Result<T, UnlockError> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(root.join(LOCK_NAME))
+        .map_err(|e| UnlockError::Io(e.to_string()))?;
+    file.lock_exclusive()
+        .map_err(|e| UnlockError::Io(e.to_string()))?;
+
+    let mut state = ThrottleState::load(root);
+    let answer = action(&mut state);
     let _ = FileExt::unlock(&file);
-    answer
+    Ok(answer)
 }
 
 /// Delay after the Nth consecutive failure: 0, 0, 1s, 2s, 4s, 8s… capped.
@@ -240,7 +309,7 @@ mod tests {
     #[test]
     fn concurrent_pin_trials_share_one_persisted_counter() {
         let root = tmp("concurrent-attempts");
-        let barrier = Arc::new(Barrier::new(3));
+        let barrier = Arc::new(Barrier::new(4));
         let handles: Vec<_> = (0..3)
             .map(|_| {
                 let root = root.clone();
@@ -264,6 +333,66 @@ mod tests {
             classify_pin_with(&root, "cube-a", || panic!("locked trial must not decrypt")).unwrap(),
             PinAttempt::Locked(_)
         ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn backup_and_unlock_trials_share_the_lock_and_counter() {
+        let root = tmp("cross-surface");
+        let barrier = Arc::new(Barrier::new(4));
+        let handles: Vec<_> = (0..3)
+            .map(|i| {
+                let root = root.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    if i == 0 {
+                        let answer =
+                            classify_pin_with(&root, "cube-a", || Ok(PinOutcome::Wrong)).unwrap();
+                        assert!(matches!(answer, PinAttempt::Classified(PinOutcome::Wrong)));
+                    } else {
+                        let answer = classify_verification::<(), _>(
+                            &root,
+                            "cube-a",
+                            || Err("wrong"),
+                            |_| true,
+                        )
+                        .unwrap();
+                        assert!(answer.is_err());
+                    }
+                })
+            })
+            .collect();
+        barrier.wait();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        assert_eq!(
+            ThrottleState::load(&root).failures["cube-a"].consecutive_failures,
+            3
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn metadata_rotation_refuses_stale_pin_without_a_wrong_attempt() {
+        let root = tmp("metadata-rotation");
+        let checks = std::cell::Cell::new(0);
+        let answer = classify_pin_with_guard(
+            &root,
+            "cube-a",
+            || Ok(PinOutcome::Wrong),
+            || {
+                checks.set(checks.get() + 1);
+                if checks.get() == 2 {
+                    Err(UnlockError::Io("rotated".into()))
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert!(matches!(answer, Err(UnlockError::Io(_))));
+        assert!(!ThrottleState::load(&root).failures.contains_key("cube-a"));
         std::fs::remove_dir_all(root).unwrap();
     }
 

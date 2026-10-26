@@ -50,6 +50,7 @@ pub(crate) struct DestinationEvidence {
 pub(crate) enum Refusal {
     SourceChanged,
     SelfCube,
+    SameWallet,
     UnsupportedChain,
     ChainChanged,
     WalletChanged,
@@ -65,6 +66,9 @@ impl Refusal {
         match self {
             Self::SourceChanged => "The source Cube changed. Start the transfer again.",
             Self::SelfCube => "Choose another Cube as the destination.",
+            Self::SameWallet => {
+                "The destination uses the same Vault wallet. Choose a different wallet."
+            }
             Self::UnsupportedChain => "Cross-Cube transfer is available only on Bitcoin mainnet.",
             Self::ChainChanged => "The destination Cube's network changed. Select it again.",
             Self::WalletChanged => "The destination wallet changed. Select it again.",
@@ -93,6 +97,9 @@ fn admit(
     }
     if selected.cube_id.is_empty() || source.cube_id == selected.cube_id {
         return Err(Refusal::SelfCube);
+    }
+    if source.wallet == selected.wallet {
+        return Err(Refusal::SameWallet);
     }
     if source.chain != ChainId::Bitcoin || selected.chain != ChainId::Bitcoin {
         return Err(Refusal::UnsupportedChain);
@@ -355,6 +362,7 @@ mod tests {
         let source = fixture().0;
         let cases = [
             Refusal::SelfCube,
+            Refusal::SameWallet,
             Refusal::UnsupportedChain,
             Refusal::ChainChanged,
             Refusal::WalletChanged,
@@ -367,6 +375,10 @@ mod tests {
             let (_, mut destination, mut evidence) = fixture();
             match expected {
                 Refusal::SelfCube => destination.cube_id = source.cube_id.clone(),
+                Refusal::SameWallet => {
+                    destination.wallet = source.wallet.clone();
+                    evidence.identity = destination.clone();
+                }
                 Refusal::UnsupportedChain => destination.chain = ChainId::BitcoinBlake2b,
                 Refusal::ChainChanged => evidence.identity.chain = ChainId::Testnet4,
                 Refusal::WalletChanged => {
