@@ -48,11 +48,13 @@ impl BalancePrivacy {
 }
 
 /// Read-only input for the shared top-bar eye. Chrome never consults disk.
-/// `interactive` is true only with an accepted, idle privacy authority.
+/// `interactive` is true only with accepted privacy choices and no explicit
+/// change pending or queued. A read-only background refresh stays interactive.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct BalancePrivacyChrome {
     pub privacy: BalancePrivacy,
-    /// An initialization, retry or save is in flight on the one ordered lane.
+    /// An explicit load or change is in flight, or a user change is queued.
+    /// Read-only background refreshes alone do not set this flag.
     pub busy: bool,
     pub interactive: bool,
 }
@@ -402,6 +404,10 @@ impl PreferencesOwner {
     /// A read-only periodic refresh must not look like a user-initiated save.
     pub fn is_background_refreshing(&self) -> bool {
         self.background_refresh.is_some()
+    }
+
+    pub fn has_queued_changes(&self) -> bool {
+        !self.queued_changes.is_empty()
     }
 
     pub fn pending_operation(&self) -> Option<Operation> {

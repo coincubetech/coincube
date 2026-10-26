@@ -551,7 +551,8 @@ impl GUI {
     }
 
     fn privacy_chrome_for(preferences: &PreferencesOwner) -> BalancePrivacyChrome {
-        let user_change_busy = preferences.is_busy() && !preferences.is_background_refreshing();
+        let user_change_busy = (preferences.is_busy() && !preferences.is_background_refreshing())
+            || preferences.has_queued_changes();
         BalancePrivacyChrome {
             privacy: preferences.privacy(),
             busy: user_change_busy,
@@ -609,8 +610,9 @@ impl GUI {
     fn preferences_view_model(&self) -> preferences_view::ViewModel<'_> {
         let accepted = self.preferences.accepted();
         let notice = self.preferences.notice();
-        let user_change_busy =
-            self.preferences.is_busy() && !self.preferences.is_background_refreshing();
+        let user_change_busy = (self.preferences.is_busy()
+            && !self.preferences.is_background_refreshing())
+            || self.preferences.has_queued_changes();
         let pending_operation = self.preferences.pending_operation();
         preferences_view::ViewModel {
             saved: accepted.map(|value| value.preferences),
@@ -622,7 +624,8 @@ impl GUI {
             system_theme: self.system_theme,
             system_reduces_motion: self.system_reduces_motion,
             cubes_renderer_available: true,
-            saving: matches!(pending_operation, Some(Operation::Save(_))),
+            saving: matches!(pending_operation, Some(Operation::Save(_)))
+                || self.preferences.has_queued_changes(),
             balance_privacy: self.preferences.privacy(),
             balance_privacy_interactive: !user_change_busy,
             durability_unconfirmed: matches!(notice, PreferencesNotice::SavedUnconfirmed),
@@ -3359,6 +3362,12 @@ mod app_preferences_sheet_tests {
         ));
         std::fs::create_dir_all(&path).unwrap();
         let root = CoincubeDirectory::new(path.clone());
+        GlobalSettings::load_or_initialize_preferences(&root).unwrap();
+        GlobalSettings::save_preference(
+            &GlobalSettings::path(&root),
+            PreferenceChange::HideBalances(false),
+        )
+        .unwrap();
         let mut gui = launcher_gui(&root);
         fn inspect(
             scenario: &str,
@@ -3377,6 +3386,12 @@ mod app_preferences_sheet_tests {
         let baseline_model = gui.preferences_view_model();
         assert!(!baseline_model.saving);
         assert!(baseline_model.balance_privacy_interactive);
+        let baseline_chrome = GUI::privacy_chrome_for(&gui.preferences);
+        assert_eq!(
+            crate::app::view::nav::shell::balance_privacy_label(baseline_chrome),
+            "Hide balances"
+        );
+        assert!(baseline_chrome.intent().is_some());
         let baseline = inspect("preferences-idle", baseline_model);
 
         std::thread::sleep(Duration::from_millis(1100));
@@ -3386,14 +3401,31 @@ mod app_preferences_sheet_tests {
         let pending_model = gui.preferences_view_model();
         assert!(!pending_model.saving);
         assert!(pending_model.balance_privacy_interactive);
+        let reading_chrome = GUI::privacy_chrome_for(&gui.preferences);
+        assert_eq!(reading_chrome, baseline_chrome);
+        assert_eq!(
+            crate::app::view::nav::shell::balance_privacy_label(reading_chrome),
+            "Hide balances"
+        );
         let pending = inspect("preferences-background-refresh", pending_model);
         assert_eq!(baseline.text, pending.text);
         assert!(!pending.contains("Saving device preferences"));
 
         // A click during the read is retained, then becomes the only visible
         // save once the read finishes on the same ordered lane.
-        drop(gui.change_preference(PreferenceChange::DeveloperMode(true)));
+        drop(gui.change_preference(PreferenceChange::HideBalances(true)));
         assert!(gui.preferences.is_background_refreshing());
+        let queued_model = gui.preferences_view_model();
+        assert!(queued_model.saving);
+        assert!(!queued_model.balance_privacy_interactive);
+        let queued_chrome = GUI::privacy_chrome_for(&gui.preferences);
+        assert_eq!(
+            crate::app::view::nav::shell::balance_privacy_label(queued_chrome),
+            "Saving balance privacy…"
+        );
+        assert!(queued_chrome.intent().is_none());
+        let queued = inspect("preferences-queued-save", queued_model);
+        assert!(queued.contains("Saving device preferences"));
         let receipt = GlobalSettings::load_or_initialize_preferences(&root).unwrap();
         let next = gui.update(Message::Preferences(refresh, Ok(receipt)));
         assert!(next.units() > 0);
