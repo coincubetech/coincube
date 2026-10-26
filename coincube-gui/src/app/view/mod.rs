@@ -28,7 +28,7 @@ pub use vault::fiat::FiatAmountConverter;
 pub use vault::warning::warn;
 
 use iced::{
-    widget::{column, container, row, scrollable, Space},
+    widget::{container, row, scrollable, Space},
     Alignment, Length,
 };
 
@@ -160,16 +160,16 @@ pub fn dashboard_with_info<'a, T: Into<Element<'a, Message>>>(
             Container::new(
                 scrollable(row!(
                     Space::new().width(Length::FillPortion(1)),
-                    column!(
-                        Space::new().height(Length::Fixed(30.0)),
-                        content.into(),
+                    Column::new()
+                        .push(Space::new().height(Length::Fixed(30.0)))
+                        .push_maybe(settings::frame::in_content_navigation(menu, cache))
+                        .push(content.into())
                         // Symmetric bottom breathing room so the last element
                         // of any screen doesn't sit flush against the viewport
                         // edge when the content fills the height.
-                        Space::new().height(Length::Fixed(30.0)),
-                    )
-                    .width(Length::FillPortion(8))
-                    .max_width(1500),
+                        .push(Space::new().height(Length::Fixed(30.0)))
+                        .width(Length::FillPortion(8))
+                        .max_width(1500),
                     Space::new().width(Length::FillPortion(1)),
                 ))
                 .on_scroll(|w| Message::Scroll(w.absolute_offset().y)),

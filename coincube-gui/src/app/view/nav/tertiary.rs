@@ -91,6 +91,17 @@ fn cube_settings_items() -> Vec<SubItem> {
             },
         ),
         SubItem::new(
+            "Payment checks",
+            wallet_icon,
+            Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::PaymentChecks)),
+            |m| {
+                matches!(
+                    m,
+                    Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::PaymentChecks))
+                )
+            },
+        ),
+        SubItem::new(
             "Stats",
             graph_icon,
             Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Stats)),

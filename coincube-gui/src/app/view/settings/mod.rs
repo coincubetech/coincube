@@ -1,5 +1,6 @@
 pub mod about;
 pub mod backup;
+pub mod frame;
 pub mod general;
 pub mod install_stats;
 pub mod local_signing;

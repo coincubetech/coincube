@@ -9,7 +9,7 @@ use coincube_ui::theme;
 use coincube_ui::widget::{ColumnExt, Element};
 
 use crate::app::cache;
-use crate::app::menu::Menu;
+use crate::app::menu::{CubeSettingsOption, CubeSubMenu, Menu, SettingsOption, VaultSubMenu};
 use crate::app::settings::display::DisplayMode;
 use crate::app::settings::fiat::PriceSetting;
 use crate::app::settings::unit::{BitcoinDisplayUnit, UnitSetting};
@@ -48,6 +48,8 @@ pub fn settings_content_section<'a>(
             currencies_list,
             show_direction_badges,
         ),
+        SettingsSection::PaymentChecks => payment_checks_section(menu, cache),
+        SettingsSection::DataExports => data_exports_section(menu, cache),
         SettingsSection::Recovery => recovery_section(
             menu,
             cache,
@@ -79,7 +81,11 @@ fn general_section<'a>(
             cache.fiat_toggle_allowed(),
         ))
         .push(direction_badges_toggle(show_direction_badges))
-        .push(recipient_identity_checks_toggle())
+        .push(
+            button::secondary(None, "Manage Cube avatar").on_press(Message::Menu(Menu::Cube(
+                CubeSubMenu::Settings(CubeSettingsOption::Avatar),
+            ))),
+        )
         .push(fiat_price(
             new_price_setting,
             currencies_list,
@@ -87,6 +93,95 @@ fn general_section<'a>(
         ));
 
     dashboard(menu, cache, col)
+}
+
+fn payment_checks_section<'a>(menu: &'a Menu, cache: &'a cache::Cache) -> Element<'a, Message> {
+    dashboard(
+        menu,
+        cache,
+        Column::new()
+            .spacing(20)
+            .push(super::header(
+                "Payment checks",
+                SettingsMessage::PaymentChecksSection,
+            ))
+            .push(p2_regular(
+                "Payment checks currently apply to all Cubes on this device.",
+            ))
+            .push(recipient_identity_checks_toggle()),
+    )
+}
+
+fn recovery_kit_route() -> Menu {
+    Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Recovery))
+}
+
+/// Imported Bitcoin has a Vault scope, but it has no `VaultSettingsState` or
+/// `ImportExportSettingsState`. Keep its route unavailable until it has a
+/// dedicated data export flow.
+fn vault_data_route(cache: &cache::Cache) -> Option<Menu> {
+    (cache.has_vault && !cache.has_imported_bitcoin).then_some(Menu::Vault(VaultSubMenu::Settings(
+        Some(SettingsOption::ImportExport),
+    )))
+}
+
+fn data_exports_section<'a>(menu: &'a Menu, cache: &'a cache::Cache) -> Element<'a, Message> {
+    let vault_detail = if cache.has_imported_bitcoin {
+        "Imported Bitcoin data exports are unavailable in this version."
+    } else if cache.has_vault {
+        "Exported per Vault."
+    } else {
+        "No Vault in this Cube."
+    };
+
+    let recovery_row = card::simple(
+        Row::new()
+            .spacing(20)
+            .align_y(Alignment::Center)
+            .push(
+                Column::new()
+                    .spacing(4)
+                    .width(Length::Fill)
+                    .push(text("Recovery Kit").bold())
+                    .push(text("Managed in Backup & protection.").size(14)),
+            )
+            .push(
+                button::secondary(None, "Open Backup & protection")
+                    .on_press(Message::Menu(recovery_kit_route())),
+            ),
+    )
+    .width(Length::Fill);
+
+    let vault_row = card::simple(
+        Row::new()
+            .spacing(20)
+            .align_y(Alignment::Center)
+            .push(
+                Column::new()
+                    .spacing(4)
+                    .width(Length::Fill)
+                    .push(text("Vault files and records").bold())
+                    .push(text(vault_detail).size(14)),
+            )
+            .push(
+                button::secondary(None, "Open Vault data")
+                    .on_press_maybe(vault_data_route(cache).map(Message::Menu)),
+            ),
+    )
+    .width(Length::Fill);
+
+    dashboard(
+        menu,
+        cache,
+        Column::new()
+            .spacing(20)
+            .push(super::header(
+                "Data & exports",
+                SettingsMessage::DataExportsSection,
+            ))
+            .push(recovery_row)
+            .push(vault_row),
+    )
 }
 
 /// Recovery tab: local paper backup + Connect Recovery Kit + Vault Recovery
@@ -1396,6 +1491,40 @@ fn drift_warning_line(d: &DescriptorDrift) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cube_data_exports_reuses_only_available_destinations() {
+        assert!(matches!(
+            recovery_kit_route(),
+            Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Recovery))
+        ));
+        let regular = cache::Cache {
+            has_vault: true,
+            ..cache::Cache::default()
+        };
+        assert!(matches!(
+            vault_data_route(&regular),
+            Some(Menu::Vault(VaultSubMenu::Settings(Some(
+                SettingsOption::ImportExport
+            ))))
+        ));
+        let no_vault = cache::Cache::default();
+        assert!(vault_data_route(&no_vault).is_none());
+        let imported = cache::Cache {
+            has_vault: false,
+            has_imported_bitcoin: true,
+            ..cache::Cache::default()
+        };
+        assert!(vault_data_route(&imported).is_none());
+        // A stale cache must still fail closed instead of dispatching into an
+        // export panel that imported Bitcoin never constructs.
+        let inconsistent = cache::Cache {
+            has_vault: true,
+            has_imported_bitcoin: true,
+            ..cache::Cache::default()
+        };
+        assert!(vault_data_route(&inconsistent).is_none());
+    }
 
     #[test]
     fn no_drift_when_server_has_no_descriptor() {

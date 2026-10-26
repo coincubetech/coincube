@@ -435,6 +435,7 @@ impl std::fmt::Debug for BorderWalletReconMessage {
 
 #[derive(Debug, Clone)]
 pub enum SettingsMessage {
+    DataExportsSection,
     EditBitcoindSettings,
     BitcoindSettings(SettingsEditMessage),
     ElectrumSettings(SettingsEditMessage),
@@ -474,6 +475,7 @@ pub enum SettingsMessage {
     WalletAliasEdited(String),
     Save,
     GeneralSection,
+    PaymentChecksSection,
     /// Install the Recovery settings section (backup + Recovery Kit + alerts).
     RecoverySection,
     DisplayUnitChanged(BitcoinDisplayUnit),

@@ -952,6 +952,8 @@ async fn update_unit_setting(
 pub enum SettingsSection {
     /// App/display preferences (network, unit, display mode, badges, fiat).
     General,
+    PaymentChecks,
+    DataExports,
     /// Backup & recovery: local paper backup + Recovery Kit + Vault alerts.
     Recovery,
 }

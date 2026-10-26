@@ -18,7 +18,7 @@ pub enum CubeSubMenu {
     /// Cube landing / dashboard.
     Overview,
     /// Cube-level settings. The inner enum drives the third rail —
-    /// General / About / Stats / Avatar / Members.
+    /// General / Recovery / Payment checks / About / Stats / Avatar / Members.
     Settings(CubeSettingsOption),
 }
 
@@ -32,6 +32,10 @@ pub enum CubeSettingsOption {
     /// (password / Keychain), and Vault Recovery Alerts. Split out of General
     /// so each screen stays focused.
     Recovery,
+    /// Recipient verification controls, separate from display preferences.
+    PaymentChecks,
+    /// Cube-wide entry points for recovery and Vault-specific files.
+    DataExports,
     About,
     Stats,
     /// Avatar questionnaire / generation / reveal / management. Renders

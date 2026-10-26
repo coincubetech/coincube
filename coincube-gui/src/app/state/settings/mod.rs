@@ -97,6 +97,32 @@ impl State for SettingsState {
                     .map(|s| s.reload(daemon, None))
                     .unwrap_or_else(Task::none)
             }
+            Message::View(view::Message::Settings(view::SettingsMessage::PaymentChecksSection)) => {
+                self.setting = Some(
+                    GeneralSettingsState::new(
+                        self.cube_id.clone(),
+                        SettingsSection::PaymentChecks,
+                        self.current_price_setting.clone(),
+                        self.current_unit_setting.clone(),
+                        &cache.datadir_path,
+                    )
+                    .into(),
+                );
+                Task::none()
+            }
+            Message::View(view::Message::Settings(view::SettingsMessage::DataExportsSection)) => {
+                self.setting = Some(
+                    GeneralSettingsState::new(
+                        self.cube_id.clone(),
+                        SettingsSection::DataExports,
+                        self.current_price_setting.clone(),
+                        self.current_unit_setting.clone(),
+                        &cache.datadir_path,
+                    )
+                    .into(),
+                );
+                Task::none()
+            }
             Message::View(view::Message::Settings(view::SettingsMessage::RecoverySection)) => {
                 // Same content state, Recovery face — it hosts the local backup
                 // flow plus the Recovery-Kit and Vault-Alerts cards.
