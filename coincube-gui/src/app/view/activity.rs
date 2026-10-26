@@ -11,7 +11,10 @@ use coincube_ui::{
 #[allow(deprecated)]
 use iced::{
     advanced::widget::Id,
-    widget::{column, component, container, pick_list, row, rule, text_input, Component, Space},
+    widget::{
+        column, component, container, pick_list, row, rule, scrollable, text_input, Component,
+        Space,
+    },
     Alignment, Length,
 };
 
@@ -511,6 +514,11 @@ fn vault_confirmation_detail(height: i32, tip: i32) -> String {
 const MIN_ACTIVITY_LIST_WIDTH: f32 = 44.0 + 112.0 + 180.0 + 128.0 + 132.0 + 4.0 * 12.0;
 const SELECTED_DETAIL_WIDTH: f32 = 420.0;
 const DETAIL_GAP: f32 = 0.0;
+// The dashboard itself scrolls, so a bounded split keeps the detail visible
+// while a deep activity row is brought into the list viewport.
+const WIDE_ACTIVITY_PANE_HEIGHT: f32 = 560.0;
+const ACTIVITY_LIST_SCROLL_ID: &str = "tenshu.activity.list.scroll";
+const ACTIVITY_DETAIL_SCROLL_ID: &str = "tenshu.activity.detail.scroll";
 
 fn detail_beside_list(width: f32) -> bool {
     width >= MIN_ACTIVITY_LIST_WIDTH + SELECTED_DETAIL_WIDTH + DETAIL_GAP
@@ -1287,15 +1295,27 @@ fn render_at_width<'a>(
         }
         list = list.push(more);
     }
-    let main: Element<'a, Message> = list.width(Length::Fill).into();
-    if let Some(detail) = selected_detail {
-        column![
-            heading,
-            row![main, detail.width(Length::Fixed(SELECTED_DETAIL_WIDTH))].spacing(DETAIL_GAP)
-        ]
-        .spacing(16)
-        .into()
+    if detail_beside_list(width) {
+        let main = scrollable(list.width(Length::Fill))
+            .id(Id::from(ACTIVITY_LIST_SCROLL_ID))
+            .width(Length::Fill)
+            .height(Length::Fixed(WIDE_ACTIVITY_PANE_HEIGHT));
+        let split: Element<'a, Message> = if let Some(detail) = selected_detail {
+            row![
+                main,
+                scrollable(detail)
+                    .id(Id::from(ACTIVITY_DETAIL_SCROLL_ID))
+                    .width(Length::Fixed(SELECTED_DETAIL_WIDTH))
+                    .height(Length::Fixed(WIDE_ACTIVITY_PANE_HEIGHT))
+            ]
+            .spacing(DETAIL_GAP)
+            .into()
+        } else {
+            main.into()
+        };
+        column![heading, split].spacing(16).into()
     } else {
+        let main: Element<'a, Message> = list.width(Length::Fill).into();
         column![heading, main].spacing(16).into()
     }
 }
@@ -1617,6 +1637,153 @@ mod tests {
         let close = position(Id::from("tenshu.activity.detail.close")).expect("detail mounted");
         let next = position(row_focus_id(&next_id)).expect("next row mounted");
         assert!(selected < close && close < next);
+    }
+
+    #[test]
+    fn wide_deep_selection_keeps_detail_visible_while_list_scrolls() {
+        use iced::advanced::{
+            layout,
+            renderer::Headless,
+            widget::{operation, operation::Scrollable, Layout, Operation, Tree},
+        };
+        use iced::{Rectangle, Size, Vector};
+
+        #[derive(Default)]
+        struct Probe {
+            panes: Vec<(Id, Rectangle, Rectangle, Vector)>,
+            rows: Vec<(Id, Rectangle)>,
+        }
+        impl Operation for Probe {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn scrollable(
+                &mut self,
+                id: Option<&Id>,
+                bounds: Rectangle,
+                content: Rectangle,
+                translation: Vector,
+                _state: &mut dyn Scrollable,
+            ) {
+                if let Some(id) = id {
+                    self.panes.push((id.clone(), bounds, content, translation));
+                }
+            }
+            fn focusable(
+                &mut self,
+                id: Option<&Id>,
+                bounds: Rectangle,
+                _state: &mut dyn operation::Focusable,
+            ) {
+                if let Some(id) = id {
+                    self.rows.push((id.clone(), bounds));
+                }
+            }
+        }
+
+        let cache = Cache::default();
+        let mut activity = Activity::new(None, None);
+        let payments: Vec<_> = (0..30)
+            .map(|index| {
+                let mut payment = spark_payment();
+                payment.id = format!("wide-pay-{index}");
+                payment.description = Some(format!("Payment {index}"));
+                payment.timestamp -= index * 60;
+                payment
+            })
+            .collect();
+        let selected_id = Entry::spark(payments[20].clone()).id;
+        drop(activity.update(
+            None,
+            &cache,
+            crate::app::message::Message::ActivitySparkLoaded(0, Ok((payments, false))),
+        ));
+        activity.selected_id = Some(selected_id.clone());
+        for (appearance, theme) in [
+            ("dark", coincube_ui::theme::Theme::dark()),
+            ("light", coincube_ui::theme::Theme::light()),
+        ] {
+            let mounted = capture::inspect_wide_content(
+                "r09-activity-deep-wide-detail",
+                render_at_width(&activity, &cache, 1144.0),
+                (1440, 900),
+                appearance,
+                theme,
+                1144,
+            );
+            assert!(mounted.contains("Payment 20"));
+            assert!(mounted.contains("× Close"));
+        }
+
+        for bytes in font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(bytes);
+        }
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let mut element: Element<'_, Message> =
+            scrollable(render_at_width(&activity, &cache, 1144.0))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into();
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, Size::new(1144.0, 800.0)),
+        );
+        let inspect = |element: &mut Element<'_, Message>, tree: &mut Tree| {
+            let mut probe = Probe::default();
+            element
+                .as_widget_mut()
+                .operate(tree, Layout::new(&node), &renderer, &mut probe);
+            probe
+        };
+        let before = inspect(&mut element, &mut tree);
+        fn pane<'p>(probe: &'p Probe, id: &str) -> &'p (Id, Rectangle, Rectangle, Vector) {
+            probe
+                .panes
+                .iter()
+                .find(|(actual, _, _, _)| *actual == Id::from(id))
+                .expect("independent Activity pane")
+        }
+        let (_, list_bounds, list_content, _) = pane(&before, ACTIVITY_LIST_SCROLL_ID);
+        let (_, detail_bounds, _, detail_before) = pane(&before, ACTIVITY_DETAIL_SCROLL_ID);
+        assert!(list_content.height > list_bounds.height + 500.0);
+        assert!((list_bounds.y - detail_bounds.y).abs() < 1.0);
+        assert!(detail_bounds.y + detail_bounds.height <= 800.0);
+        let row_bounds = before
+            .rows
+            .iter()
+            .find(|(id, _)| *id == row_focus_id(&selected_id))
+            .expect("deep selected row")
+            .1;
+        assert!(row_bounds.y > list_bounds.y + list_bounds.height);
+        let offset = row_bounds.y - list_bounds.y - 100.0;
+        let mut scroll = operation::scrollable::scroll_to::<()>(
+            Id::from(ACTIVITY_LIST_SCROLL_ID),
+            operation::scrollable::AbsoluteOffset {
+                x: None,
+                y: Some(offset),
+            },
+        );
+        element
+            .as_widget_mut()
+            .operate(&mut tree, Layout::new(&node), &renderer, &mut scroll);
+        let after = inspect(&mut element, &mut tree);
+        let (_, _, _, list_after) = pane(&after, ACTIVITY_LIST_SCROLL_ID);
+        let (_, _, _, detail_after) = pane(&after, ACTIVITY_DETAIL_SCROLL_ID);
+        assert!(list_after.y > 500.0);
+        assert_eq!(detail_before.y, detail_after.y);
+        let selected_visible_y = row_bounds.y - list_after.y;
+        assert!(selected_visible_y >= list_bounds.y);
+        assert!(selected_visible_y < list_bounds.y + list_bounds.height);
     }
 
     #[test]
