@@ -11217,17 +11217,27 @@ impl App {
             // The Spark landing reuses the Connect-owned address form and its
             // confirmation. No second address or auth state lives in Overview.
             let address = if self.panels.connect.account.is_authenticated() {
-                view::spark::settings::lightning_address::lightning_address_ux(
-                    &self.panels.connect.cube,
-                )
-                .map(view::Message::ConnectCube)
+                view::spark::overview::spark_landing_address(&self.panels.connect.cube)
             } else {
                 view::connect::sign_in_prompt::sign_in_prompt("claim a Lightning Address")
             };
-            self.panels.spark_overview.view_with_address(
+            let confirmation = self
+                .panels
+                .connect
+                .account
+                .is_authenticated()
+                .then(|| {
+                    view::spark::settings::lightning_address::lightning_address_confirmation(
+                        &self.panels.connect.cube,
+                    )
+                })
+                .flatten()
+                .map(|dialog| dialog.map(view::Message::ConnectCube));
+            self.panels.spark_overview.view_with_address_overlay(
                 &self.panels.current,
                 &self.cache,
-                Some(address),
+                address,
+                confirmation,
             )
         } else if let Some(content) = self.connect_settings_content() {
             // Connect-dependent settings sub-pages (Spark → Settings →
