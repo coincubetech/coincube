@@ -383,6 +383,9 @@ impl State for SparkReceive {
                 // A Bitcoin rail: clear any cross-network flow, set the method,
                 // close the picker.
                 self.sender_picker_open = false;
+                if self.sideshift_flow.is_none() && self.method == method {
+                    return Task::none();
+                }
                 self.sideshift_flow = None;
                 self.method = method;
                 self.phase = SparkReceivePhase::Idle;
@@ -1199,6 +1202,23 @@ mod tests {
         assert!(matches!(panel.phase(), SparkReceivePhase::Idle));
         assert!(panel.qr_data.is_none());
         assert!(panel.displayed_invoice.is_none());
+    }
+
+    #[test]
+    fn selecting_current_method_keeps_live_invoice() {
+        let mut panel = SparkReceive::new(None);
+        update(
+            &mut panel,
+            SparkReceiveMessage::GenerateSucceeded(receive_ok("lnbc1invoice")),
+        );
+
+        update(
+            &mut panel,
+            SparkReceiveMessage::SelectSenderRail(SparkReceiveMethod::Bolt11),
+        );
+
+        assert!(matches!(panel.phase(), SparkReceivePhase::Generated(_)));
+        assert_eq!(panel.displayed_invoice.as_deref(), Some("lnbc1invoice"));
     }
 
     #[test]

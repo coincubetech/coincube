@@ -229,6 +229,7 @@ impl State for LiquidReceive {
             self.onchain_receive_limits,
             self.receive_asset,
             self.sender_network,
+            usdt_asset_id(self.breez_client.network()).is_some(),
             &self.recent_transaction,
             self.btc_balance,
             self.usdt_balance,
@@ -608,6 +609,11 @@ impl State for LiquidReceive {
                 }
                 LiquidReceiveMessage::SetReceiveAsset(asset) => {
                     self.receive_picker_open = false;
+                    if asset == SendAsset::Usdt
+                        && usdt_asset_id(self.breez_client.network()).is_none()
+                    {
+                        return Task::none();
+                    }
                     if self.receive_asset != asset {
                         self.receive_asset = asset;
                         self.sideshift_flow = None;
@@ -634,6 +640,20 @@ impl State for LiquidReceive {
                 }
                 LiquidReceiveMessage::SetSenderNetwork(network) => {
                     self.sender_picker_open = false;
+                    if !SenderNetwork::options_for_receive_asset(self.receive_asset)
+                        .contains(&network)
+                    {
+                        return Task::none();
+                    }
+                    if network.is_sideshift()
+                        && self.breez_client.network()
+                            != breez_sdk_liquid::bitcoin::Network::Bitcoin
+                    {
+                        return Task::none();
+                    }
+                    if self.sender_network == network {
+                        return Task::none();
+                    }
                     self.sender_network = network;
                     self.sideshift_flow = None;
                     self.error = None;

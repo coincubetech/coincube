@@ -106,11 +106,23 @@ impl<'a> SparkReceiveView<'a> {
 
         let mut content = Column::new().spacing(20);
 
-        // ── Two-card selector: YOU RECEIVE (Bitcoin) ← THEY SEND ───────
-        // Replaces the old Method chips + "Receive from another network" card.
-        // Tapping the THEY SEND card opens the unified picker modal (Bitcoin
-        // rails + cross-network assets), wired at the state's `view()` since the
-        // picker-open flag lives there.
+        content = content.push(
+            Column::new()
+                .spacing(4)
+                .push(h3("Receive").bold())
+                .push(p2_regular("Spark wallet").style(theme::text::secondary)),
+        );
+
+        content = content.push(receive_kind_selector(
+            self.cross_network_selected.is_some(),
+            self.network,
+        ));
+
+        if self.cross_network_selected.is_none() {
+            content = content.push(bitcoin_method_selector(self.method));
+        }
+
+        // Keep the Send-like route summary below the asset and method selectors.
         content = content.push(spark_receive_cards(
             self.method,
             self.cross_network_selected,
@@ -230,6 +242,70 @@ impl<'a> SparkReceiveView<'a> {
 
         content.into()
     }
+}
+
+fn receive_kind_selector(stablecoin: bool, network: Network) -> Element<'static, Message> {
+    let mut stable = button::secondary(
+        None,
+        if stablecoin {
+            "Stablecoin ✓"
+        } else {
+            "Stablecoin"
+        },
+    );
+    if supported_on(network) {
+        stable = stable.on_press(Message::SparkReceive(SparkReceiveMessage::OpenSenderPicker));
+    }
+    let mut selector = Row::new()
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .push(p2_bold("Receive"))
+        .push(
+            button::secondary(None, if stablecoin { "Bitcoin" } else { "Bitcoin ✓" }).on_press(
+                Message::SparkReceive(SparkReceiveMessage::SelectSenderRail(
+                    SparkReceiveMethod::Bolt11,
+                )),
+            ),
+        )
+        .push(stable);
+    if !supported_on(network) {
+        selector = selector.push(p2_regular("Stablecoin deposits require Bitcoin mainnet."));
+    }
+    selector.into()
+}
+
+fn bitcoin_method_selector(current: SparkReceiveMethod) -> Element<'static, Message> {
+    let mut row = Row::new().spacing(8).align_y(Alignment::Center);
+    for (method, label) in [
+        (SparkReceiveMethod::Bolt11, "Lightning invoice"),
+        (SparkReceiveMethod::Spark, "Spark address"),
+        (SparkReceiveMethod::OnchainBitcoin, "Bitcoin deposit"),
+    ] {
+        row = row.push(
+            iced_button(text(if current == method {
+                format!("{label} ✓")
+            } else {
+                label.to_string()
+            }))
+            .padding(10)
+            .style(theme::button::secondary)
+            .on_press(Message::SparkReceive(
+                SparkReceiveMessage::SelectSenderRail(method),
+            )),
+        );
+    }
+    Column::new()
+        .spacing(8)
+        .push(row)
+        .push(
+            button::transparent_border(None, "Lightning address · manage in Spark settings")
+                .on_press(Message::Menu(crate::app::menu::Menu::Spark(
+                    crate::app::menu::SparkSubMenu::Settings(Some(
+                        crate::app::menu::SparkSettingsOption::LightningAddress,
+                    )),
+                ))),
+        )
+        .into()
 }
 
 fn pending_deposits_card<'a>(
@@ -525,7 +601,7 @@ fn spark_receive_cards<'a>(
         .style(theme::card::simple),
     )
     .padding(0)
-    .on_press(Message::SparkReceive(SparkReceiveMessage::OpenSenderPicker))
+    .on_press_maybe(cross.map(|_| Message::SparkReceive(SparkReceiveMessage::OpenSenderPicker)))
     .style(card_button_style);
 
     Row::new()
@@ -642,37 +718,20 @@ fn picker_row_selected(theme: &theme::Theme) -> container::Style {
     }
 }
 
-/// The "THEY SEND" picker modal: Bitcoin rails, then (mainnet only) the
-/// cross-network deposit assets. Overlaid by the state's `view()`.
+/// The Stablecoin rail picker. Options come from the validated SideShift
+/// deposit list, not from the prototype's synthetic network fixtures.
 ///
 /// `cross` is the cross-network asset a running SideShift flow is set to. While
 /// one is up it — not the Bitcoin rail underneath — is what the panel is
 /// actually set to receive, so it carries the checkmark.
 pub fn sender_picker_modal<'a>(
-    current: SparkReceiveMethod,
+    _current: SparkReceiveMethod,
     cross: Option<DepositOption>,
     network: Network,
 ) -> Element<'a, Message> {
     let is_mainnet = supported_on(network);
 
-    let mut list = Column::new()
-        .spacing(8)
-        .push(text("Bitcoin").size(P2_SIZE).style(theme::text::secondary));
-
-    for method in [
-        SparkReceiveMethod::Bolt11,
-        SparkReceiveMethod::OnchainBitcoin,
-        SparkReceiveMethod::Spark,
-    ] {
-        let (net_slug, badge) = rail_display(method);
-        list = list.push(spark_picker_row(
-            asset_network_logo("btc", net_slug, 36.0),
-            "Bitcoin",
-            badge,
-            cross.is_none() && current == method,
-            Message::SparkReceive(SparkReceiveMessage::SelectSenderRail(method)),
-        ));
-    }
+    let mut list = Column::new().spacing(8);
 
     if is_mainnet {
         list = list.push(Space::new().height(Length::Fixed(6.0))).push(
@@ -706,7 +765,7 @@ pub fn sender_picker_modal<'a>(
         list.into()
     };
 
-    picker_modal_card("THEY SEND", body)
+    picker_modal_card("Stablecoin · they send", body)
 }
 
 fn phase_body<'a>(
@@ -830,6 +889,29 @@ mod tests {
     use crate::app::cache::Cache;
     use crate::app::state::preferences::{BalancePrivacy, BalancePrivacyChrome};
     use crate::app::view::shared::landing::capture;
+
+    #[test]
+    fn receive_selectors_show_supported_methods_and_mainnet_gate() {
+        let methods = capture::inspect(
+            "spark-receive-methods",
+            bitcoin_method_selector(SparkReceiveMethod::Bolt11),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        for label in ["Lightning invoice", "Spark address", "Bitcoin deposit"] {
+            assert!(methods.contains(label));
+        }
+
+        let regtest = capture::inspect(
+            "spark-receive-regtest",
+            receive_kind_selector(false, Network::Regtest),
+            (1024, 768),
+            "light",
+            theme::Theme::light(),
+        );
+        assert!(regtest.contains("Stablecoin deposits require Bitcoin mainnet"));
+    }
 
     #[test]
     fn pending_deposit_amount_follows_passive_privacy_authority() {

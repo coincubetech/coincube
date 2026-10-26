@@ -45,6 +45,7 @@ pub fn liquid_receive_view<'a>(
     onchain_limits: Option<(u64, u64)>,
     receive_asset: SendAsset,
     sender_network: SenderNetwork,
+    stablecoin_available: bool,
     recent_transaction: &[RecentTransaction],
     btc_balance: Amount,
     usdt_balance: u64,
@@ -52,6 +53,19 @@ pub fn liquid_receive_view<'a>(
     mask_amounts: bool,
 ) -> Element<'a, LiquidReceiveMessage> {
     let mut content = Column::new().spacing(20).width(Length::Fill);
+
+    content = content.push(
+        Column::new()
+            .spacing(4)
+            .push(h3("Receive").bold())
+            .push(p2_regular("Liquid wallet").style(theme::text::secondary)),
+    );
+
+    // Asset first, then only the receive rails implemented for that asset.
+    // The sender-network picker is the validated SideShift entry for USDt;
+    // it never turns prototype rail fixtures into wallet capabilities.
+    content = content.push(receive_kind_selector(receive_asset, stablecoin_available));
+    content = content.push(receive_method_selector(receive_asset, sender_network));
 
     // ── Two-card "You Receive ← They Send" layout ───────────────────────────
     content = content.push(receive_cards(
@@ -101,7 +115,7 @@ pub fn liquid_receive_view<'a>(
         content = content.push(crate::loading::loading_indicator(Some(
             "Generating Address",
         )));
-    } else if let (Some(addr), Some(_qr)) = (address, qr_data) {
+    } else if let Some(addr) = address {
         // Clean on-chain addresses for display
         let display_addr = if *receive_method == ReceiveMethod::OnChain {
             let cleaned = addr.strip_prefix("bitcoin:").unwrap_or(addr);
@@ -147,9 +161,13 @@ pub fn liquid_receive_view<'a>(
             button_row = button_row.push(Space::new().width(Length::Fill));
         }
 
-        button_row = button_row.push(
-            button::secondary(None, "Show QR Code").on_press(LiquidReceiveMessage::ShowQrCode),
-        );
+        if qr_data.is_some() {
+            button_row = button_row.push(
+                button::secondary(None, "Show QR Code").on_press(LiquidReceiveMessage::ShowQrCode),
+            );
+        } else {
+            button_row = button_row.push(p2_regular("QR unavailable · copy the address instead"));
+        }
 
         // Descriptive text inside the card
         let description = match receive_method {
@@ -350,6 +368,80 @@ pub fn liquid_receive_view<'a>(
     } else {
         content.into()
     }
+}
+
+fn receive_kind_selector(
+    asset: SendAsset,
+    stablecoin_available: bool,
+) -> Element<'static, LiquidReceiveMessage> {
+    let mut selector = Row::new()
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .push(p2_bold("Receive"))
+        .push(
+            button::secondary(
+                None,
+                if asset == SendAsset::Lbtc {
+                    "Bitcoin ✓"
+                } else {
+                    "Bitcoin"
+                },
+            )
+            .on_press(LiquidReceiveMessage::SetReceiveAsset(SendAsset::Lbtc)),
+        )
+        .push(
+            button::secondary(
+                None,
+                if asset == SendAsset::Usdt {
+                    "Stablecoin ✓"
+                } else {
+                    "Stablecoin"
+                },
+            )
+            .on_press_maybe(
+                stablecoin_available
+                    .then_some(LiquidReceiveMessage::SetReceiveAsset(SendAsset::Usdt)),
+            ),
+        );
+    if !stablecoin_available {
+        selector = selector.push(p2_regular("USDt is unavailable on this network."));
+    }
+    selector.into()
+}
+
+fn receive_method_selector(
+    asset: SendAsset,
+    sender: SenderNetwork,
+) -> Element<'static, LiquidReceiveMessage> {
+    let mut row = Row::new().spacing(8).align_y(Alignment::Center);
+    let methods: &[(SenderNetwork, &str)] = if asset == SendAsset::Lbtc {
+        &[
+            (SenderNetwork::Lightning, "Lightning invoice"),
+            (SenderNetwork::Liquid, "Liquid address"),
+            (SenderNetwork::Bitcoin, "Bitcoin swap"),
+        ]
+    } else {
+        &[(SenderNetwork::Liquid, "Liquid USDt address")]
+    };
+    for (network, label) in methods {
+        row = row.push(
+            iced_button(text(if sender == *network {
+                format!("{label} ✓")
+            } else {
+                label.to_string()
+            }))
+            .padding(10)
+            .style(theme::button::secondary)
+            .on_press(LiquidReceiveMessage::SetSenderNetwork(*network)),
+        );
+    }
+    if asset == SendAsset::Usdt {
+        row = row.push(
+            button::secondary(None, "From another network")
+                .on_press(LiquidReceiveMessage::OpenSenderPicker),
+        );
+    }
+    row.into()
 }
 
 #[allow(dead_code)]
@@ -1372,6 +1464,54 @@ mod privacy_tests {
     use crate::app::view::shared::landing::capture;
 
     #[test]
+    fn address_remains_copyable_when_qr_encoding_is_unavailable() {
+        let input = form::Value::<String>::default();
+        let address = "lq1q-test-address".to_string();
+        let mounted = capture::inspect(
+            "liquid-receive-no-qr",
+            liquid_receive_view(
+                &ReceiveMethod::Liquid,
+                Some(&address),
+                None,
+                false,
+                &input,
+                &input,
+                "",
+                BitcoinDisplayUnit::Sats,
+                None,
+                None,
+                None,
+                SendAsset::Lbtc,
+                SenderNetwork::Liquid,
+                true,
+                &[],
+                Amount::ZERO,
+                0,
+                false,
+                false,
+            ),
+            (1024, 768),
+            "light",
+            theme::Theme::light(),
+        );
+        assert!(mounted.contains(&address));
+        assert!(mounted.contains("QR unavailable"));
+    }
+
+    #[test]
+    fn unavailable_stablecoin_has_network_explanation() {
+        let mounted = capture::inspect(
+            "liquid-receive-regtest",
+            receive_kind_selector(SendAsset::Lbtc, false),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(mounted.contains("Stablecoin"));
+        assert!(mounted.contains("USDt is unavailable on this network"));
+    }
+
+    #[test]
     fn receive_passive_balances_and_recent_rows_follow_global_mask() {
         let input = form::Value::<String>::default();
         let rows = vec![
@@ -1429,6 +1569,7 @@ mod privacy_tests {
                 None,
                 receive_asset,
                 SenderNetwork::Liquid,
+                true,
                 &rows,
                 Amount::from_sat(12_345_678),
                 135_791_113,
