@@ -292,6 +292,208 @@ fn no_cube_signed_out_launcher_close_focuses_mounted_sign_in() {
     });
 }
 
+#[test]
+fn launcher_auth_changes_return_focus_to_mounted_control() {
+    with_runtime("connect-launcher-auth-focus", |path, _| {
+        for catalog in [false, true] {
+            for signed_in_at_open in [false, true] {
+                for escape in [false, true] {
+                    let root = CoincubeDirectory::new(path.to_path_buf());
+                    let mut gui = launcher_gui(&root);
+                    let pane_id = gui.focus.unwrap();
+                    let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
+                    let tab::State::Home(home) =
+                        &mut gui.panes.get_mut(pane_id).unwrap().tabs[0].state
+                    else {
+                        unreachable!()
+                    };
+                    if catalog {
+                        drop(home.update(home::Message::Checked {
+                            for_chain: crate::chain::ChainId::Bitcoin,
+                            res: Ok(home::State::Cubes {
+                                cubes: Vec::new(),
+                                create_cube: false,
+                                source: crate::chain::ChainId::Bitcoin,
+                            }),
+                        }));
+                    }
+                    if !signed_in_at_open {
+                        home.connect_account.step =
+                            crate::app::state::connect::ConnectFlowStep::Login {
+                                email: String::new(),
+                                loading: false,
+                            };
+                    }
+                    if signed_in_at_open {
+                        sign_in_home(&mut gui, pane_id);
+                    }
+                    launcher_connect_entry(&mut gui, pane_id, tab_id);
+                    let origin = gui.connect_sheet.as_ref().unwrap().origin.clone();
+                    let tab::State::Home(home) =
+                        &mut gui.panes.get_mut(pane_id).unwrap().tabs[0].state
+                    else {
+                        unreachable!()
+                    };
+                    if signed_in_at_open {
+                        home.connect_account.user = None;
+                        home.connect_account.step =
+                            crate::app::state::connect::ConnectFlowStep::Login {
+                                email: String::new(),
+                                loading: false,
+                            };
+                    } else {
+                        sign_in_home(&mut gui, pane_id);
+                    }
+                    let expected = match &gui.panes.get(pane_id).unwrap().tabs[0].state {
+                        tab::State::Home(home) => home.connect_sheet_origin_id(),
+                        _ => unreachable!(),
+                    };
+                    assert_ne!(origin.focus, Some(expected.clone()));
+                    assert_eq!(gui.connect_return_focus(&origin), Some(expected.clone()));
+                    let task = if escape {
+                        gui.update(Message::KeyPressed(Key::Escape))
+                    } else {
+                        gui.update(Message::ConnectSheet(ConnectSheetMessage::Close))
+                    };
+                    assert!(task.units() > 0);
+                    assert!(gui.connect_sheet.is_none());
+                    assert_focus_target_mounted(&gui, expected);
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn cube_auth_changes_return_focus_to_mounted_control() {
+    with_runtime("connect-cube-auth-focus", |path, _| {
+        for signed_in_at_open in [false, true] {
+            for escape in [false, true] {
+                let (mut app, _) = app::claim_step1_tests::bitcoin_app(path);
+                if signed_in_at_open {
+                    app::claim_step1_tests::signed_in_connect_for_shell(&mut app);
+                    app.cache_mut().sidebar_connect_signed_in = true;
+                }
+                let (panes, pane_id) =
+                    pane_grid::State::new(pane::Pane::new_with_tab(tab::State::App(app)));
+                let mut gui = GUI {
+                    panes,
+                    focus: Some(pane_id),
+                    config: Config::new(CoincubeDirectory::new(path.to_path_buf()), None),
+                    window_id: None,
+                    window_init: None,
+                    window_config: None,
+                    global_cache: GlobalCache::default(),
+                    theme_mode: Default::default(),
+                    system_theme: None,
+                    system_reduces_motion: None,
+                    preferences_sheet: None,
+                    connect_sheet: None,
+                    preferences: unresolved_test_preferences(),
+                };
+                let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
+                drop(gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::tab(
+                        tab_id,
+                        tab::Message::Run(AppMessage::View(view::Message::OpenConnectSignIn)),
+                    ),
+                )));
+                let origin = gui.connect_sheet.as_ref().unwrap().origin.clone();
+                let tab::State::App(app) = &mut gui.panes.get_mut(pane_id).unwrap().tabs[0].state
+                else {
+                    unreachable!()
+                };
+                let account = app.connect_sheet_account_mut();
+                if signed_in_at_open {
+                    account.user = None;
+                    account.step = crate::app::state::connect::ConnectFlowStep::Login {
+                        email: String::new(),
+                        loading: false,
+                    };
+                } else {
+                    account.user = Some(crate::services::coincube::User {
+                        id: 7,
+                        email: "shell@example.invalid".into(),
+                        email_verified: Some(true),
+                    });
+                    account.step = crate::app::state::connect::ConnectFlowStep::Dashboard;
+                }
+                app.cache_mut().connect_authenticated = !signed_in_at_open;
+                app.cache_mut().sidebar_connect_signed_in = !signed_in_at_open;
+                let expected = iced::advanced::widget::Id::new(if signed_in_at_open {
+                    "tenshu.connect.sign-in"
+                } else {
+                    "tenshu.connect.account"
+                });
+                assert_ne!(origin.focus, Some(expected.clone()));
+                assert_eq!(gui.connect_return_focus(&origin), Some(expected.clone()));
+                let task = if escape {
+                    gui.update(Message::KeyPressed(Key::Escape))
+                } else {
+                    gui.update(Message::ConnectSheet(ConnectSheetMessage::Close))
+                };
+                assert!(task.units() > 0);
+                assert!(gui.connect_sheet.is_none());
+                assert_focus_target_mounted(&gui, expected);
+            }
+        }
+    });
+}
+
+#[test]
+fn launcher_sheet_sign_out_invalidates_sibling_cube_session() {
+    with_runtime("connect-sheet-global-sign-out", |path, _| {
+        let root = CoincubeDirectory::new(path.to_path_buf());
+        let (app, _) = app::claim_step1_tests::bitcoin_app(path);
+        let (mut home, startup) = home::Home::new_for_chain(root, None);
+        drop(startup);
+        for _ in crate::hw_advisory::ADVISORIES {
+            drop(home.update(home::Message::View(
+                home::ViewMessage::DismissAdvisoryNotice,
+            )));
+        }
+        home.connect_account.user = Some(crate::services::coincube::User {
+            id: 7,
+            email: "shell@example.invalid".into(),
+            email_verified: Some(true),
+        });
+        home.connect_account.step = crate::app::state::connect::ConnectFlowStep::Dashboard;
+        let mut gui = GUI::reviewer_app_home_gui(app, home);
+        let pane_id = gui.focus.unwrap();
+        gui.panes.get_mut(pane_id).unwrap().focused_tab = 1;
+        launcher_connect_entry(&mut gui, pane_id, 2);
+        assert_eq!(gui.connect_sheet.as_ref().unwrap().origin.tab_id, 2);
+        let before_epoch = match &gui.panes.get(pane_id).unwrap().tabs[1].state {
+            tab::State::Home(home) => home.connect_account.auth_epoch(),
+            _ => unreachable!(),
+        };
+        let before_generation =
+            gui.panes.get(pane_id).unwrap().tabs[0].reviewer_fork_session_generation();
+
+        drop(
+            gui.update(Message::ConnectSheet(ConnectSheetMessage::Account(
+                view::ConnectAccountMessage::LogOut,
+            ))),
+        );
+
+        let after_epoch = match &gui.panes.get(pane_id).unwrap().tabs[1].state {
+            tab::State::Home(home) => home.connect_account.auth_epoch(),
+            _ => unreachable!(),
+        };
+        let after_generation =
+            gui.panes.get(pane_id).unwrap().tabs[0].reviewer_fork_session_generation();
+        assert!(
+            after_epoch > before_epoch,
+            "originating Home did not invalidate auth"
+        );
+        assert!(
+            after_generation > before_generation,
+            "sibling Cube did not invalidate its session"
+        );
+    });
+}
+
 /// P3: signed out, the Launcher's "Sign In" entry opens the sign-in screen
 /// (review doc: "signed out, its Connect entry ... opens the V6 sign-in screen").
 #[test]

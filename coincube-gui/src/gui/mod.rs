@@ -651,13 +651,41 @@ impl GUI {
             return Task::none();
         };
         if self.overlay_origin_is_current(&sheet.origin) {
-            if let Some(focus) = sheet.origin.focus {
+            if let Some(focus) = self.connect_return_focus(&sheet.origin) {
                 return iced_runtime::task::widget(
                     iced::advanced::widget::operation::focusable::focus(focus),
                 );
             }
         }
         Task::none()
+    }
+
+    fn connect_return_focus(&self, origin: &OverlayOrigin) -> Option<iced::advanced::widget::Id> {
+        let saved = origin.focus.as_ref()?;
+        let tab = self
+            .panes
+            .get(origin.pane)?
+            .tabs
+            .iter()
+            .find(|tab| tab.id == origin.tab_id)?;
+        match &tab.state {
+            // The Launcher renders one of two Connect controls in each mode.
+            // Authentication may have replaced the control while the sheet was open.
+            tab::State::Home(home) => home.connect_sheet_return_id(saved),
+            tab::State::App(app)
+                if *saved == iced::advanced::widget::Id::new("tenshu.connect.sign-in")
+                    || *saved == iced::advanced::widget::Id::new("tenshu.connect.account") =>
+            {
+                Some(iced::advanced::widget::Id::new(
+                    if app.cache().sidebar_connect_signed_in {
+                        "tenshu.connect.account"
+                    } else {
+                        "tenshu.connect.sign-in"
+                    },
+                ))
+            }
+            _ => Some(saved.clone()),
+        }
     }
 
     fn open_connect_sheet(
@@ -776,9 +804,13 @@ impl GUI {
                         | crate::app::view::ConnectAccountMessage::RenewCurrentPlan
                 );
                 let inner = match origin.source {
-                    tab::PreferencesSource::Home => tab::Message::Launch(home::Message::View(
-                        home::ViewMessage::ConnectSheetAccount(message),
-                    )),
+                    tab::PreferencesSource::Home => {
+                        tab::Message::Launch(home::Message::View(if plan_navigation {
+                            home::ViewMessage::ConnectSheetAccount(message)
+                        } else {
+                            home::ViewMessage::ConnectAccount(message)
+                        }))
+                    }
                     tab::PreferencesSource::App(_) => tab::Message::Run(AppMessage::View(
                         crate::app::view::Message::ConnectAccount(message),
                     )),

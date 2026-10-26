@@ -5192,6 +5192,22 @@ impl Home {
         Id::new(LEGACY_CONNECT_ENTRY_ID)
     }
 
+    /// Replace a saved Connect control only when it belongs to the Launcher.
+    /// Other sheet triggers retain their exact return target.
+    pub(crate) fn connect_sheet_return_id(&self, saved: &Id) -> Option<Id> {
+        if *saved == launcher_catalog::connect_id()
+            || *saved == launcher_catalog::sign_in_id()
+            || *saved == Id::new(LEGACY_CONNECT_ENTRY_ID)
+            || *saved == Id::new(LEGACY_CONNECT_SIGN_IN_ID)
+        {
+            // Both Launcher modes replace their action with status-only copy
+            // during a pending session check, so there is no control to focus.
+            (!self.connect_account.is_checking_session()).then(|| self.connect_sheet_origin_id())
+        } else {
+            Some(saved.clone())
+        }
+    }
+
     pub fn view(&self) -> Element<Message> {
         // The visible Launcher List has its own compact chrome and owns its
         // body scrolling. Every other Home screen keeps the legacy frame.
