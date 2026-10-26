@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod buysell;
 pub mod connect;
 mod global_home;

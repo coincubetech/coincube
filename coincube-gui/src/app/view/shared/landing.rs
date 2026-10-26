@@ -303,6 +303,19 @@ pub(crate) mod capture {
         inspect_at_width(scenario, content, outer, appearance, theme, outer.0)
     }
 
+    /// Activity uses the wide dashboard body rather than the ordinary 8/10
+    /// content width. Match its measured shell width for layout captures.
+    pub fn inspect_wide_content<M: 'static>(
+        scenario: &str,
+        content: Element<'_, M>,
+        outer: (u32, u32),
+        appearance: &str,
+        theme: theme::Theme,
+        content_width: u32,
+    ) -> Inspection {
+        inspect_at_width(scenario, content, outer, appearance, theme, content_width)
+    }
+
     fn inspect_at_width<M: 'static>(
         scenario: &str,
         content: Element<'_, M>,

@@ -98,6 +98,7 @@ impl ToastContent {
 
 struct Panels {
     current: Menu,
+    activity: state::activity::Activity,
     imported_bitcoin: Option<Box<state::imported_bitcoin::ImportedBitcoinPanel>>,
     // Always available panels
     global_home: GlobalHome,
@@ -224,6 +225,10 @@ impl Panels {
 
         Self {
             current: Menu::Cube(crate::app::menu::CubeSubMenu::Overview),
+            activity: state::activity::Activity::new(
+                Some(liquid_backend.clone()),
+                spark_backend.clone(),
+            ),
             imported_bitcoin: bitcoin_import.map(|import| {
                 let mut panel = state::imported_bitcoin::ImportedBitcoinPanel::new(
                     datadir.network_directory(chain),
@@ -353,6 +358,7 @@ impl Panels {
 
         Self {
             current: Menu::Cube(crate::app::menu::CubeSubMenu::Overview),
+            activity: state::activity::Activity::new(liquid_backend.clone(), spark_backend.clone()),
             imported_bitcoin: None,
             global_home: GlobalHome::new(
                 wallet.clone(),
@@ -639,6 +645,7 @@ impl Panels {
         }
         match &self.current {
             Menu::Cube(crate::app::menu::CubeSubMenu::Overview) => Some(&self.global_home),
+            Menu::Cube(crate::app::menu::CubeSubMenu::Activity) => Some(&self.activity),
             Menu::Cube(crate::app::menu::CubeSubMenu::Settings(_)) => {
                 Some(&self.global_settings as &dyn State)
             }
@@ -735,6 +742,7 @@ impl Panels {
         }
         match &self.current {
             Menu::Cube(crate::app::menu::CubeSubMenu::Overview) => Some(&mut self.global_home),
+            Menu::Cube(crate::app::menu::CubeSubMenu::Activity) => Some(&mut self.activity),
             Menu::Cube(crate::app::menu::CubeSubMenu::Settings(_)) => {
                 Some(&mut self.global_settings as &mut dyn State)
             }
@@ -9605,6 +9613,71 @@ impl App {
                     self.cache.vault_tools_open = true;
                 }
                 return Task::batch([close_task, self.set_current_panel(menu)]);
+            }
+            Message::ActivityOpenDetail(target) => {
+                // Hand off the source record to its owning wallet panel. Those
+                // panels retain signing, refund and replacement safeguards.
+                match target {
+                    state::activity::ActivityTarget::Vault(tx) => {
+                        if self.panels.transactions.is_some() {
+                            let load = self.set_current_panel(Menu::Vault(
+                                menu::VaultSubMenu::Transactions(None),
+                            ));
+                            let panel = self.panels.transactions.as_mut().expect("checked above");
+                            panel.preselect(tx);
+                            return load;
+                        }
+                    }
+                    state::activity::ActivityTarget::Psbt(tx) => {
+                        if self.panels.psbts.is_some() {
+                            let load = self
+                                .set_current_panel(Menu::Vault(menu::VaultSubMenu::PSBTs(None)));
+                            let panel = self.panels.psbts.as_mut().expect("checked above");
+                            panel.preselect(tx);
+                            return load;
+                        }
+                    }
+                    state::activity::ActivityTarget::Spark(payment) => {
+                        let row =
+                            state::spark::overview::payment_summary_to_recent_tx(&payment, None);
+                        self.panels.current = Menu::Spark(menu::SparkSubMenu::Transactions(None));
+                        let load = self
+                            .panels
+                            .spark_transactions
+                            .reload(self.daemon.clone(), self.wallet.clone());
+                        let select = self.panels.spark_transactions.update(
+                            self.daemon.clone(),
+                            &self.cache,
+                            Message::View(view::Message::SparkTransactions(
+                                view::SparkTransactionsMessage::Preselect(row),
+                            )),
+                        );
+                        return Task::batch([load, select]);
+                    }
+                    state::activity::ActivityTarget::Liquid(payment) => {
+                        if let Some(panel) = self.panels.liquid_transactions.as_mut() {
+                            self.panels.current =
+                                Menu::Liquid(menu::LiquidSubMenu::Transactions(None));
+                            let load = panel.reload(self.daemon.clone(), self.wallet.clone());
+                            let select = panel.update(
+                                self.daemon.clone(),
+                                &self.cache,
+                                Message::View(view::Message::PreselectPayment(payment)),
+                            );
+                            return Task::batch([load, select]);
+                        }
+                    }
+                    state::activity::ActivityTarget::Refundable(refundable) => {
+                        if let Some(panel) = self.panels.liquid_transactions.as_mut() {
+                            let load = panel.reload(self.daemon.clone(), self.wallet.clone());
+                            panel.preselect_refundable(refundable);
+                            self.panels.current =
+                                Menu::Liquid(menu::LiquidSubMenu::Transactions(None));
+                            return load;
+                        }
+                    }
+                }
+                return Task::none();
             }
             msg @ Message::View(view::Message::ConnectAccount(_))
             | msg @ Message::View(view::Message::ConnectCube(_)) => {
