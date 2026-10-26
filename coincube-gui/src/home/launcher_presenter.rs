@@ -170,29 +170,69 @@ fn floor_style() -> impl Fn(&theme::Theme, iced_button::Status) -> iced_button::
     }
 }
 
-pub(super) fn local_wallets(cube: &crate::app::settings::CubeSettings) -> &'static str {
-    use crate::app::settings::BitcoinImportStage;
-    if let Some(import) = &cube.bitcoin_import {
-        return match &import.stage {
-            BitcoinImportStage::PendingSource => "Bitcoin import pending · others unknown",
-            BitcoinImportStage::Installing { .. } => "Bitcoin import installing · others unknown",
-            BitcoinImportStage::Syncing { .. } => "Bitcoin import syncing · others unknown",
-            BitcoinImportStage::Ready { .. } => "Bitcoin imported · others unknown",
-        };
+/// The wallets a Cube holds, read without unlocking it, in the order the
+/// Cube's sidebar lists them. Spark comes with every Cube on a network it
+/// supports. Liquid follows the same sunset gate as the sidebar
+/// ([`crate::app::features::LiquidGate`]): this Cube's persisted grant, or a
+/// Liquid wallet already on this device (`liquid_on_disk`).
+pub(super) fn wallet_kinds(
+    cube: &crate::app::settings::CubeSettings,
+    liquid_on_disk: bool,
+) -> Vec<&'static str> {
+    use crate::app::{features, settings::BitcoinImportStage};
+    let mut kinds = Vec::new();
+    if features::spark(cube.network).is_available() {
+        kinds.push("Spark");
     }
     if cube.vault_wallet_id.is_some() {
-        "Vault · others unknown"
+        kinds.push("Vault");
+    }
+    if let Some(import) = &cube.bitcoin_import {
+        // A pending import is an intent, not an installed wallet.
+        kinds.push(match &import.stage {
+            BitcoinImportStage::Ready { .. } => "Bitcoin",
+            _ => "Bitcoin (importing)",
+        });
+    }
+    let gate = features::LiquidGate {
+        server_enabled: cube.liquid_granted == Some(true),
+        local_state_exists: liquid_on_disk,
+    };
+    if features::liquid_wallet_usable(cube.network, gate) {
+        kinds.push("Liquid");
+    }
+    kinds
+}
+
+pub(super) fn local_wallets(
+    cube: &crate::app::settings::CubeSettings,
+    liquid_on_disk: bool,
+) -> String {
+    let kinds = wallet_kinds(cube, liquid_on_disk);
+    if kinds.is_empty() {
+        "No wallets yet".into()
     } else {
-        "Status unknown"
+        kinds.join(", ")
     }
 }
 
+/// Matches the Cube's own "Backup not confirmed" warning: `backed_up` is set
+/// once the user confirms the seed phrase backup. The Recovery Kit is a
+/// Connect fact and shows on the Connect line.
 pub(super) fn backup(cube: &crate::app::settings::CubeSettings) -> (&'static str, tenshu::Tone) {
-    match (cube.backed_up, cube.has_recovery_kit()) {
-        (true, true) => ("Phrase + Kit recorded", tenshu::Tone::Good),
-        (true, false) => ("Phrase recorded", tenshu::Tone::Good),
-        (false, true) => ("Kit recorded (cached)", tenshu::Tone::Good),
-        (false, false) => ("Status unknown", tenshu::Tone::Muted),
+    if cube.backed_up {
+        ("Confirmed", tenshu::Tone::Good)
+    } else {
+        ("Not confirmed", tenshu::Tone::Warn)
+    }
+}
+
+/// A Cube is open while this process holds its unlocked session.
+pub(super) fn lock_state(open: bool) -> &'static str {
+    if open {
+        "Open"
+    } else {
+        "Locked"
     }
 }
 
@@ -245,7 +285,7 @@ fn local_facts<'a>(
                     .width(Length::Fill)
                     .wrapping(Wrapping::WordOrGlyph),
             )
-            .push(tenshu::caption("Lock state unknown"))
+            .push(tenshu::caption(lock_state(row.open)))
             .push(row.sync_warning.as_ref().map(|warning| {
                 tenshu::caption(warning.clone()).style(text_tone(tenshu::Tone::Warn))
             }));
@@ -260,7 +300,7 @@ fn local_facts<'a>(
                     .width(Length::Fixed(NETWORK_WIDTH)),
             )
             .push(
-                tenshu::caption(local_wallets(row.cube))
+                tenshu::caption(row.wallets.clone())
                     .width(Length::Fixed(WALLETS_WIDTH))
                     .wrapping(Wrapping::WordOrGlyph),
             )
@@ -286,8 +326,7 @@ fn local_facts<'a>(
             .push(
                 tenshu::caption(format!(
                     "Wallets: {} · Backup: {}",
-                    local_wallets(row.cube),
-                    backup_text
+                    row.wallets, backup_text
                 ))
                 .wrapping(Wrapping::WordOrGlyph),
             )
@@ -378,7 +417,10 @@ fn details<'a>(row: &launcher_catalog::LocalRow<'_>, light: bool) -> Element<'a,
             "Network",
             network_label(row.key.chain, 18.0, light),
         ))
-        .push(detail_line("Lock", tenshu::body("State unknown").into()))
+        .push(detail_line(
+            "Lock",
+            tenshu::body(lock_state(row.open)).into(),
+        ))
         .push(detail_line(
             "Backup",
             tenshu::body(backup_text)
@@ -393,7 +435,7 @@ fn details<'a>(row: &launcher_catalog::LocalRow<'_>, light: bool) -> Element<'a,
         ))
         .push(detail_line(
             "Wallets",
-            tenshu::body(local_wallets(row.cube)).into(),
+            tenshu::body(row.wallets.clone()).into(),
         ))
         .push(detail_line(
             "Connect",
@@ -662,7 +704,7 @@ fn floor_details<'a>(
         .spacing(10)
         .push(face_fact(
             "Lock",
-            face_words("State unknown", 14.0, font::REGULAR, false).into(),
+            face_words(lock_state(row.open), 14.0, font::REGULAR, false).into(),
         ))
         .push(face_fact(
             "Backup",
@@ -676,7 +718,7 @@ fn floor_details<'a>(
         ))
         .push(face_fact(
             "Wallets",
-            face_words(local_wallets(row.cube), 14.0, font::REGULAR, false).into(),
+            face_words(row.wallets.clone(), 14.0, font::REGULAR, false).into(),
         ));
     let actions = Row::new()
         .spacing(16)
@@ -1024,9 +1066,10 @@ fn floor_label<'a, M: 'static>(name: &str, state: &'static str, dimmed: bool) ->
 fn face_text<'r>(row: &'r launcher_catalog::LocalRow<'_>) -> launcher_scene::FaceText<'r> {
     launcher_scene::FaceText {
         name: &row.name,
+        lock: lock_state(row.open),
         backup: backup(row.cube).0,
         connect: &row.connect.1,
-        wallets: local_wallets(row.cube),
+        wallets: &row.wallets,
         passkey: row.cube.is_passkey_cube(),
     }
 }
@@ -1504,6 +1547,9 @@ fn lone_cube<'a, M: 'a>(
 ) -> Element<'a, M> {
     let light = matches!(mode, coincube_ui::theme::palette::ThemeMode::Light);
     let cube = cube.clone();
+    // No Launcher behind this screen, so no probe of Liquid on disk: the
+    // persisted grant alone decides, for the moment the face is in view.
+    let wallets = local_wallets(&cube, false);
     responsive(move |size: Size| {
         let layout = launcher_scene::Layout::centered(size.width, size.height);
         let name = crate::cube_display::name(&cube.name);
@@ -1517,9 +1563,10 @@ fn lone_cube<'a, M: 'a>(
                 marks: launcher_gpu::marks(&cube),
                 details: Some(launcher_scene::FaceText {
                     name: &name,
+                    lock: lock_state(false),
                     backup: backup(&cube).0,
                     connect: "Checking…",
-                    wallets: local_wallets(&cube),
+                    wallets: &wallets,
                     passkey: cube.is_passkey_cube(),
                 }),
                 unlock_name: Some(&name),
@@ -1635,9 +1682,10 @@ fn unlock_floor_stage<'a, M: 'a + 'static>(
             marks: peer.marks,
             details: selected.then_some(launcher_scene::FaceText {
                 name: &name,
+                lock: lock_state(false),
                 backup: context.backup,
                 connect: &context.connect,
-                wallets: context.wallets,
+                wallets: &context.wallets,
                 passkey: cube.is_passkey_cube(),
             }),
             unlock_name: selected.then_some(name.as_str()),
@@ -1871,9 +1919,9 @@ mod tests {
             selected: selected.clone(),
             page: 0,
             selected_slot: 0,
-            backup: "Status unknown",
+            backup: "Not confirmed",
             connect: "Sovereign — local only".into(),
-            wallets: "Not yet known",
+            wallets: "Spark".into(),
             peers: vec![
                 launcher_catalog::LauncherScenePeer {
                     key: selected,
@@ -2747,8 +2795,8 @@ mod tests {
                 );
                 assert!(mounted.contains("Everyday"));
                 assert!(mounted.contains("Travel"));
-                assert!(mounted.contains("Lock state unknown"));
-                assert!(mounted.contains("Status unknown"));
+                assert!(mounted.contains("Locked"));
+                assert!(mounted.contains("Not confirmed"));
                 assert!(!mounted.contains("Balance"));
                 assert!(!mounted.contains("Checks passed"));
                 assert!(mounted.has_focus(search_id().into()));

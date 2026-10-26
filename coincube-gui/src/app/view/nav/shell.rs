@@ -21,7 +21,7 @@ use coincube_ui::{
         lightning_outline_icon, receipt_icon, recovery_icon, settings_icon, shop_icon, vault_icon,
     },
     theme,
-    widget::{action::Action, Column, ColumnExt, Element, Row, Text},
+    widget::{action::Action, floating::Floating, Column, ColumnExt, Element, Row, Text},
 };
 use iced::{
     widget::{column, container, row, rule, scrollable, text, Space},
@@ -65,6 +65,20 @@ pub(crate) fn network_label(network: ChainId) -> &'static str {
         ChainId::BitcoinBlake2b => "Bitcoin Blake2b mainnet",
         other => other.label(),
     }
+}
+
+/// The Launcher's coin for the Cube's chain, beside its network name.
+fn network_coin<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
+    let light = matches!(
+        ctx.theme_mode,
+        coincube_ui::theme::palette::ThemeMode::Light
+    );
+    iced::widget::Svg::new(iced::widget::svg::Handle::from_memory(
+        crate::home::launcher_coin::widget_source(ctx.network, 14.0, 1.0, light).into_bytes(),
+    ))
+    .width(Length::Fixed(14.0))
+    .height(Length::Fixed(14.0))
+    .into()
 }
 
 fn short_cube_name(name: &str) -> String {
@@ -374,7 +388,14 @@ fn identity<'a>(ctx: &NavContext<'a>, state: ShellState) -> Element<'a, Message>
                 text(title)
                     .size(14)
                     .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
-                muted(network_label(ctx.network), 12)
+                // `.net { white-space: nowrap }`: the coin and the name stay on one line.
+                row![
+                    network_coin(ctx),
+                    muted(network_label(ctx.network), 12)
+                        .wrapping(iced::widget::text::Wrapping::None)
+                ]
+                .spacing(5)
+                .align_y(Alignment::Center)
             ]
             .spacing(1)
             .width(Length::Fill),
@@ -618,8 +639,11 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
         .push(identity(ctx, state))
         .width(Length::Fill)
         .height(Length::Fill);
+    // The menu covers the rows below it rather than pushing them down.
     if state.switcher_open {
-        sidebar = sidebar.push(container(switcher_menu(ctx, state)).padding([0, 8]));
+        sidebar = sidebar.push(Floating::new(
+            container(switcher_menu(ctx, state)).padding([0, 8]),
+        ));
     }
     sidebar = sidebar
         .push(top)
@@ -642,6 +666,108 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
         .height(Length::Fill)
         .style(theme::container::shell_rail)
         .into()
+}
+
+/// What the runtime does with one event, for tests that drive the shell
+/// without it: overlays (the switcher menu) first, the base only if they
+/// leave the event uncaptured, and with no cursor where they cover it.
+#[cfg(test)]
+pub(crate) fn test_send(
+    element: &mut Element<'_, Message>,
+    tree: &mut iced::advanced::widget::Tree,
+    node: &iced::advanced::layout::Node,
+    renderer: &iced::Renderer,
+    event: &iced::Event,
+    cursor: iced::mouse::Cursor,
+    size: iced::Size,
+) -> Vec<Message> {
+    use iced::advanced::{clipboard::Null, Layout, Shell};
+    let mut messages = Vec::new();
+    let viewport = iced::Rectangle::with_size(size);
+    let mut base_cursor = cursor;
+    if let Some(mut overlay) = element.as_widget_mut().overlay(
+        tree,
+        Layout::new(node),
+        renderer,
+        &viewport,
+        iced::Vector::ZERO,
+    ) {
+        let overlay = overlay.as_overlay_mut();
+        let overlay_node = overlay.layout(renderer, size);
+        let mut shell = Shell::new(&mut messages);
+        overlay.update(
+            event,
+            Layout::new(&overlay_node),
+            cursor,
+            renderer,
+            &mut Null,
+            &mut shell,
+        );
+        if shell.is_event_captured() {
+            return messages;
+        }
+        if overlay.mouse_interaction(Layout::new(&overlay_node), cursor, renderer)
+            != iced::mouse::Interaction::None
+        {
+            base_cursor = iced::mouse::Cursor::Unavailable;
+        }
+    }
+    element.as_widget_mut().update(
+        tree,
+        event,
+        Layout::new(node),
+        base_cursor,
+        renderer,
+        &mut Null,
+        &mut Shell::new(&mut messages),
+        &viewport,
+    );
+    messages
+}
+
+/// Draws the shell and then its overlays on top, as the runtime does.
+#[cfg(test)]
+pub(crate) fn test_draw(
+    element: &mut Element<'_, Message>,
+    tree: &mut iced::advanced::widget::Tree,
+    node: &iced::advanced::layout::Node,
+    renderer: &mut iced::Renderer,
+    theme: &theme::Theme,
+    size: iced::Size,
+) {
+    use iced::advanced::{renderer::Style, Layout, Renderer as _};
+    let viewport = iced::Rectangle::with_size(size);
+    let style = Style {
+        text_color: theme.colors.shell.ink,
+    };
+    element.as_widget().draw(
+        tree,
+        renderer,
+        theme,
+        &style,
+        Layout::new(node),
+        iced::mouse::Cursor::Unavailable,
+        &viewport,
+    );
+    if let Some(mut overlay) = element.as_widget_mut().overlay(
+        tree,
+        Layout::new(node),
+        renderer,
+        &viewport,
+        iced::Vector::ZERO,
+    ) {
+        let overlay = overlay.as_overlay_mut();
+        let overlay_node = overlay.layout(renderer, size);
+        renderer.with_layer(viewport, |renderer| {
+            overlay.draw(
+                renderer,
+                theme,
+                &style,
+                Layout::new(&overlay_node),
+                iced::mouse::Cursor::Unavailable,
+            );
+        });
+    }
 }
 
 #[cfg(test)]

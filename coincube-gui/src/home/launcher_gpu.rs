@@ -1240,6 +1240,7 @@ mod tests {
                 i % 2 == 0,
                 FaceText {
                     name: &format!("Budget {i}"),
+                    lock: "Locked",
                     backup: "Recorded",
                     connect: "Signed in",
                     wallets: "Vault",
@@ -1265,9 +1266,10 @@ mod tests {
         };
         let text = FaceText {
             name: "Everyday",
+            lock: "Locked",
             backup: "Not confirmed",
             connect: "Signed out",
-            wallets: "Status unknown",
+            wallets: "Spark",
             passkey: false,
         };
         let cubes = |pose: Pose| {

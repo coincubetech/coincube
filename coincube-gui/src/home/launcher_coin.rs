@@ -66,7 +66,7 @@ pub(super) fn fragment(
     mark
 }
 
-pub(super) fn widget_source(chain: ChainId, size: f32, test_border: f32, light: bool) -> String {
+pub(crate) fn widget_source(chain: ChainId, size: f32, test_border: f32, light: bool) -> String {
     let ink = if light { "#30302d" } else { "#ecebe6" };
     format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {size:.2} {size:.2}\" color=\"{ink}\">{}</svg>",

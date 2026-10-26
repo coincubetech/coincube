@@ -110,7 +110,7 @@ pub(crate) struct LauncherSceneContext {
     pub selected_slot: usize,
     pub backup: &'static str,
     pub connect: String,
-    pub wallets: &'static str,
+    pub wallets: String,
     pub peers: Vec<LauncherScenePeer>,
     /// Floor pages, for the arrows and dots that stay up under the face.
     pub pages: usize,
@@ -606,7 +606,7 @@ impl Home {
             selected_slot,
             backup: super::launcher_presenter::backup(cube).0,
             connect: selected.connect.1.clone(),
-            wallets: super::launcher_presenter::local_wallets(cube),
+            wallets: selected.wallets.clone(),
             peers,
             pages: projection.locals.len().div_ceil(FLOOR_PAGE_SIZE).max(1),
             chrome: super::launcher_chrome::snapshot(self, &projection),
@@ -887,7 +887,18 @@ impl Home {
                 self.catalog.open_from_floor = false;
             }
         }
-        if self.catalog.selected.is_none() || self.catalog.mode != LauncherMode::Cubes {
+        // Back leaves nothing selected while its Cube spins home, so a Return
+        // motion survives the empty selection until it finishes or its Cube
+        // goes away.
+        let returning = self
+            .catalog
+            .motion
+            .as_ref()
+            .and_then(|motion| motion.returning_key())
+            .is_some_and(|key| self.catalog_selectable(key));
+        if (self.catalog.selected.is_none() && !returning)
+            || self.catalog.mode != LauncherMode::Cubes
+        {
             self.catalog.motion = None;
             self.catalog.open_from_floor = false;
         }
@@ -1108,6 +1119,10 @@ pub(super) struct LocalRow<'a> {
     pub(super) connect: (Tone, String),
     /// A short, visible registration refusal; full guidance stays in details.
     pub(super) sync_warning: Option<String>,
+    /// This process holds the Cube's unlocked session.
+    pub(super) open: bool,
+    /// The wallets the Cube holds, as the details list them.
+    pub(super) wallets: String,
     /// The key is nonempty, the record's chain is the current network and the
     /// list's source, and `catalog_index` resolves to this very record.
     /// Otherwise the row is shown but its controls have no press target.
@@ -1180,6 +1195,7 @@ pub(super) fn project(home: &Home) -> Projection<'_> {
         State::Cubes { cubes, source, .. } => (Some((cubes.as_slice(), *source)), true),
         _ => (None, false),
     };
+    let open_cube = crate::app::session::current_cube_id();
     let filter = home.effective_filter();
     // Every listed network, in the canvas's order. The current network's
     // rows come from the checked list; the others from read-only copies,
@@ -1227,6 +1243,12 @@ pub(super) fn project(home: &Home) -> Projection<'_> {
                 index: if current { index } else { usize::MAX },
                 connect,
                 sync_warning,
+                open: open_cube.as_deref() == Some(cube.id.as_str()),
+                // The Liquid probe reads the current network's data only.
+                wallets: super::launcher_presenter::local_wallets(
+                    cube,
+                    chain == network && home.liquid_on_disk,
+                ),
                 vault: vault_subtitle(cube),
                 key,
                 cube,
@@ -1358,57 +1380,24 @@ fn muted(theme: &theme::Theme) -> iced::widget::text::Style {
     }
 }
 
-/// `backed_up` records the local phrase backup. A Recovery Kit is a separate,
-/// cached Connect fact. An absent flag is not proof that either backup is missing.
+/// The Launcher presenter's Backup line, in the List's tones.
 fn backup_caption(cube: &CubeSettings) -> (Tone, &'static str) {
-    match (cube.backed_up, cube.has_recovery_kit()) {
-        (true, true) => (Tone::Good, "Phrase + Kit recorded"),
-        (true, false) => (Tone::Good, "Phrase recorded"),
-        (false, true) => (Tone::Good, "Kit recorded (cached)"),
-        (false, false) => (Tone::Muted, "Status unknown"),
-    }
-}
-
-/// Only the Vault or imported Bitcoin slot is known from pre-unlock settings.
-/// A pending import is an intent, not an installed wallet. Liquid and Spark
-/// availability are deliberately left unclaimed here.
-fn wallets_caption(cube: &CubeSettings) -> &'static str {
-    if let Some(import) = &cube.bitcoin_import {
-        return match &import.stage {
-            settings::BitcoinImportStage::PendingSource => {
-                "Bitcoin import pending · others unknown"
-            }
-            settings::BitcoinImportStage::Installing { .. } => {
-                "Bitcoin import installing · others unknown"
-            }
-            settings::BitcoinImportStage::Syncing { .. } => {
-                "Bitcoin import syncing · others unknown"
-            }
-            settings::BitcoinImportStage::Ready { .. } => "Bitcoin imported · others unknown",
-        };
-    }
-    if cube.vault_wallet_id.is_some() {
-        "Vault · others unknown"
-    } else {
-        "Status unknown"
-    }
-}
-
-fn wallets_cell<'a>(cube: &CubeSettings) -> Element<'a, ViewMessage> {
-    let known_icon = if cube.has_imported_bitcoin() {
-        Some(icon::wallet_icon().style(muted))
-    } else if cube.bitcoin_import.is_none() && cube.vault_wallet_id.is_some() {
-        Some(icon::vault_icon().style(muted))
-    } else {
-        None
+    let (text, tone) = super::launcher_presenter::backup(cube);
+    let tone = match tone {
+        coincube_ui::theme::tenshu::Tone::Good => Tone::Good,
+        coincube_ui::theme::tenshu::Tone::Warn => Tone::Warn,
+        _ => Tone::Muted,
     };
+    (tone, text)
+}
+
+fn wallets_cell<'a>(row: &LocalRow<'_>) -> Element<'a, ViewMessage> {
     Row::new()
         .spacing(6)
         .align_y(Alignment::Center)
         .width(Length::Fixed(WALLETS_WIDTH))
-        .push(known_icon)
         .push(
-            p2_regular(wallets_caption(cube))
+            p2_regular(row.wallets.clone())
                 .style(muted)
                 .wrapping(Wrapping::WordOrGlyph),
         )
@@ -1458,7 +1447,7 @@ fn local_row<'a>(row: &LocalRow<'_>, selected: bool, table: bool) -> Element<'a,
                 .wrapping(Wrapping::WordOrGlyph)
                 .width(Length::Fill),
         )
-        .push(p2_regular("Lock state unknown").style(muted))
+        .push(p2_regular(super::launcher_presenter::lock_state(row.open)).style(muted))
         .push(row.sync_warning.as_ref().map(|warning| {
             p2_regular(warning.clone())
                 .style(tone_style(Tone::Warn))
@@ -1475,7 +1464,7 @@ fn local_row<'a>(row: &LocalRow<'_>, selected: bool, table: bool) -> Element<'a,
                     .style(muted)
                     .width(Length::Fixed(NETWORK_WIDTH)),
             )
-            .push(wallets_cell(row.cube))
+            .push(wallets_cell(row))
             .push(
                 p2_regular(backup)
                     .style(tone_style(backup_tone))
@@ -1498,7 +1487,7 @@ fn local_row<'a>(row: &LocalRow<'_>, selected: bool, table: bool) -> Element<'a,
                 p2_regular(format!(
                     "Network: {}  ·  Wallets: {}  ·  Backup: {}",
                     row.key.chain.label(),
-                    wallets_caption(row.cube),
+                    row.wallets,
                     backup,
                 ))
                 .style(muted)
@@ -1619,7 +1608,9 @@ fn details_panel<'a>(row: &LocalRow<'_>) -> Element<'a, ViewMessage> {
             .push(detail_line("Stored", p2_regular("On this device").into()))
             .push(detail_line(
                 "Lock",
-                p2_regular("State unknown").style(muted).into(),
+                p2_regular(super::launcher_presenter::lock_state(row.open))
+                    .style(muted)
+                    .into(),
             ))
             .push(detail_line(
                 "Backup",
@@ -1640,7 +1631,7 @@ fn details_panel<'a>(row: &LocalRow<'_>) -> Element<'a, ViewMessage> {
             ))
             .push(detail_line(
                 "Wallets",
-                p2_regular(wallets_caption(row.cube))
+                p2_regular(row.wallets.clone())
                     .style(muted)
                     .wrapping(Wrapping::WordOrGlyph)
                     .into(),
@@ -2528,31 +2519,41 @@ mod tests {
     }
 
     #[test]
-    fn list_facts_use_only_recorded_backup_and_wallet_metadata() {
+    fn list_facts_report_lock_backup_and_wallets_from_recorded_metadata() {
+        use super::super::launcher_presenter::{local_wallets, lock_state};
+        let wallets = |cube: &CubeSettings| local_wallets(cube, false);
         let mut home = home_with(&[("a", "Alpha")]);
+        assert_eq!(lock_state(project(&home).locals[0].open), "Locked");
         let cube = &mut cubes_mut(&mut home)[0];
-        assert_eq!(backup_caption(cube), (Tone::Muted, "Status unknown"));
-        assert_eq!(wallets_caption(cube), "Status unknown");
-
-        cube.backed_up = true;
-        assert_eq!(backup_caption(cube), (Tone::Good, "Phrase recorded"));
-        cube.backed_up = false;
+        // Matches the open Cube's "Backup not confirmed" warning.
+        assert_eq!(backup_caption(cube), (Tone::Warn, "Not confirmed"));
+        // A Recovery Kit is shown on the Connect line, not here.
         cube.recovery_kit_password_backed_up = true;
-        assert_eq!(backup_caption(cube), (Tone::Good, "Kit recorded (cached)"));
+        assert_eq!(backup_caption(cube), (Tone::Warn, "Not confirmed"));
         cube.backed_up = true;
-        assert_eq!(backup_caption(cube), (Tone::Good, "Phrase + Kit recorded"));
+        assert_eq!(backup_caption(cube), (Tone::Good, "Confirmed"));
+
+        // Spark comes with every mainnet Cube; Liquid only behind its gate.
+        assert_eq!(wallets(cube), "Spark");
+        cube.liquid_granted = Some(true);
+        assert_eq!(wallets(cube), "Spark, Liquid");
+        cube.liquid_granted = None;
+        assert_eq!(local_wallets(cube, true), "Spark, Liquid");
         cube.vault_wallet_id = Some(crate::app::settings::WalletId::new(
             "test".to_string(),
             None,
         ));
-        assert_eq!(wallets_caption(cube), "Vault · others unknown");
+        assert_eq!(wallets(cube), "Spark, Vault");
+        let mut testnet = cube.clone();
+        testnet.network = ChainId::Testnet4;
+        testnet.liquid_granted = Some(true);
+        assert_eq!(local_wallets(&testnet, true), "Vault");
+        testnet.vault_wallet_id = None;
+        assert_eq!(local_wallets(&testnet, true), "No wallets yet");
 
         cube.vault_wallet_id = None;
         cube.bitcoin_import = Some(Box::new(settings::BitcoinImport::pending()));
-        assert_eq!(
-            wallets_caption(cube),
-            "Bitcoin import pending · others unknown"
-        );
+        assert_eq!(wallets(cube), "Spark, Bitcoin (importing)");
         assert!(!cube.has_imported_bitcoin());
 
         use coincube_core::{
@@ -2582,14 +2583,11 @@ mod tests {
         cube.bitcoin_import.as_mut().unwrap().stage = settings::BitcoinImportStage::Installing {
             wallet: wallet.clone(),
         };
-        assert_eq!(
-            wallets_caption(cube),
-            "Bitcoin import installing · others unknown"
-        );
+        assert_eq!(wallets(cube), "Spark, Bitcoin (importing)");
         assert!(!cube.has_imported_bitcoin());
         cube.bitcoin_import.as_mut().unwrap().stage =
             settings::BitcoinImportStage::Ready { wallet };
-        assert_eq!(wallets_caption(cube), "Bitcoin imported · others unknown");
+        assert_eq!(wallets(cube), "Spark, Bitcoin");
         assert!(cube.has_imported_bitcoin());
     }
 
@@ -2611,8 +2609,8 @@ mod tests {
             assert!(tree.has(&select_id(&key("a"))));
             assert!(tree.has(&open_id(&key("a"))));
             assert!(tree.has(&details_open_id(&key("a"))));
-            assert!(tree.contains("Lock state unknown"));
-            assert!(tree.contains("Status unknown"));
+            assert!(tree.contains("Locked"));
+            assert!(tree.contains("Not confirmed"));
             // The presenter draws these rows: the network is a coin mark and
             // label in both layouts, and the compact List folds Wallets and
             // Backup into one caption that the wide table splits into columns.
@@ -2669,7 +2667,7 @@ mod tests {
                 theme::Theme::light(),
             );
             assert_eq!(inspection.contains("Network: Bitcoin"), !table);
-            assert!(inspection.contains("Backup: Status unknown") || table);
+            assert!(inspection.contains("Backup: Not confirmed") || table);
             let bounds = focus_bounds(layout(&projection, body_width), body_width);
             let select = bounds_of(&bounds, &select_id(&key("a")));
             let long_name = inspection
@@ -5113,5 +5111,61 @@ mod tests {
         );
         apply_widget_task(task, &mut resting);
         assert_eq!(resting.focused(), Some(details_open_id(&selected)));
+    }
+
+    #[test]
+    fn back_spins_the_cube_home_before_peers_settle() {
+        let mut home = home_with(&[("a", "Alpha"), ("b", "Beta")]);
+        home.catalog.mode = LauncherMode::Cubes;
+        catalog(&mut home, CatalogMessage::SelectFloor(key("a")));
+        let settled = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        catalog(&mut home, CatalogMessage::MotionTick(settled));
+        assert!(home.catalog.motion.is_none());
+
+        // A real pointer click on the face's Back link.
+        let back = bounds_of(
+            &focus_bounds_window(launcher_view(&home), 1440.0, 900.0),
+            &close_details_id(),
+        )
+        .center();
+        let cursor = iced::mouse::Cursor::Available(back);
+        let messages = {
+            let mut mounted = mount_window(launcher_view(&home), 1440.0, 900.0);
+            [
+                iced::mouse::Event::CursorMoved { position: back },
+                iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+                iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left),
+            ]
+            .iter()
+            .flat_map(|event| mounted.send(iced::Event::Mouse(*event), cursor))
+            .collect::<Vec<_>>()
+        };
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            ViewMessage::Catalog(CatalogMessage::ClearSelection)
+        )));
+        for message in messages {
+            let _ = home.update(Message::View(message));
+        }
+
+        assert_eq!(home.catalog.selected, None);
+        let motion = home
+            .catalog
+            .motion
+            .as_ref()
+            .expect("Back keeps the return spin running after the selection clears");
+        assert_eq!(motion.returning_key(), Some(&key("a")));
+        let midway = motion.pose(
+            &key("a"),
+            None,
+            std::time::Instant::now() + super::super::launcher_scene::TURN / 2,
+        );
+        assert!(midway.spin > 0.0 && midway.spin < 1.0, "{:?}", midway);
+
+        catalog(
+            &mut home,
+            CatalogMessage::MotionTick(settled + std::time::Duration::from_secs(5)),
+        );
+        assert!(home.catalog.motion.is_none());
     }
 }

@@ -50,6 +50,7 @@ pub(super) const FLOOR_INSET: f32 = 0.14;
 #[derive(Clone, Copy)]
 pub(super) struct FaceText<'a> {
     pub name: &'a str,
+    pub lock: &'a str,
     pub backup: &'a str,
     pub connect: &'a str,
     pub wallets: &'a str,
@@ -795,7 +796,7 @@ pub(super) fn details_svg(network: ChainId, light: bool, text: FaceText<'_>) -> 
     );
     // `.pdl`: 22px rows 10px apart, 16px under the rule.
     for (y, label, value) in [
-        (141, "Lock", "State unknown"),
+        (141, "Lock", text.lock),
         (173, "Backup", text.backup),
         (205, "Connect", text.connect),
         (237, "Wallets", text.wallets),
@@ -1027,6 +1028,7 @@ mod tests {
             false,
             FaceText {
                 name: "Alice & <Bob>",
+                lock: "Locked",
                 backup: "Recorded",
                 connect: "Signed in",
                 wallets: "Vault",
