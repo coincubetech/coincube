@@ -18165,7 +18165,8 @@ mod settings_navigation_integration_tests {
             ui_theme::Theme::dark(),
         );
         assert!(mounted.contains("Wallet & signers"));
-        assert!(mounted.contains("Wallet alias:"));
+        assert!(mounted.contains("Wallet name"));
+        assert!(mounted.contains("Save names"));
         assert!(!mounted.contains("Open Wallet & signers to review"));
         let _ = std::fs::remove_dir_all(root);
     }

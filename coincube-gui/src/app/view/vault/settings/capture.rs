@@ -22,6 +22,7 @@ use iced::advanced::{
     widget::{Id, Operation, Tree},
     Layout,
 };
+use iced::widget::qr_code;
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -164,7 +165,9 @@ fn pair_state(scenario: &str) -> LocalSigningState {
                     + 90,
                 psk_b64: String::new(),
             },
-            qr: None,
+            // Synthetic QR exercises the rendered waiting state without a live
+            // pairing offer or any wallet material.
+            qr: Some(qr_code::Data::new("synthetic-pairing-offer-not-for-use").unwrap()),
         },
         "pair_error" => PairingFlow::Error(PairingError::OfferExpired),
         _ => PairingFlow::Idle,
@@ -509,7 +512,7 @@ fn assert_mounted_wallet_policy(labels: &Labels, width: u32) {
     let end = labels
         .0
         .iter()
-        .position(|(text, _)| text == "Names and signer aliases")
+        .position(|(text, _)| text == "Signers")
         .unwrap();
     let policy_labels = &labels.0[start..end];
     for required in [
