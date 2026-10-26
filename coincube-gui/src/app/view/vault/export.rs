@@ -15,6 +15,32 @@ use iced::{
 use crate::export::ImportExportState;
 use crate::export::{Error, ImportExportMessage, ImportExportType};
 
+fn interrupted_message(state: &ImportExportState, operation: &ImportExportType) -> &'static str {
+    let importing = matches!(
+        operation,
+        ImportExportType::ImportBackup { .. }
+            | ImportExportType::FromBackup
+            | ImportExportType::ImportPsbt(_)
+            | ImportExportType::ImportXpub(_)
+            | ImportExportType::ImportDescriptor
+    );
+    match (state, importing) {
+        (ImportExportState::TimedOut, true) => {
+            "Import timed out. Check whether anything was imported before trying again."
+        }
+        (ImportExportState::Aborted, true) => {
+            "Import canceled. Check whether anything was imported before trying again."
+        }
+        (ImportExportState::TimedOut, false) => {
+            "Export timed out. Check the chosen destination before trying again; the file may be incomplete."
+        }
+        (ImportExportState::Aborted, false) => {
+            "Export canceled. Check the chosen destination before trying again."
+        }
+        _ => unreachable!("only timeout and cancellation use this copy"),
+    }
+}
+
 /// Return the modal view for an export task
 pub fn export_modal<'a, Message: From<ImportExportMessage> + Clone + 'static>(
     state: &ImportExportState,
@@ -50,8 +76,9 @@ pub fn export_modal<'a, Message: From<ImportExportMessage> + Clone + 'static>(
             ImportExportState::Path(_) => "".into(),
             ImportExportState::Started => "Starting the import or export…".into(),
             ImportExportState::Progress(p) => format!("Progress: {}%", p.round()),
-            ImportExportState::TimedOut => "The operation timed out. No completion was recorded; review the destination before trying again.".into(),
-            ImportExportState::Aborted => "Operation canceled. Check the destination before trying again.".into(),
+            ImportExportState::TimedOut | ImportExportState::Aborted => {
+                interrupted_message(state, import_export_type).into()
+            }
             ImportExportState::Ended => import_export_type.end_message().into(),
             ImportExportState::Closed => "".into(),
         }
@@ -160,4 +187,23 @@ pub fn export_modal<'a, Message: From<ImportExportMessage> + Clone + 'static>(
         Length::Fixed(300.0)
     })
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interrupted_import_and_export_copy_identifies_the_right_result_to_check() {
+        for state in [ImportExportState::TimedOut, ImportExportState::Aborted] {
+            let import = interrupted_message(&state, &ImportExportType::ImportDescriptor);
+            assert!(import.contains("Import"));
+            assert!(import.contains("imported"));
+            assert!(!import.contains("destination"));
+
+            let export = interrupted_message(&state, &ImportExportType::Transactions);
+            assert!(export.contains("Export"));
+            assert!(export.contains("destination"));
+        }
+    }
 }
