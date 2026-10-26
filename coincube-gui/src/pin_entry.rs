@@ -322,10 +322,19 @@ impl PinEntry {
                         }
                         tokio::task::spawn_blocking(move || {
                             let loc = unlock::CubeLocation::new(&root, &cube);
-                            let result = if cube.network.is_blake2b() {
-                                unlock::unlock_connect_fork(&loc, &pin)
+                            let attempt = if cube.network.is_blake2b() {
+                                unlock::throttle::classify_connect_fork(&root, &loc, &pin)
                             } else {
-                                unlock::unlock_blocking(&loc, &pin)
+                                unlock::throttle::classify_pin(&root, &loc, &pin)
+                            };
+                            let result = match attempt {
+                                Ok(unlock::throttle::PinAttempt::Classified(outcome)) => {
+                                    Ok(outcome)
+                                }
+                                Ok(unlock::throttle::PinAttempt::Locked(remaining)) => {
+                                    return Err(unlock::throttle::lockout_message(remaining));
+                                }
+                                Err(error) => Err(error),
                             };
                             match result {
                                 Ok(PinOutcome::Unlock(signer)) => retain_unlocked_signer(
@@ -371,17 +380,11 @@ impl PinEntry {
                 }
             }
             Message::Classified(Ok(Verdict::Unlock)) => {
-                unlock::throttle::ThrottleState::load(&self.datadir_root)
-                    .record_success(&self.datadir_root, &self.cube.id);
                 // Stay in `loading` — the Breez/Spark load runs next and the
                 // screen must not flash back to the keypad in between.
                 Task::done(Message::PinVerified)
             }
             Message::Classified(Ok(Verdict::Duress)) => {
-                // Clear the counter too: it must not survive as evidence that
-                // someone was guessing, and this Cube is about to be wiped.
-                unlock::throttle::ThrottleState::load(&self.datadir_root)
-                    .record_success(&self.datadir_root, &self.cube.id);
                 // Clear the buffer and bubble up the enrolled account id so the
                 // parent can drive the orchestrator. The neutral loading screen
                 // stays up during the brief async activation gap: it is
@@ -395,7 +398,7 @@ impl PinEntry {
             Message::Classified(Ok(Verdict::Wrong)) => {
                 self.loading = false;
                 let penalty = unlock::throttle::ThrottleState::load(&self.datadir_root)
-                    .record_failure(&self.datadir_root, &self.cube.id);
+                    .current_penalty(&self.cube.id);
                 self.error = Some(if penalty.is_zero() {
                     "Incorrect PIN. Please try again.".to_string()
                 } else {

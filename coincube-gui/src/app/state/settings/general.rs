@@ -1120,18 +1120,6 @@ impl GeneralSettingsState {
                 // Share the unlock counter: it is the same PIN and the same
                 // Cube, so guesses should accumulate across both surfaces.
                 let throttle_root = datadir.clone();
-                let remaining = unlock::throttle::ThrottleState::load(&throttle_root)
-                    .remaining_lockout(&cube_id);
-                if !remaining.is_zero() {
-                    return Task::done(Message::View(view::Message::Settings(
-                        view::SettingsMessage::BackupMasterSeed(
-                            view::BackupWalletMessage::PinVerified(Err(
-                                unlock::throttle::lockout_message(remaining),
-                            )),
-                        ),
-                    )));
-                }
-
                 // Run Argon2id PIN verification + mnemonic decryption off
                 // the UI thread to avoid blocking the event loop.
                 Task::perform(
@@ -1144,35 +1132,22 @@ impl GeneralSettingsState {
                             // the cheap Argon2 oracle (m=19 MiB vs the seed
                             // file's 256 MiB) and is gone; see
                             // PLAN-cube-unlock-hardening I1.
-                            let mut throttle =
-                                unlock::throttle::ThrottleState::load(&throttle_root);
-                            match load_mnemonic_words(
-                                &datadir,
-                                network,
-                                fingerprint,
-                                &pin,
+                            unlock::throttle::classify_verification(
+                                &throttle_root,
                                 &cube_id,
-                            ) {
-                                Ok(words) => {
-                                    throttle.record_success(&throttle_root, &cube_id);
-                                    // Wrap here, not after delivery: from this
-                                    // point on every copy the message queue
-                                    // makes is scrubbed on drop.
-                                    Ok(Zeroizing::new(words))
-                                }
-                                // Only a wrong PIN is a guess. An operational
-                                // failure keeps its own message and costs the
-                                // user nothing against the throttle.
-                                Err(e) if !is_wrong_pin(&e) => Err(e.to_string()),
-                                Err(_) => {
-                                    let penalty = throttle.record_failure(&throttle_root, &cube_id);
-                                    Err(if penalty.is_zero() {
-                                        "Incorrect PIN. Please try again.".to_string()
-                                    } else {
-                                        unlock::throttle::lockout_message(penalty)
-                                    })
-                                }
-                            }
+                                || {
+                                    load_mnemonic_words(
+                                        &datadir,
+                                        network,
+                                        fingerprint,
+                                        &pin,
+                                        &cube_id,
+                                    )
+                                    .map(Zeroizing::new)
+                                },
+                                is_wrong_pin,
+                            )
+                            .unwrap_or_else(|e| Err(e.to_string()))
                         })
                         .await
                         .map_err(|e| format!("PIN verification task failed: {}", e))?
@@ -1458,9 +1433,9 @@ impl GeneralSettingsState {
 /// unlock authenticated, under the session lock, which proves the same thing —
 /// nothing is handed back without the PIN that opened this Cube. What it does
 /// *not* do is cost 831 ms a guess, so the escalating lockout in
-/// `services::unlock::throttle` is what rate-limits this surface. Every caller
-/// checks it before calling here and charges it on every wrong PIN; see
-/// [`is_wrong_pin`].
+/// `services::unlock::throttle` is what rate-limits this surface. Backup and
+/// Recovery Kit callers run this whole decryption inside its serialized
+/// check/trial/update helper; see [`is_wrong_pin`].
 ///
 /// A wrong PIN short-circuits rather than falling through to disk. Falling
 /// through would pay a full Argon2id pass to re-derive an answer the session has
