@@ -62,6 +62,7 @@ pub fn classify_pin_scoped(
     )
 }
 
+#[cfg(test)]
 fn classify_pin_with(
     root: &Path,
     cube_id: &str,

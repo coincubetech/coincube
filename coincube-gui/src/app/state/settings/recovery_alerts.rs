@@ -742,17 +742,16 @@ fn build_seed_blob_json(
     // `load_mnemonic_words` is the PIN check: the PIN the unlock authenticated
     // when a session can answer, the seed file's GCM tag when it cannot. The
     // cheap `verify_pin` hash that used to gate this is gone (I1).
-    let words =
-        super::general::load_mnemonic_words(datadir, network, fingerprint, pin, local_cube_id)
-            .map_err(|e| {
-                // No throttle on this path, but the message still has to be
-                // true: only a failed decryption is a wrong PIN.
-                if super::general::is_wrong_pin(&e) {
-                    "Incorrect PIN. Please try again.".to_string()
-                } else {
-                    e.to_string()
-                }
-            })?;
+    let words = crate::services::unlock::throttle::classify_verification(
+        datadir,
+        local_cube_id,
+        || {
+            super::general::load_mnemonic_words(datadir, network, fingerprint, pin, local_cube_id)
+                .map(Zeroizing::new)
+        },
+        super::general::is_wrong_pin,
+    )
+    .map_err(|e| e.to_string())??;
     let phrase = Zeroizing::new(words.join(" "));
     let blob = SeedBlob {
         version: BLOB_VERSION,
