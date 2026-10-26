@@ -664,92 +664,94 @@ fn enter_amount_card<'a>(
         fiat_converter.and_then(|converter| {
             Amount::from_str_in(&amount.value, denomination)
                 .ok()
-                .map(|parsed| converter.convert(parsed).to_text())
+                .map(|parsed| {
+                    let fiat = converter.convert(parsed);
+                    format!("{} {}", fiat.to_formatted_string(), fiat.currency())
+                })
         })
     } else {
         None
     };
-    let content =
-        Column::new()
-            .push(text("Amount").bold().size(P1_SIZE))
-            .push(
-                Row::new()
-                    .spacing(4)
-                    .push(text("Sending from"))
-                    .push(text(direction.display()).bold()),
-            )
-            .push(
-                Column::new()
-                    .push(
-                        Column::new()
-                            .push(Container::new(
-                                match bitcoin_unit {
-                                    BitcoinDisplayUnit::BTC => {
-                                        form::Form::new_amount_btc("Amount in BTC", amount, |msg| {
-                                            Message::Home(HomeMessage::AmountEdited(msg))
-                                        })
-                                    }
-                                    BitcoinDisplayUnit::Sats => form::Form::new_amount_sats(
-                                        "Amount in sats",
-                                        amount,
-                                        |msg| Message::Home(HomeMessage::AmountEdited(msg)),
-                                    ),
-                                }
-                                .size(20)
-                                .padding(10),
-                            ))
-                            .push({
-                                // Helper text reflects the per-direction effective
-                                // minimum (§Design section 4) composed with Breez's
-                                // SDK limits on swap-involving legs.
-                                let effective_min = crate::app::state::effective_transfer_min_sat(
-                                    direction,
-                                    onchain_send_limit,
-                                    onchain_receive_limit,
-                                );
-                                let effective_max = crate::app::state::effective_transfer_max_sat(
-                                    direction,
-                                    onchain_send_limit,
-                                    onchain_receive_limit,
-                                );
-                                Container::new(
-                                    text(match (effective_min, effective_max) {
-                                        (Some(min), Some(max)) => format!(
-                                            "Enter an amount between {} and {} {}",
-                                            Amount::from_sat(min)
-                                                .to_formatted_string_with_unit(bitcoin_unit),
-                                            Amount::from_sat(max)
-                                                .to_formatted_string_with_unit(bitcoin_unit),
-                                            bitcoin_unit,
-                                        ),
-                                        (Some(min), None) => format!(
-                                            "Minimum transfer: {} {}",
-                                            Amount::from_sat(min)
-                                                .to_formatted_string_with_unit(bitcoin_unit),
-                                            bitcoin_unit,
-                                        ),
-                                        _ => "Loading limits…".to_string(),
+    let content = Column::new()
+        .push(text("Amount").bold().size(P1_SIZE))
+        .push(
+            Row::new()
+                .spacing(4)
+                .push(text("Sending from"))
+                .push(text(direction.display()).bold()),
+        )
+        .push(
+            Column::new()
+                .push(
+                    Column::new()
+                        .push(Container::new(
+                            match bitcoin_unit {
+                                BitcoinDisplayUnit::BTC => {
+                                    form::Form::new_amount_btc("Amount in BTC", amount, |msg| {
+                                        Message::Home(HomeMessage::AmountEdited(msg))
                                     })
-                                    .size(12),
-                                )
-                                .padding(7)
-                            })
-                            .push_maybe(fiat_estimate.map(|estimate| {
-                                estimate.size(P2_SIZE).style(theme::text::secondary)
-                            })),
-                    )
-                    .push(button::primary(None, "Next").on_press_maybe(
-                        if amount.value.is_empty() || !amount.valid {
-                            None
-                        } else {
-                            Some(Message::Home(HomeMessage::NextStep))
-                        },
-                    ))
-                    .spacing(16)
-                    .width(Length::Fill),
-            )
-            .width(Length::Fill)
-            .align_x(Alignment::Center);
+                                }
+                                BitcoinDisplayUnit::Sats => {
+                                    form::Form::new_amount_sats("Amount in sats", amount, |msg| {
+                                        Message::Home(HomeMessage::AmountEdited(msg))
+                                    })
+                                }
+                            }
+                            .size(20)
+                            .padding(10),
+                        ))
+                        .push({
+                            // Helper text reflects the per-direction effective
+                            // minimum (§Design section 4) composed with Breez's
+                            // SDK limits on swap-involving legs.
+                            let effective_min = crate::app::state::effective_transfer_min_sat(
+                                direction,
+                                onchain_send_limit,
+                                onchain_receive_limit,
+                            );
+                            let effective_max = crate::app::state::effective_transfer_max_sat(
+                                direction,
+                                onchain_send_limit,
+                                onchain_receive_limit,
+                            );
+                            Container::new(
+                                text(match (effective_min, effective_max) {
+                                    (Some(min), Some(max)) => format!(
+                                        "Enter an amount between {} and {} {}",
+                                        Amount::from_sat(min)
+                                            .to_formatted_string_with_unit(bitcoin_unit),
+                                        Amount::from_sat(max)
+                                            .to_formatted_string_with_unit(bitcoin_unit),
+                                        bitcoin_unit,
+                                    ),
+                                    (Some(min), None) => format!(
+                                        "Minimum transfer: {} {}",
+                                        Amount::from_sat(min)
+                                            .to_formatted_string_with_unit(bitcoin_unit),
+                                        bitcoin_unit,
+                                    ),
+                                    _ => "Loading limits…".to_string(),
+                                })
+                                .size(12),
+                            )
+                            .padding(7)
+                        })
+                        .push_maybe(fiat_estimate.map(|estimate| {
+                            text(estimate).size(P2_SIZE).style(theme::text::secondary)
+                        })),
+                )
+                .push(button::primary(None, "Next").on_press_maybe(
+                    if amount.value.is_empty() || !amount.valid {
+                        None
+                    } else {
+                        Some(Message::Home(HomeMessage::NextStep))
+                    },
+                ))
+                .spacing(16)
+                .width(Length::Fill),
+        )
+        .width(Length::Fill)
+        .align_x(Alignment::Center);
 
     Container::new(content)
         .padding(0)
@@ -3284,10 +3286,17 @@ mod tests {
                     theme,
                 );
                 for label in ["Transfer between wallets", "From", "To", "Amount"] {
-                    assert!(snapshot.contains(label), "{appearance} {width}: {label}");
+                    assert!(
+                        snapshot.contains(label),
+                        "{} {}: {}",
+                        appearance,
+                        width,
+                        label
+                    );
                 }
                 assert!(snapshot.contains("250,000"));
                 assert!(snapshot.contains("375,000"));
+                assert!(snapshot.contains("25.00 USD"));
             }
         }
     }
