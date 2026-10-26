@@ -835,6 +835,18 @@ fn check_row<'a>(label: &'static str, ok: Option<bool>, detail: String) -> Eleme
 
 /// Funding keeps its own live safety boundary. These are display readings
 /// available on the panel, not a replay-protection or signing verdict.
+fn funding_node_check<'a>(review: Option<&VerifiedCoinPairReview>) -> Element<'a, Message> {
+    check_row(
+        "Node backend",
+        review.map(|_| true),
+        if review.is_some() {
+            "Both-chain deposit verification completed for this paired Vault.".into()
+        } else {
+            "Both chain readings are checked with each deposit verification.".into()
+        },
+    )
+}
+
 fn funding_checks<'a>(panel: &ClaimStep1Panel, cache: &Cache) -> Element<'a, Message> {
     let coins = panel.coins();
     Column::new()
@@ -853,11 +865,7 @@ fn funding_checks<'a>(panel: &ClaimStep1Panel, cache: &Cache) -> Element<'a, Mes
             Some(panel.wallet().inheritance_descriptor().is_some()),
             "This Bitcoin Vault supplies the claim policy.".into(),
         ))
-        .push(check_row(
-            "Node backend",
-            None,
-            "Both chain readings are checked with each deposit verification.".into(),
-        ))
+        .push(funding_node_check(panel.funding_review()))
         .push(check_row(
             "Coins to split",
             coins.map(|coins| !coins.pre_fork.is_empty()),
@@ -1787,6 +1795,40 @@ mod tests {
             );
         }
         assert!(!active.contains("********"));
+
+        // The production funding presenter passes panel.funding_review() to
+        // this row. A matching review is the only source of its Ready label.
+        // This state cannot be mounted through ClaimStep1Panel here because
+        // FundingDeposits and its paired review have no public test setter.
+        for (width, height) in [(1440, 900), (1024, 768)] {
+            for (appearance, palette) in [
+                ("dark", theme::Theme::dark()),
+                ("light", theme::Theme::light()),
+            ] {
+                let pending = capture::inspect(
+                    "claim-node-pending",
+                    workflow_page(0, funding_node_check(None)),
+                    (width, height),
+                    appearance,
+                    palette,
+                );
+                assert!(pending.contains("Node backend"));
+                assert!(pending.contains("Pending"));
+                assert!(!pending.contains("Both-chain deposit verification completed"));
+
+                let verified = capture::inspect(
+                    "claim-node-verified",
+                    workflow_page(1, funding_node_check(Some(&review))),
+                    (width, height),
+                    appearance,
+                    palette,
+                );
+                assert!(verified.contains("Node backend"));
+                assert!(verified.contains("Ready"));
+                assert!(verified.contains("Both-chain deposit verification completed"));
+                assert!(!verified.contains("Pending"));
+            }
+        }
 
         let passive = capture::inspect(
             "claim-passive-deposit",
