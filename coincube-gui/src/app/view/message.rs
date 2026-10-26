@@ -443,8 +443,14 @@ pub enum SettingsMessage {
     EditRemoteBackendSettings,
     RemoteBackendSettings(RemoteBackendSettingsMessage),
     EditWalletSettings,
+    ToggleWalletExpert,
+    ReviewDescriptorCopy,
+    ConfirmDescriptorCopy,
+    CancelDescriptorCopy,
     ImportExportSection,
     ExportEncryptedDescriptor,
+    ReviewPlaintextDescriptorExport,
+    CancelPlaintextDescriptorExport,
     ExportPlaintextDescriptor,
     ExportTransactions,
     ExportLabels,
@@ -614,6 +620,8 @@ pub enum LocalSigningMessage {
     ),
     /// User asked to remove a paired phone (8-hex fingerprint of the
     /// phone's cert pin).
+    ReviewRemovePhone(String),
+    CancelRemovePhone,
     RemovePhone(String),
     /// Periodic tick while no pairing is in progress: tell phones about
     /// removals made here, and ask paired phones whether they removed this
@@ -928,7 +936,9 @@ pub enum LiquidOverviewMessage {
     /// button is hidden off-mainnet, where SideSwap is unavailable).
     Swap,
     History,
-    SelectTransaction(usize),
+    SelectTransaction(crate::app::wallets::types::DomainPaymentIdentity),
+    /// Request whole-tree focus after a pointer interaction with a landing action.
+    FocusAction(iced::advanced::widget::Id),
     /// Forwarded to the top-level handler to flip the global
     /// fiat-native ↔ bitcoin-native display mode.
     FlipDisplayMode,

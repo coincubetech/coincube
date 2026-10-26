@@ -29,10 +29,17 @@ use crate::theme::tenshu::{self as tokens, size, space};
 use crate::theme::Theme;
 use crate::widget::{Column, Container, Element, Renderer, Row, Scrollable};
 
+mod controls;
+
 #[derive(Debug, Clone, PartialEq)]
 enum Msg {
     Focus(Id),
     Pressed(&'static str),
+    Toggled(&'static str, bool),
+    Selected(&'static str, u8),
+    Input(&'static str, String),
+    Submitted(&'static str),
+    Cleared(&'static str),
 }
 
 const WINDOWS: [(u32, u32); 2] = [(1024, 768), (1440, 900)];
@@ -188,7 +195,11 @@ impl Mounted {
     }
 
     fn pixels(&mut self, theme: &Theme, cursor: mouse::Cursor) -> Vec<u8> {
+        use iced::advanced::Renderer as _;
         self.redraw(cursor);
+        // Start each capture from an empty frame, as Iced's compositor does;
+        // otherwise a second capture of one mount keeps the first's layers.
+        self.renderer.reset(Rectangle::with_size(self.size));
         self.element.as_widget().draw(
             &self.tree,
             &mut self.renderer,

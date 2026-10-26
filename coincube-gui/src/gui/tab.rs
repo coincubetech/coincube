@@ -824,6 +824,8 @@ pub struct Tab {
     pub theme_mode: coincube_ui::theme::palette::ThemeMode,
     pub balance_privacy: Option<crate::app::state::preferences::BalancePrivacyChrome>,
     unlock_motion: Option<Instant>,
+    /// Safe, owned Launcher geometry retained only through this unlock.
+    unlock_floor: Option<home::LauncherSceneContext>,
     /// A seed-migration warning waiting for a surface to show it on.
     ///
     /// Held rather than dispatched because only `State::App` handles
@@ -890,6 +892,7 @@ impl Tab {
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
             balance_privacy: None,
             unlock_motion: None,
+            unlock_floor: None,
             pending_unlock_warnings: Vec::new(),
             app_generation: 0,
             claim_open: None,
@@ -1301,8 +1304,14 @@ impl Tab {
         };
         match message {
             home::Message::Run(root, _, chain, cube)
+            | home::Message::RunFromFloor(root, _, chain, cube, _)
             | home::Message::RunToRecovery(root, _, chain, cube)
             | home::Message::RunClaim(root, _, chain, cube, _) => {
+                if let home::Message::RunFromFloor(_, _, _, _, generation) = message {
+                    if !home.floor_open_matches_queued(*generation, cube) {
+                        return Err("This Cube changed while opening. Select it again to use the current details.".into());
+                    }
+                }
                 if !crate::chain::same_path(root.path(), home.datadir_path.path()) {
                     return Err("The selected Cube belongs to another data directory.".into());
                 }
@@ -1420,8 +1429,12 @@ impl Tab {
         let was_fork_app =
             matches!(&self.state, State::App(app) if app.cube_settings().network.is_blake2b());
         let mut result = self.update_inner(message);
-        if !matches!(self.state, State::PinEntry(_) | State::PasskeyUnlock(_)) {
+        if !matches!(self.state, State::PinEntry(_) | State::PasskeyUnlock(_))
+            || matches!(&self.state, State::PinEntry(pin) if pin.is_loading())
+            || matches!(&self.state, State::PasskeyUnlock(passkey) if passkey.is_opening())
+        {
             self.unlock_motion = None;
+            self.unlock_floor = None;
         }
         let is_app = matches!(&self.state, State::App(_));
         if matches!(self.state, State::Home(_) | State::DuressActive(_)) {
@@ -1482,8 +1495,24 @@ impl Tab {
     fn update_inner(&mut self, message: Message) -> Task<Message> {
         use crate::app::settings::global::GlobalSettings;
         let message = match message {
+            Message::Launch(floor @ home::Message::RunFromFloor(..)) => {
+                if let Err(error) = self.validate_home_exit(&floor) {
+                    if let State::Home(home) = &mut self.state {
+                        home.set_error(error);
+                    }
+                    app::split_intent::clear();
+                    self.pending_split_intent = None;
+                    return Task::none();
+                }
+                let home::Message::RunFromFloor(root, config, chain, cube, _) = floor else {
+                    unreachable!();
+                };
+                self.pending_recovery_route = None;
+                Message::Launch(home::Message::Run(root, config, chain, cube))
+            }
             Message::Launch(home::Message::RunToRecovery(root, config, chain, cube)) => {
                 self.pending_recovery_route = Some((root.clone(), chain, cube.id.clone()));
+                self.claim_open = None;
                 Message::Launch(home::Message::Run(root, config, chain, cube))
             }
             Message::Launch(home::Message::RunClaim(root, config, chain, cube, intent)) => {
@@ -1493,6 +1522,7 @@ impl Tab {
             }
             Message::Launch(home::Message::Run(root, config, chain, cube)) => {
                 self.pending_recovery_route = None;
+                self.claim_open = None;
                 Message::Launch(home::Message::Run(root, config, chain, cube))
             }
             Message::ForkInstallCompleted(generation, msg) => {
@@ -1520,6 +1550,7 @@ impl Tab {
                     }
                     app::split_intent::clear();
                     self.pending_split_intent = None;
+                    self.claim_open = None;
                     return Task::none();
                 }
             }
@@ -1688,7 +1719,17 @@ impl Tab {
                     command.map(Message::Install)
                 }
                 home::Message::Run(datadir_path, cfg, chain, cube) => {
+                    self.unlock_floor = None;
+                    let opened_on_floor = l.launcher_floor_open_armed();
                     let spin_from_details = l.take_launcher_details_face(&cube);
+                    if opened_on_floor && !l.floor_open_matches_current_cube(&cube) {
+                        l.set_error(
+                            "This Cube changed while opening. Select it again to use the current details.",
+                        );
+                        self.unlock_motion = None;
+                        app::split_intent::clear();
+                        return Task::none();
+                    }
                     // Every refusal below abandons this open: drop an armed Split
                     // handoff with it rather than let a later open inherit it.
                     // Chain gate — first, before anything below can touch a
@@ -1847,6 +1888,9 @@ impl Tab {
                         connect_client: l.connect_account.authenticated_client(),
                     };
 
+                    let unlock_floor = spin_from_details
+                        .then(|| l.launcher_scene_context(&cube))
+                        .flatten();
                     let mut state = unlock_state(cube, datadir_root, on_success, duress_account_id);
                     if let State::PinEntry(pin) = &mut state {
                         pin.set_connect_provider(&l.connect_account.client.base_url);
@@ -1860,7 +1904,8 @@ impl Tab {
                         }
                     }
                     self.state = state;
-                    self.unlock_motion = spin_from_details.then(Instant::now);
+                    self.unlock_motion = unlock_floor.as_ref().map(|_| Instant::now());
+                    self.unlock_floor = unlock_floor;
                     match &self.state {
                         State::PinEntry(_) => {
                             iced::widget::operation::focus(crate::pin_input::first_digit_id())
@@ -4271,27 +4316,57 @@ impl Tab {
             State::Home(v) => v.view().map(Message::Launch),
             State::Loader(v) => v.view().map(Message::Load),
             State::Login(v) => v.view().map(Message::Login),
-            State::PinEntry(v) => home::launcher_presenter::unlock_turn_with_controls(
-                v.cube(),
-                self.theme_mode,
-                self.unlock_motion
+            State::PinEntry(v) => {
+                let progress = self
+                    .unlock_motion
                     .map(|started| {
                         home::launcher_presenter::unlock_turn_progress(started, Instant::now())
                     })
-                    .filter(|progress| *progress < 1.0),
-                v.view_with_theme(self.theme_mode).map(Message::PinEntry),
-            ),
-            State::PasskeyUnlock(v) => home::launcher_presenter::unlock_turn_with_controls(
-                v.cube(),
-                self.theme_mode,
-                self.unlock_motion
+                    .filter(|progress| *progress < 1.0);
+                if let Some(floor) = self.unlock_floor.as_ref() {
+                    home::launcher_presenter::unlock_turn_with_floor_controls(
+                        v.cube(),
+                        self.theme_mode,
+                        floor,
+                        progress,
+                        v.view_with_theme_and_floor(self.theme_mode, Some(floor))
+                            .map(Message::PinEntry),
+                    )
+                } else {
+                    home::launcher_presenter::unlock_turn_with_controls(
+                        v.cube(),
+                        self.theme_mode,
+                        progress,
+                        v.view_with_theme(self.theme_mode).map(Message::PinEntry),
+                    )
+                }
+            }
+            State::PasskeyUnlock(v) => {
+                let progress = self
+                    .unlock_motion
                     .map(|started| {
                         home::launcher_presenter::unlock_turn_progress(started, Instant::now())
                     })
-                    .filter(|progress| *progress < 1.0),
-                v.view_with_theme(self.theme_mode)
-                    .map(Message::PasskeyUnlock),
-            ),
+                    .filter(|progress| *progress < 1.0);
+                if let Some(floor) = self.unlock_floor.as_ref() {
+                    home::launcher_presenter::unlock_turn_with_floor_controls(
+                        v.cube(),
+                        self.theme_mode,
+                        floor,
+                        progress,
+                        v.view_with_theme_and_floor(self.theme_mode, Some(floor))
+                            .map(Message::PasskeyUnlock),
+                    )
+                } else {
+                    home::launcher_presenter::unlock_turn_with_controls(
+                        v.cube(),
+                        self.theme_mode,
+                        progress,
+                        v.view_with_theme(self.theme_mode)
+                            .map(Message::PasskeyUnlock),
+                    )
+                }
+            }
             State::DuressActive(v) => v.view().map(Message::Duress),
         }
     }
@@ -4308,6 +4383,8 @@ impl Tab {
     pub fn stop(&mut self) {
         self.pending_split_intent = None;
         self.claim_open = None;
+        self.unlock_motion = None;
+        self.unlock_floor = None;
         match &mut self.state {
             State::Loader(s) => s.stop(),
             State::Home(s) => s.stop(),
@@ -5405,6 +5482,115 @@ mod migration_warning_tests {
             assert!(error.is_some());
             assert!(app::split_intent::take_for_open(&id, ChainId::BitcoinBlake2b).is_none());
         }
+    }
+
+    #[test]
+    fn refused_home_open_discards_any_prior_floor_snapshot() {
+        let mut tab = non_app_tab();
+        tab.unlock_floor = Some(home::LauncherSceneContext {
+            selected: home::CubeCatalogKey {
+                chain: crate::chain::ChainId::Bitcoin,
+                cube_id: "prior".into(),
+            },
+            page: 0,
+            selected_slot: 0,
+            backup: "Status unknown",
+            connect: String::new(),
+            wallets: "Not yet known",
+            peers: Vec::new(),
+        });
+        let datadir = match &tab.state {
+            State::Home(home) => home.datadir_path.clone(),
+            _ => unreachable!(),
+        };
+        let cube = cube_on(crate::chain::ChainId::Bitcoin);
+        drop(tab.update(Message::Launch(home::Message::Run(
+            datadir,
+            app::config::Config::new(false),
+            crate::chain::ChainId::Signet,
+            cube,
+        ))));
+        assert!(matches!(tab.state, State::Home(_)));
+        assert!(tab.unlock_floor.is_none());
+        assert!(tab.unlock_motion.is_none());
+    }
+
+    #[test]
+    fn refused_claim_then_ordinary_open_does_not_retain_claim_authority() {
+        use crate::chain::ChainId;
+
+        let mut tab = non_app_tab();
+        let root = match &tab.state {
+            State::Home(home) => home.datadir_path.clone(),
+            _ => unreachable!(),
+        };
+        let target = cube_on(ChainId::BitcoinBlake2b);
+        let handoff =
+            app::claim_intent::ForkHandoff::new(&root, "source-cube".into(), target.id.clone())
+                .unwrap();
+        let intent = home::ClaimOpenIntent::new(
+            app::cache::AppGeneration::next(),
+            &root,
+            "source-cube".into(),
+            target.id.clone(),
+            home::ClaimRoute::Begin(handoff),
+        );
+        drop(tab.update(Message::Launch(home::Message::RunClaim(
+            root.clone(),
+            app::config::Config::new(false),
+            ChainId::Bitcoin, // Wrong folder: refuse before PIN entry.
+            target,
+            intent,
+        ))));
+        assert!(matches!(tab.state, State::Home(_)));
+        assert!(tab.claim_open.is_none(), "refusal must discard the Claim");
+
+        let ordinary = cube_on(ChainId::Bitcoin);
+        drop(tab.update(Message::Launch(home::Message::Run(
+            root,
+            app::config::Config::new(false),
+            ChainId::Bitcoin,
+            ordinary,
+        ))));
+        assert!(matches!(tab.state, State::PinEntry(_)));
+        assert!(tab.claim_open.is_none());
+    }
+
+    #[test]
+    fn ordinary_open_clears_preexisting_claim_intent() {
+        use crate::chain::ChainId;
+
+        let mut tab = non_app_tab();
+        let root = match &tab.state {
+            State::Home(home) => home.datadir_path.clone(),
+            _ => unreachable!(),
+        };
+        let ordinary = cube_on(ChainId::Bitcoin);
+        tab.set_claim_open(home::ClaimOpenIntent::new(
+            app::cache::AppGeneration::next(),
+            &root,
+            "source-cube".into(),
+            ordinary.id.clone(),
+            home::ClaimRoute::Begin(
+                app::claim_intent::ForkHandoff::new(
+                    &root,
+                    "source-cube".into(),
+                    ordinary.id.clone(),
+                )
+                .unwrap(),
+            ),
+        ));
+        drop(tab.update(Message::Launch(home::Message::Run(
+            root,
+            app::config::Config::new(false),
+            ChainId::Bitcoin,
+            ordinary,
+        ))));
+        assert!(matches!(tab.state, State::PinEntry(_)));
+        assert!(
+            tab.claim_open.is_none(),
+            "ordinary open must discard stale Claim"
+        );
     }
 
     fn cube_on(chain: crate::chain::ChainId) -> app::settings::CubeSettings {

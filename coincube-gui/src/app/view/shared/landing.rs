@@ -1,17 +1,230 @@
-//! Synthetic mounted-presenter inspection for privacy and Launcher regressions.
-//! This test-only probe does not depend on the Tenshu landing components.
+//! Pure presentation pieces shared by the four wallet landing routes.
+//!
+//! Callers decide visibility, units, rates, and availability before constructing
+//! an `AmountCell`. This module never reads preferences or interprets token units.
 
+use coincube_ui::{
+    component::text::{text, Text as _, H2_SIZE, P1_SIZE, P2_SIZE},
+    font::MEDIUM,
+    theme,
+    widget::{action::Action, Column, ColumnExt, Element, Row, RowExt, Text},
+};
+use iced::{
+    advanced::widget::Id,
+    widget::{button, container, text::Wrapping},
+    Alignment, Length,
+};
+
+pub fn landing_control_id(cube: &str, wallet: &str, control: &str) -> Id {
+    Id::from(format!(
+        "tenshu.overview.{}:{}:{}:{}:{}:{}",
+        cube.len(),
+        cube,
+        wallet.len(),
+        wallet,
+        control.len(),
+        control,
+    ))
+}
+
+/// Neutral wallet card used on the hub; the orange accent belongs to actions.
+pub fn landing_card_style(theme: &theme::Theme) -> container::Style {
+    container::Style {
+        background: Some(iced::Background::Color(theme.colors.shell.panel)),
+        border: iced::Border {
+            color: theme.colors.shell.line,
+            width: 1.0,
+            radius: 16.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+/// Quiet rectangular control for secondary wallet-page navigation.
+pub fn landing_subtle_button_style(theme: &theme::Theme, status: button::Status) -> button::Style {
+    button::Style {
+        background: Some(iced::Background::Color(
+            if matches!(status, button::Status::Hovered | button::Status::Pressed) {
+                theme.colors.shell.hover
+            } else {
+                theme.colors.shell.background
+            },
+        )),
+        text_color: theme.colors.shell.ink,
+        border: iced::Border {
+            color: theme.colors.shell.line,
+            width: 1.0,
+            radius: 8.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+/// Wallet-page balance is a section of the page, not a second hub card.
+pub fn landing_balance_section<'a, M: 'a>(content: impl Into<Element<'a, M>>) -> Element<'a, M> {
+    Column::new()
+        .spacing(20)
+        .width(Length::Fill)
+        .push(content)
+        .push(iced::widget::rule::horizontal(1))
+        .into()
+}
+
+/// A landing navigation button using the released keyboard Action behavior.
+/// `focus_intent` must route to a whole-tree focus operation in the owner.
+pub fn landing_button<'a, M: Clone + 'static>(
+    id: impl Into<Id>,
+    label: &'static str,
+    icon: Option<Text<'a>>,
+    focus_intent: fn(Id) -> M,
+    press: Option<M>,
+    style: fn(&theme::Theme, button::Status) -> button::Style,
+) -> Action<'a, M> {
+    let label = text(label)
+        .font(MEDIUM)
+        .align_y(Alignment::Center)
+        .align_x(Alignment::Center);
+    let content: Element<'a, M> = if let Some(icon) = icon {
+        Row::new()
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .push(icon)
+            .push(label)
+            .into()
+    } else {
+        label.into()
+    };
+    Action::new(
+        id,
+        container(content)
+            .align_y(iced::alignment::Vertical::Center)
+            .align_x(iced::alignment::Horizontal::Center)
+            .width(Length::Fill)
+            .padding(5),
+        focus_intent,
+    )
+    .style(style)
+    .width(Length::Shrink)
+    .on_press_maybe(press)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AmountCell {
+    pub primary: String,
+    pub secondary: Option<String>,
+    /// Nonmonetary status only. A masked cell discards this so callers cannot
+    /// accidentally retain an amount-bearing tooltip or accessibility label.
+    pub explanation: Option<String>,
+}
+
+impl AmountCell {
+    pub fn shown(primary: impl Into<String>, secondary: Option<String>) -> Self {
+        Self {
+            primary: primary.into(),
+            secondary,
+            explanation: None,
+        }
+    }
+
+    pub fn unknown(explanation: impl Into<String>) -> Self {
+        Self {
+            primary: "—".into(),
+            secondary: None,
+            explanation: Some(explanation.into()),
+        }
+    }
+
+    pub fn unavailable(explanation: impl Into<String>) -> Self {
+        Self {
+            primary: "Unavailable".into(),
+            secondary: None,
+            explanation: Some(explanation.into()),
+        }
+    }
+
+    pub fn masked() -> Self {
+        Self {
+            primary: "••••••".into(),
+            secondary: None,
+            explanation: None,
+        }
+    }
+
+    pub fn with_explanation(mut self, explanation: impl Into<String>) -> Self {
+        self.explanation = Some(explanation.into());
+        self
+    }
+
+    /// Erases every supplied monetary string, including explanatory text.
+    pub fn redact(self) -> Self {
+        Self::masked()
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum AmountTier {
+    Total,
+    Card,
+    Row,
+}
+
+pub fn amount_cell<'a, M: 'a>(cell: AmountCell, tier: AmountTier) -> Element<'a, M> {
+    let size = match tier {
+        AmountTier::Total => H2_SIZE + 8,
+        AmountTier::Card => H2_SIZE,
+        AmountTier::Row => P1_SIZE,
+    };
+    Column::new()
+        .align_x(if matches!(tier, AmountTier::Row) {
+            Alignment::End
+        } else {
+            Alignment::Start
+        })
+        .spacing(3)
+        .push(
+            text(cell.primary)
+                .size(size)
+                .bold()
+                .wrapping(Wrapping::WordOrGlyph),
+        )
+        .push_maybe(cell.secondary.map(|s| {
+            text(s)
+                .size(P2_SIZE)
+                .style(theme::text::secondary)
+                .wrapping(Wrapping::WordOrGlyph)
+        }))
+        .push_maybe(cell.explanation.map(|s| {
+            text(s)
+                .size(P2_SIZE)
+                .style(theme::text::secondary)
+                .wrapping(Wrapping::WordOrGlyph)
+        }))
+        .into()
+}
+
+pub fn section_heading<'a, M: 'a>(
+    title: &'static str,
+    action: Option<Element<'a, M>>,
+) -> Row<'a, M> {
+    Row::new()
+        .spacing(12)
+        .align_y(Alignment::Center)
+        .width(Length::Fill)
+        .push(text(title).size(H2_SIZE).bold())
+        .push(iced::widget::Space::new().width(Length::Fill))
+        .push_maybe(action)
+}
+
+#[cfg(test)]
 pub(crate) mod capture {
+    use super::*;
     use coincube_ui::font;
-    use coincube_ui::{theme, widget::Element};
-    use iced::advanced::widget::Id;
     use iced::advanced::{
         layout,
         renderer::Headless,
         widget::{operation, operation::focusable, operation::Focusable, Operation, Tree},
         Layout,
     };
-    use iced::Length;
     use iced::{keyboard, mouse, Event, Rectangle, Size};
 
     #[derive(Default)]
@@ -48,6 +261,18 @@ pub(crate) mod capture {
 
         pub fn has_focus(&self, id: Id) -> bool {
             self.focus.iter().any(|(actual, _)| actual == &id)
+        }
+
+        pub fn right_aligned(&self, primary: &str, secondary: &str) -> bool {
+            let right = |needle: &str| {
+                self.text.iter().find_map(|(value, bounds)| {
+                    (value == needle).then_some(bounds.x + bounds.width)
+                })
+            };
+            match (right(primary), right(secondary)) {
+                (Some(a), Some(b)) => (a - b).abs() <= 4.0,
+                _ => false,
+            }
         }
     }
 
@@ -286,5 +511,28 @@ pub(crate) mod capture {
             );
         }
         messages
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AmountCell;
+
+    #[test]
+    fn masking_erases_primary_secondary_and_explanation() {
+        let cell = AmountCell::shown("42 BTC", Some("$123".into()))
+            .with_explanation("42 BTC available at current rate")
+            .redact();
+        assert_eq!(cell, AmountCell::masked());
+        assert!(!format!("{cell:?}").contains("42"));
+        assert!(!format!("{cell:?}").contains("123"));
+    }
+
+    #[test]
+    fn unknown_and_zero_are_distinct() {
+        let unknown = AmountCell::unknown("History is still loading");
+        let known_zero = AmountCell::shown("0 SATS", None);
+        assert_ne!(unknown, known_zero);
+        assert_eq!(unknown.primary, "—");
     }
 }

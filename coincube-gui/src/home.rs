@@ -55,8 +55,10 @@ use crate::{
 use coincube_core::signer::{MasterSigner, MASTER_SEED_LABEL};
 
 mod launcher_catalog;
+mod launcher_coin;
 pub(crate) mod launcher_presenter;
 pub(crate) mod launcher_scene;
+pub(crate) use launcher_catalog::LauncherSceneContext;
 
 /// The firmware advisory whose one-time incident notice this install still
 /// owes the user, if any.
@@ -1629,6 +1631,10 @@ impl Home {
                 };
                 self.catalog.open_from_floor = self.catalog.selected.as_ref() == Some(&key)
                     && self.catalog.mode == launcher_catalog::LauncherMode::Cubes;
+                if self.catalog.open_from_floor {
+                    self.catalog.floor_open_generation =
+                        self.catalog.floor_open_generation.wrapping_add(1);
+                }
                 Message::View(ViewMessage::Run(index))
             }
             Message::View(ViewMessage::RenameCatalog(key)) => {
@@ -3058,9 +3064,18 @@ impl Home {
                             }
                         };
                         let cube = cube.clone();
+                        let floor_generation = self
+                            .catalog
+                            .open_from_floor
+                            .then_some(self.catalog.floor_open_generation);
                         Task::perform(
-                            async move { (datadir_path.clone(), cfg, source, cube) },
-                            |m| Message::Run(m.0, m.1, m.2, m.3),
+                            async move { (datadir_path, cfg, source, cube, floor_generation) },
+                            |(root, cfg, chain, cube, generation)| match generation {
+                                Some(generation) => {
+                                    Message::RunFromFloor(root, cfg, chain, cube, generation)
+                                }
+                                None => Message::Run(root, cfg, chain, cube),
+                            },
                         )
                     } else {
                         Task::none()
@@ -6611,6 +6626,15 @@ pub enum Message {
         app::config::Config,
         crate::chain::ChainId,
         CubeSettings,
+    ),
+    /// The same open, with an immutable floor origin attached before the
+    /// asynchronous handoff. GUI validates it before retiring public owners.
+    RunFromFloor(
+        CoincubeDirectory,
+        app::config::Config,
+        crate::chain::ChainId,
+        CubeSettings,
+        u64,
     ),
     /// Open the selected local Cube through its normal unlock path, then show
     /// its existing Cube → Settings → Recovery management screen.

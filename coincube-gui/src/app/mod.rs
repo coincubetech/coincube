@@ -460,6 +460,10 @@ impl Panels {
                     internal_bitcoind.is_some(),
                     config.clone(),
                 )
+                .with_managed_owner(
+                    internal_bitcoind
+                        .and_then(|node| node.owner_lock_path().map(std::path::PathBuf::from)),
+                )
             }),
             claim,
             fork_claim: None,
@@ -605,6 +609,10 @@ impl Panels {
                 daemon_backend,
                 internal_bitcoind.is_some(),
                 config.clone(),
+            )
+            .with_managed_owner(
+                internal_bitcoind
+                    .and_then(|node| node.owner_lock_path().map(std::path::PathBuf::from)),
             )
         });
         self.fork_claim = None; // replacing the Vault drops and revokes its old session
@@ -8139,6 +8147,11 @@ impl App {
                 }
             }
             Message::SetInternalBitcoind(bitcoind) => {
+                if let Some(settings) = self.panels.vault_settings.as_mut() {
+                    settings.set_managed_owner(
+                        bitcoind.owner_lock_path().map(std::path::PathBuf::from),
+                    );
+                }
                 self.internal_bitcoind = Some(bitcoind);
             }
             Message::BackgroundManagedNodeReady {
@@ -8194,6 +8207,11 @@ impl App {
                         // The pending node's sync card takes over from here.
                         if current {
                             self.cache.background_node_install = cache::BackgroundNodeInstall::Idle;
+                        }
+                        if let Some(settings) = self.panels.vault_settings.as_mut() {
+                            settings.set_managed_owner(
+                                node.owner_lock_path().map(std::path::PathBuf::from),
+                            );
                         }
                         self.internal_bitcoind = Some(node);
                         let mut updated = cfg.clone();
@@ -8331,6 +8349,7 @@ impl App {
                     network: self.cache.network,
                     chain: self.cache.chain(),
                     config: config.clone(),
+                    managed_owner: managed.owner_lock_path().map(std::path::PathBuf::from),
                     daemon: daemon.clone(),
                     wallet: wallet.clone(),
                 };
@@ -8379,6 +8398,11 @@ impl App {
                     Ok(outcome) => {
                         self.cache.node_history = outcome.status;
                         if let Some(node) = outcome.node {
+                            if let Some(settings) = self.panels.vault_settings.as_mut() {
+                                settings.set_managed_owner(
+                                    node.owner_lock_path().map(std::path::PathBuf::from),
+                                );
+                            }
                             self.internal_bitcoind = Some(node);
                         }
                     }
@@ -12804,6 +12828,9 @@ pub(crate) mod tests {
                 if error.contains("Split was cancelled"))));
         assert!(source.claim_pair_context.is_none());
         assert!(!binding.current(), "refusal revoked the old operation");
+        assert!(crate::node::bitcoind::wait_for_managed_node_cleanup(
+            std::time::Duration::from_secs(120)
+        ));
         assert!(!lock_dir.exists(), "refusal stopped its owned node");
         assert_eq!(
             target_daemon
@@ -12847,6 +12874,9 @@ pub(crate) mod tests {
             "old completion cannot stop new owner"
         );
         source.revoke_claim();
+        assert!(crate::node::bitcoind::wait_for_managed_node_cleanup(
+            std::time::Duration::from_secs(120)
+        ));
         assert!(!lock_dir.exists());
         assert_eq!(
             target_daemon
@@ -18113,6 +18143,58 @@ mod local_node_sync_tests {
         assert!(!app.cache.node_history.busy);
         assert!(app.node_history_pending.is_none());
         assert!(app.cache.node_history.error.is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn history_node_replacement_refreshes_open_settings_owner() {
+        let root =
+            std::env::temp_dir().join(format!("history-settings-owner-{}", uuid::Uuid::new_v4()));
+        let _guard = crate::app::session::test_guard();
+        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+        let config = node(8333);
+        let mut daemon_config = app.daemon.as_ref().unwrap().config().unwrap().clone();
+        daemon_config.pending_bitcoind = Some(config.clone());
+        app.daemon = Some(Arc::new(EmbeddedDaemon::unstarted_for_test(
+            daemon_config,
+            None,
+        )));
+        let prior = Bitcoind::for_test(config.clone(), &app.cache.datadir_path, app.cache.network);
+        let prior_path = prior.owner_lock_path().unwrap().to_path_buf();
+        app.panels
+            .vault_settings
+            .as_mut()
+            .unwrap()
+            .set_managed_owner(Some(prior_path.clone()));
+        app.internal_bitcoind = Some(prior);
+        let replacement =
+            Bitcoind::for_test(config.clone(), &app.cache.datadir_path, app.cache.network);
+        let replacement_path = replacement.owner_lock_path().unwrap().to_path_buf();
+        assert_ne!(prior_path, replacement_path);
+        app.node_history_request_epoch = 1;
+        let wallet = app.wallet.as_ref().unwrap().id();
+        drop(app.update(Message::NodeHistoryCompleted {
+            request_epoch: 1,
+            app: app.cache.app_generation,
+            wallet,
+            config,
+            result: Ok(Box::new(node_history::Outcome {
+                status: node_history::Status::default(),
+                node: Some(replacement),
+            })),
+        }));
+        assert_eq!(
+            app.panels
+                .vault_settings
+                .as_ref()
+                .unwrap()
+                .managed_owner_path(),
+            Some(replacement_path)
+        );
+        drop(app);
+        assert!(crate::node::bitcoind::wait_for_managed_node_cleanup(
+            std::time::Duration::from_secs(120)
+        ));
         let _ = std::fs::remove_dir_all(root);
     }
 

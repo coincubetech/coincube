@@ -18,7 +18,7 @@ use coincube_ui::{
 
 use super::{
     launcher_catalog::{self, CatalogMessage, LauncherMode, Projection},
-    launcher_scene, CubeCatalogKey, DeleteCubeMessage, Home, ViewMessage,
+    launcher_coin, launcher_scene, CubeCatalogKey, DeleteCubeMessage, Home, ViewMessage,
 };
 use crate::{
     chain::{ChainId, ChainIdExt},
@@ -88,7 +88,7 @@ fn cube_glyph_with_opacity(
 ) -> iced::widget::Svg<'static, theme::Theme> {
     let scale = 1.0 - 0.08 * ((1.0 - opacity) / 0.6).clamp(0.0, 1.0);
     let shift_x = 90.0 * (1.0 - scale);
-    let shift_y = 78.0 * (1.0 - scale);
+    let shift_y = 84.5 * (1.0 - scale);
     let source = cube_glyph_source(cube, light)
         .replace("<svg ", &format!("<svg opacity=\"{opacity:.3}\" "))
         .replacen(
@@ -102,64 +102,46 @@ fn cube_glyph_with_opacity(
     iced::widget::Svg::new(iced::widget::svg::Handle::from_memory(source.into_bytes()))
 }
 
-fn cube_glyph_source(cube: &crate::app::settings::CubeSettings, light: bool) -> String {
+pub(super) fn cube_glyph_source(cube: &crate::app::settings::CubeSettings, light: bool) -> String {
     let chain = cube.network;
-    let edge = if chain.is_blake2b() {
-        if light {
-            "#c69f43"
-        } else {
-            "#d4a62a"
-        }
-    } else if light {
-        "#f9a45a"
-    } else {
-        "#f3821d"
-    };
-    let mark = if chain.is_blake2b() {
-        r##"<text x="90" y="53" text-anchor="middle" font-size="18" font-weight="bold" font-family="sans-serif" fill="#201407">B2</text>"##
-    } else {
-        // The repo's BTC logo path, scaled onto the top face. Text glyphs are
-        // not reliable in the headless SVG renderer on every platform.
-        r##"<g transform="translate(75 31) scale(.92)"><path fill="#fff" fill-rule="nonzero" d="M23.2 14c.3-2-1.3-3.2-3.5-4l.7-2.8-1.7-.4-.7 2.7-1.4-.3.7-2.8-1.7-.4-.7 2.8-1.1-.2-2.4-.6-.5 1.8 1.3.3q1 .4.8 1l-.8 3.3h.2-.2L11 18.9q-.1.4-.8.4L9 19l-.8 2 2.2.6 1.2.3-.7 2.8 1.7.5.8-2.9 1.3.4-.7 2.8 1.8.4.7-2.8c3 .5 5.1.3 6-2.3.8-2.2 0-3.4-1.5-4.2q1.8-.3 2.2-2.6m-4 5.6c-.5 2.1-4.1 1-5.3.7l1-3.9c1.1.3 4.9 1 4.3 3.2m.6-5.6c-.5 2-3.5 1-4.5.7l.9-3.4c1 .2 4 .7 3.6 2.7"/></g>"##
-    };
+    let edge = launcher_scene::edge_color(chain);
+    let mark = launcher_scene::rest_glyph_coin(chain, light);
+    let top_points = launcher_scene::polygon_points(launcher_scene::rest_glyph_face(4));
+    let left_points = launcher_scene::polygon_points(launcher_scene::rest_glyph_face(2));
+    let right_points = launcher_scene::polygon_points(launcher_scene::rest_glyph_face(0));
     let dash = if matches!(chain, ChainId::Bitcoin | ChainId::BitcoinBlake2b) {
         "none"
     } else {
         "5 3"
     };
     let (top, left, right, marks, shadow) = if light {
-        ("#e9e3d9", "#d8d0c4", "#ccc3b5", "#30302d", "#4d463b")
+        ("#e6e0d5", "#d6cfc2", "#c9c1b2", "#30302d", "#4d463b")
     } else {
-        ("#52534d", "#343633", "#292b29", "#ecebe6", "#080908")
+        ("#41423e", "#2e2f2c", "#262724", "#ecebe6", "#080908")
     };
-    // A face mark is shown only for a fact persisted on this Cube. Spark and
-    // Liquid inventories are unknown before unlock, so neither gets a mark.
-    let wallet_mark = match wallet_face_mark(cube) {
-        WalletFaceMark::Vault => {
-            r##"<path d="M58 73 67 77V87c0 7-5 12-9 14-4-2-9-7-9-14V77Z" fill="none" stroke="{marks}" stroke-width="2" stroke-linejoin="round"/>"##
-        }
-        WalletFaceMark::ImportedBitcoin => {
-            r##"<circle cx="58" cy="85" r="12" fill="none" stroke="{marks}" stroke-width="2"/><path d="M58 78v14m-4-11h7c4 0 4 4 0 4h-7m0 0h8c4 0 4 4 0 4h-8" fill="none" stroke="{marks}" stroke-width="2"/>"##
-        }
-        WalletFaceMark::None => "",
-    };
-    let backup_mark = if cube.backed_up || cube.has_recovery_kit() {
-        r##"<circle cx="137" cy="64" r="9" fill="none" stroke="{marks}" stroke-width="1.5"/><path d="m133 64 3 3 5-6" fill="none" stroke="{marks}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"##
-    } else {
-        ""
-    };
-    let wallet_mark = wallet_mark.replace("{marks}", marks);
-    let backup_mark = backup_mark.replace("{marks}", marks);
-    // The right-face mark distinguishes the passkey route from the ordinary
-    // gated route. It does not establish PIN presence or a retained session.
-    let unlock_mark = if cube.is_passkey_cube() {
-        r##"<circle cx="117" cy="82" r="6" fill="none" stroke="{marks}" stroke-width="2"/><path d="m122 86 12 12m-5-5 4-4m-1 7 4-4" fill="none" stroke="{marks}" stroke-width="2" stroke-linecap="round"/>"##
-    } else {
-        r##"<path d="M116 83v-6a7 7 0 0 1 14 0v6m-17 0h20v18h-20z" fill="none" stroke="{marks}" stroke-width="2" stroke-linejoin="round"/><circle cx="123" cy="91" r="1.5" fill="{marks}"/>"##
-    }
-    .replace("{marks}", marks);
+    // Spark and Liquid inventories are unknown before unlock; only persisted
+    // Vault or imported Bitcoin facts receive a wallet mark.
+    let wallet_mark = wallet_face_mark(cube);
+    let wallet_mark = launcher_scene::rest_side_marks(
+        2,
+        wallet_mark == WalletFaceMark::Vault,
+        wallet_mark == WalletFaceMark::ImportedBitcoin,
+        cube.is_passkey_cube(),
+        cube.backed_up || cube.has_recovery_kit(),
+        light,
+    );
+    // The right face indicates the passkey route or ordinary gated route,
+    // without claiming a retained session or known PIN state.
+    let unlock_mark = launcher_scene::rest_side_marks(
+        0,
+        false,
+        false,
+        cube.is_passkey_cube(),
+        cube.backed_up || cube.has_recovery_kit(),
+        light,
+    );
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="20 8 140 140"><ellipse cx="90" cy="139" rx="60" ry="10" fill="{shadow}" opacity=".35"/><path d="M90 12 153 43 90 76 27 43Z" fill="{top}" stroke="{edge}" stroke-width="1.25" stroke-dasharray="{dash}"/><path d="M27 43 90 76 90 133 27 99Z" fill="{left}" stroke="{edge}" stroke-width="1.25" stroke-dasharray="{dash}"/><path d="M153 43 90 76 90 133 153 99Z" fill="{right}" stroke="{edge}" stroke-width="1.25" stroke-dasharray="{dash}"/><circle cx="90" cy="46" r="17" fill="{edge}"/>{mark}{wallet_mark}{unlock_mark}{backup_mark}</svg>"##,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="27 8 126 153"><ellipse cx="90" cy="155" rx="60" ry="10" fill="{shadow}" opacity=".35"/><polygon points="{top_points}" fill="{top}" stroke="{edge}" stroke-width="1.25" stroke-dasharray="{dash}"/><polygon points="{left_points}" fill="{left}" stroke="{edge}" stroke-width="1.25" stroke-dasharray="{dash}"/><polygon points="{right_points}" fill="{right}" stroke="{edge}" stroke-width="1.25" stroke-dasharray="{dash}"/><defs><clipPath id="launcher-top"><polygon points="{top_points}"/></clipPath></defs><g clip-path="url(#launcher-top)" color="{marks}">{mark}</g>{wallet_mark}{unlock_mark}</svg>"##,
     )
 }
 
@@ -286,7 +268,7 @@ fn floor_style(
     }
 }
 
-fn local_wallets(cube: &crate::app::settings::CubeSettings) -> &'static str {
+pub(super) fn local_wallets(cube: &crate::app::settings::CubeSettings) -> &'static str {
     use crate::app::settings::BitcoinImportStage;
     if let Some(import) = &cube.bitcoin_import {
         return match &import.stage {
@@ -303,7 +285,7 @@ fn local_wallets(cube: &crate::app::settings::CubeSettings) -> &'static str {
     }
 }
 
-fn backup(cube: &crate::app::settings::CubeSettings) -> (&'static str, tenshu::Tone) {
+pub(super) fn backup(cube: &crate::app::settings::CubeSettings) -> (&'static str, tenshu::Tone) {
     match (cube.backed_up, cube.has_recovery_kit()) {
         (true, true) => ("Phrase + Kit recorded", tenshu::Tone::Good),
         (true, false) => ("Phrase recorded", tenshu::Tone::Good),
@@ -312,7 +294,7 @@ fn backup(cube: &crate::app::settings::CubeSettings) -> (&'static str, tenshu::T
     }
 }
 
-fn unlock_prompt(cube: &crate::app::settings::CubeSettings) -> &'static str {
+pub(super) fn unlock_prompt(cube: &crate::app::settings::CubeSettings) -> &'static str {
     if cube.is_passkey_cube() {
         "Passkey prompt"
     } else {
@@ -324,7 +306,33 @@ fn text_tone(tone: tenshu::Tone) -> impl Fn(&theme::Theme) -> iced::widget::text
     move |theme| theme::tenshu::text::tone(theme, tone)
 }
 
-fn local_facts<'a>(row: &launcher_catalog::LocalRow<'_>, table: bool) -> Element<'a, ViewMessage> {
+fn network_coin(
+    chain: ChainId,
+    size: f32,
+    light: bool,
+) -> iced::widget::Svg<'static, theme::Theme> {
+    let border = if size == 18.0 { 1.0 } else { 1.5 };
+    iced::widget::Svg::new(iced::widget::svg::Handle::from_memory(
+        launcher_coin::widget_source(chain, size, border, light).into_bytes(),
+    ))
+    .width(Length::Fixed(size))
+    .height(Length::Fixed(size))
+}
+
+fn network_label<'a>(chain: ChainId, size: f32, light: bool) -> Element<'a, ViewMessage> {
+    Row::new()
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .push(network_coin(chain, size, light))
+        .push(tenshu::caption(chain.label()))
+        .into()
+}
+
+fn local_facts<'a>(
+    row: &launcher_catalog::LocalRow<'_>,
+    table: bool,
+    light: bool,
+) -> Element<'a, ViewMessage> {
     let (backup_text, backup_tone) = backup(row.cube);
     let name =
         Column::new()
@@ -345,7 +353,10 @@ fn local_facts<'a>(row: &launcher_catalog::LocalRow<'_>, table: bool) -> Element
             .align_y(Alignment::Center)
             .push(Container::new(icon::cube_icon()).width(Length::Fixed(AVATAR_WIDTH)))
             .push(name)
-            .push(tenshu::body(row.key.chain.label()).width(Length::Fixed(NETWORK_WIDTH)))
+            .push(
+                Container::new(network_label(row.key.chain, 16.0, light))
+                    .width(Length::Fixed(NETWORK_WIDTH)),
+            )
             .push(
                 tenshu::caption(local_wallets(row.cube))
                     .width(Length::Fixed(WALLETS_WIDTH))
@@ -369,10 +380,10 @@ fn local_facts<'a>(row: &launcher_catalog::LocalRow<'_>, table: bool) -> Element
                     .push(icon::cube_icon())
                     .push(name),
             )
+            .push(network_label(row.key.chain, 16.0, light))
             .push(
                 tenshu::caption(format!(
-                    "Network: {} · Wallets: {} · Backup: {}",
-                    row.key.chain.label(),
+                    "Wallets: {} · Backup: {}",
                     local_wallets(row.cube),
                     backup_text
                 ))
@@ -386,10 +397,11 @@ fn local_row<'a>(
     row: &launcher_catalog::LocalRow<'_>,
     selected: bool,
     table: bool,
+    light: bool,
 ) -> Element<'a, ViewMessage> {
     let select = Action::new(
         launcher_catalog::select_id(&row.key),
-        local_facts(row, table),
+        local_facts(row, table, light),
         focus,
     )
     .width(Length::Fill)
@@ -435,7 +447,7 @@ fn detail_line<'a>(
         .into()
 }
 
-fn details<'a>(row: &launcher_catalog::LocalRow<'_>) -> Element<'a, ViewMessage> {
+fn details<'a>(row: &launcher_catalog::LocalRow<'_>, light: bool) -> Element<'a, ViewMessage> {
     let (backup_text, backup_tone) = backup(row.cube);
     let mut content = Column::new()
         .spacing(14)
@@ -462,7 +474,7 @@ fn details<'a>(row: &launcher_catalog::LocalRow<'_>) -> Element<'a, ViewMessage>
         )
         .push(detail_line(
             "Network",
-            tenshu::body(row.key.chain.label()).into(),
+            network_label(row.key.chain, 18.0, light),
         ))
         .push(detail_line("Lock", tenshu::body("State unknown").into()))
         .push(detail_line(
@@ -533,7 +545,10 @@ fn details<'a>(row: &launcher_catalog::LocalRow<'_>) -> Element<'a, ViewMessage>
 
 /// The floor face has a fixed 420px rectangle. Keep its content deliberately
 /// shorter than the List details card so actions stay on the visible face.
-fn floor_details<'a>(row: &launcher_catalog::LocalRow<'_>) -> Element<'a, ViewMessage> {
+fn floor_details<'a>(
+    row: &launcher_catalog::LocalRow<'_>,
+    light: bool,
+) -> Element<'a, ViewMessage> {
     let (backup_text, backup_tone) = backup(row.cube);
     Container::new(
         Column::new()
@@ -549,10 +564,13 @@ fn floor_details<'a>(row: &launcher_catalog::LocalRow<'_>) -> Element<'a, ViewMe
                             .wrapping(Wrapping::WordOrGlyph),
                     ),
             )
-            .push(tenshu::caption(format!(
-                "Network · {}",
-                row.key.chain.label()
-            )))
+            .push(
+                Row::new()
+                    .spacing(6)
+                    .align_y(Alignment::Center)
+                    .push(tenshu::caption("Network ·"))
+                    .push(network_label(row.key.chain, 18.0, light)),
+            )
             .push(rule::horizontal(1))
             .push(detail_line("Lock", tenshu::body("State unknown").into()))
             .push(detail_line(
@@ -685,6 +703,7 @@ fn list_layout<'a>(
     projection: &Projection<'_>,
     scene: &LauncherScene,
     width: f32,
+    light: bool,
 ) -> Element<'a, ViewMessage> {
     let list_width =
         if scene.selected.is_some() && width >= LIST_MIN_WIDTH + DETAILS_WIDTH + PANEL_GAP {
@@ -734,6 +753,7 @@ fn list_layout<'a>(
                 row,
                 scene.selected.as_ref() == Some(&row.key),
                 table,
+                light,
             ));
         }
     }
@@ -753,7 +773,7 @@ fn list_layout<'a>(
         .selected
         .as_ref()
         .and_then(|key| projection.locals.iter().find(|row| &row.key == key))
-        .map(details);
+        .map(|row| details(row, light));
     match details {
         None => list.into(),
         Some(panel) if width >= LIST_MIN_WIDTH + DETAILS_WIDTH + PANEL_GAP => Row::new()
@@ -776,6 +796,10 @@ fn list_layout<'a>(
 pub(super) fn list_body(home: &Home) -> Element<'_, ViewMessage> {
     let projection = launcher_catalog::project(home);
     let scene = project_catalog(&projection);
+    let light = matches!(
+        home.theme_mode,
+        coincube_ui::theme::palette::ThemeMode::Light
+    );
     let fallback = (home.catalog.mode == LauncherMode::Cubes
         && projection.local_total > launcher_catalog::FLOOR_MAX_CUBES)
         .then(|| tenshu::caption("List view for more than 20 Cubes on this network."));
@@ -783,7 +807,7 @@ pub(super) fn list_body(home: &Home) -> Element<'_, ViewMessage> {
         .spacing(8)
         .push(fallback)
         .push(
-            responsive(move |size: Size| list_layout(&projection, &scene, size.width))
+            responsive(move |size: Size| list_layout(&projection, &scene, size.width, light))
                 .height(Length::Shrink),
         )
         .into()
@@ -794,12 +818,11 @@ fn floor_cube<'a>(
     selected: bool,
     width: f32,
     light: bool,
-    dimmed: bool,
     opacity: f32,
 ) -> Element<'a, ViewMessage> {
     let glyph = cube_glyph_with_opacity(row.cube, light, opacity)
-        .width(Length::Fixed(170.0))
-        .height(Length::Fixed(190.0));
+        .width(Length::Fixed(launcher_scene::REST_GLYPH_WIDTH))
+        .height(Length::Fixed(launcher_scene::REST_GLYPH_HEIGHT));
     let label = Container::new(
         Row::new()
             .spacing(8)
@@ -809,9 +832,7 @@ fn floor_cube<'a>(
                 Column::new()
                     .spacing(2)
                     .push(tenshu::label(row.name.clone()).wrapping(Wrapping::WordOrGlyph))
-                    .push(tenshu::caption(if dimmed {
-                        "Select Cube"
-                    } else if row.actionable {
+                    .push(tenshu::caption(if row.actionable {
                         unlock_prompt(row.cube)
                     } else {
                         "Unavailable on this network"
@@ -978,7 +999,7 @@ fn floor_layout<'a>(
         cubes = cubes.push(if moving {
             Space::new()
                 .width(Length::Fill)
-                .height(Length::Fixed(274.0))
+                .height(Length::Fixed(330.0))
                 .into()
         } else {
             floor_cube(
@@ -986,7 +1007,6 @@ fn floor_layout<'a>(
                 false,
                 if compact { 200.0 } else { 250.0 },
                 light,
-                selected.is_some(),
                 if selected.is_some() {
                     motion.map_or(0.4, |m| m.peer_opacity(std::time::Instant::now()))
                 } else {
@@ -998,7 +1018,7 @@ fn floor_layout<'a>(
     stage = stage.push(
         Container::new(
             Column::new()
-                .push(Space::new().height(Length::Fixed(if compact { 116.0 } else { 160.0 })))
+                .push(Space::new().height(Length::Fixed(if compact { 90.0 } else { 134.0 })))
                 .push(
                     Container::new(cubes)
                         .width(Length::Fill)
@@ -1029,6 +1049,9 @@ fn floor_layout<'a>(
                         connect: &peer.connect.1,
                         wallets: local_wallets(peer.cube),
                         passkey: peer.cube.is_passkey_cube(),
+                        vault: peer.cube.vault_wallet_id.is_some(),
+                        imported_bitcoin: peer.cube.has_imported_bitcoin(),
+                        backup_confirmed: peer.cube.backed_up || peer.cube.has_recovery_kit(),
                     },
                     m.outgoing_progress(now),
                 ))
@@ -1047,6 +1070,9 @@ fn floor_layout<'a>(
                 connect: &row.connect.1,
                 wallets: local_wallets(row.cube),
                 passkey: row.cube.is_passkey_cube(),
+                vault: row.cube.vault_wallet_id.is_some(),
+                imported_bitcoin: row.cube.has_imported_bitcoin(),
+                backup_confirmed: row.cube.backed_up || row.cube.has_recovery_kit(),
             },
             light,
             progress,
@@ -1061,7 +1087,7 @@ fn floor_layout<'a>(
         // The selected Cube itself becomes the centered face. Controls arrive
         // only when it is square to the camera and remain real Iced widgets.
         if progress >= 1.0 {
-            let panel = Container::new(floor_details(row))
+            let panel = Container::new(floor_details(row, light))
                 .width(Length::Fixed(420.0))
                 .height(Length::Fixed(420.0))
                 .style(|theme: &theme::Theme| container::Style {
@@ -1194,7 +1220,7 @@ pub(super) fn floor_body(home: &Home) -> Element<'_, ViewMessage> {
     let scene = project_catalog(&projection);
     responsive(move |size: Size| {
         if size.width < 840.0 {
-            list_layout(&projection, &scene, size.width)
+            list_layout(&projection, &scene, size.width, light)
         } else {
             floor_layout(&projection, page, size.width, light, motion.as_ref())
         }
@@ -1238,6 +1264,9 @@ pub(crate) fn unlock_turn<'a, M: 'a>(
             connect: "Checking…",
             wallets: local_wallets(cube),
             passkey: cube.is_passkey_cube(),
+            vault: cube.vault_wallet_id.is_some(),
+            imported_bitcoin: cube.has_imported_bitcoin(),
+            backup_confirmed: cube.backed_up || cube.has_recovery_kit(),
         },
         progress,
     );
@@ -1324,6 +1353,230 @@ pub(crate) fn unlock_face<'a, M: 'a>(
     .into()
 }
 
+fn unlock_floor_stage<'a, M: 'a + 'static>(
+    context: &launcher_catalog::LauncherSceneContext,
+    cube: &crate::app::settings::CubeSettings,
+    mode: coincube_ui::theme::palette::ThemeMode,
+    width: f32,
+    controls: Option<Element<'a, M>>,
+    progress: Option<f32>,
+) -> Element<'a, M> {
+    let light = matches!(mode, coincube_ui::theme::palette::ThemeMode::Light);
+    let compact = width < 1200.0;
+    let stage_height = if compact { 600.0 } else { 740.0 };
+    let target_y = if compact { 300.0 } else { 340.0 };
+    let floor_width = if compact { width - 96.0 } else { 1200.0 };
+    let slot_width = (floor_width - 12.0 * context.peers.len().saturating_sub(1) as f32)
+        / context.peers.len().max(1) as f32;
+    let mut peers = Row::new()
+        .spacing(12)
+        .align_y(Alignment::Center)
+        .width(Length::Fixed(floor_width));
+    for (index, peer) in context.peers.iter().enumerate() {
+        if index == context.selected_slot && peer.key == context.selected {
+            peers = peers.push(
+                Space::new()
+                    .width(Length::Fill)
+                    .height(Length::Fixed(330.0)),
+            );
+            continue;
+        }
+        let source = if light {
+            &peer.glyph_light
+        } else {
+            &peer.glyph_dark
+        };
+        let source = source.replace("<svg ", "<svg opacity=\"0.4\" ");
+        let glyph =
+            iced::widget::Svg::new(iced::widget::svg::Handle::from_memory(source.into_bytes()))
+                .width(Length::Fixed(launcher_scene::REST_GLYPH_WIDTH))
+                .height(Length::Fixed(launcher_scene::REST_GLYPH_HEIGHT));
+        peers = peers.push(
+            Container::new(
+                Column::new()
+                    .spacing(4)
+                    .align_x(Alignment::Center)
+                    .push(glyph)
+                    .push(tenshu::label(peer.name.clone()).wrapping(Wrapping::WordOrGlyph))
+                    .push(tenshu::caption(peer.status)),
+            )
+            .width(Length::Fixed(slot_width))
+            .height(Length::Fixed(330.0)),
+        );
+    }
+    let backdrop = Container::new(Space::new())
+        .width(Length::Fill)
+        .height(Length::Fixed(stage_height))
+        .style(|theme: &theme::Theme| container::Style {
+            background: Some(iced::Background::Color(theme.colors.shell.background)),
+            ..Default::default()
+        });
+    let plane = Container::new(
+        floor_plane(light)
+            .width(Length::Fill)
+            .height(Length::Fixed(stage_height * 0.62))
+            .content_fit(iced::ContentFit::Fill),
+    )
+    .width(Length::Fill)
+    .height(Length::Fixed(stage_height))
+    .align_y(iced::alignment::Vertical::Bottom);
+    let mut stage = Stack::new()
+        .width(Length::Fill)
+        .height(Length::Fixed(stage_height))
+        .push(backdrop)
+        .push(plane)
+        .push(
+            Container::new(
+                Column::new()
+                    .push(Space::new().height(Length::Fixed(if compact { 90.0 } else { 134.0 })))
+                    .push(
+                        Container::new(peers)
+                            .width(Length::Fill)
+                            .center_x(Length::Fill),
+                    ),
+            )
+            .width(Length::Fill)
+            .height(Length::Fixed(stage_height)),
+        );
+    if let Some(progress) = progress {
+        let name = crate::cube_display::name(&cube.name);
+        let svg = launcher_scene::second_turn_on_floor_source(
+            width,
+            stage_height,
+            target_y,
+            cube.network,
+            light,
+            launcher_scene::FaceText {
+                name: &name,
+                backup: context.backup,
+                connect: &context.connect,
+                wallets: context.wallets,
+                passkey: cube.is_passkey_cube(),
+                vault: cube.vault_wallet_id.is_some(),
+                imported_bitcoin: cube.has_imported_bitcoin(),
+                backup_confirmed: cube.backed_up || cube.has_recovery_kit(),
+            },
+            progress,
+        );
+        stage = stage.push(
+            iced::widget::Svg::new(iced::widget::svg::Handle::from_memory(svg.into_bytes()))
+                .width(Length::Fill)
+                .height(Length::Fixed(stage_height))
+                .content_fit(iced::ContentFit::Fill),
+        );
+    } else if let Some(controls) = controls {
+        let face = Container::new(
+            Column::new()
+                .spacing(12)
+                .push(tenshu::caption(format!(
+                    "Open {} · {}",
+                    crate::cube_display::name(&cube.name),
+                    cube.network.label()
+                )))
+                .push(controls),
+        )
+        .width(Length::Fixed(416.0))
+        .height(Length::Fixed(416.0))
+        .padding(22)
+        .style(|theme: &theme::Theme| container::Style {
+            background: Some(iced::Background::Color(theme.colors.shell.panel)),
+            ..Default::default()
+        });
+        let cube_face = Stack::new()
+            .width(Length::Fixed(420.0))
+            .height(Length::Fixed(420.0))
+            .push(
+                iced::widget::Svg::new(iced::widget::svg::Handle::from_memory(
+                    launcher_scene::unlock_source(cube.network, light).into_bytes(),
+                ))
+                .width(Length::Fixed(420.0))
+                .height(Length::Fixed(420.0)),
+            )
+            .push(Container::new(face).center(Length::Fill));
+        stage = stage.push(
+            Container::new(
+                Column::new()
+                    .push(Space::new().height(Length::Fixed(target_y - 210.0)))
+                    .push(cube_face),
+            )
+            .width(Length::Fill)
+            .height(Length::Fixed(stage_height))
+            .center_x(Length::Fill),
+        );
+    }
+    Column::new()
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .push(
+            Container::new(
+                Row::new()
+                    .spacing(12)
+                    .align_y(Alignment::Center)
+                    .push(icon::cube_icon())
+                    .push(tenshu::label("Tenshu"))
+                    .push(tenshu::caption(format!(
+                        "{} · Page {}",
+                        cube.network.label(),
+                        context.page + 1
+                    ))),
+            )
+            .height(Length::Fixed(64.0))
+            .width(Length::Fill)
+            .padding([0.0, 24.0])
+            .style(opening_rail_style),
+        )
+        .push(stage.clip(true))
+        .push(
+            Container::new(tenshu::caption("Create Cube     Import or restore a Cube"))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .padding([20.0, 24.0])
+                .style(opening_rail_style),
+        )
+        .into()
+}
+
+pub(crate) fn unlock_face_on_floor<'a, M: 'a + 'static>(
+    cube: &'a crate::app::settings::CubeSettings,
+    mode: coincube_ui::theme::palette::ThemeMode,
+    context: &'a launcher_catalog::LauncherSceneContext,
+    controls: impl Fn() -> Element<'a, M> + 'a,
+) -> Element<'a, M> {
+    responsive(move |size: Size| {
+        unlock_floor_stage(context, cube, mode, size.width, Some(controls()), None)
+    })
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
+
+pub(crate) fn unlock_turn_with_floor_controls<'a, M: 'a + 'static>(
+    cube: &'a crate::app::settings::CubeSettings,
+    mode: coincube_ui::theme::palette::ThemeMode,
+    context: &'a launcher_catalog::LauncherSceneContext,
+    progress: Option<f32>,
+    controls: Element<'a, M>,
+) -> Element<'a, M> {
+    // Keep the same root and child shape after the turn. Iced diffs widget
+    // state by position, so replacing this Stack with bare controls drops the
+    // focused PIN field or passkey action at the animation boundary.
+    let visual: Element<'a, M> = match progress {
+        Some(progress) => responsive(move |size: Size| {
+            unlock_floor_stage(context, cube, mode, size.width, None, Some(progress))
+        })
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into(),
+        None => Space::new().width(Length::Fill).height(Length::Fill).into(),
+    };
+    Stack::new()
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .push(controls)
+        .push(visual)
+        .into()
+}
+
 fn opening_rail_style(theme: &theme::Theme) -> container::Style {
     container::Style {
         background: Some(iced::Background::Color(theme.colors.shell.rail)),
@@ -1365,11 +1618,16 @@ pub(crate) fn opening_body<'a>(
     .height(Length::Fixed(64.0))
     .padding([0.0, 24.0])
     .style(opening_rail_style);
-    let stage = Container::new(loader::view(step, quote, image, restricted_claim))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill);
+    let stage = Container::new(loader::view_with_retry(
+        step,
+        quote,
+        image,
+        !restricted_claim,
+    ))
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .center_x(Length::Fill)
+    .center_y(Length::Fill);
     Column::new()
         .width(Length::Fill)
         .height(Length::Fill)
@@ -1394,6 +1652,108 @@ mod tests {
     };
     use iced::Rectangle;
     use std::path::PathBuf;
+
+    fn floor_context(
+        cube: &crate::app::settings::CubeSettings,
+    ) -> launcher_catalog::LauncherSceneContext {
+        let peer = crate::app::settings::CubeSettings::new_with_raw_id(
+            "peer".into(),
+            "Travel".into(),
+            cube.network,
+        );
+        let selected = CubeCatalogKey {
+            chain: cube.network,
+            cube_id: cube.id.clone(),
+        };
+        let peer_key = CubeCatalogKey {
+            chain: peer.network,
+            cube_id: peer.id.clone(),
+        };
+        launcher_catalog::LauncherSceneContext {
+            selected: selected.clone(),
+            page: 0,
+            selected_slot: 0,
+            backup: "Status unknown",
+            connect: "Sovereign — local only".into(),
+            wallets: "Not yet known",
+            peers: vec![
+                launcher_catalog::LauncherScenePeer {
+                    key: selected,
+                    name: "Everyday".into(),
+                    status: "PIN prompt",
+                    glyph_dark: cube_glyph_source(cube, false),
+                    glyph_light: cube_glyph_source(cube, true),
+                },
+                launcher_catalog::LauncherScenePeer {
+                    key: peer_key,
+                    name: "Travel".into(),
+                    status: "PIN prompt",
+                    glyph_dark: cube_glyph_source(&peer, false),
+                    glyph_light: cube_glyph_source(&peer, true),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn unlock_floor_keeps_peer_and_live_input_at_compact_and_wide_sizes() {
+        let cube = crate::app::settings::CubeSettings::new_with_raw_id(
+            "floor".into(),
+            "Everyday".into(),
+            ChainId::Bitcoin,
+        );
+        let context = floor_context(&cube);
+        let pin = String::new();
+        for (width, height, appearance, palette, mode) in [
+            (
+                1024,
+                768,
+                "dark",
+                theme::Theme::dark(),
+                coincube_ui::theme::palette::ThemeMode::Dark,
+            ),
+            (
+                1440,
+                900,
+                "light",
+                theme::Theme::light(),
+                coincube_ui::theme::palette::ThemeMode::Light,
+            ),
+        ] {
+            let scene = unlock_face_on_floor(&cube, mode, &context, || {
+                iced::widget::text_input("", &pin)
+                    .id(crate::pin_input::first_digit_id())
+                    .on_input(|value| value)
+                    .into()
+            });
+            // The inspector reserves 100px for an outer chrome that this
+            // standalone Launcher scene owns itself.
+            let mounted = capture::inspect_full_window(
+                "v113-unlock-floor",
+                scene,
+                (width, height + 100),
+                appearance,
+                palette,
+            );
+            assert!(mounted.contains("Travel"));
+            assert!(mounted.contains("PIN prompt"));
+            assert!(mounted.contains("Open Everyday"));
+            assert!(mounted.has_focus(crate::pin_input::first_digit_id()));
+            let face = mounted
+                .text
+                .iter()
+                .find(|(value, _)| value.starts_with("Open Everyday"))
+                .map(|(_, bounds)| *bounds)
+                .expect("selected unlock face caption");
+            let expected = if width == 1024 { 176.0 } else { 216.0 };
+            assert!(
+                (face.y - expected).abs() < 22.0,
+                "{}px floor face moved from its selected pose: {:?}",
+                width,
+                face
+            );
+        }
+    }
 
     #[test]
     fn unlock_turn_keeps_pin_focus_when_art_completes() {
@@ -1509,6 +1869,71 @@ mod tests {
             targets.first_focused,
             "input focus must survive turn completion"
         );
+
+        let mode = coincube_ui::theme::palette::ThemeMode::Dark;
+        let context = floor_context(&cube);
+        let floor_controls = unlock_face_on_floor(
+            &cube,
+            coincube_ui::theme::palette::ThemeMode::Dark,
+            &context,
+            || {
+                iced::widget::text_input("", &pin)
+                    .id(crate::pin_input::first_digit_id())
+                    .on_input(|value| value)
+                    .into()
+            },
+        );
+        let mut floor_turn = unlock_turn_with_floor_controls(
+            &cube,
+            coincube_ui::theme::palette::ThemeMode::Dark,
+            &context,
+            Some(0.0),
+            floor_controls,
+        );
+        let mut floor_tree = Tree::new(floor_turn.as_widget());
+        let floor_node = floor_turn.as_widget_mut().layout(
+            &mut floor_tree,
+            &renderer,
+            &widget_layout::Limits::new(Size::ZERO, Size::new(1024.0, 768.0)),
+        );
+        floor_turn.as_widget_mut().operate(
+            &mut floor_tree,
+            Layout::new(&floor_node),
+            &renderer,
+            &mut FocusFirst,
+        );
+        let mut floor_targets = FocusTargets::default();
+        floor_turn.as_widget_mut().operate(
+            &mut floor_tree,
+            Layout::new(&floor_node),
+            &renderer,
+            &mut floor_targets,
+        );
+        assert!(floor_targets.first_focused, "PIN focuses at turn start");
+
+        drop(floor_turn);
+        let settled_floor_controls = unlock_face_on_floor(&cube, mode, &context, || {
+            iced::widget::text_input("", &pin)
+                .id(crate::pin_input::first_digit_id())
+                .on_input(|value| value)
+                .into()
+        });
+        let mut settled_floor =
+            unlock_turn_with_floor_controls(&cube, mode, &context, None, settled_floor_controls);
+        floor_tree.diff(settled_floor.as_widget());
+        let settled_floor_node = settled_floor.as_widget_mut().layout(
+            &mut floor_tree,
+            &renderer,
+            &widget_layout::Limits::new(Size::ZERO, Size::new(1024.0, 768.0)),
+        );
+        let mut floor_targets = FocusTargets::default();
+        settled_floor.as_widget_mut().operate(
+            &mut floor_tree,
+            Layout::new(&settled_floor_node),
+            &renderer,
+            &mut floor_targets,
+        );
+        assert!(floor_targets.first_focused, "PIN focus survives floor turn");
     }
 
     #[test]
@@ -1577,6 +2002,91 @@ mod tests {
         assert!(targets
             .0
             .contains(&crate::passkey_unlock::begin_button_id()));
+
+        struct FocusPasskey;
+        impl Operation for FocusPasskey {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn focusable(
+                &mut self,
+                id: Option<&iced::advanced::widget::Id>,
+                _: Rectangle,
+                state: &mut dyn Focusable,
+            ) {
+                if id == Some(&crate::passkey_unlock::begin_button_id()) {
+                    state.focus();
+                }
+            }
+        }
+        let context = floor_context(&cube);
+        let mut on_floor = unlock_turn_with_floor_controls(
+            &cube,
+            mode,
+            &context,
+            Some(0.0),
+            unlock.view_with_theme_and_floor(mode, Some(&context)),
+        );
+        let mut floor_tree = Tree::new(on_floor.as_widget());
+        let floor_node = on_floor.as_widget_mut().layout(
+            &mut floor_tree,
+            &renderer,
+            &widget_layout::Limits::new(Size::ZERO, Size::new(1024.0, 768.0)),
+        );
+        on_floor.as_widget_mut().operate(
+            &mut floor_tree,
+            Layout::new(&floor_node),
+            &renderer,
+            &mut FocusPasskey,
+        );
+        #[derive(Default)]
+        struct PasskeyFocused(bool);
+        impl Operation for PasskeyFocused {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn focusable(
+                &mut self,
+                id: Option<&iced::advanced::widget::Id>,
+                _: Rectangle,
+                state: &mut dyn Focusable,
+            ) {
+                if id == Some(&crate::passkey_unlock::begin_button_id()) {
+                    self.0 = state.is_focused();
+                }
+            }
+        }
+        let mut focused = PasskeyFocused::default();
+        on_floor.as_widget_mut().operate(
+            &mut floor_tree,
+            Layout::new(&floor_node),
+            &renderer,
+            &mut focused,
+        );
+        assert!(focused.0, "passkey action focuses at turn start");
+
+        drop(on_floor);
+        let mut settled_floor = unlock_turn_with_floor_controls(
+            &cube,
+            mode,
+            &context,
+            None,
+            unlock.view_with_theme_and_floor(mode, Some(&context)),
+        );
+        floor_tree.diff(settled_floor.as_widget());
+        let settled_floor_node = settled_floor.as_widget_mut().layout(
+            &mut floor_tree,
+            &renderer,
+            &widget_layout::Limits::new(Size::ZERO, Size::new(1024.0, 768.0)),
+        );
+        let mut focused = PasskeyFocused::default();
+        settled_floor.as_widget_mut().operate(
+            &mut floor_tree,
+            Layout::new(&settled_floor_node),
+            &renderer,
+            &mut focused,
+        );
+        assert!(focused.0, "passkey focus survives floor turn");
     }
 
     fn home_with_cubes() -> Home {
@@ -1671,7 +2181,7 @@ mod tests {
         cube.backed_up = true;
         let recorded_backup = cube_glyph_source(&cube, true);
         assert!(recorded_backup.contains("cx=\"137\" cy=\"64\""));
-        assert!(recorded_backup.contains("#e9e3d9"));
+        assert!(recorded_backup.contains("#e6e0d5"));
 
         cube.passkey_metadata = Some(crate::app::settings::PasskeyMetadata {
             credential_id: "fixture".into(),
@@ -1786,7 +2296,10 @@ mod tests {
             assert!(mounted.contains("Network"));
             assert!(mounted.contains("Next step"));
             assert!(mounted.contains("Passkey prompt"));
-            assert!(!mounted.contains("PIN prompt"));
+            // The dimmed peer retains its own state instead of becoming a
+            // generic "Select Cube" label while Travel's face is open.
+            assert!(mounted.contains("PIN prompt"));
+            assert!(!mounted.contains("Select Cube"));
             assert!(mounted.has_focus(launcher_catalog::details_open_id(&selected)));
             assert!(mounted.has_focus(launcher_catalog::select_id(&other)));
             assert!(mounted.has_focus(launcher_catalog::close_details_id()));
@@ -1808,13 +2321,73 @@ mod tests {
         let dark = cube_glyph_source(&cube, false);
         let light = cube_glyph_source(&cube, true);
         for svg in [&dark, &light] {
-            assert!(svg.contains("translate(75 31)"), "Bitcoin logo missing");
+            assert!(
+                svg.contains("data:image/png;base64,"),
+                "Bitcoin coin missing"
+            );
+            assert!(svg.contains("clip-path=\"url(#launcher-top)\""));
             assert!(svg.contains("M58 73 67 77V87"), "Vault mark missing");
             assert!(svg.contains("m133 64 3 3 5-6"), "backup mark missing");
         }
         assert!(dark.contains("stroke=\"#f3821d\""));
-        assert!(light.contains("stroke=\"#f9a45a\""));
+        assert!(light.contains("stroke=\"#f3821d\""));
         assert_ne!(dark, light);
+        for light_mode in [false, true] {
+            let static_glyph = cube_glyph_source(&cube, light_mode);
+            let first_motion = launcher_scene::source(
+                1000.0,
+                740.0,
+                (250.0, 265.0),
+                340.0,
+                cube.network,
+                launcher_scene::FaceText {
+                    name: "Marked",
+                    backup: "Confirmed",
+                    connect: "Offline",
+                    wallets: "Vault",
+                    passkey: false,
+                    vault: true,
+                    imported_bitcoin: false,
+                    backup_confirmed: true,
+                },
+                light_mode,
+                0.0,
+                None,
+            );
+            for path in ["M58 73 67 77V87", "M116 83v-6a7", "m133 64 3 3 5-6"] {
+                assert!(static_glyph.contains(path));
+                assert!(
+                    first_motion.contains(path),
+                    "mark changes at motion start: {}",
+                    path
+                );
+            }
+        }
+
+        cube.network = ChainId::Testnet4;
+        let testnet_glyph = cube_glyph_source(&cube, false);
+        let testnet_motion = launcher_scene::source(
+            1000.0,
+            740.0,
+            (250.0, 265.0),
+            340.0,
+            cube.network,
+            launcher_scene::FaceText {
+                name: "Marked",
+                backup: "Confirmed",
+                connect: "Offline",
+                wallets: "Vault",
+                passkey: false,
+                vault: true,
+                imported_bitcoin: false,
+                backup_confirmed: true,
+            },
+            false,
+            0.0,
+            None,
+        );
+        assert!(testnet_glyph.contains("stroke=\"#b9bbb5\""));
+        assert!(testnet_motion.contains("stroke=\"#b9bbb5\""));
         for (appearance, mode, palette) in [
             (
                 "dark",
@@ -2039,7 +2612,7 @@ mod tests {
         };
         let mounted = capture::inspect(
             "v113-launcher-wide-table",
-            list_layout(&projection, &project_catalog(&projection), 1400.0),
+            list_layout(&projection, &project_catalog(&projection), 1400.0, true),
             (2000, 900),
             "light",
             theme::Theme::light(),
