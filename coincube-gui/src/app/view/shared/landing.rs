@@ -427,6 +427,18 @@ pub(crate) mod capture {
         outer: (u32, u32),
         pointer: bool,
     ) -> Vec<M> {
+        activate_with_key(content, target, outer, pointer, keyboard::key::Named::Enter)
+    }
+
+    /// Like `activate`, but exercises a specific activation key on a focused
+    /// production Action. The pointer path ignores `key`.
+    pub fn activate_with_key<M: Clone + 'static>(
+        content: Element<'_, M>,
+        target: Id,
+        outer: (u32, u32),
+        pointer: bool,
+        key: keyboard::key::Named,
+    ) -> Vec<M> {
         for bytes in font::load() {
             iced::advanced::graphics::text::font_system()
                 .write()
@@ -488,7 +500,7 @@ pub(crate) mod capture {
                 Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
             ]
         } else {
-            let key = keyboard::Key::Named(keyboard::key::Named::Enter);
+            let key = keyboard::Key::Named(key);
             let physical_key =
                 keyboard::key::Physical::Unidentified(keyboard::key::NativeCode::Unidentified);
             vec![

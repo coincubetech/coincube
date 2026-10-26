@@ -2481,20 +2481,34 @@ impl State for LiquidSend {
                 view::LiquidSendMessage::OpenSendPicker => {
                     self.send_picker_open = true;
                     self.receive_picker_open = false;
-                    return Task::none();
+                    return iced::widget::operation::focus(iced::advanced::widget::Id::new(
+                        view::liquid::send_asset_action_id(self.from_asset),
+                    ));
                 }
                 view::LiquidSendMessage::OpenReceivePicker => {
                     self.receive_picker_open = true;
                     self.send_picker_open = false;
-                    return Task::none();
+                    return iced::widget::operation::focus(iced::advanced::widget::Id::new(
+                        view::liquid::receive_target_action_id(self.to_asset, self.receive_network),
+                    ));
                 }
                 view::LiquidSendMessage::ClosePicker => {
+                    let return_to = if self.send_picker_open {
+                        view::liquid::SEND_ROUTE_ACTION_ID
+                    } else {
+                        view::liquid::RECEIVE_ROUTE_ACTION_ID
+                    };
                     self.send_picker_open = false;
                     self.receive_picker_open = false;
-                    return Task::none();
+                    return iced::widget::operation::focus(iced::advanced::widget::Id::new(
+                        return_to,
+                    ));
                 }
                 view::LiquidSendMessage::SetSendAsset(asset) => {
                     self.send_picker_open = false;
+                    let focus_source = iced::widget::operation::focus(
+                        iced::advanced::widget::Id::new(view::liquid::SEND_ROUTE_ACTION_ID),
+                    );
                     if self.from_asset != *asset {
                         self.from_asset = *asset;
                         self.to_asset = *asset;
@@ -2510,12 +2524,15 @@ impl State for LiquidSend {
                         self.uri_asset = None;
                         self.error = None;
                         self.sideshift_flow = None;
-                        return self.load_balance();
+                        return Task::batch([self.load_balance(), focus_source]);
                     }
-                    return Task::none();
+                    return focus_source;
                 }
                 view::LiquidSendMessage::SetReceiveTarget(asset, network) => {
                     self.receive_picker_open = false;
+                    let focus_destination = iced::widget::operation::focus(
+                        iced::advanced::widget::Id::new(view::liquid::RECEIVE_ROUTE_ACTION_ID),
+                    );
                     self.to_asset = *asset;
                     self.receive_network = *network;
                     // If cross-asset, set from_asset differently
@@ -2530,7 +2547,7 @@ impl State for LiquidSend {
                     self.uri_asset = None;
                     self.error = None;
                     self.sideshift_flow = None;
-                    return self.load_balance();
+                    return Task::batch([self.load_balance(), focus_destination]);
                 }
             }
         }
@@ -2642,6 +2659,69 @@ mod tests {
                     .collect::<Vec<_>>()
                     .await
             })
+    }
+
+    fn sends_focus_operation(panel: &mut LiquidSend, msg: view::LiquidSendMessage) -> bool {
+        use iced_runtime::futures::futures::StreamExt;
+
+        let task = panel.update(
+            None,
+            &cache(),
+            Message::View(view::Message::LiquidSend(msg)),
+        );
+        let Some(stream) = iced_runtime::task::into_stream(task) else {
+            return false;
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                stream
+                    .any(|action| async move { matches!(action, iced_runtime::Action::Widget(_)) })
+                    .await
+            })
+    }
+
+    #[test]
+    fn picker_close_and_selection_return_to_the_compose_route() {
+        let mut panel = panel();
+        assert!(sends_focus_operation(
+            &mut panel,
+            view::LiquidSendMessage::OpenSendPicker
+        ));
+        assert!(panel.send_picker_open());
+        assert!(!panel.receive_picker_open());
+        assert!(sends_focus_operation(
+            &mut panel,
+            view::LiquidSendMessage::ClosePicker
+        ));
+        assert!(!panel.send_picker_open());
+        assert!(!panel.receive_picker_open());
+
+        assert!(sends_focus_operation(
+            &mut panel,
+            view::LiquidSendMessage::OpenReceivePicker
+        ));
+        assert!(panel.receive_picker_open());
+        assert!(sends_focus_operation(
+            &mut panel,
+            view::LiquidSendMessage::ClosePicker
+        ));
+        assert!(!panel.receive_picker_open());
+
+        send(&mut panel, view::LiquidSendMessage::OpenSendPicker);
+        assert!(sends_focus_operation(
+            &mut panel,
+            view::LiquidSendMessage::SetSendAsset(SendAsset::Lbtc),
+        ));
+        assert!(!panel.send_picker_open());
+        send(&mut panel, view::LiquidSendMessage::OpenReceivePicker);
+        send(
+            &mut panel,
+            view::LiquidSendMessage::SetReceiveTarget(SendAsset::Lbtc, ReceiveNetwork::Liquid),
+        );
+        assert!(!panel.receive_picker_open());
     }
 
     fn liquid_input(address: &str) -> InputType {
