@@ -12,6 +12,14 @@ use coincube_ui::{
     theme,
     widget::{action::Action as FocusableAction, *},
 };
+use coincube_ui::{
+    component::tenshu::text as tenshu_text,
+    theme::tenshu::{
+        button::{ActionKind, ActionShape},
+        Tone,
+    },
+};
+use iced::widget::text::IntoFragment;
 use iced::{
     advanced::widget::Id,
     widget::{container, scrollable, QRCode},
@@ -198,6 +206,10 @@ pub enum ConnectSheetPage {
 /// Connect's content inside an origin-preserving sheet. The caller draws the
 /// retained Launcher or Cube behind it and routes Close to that exact origin.
 /// This view never creates another account state or signs out on Close.
+///
+/// Geometry follows the Connect artboard (`design-review/canvas/P-Connect.dc.html`):
+/// a 72px header over a rule, a 232px section list with its own rule, and
+/// content inset 28/40px with a 680px reading width.
 pub fn connect_sheet<'a>(
     acct: &'a ConnectAccountPanel,
     page: ConnectSheetPage,
@@ -228,40 +240,48 @@ pub fn connect_sheet<'a>(
         .flatten()
         .map(|user| user.email.as_str());
     let mut heading = Row::new()
-        .push(text::h4_bold(title).style(theme::text::primary))
+        .push(
+            iced::widget::text(title)
+                .size(24)
+                .font(coincube_ui::font::SEMIBOLD)
+                .style(theme::tenshu::text::ink),
+        )
         .spacing(16)
         .align_y(Alignment::Center)
         .width(Length::Fill);
     if let Some(email) = identity {
-        heading = heading.push(
-            text::p2_regular(email)
-                .style(theme::text::secondary)
-                .width(Length::Fill),
-        );
-    } else {
-        heading = heading.push(iced::widget::Space::new().width(Length::Fill));
+        heading = heading.push(tenshu_text::body(email).style(theme::tenshu::text::muted));
     }
-    heading = heading.push(
-        FocusableAction::new(
-            CLOSE_ID,
-            Row::new()
-                .push(cross_icon().size(16))
-                .push(text::p2_regular("Close"))
-                .spacing(6)
-                .align_y(Alignment::Center),
-            ConnectSheetMessage::FocusAction,
-        )
-        .padding(10)
-        .style(theme::button::secondary)
-        .on_press(ConnectSheetMessage::Close),
-    );
+    heading = heading
+        .push(iced::widget::Space::new().width(Length::Fill))
+        .push(
+            FocusableAction::new(
+                CLOSE_ID,
+                centred(
+                    Row::new()
+                        .push(cross_icon().size(14).style(theme::tenshu::text::ink))
+                        .push(tenshu_text::label("Close"))
+                        .spacing(6)
+                        .align_y(Alignment::Center),
+                ),
+                ConnectSheetMessage::FocusAction,
+            )
+            .height(Length::Fixed(36.0))
+            .padding([0, 12])
+            .style(|theme, status| sheet_button_style(theme, status, ActionKind::Secondary))
+            .on_press(ConnectSheetMessage::Close),
+        );
 
     let content: Element<ConnectSheetMessage> = if blocked {
         text::p1_regular("Connect authorization ended. Close and reopen this Cube through authenticated Connect startup to reconnect.").into()
     } else if show_auth {
         connect_account_body(acct).map(ConnectSheetMessage::Account)
     } else if acct.is_checking_session() {
-        text::p1_regular("Loading your Connect account…").into()
+        Column::new()
+            .push(sheet_title(section_label(active_section)))
+            .push(lead("Loading your Connect account…"))
+            .spacing(4)
+            .into()
     } else if signed_in {
         let section_content = match active_section {
             ConnectSheetSection::Account => sheet_account_ux(acct),
@@ -284,87 +304,103 @@ pub fn connect_sheet<'a>(
     let body: Element<ConnectSheetMessage> = if !show_auth {
         let sections = [
             (
-                "Account",
                 "tenshu.connect.section.account",
                 ConnectSheetSection::Account,
             ),
             (
-                "Plan & billing",
                 "tenshu.connect.section.plan",
                 ConnectSheetSection::PlanBilling,
             ),
             (
-                "Contacts",
                 "tenshu.connect.section.contacts",
                 ConnectSheetSection::Contacts,
             ),
             (
-                "Devices & security",
                 "tenshu.connect.section.security",
                 ConnectSheetSection::DevicesSecurity,
             ),
             (
-                "Recovery services",
                 "tenshu.connect.section.recovery",
                 ConnectSheetSection::RecoveryServices,
             ),
         ];
-        let mut navigation = Column::new().spacing(8).width(Length::Fixed(210.0));
-        for (label, id, section) in sections {
+        let mut navigation = Column::new().spacing(6).height(Length::Fill);
+        for (id, section) in sections {
             let selected = section == active_section;
             let icon = match section {
-                ConnectSheetSection::Account => person_icon(),
-                ConnectSheetSection::PlanBilling => card_icon(),
-                ConnectSheetSection::Contacts => phone_icon(),
-                ConnectSheetSection::DevicesSecurity => shield_icon(),
-                ConnectSheetSection::RecoveryServices => recovery_icon(),
+                ConnectSheetSection::Account => person_outline_icon(),
+                ConnectSheetSection::PlanBilling => credit_card_icon(),
+                ConnectSheetSection::Contacts => people_icon(),
+                ConnectSheetSection::DevicesSecurity => laptop_icon(),
+                ConnectSheetSection::RecoveryServices => shield_check_icon(),
             };
+            let label = tenshu_text::body(section_label(section));
             navigation = navigation.push(
                 FocusableAction::new(
                     id,
-                    Row::new()
-                        .push(icon.size(18).color(if selected {
-                            color::ORANGE
-                        } else {
-                            color::GREY_3
-                        }))
-                        .push(text::p2_regular(label))
-                        .spacing(10)
-                        .align_y(Alignment::Center),
+                    centred(
+                        Row::new()
+                            .push(icon.size(18).style(if selected {
+                                theme::tenshu::text::accent
+                            } else {
+                                theme::tenshu::text::muted
+                            }))
+                            .push(if selected {
+                                label.font(coincube_ui::font::SEMIBOLD)
+                            } else {
+                                label
+                            })
+                            .spacing(10)
+                            .align_y(Alignment::Center),
+                    ),
                     ConnectSheetMessage::FocusAction,
                 )
                 .width(Length::Fill)
-                .padding(10)
+                .height(Length::Fixed(theme::tenshu::size::NAV_ITEM_HEIGHT))
+                .padding([0, 12])
                 .style(move |theme, status| {
                     theme::tenshu::control::nav_item(theme, status, selected)
                 })
                 .on_press(ConnectSheetMessage::SelectSection(section)),
             );
         }
-        navigation = navigation.push(
-            text::p2_regular(
-                "Account-wide. Each Cube's own service connection stays in that Cube's Settings › Connections.",
-            )
-            .style(theme::text::secondary),
-        );
-        container(
-            Row::new()
-                .push(navigation)
-                .push(
-                    scrollable(container(content).padding(iced::Padding {
-                        right: 30.0,
-                        ..iced::Padding::ZERO
-                    }))
-                    .id(CONTENT_SCROLL_ID)
-                    .width(Length::Fill)
+        navigation = navigation
+            .push(iced::widget::Space::new().height(Length::Fill))
+            .push(
+                container(tenshu_text::caption(
+                    "Account-wide. Each Cube's own service connection stays in that Cube's Settings › Connections.",
+                ))
+                .padding([0, 12]),
+            );
+        let reading_width = if signed_in && active_section == ConnectSheetSection::RecoveryServices
+        {
+            f32::INFINITY
+        } else {
+            680.0
+        };
+        Row::new()
+            .push(
+                container(navigation)
+                    .padding([16, 12])
+                    .width(Length::Fixed(232.0))
                     .height(Length::Fill),
+            )
+            .push(vertical_rule())
+            .push(
+                scrollable(
+                    container(container(content).max_width(reading_width)).padding(iced::Padding {
+                        top: 28.0,
+                        right: 40.0,
+                        bottom: 40.0,
+                        left: 40.0,
+                    }),
                 )
-                .spacing(24)
+                .id(CONTENT_SCROLL_ID)
+                .width(Length::Fill)
                 .height(Length::Fill),
-        )
-        .padding(16)
-        .height(Length::Fill)
-        .into()
+            )
+            .height(Length::Fill)
+            .into()
     } else {
         container(
             scrollable(container(content).padding(iced::Padding {
@@ -378,61 +414,287 @@ pub fn connect_sheet<'a>(
         .max_width(600)
         .center_x(Length::Fill)
         .height(Length::Fill)
-        .padding(16)
+        .padding(28)
         .into()
     };
 
     container(
         Column::new()
-            .push(container(heading).padding(20))
+            .push(
+                container(heading)
+                    .height(Length::Fixed(72.0))
+                    .center_y(Length::Fixed(72.0))
+                    .padding(iced::Padding {
+                        left: 28.0,
+                        right: 24.0,
+                        ..iced::Padding::ZERO
+                    }),
+            )
+            .push(horizontal_rule())
             .push(body)
             .spacing(0)
             .height(Length::Fill),
     )
-    .padding(12)
     .max_width(if show_auth { 600 } else { 1040 })
     .height(Length::Fill)
-    .style(card_style)
+    .style(sheet_style)
     .into()
+}
+
+fn section_label(section: ConnectSheetSection) -> &'static str {
+    match section {
+        ConnectSheetSection::Account => "Account",
+        ConnectSheetSection::PlanBilling => "Plan & billing",
+        ConnectSheetSection::Contacts => "Contacts",
+        ConnectSheetSection::DevicesSecurity => "Devices & security",
+        ConnectSheetSection::RecoveryServices => "Recovery services",
+    }
+}
+
+/// The sheet surface (`.sheet`): panel fill, 1px line, 12px radius.
+fn sheet_style(theme: &theme::Theme) -> container::Style {
+    let shell = &theme.colors.shell;
+    container::Style {
+        background: Some(iced::Background::Color(shell.panel)),
+        border: iced::Border {
+            color: shell.line,
+            width: 1.0,
+            radius: 12.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+/// `.btn` / `.btn.primary`: 8px-radius buttons in the sheet's own scale.
+fn sheet_button_style(
+    theme: &theme::Theme,
+    status: iced::widget::button::Status,
+    kind: ActionKind,
+) -> iced::widget::button::Style {
+    theme::tenshu::button::action(theme, status, kind, ActionShape::Compact)
+}
+
+/// Label ink for a sheet button; the theme's default text class would
+/// otherwise override the button's own ink.
+fn action_ink(kind: ActionKind) -> impl Fn(&theme::Theme) -> iced::widget::text::Style {
+    move |theme| iced::widget::text::Style {
+        color: Some(match kind {
+            ActionKind::Primary => theme::tenshu::ON_ACCENT,
+            ActionKind::Quiet => theme.colors.shell.accent_ink,
+            ActionKind::Destructive => theme.colors.shell.bad,
+            ActionKind::Secondary => theme.colors.shell.ink,
+        }),
+    }
+}
+
+/// Centres a control's content on its fixed height.
+fn centred<'a, M: 'a>(content: impl Into<Element<'a, M>>) -> Element<'a, M> {
+    container(content).center_y(Length::Fill).into()
+}
+
+/// A labelled `.btn` (36px) or `.btn.sm` (30px) for account-panel messages.
+fn sheet_button<'a, M: Clone + 'a>(
+    label: impl IntoFragment<'a>,
+    kind: ActionKind,
+    small: bool,
+) -> iced::widget::Button<'a, M, theme::Theme> {
+    let (height, size, pad) = if small {
+        (30.0, 13.0, 12)
+    } else {
+        (36.0, 14.0, 16)
+    };
+    iced::widget::button(centred(
+        iced::widget::text(label)
+            .size(size)
+            .font(coincube_ui::font::MEDIUM)
+            .style(action_ink(kind)),
+    ))
+    .height(Length::Fixed(height))
+    .padding([0, pad])
+    .style(move |theme, status| sheet_button_style(theme, status, kind))
+}
+
+/// `.linkbtn`: underlined-looking quiet text action.
+fn sheet_link<'a, M: Clone + 'a>(
+    label: impl IntoFragment<'a>,
+) -> iced::widget::Button<'a, M, theme::Theme> {
+    iced::widget::button(
+        iced::widget::text(label)
+            .size(13)
+            .style(action_ink(ActionKind::Quiet)),
+    )
+    .padding([2, 0])
+    .style(|theme, status| sheet_button_style(theme, status, ActionKind::Quiet))
+}
+
+/// Section heading (`.sec h3`), 20px semibold.
+fn sheet_title<'a>(label: impl IntoFragment<'a>) -> iced::widget::Text<'a, theme::Theme> {
+    tenshu_text::title(label)
+}
+
+/// Group heading (`.grp h4`), 14px semibold.
+fn group_title<'a>(label: impl IntoFragment<'a>) -> iced::widget::Text<'a, theme::Theme> {
+    tenshu_text::body(label).font(coincube_ui::font::SEMIBOLD)
+}
+
+/// Muted 13px line under a heading (`.lead`, `.s`, `.conseq`).
+fn lead<'a>(label: impl IntoFragment<'a>) -> iced::widget::Text<'a, theme::Theme> {
+    tenshu_text::body(label)
+        .size(13)
+        .style(theme::tenshu::text::muted)
+}
+
+/// 12px muted footnote (`.fnote`).
+fn footnote<'a>(label: impl IntoFragment<'a>) -> iced::widget::Text<'a, theme::Theme> {
+    tenshu_text::caption(label)
+}
+
+fn horizontal_rule<'a, M: 'a>() -> Element<'a, M> {
+    container(iced::widget::Space::new())
+        .width(Length::Fill)
+        .height(Length::Fixed(1.0))
+        .style(theme::tenshu::control::divider)
+        .into()
+}
+
+fn vertical_rule<'a, M: 'a>() -> Element<'a, M> {
+    container(iced::widget::Space::new())
+        .width(Length::Fixed(1.0))
+        .height(Length::Fill)
+        .style(theme::tenshu::control::divider)
+        .into()
+}
+
+/// A ruled list (`.list` + `.li`): a rule above the first row and under every row.
+fn ruled_list<'a, M: 'a>(rows: impl IntoIterator<Item = Element<'a, M>>) -> Element<'a, M> {
+    let mut list = Column::new().push(horizontal_rule());
+    for row in rows {
+        list = list
+            .push(container(row).padding([10, 0]).width(Length::Fill))
+            .push(horizontal_rule());
+    }
+    list.width(Length::Fill).into()
+}
+
+/// A label/value list row (`.li .k` + `.main`) with the 168px key column.
+fn key_value_row<'a, M: 'a>(key: &'a str, value: Element<'a, M>) -> Element<'a, M> {
+    Row::new()
+        .push(lead(key).width(Length::Fixed(168.0)))
+        .push(container(value).width(Length::Fill))
+        .spacing(16)
+        .height(Length::Fixed(32.0))
+        .align_y(Alignment::Center)
+        .into()
+}
+
+/// A status with its glyph (`.stt` + tone).
+fn status_line<'a, M: 'a>(
+    icon: iced::widget::Text<'a, theme::Theme>,
+    label: impl IntoFragment<'a>,
+    tone: Tone,
+) -> Element<'a, M> {
+    Row::new()
+        .push(
+            icon.size(16)
+                .style(move |t| theme::tenshu::text::tone(t, tone)),
+        )
+        .push(
+            tenshu_text::body(label)
+                .size(13)
+                .style(move |t| theme::tenshu::text::tone(t, tone)),
+        )
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .into()
+}
+
+/// A small bordered tag (`.rtag`), accent-bordered when `current`.
+fn row_tag<'a, M: 'a>(label: impl IntoFragment<'a>, current: bool) -> Element<'a, M> {
+    container(
+        iced::widget::text(label)
+            .size(12)
+            .font(coincube_ui::font::MEDIUM)
+            .style(theme::tenshu::text::ink),
+    )
+    .padding([1, 6])
+    .style(move |theme: &theme::Theme| {
+        let shell = &theme.colors.shell;
+        container::Style {
+            border: iced::Border {
+                color: if current { shell.accent } else { shell.line },
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            ..Default::default()
+        }
+    })
+    .into()
+}
+
+/// The selected-fill review block (`.review`).
+fn review_style(theme: &theme::Theme) -> container::Style {
+    container::Style {
+        background: Some(iced::Background::Color(theme.colors.shell.selected)),
+        border: iced::Border {
+            radius: 8.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
 }
 
 fn signed_out_account_ux<'a>() -> Element<'a, ConnectSheetMessage> {
     Column::new()
-        .push(text::h4_bold("Account").style(theme::text::primary))
-        .push(iced::widget::Space::new().height(Length::Fixed(14.0)))
-        .push(connect_benefits().map(ConnectSheetMessage::Account))
-        .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
+        .push(sheet_title("Account"))
+        .push(iced::widget::Space::new().height(Length::Fixed(16.0)))
+        .push(connect_benefits(true).map(ConnectSheetMessage::Account))
+        .push(iced::widget::Space::new().height(Length::Fixed(24.0)))
         .push(
             Row::new()
-                .push(
-                    FocusableAction::new(
-                        "tenshu.connect.sign-in",
-                        text::p2_regular("Sign in"),
-                        ConnectSheetMessage::FocusAction,
-                    )
-                    .padding(10)
-                    .style(theme::button::primary)
-                    .on_press(ConnectSheetMessage::OpenAuthentication {
+                .push(sheet_action(
+                    "tenshu.connect.sign-in",
+                    "Sign in",
+                    ActionKind::Primary,
+                    ConnectSheetMessage::OpenAuthentication {
                         create_account: false,
-                    }),
-                )
-                .push(
-                    FocusableAction::new(
-                        "tenshu.connect.create-account",
-                        text::p2_regular("Create account"),
-                        ConnectSheetMessage::FocusAction,
-                    )
-                    .padding(10)
-                    .style(theme::button::secondary)
-                    .on_press(ConnectSheetMessage::OpenAuthentication {
+                    },
+                ))
+                .push(sheet_action(
+                    "tenshu.connect.create-account",
+                    "Create account",
+                    ActionKind::Secondary,
+                    ConnectSheetMessage::OpenAuthentication {
                         create_account: true,
-                    }),
-                )
-                .spacing(10),
+                    },
+                ))
+                .spacing(12),
         )
-        .spacing(8)
         .width(Length::Fill)
         .into()
+}
+
+/// A focusable `.btn` owned by the sheet shell.
+fn sheet_action<'a>(
+    id: &'static str,
+    label: &'static str,
+    kind: ActionKind,
+    message: ConnectSheetMessage,
+) -> Element<'a, ConnectSheetMessage> {
+    FocusableAction::new(
+        id,
+        centred(
+            iced::widget::text(label)
+                .size(14)
+                .font(coincube_ui::font::MEDIUM)
+                .style(action_ink(kind)),
+        ),
+        ConnectSheetMessage::FocusAction,
+    )
+    .height(Length::Fixed(36.0))
+    .padding([0, 16])
+    .style(move |theme, status| sheet_button_style(theme, status, kind))
+    .on_press(message)
+    .into()
 }
 
 /// Account-wide presentation for the sheet; the legacy Home panel keeps its
@@ -443,129 +705,105 @@ fn sheet_account_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAc
         .as_ref()
         .map(|user| user.email.as_str())
         .unwrap_or("—");
-    let avatar = container(person_icon().size(24).color(color::ORANGE))
-        .width(48)
-        .height(48)
-        .align_x(Alignment::Center)
-        .align_y(Alignment::Center)
-        .style(|theme: &theme::Theme| container::Style {
-            background: Some(iced::Background::Color(theme.colors.shell.selected)),
-            border: iced::Border {
-                radius: 24.0.into(),
-                ..Default::default()
-            },
+    let avatar = container(
+        person_outline_icon()
+            .size(24)
+            .style(theme::tenshu::text::accent),
+    )
+    .width(48)
+    .height(48)
+    .align_x(Alignment::Center)
+    .align_y(Alignment::Center)
+    .style(|theme: &theme::Theme| container::Style {
+        background: Some(iced::Background::Color(theme.colors.shell.selected)),
+        border: iced::Border {
+            radius: 24.0.into(),
             ..Default::default()
-        });
+        },
+        ..Default::default()
+    });
     let mut column = Column::new()
-        .push(text::h4_bold("Account").style(theme::text::primary))
-        .push(iced::widget::Space::new().height(Length::Fixed(18.0)))
+        .push(sheet_title("Account"))
+        .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
         .push(
             Row::new()
                 .push(avatar)
                 .push(
                     Column::new()
-                        .push(text::p1_bold(email).style(theme::text::primary))
-                        .push(
-                            text::p2_regular("Signed in on this device")
-                                .style(theme::text::secondary),
-                        )
-                        .spacing(3),
+                        .push(tenshu_text::section(email))
+                        .push(lead("Signed in on this device")),
                 )
-                .spacing(14)
+                .spacing(16)
                 .align_y(Alignment::Center),
         )
         .push(iced::widget::Space::new().height(Length::Fixed(24.0)))
-        .push(overview_info_row(
+        .push(ruled_list([key_value_row(
             "Sign-in method",
-            text::p1_regular("Email · one-time code")
-                .style(theme::text::primary)
-                .into(),
-        ))
-        .push(iced::widget::Space::new().height(Length::Fixed(18.0)));
+            tenshu_text::body("Email · one-time code").into(),
+        )]));
     if let Some(banner) = renewal_banner(state) {
         column = column
-            .push(banner)
-            .push(iced::widget::Space::new().height(Length::Fixed(18.0)));
+            .push(iced::widget::Space::new().height(Length::Fixed(24.0)))
+            .push(banner);
     }
     column = column
-        .push(
-            button::secondary(None, "Plan & billing")
-                .on_press(ConnectAccountMessage::OpenPlanBilling),
-        )
-        .push(iced::widget::Space::new().height(Length::Fixed(24.0)))
-        .push(text::p1_bold("What Connect provides").style(theme::text::primary))
-        .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
-        .push(connect_benefits())
-        .push(iced::widget::Space::new().height(Length::Fixed(28.0)));
+        .push(iced::widget::Space::new().height(Length::Fixed(32.0)))
+        .push(group_title("What Connect provides"))
+        .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
+        .push(connect_benefits(false))
+        .push(iced::widget::Space::new().height(Length::Fixed(32.0)));
     let consequence = "Cubes stay on this device; Connect services pause until you sign in again.";
     if state.review_sign_out {
         column = column.push(
             container(
                 Column::new()
-                    .push(
-                        text::p1_bold(format!("Sign out {email} on this device?"))
-                            .style(theme::text::primary),
-                    )
-                    .push(text::p2_regular(consequence).style(theme::text::secondary))
+                    .push(group_title(format!("Sign out {email} on this device?")))
+                    .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
+                    .push(tenshu_text::body(consequence).size(13))
+                    .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
                     .push(
                         Row::new()
                             .push(
-                                button::primary(None, "Sign out")
+                                sheet_button("Sign out", ActionKind::Primary, false)
                                     .on_press(ConnectAccountMessage::LogOut),
                             )
                             .push(
-                                button::secondary(None, "Cancel")
+                                sheet_button("Cancel", ActionKind::Secondary, false)
                                     .on_press(ConnectAccountMessage::ReviewSignOut(false)),
                             )
-                            .spacing(8),
-                    )
-                    .spacing(10),
+                            .spacing(12),
+                    ),
             )
-            .padding(16)
-            .style(|theme: &theme::Theme| container::Style {
-                background: Some(iced::Background::Color(theme.colors.shell.selected)),
-                border: iced::Border {
-                    radius: 8.0.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            }),
+            .padding([14, 16])
+            .width(Length::Fill)
+            .style(review_style),
         );
     } else {
         column = column
             .push(
-                button::secondary(None, "Sign out…")
+                sheet_button("Sign out…", ActionKind::Secondary, false)
                     .on_press(ConnectAccountMessage::ReviewSignOut(true)),
             )
-            .push(text::p2_regular(consequence).style(theme::text::secondary));
+            .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
+            .push(lead(consequence));
     }
-    column.spacing(4).width(Length::Fill).into()
+    column.width(Length::Fill).into()
 }
 
 fn signed_out_section_ux<'a>(section: ConnectSheetSection) -> Element<'a, ConnectSheetMessage> {
-    let title = match section {
-        ConnectSheetSection::Account => "Account",
-        ConnectSheetSection::PlanBilling => "Plan & billing",
-        ConnectSheetSection::Contacts => "Contacts",
-        ConnectSheetSection::DevicesSecurity => "Devices & security",
-        ConnectSheetSection::RecoveryServices => "Recovery services",
-    };
     Column::new()
-        .push(text::h4_bold(title).style(theme::text::primary))
-        .push(text::p1_regular("Sign in to see this").style(theme::text::secondary))
-        .push(
-            FocusableAction::new(
-                "tenshu.connect.gate.sign-in",
-                text::p2_regular("Sign in"),
-                ConnectSheetMessage::FocusAction,
-            )
-            .padding(10)
-            .style(theme::button::primary)
-            .on_press(ConnectSheetMessage::OpenAuthentication {
+        .push(sheet_title(section_label(section)))
+        .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
+        .push(tenshu_text::body("Sign in to see this").style(theme::tenshu::text::muted))
+        .push(iced::widget::Space::new().height(Length::Fixed(16.0)))
+        .push(sheet_action(
+            "tenshu.connect.gate.sign-in",
+            "Sign in",
+            ActionKind::Primary,
+            ConnectSheetMessage::OpenAuthentication {
                 create_account: false,
-            }),
-        )
-        .spacing(12)
+            },
+        ))
         .width(Length::Fill)
         .into()
 }
@@ -703,30 +941,32 @@ fn account_error_card<'a>(err: &PanelError) -> Element<'a, ConnectAccountMessage
     .into()
 }
 
-/// Product benefits from the approved Connect artboards. These describe the
-/// service; the plan picker below remains the source for current eligibility.
-const CONNECT_BENEFITS: [&str; 8] = [
-    "Encrypted Recovery Kit backup for each Cube — COINCUBE never sees your keys",
-    "Inheritance: invite family or friends to hold keys in Keychain, with time-locked recovery keys to recover funds",
-    "Recovery alerts and emergency contacts for people you trust",
-    "Hosted Esplora server — use your Vault while your node syncs",
-    "Sign Vault transactions from your phone with the Keychain app",
-    "Lightning Address and avatar for Spark wallets",
-    "Duress mode and Connect-enforced spending policies (Pro and Estate)",
-    "Buy/Sell and P2P marketplace access",
-];
+/// Product benefits from the approved Connect artboards, each with its own
+/// glyph. These describe the service; the plan picker below remains the
+/// source for current eligibility.
+fn connect_benefit_rows<'a>() -> [(iced::widget::Text<'a, theme::Theme>, &'static str); 8] {
+    [
+        (shield_check_icon(), "Encrypted Recovery Kit backup for each Cube — COINCUBE never sees your keys"),
+        (people_icon(), "Inheritance: invite family or friends to hold keys in the Keychain app, with time-locked recovery keys to recover funds"),
+        (bell_icon(), "Recovery alerts and emergency contacts for people you trust"),
+        (lightning_outline_icon(), "Hosted Esplora server — use your Vault instantly while your node syncs"),
+        (laptop_icon(), "Sign Vault transactions from your phone with the companion Keychain app"),
+        (lightning_outline_icon(), "Lightning Address and avatar for Spark wallets"),
+        (exclamation_circle_icon(), "Duress mode and Connect-enforced spending policies (Pro and Estate)"),
+        (credit_card_icon(), "Buy/Sell and P2P marketplace access"),
+    ]
+}
 
-fn connect_benefits<'a>() -> Element<'a, ConnectAccountMessage> {
-    let mut list = Column::new().spacing(6);
-    for benefit in CONNECT_BENEFITS {
+/// "What Connect provides" (`.provides`); `compact` is the signed-out
+/// variant with 13px text and tighter rows.
+fn connect_benefits<'a>(compact: bool) -> Element<'a, ConnectAccountMessage> {
+    let (size, gap) = if compact { (13.0, 6) } else { (14.0, 8) };
+    let mut list = Column::new().spacing(gap);
+    for (icon, benefit) in connect_benefit_rows() {
         list = list.push(
             Row::new()
-                .push(check_circle_icon().size(15).color(color::ORANGE))
-                .push(
-                    text::p2_regular(benefit)
-                        .style(theme::text::secondary)
-                        .width(Length::Fill),
-                )
+                .push(icon.size(18).style(theme::tenshu::text::muted))
+                .push(tenshu_text::body(benefit).size(size).width(Length::Fill))
                 .spacing(10)
                 .align_y(Alignment::Start),
         );
@@ -784,7 +1024,7 @@ fn login_ux<'a>(email: &'a str, loading: bool) -> Element<'a, ConnectAccountMess
                 .style(theme::text::secondary),
         )
         .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
-        .push(connect_benefits())
+        .push(connect_benefits(true))
         .push(iced::widget::Space::new().height(Length::Fixed(18.0)))
         .push(
             text::p2_regular("Enter your email address to receive a verification code.")
@@ -856,7 +1096,7 @@ fn register_ux<'a>(
                 .style(theme::text::secondary),
         )
         .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
-        .push(connect_benefits())
+        .push(connect_benefits(true))
         .push(iced::widget::Space::new().height(Length::Fixed(18.0)))
         .push(text::p2_medium("Email").style(theme::text::primary))
         .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
@@ -1106,7 +1346,7 @@ fn overview_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccount
         .push(iced::widget::Space::new().height(Length::Fixed(24.0)))
         .push(text::p1_bold("What Connect provides").style(theme::text::primary))
         .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
-        .push(connect_benefits())
+        .push(connect_benefits(false))
         .push(iced::widget::Space::new().height(Length::Fixed(24.0)))
         .push(recovery_services_ux(state))
         .push(iced::widget::Space::new().height(Length::Fixed(24.0)));
@@ -1159,35 +1399,38 @@ fn overview_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccount
 pub fn recovery_services_ux<'a>(
     state: &'a ConnectAccountPanel,
 ) -> Element<'a, ConnectAccountMessage> {
-    let eligibility = match state.recovery_alert_eligibility() {
+    // Plan-wide: Connect does not report per-Cube alert setup yet.
+    let eligibility = state.recovery_alert_eligibility();
+    let alerts_status = move || match eligibility {
         RecoveryAlertEligibility::Included => {
-            "Recovery alerts: Included in this plan; per-Cube setup unknown"
+            status_line(check_circle_icon(), "Included in plan", Tone::Good)
         }
-        RecoveryAlertEligibility::NotIncluded => "Recovery alerts: Not included in this plan",
-        RecoveryAlertEligibility::Unknown => "Recovery alerts: Plan eligibility unknown",
+        RecoveryAlertEligibility::NotIncluded => {
+            status_line(dash_circle_icon(), "Not in this plan", Tone::Muted)
+        }
+        RecoveryAlertEligibility::Unknown => {
+            status_line(question_circle_icon(), "Unknown", Tone::Muted)
+        }
     };
     let mut col = Column::new()
-        .push(text::p1_bold("Recovery services").style(theme::text::primary))
-        .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
-        .push(text::p2_regular("Cube status reported by Connect. Open a Cube from the launcher to manage Backup & protection.").style(theme::text::secondary))
-        .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
-        .spacing(8)
+        .push(sheet_title("Recovery services"))
+        .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
+        .push(lead("Recovery Kit and recovery alerts per Cube, as reported by Connect. Open a Cube from the launcher to manage Backup & protection."))
+        .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
         .width(Length::Fill);
 
     match &state.recovery_services {
         RecoveryServicesState::NotLoaded => {
             col = col
+                .push(lead("Cube status has not been loaded."))
+                .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
                 .push(
-                    text::p2_regular("Cube status has not been loaded.")
-                        .style(theme::text::secondary),
-                )
-                .push(
-                    button::secondary(None, "Load Cube status")
+                    sheet_button("Load Cube status", ActionKind::Secondary, false)
                         .on_press(ConnectAccountMessage::RefreshRecoveryServices),
                 );
         }
         RecoveryServicesState::Loading => {
-            col = col.push(text::p2_regular("Loading Cube status…").style(theme::text::secondary));
+            col = col.push(lead("Loading Cube status…"));
         }
         RecoveryServicesState::Failed(error) => {
             col = col.push(notification::error_card(
@@ -1198,44 +1441,70 @@ pub fn recovery_services_ux<'a>(
             ));
         }
         RecoveryServicesState::Ready(rows) if rows.is_empty() => {
-            col = col.push(
-                text::p2_regular("No Cubes are registered with Connect yet.")
-                    .style(theme::text::secondary),
-            );
+            col = col.push(lead("No Cubes are registered with Connect yet."));
         }
         RecoveryServicesState::Ready(rows) => {
+            let cell = |content: Element<'a, ConnectAccountMessage>| {
+                container(content).width(Length::FillPortion(1))
+            };
+            let header = Row::new()
+                .push(cell(tenshu_text::caption("Cube").into()))
+                .push(cell(tenshu_text::caption("Network").into()))
+                .push(cell(tenshu_text::caption("Recovery Kit").into()))
+                .push(cell(tenshu_text::caption("Recovery alerts").into()))
+                .spacing(12);
+            col = col
+                .push(container(header).padding(iced::Padding {
+                    bottom: 8.0,
+                    ..iced::Padding::ZERO
+                }))
+                .push(horizontal_rule());
             for row in rows {
-                let kit = match row.kit {
-                    RecoveryKitReport::Reported => "Kit record: Reported by Connect",
-                    RecoveryKitReport::NotReported => "Kit record: Not reported by Connect",
+                let (kit_icon, kit, kit_tone) = match row.kit {
+                    RecoveryKitReport::Reported => (check_circle_icon(), "Reported", Tone::Good),
+                    RecoveryKitReport::NotReported => {
+                        (question_circle_icon(), "Not reported", Tone::Muted)
+                    }
                 };
-                let network = if row.target.network.trim().is_empty() {
-                    "Unknown network"
-                } else {
-                    row.target.network.as_str()
-                };
-                col = col.push(
-                    container(
-                        Column::new()
-                            .push(
-                                text::p1_bold(crate::cube_display::name(&row.name))
-                                    .style(theme::text::primary),
-                            )
-                            .push(text::p2_regular(network).style(theme::text::secondary))
-                            .push(text::p2_regular(kit).style(theme::text::primary))
-                            .push(text::p2_regular(eligibility).style(theme::text::secondary))
-                            .spacing(5)
-                            .padding(14),
+                col = col
+                    .push(
+                        container(
+                            Row::new()
+                                .push(cell(
+                                    tenshu_text::label(crate::cube_display::name(&row.name)).into(),
+                                ))
+                                .push(cell(
+                                    tenshu_text::body(network_label(&row.target.network)).into(),
+                                ))
+                                .push(cell(status_line(kit_icon, kit, kit_tone)))
+                                .push(cell(alerts_status()))
+                                .spacing(12)
+                                .align_y(Alignment::Center),
+                        )
+                        .padding([12, 0]),
                     )
-                    .style(card_style)
-                    .width(Length::Fill),
-                );
+                    .push(horizontal_rule());
             }
-            col = col.push(text::p2_regular("A reported Kit record does not confirm this device is verified or that every secret is backed up.").style(theme::text::secondary));
+            col = col
+                .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
+                .push(footnote("A reported Kit record does not confirm this device is verified or that every secret is backed up."));
         }
     }
 
     col.into()
+}
+
+/// Connect's network id as the artboard names it.
+fn network_label(network: &str) -> String {
+    match network.trim() {
+        "" => "Unknown network".to_string(),
+        "bitcoin" | "mainnet" => "Bitcoin mainnet".to_string(),
+        "testnet" => "Bitcoin testnet".to_string(),
+        "testnet4" => "Bitcoin Testnet4".to_string(),
+        "signet" => "Bitcoin signet".to_string(),
+        "regtest" => "Bitcoin regtest".to_string(),
+        other => other.to_string(),
+    }
 }
 
 /// One label/value line in the Account Overview card: muted label on the
@@ -1473,21 +1742,64 @@ fn plan_billing_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAcc
 }
 
 fn billing_management_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMessage> {
+    let cancelled = state
+        .plan
+        .as_ref()
+        .is_some_and(|plan| matches!(plan.status, PlanStatus::Canceled));
     let mut col = Column::new()
-        .push(text::h4_bold("Plan & Billing").style(theme::text::primary))
+        .push(sheet_title("Plan & billing"))
+        .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
+        .push(current_plan_summary(state));
+    if cancelled {
+        col = col
+            .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
+            .push(footnote(
+                "Your plan is cancelled. Connect services stay on until the access date.",
+            ));
+    }
+    col = col
         .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
-        .push(current_plan_summary(state))
-        .push(iced::widget::Space::new().height(Length::Fixed(15.0)));
-
+        .push(
+            Row::new()
+                .push(
+                    sheet_button(
+                        if cancelled {
+                            "Resubscribe…"
+                        } else {
+                            "Change plan…"
+                        },
+                        ActionKind::Secondary,
+                        true,
+                    )
+                    .on_press(ConnectAccountMessage::ComparePlans(true)),
+                )
+                .push(
+                    sheet_link(if state.show_campaign_redeem {
+                        "Hide referral code"
+                    } else {
+                        "Referral"
+                    })
+                    .on_press(ConnectAccountMessage::ShowCampaignRedeem(
+                        !state.show_campaign_redeem,
+                    )),
+                )
+                .spacing(12)
+                .align_y(Alignment::Center),
+        );
+    if state.show_campaign_redeem {
+        col = col
+            .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
+            .push(campaign_redeem_field(state));
+    }
     if let Some(banner) = renewal_banner(state) {
         col = col
-            .push(banner)
-            .push(iced::widget::Space::new().height(Length::Fixed(15.0)));
+            .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
+            .push(banner);
     }
     if let Some(provenance) = state.plan.as_ref().and_then(plan_provenance_card) {
         col = col
-            .push(provenance)
-            .push(iced::widget::Space::new().height(Length::Fixed(15.0)));
+            .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
+            .push(provenance);
     }
 
     let current_features = state.plan.as_ref().and_then(|plan| {
@@ -1501,93 +1813,75 @@ fn billing_management_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, Conn
                 || (tier_name == "estate" && info.name.eq_ignore_ascii_case("legacy"))
         })
     });
-    let mut features = Column::new()
-        .push(text::p1_bold("Current plan includes").style(theme::text::primary))
-        .spacing(8);
-    if let Some(info) = current_features {
-        if info.features.is_empty() {
-            features = features.push(
-                text::p2_regular("No feature details are available for this plan.")
-                    .style(theme::text::secondary),
-            );
-        } else {
-            for feature in &info.features {
-                features = features.push(
-                    text::p2_regular(launch_feature_copy(feature)).style(theme::text::primary),
-                );
-            }
-        }
-    } else {
-        features = features.push(
-            text::p2_regular(
-                "Current plan features are unavailable. Try again when Connect is online.",
-            )
-            .style(theme::text::secondary),
-        );
-    }
     col = col
-        .push(container(features.padding(16)).style(card_style).width(Length::Fill))
-        .push(iced::widget::Space::new().height(Length::Fixed(15.0)))
-        .push(button::secondary(None, "View billing history").on_press(ConnectAccountMessage::ToggleBillingHistory).width(Length::Fill))
-        .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
-        .push(text::p2_regular("Payments use Bitcoin (Lightning or on-chain). Plans are paid upfront, with no recurring subscription.").style(theme::text::secondary))
-        .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
-        .push(button::secondary(None, "Compare plans").on_press(ConnectAccountMessage::ComparePlans(true)).width(Length::Fill))
-        .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
-        .push(button::secondary(None, if state.show_campaign_redeem { "Hide referral code" } else { "Have a promo or referral code?" })
-            .on_press(ConnectAccountMessage::ShowCampaignRedeem(!state.show_campaign_redeem))
-            .width(Length::Fill));
-    if state.show_campaign_redeem {
-        col = col
-            .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
-            .push(campaign_redeem_field(state));
+        .push(iced::widget::Space::new().height(Length::Fixed(32.0)))
+        .push(group_title("Features on this account"))
+        .push(iced::widget::Space::new().height(Length::Fixed(8.0)));
+    match current_features {
+        Some(info) if !info.features.is_empty() => {
+            col = col.push(ruled_list(info.features.iter().map(|feature| {
+                Row::new()
+                    .push(tenshu_text::label(launch_feature_copy(feature)).width(Length::Fill))
+                    .push(status_line(check_circle_icon(), "Included", Tone::Good))
+                    .spacing(16)
+                    .align_y(Alignment::Center)
+                    .into()
+            })));
+        }
+        Some(_) => {
+            col = col.push(lead("No feature details are available for this plan."));
+        }
+        None => {
+            col = col.push(lead(
+                "Current plan features are unavailable. Try again when Connect is online.",
+            ));
+        }
     }
-    col.push(iced::widget::Space::new().height(Length::Fixed(20.0)))
+    col.push(iced::widget::Space::new().height(Length::Fixed(32.0)))
+        .push(group_title("Billing history"))
+        .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
+        .push(lead("Payments use Bitcoin (Lightning or on-chain). Plans are paid upfront, with no recurring subscription."))
+        .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
+        .push(
+            sheet_link("View billing history")
+                .on_press(ConnectAccountMessage::ToggleBillingHistory),
+        )
         .width(Length::Fill)
         .into()
 }
 
+/// The "Current plan" row (`.li` with `.k`, plan and date, billing status).
 fn current_plan_summary<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMessage> {
-    let mut content = Column::new()
-        .push(text::p1_bold("Current plan").style(theme::text::primary))
-        .spacing(7);
-    if let Some(plan) = state.plan.as_ref() {
-        let status = match plan.status {
-            PlanStatus::Active => "Active",
-            PlanStatus::PastDue => "Past due",
-            PlanStatus::Canceled => "Cancelled",
+    let value: Element<'a, ConnectAccountMessage> = if let Some(plan) = state.plan.as_ref() {
+        let (icon, status, tone) = match plan.status {
+            PlanStatus::Active => (check_circle_icon(), "Active", Tone::Good),
+            PlanStatus::PastDue => (exclamation_circle_icon(), "Past due", Tone::Warn),
+            PlanStatus::Canceled => (dash_circle_icon(), "Cancelled", Tone::Muted),
         };
-        content = content.push(overview_info_row(
-            "Plan",
-            text::p1_bold(plan.tier().to_string())
-                .color(color::ORANGE)
-                .into(),
-        ));
-        content = content.push(overview_info_row(
-            "Status",
-            text::p1_regular(status).style(theme::text::primary).into(),
-        ));
+        let mut main = Column::new().push(tenshu_text::label(plan.tier().to_string()));
         if let Some(date) = plan.renewal_at.as_deref() {
             let label = match plan.status {
                 PlanStatus::Active => "Paid through",
                 PlanStatus::PastDue => "Payment due",
                 PlanStatus::Canceled => "Access until",
             };
-            content = content.push(overview_info_row(
-                label,
-                text::p1_regular(format_date(date))
-                    .style(theme::text::primary)
-                    .into(),
-            ));
+            main = main.push(lead(format!("{label} {}", format_date(date))));
         }
+        Row::new()
+            .push(main.width(Length::Fill))
+            .push(status_line(icon, status, tone))
+            .spacing(16)
+            .align_y(Alignment::Center)
+            .into()
     } else {
-        content = content
-            .push(text::p2_regular("Checking your current plan…").style(theme::text::secondary));
-    }
-    container(content.padding(16))
-        .style(card_style)
-        .width(Length::Fill)
-        .into()
+        lead("Checking your current plan…").into()
+    };
+    ruled_list([Row::new()
+        .push(lead("Current plan").width(Length::Fixed(168.0)))
+        .push(value)
+        .spacing(16)
+        .align_y(Alignment::Center)
+        .into()])
 }
 
 // ── Plan provenance card (server-driven, v2) ────────────────────────────────
@@ -2320,7 +2614,7 @@ fn billing_history_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, Connect
     let mut col = Column::new()
         .push(back_button)
         .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
-        .push(text::h4_bold("Billing History").style(theme::text::primary))
+        .push(sheet_title("Billing history"))
         .push(iced::widget::Space::new().height(Length::Fixed(15.0)));
 
     match &state.billing_history {
@@ -2399,90 +2693,94 @@ fn billing_history_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, Connect
 
 fn security_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMessage> {
     let devices_section: Element<ConnectAccountMessage> = match &state.verified_devices {
-        None => text::p2_regular("Loading devices…")
-            .color(color::GREY_3)
-            .into(),
-        Some(devices) if devices.is_empty() => text::p2_regular("No verified devices on record.")
-            .color(color::GREY_3)
-            .into(),
+        None => lead("Loading devices…").into(),
+        Some(devices) if devices.is_empty() => lead("No verified devices on record.").into(),
         Some(devices) => {
-            let mut col = Column::new().spacing(6);
+            let mut col = Column::new().push(horizontal_rule());
 
             for d in devices {
                 let name = non_blank(d.device_name.as_deref()).unwrap_or("Unknown Device");
-                let suffix = if d.is_current { " · Current" } else { "" };
-                let label = format!("{name}{suffix}");
-
                 let time_label = if let Some(ref last_used) = d.last_used_at {
-                    format!("Last active: {}", format_datetime(last_used))
+                    format!("Last activity {}", format_datetime(last_used))
                 } else {
-                    format!("Added: {}", format_datetime(&d.created_at))
+                    format!("Added {}", format_datetime(&d.created_at))
                 };
 
-                let details = Column::new()
-                    .push(text::p1_medium(label).style(theme::text::primary))
-                    .push(text::p2_regular(time_label).style(theme::text::secondary))
-                    .spacing(3)
-                    .width(Length::Fill);
+                let mut title = Row::new()
+                    .push(tenshu_text::label(name))
+                    .spacing(8)
+                    .align_y(Alignment::Center);
+                if d.is_current {
+                    title = title.push(row_tag("Current", true));
+                }
                 let mut row = Row::new()
-                    .spacing(12)
-                    .align_y(iced::Alignment::Center)
-                    .push(details);
+                    .push(laptop_icon().size(20).style(theme::tenshu::text::muted))
+                    .push(
+                        Column::new()
+                            .push(title)
+                            .push(lead(time_label))
+                            .width(Length::Fill),
+                    )
+                    .spacing(16)
+                    .align_y(Alignment::Center);
 
                 if !d.is_current {
                     let is_deleting = state.verified_devices_state.deleting_ids.contains(&d.id);
-
-                    let mut delete_button = button::secondary(
-                        None,
-                        if is_deleting {
-                            "Removing…"
-                        } else {
-                            "Remove…"
-                        },
-                    )
-                    .width(Length::Shrink);
-
+                    let mut remove = sheet_button(
+                        if is_deleting { "Removing…" } else { "Remove" },
+                        ActionKind::Secondary,
+                        true,
+                    );
                     if !is_deleting {
-                        delete_button = delete_button.on_press(
+                        remove = remove.on_press(
                             ConnectAccountMessage::ReviewVerifiedDeviceRemoval(Some(d.id)),
                         );
                     }
-
-                    row = row.push(delete_button);
+                    row = row.push(remove);
                 }
 
-                col = col.push(container(row).padding(10).width(Length::Fill));
+                col = col
+                    .push(container(row).padding([10, 0]).width(Length::Fill))
+                    .push(horizontal_rule());
                 if state.review_device_removal == Some(d.id) {
                     col = col.push(
                         container(
                             Column::new()
+                                .push(group_title(format!("Remove {name}?")))
+                                .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
                                 .push(
-                                    text::p1_bold(format!("Remove {name}?"))
-                                        .style(theme::text::primary),
-                                )
-                                .push(
-                                    text::p2_regular(
+                                    tenshu_text::body(
                                         "This removes the device from your verified devices.",
                                     )
-                                    .style(theme::text::secondary),
+                                    .size(13),
                                 )
+                                .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
                                 .push(
                                     Row::new()
-                                        .push(button::primary(None, "Remove device").on_press(
-                                            ConnectAccountMessage::DeleteVerifiedDevice(d.id),
-                                        ))
-                                        .push(button::secondary(None, "Cancel").on_press(
-                                            ConnectAccountMessage::ReviewVerifiedDeviceRemoval(
-                                                None,
+                                        .push(
+                                            sheet_button(
+                                                format!("Remove {name}"),
+                                                ActionKind::Primary,
+                                                false,
+                                            )
+                                            .on_press(
+                                                ConnectAccountMessage::DeleteVerifiedDevice(d.id),
                                             ),
-                                        ))
-                                        .spacing(8),
-                                )
-                                .spacing(10)
-                                .padding(12),
+                                        )
+                                        .push(
+                                            sheet_button("Cancel", ActionKind::Secondary, false)
+                                                .on_press(
+                                                ConnectAccountMessage::ReviewVerifiedDeviceRemoval(
+                                                    None,
+                                                ),
+                                            ),
+                                        )
+                                        .spacing(12),
+                                ),
                         )
-                        .style(card_style)
-                        .width(Length::Fill),
+                        .padding([14, 16])
+                        .width(Length::Fill)
+                        .style(review_style),
                     );
                 }
             }
@@ -2491,92 +2789,66 @@ fn security_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccount
         }
     };
 
+    let mut activity_summary = None;
     let activity_section: Element<ConnectAccountMessage> = match &state.login_activity {
-        None => text::p2_regular("Loading activity…")
-            .color(color::GREY_3)
-            .into(),
-        Some(activity) if activity.is_empty() => text::p2_regular("No login activity on record.")
-            .color(color::GREY_3)
-            .into(),
+        None => lead("Loading activity…").into(),
+        Some(activity) if activity.is_empty() => lead("No login activity on record.").into(),
         Some(activity) => {
-            let mut col = Column::new().spacing(6);
-            for a in activity.iter().take(50) {
-                let (status, status_color) = match a.success {
-                    Some(true) => ("Successful", color::ORANGE),
-                    Some(false) => ("Failed", color::RED),
-                    None => ("Unknown", color::GREY_3),
+            let shown = &activity[..activity.len().min(50)];
+            let succeeded = shown.iter().filter(|a| a.success == Some(true)).count();
+            let failed = shown.iter().filter(|a| a.success == Some(false)).count();
+            activity_summary = Some(format!("{succeeded} successful · {failed} failed"));
+            ruled_list(shown.iter().map(|a| {
+                let (icon, status, tone) = match a.success {
+                    Some(true) => (check_circle_icon(), "Successful", Tone::Good),
+                    Some(false) => (x_circle_icon(), "Failed", Tone::Bad),
+                    None => (question_circle_icon(), "Unknown", Tone::Muted),
                 };
 
                 let ip = non_blank(a.ip_address.as_deref());
                 let ua = non_blank(a.device_name.as_deref());
+                let shorten = |u: &str| {
+                    if u.chars().count() > 60 {
+                        format!("{}…", u.chars().take(59).collect::<String>())
+                    } else {
+                        u.to_string()
+                    }
+                };
                 let ip_and_ua = match (ip, ua) {
-                    (Some(i), Some(u)) => {
-                        let short_u = if u.chars().count() > 60 {
-                            format!("{}…", u.chars().take(59).collect::<String>())
-                        } else {
-                            u.to_string()
-                        };
-                        format!("{} - {}", i, short_u)
-                    }
+                    (Some(i), Some(u)) => format!("{} - {}", i, shorten(u)),
                     (Some(i), None) => i.to_string(),
-                    (None, Some(u)) => {
-                        if u.chars().count() > 60 {
-                            format!("{}…", u.chars().take(59).collect::<String>())
-                        } else {
-                            u.to_string()
-                        }
-                    }
+                    (None, Some(u)) => shorten(u),
                     (None, None) => "Unknown device".to_string(),
                 };
 
-                col = col.push(
-                    Column::new()
-                        .push(
-                            Row::new()
-                                .push(text::p2_bold(status).color(status_color))
-                                .push(text::p2_regular(ip_and_ua).style(theme::text::primary))
-                                .spacing(12),
-                        )
-                        .push(
-                            text::caption(format_datetime(&a.created_at))
-                                .style(theme::text::secondary),
-                        )
-                        .spacing(3),
-                );
-            }
-            col.into()
+                Row::new()
+                    .push(container(status_line(icon, status, tone)).width(Length::Fixed(120.0)))
+                    .push(tenshu_text::body(ip_and_ua).width(Length::Fill))
+                    .push(lead(format_datetime(&a.created_at)))
+                    .spacing(16)
+                    .align_y(Alignment::Center)
+                    .into()
+            }))
         }
     };
 
+    let mut activity_heading = Row::new()
+        .push(group_title("Login Activity").width(Length::Fill))
+        .align_y(Alignment::Center);
+    if let Some(summary) = activity_summary {
+        activity_heading = activity_heading.push(lead(summary));
+    }
+
     Column::new()
-        .push(text::h4_bold("Devices & security").style(theme::text::primary))
-        .push(iced::widget::Space::new().height(Length::Fixed(15.0)))
-        .push(
-            container(
-                Column::new()
-                    .push(text::p1_bold("Verified Devices").style(theme::text::primary))
-                    .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
-                    .push(devices_section)
-                    .padding(16)
-                    .spacing(2),
-            )
-            .style(card_style)
-            .width(Length::Fill),
-        )
-        .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
-        .push(
-            container(
-                Column::new()
-                    .push(text::p1_bold("Login Activity").style(theme::text::primary))
-                    .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
-                    .push(activity_section)
-                    .padding(16)
-                    .spacing(2),
-            )
-            .style(card_style)
-            .width(Length::Fill),
-        )
-        .spacing(0)
+        .push(sheet_title("Devices & security"))
+        .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
+        .push(group_title("Verified Devices"))
+        .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
+        .push(devices_section)
+        .push(iced::widget::Space::new().height(Length::Fixed(32.0)))
+        .push(activity_heading)
+        .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
+        .push(activity_section)
         .width(Length::Fill)
         .into()
 }
@@ -4850,5 +5122,61 @@ mod renewal_banner_tests {
                 }
             }
         }
+    }
+
+    /// The sheet follows the Connect artboard's copy: sentence-case section
+    /// titles, the artboard's benefit wording and its list headings.
+    #[tokio::test]
+    async fn connect_sheet_sections_use_artboard_copy() {
+        use iced::advanced::renderer::Headless;
+
+        let renderer = <iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer");
+        let account = dashboard_panel();
+        let labels = |section| {
+            visible_labels(
+                connect_sheet(&account, ConnectSheetPage::Sections(section)),
+                &renderer,
+            )
+        };
+
+        let overview = labels(ConnectSheetSection::Account);
+        for expected in [
+            "Connect account",
+            "Signed in on this device",
+            "Sign-in method",
+            "What Connect provides",
+            "Hosted Esplora server — use your Vault instantly while your node syncs",
+            "Sign Vault transactions from your phone with the companion Keychain app",
+            "Sign out…",
+        ] {
+            assert!(
+                overview.iter().any(|l| l == expected),
+                "{}: {:?}",
+                expected,
+                overview
+            );
+        }
+        // The section list already routes to Plan & billing.
+        assert_eq!(
+            overview.iter().filter(|l| *l == "Plan & billing").count(),
+            1,
+            "{:?}",
+            overview
+        );
+
+        let plan = labels(ConnectSheetSection::PlanBilling);
+        assert!(plan.iter().any(|l| l == "Features on this account"));
+        assert!(plan.iter().any(|l| l == "Billing history"));
+        assert!(!plan.iter().any(|l| l == "Plan & Billing"));
+
+        let security = labels(ConnectSheetSection::DevicesSecurity);
+        assert!(security.iter().any(|l| l == "Verified Devices"));
+        assert!(security.iter().any(|l| l == "Login Activity"));
     }
 }

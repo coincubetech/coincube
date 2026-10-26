@@ -3050,10 +3050,12 @@ impl GUI {
                 if let Some(account) = self.connect_panel(&sheet.origin) {
                     let foreground = crate::app::view::connect::connect_sheet(account, sheet.page)
                         .map(Message::ConnectSheet);
+                    // P-Connect keeps the Launcher's top bar above the sheet;
+                    // over an open Cube (P-Connect-InCube) the sheet covers it.
                     return compose_overlay(
                         background,
                         foreground,
-                        matches!(sheet.origin.source, tab::PreferencesSource::App(_)),
+                        matches!(sheet.origin.source, tab::PreferencesSource::Home),
                     );
                 }
             }
