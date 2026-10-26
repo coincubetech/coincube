@@ -284,7 +284,6 @@ pub struct Cache {
     /// deliberately not persisted with wallet or device settings.
     pub cube_switcher_open: bool,
     pub cube_lock_confirmation: bool,
-    pub vault_tools_open: bool,
     /// BTC price in USD, always fetched regardless of the user's selected fiat
     /// currency. Used for converting USDt (which is pegged to USD) into sats.
     pub btc_usd_price: Option<f64>,
@@ -443,7 +442,6 @@ impl std::default::Default for Cache {
             balance_privacy: None,
             cube_switcher_open: false,
             cube_lock_confirmation: false,
-            vault_tools_open: false,
             btc_usd_price: None,
             show_direction_badges: true,
             lightning_address: None,

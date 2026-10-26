@@ -3459,7 +3459,6 @@ impl App {
         view::nav::shell::escape_intent(view::nav::shell::ShellState {
             switcher_open: self.cache.cube_switcher_open,
             lock_confirmation: self.cache.cube_lock_confirmation,
-            tools_open: self.cache.vault_tools_open,
             backup_attention: false,
         })
     }
@@ -9658,7 +9657,6 @@ impl App {
             Message::View(view::Message::Menu(Menu::Vault(menu::VaultSubMenu::Claim))) => {
                 self.cache.cube_switcher_open = false;
                 self.cache.cube_lock_confirmation = false;
-                self.cache.vault_tools_open = true;
                 return self.enter_claim();
             }
             // Claim step 1's own results go to the claim panel whether or not
@@ -9703,10 +9701,6 @@ impl App {
                 self.cache.cube_lock_confirmation = false;
                 return iced::widget::operation::focus(view::nav::shell::CUBE_LOCK_ID);
             }
-            Message::View(view::Message::ToggleVaultTools) => {
-                self.cache.vault_tools_open = !self.cache.vault_tools_open;
-                return iced::widget::operation::focus(view::nav::shell::VAULT_TOOLS_ID);
-            }
             Message::View(view::Message::FocusAction(id)) => {
                 return iced::widget::operation::focus(id.clone());
             }
@@ -9730,17 +9724,6 @@ impl App {
                     .unwrap_or_else(Task::none);
                 self.cache.cube_switcher_open = false;
                 self.cache.cube_lock_confirmation = false;
-                if matches!(
-                    &menu,
-                    Menu::Vault(
-                        menu::VaultSubMenu::Coins(_)
-                            | menu::VaultSubMenu::PSBTs(_)
-                            | menu::VaultSubMenu::Recovery
-                            | menu::VaultSubMenu::Claim
-                    )
-                ) {
-                    self.cache.vault_tools_open = true;
-                }
                 return Task::batch([close_task, self.set_current_panel(menu)]);
             }
             Message::ActivityOpenDetail(target) => {
@@ -18055,7 +18038,6 @@ pub(crate) mod claim_step1_tests {
         let produced = outputs(app.update(entry())).await;
         assert!(!app.cache.cube_switcher_open);
         assert!(!app.cache.cube_lock_confirmation);
-        assert!(app.cache.vault_tools_open);
         assert!(
             starts_installer(&produced),
             "no target: the installer starts"

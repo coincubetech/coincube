@@ -154,7 +154,6 @@ pub enum Message {
     ToggleCubeSwitcher,
     AskCubeLock,
     CancelCubeLock,
-    ToggleVaultTools,
     /// A shared Action's pointer-down request. The App applies whole-tree
     /// focus so a captured sidebar click also blurs content controls.
     FocusAction(iced::advanced::widget::Id),

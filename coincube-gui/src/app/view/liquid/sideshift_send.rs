@@ -176,9 +176,9 @@ fn address_input_view<'a>(
                     .height(Length::Fixed(50.0))
                     .center_y(Length::Fixed(50.0))
                     .style(if is_selected {
-                        theme::pill::selected
+                        |t: &theme::Theme| squared(theme::pill::selected(t))
                     } else {
-                        theme::pill::simple
+                        |t: &theme::Theme| squared(theme::pill::simple(t))
                     });
 
                 let btn = iced::widget::button(pill)
@@ -365,9 +365,9 @@ fn disambiguation_view<'a>(
             .padding([12, 16])
             .width(Length::Fill)
             .style(if is_selected {
-                theme::pill::selected
+                |t: &theme::Theme| squared(theme::pill::selected(t))
             } else {
-                theme::card::simple
+                |t: &theme::Theme| squared(theme::card::simple(t))
             });
 
         let btn = iced::widget::button(card)
@@ -822,6 +822,13 @@ fn error_view(error: Option<&str>) -> Element<SideshiftSendMessage> {
     )
     .center_x(Length::Fill)
     .into()
+}
+
+/// Network choices are buttons, so they take the square 8px corner every
+/// button has since canvas v122, over their pill or card colours.
+fn squared(mut style: iced::widget::container::Style) -> iced::widget::container::Style {
+    style.border.radius = 8.0.into();
+    style
 }
 
 #[cfg(test)]

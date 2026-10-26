@@ -1883,7 +1883,7 @@ impl SelectKeySource {
                     border: iced::Border {
                         color: border_color,
                         width: 1.5,
-                        radius: 16.0.into(),
+                        radius: 8.0.into(),
                     },
                     ..Default::default()
                 }
