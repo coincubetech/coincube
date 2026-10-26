@@ -234,6 +234,10 @@ pub async fn remove_cube_import(
             return Err("Another Cube still references this wallet; no files were removed.".into());
         }
     }
+    if let Some(attachment) = expected_attachment {
+        crate::services::imported_keys::LocalKeyRepository::new(directory, expected, attachment)?
+            .remove_operation_storage()?;
+    }
 
     // Keep the Cube visible until cleanup finishes. An interrupted removal
     // can be retried from its delete dialog, even if some owned files are gone.
