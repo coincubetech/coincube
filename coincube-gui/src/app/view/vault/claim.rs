@@ -652,12 +652,17 @@ fn deposit_status_view<'a>(
         .push(p1_bold("Deposit addresses"))
         .push(p1_regular("Send BTC to the Bitcoin address and BTCB2 to the Blake2b address. Keep both Cubes open under the same Connect account.").style(theme::text::secondary))
         .push(button::secondary_compact(Some(if expanded { icon::collapsed_icon() } else { icon::collapse_icon() }),
-            if expanded { "Hide deposit addresses" } else { "Show deposit addresses" })
+            if expanded { "Hide deposit addresses" } else { "Deposit addresses" })
             .on_press(Message::Claim(ClaimMessage::ToggleDepositDetails)))
-        .push(bitcoin)
-        .push(btcb2)
+        .push_maybe(expanded.then_some(bitcoin))
+        .push_maybe(expanded.then_some(btcb2))
         .push_maybe(expanded.then(|| p2_regular(format!("Minimums cover estimated fees at {} sat/vB on Bitcoin and {} sat/vB on BTCB2. Fees may change. Each deposit must be confirmed and verified as chain-specific.", addresses.bitcoin_rate_sat_vb, addresses.btcb2_rate_sat_vb)).style(theme::text::secondary)))
         .push(p1_bold(deposit_heading(status, review.is_some())))
+        .push_maybe((!expanded && panel.funding_checking()).then(|| p2_regular("Verifying replay protection…").style(theme::text::secondary)))
+        .push_maybe((!expanded && review.is_none() && matches!(panel.funding_proof_status(ChainId::Bitcoin), crate::services::claim_observation::http::FundingProofStatus::Failed(_) | crate::services::claim_observation::http::FundingProofStatus::NoQualifyingAncestry))
+            .then(|| p2_regular(format!("Bitcoin: {}", deposit_proof_detail(panel.funding_proof_status(ChainId::Bitcoin), panel.funding_checking()))).style(theme::text::warning)))
+        .push_maybe((!expanded && review.is_none() && matches!(panel.funding_proof_status(ChainId::BitcoinBlake2b), crate::services::claim_observation::http::FundingProofStatus::Failed(_) | crate::services::claim_observation::http::FundingProofStatus::NoQualifyingAncestry))
+            .then(|| p2_regular(format!("Bitcoin Blake2b: {}", deposit_proof_detail(panel.funding_proof_status(ChainId::BitcoinBlake2b), panel.funding_checking()))).style(theme::text::warning)))
         .push_maybe((panel.deposit_polling() && status.is_some()).then(|| p2_regular("Refreshing deposit status…")))
         .into()
 }
@@ -962,7 +967,7 @@ fn preconditions_view<'a>(
             Column::new()
                 .spacing(12)
                 .push(p1_bold("Before you start"))
-                .push(checklist)
+                .push_maybe((!pre.checking || panel.setup_details_expanded()).then_some(checklist))
                 .push_maybe(summary.map(p1_regular))
                 .push_maybe(problem.as_ref().map(|reason| card::warning(reason.clone())))
                 .push_maybe((problem.is_none()).then(|| {
@@ -1001,7 +1006,13 @@ fn preconditions_view<'a>(
                         } else {
                             icon::collapse_icon()
                         }),
-                        if panel.setup_details_expanded() { "Hide setup note" } else { "Setup note" },
+                        if pre.checking {
+                            "Wallet details"
+                        } else if panel.setup_details_expanded() {
+                            "Hide setup note"
+                        } else {
+                            "Setup note"
+                        },
                     )
                     .on_press(Message::Claim(ClaimMessage::ToggleSetupDetails)),
                 )
@@ -1726,6 +1737,31 @@ mod tests {
                 }
                 assert!(!funding.contains("Both deposits verified for replay protection"));
                 assert!(!funding.contains("Sign with this Vault's keys"));
+
+                for expanded in [false, true] {
+                    let detail = capture::inspect(
+                        if expanded {
+                            "claim-deposit-detail-expanded"
+                        } else {
+                            "claim-deposit-detail-collapsed"
+                        },
+                        deposit_status_view(&panel, &addresses, expanded, true),
+                        (width, height),
+                        appearance,
+                        palette,
+                    );
+                    assert!(detail.contains("Checking for funds"));
+                    assert_eq!(detail.contains("Bitcoin · minimum"), expanded);
+                    assert_eq!(detail.contains("Bitcoin Blake2b · minimum"), expanded);
+                    assert_eq!(detail.contains("bc1qsyntheticbitcoinaddress"), expanded);
+                    assert_eq!(detail.contains("bc1qsyntheticblake2baddress"), expanded);
+                    assert_eq!(detail.contains("Copy address"), expanded);
+                    assert!(detail.contains(if expanded {
+                        "Hide deposit addresses"
+                    } else {
+                        "Deposit addresses"
+                    }));
+                }
             }
         }
     }
