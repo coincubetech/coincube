@@ -1406,7 +1406,7 @@ mod tests {
                         (Message::Capability(actual_index, actual_value), Message::Capability(expected_index, expected_value)) => actual_index == expected_index && actual_value == expected_value,
                         _ => false,
                     }
-                )), "{id} should respond to {key:?}");
+                )), "{} should respond to {:?}", id, key);
             }
         }
         paired.wallet_allowed = true;
@@ -1476,7 +1476,9 @@ mod tests {
                     ) || matches!(intent,
                         view::Message::LocalMcp(Message::CancelRevokePair) if !expected
                     )),
-                    "{id} should respond to {key:?}"
+                    "{} should respond to {:?}",
+                    id,
+                    key
                 );
             }
         }
