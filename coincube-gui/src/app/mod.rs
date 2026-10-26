@@ -6296,6 +6296,15 @@ impl App {
     }
 
     fn set_current_panel(&mut self, menu: Menu) -> Task<Message> {
+        // A bare Vault Settings route has no distinct landing page. Resolve it
+        // before imported-wallet dispatch and panel reload so the content and
+        // selected in-content section both become Wallet & signers.
+        let menu = match menu {
+            Menu::Vault(menu::VaultSubMenu::Settings(None)) => Menu::Vault(
+                menu::VaultSubMenu::Settings(Some(menu::SettingsOption::Wallet)),
+            ),
+            menu => menu,
+        };
         if self.cache.has_imported_bitcoin {
             if matches!(
                 &menu,
@@ -18010,6 +18019,44 @@ mod incoming_liquid_toast_privacy_tests {
         assert!(mounted(&app).contains("12,345"));
         assert_eq!(app.errors.len(), 1);
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod settings_navigation_integration_tests {
+    use super::*;
+    use crate::app::view::shared::landing::capture;
+
+    #[test]
+    fn bare_vault_settings_route_mounts_the_selected_wallet_section() {
+        let _guard = crate::app::session::test_guard();
+        let root =
+            std::env::temp_dir().join(format!("settings-default-route-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+
+        drop(app.update(Message::View(view::Message::Menu(Menu::Vault(
+            menu::VaultSubMenu::Settings(None),
+        )))));
+        assert_eq!(
+            app.panels.current,
+            Menu::Vault(menu::VaultSubMenu::Settings(Some(
+                menu::SettingsOption::Wallet
+            )))
+        );
+        let mounted = capture::inspect(
+            "vault-settings-default-route",
+            app.panels
+                .current()
+                .unwrap()
+                .view(&app.panels.current, &app.cache),
+            (1024, 768),
+            "dark",
+            ui_theme::Theme::dark(),
+        );
+        assert!(mounted.contains("Wallet & signers"));
+        assert!(mounted.contains("Wallet alias:"));
+        assert!(!mounted.contains("Open Wallet & signers to review"));
+        let _ = std::fs::remove_dir_all(root);
     }
 }
 
