@@ -192,8 +192,8 @@ fn coin_list_view<'a>(
                                 .spacing(3)
                                 .push(amount)
                                 .push(p2_regular(match coin.block_height {
-                                    Some(height) if height <= blockheight => {
-                                        let confirmations = blockheight - height + 1;
+                                    Some(height) if height >= 0 && (height as u32) <= blockheight => {
+                                        let confirmations = blockheight - height as u32 + 1;
                                         format!("{} confirmation{}", confirmations,
                                             if confirmations == 1 { "" } else { "s" })
                                     }
