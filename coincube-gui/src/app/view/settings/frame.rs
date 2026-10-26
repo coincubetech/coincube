@@ -89,6 +89,7 @@ fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
             let mut sections = vec![
                 (CubeSettingsOption::General, "Display & appearance", "display"),
                 (CubeSettingsOption::Recovery, "Backup & protection", "backup"),
+                (CubeSettingsOption::AiAccess, "AI access", "ai-access"),
                 (CubeSettingsOption::PaymentChecks, "Payment checks", "payment-checks"),
                 (CubeSettingsOption::DataExports, "Data & exports", "data"),
                 (CubeSettingsOption::Stats, "Download stats", "stats"),
@@ -103,6 +104,7 @@ fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
                     id: match id {
                         "display" => "tenshu.settings.route.cube.display",
                         "backup" => "tenshu.settings.route.cube.backup",
+                        "ai-access" => "tenshu.settings.route.cube.ai-access",
                         "payment-checks" => "tenshu.settings.route.cube.payment-checks",
                         "data" => "tenshu.settings.route.cube.data",
                         "stats" => "tenshu.settings.route.cube.stats",
@@ -314,6 +316,14 @@ mod tests {
         assert!(sections
             .iter()
             .any(|choice| choice.label == "Display & appearance" && !choice.selected));
+    }
+
+    #[test]
+    fn cube_settings_exposes_read_only_ai_access_route() {
+        let menu = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::AiAccess));
+        assert!(section_routes(&menu, &Cache::default()).iter().any(|choice| {
+            choice.label == "AI access" && choice.selected && choice.enabled
+        }));
     }
 
     #[test]

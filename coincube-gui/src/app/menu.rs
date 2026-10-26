@@ -30,6 +30,7 @@ pub enum CubeSubMenu {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CubeSettingsOption {
     General,
+    AiAccess,
     /// Backup & recovery: local paper backup, the Connect Recovery Kit
     /// (password / Keychain), and Vault Recovery Alerts. Split out of General
     /// so each screen stays focused.

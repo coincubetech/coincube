@@ -21,11 +21,11 @@ else
   CARGO_PROFILE_FLAG := --profile $(PROFILE)
 endif
 
-.PHONY: all build bridge gui run release test clean sync-proto
+.PHONY: all build bridge gui mcp run release test clean sync-proto
 
 all: build
 
-build: bridge gui
+build: bridge gui mcp
 
 bridge:
 	$(CARGO) build --manifest-path $(BRIDGE_MANIFEST) $(CARGO_PROFILE_FLAG)
@@ -33,7 +33,10 @@ bridge:
 gui:
 	$(CARGO) build --package coincube-gui $(CARGO_PROFILE_FLAG)
 
-run: bridge
+mcp:
+	$(CARGO) build --package coincube-mcp --features adapter $(CARGO_PROFILE_FLAG)
+
+run: bridge mcp
 	$(CARGO) run --package coincube-gui $(CARGO_PROFILE_FLAG)
 
 release:
@@ -41,6 +44,7 @@ release:
 
 test:
 	$(CARGO) test
+	$(CARGO) test --package coincube-mcp --features adapter
 	$(CARGO) test --manifest-path $(BRIDGE_MANIFEST)
 
 clean:

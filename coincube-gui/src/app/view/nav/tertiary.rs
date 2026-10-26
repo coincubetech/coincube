@@ -91,6 +91,12 @@ fn cube_settings_items() -> Vec<SubItem> {
             },
         ),
         SubItem::new(
+            "AI access",
+            wallet_icon,
+            Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::AiAccess)),
+            |m| matches!(m, Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::AiAccess))),
+        ),
+        SubItem::new(
             "Payment checks",
             wallet_icon,
             Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::PaymentChecks)),

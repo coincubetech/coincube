@@ -17,6 +17,7 @@ name = "coincube"
 path = "src/main.rs"
 
 [dependencies]
+coincube-mcp = { path = "../coincube-mcp" }
 # Official SDK source at ba5e510a; manifest-only reqwest adjustment avoids the
 # existing Breez iOS build-dependency pin conflict. Drop the adaptation when
 # upstream relaxes that pin or provides compatible HTTP/TLS configuration.
@@ -246,6 +247,10 @@ tokio = { version = "1", features = ["rt", "macros", "test-util"] }
 httpmock = "0.7"
 
 [features]
+# Reserved for later, independently reviewed R24/R25 ports. The ordinary
+# desktop and companion build exposes only read-only Vault access.
+mcp-proposals = ["coincube-mcp/native-proposals"]
+mcp-transactions = ["coincube-mcp/native-transactions"]
 # Explicit opt-in for disposable loopback regtest integration.
 regtest-harness = ["coincubed/regtest-harness"]
 # Opt-in tests that hit a real `coincube-api` dev endpoint. Requires
