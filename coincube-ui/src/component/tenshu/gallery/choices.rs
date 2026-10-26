@@ -661,6 +661,204 @@ fn disabled_select_is_inert_and_skipped_by_tab() {
     assert!(mounted.click(label.center()).is_empty());
 }
 
+/// 24 synthetic currencies: taller than a 768px window once open.
+const CURRENCIES: [(u8, &str); 24] = [
+    (0, "USD · US dollar"),
+    (1, "EUR · Euro"),
+    (2, "GBP · Pound sterling"),
+    (3, "JPY · Yen"),
+    (4, "CHF · Swiss franc"),
+    (5, "CAD · Canadian dollar"),
+    (6, "AUD · Australian dollar"),
+    (7, "NZD · New Zealand dollar"),
+    (8, "SEK · Swedish krona"),
+    (9, "NOK · Norwegian krone"),
+    (10, "DKK · Danish krone"),
+    (11, "PLN · Złoty"),
+    (12, "CZK · Czech koruna"),
+    (13, "HUF · Forint"),
+    (14, "MXN · Mexican peso"),
+    (15, "BRL · Real"),
+    (16, "ARS · Argentine peso"),
+    (17, "CLP · Chilean peso"),
+    (18, "COP · Colombian peso"),
+    (19, "NGN · Naira"),
+    (20, "KES · Kenyan shilling"),
+    (21, "ZAR · Rand"),
+    (22, "INR · Rupee"),
+    (23, "PHP · Philippine peso"),
+];
+
+/// A currency select `above` px down a window of `height`.
+fn currencies(above: f32, options: &'static [(u8, &'static str)]) -> Element<'static, Msg> {
+    Column::new()
+        .push(iced::widget::Space::new().height(Length::Fixed(above)))
+        .push(
+            Container::new(
+                select(
+                    "currency",
+                    "Currency",
+                    options.iter().copied(),
+                    Some(0),
+                    Msg::Focus,
+                )
+                .width(Length::Fixed(240.0))
+                .on_select(selected("currency")),
+            )
+            .padding([0.0, 12.0]),
+        )
+        .into()
+}
+
+fn assert_in_window(menu: Rectangle, window: Size, case: &str) {
+    assert!(
+        menu.y >= 0.0 && menu.y + menu.height <= window.height,
+        "{case}: menu {menu:?} leaves the {window:?} window"
+    );
+}
+
+/// Centre of visible menu row `row`.
+fn menu_row(menu: Rectangle, row: usize) -> Point {
+    Point::new(menu.center_x(), menu.y + 4.0 + 32.0 * row as f32 + 16.0)
+}
+
+fn visible_rows(menu: Rectangle) -> usize {
+    ((menu.height - 8.0) / 32.0).round() as usize
+}
+
+fn wheel(mounted: &mut Mounted, at: Point, lines: f32) -> Vec<Msg> {
+    overlay_event(
+        mounted,
+        Event::Mouse(mouse::Event::WheelScrolled {
+            delta: mouse::ScrollDelta::Lines { x: 0.0, y: lines },
+        }),
+        mouse::Cursor::Available(at),
+    )
+}
+
+#[test]
+fn long_select_menu_stays_in_the_window_and_every_option_is_reachable() {
+    let window = Size::new(520.0, 768.0);
+    let full = 24.0 * 32.0 + 8.0;
+    assert!(full > window.height, "the fixture must not fit the window");
+
+    // Mid-window: neither side fits, so the menu is clamped and scrolls.
+    let mut mounted = Mounted::new(currencies(340.0, &CURRENCIES), window);
+    mounted.focus("currency");
+    press(&mut mounted, key::Named::Enter);
+    let menu = overlay_bounds(&mut mounted).expect("open");
+    assert_in_window(menu, window, "mid-window");
+    let rows = visible_rows(menu);
+    assert!((4..24).contains(&rows), "{rows} rows visible");
+    for _ in 0..6 {
+        press(&mut mounted, key::Named::ArrowDown);
+    }
+    for (name, theme) in themes() {
+        let pixels = pixels_with_overlay(&mut mounted, &theme);
+        save(
+            &format!("tenshu-select-long-{name}"),
+            &pixels,
+            window.width as u32,
+            window.height as u32,
+        );
+    }
+
+    // Keys: End scrolls the last option into view; its row selects it.
+    press(&mut mounted, key::Named::End);
+    let menu = overlay_bounds(&mut mounted).unwrap();
+    assert_in_window(menu, window, "after End");
+    assert_eq!(
+        overlay_click(&mut mounted, menu_row(menu, rows - 1)),
+        vec![Msg::Selected("currency", 23)],
+        "the last option is reachable by keys"
+    );
+
+    // Keys: ↓ from the top walks past the fold and keeps the highlight in view.
+    press(&mut mounted, key::Named::Enter);
+    press(&mut mounted, key::Named::Home);
+    for _ in 0..rows + 2 {
+        press(&mut mounted, key::Named::ArrowDown);
+    }
+    let menu = overlay_bounds(&mut mounted).unwrap();
+    assert_eq!(
+        press(&mut mounted, key::Named::Enter),
+        vec![Msg::Selected("currency", (rows + 2) as u8)],
+        "the highlight moved past the fold"
+    );
+    assert_in_window(menu, window, "after arrows");
+
+    // Pointer: the wheel scrolls to the end; the last row selects option 23.
+    press(&mut mounted, key::Named::Enter);
+    press(&mut mounted, key::Named::Home);
+    let menu = overlay_bounds(&mut mounted).unwrap();
+    assert_eq!(
+        overlay_click(&mut mounted, menu_row(menu, 0)),
+        vec![Msg::Selected("currency", 0)]
+    );
+    press(&mut mounted, key::Named::Enter);
+    let menu = overlay_bounds(&mut mounted).unwrap();
+    assert!(wheel(&mut mounted, menu.center(), -100.0).is_empty());
+    let menu = overlay_bounds(&mut mounted).unwrap();
+    assert_eq!(
+        overlay_click(&mut mounted, menu_row(menu, rows - 1)),
+        vec![Msg::Selected("currency", 23)],
+        "the last option is reachable by pointer"
+    );
+    press(&mut mounted, key::Named::Enter);
+    let menu = overlay_bounds(&mut mounted).unwrap();
+    wheel(&mut mounted, menu.center(), -100.0);
+    wheel(&mut mounted, menu.center(), 100.0);
+    let menu = overlay_bounds(&mut mounted).unwrap();
+    assert_eq!(
+        overlay_click(&mut mounted, menu_row(menu, 0)),
+        vec![Msg::Selected("currency", 0)],
+        "the wheel scrolls back to the first option"
+    );
+
+    // Near the bottom: a short list opens above; a long one clamps above.
+    for (options, case) in [(&CURRENCIES[..4], "short"), (&CURRENCIES[..], "long")] {
+        let mut low = Mounted::new(currencies(660.0, options), window);
+        let field = bounds_of(&mut low, "currency");
+        low.focus("currency");
+        press(&mut low, key::Named::Enter);
+        let menu = overlay_bounds(&mut low).unwrap();
+        assert!(
+            menu.y + menu.height <= field.y,
+            "{case}: opens above the field"
+        );
+        assert_in_window(menu, window, case);
+    }
+
+    // Near the top of a short window: clamped below the field.
+    let short = Size::new(520.0, 300.0);
+    let mut high = Mounted::new(currencies(0.0, &CURRENCIES), short);
+    let field = bounds_of(&mut high, "currency");
+    high.focus("currency");
+    press(&mut high, key::Named::Enter);
+    let menu = overlay_bounds(&mut high).unwrap();
+    assert!(menu.y >= field.y + field.height, "opens below the field");
+    assert_in_window(menu, short, "short window");
+}
+
+#[test]
+fn select_label_focuses_without_opening_like_a_native_label() {
+    let mut mounted = Mounted::new(direction(0, true), Size::new(600.0, 400.0));
+    let label = text_bounds(&mut mounted, "Direction");
+    let messages = mounted.click(label.center());
+    assert_eq!(messages, vec![Msg::Focus(Id::new("direction"))]);
+    apply(&mut mounted, &messages);
+    assert_eq!(mounted.focused(), Some(Id::new("direction")));
+    assert!(
+        overlay_bounds(&mut mounted).is_none(),
+        "the label focuses without opening"
+    );
+    assert!(press(&mut mounted, key::Named::Space).is_empty());
+    assert!(
+        overlay_bounds(&mut mounted).is_some(),
+        "the focused select then opens by key"
+    );
+}
+
 // ----- Field details from the live artifact ----------------------------------
 
 #[test]

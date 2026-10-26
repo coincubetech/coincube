@@ -7,10 +7,18 @@
 //!
 //! - pointer: pressing the field emits the owner's focus intent and opens or
 //!   closes the menu; pressing an option selects it and closes the menu;
-//!   pressing elsewhere closes it;
+//!   pressing elsewhere closes it. Pressing the label focuses the select
+//!   without opening it, as a `<label for>` does for the artboards' native
+//!   `<select>`;
 //! - keys: Enter, Space, ↓ or ↑ open the menu on the current option; while
 //!   open, ↑/↓ (and Home/End) move the highlight, Enter or Space select it,
 //!   Escape closes the menu and Tab closes it and moves on.
+//!
+//! The menu stays inside the window: it opens below the field, or above when
+//! only that side fits, and a list taller than either side is clamped to the
+//! larger one and scrolls. The highlighted row is always scrolled into view,
+//! and the mouse wheel scrolls the list, keeping the highlight on a visible
+//! row, so every option is reachable by pointer and by keys.
 //!
 //! The owner holds the selection; the menu's open and highlighted row are UI
 //! state kept in the widget tree, like a text cursor. A select without
@@ -48,6 +56,11 @@ const CHECK: char = '\u{F26E}';
 const ROW_HEIGHT: f32 = 32.0;
 const MENU_PADDING: f32 = 4.0;
 const MENU_GAP: f32 = 4.0;
+/// Space kept between the menu and the window edge.
+const VIEWPORT_MARGIN: f32 = 8.0;
+/// The scroll thumb of a clamped menu, and the room kept for it.
+const THUMB_WIDTH: f32 = 3.0;
+const THUMB_ROOM: f32 = 8.0;
 
 /// A select. Build it, then convert it into an [`Element`].
 pub struct Select<'a, T, M> {
@@ -65,7 +78,8 @@ pub struct Select<'a, T, M> {
 
 /// A select over `options` (value, visible text) showing `selected`, under a
 /// visible `label`. The `focus_intent` must apply Iced's whole-tree focus
-/// operation for the given `Id`; the field and its label emit it.
+/// operation for the given `Id`; the field emits it as it opens, the label
+/// to focus the select without opening it.
 pub fn select<'a, T, M>(
     id: impl Into<Id>,
     label: impl Into<Cow<'a, str>>,
@@ -219,6 +233,8 @@ struct State {
     focused: bool,
     open: bool,
     highlighted: usize,
+    /// First menu row shown while the list is clamped and scrolls.
+    offset: usize,
 }
 
 impl Focusable for State {
@@ -296,6 +312,7 @@ impl<M: Clone + 'static> Widget<M, Theme, Renderer> for SelectField<'_, M> {
             focused: false,
             open: false,
             highlighted: 0,
+            offset: 0,
         })
     }
 
@@ -546,11 +563,12 @@ impl<M: Clone + 'static> Widget<M, Theme, Renderer> for SelectField<'_, M> {
             messages,
             anchor: layout.bounds() + translation,
             text_size: self.text_size(),
+            visible: self.labels.len(),
         })))
     }
 }
 
-/// The open option list, drawn over everything below the field.
+/// The open option list, drawn over everything near the field.
 struct Menu<'b, 'a, M> {
     state: &'b mut State,
     labels: &'b [Cow<'a, str>],
@@ -558,29 +576,79 @@ struct Menu<'b, 'a, M> {
     messages: &'b [M],
     anchor: Rectangle,
     text_size: f32,
+    /// Rows that fit, set by `layout`.
+    visible: usize,
 }
 
 impl<M> Menu<'_, '_, M> {
+    fn scrolls(&self) -> bool {
+        self.visible < self.labels.len()
+    }
+
+    fn max_offset(&self) -> usize {
+        self.labels.len().saturating_sub(self.visible)
+    }
+
     fn row_at(&self, layout: Layout<'_>, point: Point) -> Option<usize> {
         let bounds = layout.bounds();
         if !bounds.contains(point) {
             return None;
         }
         let y = point.y - bounds.y - MENU_PADDING;
-        let index = (y / ROW_HEIGHT).floor();
-        (index >= 0.0 && (index as usize) < self.labels.len()).then_some(index as usize)
+        let row = (y / ROW_HEIGHT).floor();
+        if row < 0.0 || row as usize >= self.visible {
+            return None;
+        }
+        let index = self.state.offset + row as usize;
+        (index < self.labels.len()).then_some(index)
+    }
+
+    /// Scroll by `rows`, keeping the highlight on a visible row.
+    fn scroll(&mut self, rows: isize) {
+        let offset = (self.state.offset as isize + rows).clamp(0, self.max_offset() as isize);
+        self.state.offset = offset as usize;
+        let last_visible = self.state.offset + self.visible - 1;
+        self.state.highlighted = self
+            .state
+            .highlighted
+            .clamp(self.state.offset, last_visible);
     }
 }
 
 impl<M: Clone> overlay::Overlay<M, Theme, Renderer> for Menu<'_, '_, M> {
     fn layout(&mut self, _renderer: &Renderer, bounds: Size) -> layout::Node {
-        let height = self.labels.len() as f32 * ROW_HEIGHT + MENU_PADDING * 2.0;
-        let below = self.anchor.y + self.anchor.height + MENU_GAP;
-        let y = if below + height > bounds.height && self.anchor.y - MENU_GAP - height >= 0.0 {
+        let count = self.labels.len();
+        let full = count as f32 * ROW_HEIGHT + MENU_PADDING * 2.0;
+        let below_y = self.anchor.y + self.anchor.height + MENU_GAP;
+        let room_below = (bounds.height - VIEWPORT_MARGIN - below_y).max(0.0);
+        let room_above = (self.anchor.y - MENU_GAP - VIEWPORT_MARGIN).max(0.0);
+        // Below when the whole list fits there, else above when it fits
+        // there, else clamped to the roomier side.
+        let (above, room) = if full <= room_below {
+            (false, room_below)
+        } else if full <= room_above || room_above > room_below {
+            (true, room_above)
+        } else {
+            (false, room_below)
+        };
+        let fits = ((room - MENU_PADDING * 2.0) / ROW_HEIGHT).floor().max(1.0) as usize;
+        self.visible = fits.min(count).max(1);
+        let height = self.visible as f32 * ROW_HEIGHT + MENU_PADDING * 2.0;
+        let y = if above {
             self.anchor.y - MENU_GAP - height
         } else {
-            below
+            below_y
         };
+
+        // Keep the highlighted row in view (keys move it between frames).
+        let state = &mut *self.state;
+        if state.highlighted < state.offset {
+            state.offset = state.highlighted;
+        } else if state.highlighted >= state.offset + self.visible {
+            state.offset = state.highlighted + 1 - self.visible;
+        }
+        state.offset = state.offset.min(count.saturating_sub(self.visible));
+
         layout::Node::new(Size::new(self.anchor.width, height))
             .move_to(Point::new(self.anchor.x, y))
     }
@@ -612,17 +680,23 @@ impl<M: Clone> overlay::Overlay<M, Theme, Renderer> for Menu<'_, '_, M> {
             },
             Background::Color(shell.panel),
         );
-        for (index, label) in self.labels.iter().enumerate() {
-            let row = Rectangle {
+        let row_width =
+            bounds.width - MENU_PADDING * 2.0 - if self.scrolls() { THUMB_ROOM } else { 0.0 };
+        let first = self.state.offset;
+        for (row, index) in (first..first + self.visible).enumerate() {
+            let Some(label) = self.labels.get(index) else {
+                break;
+            };
+            let row_bounds = Rectangle {
                 x: bounds.x + MENU_PADDING,
-                y: bounds.y + MENU_PADDING + index as f32 * ROW_HEIGHT,
-                width: bounds.width - MENU_PADDING * 2.0,
+                y: bounds.y + MENU_PADDING + row as f32 * ROW_HEIGHT,
+                width: row_width,
                 height: ROW_HEIGHT,
             };
             if index == self.state.highlighted {
                 renderer.fill_quad(
                     renderer::Quad {
-                        bounds: row,
+                        bounds: row_bounds,
                         border: Border {
                             radius: radius::ROW.into(),
                             ..Border::default()
@@ -637,16 +711,16 @@ impl<M: Clone> overlay::Overlay<M, Theme, Renderer> for Menu<'_, '_, M> {
                 label_text(
                     label,
                     self.text_size,
-                    Size::new(row.width - 44.0, 20.0),
+                    Size::new(row_bounds.width - 44.0, 20.0),
                     if is_selected {
                         font::SEMIBOLD
                     } else {
                         font::REGULAR
                     },
                 ),
-                Point::new(row.x + 10.0, row.center_y()),
+                Point::new(row_bounds.x + 10.0, row_bounds.center_y()),
                 shell.ink,
-                row,
+                row_bounds,
             );
             if is_selected {
                 renderer.fill_text(
@@ -659,11 +733,36 @@ impl<M: Clone> overlay::Overlay<M, Theme, Renderer> for Menu<'_, '_, M> {
                             BOOTSTRAP_ICONS,
                         )
                     },
-                    Point::new(row.x + row.width - 10.0, row.center_y()),
+                    Point::new(
+                        row_bounds.x + row_bounds.width - 10.0,
+                        row_bounds.center_y(),
+                    ),
                     shell.accent_ink,
-                    row,
+                    row_bounds,
                 );
             }
+        }
+        if self.scrolls() {
+            // A thumb shows how much of the list is in view, and where.
+            let track = bounds.height - MENU_PADDING * 2.0;
+            let thumb = (track * self.visible as f32 / self.labels.len() as f32).max(16.0);
+            let progress = self.state.offset as f32 / self.max_offset() as f32;
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: Rectangle {
+                        x: bounds.x + bounds.width - MENU_PADDING - THUMB_WIDTH,
+                        y: bounds.y + MENU_PADDING + (track - thumb) * progress,
+                        width: THUMB_WIDTH,
+                        height: thumb,
+                    },
+                    border: Border {
+                        radius: (THUMB_WIDTH / 2.0).into(),
+                        ..Border::default()
+                    },
+                    ..renderer::Quad::default()
+                },
+                Background::Color(shell.muted),
+            );
         }
     }
 
@@ -687,6 +786,19 @@ impl<M: Clone> overlay::Overlay<M, Theme, Renderer> for Menu<'_, '_, M> {
                         shell.request_redraw();
                     }
                 }
+            }
+            Event::Mouse(mouse::Event::WheelScrolled { delta })
+                if layout.bounds().contains(point) =>
+            {
+                let rows = match delta {
+                    mouse::ScrollDelta::Lines { y, .. } => -y.round() as isize,
+                    mouse::ScrollDelta::Pixels { y, .. } => -(y / ROW_HEIGHT).round() as isize,
+                };
+                if rows != 0 {
+                    self.scroll(rows);
+                    shell.request_redraw();
+                }
+                shell.capture_event();
             }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
             | Event::Touch(iced::touch::Event::FingerPressed { .. }) => {
