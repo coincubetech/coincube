@@ -157,12 +157,22 @@ pub fn spark_landing_address<'a>(
                     .push(text(short_address).size(P2_SIZE)),
             )
             .push(
-                button::secondary(None, "Copy")
-                    .on_press(ConnectCubeMessage::CopyToClipboard(address)),
+                button::secondary_compact_action(
+                    landing_control_id(&state.cube_uuid, "Spark", "ln-copy"),
+                    None,
+                    "Copy",
+                    ConnectCubeMessage::FocusAction,
+                )
+                .on_press(ConnectCubeMessage::CopyToClipboard(address)),
             )
             .push(
-                button::secondary(None, "Change")
-                    .on_press(ConnectCubeMessage::BeginEditLightningAddress),
+                button::secondary_compact_action(
+                    landing_control_id(&state.cube_uuid, "Spark", "ln-change"),
+                    None,
+                    "Change",
+                    ConnectCubeMessage::FocusAction,
+                )
+                .on_press(ConnectCubeMessage::BeginEditLightningAddress),
             ),
     )
     .padding(16)
@@ -726,6 +736,25 @@ mod tests {
                     "Spark",
                     "stable-balance-toggle"
                 )));
+                for control in ["ln-copy", "ln-change"] {
+                    assert!(mounted.has_focus(landing_control_id(
+                        "synthetic-cube",
+                        "Spark",
+                        control
+                    )));
+                }
+                for pointer in [false, true] {
+                    let emitted = capture::activate(
+                        spark_landing_address(&connect),
+                        landing_control_id("synthetic-cube", "Spark", "ln-change"),
+                        size,
+                        pointer,
+                    );
+                    assert!(emitted.iter().any(|message| matches!(
+                        message,
+                        view::Message::ConnectCube(ConnectCubeMessage::BeginEditLightningAddress)
+                    )));
+                }
 
                 connect.ln_editing = true;
                 connect.ln_username_input = "newname".into();
