@@ -24,7 +24,7 @@ use crate::{
 pub fn entangled_badge<'a, T: 'a>(status: Entanglement) -> Option<Container<'a, T>> {
     match status {
         Entanglement::Entangled => Some(badge::badge_pill(
-            "  Seen on both chains  ",
+            "  Before fork · both chains  ",
             "This deposit transaction has been seen on both Bitcoin and BTCB2. It may be replayable. Use the split wizard to verify and separate shared coins.",
         )),
         Entanglement::Unknown => Some(badge::badge_pill(
@@ -50,12 +50,14 @@ pub fn coins_view<'a>(
     blake2b: bool,
 ) -> Element<'a, Message> {
     Column::new()
-        .push(Container::new(h3("Coins").bold()).width(Length::Fill))
+        .push(Container::new(h3("Coin control").bold()).width(Length::Fill))
+        .push(p1_regular("Inspect coins, labels, confirmations and recovery timing before choosing inputs for a spend.")
+            .style(theme::text::secondary))
         .push(coins.is_empty().then(|| {
             placeholder(
                 coins_icon().size(80),
                 "No coins yet",
-                "Your coins will appear here once you receive bitcoin.",
+                "Coins will appear here after this Vault receives bitcoin.",
             )
         }))
         .push(
@@ -184,7 +186,22 @@ fn coin_list_view<'a>(
                                 .align_y(Alignment::Center)
                                 .width(Length::Fill),
                         )
-                        .push(amount)
+                        .push(
+                            Column::new()
+                                .align_x(Alignment::End)
+                                .spacing(3)
+                                .push(amount)
+                                .push(p2_regular(match coin.block_height {
+                                    Some(height) if height <= blockheight => {
+                                        let confirmations = blockheight - height + 1;
+                                        format!("{} confirmation{}", confirmations,
+                                            if confirmations == 1 { "" } else { "s" })
+                                    }
+                                    Some(_) => "Awaiting confirmation".to_string(),
+                                    None => "Unconfirmed".to_string(),
+                                }).style(theme::text::secondary)),
+                        )
+                        .push(p2_regular("Details").style(theme::text::secondary))
                         .align_y(Alignment::Center)
                         .spacing(20),
                 )
@@ -515,6 +532,8 @@ mod tests {
                 theme::Theme::dark(),
             );
             assert!(mounted.contains("Coins"));
+            assert!(mounted.contains("Coin control"));
+            assert!(mounted.contains("Details"));
             assert_eq!(
                 mounted.contains("98,765,432"),
                 privacy == BalancePrivacy::Shown

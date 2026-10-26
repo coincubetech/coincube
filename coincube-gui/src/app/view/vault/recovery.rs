@@ -33,12 +33,12 @@ pub fn recovery<'a>(
     selected_path: Option<usize>,
 ) -> Element<'a, Message> {
     let no_recovery_paths = recovery_paths.is_empty();
-    const INFO_TEXT: &str = "Recover your funds by sending them to another wallet if you have lost access to your primary spending path.";
+    const INFO_TEXT: &str = "Use a recovery path to send funds to another wallet after its time lock has elapsed. A backup does not unlock a time lock.";
     dashboard(
         menu,
         cache,
         Column::new()
-            .push(Container::new(h3("Recovery").bold()).width(Length::Fill))
+            .push(Container::new(h3("Recovery path").bold()).width(Length::Fill))
             .push(Container::new(text(INFO_TEXT)))
             .push(cache.unswept_recovery_notice().map(text))
             .push(Space::new().height(Length::Fixed(20.0)))
