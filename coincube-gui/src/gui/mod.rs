@@ -61,6 +61,664 @@ fn privacy_render_needs_cover(
         )
 }
 
+#[cfg(test)]
+mod seed_export_duress_gui_tests {
+    use super::*;
+    use iced::futures::StreamExt;
+
+    #[test]
+    fn stale_app_callback_carries_verified_duress_after_switch() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let _guard = crate::app::session::test_guard();
+        crate::app::session::close();
+        let path = std::env::temp_dir().join(format!("seed-export-gui-{}", uuid::Uuid::new_v4()));
+        let (app, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+        let root = app.datadir().clone();
+        let cube_id = app.cube_settings().id.clone();
+        let chain = app.cube_settings().network;
+        let app_generation = app.cache().app_generation;
+        let (home, startup) = home::Home::new_for_chain(root.clone(), None);
+        drop(startup);
+        let mut gui = GUI::reviewer_app_home_gui(app, home);
+        let pane_id = gui.focus.unwrap();
+        let old_generation = gui.panes.get(pane_id).unwrap().tabs[0]
+            .app_generation_token()
+            .unwrap();
+        // The first App message registers this exact App/Cube/root origin.
+        drop(
+            gui.panes.get_mut(pane_id).unwrap().tabs[0]
+                .update(tab::Message::UnlockMotionTick(Instant::now())),
+        );
+        let proof = crate::services::unlock::throttle::verified_seed_export_duress_for_test(
+            path.clone(),
+            cube_id,
+            chain,
+            app_generation,
+        );
+        let (release, delayed) = tokio::sync::oneshot::channel();
+        let pending = Task::perform(async move { delayed.await.unwrap() }, move |proof| {
+            Message::Pane(
+                pane_id,
+                pane::Message::tab(
+                    1,
+                    tab::Message::AppAsync(
+                        old_generation,
+                        Box::new(tab::Message::Run(AppMessage::View(
+                            crate::app::view::Message::DuressActivateLocal(proof),
+                        ))),
+                    ),
+                ),
+            )
+        });
+        let (home, startup) = home::Home::new_for_chain(root.clone(), None);
+        drop(startup);
+        gui.panes.get_mut(pane_id).unwrap().tabs[0].state = tab::State::Home(home);
+        release.send(proof).unwrap();
+        let delivered = runtime.block_on(async {
+            let mut stream = iced_runtime::task::into_stream(pending).unwrap();
+            while let Some(action) = stream.next().await {
+                if let iced_runtime::Action::Output(message) = action {
+                    return message;
+                }
+            }
+            panic!("pending duress task did not deliver")
+        });
+        drop(gui.update(delivered));
+        assert!(matches!(
+            gui.panes.get(pane_id).unwrap().tabs[0].state,
+            tab::State::DuressActive(_)
+        ));
+        assert!(!crate::app::session::is_open());
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn verified_duress_hides_foreground_seed_reveal_before_wipe_task_runs() {
+        let result = std::thread::Builder::new()
+            .name("seed-export-immediate-global-seal".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = runtime.enter();
+                let _guard = crate::app::session::test_guard();
+                let path = std::env::temp_dir()
+                    .join(format!("seed-export-global-seal-{}", uuid::Uuid::new_v4()));
+                let (source, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+                let root = source.datadir().clone();
+                let proof = crate::services::unlock::throttle::verified_seed_export_duress_for_test(
+                    path.clone(),
+                    source.cube_settings().id.clone(),
+                    source.cube_settings().network,
+                    source.cache().app_generation,
+                );
+                let (home, startup) = home::Home::new_for_chain(root, None);
+                drop(startup);
+                let (mut gui, pane_id) = GUI::reviewer_split_app_home_gui(source, home);
+                let sibling_pane = gui.focus.unwrap();
+                let generation = gui.panes.get(pane_id).unwrap().tabs[0]
+                    .app_generation_token()
+                    .unwrap();
+                drop(
+                    gui.panes.get_mut(pane_id).unwrap().tabs[0]
+                        .update(tab::Message::UnlockMotionTick(Instant::now())),
+                );
+
+                let (mut revealing, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+                revealing.reviewer_show_seed_phrase_for_test();
+                let stopped =
+                    crate::app::tests::reviewer_attach_counted_claim_context(&mut revealing);
+                let pane = gui.panes.get_mut(sibling_pane).unwrap();
+                pane.tabs.push(tab::Tab::new(3, tab::State::App(revealing)));
+                pane.focused_tab = 1;
+                crate::app::session::open(
+                    "foreground-seed-reveal",
+                    zeroize::Zeroizing::new("2468".into()),
+                );
+
+                // Hold the returned Task: local wipe and DuressActivated are
+                // delayed. The foreground reveal must already be gone.
+                let pending_activation = gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::tab(
+                        1,
+                        tab::Message::AppAsync(
+                            generation,
+                            Box::new(tab::Message::Run(AppMessage::View(
+                                crate::app::view::Message::DuressActivateLocal(proof),
+                            ))),
+                        ),
+                    ),
+                ));
+                let pane = gui.panes.get(pane_id).unwrap();
+                assert_eq!(pane.tabs.len(), 1, "seed reveal sibling was retired");
+                assert_eq!(pane.focused_tab, 0);
+                assert!(matches!(pane.tabs[0].state, tab::State::DuressActive(_)));
+                assert_eq!(gui.focus, Some(pane_id));
+                assert_eq!(gui.panes.iter().count(), 1, "sibling pane was retired");
+                assert!(!crate::app::session::is_open());
+                assert_eq!(stopped.load(std::sync::atomic::Ordering::SeqCst), 1);
+                drop(pending_activation);
+                drop(gui);
+                std::fs::remove_dir_all(path).ok();
+            })
+            .unwrap()
+            .join();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[test]
+    fn unlock_duress_hides_foreground_seed_reveal_before_wipe_task_runs() {
+        let result = std::thread::Builder::new()
+            .name("unlock-duress-immediate-global-seal".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = runtime.enter();
+                let _guard = crate::app::session::test_guard();
+                let path = std::env::temp_dir().join(format!(
+                    "unlock-duress-global-seal-{}",
+                    uuid::Uuid::new_v4()
+                ));
+                let (source, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+                let root = source.datadir().clone();
+                let (home, startup) = home::Home::new_for_chain(root.clone(), None);
+                drop(startup);
+                let (mut gui, pane_id) = GUI::reviewer_split_app_home_gui(source, home);
+                let sibling_pane = gui.focus.unwrap();
+                let pin = crate::pin_entry::PinEntry::new(
+                    crate::app::settings::CubeSettings::new(
+                        "Locked Cube".into(),
+                        crate::chain::ChainId::Bitcoin,
+                    ),
+                    path.clone(),
+                    crate::pin_entry::PinEntrySuccess::LoadApp {
+                        datadir: root,
+                        config: crate::app::Config::new(false),
+                        network: bitcoin::Network::Bitcoin,
+                        internal_bitcoind: None,
+                        backup: None,
+                        wallet_settings: None,
+                        connect_client: None,
+                    },
+                    None,
+                );
+                gui.panes.get_mut(pane_id).unwrap().tabs[0].state = tab::State::PinEntry(pin);
+
+                let (mut revealing, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+                revealing.reviewer_show_seed_phrase_for_test();
+                let stopped =
+                    crate::app::tests::reviewer_attach_counted_claim_context(&mut revealing);
+                let pane = gui.panes.get_mut(sibling_pane).unwrap();
+                pane.tabs.push(tab::Tab::new(3, tab::State::App(revealing)));
+                pane.focused_tab = 1;
+                crate::app::session::open(
+                    "foreground-seed-reveal",
+                    zeroize::Zeroizing::new("2468".into()),
+                );
+
+                let pending_activation = gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::tab(
+                        1,
+                        tab::Message::PinEntry(crate::pin_entry::Message::DuressDetected {
+                            account_id: None,
+                        }),
+                    ),
+                ));
+                let pane = gui.panes.get(pane_id).unwrap();
+                assert_eq!(pane.tabs.len(), 1);
+                assert_eq!(pane.focused_tab, 0);
+                assert!(matches!(pane.tabs[0].state, tab::State::DuressActive(_)));
+                assert_eq!(gui.focus, Some(pane_id));
+                assert_eq!(gui.panes.iter().count(), 1);
+                assert!(!crate::app::session::is_open());
+                assert_eq!(stopped.load(std::sync::atomic::Ordering::SeqCst), 1);
+                drop(pending_activation);
+                drop(gui);
+                std::fs::remove_dir_all(path).ok();
+            })
+            .unwrap()
+            .join();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[test]
+    fn delayed_classifier_duress_survives_back_and_same_tab_reopen() {
+        let result = std::thread::Builder::new()
+            .name("delayed-unlock-duress-origin".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = runtime.enter();
+                let _guard = crate::app::session::test_guard();
+                for reopen in [false, true] {
+                    crate::app::session::close();
+                    let path = std::env::temp_dir().join(format!(
+                        "delayed-unlock-duress-{}-{}",
+                        reopen,
+                        uuid::Uuid::new_v4()
+                    ));
+                    let (source, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+                    let cube = source.cube_settings().clone();
+                    let root = source.datadir().clone();
+                    let (home, startup) = home::Home::new_for_chain(root.clone(), None);
+                    drop(startup);
+                    let (mut gui, pane_id) = GUI::reviewer_split_app_home_gui(source, home);
+                    let sibling_pane = gui.focus.unwrap();
+                    let pin = crate::pin_entry::PinEntry::new(
+                        cube.clone(),
+                        path.clone(),
+                        crate::pin_entry::PinEntrySuccess::LoadApp {
+                            datadir: root.clone(),
+                            config: crate::app::Config::new(false),
+                            network: bitcoin::Network::Bitcoin,
+                            internal_bitcoind: None,
+                            backup: None,
+                            wallet_settings: None,
+                            connect_client: None,
+                        },
+                        None,
+                    );
+                    let old_generation = pin.reviewer_trial_generation();
+                    gui.panes.get_mut(pane_id).unwrap().tabs[0].state = tab::State::PinEntry(pin);
+
+                    let (mut revealing, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+                    revealing.reviewer_show_seed_phrase_for_test();
+                    let stopped =
+                        crate::app::tests::reviewer_attach_counted_claim_context(&mut revealing);
+                    let pane = gui.panes.get_mut(sibling_pane).unwrap();
+                    pane.tabs.push(tab::Tab::new(3, tab::State::App(revealing)));
+                    pane.focused_tab = 1;
+                    crate::app::session::open(
+                        "foreground-seed-reveal",
+                        zeroize::Zeroizing::new("2468".into()),
+                    );
+
+                    let proof = crate::pin_entry::VerifiedUnlockDuress::for_test(
+                        path.clone(),
+                        cube.id.clone(),
+                        cube.network,
+                    );
+                    let (release, delayed) = tokio::sync::oneshot::channel();
+                    let pending_classifier =
+                        Task::perform(async move { delayed.await.unwrap() }, move |proof| {
+                            Message::Pane(
+                                pane_id,
+                                pane::Message::tab(
+                                    1,
+                                    tab::Message::PinEntry(crate::pin_entry::Message::Classified(
+                                        old_generation,
+                                        Ok(crate::pin_entry::Verdict::Duress(proof)),
+                                    )),
+                                ),
+                            )
+                        });
+                    drop(gui.update(Message::Pane(
+                        pane_id,
+                        pane::Message::tab(
+                            1,
+                            tab::Message::PinEntry(crate::pin_entry::Message::Back),
+                        ),
+                    )));
+                    assert!(matches!(
+                        gui.panes.get(pane_id).unwrap().tabs[0].state,
+                        tab::State::Home(_)
+                    ));
+
+                    if reopen {
+                        let mut new_cube = cube.clone();
+                        new_cube.id = "reopened-different-cube".into();
+                        let mut reopened = crate::pin_entry::PinEntry::new(
+                            new_cube,
+                            path.clone(),
+                            crate::pin_entry::PinEntrySuccess::LoadApp {
+                                datadir: root,
+                                config: crate::app::Config::new(false),
+                                network: bitcoin::Network::Bitcoin,
+                                internal_bitcoind: None,
+                                backup: None,
+                                wallet_settings: None,
+                                connect_client: None,
+                            },
+                            None,
+                        );
+                        assert_ne!(reopened.reviewer_trial_generation(), old_generation);
+                        for (index, digit) in "1234".chars().enumerate() {
+                            drop(reopened.update(crate::pin_entry::Message::PinInput(
+                                crate::pin_input::Message::DigitChanged(index, digit.to_string()),
+                            )));
+                        }
+                        drop(reopened.update(crate::pin_entry::Message::Submit));
+                        assert!(reopened.is_loading());
+                        gui.panes.get_mut(pane_id).unwrap().tabs[0].state =
+                            tab::State::PinEntry(reopened);
+                    }
+
+                    // An old ordinary Unlock cannot advance the new PinEntry
+                    // or write a signer into the foreground Cube's session.
+                    drop(gui.update(Message::Pane(
+                        pane_id,
+                        pane::Message::tab(
+                            1,
+                            tab::Message::PinEntry(crate::pin_entry::Message::Classified(
+                                old_generation,
+                                Ok(crate::pin_entry::Verdict::Unlock),
+                            )),
+                        ),
+                    )));
+                    if reopen {
+                        let tab::State::PinEntry(pin) =
+                            &gui.panes.get(pane_id).unwrap().tabs[0].state
+                        else {
+                            panic!("old ordinary verdict changed the new PIN entry")
+                        };
+                        assert!(pin.is_loading());
+                    }
+                    assert_eq!(
+                        crate::app::session::current_cube_id().as_deref(),
+                        Some("foreground-seed-reveal")
+                    );
+
+                    release.send(proof).unwrap();
+                    let delivered = runtime.block_on(async {
+                        let mut stream =
+                            iced_runtime::task::into_stream(pending_classifier).unwrap();
+                        while let Some(action) = stream.next().await {
+                            if let iced_runtime::Action::Output(message) = action {
+                                return message;
+                            }
+                        }
+                        panic!("held classifier did not deliver")
+                    });
+                    let pending_activation = gui.update(delivered);
+                    let pane = gui.panes.get(pane_id).unwrap();
+                    assert_eq!(pane.tabs.len(), 1);
+                    assert!(matches!(pane.tabs[0].state, tab::State::DuressActive(_)));
+                    assert_eq!(gui.focus, Some(pane_id));
+                    assert_eq!(gui.panes.iter().count(), 1);
+                    assert!(!crate::app::session::is_open());
+                    assert_eq!(stopped.load(std::sync::atomic::Ordering::SeqCst), 1);
+                    drop(pending_activation);
+                    drop(gui);
+                    std::fs::remove_dir_all(path).ok();
+                }
+            })
+            .unwrap()
+            .join();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[test]
+    fn closed_origin_tab_routes_only_same_root_verified_duress_to_surviving_home() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let _guard = crate::app::session::test_guard();
+        let path = std::env::temp_dir().join(format!("seed-export-close-{}", uuid::Uuid::new_v4()));
+        let (app, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+        let root = app.datadir().clone();
+        let cube_id = app.cube_settings().id.clone();
+        let chain = app.cube_settings().network;
+        let app_generation = app.cache().app_generation;
+        let (home, startup) = home::Home::new_for_chain(root, None);
+        drop(startup);
+        let mut gui = GUI::reviewer_app_home_gui(app, home);
+        let pane_id = gui.focus.unwrap();
+        let generation = gui.panes.get(pane_id).unwrap().tabs[0]
+            .app_generation_token()
+            .unwrap();
+        let deliver = move |proof| {
+            Message::Pane(
+                pane_id,
+                pane::Message::tab(
+                    1,
+                    tab::Message::AppAsync(
+                        generation,
+                        Box::new(tab::Message::Run(AppMessage::View(
+                            crate::app::view::Message::DuressActivateLocal(proof),
+                        ))),
+                    ),
+                ),
+            )
+        };
+        let proof = crate::services::unlock::throttle::verified_seed_export_duress_for_test(
+            path.clone(),
+            cube_id.clone(),
+            chain,
+            app_generation,
+        );
+        let (release, delayed) = tokio::sync::oneshot::channel();
+        let pending = Task::perform(async move { delayed.await.unwrap() }, deliver);
+        gui.panes.get_mut(pane_id).unwrap().close_tab(0);
+        assert_eq!(gui.panes.get(pane_id).unwrap().tabs.len(), 1);
+        let unrelated = crate::services::unlock::throttle::verified_seed_export_duress_for_test(
+            std::env::temp_dir().join("unrelated-root"),
+            cube_id,
+            chain,
+            app_generation,
+        );
+        drop(gui.update(deliver(unrelated)));
+        assert!(matches!(
+            gui.panes.get(pane_id).unwrap().tabs[0].state,
+            tab::State::Home(_)
+        ));
+        assert_eq!(
+            gui.panes.get(pane_id).unwrap().tabs.len(),
+            1,
+            "a wrong-root proof must not retire an unrelated surface"
+        );
+        release.send(proof).unwrap();
+        let delivered = runtime.block_on(async {
+            let mut stream = iced_runtime::task::into_stream(pending).unwrap();
+            while let Some(action) = stream.next().await {
+                if let iced_runtime::Action::Output(message) = action {
+                    return message;
+                }
+            }
+            panic!("pending duress task did not deliver")
+        });
+        drop(gui.update(delivered));
+        assert!(matches!(
+            gui.panes.get(pane_id).unwrap().tabs[0].state,
+            tab::State::DuressActive(_)
+        ));
+        assert!(!crate::app::session::is_open());
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn verified_duress_from_last_closed_tab_installs_emergency_target() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let _guard = crate::app::session::test_guard();
+        let path =
+            std::env::temp_dir().join(format!("seed-export-no-tab-{}", uuid::Uuid::new_v4()));
+        let (app, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+        let root = app.datadir().clone();
+        let proof = crate::services::unlock::throttle::verified_seed_export_duress_for_test(
+            path.clone(),
+            app.cube_settings().id.clone(),
+            app.cube_settings().network,
+            app.cache().app_generation,
+        );
+        let (home, startup) = home::Home::new_for_chain(root, None);
+        drop(startup);
+        let mut gui = GUI::reviewer_app_home_gui(app, home);
+        let pane_id = gui.focus.unwrap();
+        let generation = gui.panes.get(pane_id).unwrap().tabs[0]
+            .app_generation_token()
+            .unwrap();
+        let (release, delayed) = tokio::sync::oneshot::channel();
+        let pending = Task::perform(async move { delayed.await.unwrap() }, move |proof| {
+            Message::Pane(
+                pane_id,
+                pane::Message::tab(
+                    1,
+                    tab::Message::AppAsync(
+                        generation,
+                        Box::new(tab::Message::Run(AppMessage::View(
+                            crate::app::view::Message::DuressActivateLocal(proof),
+                        ))),
+                    ),
+                ),
+            )
+        });
+        let (release_wrong, delayed_wrong) = tokio::sync::oneshot::channel::<()>();
+        let pending_wrong = Task::perform(async move { delayed_wrong.await.unwrap() }, move |()| {
+            Message::Pane(
+                pane_id,
+                pane::Message::tab(
+                    1,
+                    tab::Message::AppAsync(
+                        generation,
+                        Box::new(tab::Message::Run(AppMessage::View(
+                            crate::app::view::Message::Settings(
+                                crate::app::view::SettingsMessage::BackupMasterSeed(
+                                    crate::app::view::BackupWalletMessage::PinVerifiedAttempt(
+                                        crate::app::cache::AppGeneration::next(),
+                                        Err("Incorrect PIN".into()),
+                                    ),
+                                ),
+                            ),
+                        ))),
+                    ),
+                ),
+            )
+        });
+        drop(gui.update(Message::Pane(
+            pane_id,
+            pane::Message::View(pane::ViewMessage::CloseTab(1)),
+        )));
+        gui.panes.get_mut(pane_id).unwrap().tabs[0].mark_seed_export_trial_pending_for_test();
+        gui.panes.get_mut(pane_id).unwrap().tabs[0].mark_seed_export_trial_pending_for_test();
+        drop(gui.update(Message::Pane(
+            pane_id,
+            pane::Message::View(pane::ViewMessage::CloseTab(0)),
+        )));
+        let pane = gui
+            .panes
+            .get(pane_id)
+            .expect("PIN trial keeps window alive");
+        assert_eq!(pane.tabs.len(), 1);
+        assert_eq!(pane.tabs[0].id, usize::MAX);
+        release_wrong.send(()).unwrap();
+        let wrong = runtime.block_on(async {
+            let mut stream = iced_runtime::task::into_stream(pending_wrong).unwrap();
+            while let Some(action) = stream.next().await {
+                if let iced_runtime::Action::Output(message) = action {
+                    return message;
+                }
+            }
+            panic!("first pending PIN task did not deliver")
+        });
+        drop(gui.update(wrong));
+        assert_eq!(
+            gui.panes.get(pane_id).unwrap().tabs[0].id,
+            usize::MAX,
+            "one wrong result must not close the window before another trial's Duress verdict"
+        );
+        release.send(proof).unwrap();
+        let delivered = runtime.block_on(async {
+            let mut stream = iced_runtime::task::into_stream(pending).unwrap();
+            while let Some(action) = stream.next().await {
+                if let iced_runtime::Action::Output(message) = action {
+                    return message;
+                }
+            }
+            panic!("pending duress task did not deliver")
+        });
+        drop(gui.update(delivered));
+        let pane = gui.panes.get(pane_id).unwrap();
+        assert_eq!(pane.tabs.len(), 1);
+        assert!(matches!(pane.tabs[0].state, tab::State::DuressActive(_)));
+        assert!(!crate::app::session::is_open());
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn ordinary_pin_result_releases_last_tab_window_hold() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let _guard = crate::app::session::test_guard();
+        let path =
+            std::env::temp_dir().join(format!("seed-export-close-wrong-{}", uuid::Uuid::new_v4()));
+        let (app, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+        let (home, startup) = home::Home::new_for_chain(app.datadir().clone(), None);
+        drop(startup);
+        let mut gui = GUI::reviewer_app_home_gui(app, home);
+        let pane_id = gui.focus.unwrap();
+        let generation = gui.panes.get(pane_id).unwrap().tabs[0]
+            .app_generation_token()
+            .unwrap();
+        drop(gui.update(Message::Pane(
+            pane_id,
+            pane::Message::View(pane::ViewMessage::CloseTab(1)),
+        )));
+        gui.panes.get_mut(pane_id).unwrap().tabs[0].mark_seed_export_trial_pending_for_test();
+        drop(gui.update(Message::Pane(
+            pane_id,
+            pane::Message::View(pane::ViewMessage::CloseTab(0)),
+        )));
+        assert_eq!(gui.panes.get(pane_id).unwrap().tabs[0].id, usize::MAX);
+        let stale = Message::Pane(
+            pane_id,
+            pane::Message::tab(
+                1,
+                tab::Message::AppAsync(
+                    generation,
+                    Box::new(tab::Message::Run(AppMessage::View(
+                        crate::app::view::Message::Settings(
+                            crate::app::view::SettingsMessage::BackupMasterSeed(
+                                crate::app::view::BackupWalletMessage::PinVerifiedAttempt(
+                                    crate::app::cache::AppGeneration::next(),
+                                    Err("Incorrect PIN".into()),
+                                ),
+                            ),
+                        ),
+                    ))),
+                ),
+            ),
+        );
+        drop(gui.update(stale));
+        assert!(gui
+            .panes
+            .get(pane_id)
+            .is_none_or(|pane| pane.tabs.is_empty()));
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+}
+
 use iced::window::Id;
 
 /// Both automatic polling and explicit signing actions need the current
@@ -445,6 +1103,22 @@ fn route_guarded_tab_result(
     Message::Pane(pane_id, pane::Message::View(view))
 }
 
+fn is_seed_export_trial_result(message: &tab::Message) -> bool {
+    matches!(
+        message,
+        tab::Message::Run(AppMessage::View(crate::app::view::Message::Settings(
+            crate::app::view::SettingsMessage::BackupMasterSeed(
+                crate::app::view::BackupWalletMessage::PinVerifiedAttempt(..)
+            ) | crate::app::view::SettingsMessage::RecoveryKit(
+                crate::app::view::RecoveryKitMessage::PinVerifiedAttempt(..)
+            ) | crate::app::view::SettingsMessage::RecoveryAlerts(
+                crate::app::view::RecoveryAlertsMessage::FullCubePinReady(..)
+                    | crate::app::view::RecoveryAlertsMessage::FullCubePinFailed(..)
+            )
+        )))
+    )
+}
+
 #[cfg(test)]
 fn unresolved_test_preferences() -> PreferencesOwner {
     PreferencesOwner::new(
@@ -459,6 +1133,215 @@ fn unresolved_test_preferences() -> PreferencesOwner {
 }
 
 impl GUI {
+    fn finish_closed_seed_export_trial(
+        &mut self,
+        pane_id: pane_grid::Pane,
+        origin_tab: usize,
+    ) -> Task<Message> {
+        let Some(pane) = self.panes.get_mut(pane_id) else {
+            return Task::none();
+        };
+        let Some(index) = pane.tabs.iter().position(|tab| tab.id == usize::MAX) else {
+            return Task::none();
+        };
+        if pane.tabs[index].finish_closed_seed_export_trial(origin_tab) != Some(true) {
+            return Task::none();
+        }
+        pane.close_tab(index);
+        if pane.tabs.is_empty() {
+            self.panes.close(pane_id);
+            if self.focus == Some(pane_id) {
+                self.focus = None;
+            }
+        }
+        if !self.panes.iter().any(|(_, pane)| !pane.tabs.is_empty()) {
+            iced::window::latest().and_then(iced::window::close)
+        } else {
+            Task::none()
+        }
+    }
+
+    /// A verified marker is an emergency after the originating settings tab
+    /// closes as well. The proof is private to the locked PIN classifier; the
+    /// GUI data directory is the final owner boundary before local activation.
+    fn route_verified_seed_export_duress(
+        &mut self,
+        pane_id: pane_grid::Pane,
+        tab_id: usize,
+        proof: crate::services::unlock::throttle::VerifiedSeedExportDuress,
+    ) -> Task<Message> {
+        let (root, cube_id, chain, _app) = proof.origin();
+        if cube_id.is_empty()
+            || !crate::chain::same_path(root, self.config.coincube_directory.path())
+        {
+            return Task::none();
+        }
+        if self
+            .panes
+            .get(pane_id)
+            .is_some_and(|pane| pane.tabs.iter().any(|tab| tab.id == tab_id))
+        {
+            let was_duress = self.panes.get(pane_id).is_some_and(|pane| {
+                pane.tabs
+                    .iter()
+                    .any(|tab| tab.id == tab_id && matches!(tab.state, tab::State::DuressActive(_)))
+            });
+            let task = self.update(Message::Pane(
+                pane_id,
+                pane::Message::tab(tab_id, tab::Message::LocalDuress(proof)),
+            ));
+            if !was_duress {
+                self.seal_verified_seed_export_duress_surface(pane_id, tab_id);
+            }
+            return task;
+        }
+        let (target_pane, target_tab) = self.emergency_duress_target(pane_id, tab_id, root, chain);
+        let was_duress = self.panes.get(target_pane).is_some_and(|pane| {
+            pane.tabs
+                .iter()
+                .any(|tab| tab.id == target_tab && matches!(tab.state, tab::State::DuressActive(_)))
+        });
+        let task = self
+            .panes
+            .get_mut(target_pane)
+            .unwrap()
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id == target_tab)
+            .unwrap()
+            .activate_unhosted_seed_export_duress(proof);
+        if !was_duress {
+            self.seal_verified_seed_export_duress_surface(target_pane, target_tab);
+        }
+        task.map(move |message| Message::Pane(target_pane, pane::Message::tab(target_tab, message)))
+    }
+
+    fn route_verified_unlock_duress(
+        &mut self,
+        pane_id: pane_grid::Pane,
+        tab_id: usize,
+        proof: crate::pin_entry::VerifiedUnlockDuress,
+    ) -> Task<Message> {
+        let (root, cube_id, chain) = proof.origin();
+        if cube_id.is_empty()
+            || !crate::chain::same_path(root, self.config.coincube_directory.path())
+        {
+            return Task::none();
+        }
+        let (target_pane, target_tab) = self.emergency_duress_target(pane_id, tab_id, root, chain);
+        let was_duress = self.panes.get(target_pane).is_some_and(|pane| {
+            pane.tabs
+                .iter()
+                .any(|tab| tab.id == target_tab && matches!(tab.state, tab::State::DuressActive(_)))
+        });
+        let task = self
+            .panes
+            .get_mut(target_pane)
+            .unwrap()
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id == target_tab)
+            .unwrap()
+            .activate_verified_unlock_duress(proof);
+        if !was_duress {
+            self.seal_verified_seed_export_duress_surface(target_pane, target_tab);
+        }
+        task.map(move |message| Message::Pane(target_pane, pane::Message::tab(target_tab, message)))
+    }
+
+    fn emergency_duress_target(
+        &mut self,
+        pane_id: pane_grid::Pane,
+        tab_id: usize,
+        root: &std::path::Path,
+        chain: crate::chain::ChainId,
+    ) -> (pane_grid::Pane, usize) {
+        if self
+            .panes
+            .get(pane_id)
+            .is_some_and(|pane| pane.tabs.iter().any(|tab| tab.id == tab_id))
+        {
+            return (pane_id, tab_id);
+        }
+        let mut target = self
+            .panes
+            .iter()
+            .find_map(|(id, pane)| pane.tabs.first().map(|tab| (*id, tab.id)));
+        if target.is_none() {
+            // Pane::remove_tab can leave a live GUI with no tabs. Build an
+            // emergency-only target from the verified proof's root; no App or
+            // signer is reconstructed just to deliver the wipe completion.
+            let datadir = CoincubeDirectory::new(root.to_path_buf());
+            let state = tab::State::DuressActive(
+                crate::app::view::duress::active_screen::DuressActiveScreen::with_context(
+                    datadir,
+                    Some(chain.bitcoin_network()),
+                ),
+            );
+            let other_pane = self.panes.iter().next().map(|(id, _)| *id);
+            if let Some(pane) = self.panes.get_mut(pane_id) {
+                let emergency_id = usize::MAX;
+                pane.tabs.push(tab::Tab::new(emergency_id, state));
+                pane.focused_tab = pane.tabs.len() - 1;
+                target = Some((pane_id, emergency_id));
+            } else if let Some(other_id) = other_pane {
+                let pane = self.panes.get_mut(other_id).expect("pane still exists");
+                let emergency_id = usize::MAX;
+                pane.tabs.push(tab::Tab::new(emergency_id, state));
+                pane.focused_tab = pane.tabs.len() - 1;
+                target = Some((other_id, emergency_id));
+            } else {
+                let (panes, new_pane) = pane_grid::State::new(pane::Pane::new_with_tab(state));
+                self.panes = panes;
+                self.focus = Some(new_pane);
+                target = Some((new_pane, 1));
+            }
+        }
+        target.expect("emergency target was installed")
+    }
+
+    /// Admit the private proof across the entire window immediately. The
+    /// orchestrator may wait on disk or network work, so its completion cannot
+    /// be the event that hides a foreground seed reveal in another pane.
+    /// A refused or replayed proof never changes its target to DuressActive.
+    fn seal_verified_seed_export_duress_surface(
+        &mut self,
+        pane_id: pane_grid::Pane,
+        tab_id: usize,
+    ) {
+        let admitted = self.panes.get(pane_id).is_some_and(|pane| {
+            pane.tabs
+                .iter()
+                .any(|tab| tab.id == tab_id && matches!(tab.state, tab::State::DuressActive(_)))
+        });
+        if !admitted {
+            return;
+        }
+        let mut empty_panes = Vec::new();
+        for (&other_id, pane) in self.panes.iter_mut() {
+            pane.close_tabs_matching(|tab| other_id != pane_id || tab.id != tab_id);
+            if other_id != pane_id && pane.tabs.is_empty() {
+                empty_panes.push(other_id);
+            }
+        }
+        for empty in empty_panes {
+            self.panes.close(empty);
+        }
+        if let Some(pane) = self.panes.get_mut(pane_id) {
+            pane.focused_tab = pane
+                .tabs
+                .iter()
+                .position(|tab| tab.id == tab_id)
+                .unwrap_or(0);
+        }
+        self.focus = Some(pane_id);
+        self.preferences_sheet = None;
+        self.connect_sheet = None;
+        crate::app::session::close();
+        crate::app::claim_intent::clear();
+        crate::app::split_intent::clear();
+    }
+
     /// The process owns one secret session and idle clock. A new public Cube
     /// admission must retire every old secret-bearing surface before its
     /// constructor or unlock callback can run, even when no App tab remains.
@@ -1045,6 +1928,39 @@ impl GUI {
         {
             self.connect_sheet = None;
         }
+        // A completed classifier is an emergency even if Back closed its
+        // PinEntry or a different Cube reopened at the same tab id. The proof
+        // was minted by the captured trial, and carries no seed into Iced.
+        if matches!(
+            &message,
+            Message::Pane(_, pane::Message::Tab(_, inner))
+                if matches!(
+                    inner.as_ref(),
+                    tab::Message::PinEntry(
+                        crate::pin_entry::Message::Classified(_, Ok(crate::pin_entry::Verdict::Duress(_)))
+                            | crate::pin_entry::Message::ForkClassified(_, Ok(crate::pin_entry::Verdict::Duress(_)))
+                    )
+                )
+        ) {
+            let Message::Pane(pane_id, pane::Message::Tab(tab_id, inner)) = message else {
+                unreachable!()
+            };
+            let tab::Message::PinEntry(classified) = *inner else {
+                unreachable!()
+            };
+            let proof = match classified {
+                crate::pin_entry::Message::Classified(
+                    _,
+                    Ok(crate::pin_entry::Verdict::Duress(proof)),
+                )
+                | crate::pin_entry::Message::ForkClassified(
+                    _,
+                    Ok(crate::pin_entry::Verdict::Duress(proof)),
+                ) => proof,
+                _ => unreachable!(),
+            };
+            return self.route_verified_unlock_duress(pane_id, tab_id, proof);
+        }
         // Intercept before stripping AppAsync/ForkAsync so a queued eye press
         // from a closed or replaced Cube cannot mutate device preferences.
         if let Message::Pane(pane_id, pane::Message::Tab(tab_id, inner)) = &message {
@@ -1076,14 +1992,40 @@ impl GUI {
                 let tab::Message::AppAsync(generation, message) = *tab_message else {
                     unreachable!();
                 };
+                if let tab::Message::Run(AppMessage::View(
+                    crate::app::view::Message::DuressActivateLocal(_),
+                )) = message.as_ref()
+                {
+                    let tab::Message::Run(AppMessage::View(
+                        crate::app::view::Message::DuressActivateLocal(proof),
+                    )) = *message
+                    else {
+                        unreachable!()
+                    };
+                    return self.route_verified_seed_export_duress(pane_id, tab_id, proof);
+                }
                 let current = self
                     .panes
                     .get(pane_id)
                     .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == tab_id))
                     .is_some_and(|tab| tab.accepts_app_generation(generation));
                 if !current {
+                    let closed_trial_finished = is_seed_export_trial_result(message.as_ref());
                     tab::discard_closed_loader_result(*message);
-                    return Task::none();
+                    return if closed_trial_finished {
+                        if let Some(tab) = self
+                            .panes
+                            .get_mut(pane_id)
+                            .and_then(|pane| pane.tabs.iter_mut().find(|tab| tab.id == tab_id))
+                        {
+                            tab.finish_stale_seed_export_trial();
+                            Task::none()
+                        } else {
+                            self.finish_closed_seed_export_trial(pane_id, tab_id)
+                        }
+                    } else {
+                        Task::none()
+                    };
                 }
                 route_guarded_tab_result(pane_id, tab_id, *message)
             }
@@ -1093,14 +2035,40 @@ impl GUI {
                 let tab::Message::ForkAsync(generation, message) = *tab_message else {
                     unreachable!();
                 };
+                if let tab::Message::Run(AppMessage::View(
+                    crate::app::view::Message::DuressActivateLocal(_),
+                )) = message.as_ref()
+                {
+                    let tab::Message::Run(AppMessage::View(
+                        crate::app::view::Message::DuressActivateLocal(proof),
+                    )) = *message
+                    else {
+                        unreachable!()
+                    };
+                    return self.route_verified_seed_export_duress(pane_id, tab_id, proof);
+                }
                 let current = self
                     .panes
                     .get(pane_id)
                     .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == tab_id))
                     .is_some_and(|tab| tab.accepts_fork_generation(generation));
                 if !current {
+                    let closed_trial_finished = is_seed_export_trial_result(message.as_ref());
                     tab::discard_closed_loader_result(*message);
-                    return Task::none();
+                    return if closed_trial_finished {
+                        if let Some(tab) = self
+                            .panes
+                            .get_mut(pane_id)
+                            .and_then(|pane| pane.tabs.iter_mut().find(|tab| tab.id == tab_id))
+                        {
+                            tab.finish_stale_seed_export_trial();
+                            Task::none()
+                        } else {
+                            self.finish_closed_seed_export_trial(pane_id, tab_id)
+                        }
+                    } else {
+                        Task::none()
+                    };
                 }
                 route_guarded_tab_result(pane_id, tab_id, *message)
             }
@@ -1349,9 +2317,53 @@ impl GUI {
         } else {
             message
         };
+        // Both the scoped seed-export proof and the existing Cube-unlock PIN
+        // verdict enter Duress before their async wipe task runs. The unlock
+        // verdict has no private proof object, so its live PinEntry and exact
+        // data root are the GUI admission boundary for the global surface seal.
+        let unlock_duress_message = matches!(
+            &message,
+            Message::Pane(_, pane::Message::Tab(_, inner))
+                if matches!(
+                    inner.as_ref(),
+                    tab::Message::PinEntry(crate::pin_entry::Message::DuressDetected { .. })
+                )
+        );
+        let unlock_duress_target = match &message {
+            Message::Pane(pane_id, pane::Message::Tab(tab_id, inner))
+                if matches!(
+                    inner.as_ref(),
+                    tab::Message::PinEntry(crate::pin_entry::Message::DuressDetected { .. })
+                ) =>
+            {
+                self.panes
+                    .get(*pane_id)
+                    .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == *tab_id))
+                    .and_then(|tab| match &tab.state {
+                        tab::State::PinEntry(pin) => {
+                            let crate::pin_entry::PinEntrySuccess::LoadApp { datadir, .. } =
+                                &pin.on_success;
+                            crate::chain::same_path(
+                                datadir.path(),
+                                self.config.coincube_directory.path(),
+                            )
+                            .then_some((*pane_id, *tab_id))
+                        }
+                        _ => None,
+                    })
+            }
+            _ => None,
+        };
+        if unlock_duress_message && unlock_duress_target.is_none() {
+            return Task::none();
+        }
         // Dispatch may return early (notably for in-App account messages).
         // Keep those returns inside the helper so invalidation tasks always run.
-        auth_tasks.push(self.update_message(message));
+        let routed = self.update_message(message);
+        if let Some((pane_id, tab_id)) = unlock_duress_target {
+            self.seal_verified_seed_export_duress_surface(pane_id, tab_id);
+        }
+        auth_tasks.push(routed);
         if let Some(candidate) = ready_unlock {
             for (_, pane) in self.panes.iter_mut() {
                 for tab in &mut pane.tabs {
@@ -2180,12 +3192,38 @@ impl GUI {
             Message::Pane(_, pane::Message::View(pane::ViewMessage::SplitTab(_))) => Task::none(),
             Message::Pane(pane_id, pane::Message::View(pane::ViewMessage::CloseTab(i))) => {
                 if let Some(pane) = self.panes.get_mut(pane_id) {
+                    if pane.tabs.get(i).is_some_and(|tab| tab.id == usize::MAX) {
+                        return Task::none();
+                    }
+                    let pending_seed_trials = pane
+                        .tabs
+                        .get(i)
+                        .map_or(0, tab::Tab::pending_seed_export_trials);
+                    let closed_tab_id = pane.tabs.get(i).map(|tab| tab.id);
                     let _ = pane
                         .update(
                             pane::Message::View(pane::ViewMessage::CloseTab(i)),
                             &self.config,
                         )
                         .map(move |msg| Message::Pane(pane_id, msg));
+                    if pane.tabs.is_empty() && pending_seed_trials > 0 {
+                        // Closing the final tab must not close the Iced runtime
+                        // before a submitted PIN can classify as Duress. Keep
+                        // a neutral tab alive; a non-duress result closes it.
+                        let (home, startup) = home::Home::new(
+                            self.config.coincube_directory.clone(),
+                            self.config.network,
+                        );
+                        drop(startup);
+                        let mut placeholder = tab::Tab::new(usize::MAX, tab::State::Home(home));
+                        placeholder.hold_closed_seed_export_trials(
+                            closed_tab_id.expect("closed tab existed"),
+                            pending_seed_trials,
+                        );
+                        pane.tabs.push(placeholder);
+                        pane.focused_tab = 0;
+                        self.focus = Some(pane_id);
+                    }
                     if pane.tabs.is_empty() {
                         self.panes.close(pane_id);
                         if self.focus == Some(pane_id) {

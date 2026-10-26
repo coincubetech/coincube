@@ -47,6 +47,23 @@ pub struct SettingsState {
 }
 
 impl SettingsState {
+    #[cfg(test)]
+    pub(crate) fn reviewer_show_seed_phrase_for_test(
+        &mut self,
+        datadir: &crate::dir::CoincubeDirectory,
+    ) {
+        let mut recovery = GeneralSettingsState::new(
+            self.cube_id.clone(),
+            SettingsSection::Recovery,
+            self.current_price_setting.clone(),
+            self.current_unit_setting.clone(),
+            datadir,
+        );
+        recovery.backup_state = general::BackupSeedState::RecoveryPhrase;
+        recovery.backup_mnemonic = Some(zeroize::Zeroizing::new(vec!["synthetic".into(); 12]));
+        self.setting = Some(recovery.into());
+    }
+
     /// Load the active Cube's preferences from its authenticated chain directory.
     pub fn from_directory(cube_id: String, directory: &crate::dir::NetworkDirectory) -> Self {
         let (price, unit) = crate::app::settings::Settings::from_file(directory)

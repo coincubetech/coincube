@@ -23,10 +23,17 @@
 //! wipe takes those, and a wipe must not hand the attacker a fresh counter.
 
 use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
+
+use coincube_core::signer::SignerError;
 
 use super::{CubeLocation, PinOutcome, UnlockError};
 
@@ -39,6 +46,213 @@ const LOCK_NAME: &str = "unlock-throttle.lock";
 pub enum PinAttempt {
     Locked(Duration),
     Classified(PinOutcome),
+}
+
+/// A permanent-seed export trial. `Words` is zeroizing from the moment it
+/// leaves the locked check; no duress outcome can carry a seed or seed blob.
+pub enum SeedExportAttempt {
+    Words(Zeroizing<Vec<String>>),
+    Duress,
+    Wrong(Duration),
+    Locked(Duration),
+}
+
+/// One-use evidence that this root/Cube's marker opened under the submitted
+/// PIN. Only `classify_seed_export_cube` can mint it. UI navigation may revoke
+/// a pending seed reveal, but cannot revoke a confirmed emergency activation.
+#[derive(Clone)]
+pub struct VerifiedSeedExportDuress {
+    root: PathBuf,
+    cube_id: String,
+    chain: crate::chain::ChainId,
+    app: crate::app::cache::AppGeneration,
+    account_id: Option<String>,
+    claimed: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for VerifiedSeedExportDuress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VerifiedSeedExportDuress(<redacted>)")
+    }
+}
+
+impl VerifiedSeedExportDuress {
+    pub(crate) fn origin(
+        &self,
+    ) -> (
+        &Path,
+        &str,
+        crate::chain::ChainId,
+        crate::app::cache::AppGeneration,
+    ) {
+        (&self.root, &self.cube_id, self.chain, self.app)
+    }
+    /// Consume the capability once. Root and account came from the verified
+    /// trial, not whichever Cube happens to be visible when it resolves.
+    pub(crate) fn claim(
+        self,
+    ) -> Option<(
+        PathBuf,
+        String,
+        crate::chain::ChainId,
+        crate::app::cache::AppGeneration,
+        Option<String>,
+    )> {
+        (!self.claimed.swap(true, Ordering::AcqRel)).then_some((
+            self.root,
+            self.cube_id,
+            self.chain,
+            self.app,
+            self.account_id,
+        ))
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn verified_seed_export_duress_for_test(
+    root: PathBuf,
+    cube_id: String,
+    chain: crate::chain::ChainId,
+    app: crate::app::cache::AppGeneration,
+) -> VerifiedSeedExportDuress {
+    VerifiedSeedExportDuress {
+        root,
+        cube_id,
+        chain,
+        app,
+        account_id: None,
+        claimed: Arc::new(AtomicBool::new(false)),
+    }
+}
+
+pub enum SeedExportCubeAttempt {
+    Words(Zeroizing<Vec<String>>),
+    Duress(VerifiedSeedExportDuress),
+    Wrong(Duration),
+    Locked(Duration),
+}
+
+/// Share the ordinary Cube PIN's serialized throttle and duress policy across
+/// settings surfaces that can reveal the permanent master seed. The first
+/// verifier preserves the active session's correct-PIN fast path; on an
+/// incorrect PIN, `unlock_blocking` applies the existing seed/marker/keystore
+/// classification at full cost. Wrong and duress both take that path.
+///
+/// `validate` must re-read the exact Cube/chain/marker selection. It runs under
+/// the attempt lock before decryption and before a successful or wrong result
+/// is committed. A verified duress marker remains an emergency signal even if
+/// the selection changes while Argon2 is running, as in `classify_pin_scoped`.
+pub fn classify_seed_export(
+    root: &Path,
+    loc: &CubeLocation,
+    pin: &str,
+    verify: impl FnOnce() -> Result<Vec<String>, SignerError>,
+    validate: impl Fn() -> Result<(), UnlockError>,
+) -> Result<SeedExportAttempt, String> {
+    with_locked_throttle(root, |state| {
+        let remaining = state.remaining_lockout(loc.cube_id);
+        if !remaining.is_zero() {
+            return Ok(SeedExportAttempt::Locked(remaining));
+        }
+        validate().map_err(|error| error.to_string())?;
+        match verify() {
+            Ok(words) => {
+                let words = Zeroizing::new(words);
+                validate().map_err(|error| error.to_string())?;
+                state.record_success(root, loc.cube_id);
+                Ok(SeedExportAttempt::Words(words))
+            }
+            Err(SignerError::InvalidPassword) => match super::unlock_blocking(loc, pin) {
+                Ok(PinOutcome::Duress) => {
+                    state.record_success(root, loc.cube_id);
+                    Ok(SeedExportAttempt::Duress)
+                }
+                Ok(PinOutcome::Wrong) => {
+                    validate().map_err(|error| error.to_string())?;
+                    let penalty = state.record_failure(root, loc.cube_id);
+                    Ok(SeedExportAttempt::Wrong(penalty))
+                }
+                // The session and disk disagreed, but the seed on disk opened.
+                // Return its words after the same fingerprint/selection check
+                // instead of treating a real PIN as an incorrect attempt.
+                Ok(PinOutcome::Unlock(signer)) => {
+                    let secp =
+                        coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::signing_only();
+                    if loc.master_signer_fingerprint != Some(signer.fingerprint(&secp)) {
+                        return Err(
+                            "Cube master seed identity changed during PIN verification".into()
+                        );
+                    }
+                    let words = Zeroizing::new(
+                        signer
+                            .words()
+                            .iter()
+                            .map(|word| (*word).to_string())
+                            .collect(),
+                    );
+                    validate().map_err(|error| error.to_string())?;
+                    state.record_success(root, loc.cube_id);
+                    Ok(SeedExportAttempt::Words(words))
+                }
+                Err(error) => Err(error.to_string()),
+            },
+            Err(error) => Err(error.to_string()),
+        }
+    })
+    .map_err(|error| error.to_string())?
+}
+
+/// Settings callers capture their Cube at submission. Refuse if its security
+/// selection changes while the PIN is being classified, including a rotated
+/// duress slot or a re-associated master seed.
+pub fn classify_seed_export_cube(
+    root: &Path,
+    cube: &crate::app::settings::CubeSettings,
+    app: crate::app::cache::AppGeneration,
+    pin: &str,
+    verify: impl FnOnce() -> Result<Vec<String>, SignerError>,
+) -> Result<SeedExportCubeAttempt, String> {
+    let loc = CubeLocation::new(root, cube);
+    let validate = || {
+        let directory =
+            crate::dir::CoincubeDirectory::new(root.to_path_buf()).network_directory(cube.network);
+        let settings = crate::app::settings::Settings::from_file(&directory)
+            .map_err(|error| UnlockError::Io(error.to_string()))?;
+        let current = settings
+            .cubes
+            .iter()
+            .find(|candidate| candidate.id == cube.id && candidate.network == cube.network)
+            .ok_or_else(|| UnlockError::Io("Cube changed during PIN verification".into()))?;
+        if current.created_at != cube.created_at
+            || current.master_signer_fingerprint != cube.master_signer_fingerprint
+            || current.duress_slot_file != cube.duress_slot_file
+            || current.is_passkey_cube() != cube.is_passkey_cube()
+        {
+            return Err(UnlockError::Io(
+                "Cube changed during PIN verification".into(),
+            ));
+        }
+        Ok(())
+    };
+    let result = classify_seed_export(root, &loc, pin, verify, validate)?;
+    Ok(match result {
+        SeedExportAttempt::Words(words) => SeedExportCubeAttempt::Words(words),
+        SeedExportAttempt::Wrong(penalty) => SeedExportCubeAttempt::Wrong(penalty),
+        SeedExportAttempt::Locked(remaining) => SeedExportCubeAttempt::Locked(remaining),
+        SeedExportAttempt::Duress => {
+            let account_id = crate::services::duress::DuressLocalState::load(root)
+                .map(|state| state.account_id)
+                .unwrap_or(None);
+            SeedExportCubeAttempt::Duress(VerifiedSeedExportDuress {
+                root: root.to_path_buf(),
+                cube_id: cube.id.clone(),
+                chain: cube.network,
+                app,
+                account_id,
+                claimed: Arc::new(AtomicBool::new(false)),
+            })
+        }
+    })
 }
 
 pub fn classify_pin(root: &Path, loc: &CubeLocation, pin: &str) -> Result<PinAttempt, UnlockError> {
@@ -303,6 +517,181 @@ pub fn lockout_message(remaining: Duration) -> String {
 mod tests {
     use super::*;
     use std::sync::{Arc, Barrier};
+
+    fn synthetic_seed(root: &Path, cube: &mut crate::app::settings::CubeSettings) {
+        use coincube_core::miniscript::bitcoin::{secp256k1::Secp256k1, Network};
+        use coincube_core::signer::{MasterSigner, MASTER_SEED_LABEL};
+
+        let signer = MasterSigner::generate(Network::Bitcoin).unwrap();
+        let secp = Secp256k1::signing_only();
+        cube.master_signer_fingerprint = Some(signer.fingerprint(&secp));
+        signer
+            .store_encrypted(
+                root,
+                Network::Bitcoin,
+                &secp,
+                Some((
+                    format!("{}{}", MASTER_SEED_LABEL, cube.created_at),
+                    cube.created_at,
+                )),
+                "1234",
+                &cube.id,
+                None,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn seed_export_trial_classifies_real_wrong_duress_and_lockout() {
+        use crate::{app::settings::CubeSettings, chain::ChainId};
+
+        let root = tmp("seed-export-outcomes");
+        let mut cube =
+            CubeSettings::new_with_raw_id("export-cube".into(), "Export".into(), ChainId::Bitcoin);
+        synthetic_seed(&root, &mut cube);
+        let marker = super::super::marker::new_file_name(cube.created_at);
+        super::super::marker::write(&root, ChainId::Bitcoin, &cube.id, &marker, "9999", None)
+            .unwrap();
+        cube.duress_slot_file = Some(marker);
+        let loc = CubeLocation::new(&root, &cube);
+        let verify = |pin: &str| {
+            super::super::open_seed_by_fingerprint(
+                &root,
+                ChainId::Bitcoin,
+                cube.master_signer_fingerprint.unwrap(),
+                pin,
+                &cube.id,
+            )
+            .map(|signer| {
+                signer
+                    .words()
+                    .iter()
+                    .map(|word| (*word).to_string())
+                    .collect()
+            })
+        };
+        assert!(matches!(
+            classify_seed_export(&root, &loc, "4321", || verify("4321"), || Ok(())).unwrap(),
+            SeedExportAttempt::Wrong(Duration::ZERO)
+        ));
+        assert!(matches!(
+            classify_seed_export(&root, &loc, "1234", || verify("1234"), || Ok(())).unwrap(),
+            SeedExportAttempt::Words(_)
+        ));
+        assert!(matches!(
+            classify_seed_export(&root, &loc, "9999", || verify("9999"), || Ok(())).unwrap(),
+            SeedExportAttempt::Duress
+        ));
+        for _ in 0..3 {
+            assert!(matches!(
+                classify_seed_export(&root, &loc, "4321", || verify("4321"), || Ok(())).unwrap(),
+                SeedExportAttempt::Wrong(_)
+            ));
+        }
+        assert!(matches!(
+            classify_seed_export(
+                &root,
+                &loc,
+                "1234",
+                || panic!("lockout must prevent seed export"),
+                || Ok(())
+            )
+            .unwrap(),
+            SeedExportAttempt::Locked(_)
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn seed_export_fallback_refuses_a_substituted_signer() {
+        use crate::{app::settings::CubeSettings, chain::ChainId};
+        use coincube_core::miniscript::bitcoin::{secp256k1::Secp256k1, Network};
+        use coincube_core::signer::MasterSigner;
+
+        let root = tmp("seed-export-substitution");
+        let mut cube =
+            CubeSettings::new_with_raw_id("export-cube".into(), "Export".into(), ChainId::Bitcoin);
+        synthetic_seed(&root, &mut cube);
+        let actual = cube.master_signer_fingerprint.unwrap();
+        let expected = MasterSigner::generate(Network::Bitcoin)
+            .unwrap()
+            .fingerprint(&Secp256k1::signing_only());
+        let folder = super::super::seed_folder(&root, ChainId::Bitcoin);
+        let path = std::fs::read_dir(&folder)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let changed_name = path
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .replace(&actual.to_string(), &expected.to_string());
+        std::fs::rename(&path, folder.join(changed_name)).unwrap();
+        cube.master_signer_fingerprint = Some(expected);
+        let loc = CubeLocation::new(&root, &cube);
+        let result = classify_seed_export(
+            &root,
+            &loc,
+            "1234",
+            || Err(SignerError::InvalidPassword),
+            || Ok(()),
+        );
+        assert!(matches!(result, Err(message) if message.contains("identity changed")));
+        let counters = serde_json::to_value(ThrottleState::load(&root)).unwrap();
+        assert!(counters["failures"].get("export-cube").is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn confirmed_duress_survives_slot_rotation_during_trial_but_words_do_not() {
+        use crate::{app::settings::CubeSettings, chain::ChainId, dir::CoincubeDirectory};
+        let root = tmp("seed-export-rotation");
+        let mut cube =
+            CubeSettings::new_with_raw_id("export-cube".into(), "Export".into(), ChainId::Bitcoin);
+        synthetic_seed(&root, &mut cube);
+        let marker = super::super::marker::new_file_name(cube.created_at);
+        super::super::marker::write(&root, ChainId::Bitcoin, &cube.id, &marker, "9999", None)
+            .unwrap();
+        cube.duress_slot_file = Some(marker);
+        let directory = CoincubeDirectory::new(root.clone()).network_directory(ChainId::Bitcoin);
+        std::fs::create_dir_all(directory.path()).unwrap();
+        let path = directory
+            .path()
+            .join(crate::app::settings::SETTINGS_FILE_NAME);
+        let mut settings = crate::app::settings::Settings::default();
+        settings.cubes.push(cube.clone());
+        std::fs::write(&path, serde_json::to_vec(&settings).unwrap()).unwrap();
+        let rotate = || {
+            let mut settings = crate::app::settings::Settings::from_file(&directory).unwrap();
+            settings.cubes[0].duress_slot_file = Some("rotated-marker".into());
+            std::fs::write(&path, serde_json::to_vec(&settings).unwrap()).unwrap();
+        };
+        let duress = classify_seed_export_cube(
+            &root,
+            &cube,
+            crate::app::cache::AppGeneration::next(),
+            "9999",
+            || {
+                rotate();
+                Err(SignerError::InvalidPassword)
+            },
+        )
+        .unwrap();
+        assert!(matches!(duress, SeedExportCubeAttempt::Duress(_)));
+        // A real seed result from the old selection cannot become exportable.
+        let stale_words = classify_seed_export_cube(
+            &root,
+            &cube,
+            crate::app::cache::AppGeneration::next(),
+            "1234",
+            || panic!("rotated selection must fail before seed decrypt"),
+        );
+        assert!(matches!(stale_words, Err(message) if message.contains("Cube changed")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn remaining_at_last_failure(state: &ThrottleState, cube_id: &str) -> Duration {
         let last_failure_unix = state
