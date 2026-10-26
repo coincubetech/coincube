@@ -10,9 +10,10 @@ use coincube_ui::{
     icon::*,
     image::coincube_wordmark,
     theme,
-    widget::*,
+    widget::{action::Action as FocusableAction, *},
 };
 use iced::{
+    advanced::widget::Id,
     widget::{container, scrollable, QRCode},
     Alignment, Length,
 };
@@ -164,9 +165,13 @@ pub fn connect_account_panel<'a>(
 #[derive(Debug, Clone)]
 pub enum ConnectSheetMessage {
     Account(ConnectAccountMessage),
+    FocusAction(Id),
     SelectSection(ConnectSheetSection),
     Close,
 }
+
+pub const CLOSE_ID: &str = "tenshu.connect.close";
+pub const CONTENT_SCROLL_ID: &str = "tenshu.connect.content-scroll";
 
 /// The five account-wide sections shown in the Connect sheet. Recovery
 /// services has its own section here without changing the older Home menu.
@@ -208,7 +213,16 @@ pub fn connect_sheet<'a>(
     } else {
         heading = heading.push(iced::widget::Space::new().width(Length::Fill));
     }
-    heading = heading.push(button::secondary(None, "Close").on_press(ConnectSheetMessage::Close));
+    heading = heading.push(
+        FocusableAction::new(
+            CLOSE_ID,
+            text::p2_regular("Close"),
+            ConnectSheetMessage::FocusAction,
+        )
+        .padding(10)
+        .style(theme::button::secondary)
+        .on_press(ConnectSheetMessage::Close),
+    );
 
     let content: Element<ConnectAccountMessage> = if blocked {
         text::p1_regular("Connect authorization ended. Close and reopen this Cube through authenticated Connect startup to reconnect.").into()
@@ -235,22 +249,51 @@ pub fn connect_sheet<'a>(
     .map(ConnectSheetMessage::Account);
     let body: Element<ConnectSheetMessage> = if signed_in {
         let sections = [
-            ("Account", ConnectSheetSection::Account),
-            ("Plan & billing", ConnectSheetSection::PlanBilling),
-            ("Contacts", ConnectSheetSection::Contacts),
-            ("Devices & security", ConnectSheetSection::DevicesSecurity),
-            ("Recovery services", ConnectSheetSection::RecoveryServices),
+            (
+                "Account",
+                "tenshu.connect.section.account",
+                ConnectSheetSection::Account,
+            ),
+            (
+                "Plan & billing",
+                "tenshu.connect.section.plan",
+                ConnectSheetSection::PlanBilling,
+            ),
+            (
+                "Contacts",
+                "tenshu.connect.section.contacts",
+                ConnectSheetSection::Contacts,
+            ),
+            (
+                "Devices & security",
+                "tenshu.connect.section.security",
+                ConnectSheetSection::DevicesSecurity,
+            ),
+            (
+                "Recovery services",
+                "tenshu.connect.section.recovery",
+                ConnectSheetSection::RecoveryServices,
+            ),
         ];
         let mut navigation = Column::new().spacing(8).width(Length::Fixed(210.0));
-        for (label, section) in sections {
+        for (label, id, section) in sections {
             let selected = section == active_section;
-            let control = if selected {
-                button::primary(None, label)
+            let style = if selected {
+                theme::button::primary
             } else {
-                button::secondary(None, label)
+                theme::button::secondary
             };
-            navigation =
-                navigation.push(control.on_press(ConnectSheetMessage::SelectSection(section)));
+            navigation = navigation.push(
+                FocusableAction::new(
+                    id,
+                    text::p2_regular(label),
+                    ConnectSheetMessage::FocusAction,
+                )
+                .width(Length::Fill)
+                .padding(10)
+                .style(style)
+                .on_press(ConnectSheetMessage::SelectSection(section)),
+            );
         }
         navigation = navigation.push(
             text::p2_regular(
@@ -261,7 +304,12 @@ pub fn connect_sheet<'a>(
         container(
             Row::new()
                 .push(navigation)
-                .push(scrollable(content).width(Length::Fill).height(Length::Fill))
+                .push(
+                    scrollable(content)
+                        .id(CONTENT_SCROLL_ID)
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                )
                 .spacing(24)
                 .height(Length::Fill),
         )
@@ -269,12 +317,17 @@ pub fn connect_sheet<'a>(
         .height(Length::Fill)
         .into()
     } else {
-        container(scrollable(content).width(Length::Fill).height(Length::Fill))
-            .max_width(600)
-            .center_x(Length::Fill)
-            .height(Length::Fill)
-            .padding(16)
-            .into()
+        container(
+            scrollable(content)
+                .id(CONTENT_SCROLL_ID)
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
+        .max_width(600)
+        .center_x(Length::Fill)
+        .height(Length::Fill)
+        .padding(16)
+        .into()
     };
 
     container(
