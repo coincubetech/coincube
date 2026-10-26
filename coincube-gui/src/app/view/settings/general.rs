@@ -262,13 +262,7 @@ fn recovery_section<'a>(
             col = col.push(crate::app::view::connect::sign_in_prompt::sign_in_prompt(
                 "back up your Cube Recovery Kit",
             ));
-        } else if cache.current_cube_server_id.is_none() {
-            let registration_action = if cache.connect_authenticated {
-                button::primary(None, "Retry Cube connection")
-                    .on_press(Message::ConnectCube(ConnectCubeMessage::RetryRegistration))
-            } else {
-                button::primary(None, "Open Connect").on_press(Message::OpenConnectSwitchAccount)
-            };
+        } else if let Some((action_label, action)) = unregistered_cube_action(cache) {
             col = col.push(
                 card::simple(
                     Column::new()
@@ -277,9 +271,9 @@ fn recovery_section<'a>(
                         .push(text(if cache.connect_authenticated {
                             "This Cube is not registered with Connect yet. Retry its connection before setting up or changing a Recovery Kit."
                         } else {
-                            "Open Connect to restore this account session and finish registering the Cube before setting up a Recovery Kit."
+                            "Restore this account's Connect session on the Cube to finish registration before setting up a Recovery Kit."
                         }).size(14))
-                        .push(registration_action),
+                        .push(button::primary(None, action_label).on_press(action)),
                 )
                 .width(Length::Fill),
             );
@@ -335,6 +329,25 @@ fn recovery_section<'a>(
     }
 
     dashboard(menu, cache, col)
+}
+
+/// A stored session can authenticate this Cube tab through `OpenConnectSignIn`:
+/// the tab sends `ConnectAccount(Init)`, whose authenticated result registers
+/// the Cube. `OpenConnectSwitchAccount` skips that refresh and is only for an
+/// already authenticated user who needs a different account.
+fn unregistered_cube_action(cache: &cache::Cache) -> Option<(&'static str, Message)> {
+    if cache.current_cube_server_id.is_some() {
+        None
+    } else if cache.connect_authenticated {
+        Some((
+            "Retry Cube connection",
+            Message::ConnectCube(ConnectCubeMessage::RetryRegistration),
+        ))
+    } else if cache.has_connect_session {
+        Some(("Restore Connect session", Message::OpenConnectSignIn))
+    } else {
+        None
+    }
 }
 
 /// Vault Recovery Alerts card. Two independent controls backed by two server
@@ -1588,6 +1601,38 @@ fn drift_warning_line(d: &DescriptorDrift) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unregistered_cube_uses_session_restore_without_wrong_account_handoff() {
+        let restored_session = cache::Cache {
+            has_connect_session: true,
+            ..cache::Cache::default()
+        };
+        let (label, route) = unregistered_cube_action(&restored_session).unwrap();
+        assert_eq!(label, "Restore Connect session");
+        assert!(matches!(route, Message::OpenConnectSignIn));
+
+        let authenticated = cache::Cache {
+            connect_authenticated: true,
+            has_connect_session: true,
+            ..cache::Cache::default()
+        };
+        let (label, route) = unregistered_cube_action(&authenticated).unwrap();
+        assert_eq!(label, "Retry Cube connection");
+        assert!(matches!(
+            route,
+            Message::ConnectCube(ConnectCubeMessage::RetryRegistration)
+        ));
+
+        // A registered Cube has no registration CTA, and a missing session
+        // uses the separate sign-in prompt above this card.
+        let registered = cache::Cache {
+            current_cube_server_id: Some(7),
+            ..restored_session.clone()
+        };
+        assert!(unregistered_cube_action(&registered).is_none());
+        assert!(unregistered_cube_action(&cache::Cache::default()).is_none());
+    }
 
     #[test]
     fn cube_data_exports_reuses_only_available_destinations() {
