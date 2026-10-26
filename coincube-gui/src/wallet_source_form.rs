@@ -122,6 +122,11 @@ impl WalletSourceForm {
     pub(crate) fn hardware_mut(&mut self) -> &mut HardwareSource {
         &mut self.hardware
     }
+
+    #[cfg(test)]
+    pub(crate) fn hardware_action_id(&self, name: impl AsRef<str>) -> Id {
+        self.hardware.action_id(name)
+    }
 }
 
 /// Flow-specific copy around the same controls. Split's text is kept verbatim

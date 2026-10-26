@@ -148,7 +148,7 @@ pub enum Message {
     InternalEdited(String),
     TargetSelected(TargetCube),
     Scan,
-    Scanned(Result<Arc<ScanEvidence>, String>, u64, u64),
+    Scanned(Result<Arc<ScanEvidence>, String>, u64, u64, u64),
     Continue,
     Cancel,
     Focus(Id),
@@ -157,13 +157,10 @@ pub enum Message {
 const SCAN_ACTION_ID: &str = "tenshu.split.scan";
 const CANCEL_ACTION_ID: &str = "tenshu.split.cancel";
 const CONTINUE_ACTION_ID: &str = "tenshu.split.continue";
+static NEXT_SPLIT_ACTION_SCOPE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 fn focus(id: Id) -> Message {
     Message::Focus(id)
-}
-
-fn focus_task(id: &'static str) -> Task<Message> {
-    iced::widget::operation::focus(Id::new(id))
 }
 
 #[derive(Debug, Clone)]
@@ -237,6 +234,8 @@ impl ScanEvidence {
 }
 
 pub struct SplitWalletPanel {
+    // Runtime focus owner; never derived from a Cube or persisted.
+    action_scope: u64,
     targets: Vec<TargetCube>,
     selected: Option<TargetCube>,
     source_form: WalletSourceForm,
@@ -251,6 +250,8 @@ impl Default for SplitWalletPanel {
     fn default() -> Self {
         let (cancel, _) = watch::channel(0);
         Self {
+            action_scope: NEXT_SPLIT_ACTION_SCOPE
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             targets: Vec::new(),
             selected: None,
             source_form: WalletSourceForm::default(),
@@ -266,6 +267,14 @@ impl Default for SplitWalletPanel {
 impl SplitWalletPanel {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn action_id(&self, name: &'static str) -> Id {
+        Id::from(format!("{name}.panel.{}", self.action_scope))
+    }
+
+    fn focus_task(&self, name: &'static str) -> Task<Message> {
+        iced::widget::operation::focus(self.action_id(name))
     }
 
     /// Bind this panel to the public source saved with an imported Bitcoin
@@ -470,7 +479,7 @@ impl SplitWalletPanel {
             }
             Message::Cancel => {
                 self.cancel();
-                focus_task(SCAN_ACTION_ID)
+                self.focus_task(SCAN_ACTION_ID)
             }
             Message::Scan => {
                 let Some(client) = client else {
@@ -503,6 +512,7 @@ impl SplitWalletPanel {
                 };
                 self.generation = self.generation.wrapping_add(1);
                 let generation = self.generation;
+                let action_scope = self.action_scope;
                 let _ = self.cancel.send(generation);
                 let receiver = self.cancel.subscribe();
                 let external = plan.branches[0].descriptor.clone();
@@ -528,11 +538,16 @@ impl SplitWalletPanel {
                             .and_then(|two| ScanEvidence::new(two, external, internal))
                             .map(Arc::new)
                     },
-                    move |result| Message::Scanned(result, generation, session_generation),
+                    move |result| {
+                        Message::Scanned(result, generation, session_generation, action_scope)
+                    },
                 );
-                Task::batch([scan, focus_task(CANCEL_ACTION_ID)])
+                Task::batch([scan, self.focus_task(CANCEL_ACTION_ID)])
             }
-            Message::Scanned(result, generation, fired_session) => {
+            Message::Scanned(result, generation, fired_session, action_scope) => {
+                if action_scope != self.action_scope {
+                    return Task::none();
+                }
                 if self.imported_source.is_some() && !matches!(self.status, Status::Scanning) {
                     return Task::none();
                 }
@@ -568,7 +583,7 @@ impl SplitWalletPanel {
                     }
                 }
                 let reviewable = matches!(&self.status, Status::Complete(summary) if summary.reviewable() && (self.imported_source.is_none() || summary.inventory.splittable > 0));
-                crate::services::public_hardware_source::focus_if_unfocused(Id::new(
+                crate::services::public_hardware_source::focus_if_unfocused(self.action_id(
                     if reviewable {
                         CONTINUE_ACTION_ID
                     } else {
@@ -1006,7 +1021,7 @@ pub fn view_with_privacy(panel: &SplitWalletPanel, mask_amounts: bool) -> Elemen
     let scanning = matches!(panel.status, Status::Scanning);
     let reviewable = matches!(&panel.status, Status::Complete(summary) if summary.reviewable() && (imported.is_none() || summary.inventory.splittable > 0));
     let scan_button = ActionButton::new(
-        SCAN_ACTION_ID,
+        panel.action_id(SCAN_ACTION_ID),
         if reviewable {
             "Scan again"
         } else if imported.is_some() && scanning {
@@ -1035,12 +1050,17 @@ pub fn view_with_privacy(panel: &SplitWalletPanel, mask_amounts: bool) -> Elemen
         .align_y(Alignment::Center)
         .push(scan_button.on_press_maybe((!scanning).then_some(Message::Scan)))
         .push_maybe(scanning.then(|| {
-            ActionButton::new(CANCEL_ACTION_ID, "Cancel", ActionKind::Secondary, focus)
-                .on_press(Message::Cancel)
+            ActionButton::new(
+                panel.action_id(CANCEL_ACTION_ID),
+                "Cancel",
+                ActionKind::Secondary,
+                focus,
+            )
+            .on_press(Message::Cancel)
         }));
     let actions = actions.push_maybe(reviewable.then(|| {
         ActionButton::new(
-            CONTINUE_ACTION_ID,
+            panel.action_id(CONTINUE_ACTION_ID),
             "Continue to destination Cube",
             ActionKind::Primary,
             focus,
@@ -1655,7 +1675,7 @@ mod tests {
                 Id::new("tenshu.source.hardware"),
                 Id::new("tenshu.source.receive"),
                 Id::new("tenshu.source.change"),
-                Id::new(SCAN_ACTION_ID),
+                panel.action_id(SCAN_ACTION_ID),
             ]
         );
         for id in [
@@ -1664,7 +1684,7 @@ mod tests {
             Id::new("tenshu.source.hardware"),
             Id::new("tenshu.source.receive"),
             Id::new("tenshu.source.change"),
-            Id::new(SCAN_ACTION_ID),
+            panel.action_id(SCAN_ACTION_ID),
         ] {
             assert!(mounted.has_focus(id), "missing keyboard stop");
         }
@@ -1681,9 +1701,9 @@ mod tests {
         );
         assert!(order(Id::new("tenshu.source.hardware")) < order(Id::new("tenshu.source.receive")));
         assert!(order(Id::new("tenshu.source.receive")) < order(Id::new("tenshu.source.change")));
-        assert!(order(Id::new("tenshu.source.change")) < order(Id::new(SCAN_ACTION_ID)));
-        assert!(!mounted.has_focus(Id::new(CANCEL_ACTION_ID)));
-        assert!(!mounted.has_focus(Id::new(CONTINUE_ACTION_ID)));
+        assert!(order(Id::new("tenshu.source.change")) < order(panel.action_id(SCAN_ACTION_ID)));
+        assert!(!mounted.has_focus(panel.action_id(CANCEL_ACTION_ID)));
+        assert!(!mounted.has_focus(panel.action_id(CONTINUE_ACTION_ID)));
         for key in [Named::Enter, Named::Space] {
             assert!(matches!(
                 capture::activate_with_key(view(&panel), target_id.clone(), size, false, key)
@@ -1702,8 +1722,14 @@ mod tests {
                 [Message::SourceSelected(Source::Hardware)]
             ));
             assert!(matches!(
-                capture::activate_with_key(view(&panel), Id::new(SCAN_ACTION_ID), size, false, key)
-                    .as_slice(),
+                capture::activate_with_key(
+                    view(&panel),
+                    panel.action_id(SCAN_ACTION_ID),
+                    size,
+                    false,
+                    key
+                )
+                .as_slice(),
                 [Message::Scan]
             ));
         }
@@ -1723,7 +1749,7 @@ mod tests {
             "tenshu.hardware.account",
         ] {
             assert!(
-                hardware.has_focus(Id::new(id)),
+                hardware.has_focus(panel.source_form.hardware_action_id(id)),
                 "missing hardware keyboard stop: {}",
                 id
             );
@@ -1732,7 +1758,9 @@ mod tests {
             assert!(matches!(
                 capture::activate_with_key(
                     view(&panel),
-                    Id::new("tenshu.hardware.purpose.bip49"),
+                    panel
+                        .source_form
+                        .hardware_action_id("tenshu.hardware.purpose.bip49"),
                     size,
                     false,
                     key
@@ -1752,14 +1780,14 @@ mod tests {
             "dark",
             theme::Theme::dark(),
         );
-        assert!(!busy.has_focus(Id::new(SCAN_ACTION_ID)));
-        assert!(busy.has_focus(Id::new(CANCEL_ACTION_ID)));
-        assert!(!busy.has_focus(Id::new(CONTINUE_ACTION_ID)));
+        assert!(!busy.has_focus(panel.action_id(SCAN_ACTION_ID)));
+        assert!(busy.has_focus(panel.action_id(CANCEL_ACTION_ID)));
+        assert!(!busy.has_focus(panel.action_id(CONTINUE_ACTION_ID)));
         for key in [Named::Enter, Named::Space] {
             assert!(matches!(
                 capture::activate_with_key(
                     view(&panel),
-                    Id::new(CANCEL_ACTION_ID),
+                    panel.action_id(CANCEL_ACTION_ID),
                     size,
                     false,
                     key
@@ -1779,7 +1807,7 @@ mod tests {
             "dark",
             theme::Theme::dark()
         )
-        .has_focus(Id::new(SCAN_ACTION_ID)));
+        .has_focus(panel.action_id(SCAN_ACTION_ID)));
 
         let eligible = ScanSummary {
             generation: panel.generation,
@@ -1815,12 +1843,12 @@ mod tests {
             "light",
             theme::Theme::light(),
         );
-        assert!(ready.has_focus(Id::new(CONTINUE_ACTION_ID)));
+        assert!(ready.has_focus(panel.action_id(CONTINUE_ACTION_ID)));
         for key in [Named::Enter, Named::Space] {
             assert!(matches!(
                 capture::activate_with_key(
                     view(&panel),
-                    Id::new(CONTINUE_ACTION_ID),
+                    panel.action_id(CONTINUE_ACTION_ID),
                     size,
                     false,
                     key
@@ -1839,7 +1867,7 @@ mod tests {
             "dark",
             theme::Theme::dark()
         )
-        .has_focus(Id::new(CONTINUE_ACTION_ID)));
+        .has_focus(panel.action_id(CONTINUE_ACTION_ID)));
 
         panel.set_imported_source(imported_source(240)).unwrap();
         let imported = capture::inspect_full_window(
@@ -1849,14 +1877,20 @@ mod tests {
             "light",
             theme::Theme::light(),
         );
-        assert!(imported.has_focus(Id::new(SCAN_ACTION_ID)));
+        assert!(imported.has_focus(panel.action_id(SCAN_ACTION_ID)));
         assert!(!imported.has_focus(target_id));
         assert!(!imported.has_focus(Id::new("tenshu.source.descriptor")));
-        assert!(!imported.has_focus(Id::new(CONTINUE_ACTION_ID)));
+        assert!(!imported.has_focus(panel.action_id(CONTINUE_ACTION_ID)));
         for key in [Named::Enter, Named::Space] {
             assert!(matches!(
-                capture::activate_with_key(view(&panel), Id::new(SCAN_ACTION_ID), size, false, key)
-                    .as_slice(),
+                capture::activate_with_key(
+                    view(&panel),
+                    panel.action_id(SCAN_ACTION_ID),
+                    size,
+                    false,
+                    key
+                )
+                .as_slice(),
                 [Message::Scan]
             ));
         }
@@ -1871,7 +1905,7 @@ mod tests {
             "dark",
             theme::Theme::dark()
         )
-        .has_focus(Id::new(CONTINUE_ACTION_ID)));
+        .has_focus(panel.action_id(CONTINUE_ACTION_ID)));
         panel.status = Status::Complete(eligible);
         assert!(capture::inspect_full_window(
             "imported-claim-keyboard-eligible",
@@ -1880,12 +1914,12 @@ mod tests {
             "light",
             theme::Theme::light()
         )
-        .has_focus(Id::new(CONTINUE_ACTION_ID)));
+        .has_focus(panel.action_id(CONTINUE_ACTION_ID)));
         for key in [Named::Enter, Named::Space] {
             assert!(matches!(
                 capture::activate_with_key(
                     view(&panel),
-                    Id::new(CONTINUE_ACTION_ID),
+                    panel.action_id(CONTINUE_ACTION_ID),
                     size,
                     false,
                     key
@@ -1896,7 +1930,12 @@ mod tests {
         }
         panel.status = Status::Scanning;
         let task = panel.update(
-            Message::Scanned(Err("synthetic scan failure".into()), panel.generation, 0),
+            Message::Scanned(
+                Err("synthetic scan failure".into()),
+                panel.generation,
+                0,
+                panel.action_scope,
+            ),
             None,
             0,
         );
@@ -1911,7 +1950,7 @@ mod tests {
             "dark",
             theme::Theme::dark()
         )
-        .has_focus(Id::new(SCAN_ACTION_ID)));
+        .has_focus(panel.action_id(SCAN_ACTION_ID)));
     }
 
     #[test]
@@ -1935,18 +1974,23 @@ mod tests {
             assert_focus_task(
                 reading,
                 view(&panel),
-                Id::new("tenshu.hardware.purpose.bip84"),
+                panel
+                    .source_form
+                    .hardware_action_id("tenshu.hardware.purpose.bip84"),
             );
             let generation = panel.hardware_mut().generation_for_test();
+            let action_scope = panel.hardware_mut().action_scope_for_test();
             let loaded = panel.update(
-                Message::Hardware(loaded_for_test(generation, succeeds)),
+                Message::Hardware(loaded_for_test(generation, succeeds, action_scope)),
                 None,
                 0,
             );
             assert_focus_task(
                 loaded,
                 view(&panel),
-                Id::from("tenshu.hardware.read:5:dev-1".to_string()),
+                panel
+                    .source_form
+                    .hardware_action_id("tenshu.hardware.read:5:dev-1"),
             );
             assert_eq!(panel.source_form.hardware_account().is_some(), succeeds);
         }
@@ -1964,7 +2008,7 @@ mod tests {
         panel.set_targets(vec![target()]);
         let generation = panel.generation;
         let result = panel.update(
-            Message::Scanned(Err("failed".into()), generation, 0),
+            Message::Scanned(Err("failed".into()), generation, 0, panel.action_scope),
             None,
             0,
         );
@@ -1980,13 +2024,18 @@ mod tests {
         );
 
         let mounted = panel.update(
-            Message::Scanned(Err("failed".into()), generation, 0),
+            Message::Scanned(Err("failed".into()), generation, 0, panel.action_scope),
             None,
             0,
         );
-        assert_focus_task(mounted, view(&panel), Id::new(SCAN_ACTION_ID));
+        assert_focus_task(mounted, view(&panel), panel.action_id(SCAN_ACTION_ID));
         let stale = panel.update(
-            Message::Scanned(Err("stale".into()), generation.wrapping_sub(1), 0),
+            Message::Scanned(
+                Err("stale".into()),
+                generation.wrapping_sub(1),
+                0,
+                panel.action_scope,
+            ),
             None,
             0,
         );
@@ -1999,6 +2048,54 @@ mod tests {
             Some(other.clone()),
             other,
         );
+    }
+
+    #[test]
+    fn scan_result_from_one_panel_cannot_focus_another_panel() {
+        use crate::services::public_hardware_source::tests::{
+            assert_focus_task, assert_focus_task_outcome,
+        };
+
+        let _guard = crate::app::session::test_guard();
+        let mut first = SplitWalletPanel::new();
+        first.set_targets(vec![target()]);
+        let mut second = SplitWalletPanel::new();
+        second.set_targets(vec![target()]);
+        let first_scan = first.action_id(SCAN_ACTION_ID);
+        let second_scan = second.action_id(SCAN_ACTION_ID);
+        assert_ne!(first_scan, second_scan);
+        let generation = first.generation;
+        let action_scope = first.action_scope;
+
+        let completion = || Message::Scanned(Err("failed".into()), generation, 0, action_scope);
+        assert_focus_task_outcome(
+            first.update(completion(), None, 0),
+            view(&second),
+            None,
+            None,
+        );
+        assert_focus_task_outcome(
+            first.update(completion(), None, 0),
+            view(&second),
+            Some(second_scan.clone()),
+            Some(second_scan.clone()),
+        );
+        assert_focus_task(
+            first.update(completion(), None, 0),
+            view(&first),
+            first_scan.clone(),
+        );
+
+        // Moving a panel keeps its focus identity; recreating it gets a new one.
+        let moved = first;
+        assert_eq!(moved.action_id(SCAN_ACTION_ID), first_scan);
+        let mut recreated = SplitWalletPanel::new();
+        recreated.set_targets(vec![target()]);
+        assert_ne!(recreated.action_id(SCAN_ACTION_ID), first_scan);
+        assert_eq!(recreated.generation, generation);
+        let stale_owner = recreated.update(completion(), None, 0);
+        assert_focus_task_outcome(stale_owner, view(&recreated), None, None);
+        assert_eq!(recreated.status(), &Status::Editing);
     }
 
     /// Check source-first layout and action dispatch at narrow and standard
@@ -2236,7 +2333,7 @@ mod tests {
         assert!(panel.evidence.is_none());
         assert_eq!(panel.status(), &Status::Editing);
         let _ = panel.update(
-            Message::Scanned(Err("stale".into()), stale_generation, 0),
+            Message::Scanned(Err("stale".into()), stale_generation, 0, panel.action_scope),
             None,
             0,
         );
@@ -2303,7 +2400,11 @@ mod tests {
         assert!(!panel.imported_evidence_matches(&short));
         let short_for_handoff = short.clone();
         panel.status = Status::Scanning;
-        let _ = panel.update(Message::Scanned(Ok(short), generation, 0), None, 0);
+        let _ = panel.update(
+            Message::Scanned(Ok(short), generation, 0, panel.action_scope),
+            None,
+            0,
+        );
         assert!(
             matches!(panel.status(), Status::Failed(copy) if copy.contains("did not cover every saved receive and change address"))
         );
@@ -2349,7 +2450,7 @@ mod tests {
         panel.status = Status::Scanning;
         let generation = panel.generation;
         let _ = panel.update(
-            Message::Scanned(Err("old account".into()), generation, 3),
+            Message::Scanned(Err("old account".into()), generation, 3, panel.action_scope),
             None,
             4,
         );
@@ -2379,7 +2480,7 @@ mod tests {
             assert_eq!(panel.status(), &Status::Editing);
 
             let _ = panel.update(
-                Message::Scanned(Err("stale".into()), stale_generation, 7),
+                Message::Scanned(Err("stale".into()), stale_generation, 7, panel.action_scope),
                 None,
                 7,
             );
@@ -2593,7 +2694,11 @@ mod tests {
         panel.generation = 9;
         panel.status = Status::Scanning;
         // Delivered under the current generation tag but carrying older evidence.
-        let _ = panel.update(Message::Scanned(Ok(stale), 9, 1), None, 1);
+        let _ = panel.update(
+            Message::Scanned(Ok(stale), 9, 1, panel.action_scope),
+            None,
+            1,
+        );
         assert!(panel.evidence.is_none());
         assert_eq!(panel.status(), &Status::Editing);
         assert_eq!(panel.generation, 10);
@@ -2610,7 +2715,11 @@ mod tests {
             ChainId::Bitcoin,
             ScanError::RangeLimit,
         ));
-        let _ = panel.update(Message::Scanned(Err(copy), generation, 2), None, 2);
+        let _ = panel.update(
+            Message::Scanned(Err(copy), generation, 2, panel.action_scope),
+            None,
+            2,
+        );
         assert!(
             matches!(panel.status(), Status::Failed(copy) if copy.starts_with("Bitcoin chain:") && copy.contains("No zero-balance conclusion"))
         );
@@ -3045,7 +3154,12 @@ mod tests {
         let generation = panel.generation;
 
         let _ = panel.update(
-            Message::Scanned(Ok(completed_evidence(generation)), generation, 9),
+            Message::Scanned(
+                Ok(completed_evidence(generation)),
+                generation,
+                9,
+                panel.action_scope,
+            ),
             None,
             9,
         );
@@ -3073,7 +3187,12 @@ mod tests {
         panel.hardware_mut().ready_for_test(hardware_account());
         let generation = panel.generation;
         let _ = panel.update(
-            Message::Scanned(Ok(completed_evidence(generation)), generation, 0),
+            Message::Scanned(
+                Ok(completed_evidence(generation)),
+                generation,
+                0,
+                panel.action_scope,
+            ),
             None,
             0,
         );
