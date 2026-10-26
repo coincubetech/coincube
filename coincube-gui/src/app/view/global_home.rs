@@ -533,6 +533,7 @@ where
 
 /// Inline wallet choice matching P-Transfer's From and To rows.
 fn transfer_wallet_row<'a>(
+    cube_id: &str,
     side: PickerSide,
     kind: WalletKind,
     selected: bool,
@@ -577,12 +578,23 @@ fn transfer_wallet_row<'a>(
             },
             ..Default::default()
         });
-    Button::new(row)
-        .padding(0)
-        .width(Length::Fill)
-        .style(theme::button::transparent)
-        .on_press(Message::Home(HomeMessage::SelectTransferWallet(side, kind)))
-        .into()
+    Action::new(
+        landing_control_id(
+            cube_id,
+            kind.label(),
+            match side {
+                PickerSide::From => "transfer-from",
+                PickerSide::To => "transfer-to",
+            },
+        ),
+        row,
+        Message::FocusAction,
+    )
+    .padding(0)
+    .width(Length::Fill)
+    .style(theme::button::transparent)
+    .on_press(Message::Home(HomeMessage::SelectTransferWallet(side, kind)))
+    .into()
 }
 
 /// The selected source remains in the From list; To excludes that wallet so
@@ -590,6 +602,7 @@ fn transfer_wallet_row<'a>(
 /// previously the destination swaps the pair in the state layer.
 #[allow(clippy::too_many_arguments)]
 fn transfer_wallet_section<'a>(
+    cube_id: &str,
     side: PickerSide,
     direction: TransferDirection,
     has_vault: bool,
@@ -621,6 +634,7 @@ fn transfer_wallet_section<'a>(
     ] {
         if available && (side == PickerSide::From || kind != direction.from_kind()) {
             col = col.push(transfer_wallet_row(
+                cube_id,
                 side,
                 kind,
                 kind == selected,
@@ -745,6 +759,7 @@ fn enter_amount_card<'a>(
 
 #[allow(clippy::too_many_arguments)]
 fn enter_amount_view<'a>(
+    cube_id: &str,
     direction: TransferDirection,
     liquid_balance: Amount,
     spark_balance: Amount,
@@ -777,6 +792,7 @@ fn enter_amount_view<'a>(
                     .spacing(18)
                     .push(text("Transfer between wallets").bold().size(H4_SIZE))
                     .push(transfer_wallet_section(
+                        cube_id,
                         PickerSide::From,
                         direction,
                         has_vault,
@@ -791,6 +807,7 @@ fn enter_amount_view<'a>(
                     ))
                     .push(iced::widget::rule::horizontal(1))
                     .push(transfer_wallet_section(
+                        cube_id,
                         PickerSide::To,
                         direction,
                         has_vault,
@@ -1679,6 +1696,7 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
         1 => {
             if let Some(direction) = transfer_direction {
                 return enter_amount_view(
+                    cube_id,
                     direction,
                     liquid_balance,
                     spark_balance,
@@ -3158,6 +3176,7 @@ mod tests {
         let selected = capture::inspect(
             "hub-transfer-trusted-source",
             transfer_wallet_section(
+                "test-cube",
                 PickerSide::From,
                 TransferDirection::SparkToVault,
                 true,
@@ -3208,6 +3227,7 @@ mod tests {
             capture::inspect(
                 "hub-transfer-privacy-source",
                 transfer_wallet_section(
+                    "test-cube",
                     PickerSide::From,
                     TransferDirection::LiquidToSpark,
                     true,
@@ -3269,6 +3289,40 @@ mod tests {
                 assert!(snapshot.contains("250,000"));
                 assert!(snapshot.contains("375,000"));
             }
+        }
+    }
+
+    #[test]
+    fn transfer_wallet_rows_activate_by_enter_and_space() {
+        use iced::keyboard::key::Named;
+
+        let fixture = ViewFixture::new();
+        for key in [Named::Enter, Named::Space] {
+            let content =
+                global_home_view(fixture.config(1, Some(TransferDirection::SparkToVault), None));
+            let messages = capture::activate_with_key(
+                content,
+                landing_control_id("test-cube", "Vault", "transfer-from"),
+                (1024, 768),
+                false,
+                key,
+            );
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(|message| {
+                        matches!(
+                            message,
+                            Message::Home(HomeMessage::SelectTransferWallet(
+                                PickerSide::From,
+                                WalletKind::Vault
+                            ))
+                        )
+                    })
+                    .count(),
+                1,
+            );
+            assert_eq!(fixture.entered_amount.value, "50000");
         }
     }
 

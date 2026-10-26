@@ -4348,6 +4348,12 @@ mod tests {
                 home.transfer_direction,
                 Some(TransferDirection::LiquidToVault)
             );
+            assert_eq!(home.entered_amount.value, "100000");
+            assert!(!home.entered_amount.valid);
+            assert_eq!(
+                home.entered_amount.warning,
+                Some("Amount exceeds Liquid balance")
+            );
             drain(home.update(
                 None,
                 &cache,
