@@ -5,9 +5,10 @@ use chrono::{DateTime, Local, NaiveDate, Utc};
 use coincube_spark_protocol::PaymentSummary;
 use coincube_ui::{
     component::{button, text::*},
-    widget::{Column, Element},
+    widget::{action::Action, Column, Element},
 };
 use iced::{
+    advanced::widget::Id,
     widget::{column, container, pick_list, row, text_input},
     Alignment, Length,
 };
@@ -99,8 +100,7 @@ pub struct Filters {
     pub wallet: WalletFilter,
     pub direction: DirectionFilter,
     pub status: StatusFilter,
-    pub date_start: String,
-    pub date_end: String,
+    pub date_range: String,
     pub search: String,
 }
 
@@ -109,7 +109,7 @@ impl Filters {
         usize::from(self.wallet != WalletFilter::All)
             + usize::from(self.direction != DirectionFilter::All)
             + usize::from(self.status != StatusFilter::All)
-            + usize::from(!self.date_start.is_empty() || !self.date_end.is_empty())
+            + usize::from(!self.date_range.is_empty())
             + usize::from(!self.search.is_empty())
     }
 
@@ -123,7 +123,16 @@ impl Filters {
                     .map_err(|_| ())
             }
         }
-        Ok((parse(&self.date_start)?, parse(&self.date_end)?))
+        if self.date_range.trim().is_empty() {
+            return Ok((None, None));
+        }
+        let (start, end) = self.date_range.split_once(" to ").ok_or(())?;
+        let start = parse(start)?;
+        let end = parse(end)?;
+        if start.zip(end).is_some_and(|(start, end)| start > end) {
+            return Err(());
+        }
+        Ok((start, end))
     }
 
     fn includes(&self, entry: &Entry) -> bool {
@@ -144,17 +153,18 @@ impl Filters {
                 return false;
             }
         }
-        if let Ok((start, end)) = self.dates() {
-            let date = (entry.timestamp != 0)
-                .then(|| DateTime::<Utc>::from_timestamp(entry.timestamp as i64, 0))
-                .flatten()
-                .map(|time| time.with_timezone(&Local).date_naive());
-            if start.is_some_and(|start| date.is_none_or(|date| date < start)) {
-                return false;
-            }
-            if end.is_some_and(|end| date.is_none_or(|date| date > end)) {
-                return false;
-            }
+        let Ok((start, end)) = self.dates() else {
+            return false;
+        };
+        let date = (entry.timestamp != 0)
+            .then(|| DateTime::<Utc>::from_timestamp(entry.timestamp as i64, 0))
+            .flatten()
+            .map(|time| time.with_timezone(&Local).date_naive());
+        if start.is_some_and(|start| date.is_none_or(|date| date < start)) {
+            return false;
+        }
+        if end.is_some_and(|end| date.is_none_or(|date| date > end)) {
+            return false;
         }
         true
     }
@@ -165,8 +175,7 @@ pub enum ActivityMessage {
     Wallet(WalletFilter),
     Direction(DirectionFilter),
     Status(StatusFilter),
-    DateStart(String),
-    DateEnd(String),
+    DateRange(String),
     Search(String),
     Clear,
     Select(String),
@@ -174,6 +183,10 @@ pub enum ActivityMessage {
     Retry,
     LoadMore,
     OpenDetail(ActivityTarget),
+}
+
+pub fn row_focus_id(entry_id: &str) -> Id {
+    Id::from(format!("tenshu.activity.row:{}:{entry_id}", entry_id.len()))
 }
 
 #[derive(Debug, Clone)]
@@ -275,7 +288,7 @@ impl Entry {
             timestamp: tx.updated_at.unwrap_or(0) as u64,
             direction: DirectionFilter::Sent,
             status: StatusFilter::Pending,
-            status_label: signer_status.clone(),
+            status_label: format!("{}/{} signed", sigs.sigs_count, sigs.threshold),
             title: tx
                 .labels
                 .get(&txid)
@@ -325,7 +338,12 @@ impl Entry {
             timestamp: payment.timestamp,
             direction,
             status,
-            status_label: payment.status.clone(),
+            status_label: match status {
+                StatusFilter::Confirmed => "Confirmed",
+                StatusFilter::Failed => "Failed",
+                _ => "Pending",
+            }
+            .into(),
             title: payment
                 .description
                 .clone()
@@ -497,6 +515,17 @@ fn detail_beside_list(width: f32) -> bool {
     width >= MIN_ACTIVITY_LIST_WIDTH + SELECTED_DETAIL_WIDTH + DETAIL_GAP
 }
 
+fn day_heading(day: Option<NaiveDate>, today: NaiveDate) -> String {
+    match day {
+        None => "Pending".to_owned(),
+        Some(day) if day == today => format!("Today · {}", day.format("%a %e %b %Y")),
+        Some(day) if day == today.pred_opt().unwrap_or(today) => {
+            format!("Yesterday · {}", day.format("%a %e %b %Y"))
+        }
+        Some(day) => day.format("%a %e %b %Y").to_string(),
+    }
+}
+
 pub fn render<'a>(activity: &'a Activity, cache: &'a Cache) -> Element<'a, Message> {
     iced::widget::responsive(move |size: iced::Size| render_at_width(activity, cache, size.width))
         .height(Length::Shrink)
@@ -548,57 +577,98 @@ fn render_at_width<'a>(
         |value| Message::Activity(ActivityMessage::Status(value)),
     )
     .width(Length::Fixed(if compact { 120.0 } else { 130.0 }));
-    let from = text_input("From YYYY-MM-DD", &activity.filters.date_start)
-        .on_input(|value| Message::Activity(ActivityMessage::DateStart(value)))
-        .width(Length::Fixed(if compact { 130.0 } else { 145.0 }));
-    let to = text_input("To YYYY-MM-DD", &activity.filters.date_end)
-        .on_input(|value| Message::Activity(ActivityMessage::DateEnd(value)))
-        .width(Length::Fixed(if compact { 130.0 } else { 145.0 }));
+    let dates = text_input("Date range", &activity.filters.date_range)
+        .on_input(|value| Message::Activity(ActivityMessage::DateRange(value)))
+        .width(Length::Fixed(if compact { 210.0 } else { 230.0 }));
     let search = text_input("Search label or ID", &activity.filters.search)
         .on_input(|value| Message::Activity(ActivityMessage::Search(value)))
         .width(Length::Fill);
     let controls: Element<'a, Message> = if compact {
         column![
             row![wallet, direction, status].spacing(8),
-            row![from, to, search].spacing(8)
+            row![dates, search].spacing(8)
         ]
         .spacing(8)
         .into()
     } else {
-        row![wallet, direction, status, from, to, search]
+        row![wallet, direction, status, dates, search]
             .spacing(8)
             .align_y(Alignment::Center)
             .into()
     };
-    let mut filters = Column::new().push(controls);
+    let mut filters = Column::new().push(controls).push(
+        text("Date range: YYYY-MM-DD to YYYY-MM-DD")
+            .size(11)
+            .style(coincube_ui::theme::text::secondary),
+    );
     if count > 0 {
         filters = filters.push(
             row![
-                text(format!("{count} filters")),
+                text(format!(
+                    "{count} {} active",
+                    if count == 1 { "filter" } else { "filters" }
+                )),
                 button::secondary(None, "Clear filters")
                     .on_press(Message::Activity(ActivityMessage::Clear))
             ]
             .spacing(8),
         );
     }
-    let mut list = Column::new().spacing(8).push(h3("Activity")).push(filters);
-    if activity.filters.dates().is_err() {
-        list = list
-            .push(text("Use YYYY-MM-DD for dates.").style(coincube_ui::theme::text::destructive));
+    let cutoff = activity.complete_through();
+    let loaded = entries.len();
+    let visible: Vec<_> = entries
+        .iter()
+        .filter(|entry| {
+            (entry.timestamp == 0 || cutoff.is_none_or(|cutoff| entry.timestamp > cutoff))
+                && activity.filters.includes(entry)
+        })
+        .collect();
+    let mut heading = Column::new()
+        .spacing(8)
+        .push(h3("Activity"))
+        .push(
+            text(format!(
+                "{} · {}",
+                if cache.cube_name.is_empty() {
+                    "Cube"
+                } else {
+                    &cache.cube_name
+                },
+                cache.network
+            ))
+            .style(coincube_ui::theme::text::secondary),
+        )
+        .push(text(format!(
+            "Showing {} of {loaded} loaded · Historical fiat unavailable",
+            visible.len()
+        )))
+        .push(filters);
+    if cutoff.is_some() {
+        heading = heading.push(
+            text("Older days appear as each wallet's history loads.")
+                .style(coincube_ui::theme::text::secondary),
+        );
     }
-    for error in [
-        activity.vault_error.as_deref(),
-        activity.psbt_error.as_deref(),
-        activity.spark_error.as_deref(),
-        activity.liquid_error.as_deref(),
-        activity.refundables_error.as_deref(),
-    ]
-    .iter()
-    .flatten()
-    {
+    if activity.filters.dates().is_err() {
+        heading = heading.push(
+            text("Use YYYY-MM-DD to YYYY-MM-DD for date range.")
+                .style(coincube_ui::theme::text::destructive),
+        );
+    }
+    let mut list = Column::new().spacing(8);
+    for (wallet, error) in [
+        ("Vault", activity.vault_error.as_deref()),
+        ("Vault proposals", activity.psbt_error.as_deref()),
+        ("Spark", activity.spark_error.as_deref()),
+        ("Liquid", activity.liquid_error.as_deref()),
+        ("Liquid refunds", activity.refundables_error.as_deref()),
+    ] {
+        if error.is_none() {
+            continue;
+        }
         list = list.push(
             row![
-                text(format!("History unavailable: {error}")),
+                text(format!("{wallet} history couldn't load")),
                 button::secondary(None, "Retry")
                     .on_press(Message::Activity(ActivityMessage::Retry))
             ]
@@ -623,10 +693,6 @@ fn render_at_width<'a>(
         ]
         .spacing(8),
     );
-    let visible: Vec<_> = entries
-        .iter()
-        .filter(|entry| activity.filters.includes(entry))
-        .collect();
     if visible.is_empty()
         && !activity.vault_loading
         && !activity.psbt_loading
@@ -634,7 +700,9 @@ fn render_at_width<'a>(
         && !activity.liquid_loading
         && !activity.refundables_loading
     {
-        list = list.push(text(if entries.is_empty() {
+        list = list.push(text(if cutoff.is_some() {
+            "Load older activity to complete this date range"
+        } else if entries.is_empty() {
             "No transactions yet"
         } else {
             "No activity matches these filters"
@@ -643,18 +711,13 @@ fn render_at_width<'a>(
     let mut previous_day = None;
     let mut first_day = true;
     for entry in visible {
+        let is_selected = selected.is_some_and(|selected| selected.id == entry.id);
         let day = (entry.timestamp != 0)
             .then(|| DateTime::<Utc>::from_timestamp(entry.timestamp as i64, 0))
             .flatten()
             .map(|time| time.with_timezone(&Local).date_naive());
         if first_day || day != previous_day {
-            list = list.push(
-                text(day.map_or_else(
-                    || "Pending".to_owned(),
-                    |day| day.format("%A, %B %e").to_string(),
-                ))
-                .bold(),
-            );
+            list = list.push(text(day_heading(day, Local::now().date_naive())).bold());
             previous_day = day;
             first_day = false;
         }
@@ -670,28 +733,42 @@ fn render_at_width<'a>(
         } else {
             entry.amount.clone()
         };
+        let row_status = entry.status;
         list = list.push(
-            iced::widget::button(
+            Action::new(
+                row_focus_id(&entry.id),
                 row![
                     text(time).width(Length::Fixed(70.0)),
                     text(entry.wallet.to_string()).width(Length::Fixed(75.0)),
                     text(format!("{} · {}", entry.title, entry.rail)).width(Length::Fill),
-                    Column::new()
-                        .push(text(amount))
-                        .push(
-                            text("Historical fiat unavailable")
-                                .size(11)
-                                .style(coincube_ui::theme::text::secondary)
-                        )
-                        .width(Length::Fixed(190.0)),
-                    text(entry.status_label.clone()).width(Length::Fixed(100.0)),
+                    text(amount).width(Length::Fixed(190.0)),
+                    text(format!("● {}", entry.status_label))
+                        .style(move |theme| match row_status {
+                            StatusFilter::Confirmed => coincube_ui::theme::text::success(theme),
+                            StatusFilter::Failed => coincube_ui::theme::text::destructive(theme),
+                            _ => coincube_ui::theme::text::warning(theme),
+                        })
+                        .width(Length::Fixed(100.0)),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center),
+                Message::FocusAction,
             )
             .width(Length::Fill)
+            .padding([8, 4])
+            .style(move |theme, status| {
+                let mut style = coincube_ui::theme::button::transparent_border(theme, status);
+                if is_selected {
+                    style.background = Some(iced::Background::Color(theme.colors.shell.selected));
+                    style.border.color = theme.colors.shell.focus;
+                    style.border.width = 1.0;
+                    style.border.radius = 8.0.into();
+                }
+                style
+            })
             .on_press(Message::Activity(ActivityMessage::Select(entry.id.clone()))),
         );
+        list = list.push(iced::widget::rule::horizontal(1));
     }
     if activity.vault_has_more || activity.spark_has_more || activity.liquid_has_more {
         let mut more = button::secondary(None, "Load older activity");
@@ -711,9 +788,16 @@ fn render_at_width<'a>(
             .spacing(12)
             .push(
                 row![
-                    h3(entry.title.clone()),
-                    button::secondary(None, "Close")
-                        .on_press(Message::Activity(ActivityMessage::CloseDetail))
+                    h3(entry.title.clone()).width(Length::Fill),
+                    Action::new(
+                        Id::from("tenshu.activity.detail.close"),
+                        text("×"),
+                        Message::FocusAction,
+                    )
+                    .style(coincube_ui::theme::button::transparent_border)
+                    .padding([4, 8])
+                    .width(Length::Shrink)
+                    .on_press(Message::Activity(ActivityMessage::CloseDetail))
                 ]
                 .spacing(12),
             )
@@ -724,11 +808,25 @@ fn render_at_width<'a>(
                 entry.amount.clone()
             }))
             .push(text("Historical fiat amount unavailable"))
-            .push(text(entry.status_label.clone()));
-        if entry.signer_status.is_some() {
-            detail = detail.push(button::secondary(None, "Continue signing").on_press(
-                Message::Activity(ActivityMessage::OpenDetail(entry.target.clone())),
-            ));
+            .push(text(if entry.signer_status.is_some() {
+                "Pending".to_owned()
+            } else {
+                entry.status_label.clone()
+            }));
+        if let Some(signer_status) = &entry.signer_status {
+            detail = detail.push(text(signer_status.clone()));
+            detail = detail.push(
+                Action::new(
+                    Id::from("tenshu.activity.detail.sign"),
+                    text("Continue signing"),
+                    Message::FocusAction,
+                )
+                .style(coincube_ui::theme::button::primary)
+                .padding([8, 16])
+                .on_press(Message::Activity(ActivityMessage::OpenDetail(
+                    entry.target.clone(),
+                ))),
+            );
         }
         if let Some(time) = (entry.timestamp != 0)
             .then(|| DateTime::<Utc>::from_timestamp(entry.timestamp as i64, 0))
@@ -753,8 +851,17 @@ fn render_at_width<'a>(
         if entry.signer_status.is_none() && !entry.identifier.is_empty() {
             detail = detail.push(
                 row![
-                    text(format!("{} · {}", entry.identifier_label, entry.identifier)),
-                    button::secondary(None, "Copy").on_press(Message::CopyWithToast(
+                    text(format!("{} · {}", entry.identifier_label, entry.identifier))
+                        .width(Length::Fill),
+                    Action::new(
+                        Id::from("tenshu.activity.detail.copy"),
+                        text("Copy"),
+                        Message::FocusAction,
+                    )
+                    .style(coincube_ui::theme::button::transparent_border)
+                    .padding([4, 8])
+                    .width(Length::Shrink)
+                    .on_press(Message::CopyWithToast(
                         entry.identifier.clone(),
                         "Identifier copied".into()
                     ))
@@ -763,20 +870,32 @@ fn render_at_width<'a>(
             );
         }
         detail = detail.push(
-            button::secondary(None, "Open wallet details and actions").on_press(Message::Activity(
-                ActivityMessage::OpenDetail(entry.target.clone()),
-            )),
+            Action::new(
+                Id::from("tenshu.activity.detail.open"),
+                text("Open wallet details and actions"),
+                Message::FocusAction,
+            )
+            .style(coincube_ui::theme::button::secondary)
+            .padding([8, 16])
+            .on_press(Message::Activity(ActivityMessage::OpenDetail(
+                entry.target.clone(),
+            ))),
         );
         let detail = container(detail).padding(20);
         if !detail_beside_list(width) {
-            column![main, detail.width(Length::Fill)].spacing(16).into()
-        } else {
-            row![main, detail.width(Length::Fixed(SELECTED_DETAIL_WIDTH))]
-                .spacing(DETAIL_GAP)
+            column![heading, main, detail.width(Length::Fill)]
+                .spacing(16)
                 .into()
+        } else {
+            column![
+                heading,
+                row![main, detail.width(Length::Fixed(SELECTED_DETAIL_WIDTH))].spacing(DETAIL_GAP)
+            ]
+            .spacing(16)
+            .into()
         }
     } else {
-        main
+        column![heading, main].spacing(16).into()
     }
 }
 
@@ -784,6 +903,7 @@ fn render_at_width<'a>(
 mod tests {
     use super::*;
     use crate::app::wallets::DomainLiquidAssetInfo;
+    use crate::app::{state::State, view::shared::landing::capture};
 
     fn spark_payment() -> PaymentSummary {
         PaymentSummary {
@@ -834,12 +954,14 @@ mod tests {
             .with_timezone(&Local)
             .date_naive();
         let mut filters = Filters {
-            date_start: day.format("%Y-%m-%d").to_string(),
-            date_end: day.format("%Y-%m-%d").to_string(),
+            date_range: format!("{day} to {day}"),
             ..Default::default()
         };
         assert!(filters.includes(&row));
-        filters.date_start = "2026-13-99".into();
+        filters.date_range = "2026-13-99 to 2026-12-31".into();
+        assert!(filters.dates().is_err());
+        assert!(!filters.includes(&row));
+        filters.date_range = "2026-12-31 to 2026-01-01".into();
         assert!(filters.dates().is_err());
     }
 
@@ -968,5 +1090,47 @@ mod tests {
         assert!(detail_beside_list(
             MIN_ACTIVITY_LIST_WIDTH + SELECTED_DETAIL_WIDTH + DETAIL_GAP
         ));
+    }
+
+    #[test]
+    fn activity_rows_mount_at_compact_and_wide_widths_in_both_themes() {
+        let cache = Cache::default();
+        let mut activity = Activity::new(None, None);
+        let payment = spark_payment();
+        let id = Entry::spark(payment.clone()).id;
+        drop(activity.update(
+            None,
+            &cache,
+            crate::app::message::Message::ActivitySparkLoaded(0, Ok((vec![payment], false))),
+        ));
+        for selected in [false, true] {
+            activity.selected_id = selected.then(|| id.clone());
+            for (appearance, theme) in [
+                ("dark", coincube_ui::theme::Theme::dark()),
+                ("light", coincube_ui::theme::Theme::light()),
+            ] {
+                for (outer, width) in [((1024, 768), 768), ((1440, 900), 1144)] {
+                    let mounted = capture::inspect_wide_content(
+                        if selected {
+                            "r09-activity-selected"
+                        } else {
+                            "r09-activity-list"
+                        },
+                        render_at_width(&activity, &cache, width as f32),
+                        outer,
+                        appearance,
+                        theme,
+                        width,
+                    );
+                    assert!(mounted.contains("Coffee"));
+                    assert!(mounted.contains("Failed"));
+                    assert!(mounted.has_focus(row_focus_id(&id)));
+                    assert_eq!(
+                        mounted.contains("Open wallet details and actions"),
+                        selected
+                    );
+                }
+            }
+        }
     }
 }

@@ -9618,16 +9618,22 @@ impl App {
                 // panels retain signing, refund and replacement safeguards.
                 match target {
                     state::activity::ActivityTarget::Vault(tx) => {
-                        if let Some(panel) = self.panels.transactions.as_mut() {
+                        if self.panels.transactions.is_some() {
+                            let load = self.set_current_panel(Menu::Vault(
+                                menu::VaultSubMenu::Transactions(None),
+                            ));
+                            let panel = self.panels.transactions.as_mut().expect("checked above");
                             panel.preselect(tx);
-                            self.panels.current =
-                                Menu::Vault(menu::VaultSubMenu::Transactions(None));
+                            return load;
                         }
                     }
                     state::activity::ActivityTarget::Psbt(tx) => {
-                        if let Some(panel) = self.panels.psbts.as_mut() {
+                        if self.panels.psbts.is_some() {
+                            let load = self
+                                .set_current_panel(Menu::Vault(menu::VaultSubMenu::PSBTs(None)));
+                            let panel = self.panels.psbts.as_mut().expect("checked above");
                             panel.preselect(tx);
-                            self.panels.current = Menu::Vault(menu::VaultSubMenu::PSBTs(None));
+                            return load;
                         }
                     }
                     state::activity::ActivityTarget::Spark(payment) => {

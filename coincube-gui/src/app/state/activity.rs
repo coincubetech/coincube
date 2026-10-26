@@ -142,6 +142,56 @@ impl Activity {
         entries
     }
 
+    /// Older rows are incomplete while any paginated source still has history.
+    /// The last loaded timestamp from that source is an exclusive boundary:
+    /// another page may contain rows with the same timestamp.
+    pub fn complete_through(&self) -> Option<u64> {
+        [
+            (self.vault_has_more
+                && matches!(
+                    self.filters.wallet,
+                    view::activity::WalletFilter::All | view::activity::WalletFilter::Vault
+                ))
+            .then(|| {
+                self.vault
+                    .iter()
+                    .filter_map(|tx| tx.time.map(u64::from))
+                    .min()
+                    .unwrap_or(u64::MAX)
+            }),
+            (self.spark_has_more
+                && matches!(
+                    self.filters.wallet,
+                    view::activity::WalletFilter::All | view::activity::WalletFilter::Spark
+                ))
+            .then(|| {
+                self.spark
+                    .iter()
+                    .map(|row| row.timestamp)
+                    .filter(|time| *time > 0)
+                    .min()
+                    .unwrap_or(u64::MAX)
+            }),
+            (self.liquid_has_more
+                && matches!(
+                    self.filters.wallet,
+                    view::activity::WalletFilter::All | view::activity::WalletFilter::Liquid
+                ))
+            .then(|| {
+                self.liquid
+                    .iter()
+                    .map(|row| row.timestamp as u64)
+                    .filter(|time| *time > 0)
+                    .min()
+                    .unwrap_or(u64::MAX)
+            }),
+        ]
+        .iter()
+        .flatten()
+        .max()
+        .copied()
+    }
+
     fn load_more(&mut self, daemon: Option<Arc<dyn Daemon + Sync + Send>>) -> Task<Message> {
         let generation = self.generation;
         let mut tasks = Vec::new();
@@ -302,12 +352,16 @@ impl State for Activity {
                 ActivityMessage::Wallet(value) => self.filters.wallet = value,
                 ActivityMessage::Direction(value) => self.filters.direction = value,
                 ActivityMessage::Status(value) => self.filters.status = value,
-                ActivityMessage::DateStart(value) => self.filters.date_start = value,
-                ActivityMessage::DateEnd(value) => self.filters.date_end = value,
+                ActivityMessage::DateRange(value) => self.filters.date_range = value,
                 ActivityMessage::Search(value) => self.filters.search = value,
                 ActivityMessage::Clear => self.filters = Default::default(),
                 ActivityMessage::Select(id) => self.selected_id = Some(id),
-                ActivityMessage::CloseDetail => self.selected_id = None,
+                ActivityMessage::CloseDetail => {
+                    let selected = self.selected_id.take();
+                    return selected.map_or_else(Task::none, |id| {
+                        iced::widget::operation::focus(view::activity::row_focus_id(&id))
+                    });
+                }
                 ActivityMessage::Retry => return self.reload(_daemon, self.wallet.clone()),
                 ActivityMessage::LoadMore => return self.load_more(_daemon),
                 ActivityMessage::OpenDetail(target) => {
@@ -436,5 +490,53 @@ impl State for Activity {
             self.liquid.clear();
         }
         Task::batch(tasks)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn payment(id: &str, timestamp: u64) -> PaymentSummary {
+        PaymentSummary {
+            id: id.into(),
+            amount_sat: 1,
+            fees_sat: 0,
+            token_amount: None,
+            token_decimals: None,
+            token_ticker: None,
+            timestamp,
+            status: "completed".into(),
+            direction: "receive".into(),
+            method: "lightning".into(),
+            description: None,
+        }
+    }
+
+    #[test]
+    fn incomplete_source_hides_older_cross_wallet_days() {
+        let mut activity = Activity::new(None, None);
+        activity.spark = vec![payment("new", 300), payment("oldest-loaded", 200)];
+        activity.spark_has_more = true;
+        assert_eq!(activity.complete_through(), Some(200));
+        assert!(activity
+            .entries()
+            .iter()
+            .any(|entry| entry.timestamp == 300));
+        assert!(!activity
+            .entries()
+            .iter()
+            .filter(|entry| {
+                activity
+                    .complete_through()
+                    .is_none_or(|cutoff| entry.timestamp > cutoff)
+            })
+            .any(|entry| entry.timestamp == 200));
+        activity.spark.extend([payment("older", 100)]);
+        activity.spark_has_more = false;
+        assert_eq!(activity.complete_through(), None);
+        activity.spark_has_more = true;
+        activity.filters.wallet = view::activity::WalletFilter::Vault;
+        assert_eq!(activity.complete_through(), None);
     }
 }
