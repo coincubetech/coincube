@@ -24,7 +24,7 @@ use crate::{
 pub fn entangled_badge<'a, T: 'a>(status: Entanglement) -> Option<Container<'a, T>> {
     match status {
         Entanglement::Entangled => Some(badge::badge_pill(
-            "  Before fork · both chains  ",
+            "  Seen on both chains  ",
             "This deposit transaction has been seen on both Bitcoin and BTCB2. It may be replayable. Use the split wizard to verify and separate shared coins.",
         )),
         Entanglement::Unknown => Some(badge::badge_pill(
@@ -575,6 +575,17 @@ mod tests {
         assert!(entangled_badge::<Message>(Entanglement::Entangled).is_some());
         assert!(entangled_badge::<Message>(Entanglement::Unknown).is_some());
         assert!(entangled_badge::<Message>(Entanglement::NotEntangled).is_some());
+        let mounted = capture::inspect(
+            "vault-entangled-presence",
+            entangled_badge::<Message>(Entanglement::Entangled)
+                .unwrap()
+                .into(),
+            (400, 100),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(mounted.contains("Seen on both chains"));
+        assert!(!mounted.contains("Before fork"));
     }
 
     #[test]
