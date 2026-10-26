@@ -9,7 +9,7 @@ use coincube_core::miniscript::bitcoin::Amount;
 use coincube_ui::{
     color,
     component::{
-        amount::{BitcoinDisplayUnit, DisplayAmount},
+        amount::{format_f64_as_string, BitcoinDisplayUnit, DisplayAmount},
         button, form,
         text::*,
         transaction::{TransactionDirection, TransactionListItem},
@@ -126,9 +126,9 @@ fn fmt_rate_value(to_asset: SendAsset, rate: f64, unit: BitcoinDisplayUnit) -> S
     match to_asset {
         SendAsset::Usdt => {
             let v = if rate >= 1.0 {
-                format!("{rate:.2}")
+                format_f64_as_string(rate, ",", 2, false)
             } else if rate > 0.0 {
-                format!("{rate:.8}")
+                format_f64_as_string(rate, ",", 8, false)
             } else {
                 "—".to_string()
             };
@@ -152,34 +152,18 @@ fn card<'a>(
     content: impl Into<Element<'a, LiquidSwapMessage>>,
 ) -> Container<'a, LiquidSwapMessage> {
     Container::new(content)
-        .padding(20)
+        .padding(16)
         .width(Length::Fill)
         .style(theme::card::simple)
 }
 
-/// Small bordered "LIQUID" pill, as on the Send cards (both swap assets
-/// live on the Liquid network).
-fn liquid_pill<'a>() -> Element<'a, LiquidSwapMessage> {
-    Container::new(text("LIQUID").size(11).color(color::ORANGE))
-        .padding([2, 8])
-        .style(|_: &theme::Theme| container::Style {
-            border: iced::Border {
-                color: color::ORANGE,
-                width: 1.0,
-                radius: 8.0.into(),
-            },
-            ..Default::default()
-        })
-        .into()
-}
-
-/// Asset badge: circular network logo + ticker, mirroring the Send cards.
+/// Asset badge above the amount, as in the Liquid swap artboard.
 fn asset_badge<'a>(asset: SendAsset) -> Element<'a, LiquidSwapMessage> {
     Row::new()
         .spacing(8)
         .align_y(Alignment::Center)
-        .push(asset_network_logo(asset_slug(asset), "liquid", 32.0))
-        .push(text(ticker(asset)).size(H4_SIZE).bold())
+        .push(asset_network_logo(asset_slug(asset), "liquid", 22.0))
+        .push(text(ticker(asset)).size(P1_SIZE).bold())
         .into()
 }
 
@@ -217,9 +201,9 @@ fn flip_button<'a>() -> Element<'a, LiquidSwapMessage> {
     .padding(0)
     .on_press(LiquidSwapMessage::FlipAssets)
     .style(|t: &theme::Theme, _| iced_button::Style {
-        background: Some(Background::Color(t.colors.cards.simple.background)),
+        background: Some(Background::Color(t.colors.shell.background)),
         border: iced::Border {
-            color: color::ORANGE,
+            color: t.colors.shell.line,
             width: 1.0,
             radius: 20.0.into(),
         },
@@ -228,8 +212,7 @@ fn flip_button<'a>() -> Element<'a, LiquidSwapMessage> {
     .into()
 }
 
-/// One asset card: a header row, then an amount (left) beside the asset
-/// badge (right), then the balance + LIQUID pill. Mirrors the Send cards.
+/// One asset card: label, asset, amount, then balance and optional action.
 fn asset_card<'a>(
     header: &'a str,
     header_accessory: Option<Element<'a, LiquidSwapMessage>>,
@@ -239,32 +222,21 @@ fn asset_card<'a>(
     unit: BitcoinDisplayUnit,
     mask_amounts: bool,
 ) -> Element<'a, LiquidSwapMessage> {
-    let mut header_row = Row::new()
-        .align_y(Alignment::Center)
-        .push(text(header).size(P2_SIZE).style(theme::text::secondary))
-        .push(Space::new().width(Length::Fill));
-    if let Some(accessory) = header_accessory {
-        header_row = header_row.push(accessory);
-    }
-
-    let amount_row = Row::new()
-        .spacing(12)
-        .align_y(Alignment::Center)
-        .push(Container::new(amount).width(Length::Fill))
-        .push(asset_badge(asset));
-
-    let balance_row = Row::new()
+    let mut balance = Row::new()
         .align_y(Alignment::Center)
         .push(balance_row(asset, balance_base_units, unit, mask_amounts))
-        .push(Space::new().width(Length::Fill))
-        .push(liquid_pill());
+        .push(Space::new().width(Length::Fill));
+    if let Some(accessory) = header_accessory {
+        balance = balance.push(accessory);
+    }
 
     card(
         Column::new()
-            .spacing(14)
-            .push(header_row)
-            .push(amount_row)
-            .push(balance_row),
+            .spacing(10)
+            .push(text(header).size(P2_SIZE).style(theme::text::secondary))
+            .push(asset_badge(asset))
+            .push(amount)
+            .push(balance),
     )
     .into()
 }
@@ -418,10 +390,18 @@ fn input_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMess
         LiquidSwapMessage::AmountEditedPay,
     );
 
-    let swap_all = button::secondary(None, "Swap All")
-        .on_press(LiquidSwapMessage::SwapAll)
-        .width(Length::Fixed(110.0))
-        .into();
+    let swap_all = iced_button(
+        text("Swap All")
+            .size(P2_SIZE)
+            .bold()
+            .style(|t: &theme::Theme| iced::widget::text::Style {
+                color: Some(t.colors.shell.accent_ink),
+            }),
+    )
+    .padding(2)
+    .on_press(LiquidSwapMessage::SwapAll)
+    .style(theme::button::transparent)
+    .into();
 
     let from_card = asset_card(
         "YOU PAY",
@@ -433,7 +413,7 @@ fn input_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMess
         config.mask_amounts,
     );
 
-    // ── Rate chip + flip control (Aqua middle row) ───────────────────────
+    // ── Rate chip + direction control ────────────────────────────────────
     let rate_chip: Element<'a, LiquidSwapMessage> = match config.rate {
         Some(rate) => Container::new(
             text(format!(
@@ -442,12 +422,12 @@ fn input_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMess
                 fmt_rate_value(config.to_asset, rate, config.bitcoin_unit)
             ))
             .size(P2_SIZE)
-            .color(color::ORANGE),
+            .style(theme::text::primary),
         )
         .padding([6, 12])
-        .style(|_: &theme::Theme| container::Style {
+        .style(|t: &theme::Theme| container::Style {
             border: iced::Border {
-                color: color::ORANGE,
+                color: t.colors.shell.line,
                 width: 1.0,
                 radius: 16.0.into(),
             },
@@ -476,7 +456,7 @@ fn input_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMess
     );
 
     // ── Fee / status line ────────────────────────────────────────────────
-    let mut status = Column::new().spacing(6);
+    let mut status = Row::new().spacing(16).align_y(Alignment::Center);
     if let Some(q) = config.quote {
         status = status.push(
             Row::new()
@@ -501,14 +481,14 @@ fn input_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMess
     }
 
     let continue_btn = {
-        let mut b = button::primary(None, "Continue").width(Length::Fill);
+        let mut b = button::primary(None, "Continue").width(Length::Fixed(240.0));
         if config.quote_actionable {
             b = b.on_press(LiquidSwapMessage::Continue);
         }
         b
     };
 
-    // ── Horizontal "You pay → ⇅ → You receive" cards (Send/Receive style) ──
+    // ── Horizontal pay / direction / receive cards ───────────────────────
     let cards_row = Row::new()
         .spacing(12)
         .align_y(Alignment::Center)
@@ -534,18 +514,22 @@ fn input_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMess
     }
     content = content
         .push(cards_row)
-        // Rate chip + fee, centered under the cards.
         .push(
-            Container::new(rate_chip)
-                .width(Length::Fill)
-                .center_x(Length::Fill),
+            Container::new(
+                Row::new()
+                    .spacing(16)
+                    .align_y(Alignment::Center)
+                    .push(rate_chip)
+                    .push(status),
+            )
+            .width(Length::Fill)
+            .center_x(Length::Fill),
         )
         .push(
-            Container::new(status)
+            Container::new(continue_btn)
                 .width(Length::Fill)
                 .center_x(Length::Fill),
-        )
-        .push(continue_btn);
+        );
 
     if let Some(err) = config.error {
         content = content.push(error_card(err));
@@ -568,7 +552,7 @@ fn review_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMes
         // error (if any) so a failed swap isn't silent.
         let mut content = Column::new()
             .spacing(16)
-            .max_width(480)
+            .max_width(680)
             .push(h4_bold("Review swap"));
         if let Some(err) = config.error {
             content = content.push(error_card(err));
@@ -583,7 +567,7 @@ fn review_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMes
             .push(
                 button::secondary(None, "Back")
                     .on_press(LiquidSwapMessage::BackToInput)
-                    .width(Length::Fill),
+                    .width(Length::Fixed(120.0)),
             );
         return Container::new(content)
             .width(Length::Fill)
@@ -592,45 +576,62 @@ fn review_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMes
     };
 
     let line = |label: &'a str, value: String| -> Element<'a, LiquidSwapMessage> {
-        Row::new()
-            .push(text(label).size(P1_SIZE).style(theme::text::secondary))
-            .push(Space::new().width(Length::Fill))
-            .push(text(value).size(P1_SIZE).bold())
+        Container::new(
+            Row::new()
+                .push(text(label).size(P1_SIZE).style(theme::text::secondary))
+                .push(Space::new().width(Length::Fill))
+                .push(text(value).size(P1_SIZE).bold()),
+        )
+        .padding([12, 0])
+        .width(Length::Fill)
+        .into()
+    };
+    let rule = || -> Element<'a, LiquidSwapMessage> {
+        Container::new(Space::new().height(Length::Fixed(1.0)))
+            .width(Length::Fill)
+            .style(|t: &theme::Theme| container::Style {
+                background: Some(Background::Color(t.colors.shell.line)),
+                ..Default::default()
+            })
             .into()
     };
 
-    let summary = card(
-        Column::new()
-            .spacing(12)
-            .push(line(
-                "You pay",
-                fmt_amount(config.from_asset, q.from_total_base(), config.bitcoin_unit),
-            ))
-            .push(line(
-                "You receive",
-                fmt_amount(config.to_asset, q.receiver_base, config.bitcoin_unit),
-            ))
-            .push(line(
-                "Rate",
-                format!(
-                    "1 {} = {}",
-                    ticker(config.from_asset),
-                    fmt_rate_value(config.to_asset, q.rate_to_per_from(), config.bitcoin_unit)
-                ),
-            ))
-            .push(line(
-                "SideSwap + network fee",
-                fmt_amount(config.from_asset, q.fee_base, config.bitcoin_unit),
-            ))
-            .push(line(
-                "Quote expires in",
-                if config.is_sending {
-                    "processing…".to_string()
-                } else {
-                    format!("{}s", config.quote_remaining)
-                },
-            )),
-    );
+    let summary = Column::new()
+        .width(Length::Fill)
+        .push(rule())
+        .push(line(
+            "You pay",
+            fmt_amount(config.from_asset, q.from_total_base(), config.bitcoin_unit),
+        ))
+        .push(rule())
+        .push(line(
+            "You receive",
+            fmt_amount(config.to_asset, q.receiver_base, config.bitcoin_unit),
+        ))
+        .push(rule())
+        .push(line(
+            "Rate",
+            format!(
+                "1 {} = {}",
+                ticker(config.from_asset),
+                fmt_rate_value(config.to_asset, q.rate_to_per_from(), config.bitcoin_unit)
+            ),
+        ))
+        .push(rule())
+        .push(line(
+            "SideSwap + network fee",
+            fmt_amount(config.from_asset, q.fee_base, config.bitcoin_unit),
+        ))
+        .push(rule())
+        .push(line(
+            "Quote expires in",
+            if config.is_sending {
+                "processing…".to_string()
+            } else {
+                format!("{}s", config.quote_remaining)
+            },
+        ))
+        .push(rule());
 
     let confirm_btn = {
         let label = if config.is_sending {
@@ -642,7 +643,7 @@ fn review_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMes
         } else {
             "Confirm swap"
         };
-        let mut b = button::primary(None, label).width(Length::Fill);
+        let mut b = button::primary(None, label).width(Length::Fixed(180.0));
         // Disabled for an expired quote, a send in flight, or a wallet that
         // hasn't finished syncing (the swap would fail server-side).
         if config.confirm_enabled {
@@ -653,11 +654,11 @@ fn review_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMes
 
     let back_btn = button::secondary(None, "Back")
         .on_press(LiquidSwapMessage::BackToInput)
-        .width(Length::Fill);
+        .width(Length::Fixed(120.0));
 
     let mut content = Column::new()
         .spacing(16)
-        .max_width(480)
+        .max_width(680)
         .push(h4_bold("Review swap"));
     if config.syncing {
         content = content.push(hint_banner(
@@ -668,7 +669,13 @@ fn review_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMes
             "Couldn't sync the wallet — swaps are paused. It'll retry automatically.",
         ));
     }
-    content = content.push(summary).push(confirm_btn).push(back_btn);
+    content = content.push(summary).push(
+        Row::new()
+            .align_y(Alignment::Center)
+            .push(back_btn)
+            .push(Space::new().width(Length::Fill))
+            .push(confirm_btn),
+    );
 
     if let Some(err) = config.error {
         content = content.push(error_card(err));
@@ -723,6 +730,120 @@ pub fn liquid_swap_view<'a>(config: LiquidSwapConfig<'a>) -> Element<'a, LiquidS
             "is on its way.",
             LiquidSwapMessage::Done,
         ),
+    }
+}
+
+#[cfg(test)]
+mod presentation_tests {
+    use super::*;
+    use crate::app::view::shared::landing::capture;
+    use breez_sdk_liquid::prelude::{
+        LiquidAddressData, Network, PrepareSendResponse, SendDestination,
+    };
+    use coincube_ui::component::quote_display;
+
+    #[test]
+    fn swap_input_and_review_fit_compact_and_wide_themes() {
+        let pay = form::Value::<String>::default();
+        let receive = form::Value::<String>::default();
+        let sent_quote = quote_display::random_quote("synthetic-liquid-swap");
+        let image = quote_display::image_handle_for_context("synthetic-liquid-swap");
+        let quote = SwapQuote {
+            prepare: PrepareSendResponse {
+                destination: SendDestination::LiquidAddress {
+                    address_data: LiquidAddressData {
+                        address: "lq1synthetic-swap-fixture".into(),
+                        network: Network::Bitcoin,
+                        asset_id: None,
+                        amount: None,
+                        amount_sat: None,
+                        label: None,
+                        message: None,
+                    },
+                    bip353_address: None,
+                },
+                amount: None,
+                fees_sat: Some(210),
+                estimated_asset_fees: None,
+                exchange_amount_sat: Some(5_790),
+                disable_mrh: None,
+                payment_timeout_sec: None,
+            },
+            receiver_base: 500_000_000,
+            exchange_base: 5_790,
+            fee_base: 210,
+        };
+        for (width, height) in [(1024, 768), (1440, 900)] {
+            for (appearance, theme) in [
+                ("dark", theme::Theme::dark()),
+                ("light", theme::Theme::light()),
+            ] {
+                for (phase, actionable, suffix) in [
+                    (SwapPhase::Input, true, "input-ready"),
+                    (SwapPhase::Input, false, "input-disabled"),
+                    (SwapPhase::Review, true, "review-confirm"),
+                    (SwapPhase::Review, false, "review-disabled"),
+                ] {
+                    let inspection = capture::inspect(
+                        &format!("liquid-swap-{suffix}"),
+                        liquid_swap_view(LiquidSwapConfig {
+                            phase,
+                            from_asset: SendAsset::Lbtc,
+                            to_asset: SendAsset::Usdt,
+                            btc_balance: Amount::from_sat(12_784),
+                            usdt_balance: 1_037_000_000,
+                            pay_input: &pay,
+                            receive_input: &receive,
+                            quote: Some(&quote),
+                            rate: Some(82760.12),
+                            quoting: false,
+                            quote_remaining: if actionable { 24 } else { 0 },
+                            quote_actionable: actionable,
+                            confirm_enabled: actionable,
+                            is_sending: false,
+                            syncing: false,
+                            sync_failed: false,
+                            needs_lbtc_for_fees: false,
+                            bitcoin_unit: BitcoinDisplayUnit::Sats,
+                            error: None,
+                            sent_amount_display: "",
+                            sent_quote: &sent_quote,
+                            sent_image_handle: &image,
+                            recent_swaps: &[],
+                            usdt_id: "synthetic-usdt-id",
+                            fiat_converter: None,
+                            mask_amounts: false,
+                        }),
+                        (width, height),
+                        appearance,
+                        theme,
+                    );
+                    assert!(inspection.contains(if phase == SwapPhase::Input {
+                        "YOU PAY"
+                    } else {
+                        "You pay"
+                    }));
+                    assert!(inspection.contains(if phase == SwapPhase::Input {
+                        "YOU RECEIVE"
+                    } else {
+                        "You receive"
+                    }));
+                    assert!(inspection.contains(if phase == SwapPhase::Input {
+                        "Continue"
+                    } else {
+                        "Confirm swap"
+                    }));
+                    assert!(inspection.contains(if phase == SwapPhase::Input {
+                        "82,760.12 USDt"
+                    } else {
+                        "83,333.33 USDt"
+                    }));
+                    if phase == SwapPhase::Review {
+                        assert!(inspection.contains("Back"));
+                    }
+                }
+            }
+        }
     }
 }
 
