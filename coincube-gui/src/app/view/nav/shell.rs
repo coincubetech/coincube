@@ -17,9 +17,8 @@ use crate::{
 };
 use coincube_ui::{
     icon::{
-        arrow_down, chevron_right, coins_outline_icon, cube_icon, eye_icon, eye_slash_icon,
-        home_icon, lightning_outline_icon, receipt_icon, recovery_icon, settings_icon, shop_icon,
-        vault_icon,
+        arrow_down, chevron_right, cube_icon, eye_icon, eye_slash_icon, home_icon,
+        lightning_outline_icon, receipt_icon, recovery_icon, settings_icon, shop_icon, vault_icon,
     },
     theme,
     widget::{action::Action, Column, ColumnExt, Element, Row, Text},
@@ -36,7 +35,6 @@ pub const LAUNCHER_RETURN_ID: &str = "tenshu.launcher.return";
 pub const CUBE_SWITCHER_ID: &str = "tenshu.cube.switcher";
 pub const CUBE_LOCK_ID: &str = "tenshu.cube.lock.ask";
 pub const CUBE_LOCK_CANCEL_ID: &str = "tenshu.cube.lock.cancel";
-pub const VAULT_TOOLS_ID: &str = "tenshu.vault.tools";
 pub const SETTINGS_ID: &str = "tenshu.shell.settings";
 pub const MIDDLE_SCROLL_ID: &str = "tenshu.shell.middle-scroll";
 pub const BALANCE_PRIVACY_ID: &str = "tenshu.balance-privacy.toggle";
@@ -49,8 +47,6 @@ pub fn escape_intent(state: ShellState) -> Option<Message> {
         Some(Message::CancelCubeLock)
     } else if state.switcher_open {
         Some(Message::ToggleCubeSwitcher)
-    } else if state.tools_open {
-        Some(Message::ToggleVaultTools)
     } else {
         None
     }
@@ -60,7 +56,6 @@ pub fn escape_intent(state: ShellState) -> Option<Message> {
 pub struct ShellState {
     pub switcher_open: bool,
     pub lock_confirmation: bool,
-    pub tools_open: bool,
     pub backup_attention: bool,
 }
 
@@ -282,7 +277,6 @@ fn nav_row<'a>(
     } else {
         match label.as_str() {
             "Lock Cube" => CUBE_LOCK_ID.to_owned(),
-            "Tools" => VAULT_TOOLS_ID.to_owned(),
             "Settings" => SETTINGS_ID.to_owned(),
             "All Cubes" => "tenshu.launcher.all-cubes".to_owned(),
             _ => format!("tenshu.shell.nav.{label}"),
@@ -593,40 +587,6 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
                 for item in subpages {
                     middle = middle.push(subitem(menu, item, None));
                 }
-            }
-        }
-    }
-    if ctx.has_vault || ctx.has_imported_bitcoin {
-        middle = middle.push(section("VAULT"));
-        middle = middle.push(nav_row(
-            "Tools",
-            Some(coins_outline_icon()),
-            state.tools_open,
-            Some(Message::ToggleVaultTools),
-            false,
-            None,
-        ));
-        if state.tools_open {
-            let tools = super::vault::items(ctx);
-            for item in tools.into_iter().filter(|item| {
-                matches!(
-                    &item.route,
-                    Menu::Vault(
-                        VaultSubMenu::Coins(_)
-                            | VaultSubMenu::PSBTs(_)
-                            | VaultSubMenu::Recovery
-                            | VaultSubMenu::Claim
-                    )
-                )
-            }) {
-                let label = match &item.route {
-                    Menu::Vault(VaultSubMenu::Coins(_)) => "Coin control",
-                    Menu::Vault(VaultSubMenu::PSBTs(_)) => "PSBT proposals",
-                    Menu::Vault(VaultSubMenu::Recovery) => "Recovery path",
-                    Menu::Vault(VaultSubMenu::Claim) => "Split coins",
-                    _ => item.label,
-                };
-                middle = middle.push(subitem(menu, item, Some(label)));
             }
         }
     }

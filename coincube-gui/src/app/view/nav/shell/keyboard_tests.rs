@@ -225,7 +225,8 @@ impl Operation for MiddleEdgeSnapshot {
     fn focusable(&mut self, id: Option<&Id>, bounds: Rectangle, _: &mut dyn Focusable) {
         match id {
             Some(id) if id == &Id::new("tenshu.shell.nav.Spark") => self.first = Some(bounds),
-            Some(id) if id == &Id::new(VAULT_TOOLS_ID) => self.last = Some(bounds),
+            // The fixture's last middle row: Vault (no Liquid or Marketplace).
+            Some(id) if id == &Id::new("tenshu.shell.nav.Vault") => self.last = Some(bounds),
             _ => {}
         }
     }
@@ -491,11 +492,10 @@ fn signed_in_connect_chip_opens_account_sheet_intent() {
 }
 
 #[test]
-fn shell_escape_prefers_review_then_switcher_then_tools() {
+fn shell_escape_prefers_review_then_switcher() {
     let all = ShellState {
         switcher_open: true,
         lock_confirmation: true,
-        tools_open: true,
         backup_attention: false,
     };
     assert!(matches!(escape_intent(all), Some(Message::CancelCubeLock)));
@@ -505,14 +505,6 @@ fn shell_escape_prefers_review_then_switcher_then_tools() {
             ..all
         }),
         Some(Message::ToggleCubeSwitcher)
-    ));
-    assert!(matches!(
-        escape_intent(ShellState {
-            lock_confirmation: false,
-            switcher_open: false,
-            ..all
-        }),
-        Some(Message::ToggleVaultTools)
     ));
     assert!(escape_intent(ShellState::default()).is_none());
 }
@@ -1169,6 +1161,31 @@ fn wallets_have_no_sidebar_sub_menus() {
         local_state_exists: true,
     };
     let baseline = sidebar_targets(&ctx, &Menu::Cube(CubeSubMenu::Overview));
+    // No Vault Tools group either: those tools are links on the Vault page.
+    let all_ids = {
+        load_fonts();
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            14.into(),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let menu = Menu::Vault(VaultSubMenu::Overview);
+        let mut element = sidebar(&menu, &ctx, ShellState::default());
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, Size::new(320.0, 4000.0)),
+        );
+        focus_snapshot(&mut element, &mut tree, &node, &renderer).bounds
+    };
+    assert!(
+        !all_ids
+            .iter()
+            .any(|(id, _)| *id == Id::new("tenshu.shell.nav.Tools")),
+        "the sidebar still offers Vault Tools"
+    );
     for menu in [
         Menu::Spark(SparkSubMenu::Overview),
         Menu::Spark(SparkSubMenu::Send),
