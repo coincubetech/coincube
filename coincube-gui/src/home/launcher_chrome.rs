@@ -608,7 +608,17 @@ pub(super) fn dock<'a>(
             .wrapping(text::Wrapping::WordOrGlyph)
             .width(Length::Fill)
     });
-    let key = (projection.local_total > 0).then(|| key_button(home.catalog.key_open()));
+    let key = (projection.filtered_total > 0).then(|| key_button(home.catalog.key_open()));
+    // Create and Import act on the current network: name it once more than
+    // one network is listed, since the filter alone may not show which.
+    let target = (projection.network_counts.len() > 1).then(|| {
+        words(
+            format!("New Cubes: {}", network_name(home.network)),
+            12.0,
+            font::REGULAR,
+            Ink::Muted,
+        )
+    });
     Container::new(
         Row::new()
             .spacing(8)
@@ -616,6 +626,7 @@ pub(super) fn dock<'a>(
             .height(Length::Fill)
             .push(create)
             .push(import)
+            .push(target)
             .push(recover)
             .push(Space::new().width(Length::Fixed(16.0)))
             .push(limit)
@@ -812,7 +823,16 @@ pub(super) fn network_layer<'a>(
                 Ink::Body,
             ))
             .push(Space::new().width(Length::Fill))
-            .push(words(count.to_string(), 12.0, font::REGULAR, Ink::Muted));
+            .push(words(
+                if projection.unread.contains(&chain) {
+                    "Unavailable".to_string()
+                } else {
+                    count.to_string()
+                },
+                12.0,
+                font::REGULAR,
+                Ink::Muted,
+            ));
         rows = rows.push(
             Action::new(
                 network_option_id(chain),
@@ -1016,7 +1036,7 @@ pub(super) fn snapshot(home: &Home, projection: &Projection<'_>) -> ChromeSnapsh
         connect,
         links,
         limit: at_limit.then(|| limit_text(projection)),
-        key: projection.local_total > 0,
+        key: projection.filtered_total > 0,
     }
 }
 

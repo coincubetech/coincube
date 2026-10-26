@@ -911,8 +911,8 @@ pub(super) fn list_body(home: &Home) -> Element<'_, ViewMessage> {
         coincube_ui::theme::palette::ThemeMode::Light
     );
     let fallback = (home.catalog.mode == LauncherMode::Cubes
-        && projection.local_total > launcher_catalog::FLOOR_MAX_CUBES)
-        .then(|| tenshu::caption("List view for more than 20 Cubes on this network."));
+        && projection.filtered_total > launcher_catalog::FLOOR_MAX_CUBES)
+        .then(|| tenshu::caption("List view for more than 20 Cubes."));
     Column::new()
         .spacing(8)
         .push(fallback)
@@ -2931,6 +2931,8 @@ mod tests {
             tier: "Free",
             has_local_list: true,
             hidden: 0,
+            filtered_total: 3,
+            unread: Vec::new(),
             network_counts: vec![(ChainId::Bitcoin, 3)],
             filter: launcher_catalog::NetworkFilter::All,
         };

@@ -469,6 +469,8 @@ pub struct Home {
     network_catalog_requested: Vec<ChainId>,
     /// Each load claims a generation; an older read is dropped on arrival.
     network_catalog_generation: u64,
+    /// Networks whose last read failed. Their previous list, if any, stays.
+    network_catalog_unread: Vec<ChainId>,
     /// Descriptor checksums that already have a Bitcoin Blake2b claim target
     /// on this device. Resolved from the fork chain's settings file when the
     /// network list is refreshed — never from the view, which would put a file
@@ -658,6 +660,7 @@ impl Home {
                 network_catalog: Vec::new(),
                 network_catalog_requested: Vec::new(),
                 network_catalog_generation: 0,
+                network_catalog_unread: Vec::new(),
                 displayed_networks: if developer_mode {
                     NETWORKS.to_vec()
                 } else {
@@ -1664,11 +1667,24 @@ impl Home {
         // List presentation messages never enter the lifecycle dispatch. The
         // transient selection is reconciled with whatever screen and list
         // each message leaves, including after an early return.
+        // Connect results can grant or withdraw Bitcoin Blake2b, which changes
+        // which networks are listed (the GUI's preference reload covers the
+        // other causes).
+        let connect = matches!(
+            &message,
+            Message::View(ViewMessage::ConnectAccount(_) | ViewMessage::ConnectSheetAccount(_))
+        );
         let task = match message {
             Message::View(ViewMessage::Catalog(message)) => self.update_catalog(message),
             message => self.update_lifecycle(message),
         };
         self.reconcile_catalog();
+        // Once the catalog is in use, read the networks such a change lists.
+        if connect && self.network_catalog_generation > 0 {
+            if let Some(load) = self.refresh_network_catalog(false) {
+                return Task::batch([task, load]);
+            }
+        }
         task
     }
 
@@ -1691,6 +1707,8 @@ impl Home {
         let generation = self.network_catalog_generation;
         self.network_catalog
             .retain(|(chain, _)| wanted.contains(chain));
+        self.network_catalog_unread
+            .retain(|chain| wanted.contains(chain));
         self.network_catalog_requested = wanted.clone();
         Some(Task::batch(wanted.into_iter().map(|chain| {
             let dir = self.datadir_path.network_directory(chain);
@@ -1719,10 +1737,11 @@ impl Home {
             Message::View(ViewMessage::RunCatalog(key)) => {
                 self.catalog.open_from_floor = false;
                 let Some(index) = self.catalog_index(&key) else {
-                    // A List row read from another network: make that network
-                    // current and select the Cube; Open then runs as usual.
+                    // A Cube read from another network, or one whose network
+                    // is still being checked: switch, then open it once the
+                    // checked list confirms it.
                     return self
-                        .select_on_other_network(&key)
+                        .select_on_other_network(&key, launcher_catalog::PendingIntent::Open)
                         .unwrap_or_else(Task::none);
                 };
                 Message::View(ViewMessage::Run(index))
@@ -1730,7 +1749,9 @@ impl Home {
             Message::View(ViewMessage::RunFloorCatalog(key)) => {
                 self.catalog.open_from_floor = false;
                 let Some(index) = self.catalog_index(&key) else {
-                    return Task::none();
+                    return self
+                        .select_on_other_network(&key, launcher_catalog::PendingIntent::Open)
+                        .unwrap_or_else(Task::none);
                 };
                 self.catalog.open_from_floor = self.catalog.selected.as_ref() == Some(&key)
                     && self.catalog.mode == launcher_catalog::LauncherMode::Cubes;
@@ -2671,13 +2692,20 @@ impl Home {
                 // A read superseded by a newer load, or for a network that
                 // has since become current or stopped being listed, is
                 // dropped: it describes nothing on screen.
-                if generation == self.network_catalog_generation
-                    && self.network_catalog_requested.contains(&chain)
+                if generation != self.network_catalog_generation
+                    || !self.network_catalog_requested.contains(&chain)
                 {
-                    match self.network_catalog.iter_mut().find(|(c, _)| *c == chain) {
+                    return Task::none();
+                }
+                self.network_catalog_unread.retain(|c| *c != chain);
+                match cubes {
+                    Ok(cubes) => match self.network_catalog.iter_mut().find(|(c, _)| *c == chain) {
                         Some((_, list)) => *list = cubes,
                         None => self.network_catalog.push((chain, cubes)),
-                    }
+                    },
+                    // Keep whatever was last read; the menu says the
+                    // network is unavailable rather than showing 0 Cubes.
+                    Err(_) => self.network_catalog_unread.push(chain),
                 }
                 Task::none()
             }
@@ -3141,11 +3169,18 @@ impl Home {
                     }
                     // A Cube picked on another network made that network
                     // current; now that its list is checked, select it.
+                    // Open replays as `RunCatalog`, which resolves the Cube
+                    // through `catalog_index` on this checked list again.
                     let select = match self.catalog.pending_select.take() {
-                        Some(key) if key.chain == self.network => {
-                            Task::done(Message::View(ViewMessage::Catalog(
-                                launcher_catalog::CatalogMessage::SelectFloor(key),
-                            )))
+                        Some((key, intent)) if key.chain == self.network => {
+                            Task::done(Message::View(match intent {
+                                launcher_catalog::PendingIntent::Select => ViewMessage::Catalog(
+                                    launcher_catalog::CatalogMessage::SelectFloor(key),
+                                ),
+                                launcher_catalog::PendingIntent::Open => {
+                                    ViewMessage::RunCatalog(key)
+                                }
+                            }))
                         }
                         _ => Task::none(),
                     };
@@ -6935,7 +6970,7 @@ pub enum Message {
     NetworkCatalogLoaded {
         generation: u64,
         chain: ChainId,
-        cubes: Vec<CubeSettings>,
+        cubes: Result<Vec<CubeSettings>, String>,
     },
 }
 
@@ -7590,19 +7625,22 @@ fn probe_network_datadir<C: Into<crate::chain::ChainId>>(
 /// read-only: unlike [`check_network_datadir`] it creates no directory or
 /// config, so browsing never writes to a network. Records that claim another
 /// chain are left out, as the open path would refuse them.
-async fn read_network_catalog(chain: ChainId, dir: NetworkDirectory) -> Vec<CubeSettings> {
+async fn read_network_catalog(
+    chain: ChainId,
+    dir: NetworkDirectory,
+) -> Result<Vec<CubeSettings>, String> {
     if !dir.path().join(settings::SETTINGS_FILE_NAME).exists() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     match settings::Settings::from_file(&dir) {
-        Ok(settings) => settings
+        Ok(settings) => Ok(settings
             .cubes
             .into_iter()
             .filter(|cube| cube.network == chain)
-            .collect(),
+            .collect()),
         Err(e) => {
             tracing::warn!("Couldn't read the {} Cube list: {}", chain, e);
-            Vec::new()
+            Err(e.to_string())
         }
     }
 }
@@ -7716,6 +7754,7 @@ mod network_catalog_tests {
         let dir = datadir.network_directory(ChainId::Testnet4);
         assert!(read_network_catalog(ChainId::Testnet4, dir.clone())
             .await
+            .unwrap()
             .is_empty());
         assert!(
             !dir.path().exists(),
@@ -7736,7 +7775,9 @@ mod network_catalog_tests {
             serde_json::to_vec(&settings).unwrap(),
         )
         .unwrap();
-        let cubes = read_network_catalog(ChainId::Testnet4, dir.clone()).await;
+        let cubes = read_network_catalog(ChainId::Testnet4, dir.clone())
+            .await
+            .unwrap();
         assert_eq!(
             cubes.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
             ["t1"]
