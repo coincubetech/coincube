@@ -171,6 +171,7 @@ impl KeyCard {
             (KeyMode::Peek | KeyMode::Shut, false) => KeyMode::Closed,
             (mode, _) => mode,
         };
+        self.settle();
     }
 
     fn shut(&mut self) {
@@ -179,6 +180,7 @@ impl KeyCard {
         } else {
             KeyMode::Closed
         };
+        self.settle();
     }
 
     fn click(&mut self) {
@@ -186,6 +188,18 @@ impl KeyCard {
             self.shut();
         } else {
             self.mode = KeyMode::Pinned;
+        }
+    }
+
+    /// A hidden card is no longer under the pointer, and Iced sends no exit
+    /// for an area it stops drawing. Leaving the wrap that way clears a shut
+    /// card too, as the prototype's `keyLeave` does.
+    fn settle(&mut self) {
+        if !matches!(self.mode, KeyMode::Peek | KeyMode::Pinned) {
+            self.over_card = false;
+        }
+        if self.mode == KeyMode::Shut && !self.hovered() {
+            self.mode = KeyMode::Closed;
         }
     }
 }
@@ -1767,6 +1781,44 @@ mod tests {
             home.catalog.key
         );
         assert_eq!(home.catalog.key.mode, KeyMode::Peek);
+    }
+
+    #[test]
+    fn hiding_the_key_card_under_the_pointer_lets_hover_peek_again() {
+        let mut home = home_with(&[("a", "Alpha")]);
+        let button = bounds_of(
+            &focus_bounds_window(launcher_view(&home), 1440.0, 900.0),
+            &key_id(),
+        );
+        let on_button = button.center();
+        let card = iced::Point::new(on_button.x, button.y - 40.0);
+        let away = iced::Point::new(720.0, 450.0);
+        // Escape while resting on a peeked card.
+        pointer_path(&mut home, &[on_button, card]);
+        assert_eq!(home.catalog.key.mode, KeyMode::Peek);
+        catalog(&mut home, CatalogMessage::KeyClose);
+        assert!(!home.catalog.key_open());
+        pointer_path(&mut home, &[away, on_button]);
+        assert_eq!(
+            home.catalog.key.mode,
+            KeyMode::Peek,
+            "hover must peek again: {:?}",
+            home.catalog.key
+        );
+        // A keyboard toggle that hides a pinned card under the pointer.
+        catalog(&mut home, CatalogMessage::KeyToggle);
+        // Each call starts a fresh pointer, so the path begins on the button.
+        pointer_path(&mut home, &[on_button, card]);
+        assert_eq!(home.catalog.key.mode, KeyMode::Pinned);
+        catalog(&mut home, CatalogMessage::KeyToggle);
+        assert!(!home.catalog.key_open());
+        pointer_path(&mut home, &[away, on_button]);
+        assert_eq!(
+            home.catalog.key.mode,
+            KeyMode::Peek,
+            "{:?}",
+            home.catalog.key
+        );
     }
 
     #[test]
