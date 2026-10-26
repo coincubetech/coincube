@@ -138,6 +138,166 @@ mod seed_export_duress_gui_tests {
     }
 
     #[test]
+    fn verified_duress_hides_foreground_seed_reveal_before_wipe_task_runs() {
+        let result = std::thread::Builder::new()
+            .name("seed-export-immediate-global-seal".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = runtime.enter();
+                let _guard = crate::app::session::test_guard();
+                let path = std::env::temp_dir()
+                    .join(format!("seed-export-global-seal-{}", uuid::Uuid::new_v4()));
+                let (source, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+                let root = source.datadir().clone();
+                let proof = crate::services::unlock::throttle::verified_seed_export_duress_for_test(
+                    path.clone(),
+                    source.cube_settings().id.clone(),
+                    source.cube_settings().network,
+                    source.cache().app_generation,
+                );
+                let (home, startup) = home::Home::new_for_chain(root, None);
+                drop(startup);
+                let (mut gui, pane_id) = GUI::reviewer_split_app_home_gui(source, home);
+                let sibling_pane = gui.focus.unwrap();
+                let generation = gui.panes.get(pane_id).unwrap().tabs[0]
+                    .app_generation_token()
+                    .unwrap();
+                drop(
+                    gui.panes.get_mut(pane_id).unwrap().tabs[0]
+                        .update(tab::Message::UnlockMotionTick(Instant::now())),
+                );
+
+                let (mut revealing, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+                revealing.reviewer_show_seed_phrase_for_test();
+                let stopped =
+                    crate::app::tests::reviewer_attach_counted_claim_context(&mut revealing);
+                let pane = gui.panes.get_mut(sibling_pane).unwrap();
+                pane.tabs.push(tab::Tab::new(3, tab::State::App(revealing)));
+                pane.focused_tab = 1;
+                crate::app::session::open(
+                    "foreground-seed-reveal",
+                    zeroize::Zeroizing::new("2468".into()),
+                );
+
+                // Hold the returned Task: local wipe and DuressActivated are
+                // delayed. The foreground reveal must already be gone.
+                let pending_activation = gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::tab(
+                        1,
+                        tab::Message::AppAsync(
+                            generation,
+                            Box::new(tab::Message::Run(AppMessage::View(
+                                crate::app::view::Message::DuressActivateLocal(proof),
+                            ))),
+                        ),
+                    ),
+                ));
+                let pane = gui.panes.get(pane_id).unwrap();
+                assert_eq!(pane.tabs.len(), 1, "seed reveal sibling was retired");
+                assert_eq!(pane.focused_tab, 0);
+                assert!(matches!(pane.tabs[0].state, tab::State::DuressActive(_)));
+                assert_eq!(gui.focus, Some(pane_id));
+                assert_eq!(gui.panes.iter().count(), 1, "sibling pane was retired");
+                assert!(!crate::app::session::is_open());
+                assert_eq!(stopped.load(std::sync::atomic::Ordering::SeqCst), 1);
+                drop(pending_activation);
+                drop(gui);
+                std::fs::remove_dir_all(path).ok();
+            })
+            .unwrap()
+            .join();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[test]
+    fn unlock_duress_hides_foreground_seed_reveal_before_wipe_task_runs() {
+        let result = std::thread::Builder::new()
+            .name("unlock-duress-immediate-global-seal".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = runtime.enter();
+                let _guard = crate::app::session::test_guard();
+                let path = std::env::temp_dir().join(format!(
+                    "unlock-duress-global-seal-{}",
+                    uuid::Uuid::new_v4()
+                ));
+                let (source, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+                let root = source.datadir().clone();
+                let (home, startup) = home::Home::new_for_chain(root.clone(), None);
+                drop(startup);
+                let (mut gui, pane_id) = GUI::reviewer_split_app_home_gui(source, home);
+                let sibling_pane = gui.focus.unwrap();
+                let pin = crate::pin_entry::PinEntry::new(
+                    crate::app::settings::CubeSettings::new(
+                        "Locked Cube".into(),
+                        crate::chain::ChainId::Bitcoin,
+                    ),
+                    path.clone(),
+                    crate::pin_entry::PinEntrySuccess::LoadApp {
+                        datadir: root,
+                        config: crate::app::Config::new(false),
+                        network: bitcoin::Network::Bitcoin,
+                        internal_bitcoind: None,
+                        backup: None,
+                        wallet_settings: None,
+                        connect_client: None,
+                    },
+                    None,
+                );
+                gui.panes.get_mut(pane_id).unwrap().tabs[0].state = tab::State::PinEntry(pin);
+
+                let (mut revealing, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+                revealing.reviewer_show_seed_phrase_for_test();
+                let stopped =
+                    crate::app::tests::reviewer_attach_counted_claim_context(&mut revealing);
+                let pane = gui.panes.get_mut(sibling_pane).unwrap();
+                pane.tabs.push(tab::Tab::new(3, tab::State::App(revealing)));
+                pane.focused_tab = 1;
+                crate::app::session::open(
+                    "foreground-seed-reveal",
+                    zeroize::Zeroizing::new("2468".into()),
+                );
+
+                let pending_activation = gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::tab(
+                        1,
+                        tab::Message::PinEntry(crate::pin_entry::Message::DuressDetected {
+                            account_id: None,
+                        }),
+                    ),
+                ));
+                let pane = gui.panes.get(pane_id).unwrap();
+                assert_eq!(pane.tabs.len(), 1);
+                assert_eq!(pane.focused_tab, 0);
+                assert!(matches!(pane.tabs[0].state, tab::State::DuressActive(_)));
+                assert_eq!(gui.focus, Some(pane_id));
+                assert_eq!(gui.panes.iter().count(), 1);
+                assert!(!crate::app::session::is_open());
+                assert_eq!(stopped.load(std::sync::atomic::Ordering::SeqCst), 1);
+                drop(pending_activation);
+                drop(gui);
+                std::fs::remove_dir_all(path).ok();
+            })
+            .unwrap()
+            .join();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[test]
     fn closed_origin_tab_routes_only_same_root_verified_duress_to_surviving_home() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -193,6 +353,11 @@ mod seed_export_duress_gui_tests {
             gui.panes.get(pane_id).unwrap().tabs[0].state,
             tab::State::Home(_)
         ));
+        assert_eq!(
+            gui.panes.get(pane_id).unwrap().tabs.len(),
+            1,
+            "a wrong-root proof must not retire an unrelated surface"
+        );
         release.send(proof).unwrap();
         let delivered = runtime.block_on(async {
             let mut stream = iced_runtime::task::into_stream(pending).unwrap();
@@ -819,10 +984,19 @@ impl GUI {
             .get(pane_id)
             .is_some_and(|pane| pane.tabs.iter().any(|tab| tab.id == tab_id))
         {
-            return self.update(Message::Pane(
+            let was_duress = self.panes.get(pane_id).is_some_and(|pane| {
+                pane.tabs
+                    .iter()
+                    .any(|tab| tab.id == tab_id && matches!(tab.state, tab::State::DuressActive(_)))
+            });
+            let task = self.update(Message::Pane(
                 pane_id,
                 pane::Message::tab(tab_id, tab::Message::LocalDuress(proof)),
             ));
+            if !was_duress {
+                self.seal_verified_seed_export_duress_surface(pane_id, tab_id);
+            }
+            return task;
         }
         let mut target = self
             .panes
@@ -859,6 +1033,11 @@ impl GUI {
             }
         }
         let (target_pane, target_tab) = target.expect("emergency target was installed");
+        let was_duress = self.panes.get(target_pane).is_some_and(|pane| {
+            pane.tabs
+                .iter()
+                .any(|tab| tab.id == target_tab && matches!(tab.state, tab::State::DuressActive(_)))
+        });
         let task = self
             .panes
             .get_mut(target_pane)
@@ -868,7 +1047,52 @@ impl GUI {
             .find(|tab| tab.id == target_tab)
             .unwrap()
             .activate_unhosted_seed_export_duress(proof);
+        if !was_duress {
+            self.seal_verified_seed_export_duress_surface(target_pane, target_tab);
+        }
         task.map(move |message| Message::Pane(target_pane, pane::Message::tab(target_tab, message)))
+    }
+
+    /// Admit the private proof across the entire window immediately. The
+    /// orchestrator may wait on disk or network work, so its completion cannot
+    /// be the event that hides a foreground seed reveal in another pane.
+    /// A refused or replayed proof never changes its target to DuressActive.
+    fn seal_verified_seed_export_duress_surface(
+        &mut self,
+        pane_id: pane_grid::Pane,
+        tab_id: usize,
+    ) {
+        let admitted = self.panes.get(pane_id).is_some_and(|pane| {
+            pane.tabs
+                .iter()
+                .any(|tab| tab.id == tab_id && matches!(tab.state, tab::State::DuressActive(_)))
+        });
+        if !admitted {
+            return;
+        }
+        let mut empty_panes = Vec::new();
+        for (&other_id, pane) in self.panes.iter_mut() {
+            pane.close_tabs_matching(|tab| other_id != pane_id || tab.id != tab_id);
+            if other_id != pane_id && pane.tabs.is_empty() {
+                empty_panes.push(other_id);
+            }
+        }
+        for empty in empty_panes {
+            self.panes.close(empty);
+        }
+        if let Some(pane) = self.panes.get_mut(pane_id) {
+            pane.focused_tab = pane
+                .tabs
+                .iter()
+                .position(|tab| tab.id == tab_id)
+                .unwrap_or(0);
+        }
+        self.focus = Some(pane_id);
+        self.preferences_sheet = None;
+        self.connect_sheet = None;
+        crate::app::session::close();
+        crate::app::claim_intent::clear();
+        crate::app::split_intent::clear();
     }
 
     /// The process owns one secret session and idle clock. A new public Cube
@@ -1806,9 +2030,53 @@ impl GUI {
         } else {
             message
         };
+        // Both the scoped seed-export proof and the existing Cube-unlock PIN
+        // verdict enter Duress before their async wipe task runs. The unlock
+        // verdict has no private proof object, so its live PinEntry and exact
+        // data root are the GUI admission boundary for the global surface seal.
+        let unlock_duress_message = matches!(
+            &message,
+            Message::Pane(_, pane::Message::Tab(_, inner))
+                if matches!(
+                    inner.as_ref(),
+                    tab::Message::PinEntry(crate::pin_entry::Message::DuressDetected { .. })
+                )
+        );
+        let unlock_duress_target = match &message {
+            Message::Pane(pane_id, pane::Message::Tab(tab_id, inner))
+                if matches!(
+                    inner.as_ref(),
+                    tab::Message::PinEntry(crate::pin_entry::Message::DuressDetected { .. })
+                ) =>
+            {
+                self.panes
+                    .get(*pane_id)
+                    .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == *tab_id))
+                    .and_then(|tab| match &tab.state {
+                        tab::State::PinEntry(pin) => {
+                            let crate::pin_entry::PinEntrySuccess::LoadApp { datadir, .. } =
+                                &pin.on_success;
+                            crate::chain::same_path(
+                                datadir.path(),
+                                self.config.coincube_directory.path(),
+                            )
+                            .then_some((*pane_id, *tab_id))
+                        }
+                        _ => None,
+                    })
+            }
+            _ => None,
+        };
+        if unlock_duress_message && unlock_duress_target.is_none() {
+            return Task::none();
+        }
         // Dispatch may return early (notably for in-App account messages).
         // Keep those returns inside the helper so invalidation tasks always run.
-        auth_tasks.push(self.update_message(message));
+        let routed = self.update_message(message);
+        if let Some((pane_id, tab_id)) = unlock_duress_target {
+            self.seal_verified_seed_export_duress_surface(pane_id, tab_id);
+        }
+        auth_tasks.push(routed);
         if let Some(candidate) = ready_unlock {
             for (_, pane) in self.panes.iter_mut() {
                 for tab in &mut pane.tabs {

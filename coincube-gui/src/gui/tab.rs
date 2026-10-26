@@ -3880,10 +3880,9 @@ impl Tab {
                     // network). It is async (spawns the POST), so drive it from a
                     // Task rather than re-inlining the sequence here. `account_id`
                     // is the explicitly-threaded enrolled Connect account, `None`
-                    // for sovereign (Task A.1). The PinEntry is already showing
-                    // its neutral loading screen, so no Cube data is visible
-                    // during the brief gap; we lock into the cryptic screen the
-                    // instant activation returns (the wipe completes within it).
+                    // for sovereign (Task A.1). Enter the cryptic screen now;
+                    // GUI seals sibling surfaces before this returned Task can
+                    // be polled, even if activation later stalls.
                     let network = pin_entry.cube().network.bitcoin_network();
                     let datadir = match &pin_entry.on_success {
                         crate::pin_entry::PinEntrySuccess::LoadApp { datadir, .. } => {
@@ -3899,6 +3898,12 @@ impl Tab {
                     // No Cube was ever opened on this path, so the only thing
                     // being cleared is whatever a previous unlock left behind.
                     crate::app::session::close();
+                    self.state = State::DuressActive(
+                        crate::app::view::duress::active_screen::DuressActiveScreen::with_context(
+                            datadir.clone(),
+                            Some(network),
+                        ),
+                    );
                     Task::perform(
                         async move {
                             let root = datadir.path().to_path_buf();

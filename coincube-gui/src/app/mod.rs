@@ -5476,6 +5476,16 @@ impl App {
     }
 
     #[cfg(test)]
+    pub(crate) fn reviewer_show_seed_phrase_for_test(&mut self) {
+        self.panels.current = Menu::Cube(crate::app::menu::CubeSubMenu::Settings(
+            crate::app::menu::CubeSettingsOption::Recovery,
+        ));
+        self.panels
+            .global_settings
+            .reviewer_show_seed_phrase_for_test(&self.datadir);
+    }
+
+    #[cfg(test)]
     pub(crate) fn reviewer_pending_split_target(&self) -> Option<&str> {
         match self.split_handoff.as_ref() {
             Some(SplitHandoff::Waiting(intent) | SplitHandoff::Reserving(intent)) => {
