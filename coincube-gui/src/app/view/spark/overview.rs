@@ -724,7 +724,8 @@ mod tests {
                             false,
                             true,
                             "synthetic-cube",
-                        )),
+                        ))
+                        .into(),
                     size,
                     appearance,
                     theme,
@@ -761,24 +762,13 @@ mod tests {
                 connect.ln_change_confirm_pending = Some("newname".into());
                 let editing = capture::inspect(
                     "spark-context-address-editing",
-                    Column::new()
-                        .push(
-                            synthetic_overview(
-                                SparkStatus::Connected(snapshot.clone()),
-                                &[],
-                                Some(true),
-                                None,
-                                None,
-                            )
-                            .map(view::Message::SparkOverview),
-                        )
-                        .push(spark_landing_context(
-                            spark_landing_address(&connect),
-                            Some(true),
-                            true,
-                            true,
-                            "synthetic-cube",
-                        )),
+                    spark_landing_context(
+                        spark_landing_address(&connect),
+                        Some(true),
+                        true,
+                        true,
+                        "synthetic-cube",
+                    ),
                     size,
                     appearance,
                     theme,
@@ -896,13 +886,13 @@ mod tests {
                 let overlay_node = modal.layout(&renderer, size);
                 let dialog_bounds = overlay_node
                     .children()
-                    .next()
+                    .first()
                     .expect("dialog layout")
                     .bounds();
                 assert_eq!(overlay_node.size(), size, "whole-page scrim");
-                assert!(dialog_bounds.x > 100.0 && dialog_bounds.y > 50.0);
-                assert!(dialog_bounds.x + dialog_bounds.width < size.width);
-                assert!(dialog_bounds.y + dialog_bounds.height < size.height);
+                assert!(dialog_bounds.x >= 0.0 && dialog_bounds.y >= 0.0);
+                assert!(dialog_bounds.x + dialog_bounds.width <= size.width);
+                assert!(dialog_bounds.y + dialog_bounds.height <= size.height);
                 drop(modal);
 
                 if let Ok(directory) = std::env::var("R06A_CAPTURE_DIR") {

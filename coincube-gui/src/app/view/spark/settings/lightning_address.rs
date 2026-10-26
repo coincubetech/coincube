@@ -117,7 +117,7 @@ pub fn lightning_address_body<'a>(state: &'a ConnectCubePanel) -> Element<'a, Co
 
         container(
             Column::new()
-                .push(text::p1_bold("Your Lightning Address").style(theme::text::primary))
+                .push(text::p1_bold("Change your Lightning Address").style(theme::text::primary))
                 .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
                 .push(text::p2_regular(format!("Current: {}", address)).color(color::GREY_3))
                 .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
