@@ -44,7 +44,7 @@ use coincube_ui::{
         text::{h3, p1_regular, text},
     },
     icon, theme,
-    widget::{Column, Container, Element, Row},
+    widget::{action::Action, Column, Container, Element, Row},
 };
 
 use coincube_core::miniscript::bitcoin::bip32::Fingerprint;
@@ -73,11 +73,14 @@ use crate::services::passkey::PasskeyError;
 #[cfg(target_os = "macos")]
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
+pub(crate) fn begin_button_id() -> iced::advanced::widget::Id {
+    iced::advanced::widget::Id::new("tenshu.unlock.passkey:begin")
+}
+
 pub struct PasskeyUnlock {
     cube: CubeSettings,
-    /// Data root. Unused by the assertion itself — carried so this screen has
-    /// the same shape as `PinEntry` and so the caller has it in hand on success.
-    #[allow(dead_code)]
+    /// Data root. Also supplies the saved appearance if the GUI shell has not
+    /// passed its live resolved theme into this view.
     datadir_root: std::path::PathBuf,
     phase: Phase,
     /// What to do after a successful unlock. Shared with `PinEntry` so both
@@ -145,6 +148,8 @@ enum Phase {
 pub enum Message {
     /// Raise the system passkey prompt.
     Begin,
+    /// Focus the visible passkey action after pointer or Launcher handoff.
+    Focus(iced::advanced::widget::Id),
     /// Poll the ceremony channel. Driven by [`PasskeyUnlock::subscription`].
     Tick,
     /// Abandon the unlock and return to Home.
@@ -194,6 +199,7 @@ impl PasskeyUnlock {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Begin => self.begin(),
+            Message::Focus(id) => iced::widget::operation::focus(id),
             Message::Tick => self.poll(),
             // Both are terminal for this screen and handled by the parent.
             // `Back` still needs the in-flight ceremony torn down here, because
@@ -404,6 +410,27 @@ impl PasskeyUnlock {
     }
 
     pub fn view(&self) -> Element<Message> {
+        self.view_with_theme(crate::home::launcher_presenter::saved_unlock_theme(
+            &self.datadir_root,
+        ))
+    }
+
+    pub(crate) fn is_opening(&self) -> bool {
+        matches!(self.phase, Phase::Opening)
+    }
+
+    pub fn view_with_theme(
+        &self,
+        mode: coincube_ui::theme::palette::ThemeMode,
+    ) -> Element<Message> {
+        self.view_with_theme_and_floor(mode, None)
+    }
+
+    pub(crate) fn view_with_theme_and_floor<'a>(
+        &'a self,
+        mode: coincube_ui::theme::palette::ThemeMode,
+        floor: Option<&'a crate::home::LauncherSceneContext>,
+    ) -> Element<'a, Message> {
         if matches!(self.phase, Phase::Opening) {
             // Same full-screen loading treatment the PIN path uses once its
             // seed is in hand, so the two unlock paths look identical from the
@@ -429,6 +456,19 @@ impl PasskeyUnlock {
             .into();
         }
 
+        if let Some(floor) = floor {
+            crate::home::launcher_presenter::unlock_face_on_floor(
+                &self.cube,
+                mode,
+                floor,
+                move || self.unlock_controls(),
+            )
+        } else {
+            crate::home::launcher_presenter::unlock_face(&self.cube, mode, self.unlock_controls())
+        }
+    }
+
+    fn unlock_controls(&self) -> Element<Message> {
         let back_button = button::secondary(Some(icon::previous_icon()), "Back")
             .width(Length::Fixed(150.0))
             .on_press(Message::Back);
@@ -475,26 +515,31 @@ impl PasskeyUnlock {
                     content = content.push(p1_regular(error.as_str()).style(theme::text::error));
                 }
                 content = content.push(
-                    button::primary(None, "Unlock with passkey")
-                        .width(Length::Fixed(280.0))
-                        .on_press(Message::Begin),
+                    Action::new(
+                        begin_button_id(),
+                        text("Unlock with passkey")
+                            .font(coincube_ui::font::MEDIUM)
+                            .align_x(Alignment::Center)
+                            .align_y(Alignment::Center),
+                        Message::Focus,
+                    )
+                    .style(theme::button::primary)
+                    .width(Length::Fixed(280.0))
+                    .on_press(Message::Begin),
                 );
             }
             Phase::Opening => unreachable!("handled above"),
         }
 
-        Container::new(
-            Column::new()
-                .width(Length::Fill)
-                .push(Space::new().height(Length::Fixed(100.0)))
-                .push(header)
-                .push(Space::new().height(Length::Fixed(100.0)))
-                .push(Container::new(content).center_x(Length::Fill)),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .padding(20)
-        .into()
+        Column::new()
+            .spacing(24)
+            .push(header)
+            .push(content)
+            .push(
+                p1_regular("Network checks run after your passkey is accepted.")
+                    .style(theme::text::secondary),
+            )
+            .into()
     }
 }
 

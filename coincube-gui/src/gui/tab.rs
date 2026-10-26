@@ -421,6 +421,9 @@ pub enum Message {
     Login(login::Message),
     PinEntry(crate::pin_entry::Message),
     PasskeyUnlock(crate::passkey_unlock::Message),
+    /// Frame clock only while a selected Launcher details face turns toward
+    /// the existing PIN/passkey screen. It never changes unlock authority.
+    UnlockMotionTick(Instant),
     /// Messages from the cryptic "Duress Mode Activated" screen.
     Duress(crate::app::view::duress::active_screen::Message),
     /// The background activation-queue drainer finished (queue emptied). No-op
@@ -811,6 +814,9 @@ pub struct Tab {
     /// caches inherit the correct mode immediately.
     pub theme_mode: coincube_ui::theme::palette::ThemeMode,
     pub balance_privacy: Option<crate::app::state::preferences::BalancePrivacyChrome>,
+    unlock_motion: Option<Instant>,
+    /// Safe, owned Launcher geometry retained only through this unlock.
+    unlock_floor: Option<home::LauncherSceneContext>,
     /// A seed-migration warning waiting for a surface to show it on.
     ///
     /// Held rather than dispatched because only `State::App` handles
@@ -876,6 +882,8 @@ impl Tab {
             state,
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
             balance_privacy: None,
+            unlock_motion: None,
+            unlock_floor: None,
             pending_unlock_warnings: Vec::new(),
             app_generation: 0,
             claim_open: None,
@@ -921,8 +929,14 @@ impl Tab {
         }
     }
 
-    /// Apply the tab's stored theme_mode to the current state.
-    /// Call after any state transition to State::App or State::Home.
+    /// Feed the current native motion observation to a retained Launcher.
+    pub fn set_system_reduces_motion(&mut self, observed: Option<bool>) {
+        if let State::Home(home) = &mut self.state {
+            home.set_system_reduces_motion(observed);
+        }
+    }
+
+    /// Apply the tab's stored privacy display to the current state.
     pub fn set_balance_privacy(
         &mut self,
         chrome: Option<crate::app::state::preferences::BalancePrivacyChrome>,
@@ -933,6 +947,8 @@ impl Tab {
         }
     }
 
+    /// Apply the tab's stored theme_mode (and balance-privacy display) to the
+    /// current state. Call after any state transition to State::App or State::Home.
     fn sync_theme_mode(&mut self) {
         let mode = self.theme_mode;
         match &mut self.state {
@@ -1271,8 +1287,14 @@ impl Tab {
         };
         match message {
             home::Message::Run(root, _, chain, cube)
+            | home::Message::RunFromFloor(root, _, chain, cube, _)
             | home::Message::RunToRecovery(root, _, chain, cube)
             | home::Message::RunClaim(root, _, chain, cube, _) => {
+                if let home::Message::RunFromFloor(_, _, _, _, generation) = message {
+                    if !home.floor_open_matches_queued(*generation, cube) {
+                        return Err("This Cube changed while opening. Select it again to use the current details.".into());
+                    }
+                }
                 if !crate::chain::same_path(root.path(), home.datadir_path.path()) {
                     return Err("The selected Cube belongs to another data directory.".into());
                 }
@@ -1350,6 +1372,14 @@ impl Tab {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let message = match message {
+            Message::UnlockMotionTick(now) => {
+                if self.unlock_motion.is_some_and(|started| {
+                    home::launcher_presenter::unlock_turn_progress(started, now) >= 1.0
+                }) {
+                    self.unlock_motion = None;
+                }
+                return Task::none();
+            }
             Message::AppAsync(generation, message) => {
                 if !self.accepts_app_generation(generation) {
                     discard_closed_loader_result(*message);
@@ -1382,6 +1412,13 @@ impl Tab {
         let was_fork_app =
             matches!(&self.state, State::App(app) if app.cube_settings().network.is_blake2b());
         let mut result = self.update_inner(message);
+        if !matches!(self.state, State::PinEntry(_) | State::PasskeyUnlock(_))
+            || matches!(&self.state, State::PinEntry(pin) if pin.is_loading())
+            || matches!(&self.state, State::PasskeyUnlock(passkey) if passkey.is_opening())
+        {
+            self.unlock_motion = None;
+            self.unlock_floor = None;
+        }
         let is_app = matches!(&self.state, State::App(_));
         if matches!(self.state, State::Home(_) | State::DuressActive(_)) {
             self.pending_recovery_route = None;
@@ -1441,6 +1478,21 @@ impl Tab {
     fn update_inner(&mut self, message: Message) -> Task<Message> {
         use crate::app::settings::global::GlobalSettings;
         let message = match message {
+            Message::Launch(floor @ home::Message::RunFromFloor(..)) => {
+                if let Err(error) = self.validate_home_exit(&floor) {
+                    if let State::Home(home) = &mut self.state {
+                        home.set_error(error);
+                    }
+                    app::split_intent::clear();
+                    self.pending_split_intent = None;
+                    return Task::none();
+                }
+                let home::Message::RunFromFloor(root, config, chain, cube, _) = floor else {
+                    unreachable!();
+                };
+                self.pending_recovery_route = None;
+                Message::Launch(home::Message::Run(root, config, chain, cube))
+            }
             Message::Launch(home::Message::RunToRecovery(root, config, chain, cube)) => {
                 self.pending_recovery_route = Some((root.clone(), chain, cube.id.clone()));
                 self.claim_open = None;
@@ -1650,6 +1702,17 @@ impl Tab {
                     command.map(Message::Install)
                 }
                 home::Message::Run(datadir_path, cfg, chain, cube) => {
+                    self.unlock_floor = None;
+                    let opened_on_floor = l.launcher_floor_open_armed();
+                    let spin_from_details = l.take_launcher_details_face(&cube);
+                    if opened_on_floor && !l.floor_open_matches_current_cube(&cube) {
+                        l.set_error(
+                            "This Cube changed while opening. Select it again to use the current details.",
+                        );
+                        self.unlock_motion = None;
+                        app::split_intent::clear();
+                        return Task::none();
+                    }
                     // Every refusal below abandons this open: drop an armed Split
                     // handoff with it rather than let a later open inherit it.
                     // Chain gate — first, before anything below can touch a
@@ -1808,6 +1871,9 @@ impl Tab {
                         connect_client: l.connect_account.authenticated_client(),
                     };
 
+                    let unlock_floor = spin_from_details
+                        .then(|| l.launcher_scene_context(&cube))
+                        .flatten();
                     let mut state = unlock_state(cube, datadir_root, on_success, duress_account_id);
                     if let State::PinEntry(pin) = &mut state {
                         pin.set_connect_provider(&l.connect_account.client.base_url);
@@ -1821,11 +1887,26 @@ impl Tab {
                         }
                     }
                     self.state = state;
-                    Task::none()
+                    self.unlock_motion = unlock_floor.as_ref().map(|_| Instant::now());
+                    self.unlock_floor = unlock_floor;
+                    match &self.state {
+                        State::PinEntry(_) => {
+                            iced::widget::operation::focus(crate::pin_input::first_digit_id())
+                        }
+                        State::PasskeyUnlock(_) => {
+                            iced::widget::operation::focus(crate::passkey_unlock::begin_button_id())
+                        }
+                        _ => Task::none(),
+                    }
                 }
                 home::Message::View(home::ViewMessage::ToggleTheme) => {
                     Task::done(Message::ToggleTheme)
                 }
+                home::Message::View(home::ViewMessage::OpenAppPreferences) => l
+                    .update(home::Message::View(home::ViewMessage::GoToSection(
+                        home::HomeSection::Settings,
+                    )))
+                    .map(Message::Launch),
                 home::Message::GlobalSettingsChanged => Task::done(Message::GlobalSettingsChanged),
                 home::Message::ConnectSignedInBubble => Task::done(Message::ConnectSignedIn),
                 _ => l.update(msg).map(Message::Launch),
@@ -4152,8 +4233,8 @@ impl Tab {
         Task::batch([result, self.flush_migration_warning()])
     }
 
-    pub fn subscription(&self) -> Subscription<Message> {
-        match &self.state {
+    pub fn subscription(&self, foreground: bool) -> Subscription<Message> {
+        let base = match &self.state {
             State::Installer(v) => v.subscription().map(Message::Install),
             State::Loader(v) => v.subscription().map(Message::Load),
             // `Subscription::map` requires a non-capturing closure, so the
@@ -4176,7 +4257,7 @@ impl Tab {
                         Message::AppAsync(generation, Box::new(Message::Run(message)))
                     })
             }
-            State::Home(v) => v.subscription().map(Message::Launch),
+            State::Home(v) => v.subscription(foreground).map(Message::Launch),
             State::Login(_) => Subscription::none(),
             State::PinEntry(_) => Subscription::none(),
             // Unlike `PinEntry`, this one needs a subscription: the macOS
@@ -4184,6 +4265,18 @@ impl Tab {
             // hook, so the ceremony has to be polled.
             State::PasskeyUnlock(v) => v.subscription().map(Message::PasskeyUnlock),
             State::DuressActive(_) => Subscription::none(),
+        };
+        if foreground
+            && self.unlock_motion.is_some()
+            && matches!(self.state, State::PinEntry(_) | State::PasskeyUnlock(_))
+        {
+            Subscription::batch([
+                base,
+                iced::time::every(std::time::Duration::from_millis(16))
+                    .map(Message::UnlockMotionTick),
+            ])
+        } else {
+            base
         }
     }
 
@@ -4205,8 +4298,57 @@ impl Tab {
             State::Home(v) => v.view().map(Message::Launch),
             State::Loader(v) => v.view().map(Message::Load),
             State::Login(v) => v.view().map(Message::Login),
-            State::PinEntry(v) => v.view().map(Message::PinEntry),
-            State::PasskeyUnlock(v) => v.view().map(Message::PasskeyUnlock),
+            State::PinEntry(v) => {
+                let progress = self
+                    .unlock_motion
+                    .map(|started| {
+                        home::launcher_presenter::unlock_turn_progress(started, Instant::now())
+                    })
+                    .filter(|progress| *progress < 1.0);
+                if let Some(floor) = self.unlock_floor.as_ref() {
+                    home::launcher_presenter::unlock_turn_with_floor_controls(
+                        v.cube(),
+                        self.theme_mode,
+                        floor,
+                        progress,
+                        v.view_with_theme_and_floor(self.theme_mode, Some(floor))
+                            .map(Message::PinEntry),
+                    )
+                } else {
+                    home::launcher_presenter::unlock_turn_with_controls(
+                        v.cube(),
+                        self.theme_mode,
+                        progress,
+                        v.view_with_theme(self.theme_mode).map(Message::PinEntry),
+                    )
+                }
+            }
+            State::PasskeyUnlock(v) => {
+                let progress = self
+                    .unlock_motion
+                    .map(|started| {
+                        home::launcher_presenter::unlock_turn_progress(started, Instant::now())
+                    })
+                    .filter(|progress| *progress < 1.0);
+                if let Some(floor) = self.unlock_floor.as_ref() {
+                    home::launcher_presenter::unlock_turn_with_floor_controls(
+                        v.cube(),
+                        self.theme_mode,
+                        floor,
+                        progress,
+                        v.view_with_theme_and_floor(self.theme_mode, Some(floor))
+                            .map(Message::PasskeyUnlock),
+                    )
+                } else {
+                    home::launcher_presenter::unlock_turn_with_controls(
+                        v.cube(),
+                        self.theme_mode,
+                        progress,
+                        v.view_with_theme(self.theme_mode)
+                            .map(Message::PasskeyUnlock),
+                    )
+                }
+            }
             State::DuressActive(v) => v.view().map(Message::Duress),
         }
     }
@@ -4223,6 +4365,8 @@ impl Tab {
     pub fn stop(&mut self) {
         self.pending_split_intent = None;
         self.claim_open = None;
+        self.unlock_motion = None;
+        self.unlock_floor = None;
         match &mut self.state {
             State::Loader(s) => s.stop(),
             State::Home(s) => s.stop(),
@@ -5320,6 +5464,37 @@ mod migration_warning_tests {
             assert!(error.is_some());
             assert!(app::split_intent::take_for_open(&id, ChainId::BitcoinBlake2b).is_none());
         }
+    }
+
+    #[test]
+    fn refused_home_open_discards_any_prior_floor_snapshot() {
+        let mut tab = non_app_tab();
+        tab.unlock_floor = Some(home::LauncherSceneContext {
+            selected: home::CubeCatalogKey {
+                chain: crate::chain::ChainId::Bitcoin,
+                cube_id: "prior".into(),
+            },
+            page: 0,
+            selected_slot: 0,
+            backup: "Status unknown",
+            connect: String::new(),
+            wallets: "Not yet known",
+            peers: Vec::new(),
+        });
+        let datadir = match &tab.state {
+            State::Home(home) => home.datadir_path.clone(),
+            _ => unreachable!(),
+        };
+        let cube = cube_on(crate::chain::ChainId::Bitcoin);
+        drop(tab.update(Message::Launch(home::Message::Run(
+            datadir,
+            app::config::Config::new(false),
+            crate::chain::ChainId::Signet,
+            cube,
+        ))));
+        assert!(matches!(tab.state, State::Home(_)));
+        assert!(tab.unlock_floor.is_none());
+        assert!(tab.unlock_motion.is_none());
     }
 
     #[test]
