@@ -733,7 +733,12 @@ fn every_button_shape_is_square_cornered() {
             ActionKind::Quiet,
             ActionKind::Destructive,
         ] {
-            for status in [Status::Active, Status::Hovered, Status::Pressed, Status::Disabled] {
+            for status in [
+                Status::Active,
+                Status::Hovered,
+                Status::Pressed,
+                Status::Disabled,
+            ] {
                 let corner = button_style::action(&theme, status, kind, shape)
                     .border
                     .radius
@@ -755,7 +760,11 @@ fn every_button_shape_is_square_cornered() {
         .border
         .radius
         .top_left;
-    assert!(choice <= tokens::radius::CONTROL, "choice chip {}px", choice);
+    assert!(
+        choice <= tokens::radius::CONTROL,
+        "choice chip {}px",
+        choice
+    );
 }
 
 #[test]
