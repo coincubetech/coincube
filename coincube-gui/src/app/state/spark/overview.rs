@@ -128,7 +128,7 @@ impl SparkOverview {
         confirmation: Option<Element<'a, view::Message>>,
     ) -> Element<'a, view::Message> {
         let page = self.view_with_address(menu, cache, Some(address));
-        if let Some(confirmation) = confirmation {
+        if let Some(confirmation) = confirmation.filter(|_| self.backend.is_some()) {
             coincube_ui::widget::modal::Modal::new(page, confirmation)
                 .on_blur(Some(view::Message::ConnectCube(
                     view::ConnectCubeMessage::DismissChangeConfirmation,

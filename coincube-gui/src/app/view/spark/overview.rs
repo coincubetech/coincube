@@ -683,6 +683,12 @@ mod tests {
             balance_sats: 25_053,
             stable_balance: None,
         };
+        for bytes in coincube_ui::font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .expect("font system")
+                .load_font(bytes);
+        }
         for (appearance, theme) in [
             ("dark", theme::Theme::dark()),
             ("light", theme::Theme::light()),
@@ -771,6 +777,13 @@ mod tests {
     fn address_confirmation_overlays_the_whole_spark_page() {
         use iced::advanced::{layout, overlay, renderer::Headless, widget::Tree, Layout};
         use iced::{Rectangle, Size, Vector};
+
+        for bytes in coincube_ui::font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .expect("font system")
+                .load_font(bytes);
+        }
 
         let mut connect = ConnectCubePanel::new(
             None,
