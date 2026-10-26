@@ -67,7 +67,7 @@ pub struct ShellState {
     pub backup_attention: bool,
 }
 
-fn network_label(network: ChainId) -> &'static str {
+pub(crate) fn network_label(network: ChainId) -> &'static str {
     match network {
         ChainId::Bitcoin => "Bitcoin mainnet",
         ChainId::BitcoinBlake2b => "Bitcoin Blake2b mainnet",
