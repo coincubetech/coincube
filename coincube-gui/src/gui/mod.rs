@@ -64,6 +64,7 @@ fn privacy_render_needs_cover(
 #[cfg(test)]
 mod seed_export_duress_gui_tests {
     use super::*;
+    use iced::futures::StreamExt;
 
     #[test]
     fn stale_app_callback_carries_verified_duress_after_switch() {
@@ -92,27 +93,41 @@ mod seed_export_duress_gui_tests {
             gui.panes.get_mut(pane_id).unwrap().tabs[0]
                 .update(tab::Message::UnlockMotionTick(Instant::now())),
         );
-        let (home, startup) = home::Home::new_for_chain(root.clone(), None);
-        drop(startup);
-        gui.panes.get_mut(pane_id).unwrap().tabs[0].state = tab::State::Home(home);
         let proof = crate::services::unlock::throttle::verified_seed_export_duress_for_test(
             path.clone(),
             cube_id,
             chain,
             app_generation,
         );
-        drop(gui.update(Message::Pane(
-            pane_id,
-            pane::Message::tab(
-                1,
-                tab::Message::AppAsync(
-                    old_generation,
-                    Box::new(tab::Message::Run(AppMessage::View(
-                        crate::app::view::Message::DuressActivateLocal(proof),
-                    ))),
+        let (release, delayed) = tokio::sync::oneshot::channel();
+        let pending = Task::perform(async move { delayed.await.unwrap() }, move |proof| {
+            Message::Pane(
+                pane_id,
+                pane::Message::tab(
+                    1,
+                    tab::Message::AppAsync(
+                        old_generation,
+                        Box::new(tab::Message::Run(AppMessage::View(
+                            crate::app::view::Message::DuressActivateLocal(proof),
+                        ))),
+                    ),
                 ),
-            ),
-        )));
+            )
+        });
+        let (home, startup) = home::Home::new_for_chain(root.clone(), None);
+        drop(startup);
+        gui.panes.get_mut(pane_id).unwrap().tabs[0].state = tab::State::Home(home);
+        release.send(proof).unwrap();
+        let delivered = runtime.block_on(async {
+            let mut stream = iced_runtime::task::into_stream(pending).unwrap();
+            while let Some(action) = stream.next().await {
+                if let iced_runtime::Action::Output(message) = action {
+                    return message;
+                }
+            }
+            panic!("pending duress task did not deliver")
+        });
+        drop(gui.update(delivered));
         assert!(matches!(
             gui.panes.get(pane_id).unwrap().tabs[0].state,
             tab::State::DuressActive(_)
@@ -143,15 +158,7 @@ mod seed_export_duress_gui_tests {
         let generation = gui.panes.get(pane_id).unwrap().tabs[0]
             .app_generation_token()
             .unwrap();
-        gui.panes.get_mut(pane_id).unwrap().close_tab(0);
-        assert_eq!(gui.panes.get(pane_id).unwrap().tabs.len(), 1);
-        let unrelated = crate::services::unlock::throttle::verified_seed_export_duress_for_test(
-            std::env::temp_dir().join("unrelated-root"),
-            cube_id.clone(),
-            chain,
-            app_generation,
-        );
-        let deliver = |proof| {
+        let deliver = move |proof| {
             Message::Pane(
                 pane_id,
                 pane::Message::tab(
@@ -165,18 +172,38 @@ mod seed_export_duress_gui_tests {
                 ),
             )
         };
+        let proof = crate::services::unlock::throttle::verified_seed_export_duress_for_test(
+            path.clone(),
+            cube_id.clone(),
+            chain,
+            app_generation,
+        );
+        let (release, delayed) = tokio::sync::oneshot::channel();
+        let pending = Task::perform(async move { delayed.await.unwrap() }, deliver);
+        gui.panes.get_mut(pane_id).unwrap().close_tab(0);
+        assert_eq!(gui.panes.get(pane_id).unwrap().tabs.len(), 1);
+        let unrelated = crate::services::unlock::throttle::verified_seed_export_duress_for_test(
+            std::env::temp_dir().join("unrelated-root"),
+            cube_id,
+            chain,
+            app_generation,
+        );
         drop(gui.update(deliver(unrelated)));
         assert!(matches!(
             gui.panes.get(pane_id).unwrap().tabs[0].state,
             tab::State::Home(_)
         ));
-        let proof = crate::services::unlock::throttle::verified_seed_export_duress_for_test(
-            path.clone(),
-            cube_id,
-            chain,
-            app_generation,
-        );
-        drop(gui.update(deliver(proof)));
+        release.send(proof).unwrap();
+        let delivered = runtime.block_on(async {
+            let mut stream = iced_runtime::task::into_stream(pending).unwrap();
+            while let Some(action) = stream.next().await {
+                if let iced_runtime::Action::Output(message) = action {
+                    return message;
+                }
+            }
+            panic!("pending duress task did not deliver")
+        });
+        drop(gui.update(delivered));
         assert!(matches!(
             gui.panes.get(pane_id).unwrap().tabs[0].state,
             tab::State::DuressActive(_)
