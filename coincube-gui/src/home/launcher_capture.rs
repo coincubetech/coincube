@@ -37,16 +37,40 @@ fn renderer() -> Option<iced::Renderer> {
 
 fn save<M>(
     renderer: &mut iced::Renderer,
+    element: Element<'_, M>,
+    size: Size,
+    theme: &theme::Theme,
+    path: PathBuf,
+) {
+    save_scrolled(renderer, element, size, theme, path, None);
+}
+
+/// As `save`, after snapping the scrollable `scroll` to its end.
+fn save_scrolled<M>(
+    renderer: &mut iced::Renderer,
     mut element: Element<'_, M>,
     size: Size,
     theme: &theme::Theme,
     path: PathBuf,
+    scroll: Option<iced::advanced::widget::Id>,
 ) {
     let mut tree = Tree::new(element.as_widget());
     let node =
         element
             .as_widget_mut()
             .layout(&mut tree, renderer, &layout::Limits::new(Size::ZERO, size));
+    if let Some(id) = scroll {
+        let mut snap = iced::advanced::widget::operation::scrollable::snap_to(
+            id,
+            iced::widget::scrollable::RelativeOffset {
+                x: None,
+                y: Some(1.0),
+            },
+        );
+        element
+            .as_widget_mut()
+            .operate(&mut tree, Layout::new(&node), renderer, &mut snap);
+    }
     let viewport = Rectangle::with_size(size);
     let mut messages = Vec::new();
     element.as_widget_mut().update(
@@ -253,6 +277,24 @@ fn launcher_capture() {
                 seq(&home, &mut renderer);
             }
         }
+
+        // A short window scrolls the stage above the frame top: the GPU
+        // picture must stay under the live details face and labels.
+        let scroll = iced::advanced::widget::Id::new("launcher.capture.scroll");
+        home.catalog.selected = Some(key(pick));
+        home.catalog.motion = None;
+        save_scrolled(
+            &mut renderer,
+            iced::widget::scrollable(launcher_presenter::floor_body(&home))
+                .id(scroll.clone())
+                .height(iced::Length::Fill)
+                .into(),
+            Size::new(1440.0, 560.0),
+            &palette,
+            directory.join(format!("{appearance}-10-details-scrolled.png")),
+            Some(scroll),
+        );
+        home.catalog.selected = None;
 
         // Details -> unlock on the same floor, through the real unlock stage.
         home.catalog.selected = Some(key(pick));

@@ -55,16 +55,32 @@ fn fontdb() -> Arc<resvg::usvg::fontdb::Database> {
     .clone()
 }
 
-/// Rasterize `svg` once per content and size. The cache is small and bounded:
-/// a page holds at most four Cubes with three faces and one panel each.
+/// Retained CPU face art, in bytes. One page needs about 16MB: four Cubes'
+/// 512px faces (1.4MB each with mips) and one 840px panel (3.8MB).
+const ART_BUDGET: usize = 64 << 20;
+
+impl Art {
+    fn bytes(&self) -> usize {
+        self.levels.iter().map(|(_, data)| data.len()).sum()
+    }
+}
+
+/// Rasterize `svg` once per content and size. The cache is global across
+/// pages, themes and status text, so it is bounded by bytes, not entries.
+type ArtCache = Mutex<(HashMap<u64, Arc<Art>>, usize)>;
+
+fn art_cache() -> &'static ArtCache {
+    static CACHE: OnceLock<ArtCache> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new((HashMap::new(), 0)))
+}
+
 pub(super) fn art(svg: &str, px: u32) -> Option<Arc<Art>> {
-    static CACHE: OnceLock<Mutex<HashMap<u64, Arc<Art>>>> = OnceLock::new();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     svg.hash(&mut hasher);
     px.hash(&mut hasher);
     let key = hasher.finish();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(found) = cache.lock().ok()?.get(&key) {
+    let cache = art_cache();
+    if let Some(found) = cache.lock().ok()?.0.get(&key) {
         return Some(found.clone());
     }
     let options = resvg::usvg::Options {
@@ -104,10 +120,14 @@ pub(super) fn art(svg: &str, px: u32) -> Option<Arc<Art>> {
     }
     let art = Arc::new(Art { key, levels });
     let mut cache = cache.lock().ok()?;
-    if cache.len() > 96 {
-        cache.clear();
+    let (entries, bytes) = &mut *cache;
+    if *bytes + art.bytes() > ART_BUDGET {
+        entries.clear();
+        *bytes = 0;
     }
-    cache.insert(key, art.clone());
+    *bytes += art.bytes();
+    entries.insert(key, art.clone());
+    debug_assert!(*bytes <= ART_BUDGET);
     Some(art)
 }
 
@@ -348,8 +368,10 @@ struct Prepared {
     floor: std::ops::Range<u32>,
     layers: Vec<PreparedLayer>,
     background: [f32; 3],
-    /// Physical bounds of the stage in the target and its texel size.
-    bounds: (u32, u32, u32, u32),
+    /// Signed physical origin of the stage in the target.
+    origin: (f32, f32),
+    /// The stage's size in texels.
+    size: (u32, u32),
 }
 
 struct Layers {
@@ -494,7 +516,7 @@ fn to_linear(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_composite(v: CompositeOut) -> @location(0) vec4<f32> {
-    let t = textureSample(art, art_sampler, v.uv);
+    let t = textureSample(art, art_sampler, v.uv / vec2<f32>(textureDimensions(art, 0)));
     if (v.linearize > 0.5) {
         return vec4<f32>(to_linear(t.rgb), 1.0);
     }
@@ -808,6 +830,20 @@ impl Pipeline {
     }
 }
 
+/// The part of the stage inside iced's clip, in the target's texels.
+fn present_scissor(
+    clip: &Rectangle<u32>,
+    (ox, oy): (f32, f32),
+    (width, height): (u32, u32),
+) -> Option<(u32, u32, u32, u32)> {
+    let (ox, oy) = (ox.floor() as i64, oy.floor() as i64);
+    let x0 = (clip.x as i64).max(ox).max(0);
+    let y0 = (clip.y as i64).max(oy).max(0);
+    let x1 = (clip.x as i64 + clip.width as i64).min(ox + width as i64);
+    let y1 = (clip.y as i64 + clip.height as i64).min(oy + height as i64);
+    (x1 > x0 && y1 > y0).then(|| (x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32))
+}
+
 fn pass<'e>(
     encoder: &'e mut wgpu::CommandEncoder,
     color: wgpu::RenderPassColorAttachment<'_>,
@@ -843,9 +879,12 @@ impl shader::Primitive for StagePrimitive {
         viewport: &shader::Viewport,
     ) {
         let scale = viewport.scale_factor();
+        // The origin stays signed: a scrolled stage starts above or left of
+        // the frame, and its picture must stay under its Iced overlays.
+        let origin = ((bounds.x * scale).round(), (bounds.y * scale).round());
         let physical = (
-            (bounds.x * scale).round().max(0.0) as u32,
-            (bounds.y * scale).round().max(0.0) as u32,
+            0u32,
+            0u32,
             ((bounds.width * scale).round() as u32).max(1),
             ((bounds.height * scale).round() as u32).max(1),
         );
@@ -1000,11 +1039,9 @@ impl shader::Primitive for StagePrimitive {
         }
         // Composite triangles: one per layer into the base, then the base
         // into the frame. Each samples only the stage's corner of the layer.
-        let texel = pipeline.layers.as_ref().map_or((1, 1), |l| l.size);
-        let (u, w) = (
-            physical.2 as f32 / texel.0 as f32,
-            physical.3 as f32 / texel.1 as f32,
-        );
+        // UVs are in texels and normalized by the live texture size in the
+        // shader, so a larger stage later in the frame cannot stale them.
+        let (u, w) = (physical.2 as f32, physical.3 as f32);
         let mut composite = Vec::new();
         let mut triangle = |opacity: f32, linearize: f32| {
             for (x, y, s, t) in [
@@ -1027,7 +1064,8 @@ impl shader::Primitive for StagePrimitive {
                 floor: floor_range,
                 layers,
                 background: srgb(palette.background),
-                bounds: physical,
+                origin,
+                size: (physical.2, physical.3),
             },
         );
     }
@@ -1044,7 +1082,8 @@ impl shader::Primitive for StagePrimitive {
         else {
             return;
         };
-        let (bx, by, bw, bh) = prepared.bounds;
+        let (ox, oy) = prepared.origin;
+        let (bw, bh) = prepared.size;
         let viewport = |pass: &mut wgpu::RenderPass<'_>| {
             pass.set_viewport(0.0, 0.0, bw as f32, bh as f32, 0.0, 1.0);
             pass.set_scissor_rect(0, 0, bw.min(layers.size.0), bh.min(layers.size.1));
@@ -1120,15 +1159,11 @@ impl shader::Primitive for StagePrimitive {
             compose.draw(first..first + 3, 0..1);
         }
         let mut present = pass(encoder, attachment(target, None, wgpu::LoadOp::Load));
-        present.set_viewport(bx as f32, by as f32, bw as f32, bh as f32, 0.0, 1.0);
-        let x = clip_bounds.x.max(bx);
-        let y = clip_bounds.y.max(by);
-        let right = (clip_bounds.x + clip_bounds.width).min(bx + bw);
-        let bottom = (clip_bounds.y + clip_bounds.height).min(by + bh);
-        if right <= x || bottom <= y {
+        present.set_viewport(ox, oy, bw as f32, bh as f32, 0.0, 1.0);
+        let Some((x, y, width, height)) = present_scissor(clip_bounds, (ox, oy), (bw, bh)) else {
             return;
-        }
-        present.set_scissor_rect(x, y, right - x, bottom - y);
+        };
+        present.set_scissor_rect(x, y, width, height);
         present.set_pipeline(&pipeline.present);
         present.set_vertex_buffer(0, prepared.composite.slice(..));
         present.set_bind_group(0, &layers.base, &[]);
@@ -1174,6 +1209,48 @@ mod tests {
         let (size, pixels) = &a.levels[0];
         let center = ((size / 2) * size + size / 2) as usize * 4;
         assert_eq!(pixels[center + 3], 255);
+    }
+
+    #[test]
+    fn a_scrolled_stage_presents_at_its_signed_origin_inside_the_clip() {
+        let clip = Rectangle {
+            x: 0,
+            y: 128,
+            width: 2880,
+            height: 1400,
+        };
+        // Stage top 300 texels above the window: only its visible part is
+        // scissored, while the viewport keeps the negative origin.
+        assert_eq!(
+            present_scissor(&clip, (0.0, -300.0), (2880, 1484)),
+            Some((0, 128, 2880, 1056))
+        );
+        assert_eq!(
+            present_scissor(&clip, (0.0, 200.0), (2880, 1484)),
+            Some((0, 200, 2880, 1328))
+        );
+        assert_eq!(present_scissor(&clip, (0.0, -2000.0), (2880, 1484)), None);
+    }
+
+    #[test]
+    fn panel_art_never_exceeds_the_byte_budget() {
+        for i in 0..40 {
+            let svg = details_svg(
+                ChainId::Bitcoin,
+                i % 2 == 0,
+                FaceText {
+                    name: &format!("Budget {i}"),
+                    backup: "Recorded",
+                    connect: "Signed in",
+                    wallets: "Vault",
+                    passkey: false,
+                },
+            );
+            assert!(art(&svg, PANEL_ART_PX).is_some());
+            // 40 distinct 840px panels are about 150MB unbounded.
+            let retained = art_cache().lock().unwrap().1;
+            assert!(retained <= ART_BUDGET, "{} bytes retained", retained);
+        }
     }
 
     #[test]
