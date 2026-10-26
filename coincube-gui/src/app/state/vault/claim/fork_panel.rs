@@ -631,6 +631,7 @@ impl ForkClaimPanel {
             body = body.push(p1_regular("Sign the transfer to your Bitcoin Blake2b Vault. Each signing request checks Bitcoin confirmation and replay protection again."));
             if let Some(policy) = psbt.desc_policy.as_ref() {
                 body = body.push(view::vault::psbt::spend_overview_view(
+                    psbt.action_scope(),
                     &psbt.tx,
                     policy,
                     &psbt.wallet.keys_aliases,

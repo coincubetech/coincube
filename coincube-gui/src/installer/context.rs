@@ -109,6 +109,10 @@ pub enum RestoreSource {
 
 #[derive(Clone)]
 pub struct Context {
+    #[cfg(feature = "mcp-proposals")]
+    pub(crate) mcp_proposal: Option<Arc<super::proposal::Session>>,
+    #[cfg(feature = "mcp-proposals")]
+    pub(crate) creation_lease: Arc<std::sync::Mutex<Option<super::proposal::Lease>>>,
     pub bitcoin_config: BitcoinConfig,
     pub bitcoin_backend: Option<BitcoinBackend>,
     pub descriptor_template: DescriptorTemplate,
@@ -397,6 +401,10 @@ impl Context {
     ) -> Self {
         let network = chain.bitcoin_network();
         Self {
+            #[cfg(feature = "mcp-proposals")]
+            mcp_proposal: None,
+            #[cfg(feature = "mcp-proposals")]
+            creation_lease: Arc::new(std::sync::Mutex::new(None)),
             descriptor_template: DescriptorTemplate::default(),
             bitcoin_config: BitcoinConfig::new(chain, Duration::from_secs(10)),
             hws: Vec::new(),
