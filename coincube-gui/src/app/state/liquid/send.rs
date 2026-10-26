@@ -710,6 +710,9 @@ impl State for LiquidSend {
 
         if let Message::View(view::Message::LiquidSend(ref msg)) = message {
             match msg {
+                view::LiquidSendMessage::FocusAction(id) => {
+                    return iced::widget::operation::focus(id.clone());
+                }
                 view::LiquidSendMessage::PresetAsset(asset) => {
                     // Set both "You Send" and "They Receive" to the same asset
                     self.from_asset = *asset;
