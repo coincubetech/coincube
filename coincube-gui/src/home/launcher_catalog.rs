@@ -232,6 +232,12 @@ pub(super) struct CatalogState {
     pub(super) key: KeyCard,
     /// The top bar's network menu is open.
     pub(super) network_menu: bool,
+    /// Which networks' Cubes the Launcher shows (P-Launcher's chips and
+    /// Network menu). Presentation only; it never changes a Cube's network.
+    pub(super) filter: NetworkFilter,
+    /// A Cube picked on another network, selected once that network is
+    /// current and its list is checked.
+    pub(super) pending_select: Option<CubeCatalogKey>,
     /// Each floor Open gets a distinct origin carried by its queued Run.
     /// Clearing open_from_floor invalidates that origin even if the selected
     /// identity is later selected again.
@@ -259,6 +265,99 @@ const WHEEL_PAGE_COOLDOWN: Duration = Duration::from_millis(600);
 /// horizontal wheel input is filtered by the reducer instead of that status.
 /// `listen_with` has no hit target, so native QA must check sideways scroll
 /// over Launcher chrome and Connect rows before treating this as floor-only.
+/// P-Launcher's network filter: every listed network, the live or test
+/// ones (Developer mode only), or one network from the Network menu.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum NetworkFilter {
+    #[default]
+    All,
+    Live,
+    Test,
+    Network(ChainId),
+}
+
+impl NetworkFilter {
+    pub(super) fn matches(self, chain: ChainId) -> bool {
+        let test = super::launcher_coin::is_test_network(chain);
+        match self {
+            NetworkFilter::All => true,
+            NetworkFilter::Live => !test,
+            NetworkFilter::Test => test,
+            NetworkFilter::Network(only) => chain == only,
+        }
+    }
+}
+
+/// The canvas's network order: the two mainnets, then the test networks.
+pub(super) fn network_rank(chain: ChainId) -> u8 {
+    match chain {
+        ChainId::Bitcoin => 0,
+        ChainId::BitcoinBlake2b => 1,
+        ChainId::Testnet4 => 2,
+        ChainId::Testnet => 3,
+        ChainId::Signet => 4,
+        ChainId::Regtest => 5,
+        ChainId::BitcoinBlake2bTestnet4 => 6,
+    }
+}
+
+impl Home {
+    /// The filter as it applies now. Without Developer mode there are no
+    /// test networks, so Live, Test and a test network fall back to All, as
+    /// do networks no longer listed.
+    pub(super) fn effective_filter(&self) -> NetworkFilter {
+        match self.catalog.filter {
+            NetworkFilter::Live | NetworkFilter::Test if !self.developer_mode => NetworkFilter::All,
+            NetworkFilter::Network(chain) if !self.displayed_networks.contains(&chain) => {
+                NetworkFilter::All
+            }
+            filter => filter,
+        }
+    }
+
+    /// Listed networks in the canvas's order, plus the network of the
+    /// checked list when it is not listed (it is always shown).
+    pub(super) fn ordered_networks(&self) -> Vec<ChainId> {
+        let mut networks = self.displayed_networks.clone();
+        if let State::Cubes { source, .. } = &self.state {
+            if !networks.contains(source) {
+                networks.push(*source);
+            }
+        }
+        networks.sort_by_key(|chain| network_rank(*chain));
+        networks
+    }
+
+    pub(super) fn developer_mode(&self) -> bool {
+        self.developer_mode
+    }
+
+    /// A Cube shown from another network's read-only list cannot be acted on
+    /// in place: make its network current, and select it once that network's
+    /// list is checked (see `Message::Checked`).
+    pub(super) fn select_on_other_network(
+        &mut self,
+        key: &CubeCatalogKey,
+    ) -> Option<Task<Message>> {
+        if key.chain == self.network
+            || key.cube_id.is_empty()
+            || !self
+                .network_catalog(key.chain)
+                .iter()
+                .any(|cube| cube.id == key.cube_id)
+        {
+            return None;
+        }
+        self.catalog.pending_select = Some(key.clone());
+        self.catalog.selected = None;
+        self.catalog.motion = None;
+        self.catalog.open_from_floor = false;
+        Some(Task::done(Message::View(
+            super::ViewMessage::SelectNetwork(key.chain),
+        )))
+    }
+}
+
 pub(super) fn floor_event(
     event: iced::Event,
     status: event::Status,
@@ -321,6 +420,8 @@ pub enum CatalogMessage {
     KeyClose,
     /// Opens or closes the top bar's network menu.
     NetworkMenu(bool),
+    /// All / Live / Test networks, or one network from the menu.
+    Filter(NetworkFilter),
     ClearSelection,
     Query(String),
     ClearQuery,
@@ -470,6 +571,9 @@ impl Home {
     pub(super) fn update_catalog(&mut self, message: CatalogMessage) -> Task<Message> {
         match message {
             CatalogMessage::Select(key) => {
+                if let Some(task) = self.select_on_other_network(&key) {
+                    return task;
+                }
                 self.catalog.selected = self.catalog_selectable(&key).then_some(key.clone());
                 self.catalog.motion = None;
                 self.catalog.open_from_floor = false;
@@ -479,6 +583,9 @@ impl Home {
                 Task::none()
             }
             CatalogMessage::SelectFloor(key) => {
+                if let Some(task) = self.select_on_other_network(&key) {
+                    return task;
+                }
                 let previous = self.catalog.selected.clone();
                 self.catalog.selected = self.catalog_selectable(&key).then_some(key.clone());
                 self.catalog.motion = None;
@@ -513,6 +620,29 @@ impl Home {
             CatalogMessage::NetworkMenu(open) => {
                 self.catalog.network_menu = open;
                 Task::none()
+            }
+            CatalogMessage::Filter(filter) => {
+                self.catalog.network_menu = false;
+                self.catalog.filter = filter;
+                self.catalog.page = 0;
+                // A selection the filter hides falls back to browsing.
+                if self
+                    .catalog
+                    .selected
+                    .as_ref()
+                    .is_some_and(|key| !self.effective_filter().matches(key.chain))
+                {
+                    self.catalog.selected = None;
+                    self.catalog.motion = None;
+                    self.catalog.open_from_floor = false;
+                }
+                // One network narrows Create and Import to it too.
+                match filter {
+                    NetworkFilter::Network(chain) if chain != self.network => {
+                        Task::done(Message::View(super::ViewMessage::SelectNetwork(chain)))
+                    }
+                    _ => Task::none(),
+                }
             }
             CatalogMessage::MotionTick(now) => {
                 if self
@@ -868,11 +998,24 @@ pub(super) fn theme_id() -> Id {
 pub(super) fn recover_vault_id() -> Id {
     control_id("recover-vault")
 }
+#[cfg(test)]
 pub(super) fn split_wallet_id() -> Id {
     control_id("split-wallet")
 }
 pub(super) fn clear_query_id() -> Id {
     control_id("clear-query")
+}
+/// An All / Live / Test networks chip.
+pub(super) fn filter_id(name: &str) -> Id {
+    control_id(&format!("filter-{name}"))
+}
+/// The top bar's "Clear filters" link.
+pub(super) fn clear_filters_id() -> Id {
+    control_id("clear-filters")
+}
+/// "Clear filters" in the empty state when every Cube is filtered out.
+pub(super) fn clear_filters_empty_id() -> Id {
+    control_id("clear-filters-empty")
 }
 pub(super) fn create_id() -> Id {
     control_id("create")
@@ -923,6 +1066,11 @@ pub(super) struct Projection<'a> {
     /// Whether the screen lists local Cubes (`State::Cubes`) or only the
     /// remote ones (`State::NoCube`); their limit copy differs.
     pub(super) has_local_list: bool,
+    /// Local Cubes the network filter hides (after any search).
+    pub(super) hidden: usize,
+    /// Every listed network with its local Cube count, in the canvas order.
+    pub(super) network_counts: Vec<(ChainId, usize)>,
+    pub(super) filter: NetworkFilter,
 }
 
 impl Projection<'_> {
@@ -941,7 +1089,7 @@ impl Projection<'_> {
         self.total_count >= self.cube_limit
     }
     pub(super) fn no_matches(&self) -> bool {
-        !self.query.trim().is_empty()
+        (!self.query.trim().is_empty() || self.hidden > 0)
             && self.locals.is_empty()
             && self.remotes.is_empty()
             && self.local_total + self.remote_total > 0
@@ -957,42 +1105,65 @@ pub(super) fn project(home: &Home) -> Projection<'_> {
     let network = home.network;
     let signed_in = home.connect_account.authenticated_client().is_some();
     let query = home.catalog.query.clone();
-    let (cubes, has_local_list): (&[CubeSettings], bool) = match &home.state {
-        State::Cubes { cubes, .. } => (cubes.as_slice(), true),
-        _ => (&[], false),
+    let (checked, has_local_list): (Option<(&[CubeSettings], ChainId)>, bool) = match &home.state {
+        State::Cubes { cubes, source, .. } => (Some((cubes.as_slice(), *source)), true),
+        _ => (None, false),
     };
-    let locals: Vec<LocalRow<'_>> = cubes
-        .iter()
-        .enumerate()
-        .filter_map(|(index, cube)| {
+    let filter = home.effective_filter();
+    // Every listed network, in the canvas's order. The current network's
+    // rows come from the checked list; the others from read-only copies,
+    // which act by first making their network current.
+    let mut network_counts = Vec::new();
+    let mut local_total = 0;
+    let mut hidden = 0;
+    let mut locals: Vec<LocalRow<'_>> = Vec::new();
+    for chain in home.ordered_networks() {
+        let (cubes, current) = match checked {
+            Some((cubes, source)) if source == chain => (cubes, true),
+            _ => (home.network_catalog(chain), false),
+        };
+        network_counts.push((chain, cubes.len()));
+        local_total += cubes.len();
+        for (index, cube) in cubes.iter().enumerate() {
             let key = CubeCatalogKey {
                 chain: cube.network,
                 cube_id: cube.id.clone(),
             };
             let name = catalog_display_name(&cube.name);
-            matches_query(&name, &query).then(|| {
-                let connect = connect_caption(cube, signed_in, home.cube_sync_hint(cube));
-                let sync_warning = (signed_in && connect.0 == Tone::Warn)
-                    .then(|| connect.1.lines().next().unwrap_or_default().to_string());
-                LocalRow {
-                    // `catalog_index` also requires key chain == source == network.
-                    actionable: !key.cube_id.is_empty() && home.catalog_index(&key) == Some(index),
-                    index,
-                    connect,
-                    sync_warning,
-                    vault: vault_subtitle(cube),
-                    key,
-                    cube,
-                    name,
-                }
-            })
-        })
-        .collect();
+            if !matches_query(&name, &query) {
+                continue;
+            }
+            if !filter.matches(chain) {
+                hidden += 1;
+                continue;
+            }
+            let connect = connect_caption(cube, signed_in, home.cube_sync_hint(cube));
+            let sync_warning = (signed_in && connect.0 == Tone::Warn)
+                .then(|| connect.1.lines().next().unwrap_or_default().to_string());
+            locals.push(LocalRow {
+                // `catalog_index` also requires key chain == source == network.
+                // Another network's row is acted on by switching to it.
+                actionable: !key.cube_id.is_empty()
+                    && if current {
+                        home.catalog_index(&key) == Some(index)
+                    } else {
+                        key.chain == chain
+                    },
+                index: if current { index } else { usize::MAX },
+                connect,
+                sync_warning,
+                vault: vault_subtitle(cube),
+                key,
+                cube,
+                name,
+            });
+        }
+    }
     let network_str = settings::network_to_api_string(network);
     let all_remotes: Vec<&RemoteCube> = home
         .remote_cubes
         .iter()
-        .filter(|rc| !network.is_blake2b() && rc.network == network_str)
+        .filter(|rc| !network.is_blake2b() && rc.network == network_str && filter.matches(network))
         .collect();
     let remote_total = all_remotes.len();
     let remotes = all_remotes
@@ -1011,7 +1182,10 @@ pub(super) fn project(home: &Home) -> Projection<'_> {
             .position(|row| row.index == record && row.actionable)
     });
     Projection {
-        local_total: cubes.len(),
+        local_total,
+        hidden,
+        network_counts,
+        filter,
         remote_total,
         locals,
         remotes,
@@ -1535,10 +1709,7 @@ pub(super) fn launcher_view(home: &Home) -> Element<'_, ViewMessage> {
             .height(Length::Fill)
             .push(screen)
             .push(super::launcher_chrome::key_layer(home))
-            .push(super::launcher_chrome::network_layer(
-                home,
-                projection.local_total + projection.remote_total,
-            )),
+            .push(super::launcher_chrome::network_layer(home, &projection)),
     )
     .width(Length::Fill)
     .height(Length::Fill)
@@ -3723,7 +3894,7 @@ mod tests {
 
     /// Bounds of the container carrying `id` in a window-sized layout.
     #[test]
-    fn the_network_chip_opens_the_prototype_menu_and_sends_select_network() {
+    fn the_network_chip_opens_the_prototype_menu_and_filters_by_network() {
         use super::super::launcher_chrome::network_option_id;
         let mut home = rows(2);
         home.displayed_networks = vec![ChainId::Bitcoin, ChainId::Testnet4];
@@ -3753,13 +3924,17 @@ mod tests {
             field,
             option
         );
+        home.catalog.filter = NetworkFilter::Network(ChainId::Bitcoin);
         for press in [Press::Pointer, Press::Enter] {
             assert!(matches!(
                 activate_chrome(&home, network_option_id(ChainId::Testnet4), press),
-                ViewMessage::SelectNetwork(ChainId::Testnet4)
+                ViewMessage::Catalog(CatalogMessage::Filter(NetworkFilter::Network(
+                    ChainId::Testnet4
+                )))
             ));
+            // The network already filtered to closes the menu.
             assert!(matches!(
-                activate_chrome(&home, network_option_id(home.network), press),
+                activate_chrome(&home, network_option_id(ChainId::Bitcoin), press),
                 ViewMessage::Catalog(CatalogMessage::NetworkMenu(false))
             ));
         }
@@ -3768,6 +3943,172 @@ mod tests {
             !home.catalog.network_menu,
             "choosing a network closes the menu"
         );
+    }
+
+    /// Bitcoin "a", "b" checked; Testnet4 "t1", "t2" and Signet "s1" read
+    /// from their directories. Developer mode lists them all.
+    fn all_networks() -> Home {
+        let mut home = home_with(&[("a", "Alpha"), ("b", "Beta")]);
+        home.catalog.mode = LauncherMode::Cubes;
+        home.developer_mode = true;
+        home.displayed_networks = vec![ChainId::Bitcoin, ChainId::Testnet4, ChainId::Signet];
+        let cube = |id: &str, name: &str, chain| {
+            CubeSettings::new_with_raw_id(id.to_string(), name.to_string(), chain)
+        };
+        home.network_catalog_requested = vec![ChainId::Testnet4, ChainId::Signet];
+        home.network_catalog = vec![
+            (
+                ChainId::Testnet4,
+                vec![
+                    cube("t1", "Lab", ChainId::Testnet4),
+                    cube("t2", "Bench", ChainId::Testnet4),
+                ],
+            ),
+            (ChainId::Signet, vec![cube("s1", "Sig", ChainId::Signet)]),
+        ];
+        home
+    }
+
+    fn names(home: &Home) -> Vec<String> {
+        project(home)
+            .locals
+            .iter()
+            .map(|row| row.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn the_floor_lists_every_network_and_each_filter_narrows_it() {
+        let mut home = all_networks();
+        assert_eq!(names(&home), ["Alpha", "Beta", "Lab", "Bench", "Sig"]);
+        let projection = project(&home);
+        assert_eq!((projection.local_total, projection.hidden), (5, 0));
+        assert_eq!(
+            projection.network_counts,
+            [
+                (ChainId::Bitcoin, 2),
+                (ChainId::Testnet4, 2),
+                (ChainId::Signet, 1)
+            ]
+        );
+
+        catalog(&mut home, CatalogMessage::Filter(NetworkFilter::Live));
+        assert_eq!(names(&home), ["Alpha", "Beta"]);
+        assert_eq!(project(&home).hidden, 3);
+
+        catalog(&mut home, CatalogMessage::Filter(NetworkFilter::Test));
+        assert_eq!(names(&home), ["Lab", "Bench", "Sig"]);
+
+        // One network also makes it current, for Create and Import.
+        let task = home.update_catalog(CatalogMessage::Filter(NetworkFilter::Network(
+            ChainId::Signet,
+        )));
+        assert!(task.units() > 0, "filtering to Signet selects that network");
+        assert_eq!(names(&home), ["Sig"]);
+
+        catalog(&mut home, CatalogMessage::Filter(NetworkFilter::All));
+        assert_eq!(names(&home).len(), 5);
+    }
+
+    #[test]
+    fn test_filters_fall_back_to_all_without_developer_mode() {
+        let mut home = all_networks();
+        home.catalog.filter = NetworkFilter::Test;
+        home.developer_mode = false;
+        assert_eq!(home.effective_filter(), NetworkFilter::All);
+        home.catalog.filter = NetworkFilter::Network(ChainId::Regtest);
+        assert_eq!(
+            home.effective_filter(),
+            NetworkFilter::All,
+            "a network that is not listed cannot be the filter"
+        );
+    }
+
+    #[test]
+    fn a_filter_that_hides_every_cube_shows_the_empty_state() {
+        let mut home = all_networks();
+        home.displayed_networks.push(ChainId::Regtest);
+        catalog(
+            &mut home,
+            CatalogMessage::Filter(NetworkFilter::Network(ChainId::Regtest)),
+        );
+        let projection = project(&home);
+        assert!(projection.locals.is_empty());
+        assert_eq!(projection.hidden, 5);
+        assert!(projection.no_matches());
+        let tree = home_tree("filtered-out", &home, WIDE, "dark", theme::Theme::dark());
+        assert!(tree.contains("No Cubes match these filters"));
+        assert!(tree.contains("5 Cubes hidden."));
+        assert!(tree.has(&clear_filters_empty_id()));
+        assert!(matches!(
+            activate_chrome(&home, clear_filters_id(), Press::Pointer),
+            ViewMessage::Catalog(CatalogMessage::Filter(NetworkFilter::All))
+        ));
+    }
+
+    #[test]
+    fn the_top_bar_shows_the_canvas_chips_count_and_clear_link() {
+        let mut home = all_networks();
+        let tree = home_tree("filters", &home, WIDE, "dark", theme::Theme::dark());
+        for label in [
+            "All networks",
+            "Live networks",
+            "Test networks",
+            "Network",
+            "5 Cubes",
+        ] {
+            assert!(tree.contains(label), "missing {:?}", label);
+        }
+        assert!(!tree.contains("Clear filters"));
+        catalog(&mut home, CatalogMessage::Filter(NetworkFilter::Live));
+        let tree = home_tree("filters-live", &home, WIDE, "dark", theme::Theme::dark());
+        assert!(tree.contains("2 of 5 Cubes · 3 hidden"));
+        assert!(tree.has(&clear_filters_id()));
+        assert!(matches!(
+            activate_chrome(&home, filter_id("test"), Press::Pointer),
+            ViewMessage::Catalog(CatalogMessage::Filter(NetworkFilter::Test))
+        ));
+        // Without Developer mode: one network, so no group chips at all.
+        let mut plain = home_with(&[("a", "Alpha")]);
+        plain.catalog.mode = LauncherMode::Cubes;
+        let tree = home_tree("filters-plain", &plain, WIDE, "dark", theme::Theme::dark());
+        assert!(!tree.contains("All networks"));
+        assert!(!tree.contains("Live networks"));
+        assert!(tree.contains("Network"));
+    }
+
+    #[test]
+    fn picking_a_cube_on_another_network_switches_then_selects_it() {
+        let mut home = all_networks();
+        let lab = CubeCatalogKey {
+            chain: ChainId::Testnet4,
+            cube_id: "t1".into(),
+        };
+        let task = home.update_catalog(CatalogMessage::SelectFloor(lab.clone()));
+        assert!(task.units() > 0, "the switch to Testnet4 is requested");
+        assert_eq!(home.catalog.pending_select, Some(lab.clone()));
+        assert!(
+            home.catalog.selected.is_none(),
+            "nothing selected until checked"
+        );
+
+        // The switch, then Testnet4's checked list arriving.
+        home.network = ChainId::Testnet4;
+        let checked = State::Cubes {
+            cubes: home.network_catalog(ChainId::Testnet4).to_vec(),
+            create_cube: false,
+            source: ChainId::Testnet4,
+        };
+        let task = home.update(Message::Checked {
+            for_chain: ChainId::Testnet4,
+            res: Ok(checked),
+        });
+        assert!(home.catalog.pending_select.is_none());
+        assert!(task.units() > 0, "the pending selection is replayed");
+        catalog(&mut home, CatalogMessage::SelectFloor(lab.clone()));
+        assert_eq!(home.catalog.selected, Some(lab));
+        // The floor keeps every network, in the same order.
+        assert_eq!(names(&home), ["Alpha", "Beta", "Lab", "Bench", "Sig"]);
     }
 
     #[test]
@@ -3861,18 +4202,14 @@ mod tests {
                     ViewMessage::GoToSection(HomeSection::RecoverVault)
                 ));
             }
-            let split = signed_in
+            // "Split a Bitcoin wallet" is not in the Launcher design.
+            assert!(signed_in
                 .connect_chain_availability(ChainId::BitcoinBlake2b)
-                .is_available();
-            assert_eq!(tree.has(&split_wallet_id()), split);
-            if split {
-                assert!(matches!(
-                    activate_chrome(&signed_in, split_wallet_id(), pointer),
-                    ViewMessage::GoToSection(HomeSection::SplitWallet)
-                ));
-            }
+                .is_available());
+            assert!(!tree.has(&split_wallet_id()));
+            assert!(!tree.contains("Split a Bitcoin wallet"));
         }
-        // Off Bitcoin the Split entry is not offered, exactly as in the sidebar.
+        // Nor anywhere else.
         let mut testnet = rows(2);
         crate::home::tests::enable_btcb2(&mut testnet);
         testnet.network = ChainId::Testnet4;
