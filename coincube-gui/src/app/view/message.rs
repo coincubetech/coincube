@@ -1031,6 +1031,8 @@ pub enum LiquidSendMessage {
 /// [`crate::app::state::liquid::swap`].
 #[derive(Debug, Clone)]
 pub enum LiquidSwapMessage {
+    /// Focus a keyboard action after pointer activation.
+    FocusAction(iced::advanced::widget::Id),
     /// Balances + recorded-swap payments loaded for the Swap screen.
     DataLoaded {
         btc_balance: Amount,

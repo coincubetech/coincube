@@ -17,7 +17,7 @@ use coincube_ui::{
     icon::{left_right_icon, warning_icon},
     image::asset_network_logo,
     theme,
-    widget::{Column, Container, Element, Row},
+    widget::{action::Action, Column, Container, Element, Row},
 };
 use iced::{
     widget::{button as iced_button, container, Space},
@@ -147,6 +147,10 @@ fn asset_slug(asset: SendAsset) -> &'static str {
     }
 }
 
+const FLIP_ACTION_ID: &str = "tenshu.liquid.swap.flip";
+const SWAP_ALL_ACTION_ID: &str = "tenshu.liquid.swap.all";
+const CONTINUE_ACTION_ID: &str = "tenshu.liquid.swap.continue";
+
 /// A rounded filled card (matches the Liquid → Send "YOU SEND" cards).
 fn card<'a>(
     content: impl Into<Element<'a, LiquidSwapMessage>>,
@@ -191,14 +195,17 @@ fn balance_row<'a>(
 
 /// Circular ⇄ flip button between the two (horizontal) cards.
 fn flip_button<'a>() -> Element<'a, LiquidSwapMessage> {
-    iced_button(
+    Action::new(
+        FLIP_ACTION_ID,
         Container::new(left_right_icon().size(18).color(color::ORANGE))
             .width(Length::Fixed(40.0))
             .height(Length::Fixed(40.0))
             .center_x(Length::Fixed(40.0))
             .center_y(Length::Fixed(40.0)),
+        LiquidSwapMessage::FocusAction,
     )
     .padding(0)
+    .focus_radius(20.0)
     .on_press(LiquidSwapMessage::FlipAssets)
     .style(|t: &theme::Theme, _| iced_button::Style {
         background: Some(Background::Color(t.colors.shell.background)),
@@ -390,13 +397,15 @@ fn input_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMess
         LiquidSwapMessage::AmountEditedPay,
     );
 
-    let swap_all = iced_button(
+    let swap_all = Action::new(
+        SWAP_ALL_ACTION_ID,
         text("Swap All")
             .size(P2_SIZE)
             .bold()
             .style(|t: &theme::Theme| iced::widget::text::Style {
                 color: Some(t.colors.shell.accent_ink),
             }),
+        LiquidSwapMessage::FocusAction,
     )
     .padding(2)
     .on_press(LiquidSwapMessage::SwapAll)
@@ -480,21 +489,36 @@ fn input_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMess
         );
     }
 
-    let continue_btn = {
-        let mut b = button::primary(None, "Continue").width(Length::Fixed(240.0));
-        if config.quote_actionable {
-            b = b.on_press(LiquidSwapMessage::Continue);
-        }
-        b
-    };
+    let continue_btn = Action::new(
+        CONTINUE_ACTION_ID,
+        text("Continue")
+            .size(P1_SIZE)
+            .font(coincube_ui::font::MEDIUM)
+            .width(Length::Fill)
+            .align_x(Alignment::Center),
+        LiquidSwapMessage::FocusAction,
+    )
+    .padding([10, 16])
+    .focus_radius(25.0)
+    .style(theme::button::primary)
+    .width(Length::Fixed(240.0))
+    .on_press_maybe(
+        config
+            .quote_actionable
+            .then_some(LiquidSwapMessage::Continue),
+    );
 
     // ── Horizontal pay / direction / receive cards ───────────────────────
     let cards_row = Row::new()
         .spacing(12)
-        .align_y(Alignment::Center)
+        .align_y(Alignment::Start)
         .width(Length::Fill)
         .push(Container::new(from_card).width(Length::FillPortion(1)))
-        .push(flip_button())
+        .push(
+            Column::new()
+                .push(Space::new().height(Length::Fixed(56.0)))
+                .push(flip_button()),
+        )
         .push(Container::new(to_card).width(Length::FillPortion(1)));
 
     let mut content = Column::new().spacing(16).width(Length::Fill);
@@ -773,6 +797,36 @@ mod presentation_tests {
             exchange_base: 5_790,
             fee_base: 210,
         };
+        let render = |phase, actionable| {
+            liquid_swap_view(LiquidSwapConfig {
+                phase,
+                from_asset: SendAsset::Lbtc,
+                to_asset: SendAsset::Usdt,
+                btc_balance: Amount::from_sat(12_784),
+                usdt_balance: 1_037_000_000,
+                pay_input: &pay,
+                receive_input: &receive,
+                quote: Some(&quote),
+                rate: Some(82760.12),
+                quoting: false,
+                quote_remaining: if actionable { 24 } else { 0 },
+                quote_actionable: actionable,
+                confirm_enabled: actionable,
+                is_sending: false,
+                syncing: false,
+                sync_failed: false,
+                needs_lbtc_for_fees: false,
+                bitcoin_unit: BitcoinDisplayUnit::Sats,
+                error: None,
+                sent_amount_display: "",
+                sent_quote: &sent_quote,
+                sent_image_handle: &image,
+                recent_swaps: &[],
+                usdt_id: "synthetic-usdt-id",
+                fiat_converter: None,
+                mask_amounts: false,
+            })
+        };
         for (width, height) in [(1024, 768), (1440, 900)] {
             for (appearance, theme) in [
                 ("dark", theme::Theme::dark()),
@@ -786,34 +840,7 @@ mod presentation_tests {
                 ] {
                     let inspection = capture::inspect(
                         &format!("liquid-swap-{suffix}"),
-                        liquid_swap_view(LiquidSwapConfig {
-                            phase,
-                            from_asset: SendAsset::Lbtc,
-                            to_asset: SendAsset::Usdt,
-                            btc_balance: Amount::from_sat(12_784),
-                            usdt_balance: 1_037_000_000,
-                            pay_input: &pay,
-                            receive_input: &receive,
-                            quote: Some(&quote),
-                            rate: Some(82760.12),
-                            quoting: false,
-                            quote_remaining: if actionable { 24 } else { 0 },
-                            quote_actionable: actionable,
-                            confirm_enabled: actionable,
-                            is_sending: false,
-                            syncing: false,
-                            sync_failed: false,
-                            needs_lbtc_for_fees: false,
-                            bitcoin_unit: BitcoinDisplayUnit::Sats,
-                            error: None,
-                            sent_amount_display: "",
-                            sent_quote: &sent_quote,
-                            sent_image_handle: &image,
-                            recent_swaps: &[],
-                            usdt_id: "synthetic-usdt-id",
-                            fiat_converter: None,
-                            mask_amounts: false,
-                        }),
+                        render(phase, actionable),
                         (width, height),
                         appearance,
                         theme,
@@ -840,8 +867,51 @@ mod presentation_tests {
                     }));
                     if phase == SwapPhase::Review {
                         assert!(inspection.contains("Back"));
+                    } else {
+                        for id in [FLIP_ACTION_ID, SWAP_ALL_ACTION_ID] {
+                            assert!(inspection.has_focus(iced::advanced::widget::Id::new(id)));
+                        }
+                        assert_eq!(
+                            inspection
+                                .has_focus(iced::advanced::widget::Id::new(CONTINUE_ACTION_ID)),
+                            actionable
+                        );
+                        let label_y = |label| {
+                            inspection
+                                .text
+                                .iter()
+                                .find(|(value, _)| value == label)
+                                .expect("swap card heading")
+                                .1
+                                .y
+                        };
+                        assert!(
+                            (label_y("YOU PAY") - label_y("YOU RECEIVE")).abs() <= 1.0,
+                            "swap cards should share a top edge"
+                        );
                     }
                 }
+            }
+        }
+        for (id, expected) in [
+            (FLIP_ACTION_ID, LiquidSwapMessage::FlipAssets),
+            (SWAP_ALL_ACTION_ID, LiquidSwapMessage::SwapAll),
+            (CONTINUE_ACTION_ID, LiquidSwapMessage::Continue),
+        ] {
+            for key in [
+                iced::keyboard::key::Named::Enter,
+                iced::keyboard::key::Named::Space,
+            ] {
+                let messages = capture::activate_with_key(
+                    render(SwapPhase::Input, true),
+                    iced::advanced::widget::Id::new(id),
+                    (1024, 768),
+                    false,
+                    key,
+                );
+                assert!(messages.iter().any(|message| {
+                    std::mem::discriminant(message) == std::mem::discriminant(&expected)
+                }));
             }
         }
     }
