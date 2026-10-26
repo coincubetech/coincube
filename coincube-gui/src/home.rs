@@ -460,6 +460,17 @@ pub struct Home {
     claim_owner: Option<app::cache::AppGeneration>,
     state: State,
     displayed_networks: Vec<ChainId>,
+    /// The Cubes of every other listed network, read-only, so the Launcher
+    /// can show and filter all networks at once (P-Launcher's All / Live /
+    /// Test / Network filters). Display only: acting on one of these Cubes
+    /// first makes its network current, and the checked `state` takes over.
+    network_catalog: Vec<(ChainId, Vec<CubeSettings>)>,
+    /// The networks `network_catalog` was last asked to load.
+    network_catalog_requested: Vec<ChainId>,
+    /// Each load claims a generation; an older read is dropped on arrival.
+    network_catalog_generation: u64,
+    /// Networks whose last read failed. Their previous list, if any, stays.
+    network_catalog_unread: Vec<ChainId>,
     /// Descriptor checksums that already have a Bitcoin Blake2b claim target
     /// on this device. Resolved from the fork chain's settings file when the
     /// network list is refreshed — never from the view, which would put a file
@@ -518,6 +529,9 @@ pub struct Home {
     pub theme_mode: coincube_ui::theme::palette::ThemeMode,
     /// The GUI's accepted balance-privacy receipt for the Launcher's eye.
     pub(crate) balance_privacy: Option<crate::app::state::preferences::BalancePrivacyChrome>,
+    /// App preferences is open over this Launcher; its top-bar entry shows
+    /// the current state (`.tbtn.on`). Set by the GUI that owns the sheet.
+    pub(crate) app_preferences_open: bool,
     /// Last native accessibility observation used by Follow system motion.
     system_reduces_motion: Option<bool>,
     /// A Liquid wallet exists on this device (the sunset gate's local half),
@@ -650,6 +664,10 @@ impl Home {
                 // Resolved on the first `refresh_displayed_networks`.
                 btcb2_claim_targets: std::collections::HashSet::new(),
                 state: State::Unchecked,
+                network_catalog: Vec::new(),
+                network_catalog_requested: Vec::new(),
+                network_catalog_generation: 0,
+                network_catalog_unread: Vec::new(),
                 displayed_networks: if developer_mode {
                     NETWORKS.to_vec()
                 } else {
@@ -685,6 +703,7 @@ impl Home {
                 active_section: HomeSection::Cubes,
                 theme_mode: GlobalSettings::load_theme_mode(&GlobalSettings::path(&datadir_path)),
                 balance_privacy: None,
+                app_preferences_open: false,
                 system_reduces_motion,
                 liquid_on_disk: false,
                 // Recomputed whenever the Create Cube form opens — see
@@ -1469,6 +1488,15 @@ impl Home {
 
     /// Refresh saved preferences after a successful edit in any Home tab.
     pub(crate) fn reload_global_settings(&mut self) -> Task<Message> {
+        let task = self.reload_global_settings_inner();
+        // Developer mode and the Blake2b beta change which networks show.
+        match self.refresh_network_catalog(false) {
+            Some(load) => Task::batch([task, load]),
+            None => task,
+        }
+    }
+
+    fn reload_global_settings_inner(&mut self) -> Task<Message> {
         let path = GlobalSettings::path(&self.datadir_path);
         self.apply_launcher_mode();
         self.developer_mode = GlobalSettings::load_developer_mode(&path);
@@ -1648,12 +1676,68 @@ impl Home {
         // List presentation messages never enter the lifecycle dispatch. The
         // transient selection is reconciled with whatever screen and list
         // each message leaves, including after an early return.
+        // Connect results can grant or withdraw Bitcoin Blake2b, which changes
+        // which networks are listed (the GUI's preference reload covers the
+        // other causes).
+        let connect = matches!(
+            &message,
+            Message::View(ViewMessage::ConnectAccount(_) | ViewMessage::ConnectSheetAccount(_))
+        );
         let task = match message {
             Message::View(ViewMessage::Catalog(message)) => self.update_catalog(message),
             message => self.update_lifecycle(message),
         };
         self.reconcile_catalog();
+        // Once the catalog is in use, read the networks such a change lists.
+        if connect && self.network_catalog_generation > 0 {
+            if let Some(load) = self.refresh_network_catalog(false) {
+                return Task::batch([task, load]);
+            }
+        }
         task
+    }
+
+    /// Read the other listed networks' Cubes whenever the set changes: the
+    /// current network's list was checked (it may have moved), or settings
+    /// changed which networks are listed.
+    /// `force` rereads even an unchanged set, after the current list was
+    /// checked, so another tab's create or delete shows here too.
+    fn refresh_network_catalog(&mut self, force: bool) -> Option<Task<Message>> {
+        let wanted: Vec<ChainId> = self
+            .displayed_networks
+            .iter()
+            .copied()
+            .filter(|chain| *chain != self.network)
+            .collect();
+        if wanted == self.network_catalog_requested && (!force || wanted.is_empty()) {
+            return None;
+        }
+        self.network_catalog_generation += 1;
+        let generation = self.network_catalog_generation;
+        self.network_catalog
+            .retain(|(chain, _)| wanted.contains(chain));
+        self.network_catalog_unread
+            .retain(|chain| wanted.contains(chain));
+        self.network_catalog_requested = wanted.clone();
+        Some(Task::batch(wanted.into_iter().map(|chain| {
+            let dir = self.datadir_path.network_directory(chain);
+            Task::perform(read_network_catalog(chain, dir), move |cubes| {
+                Message::NetworkCatalogLoaded {
+                    generation,
+                    chain,
+                    cubes,
+                }
+            })
+        })))
+    }
+
+    /// Another network's Cubes, as last read; empty until loaded.
+    pub(crate) fn network_catalog(&self, chain: ChainId) -> &[CubeSettings] {
+        self.network_catalog
+            .iter()
+            .find(|(c, _)| *c == chain)
+            .map(|(_, cubes)| cubes.as_slice())
+            .unwrap_or(&[])
     }
 
     /// The Launcher's message handling, unchanged by the List body.
@@ -1662,14 +1746,21 @@ impl Home {
             Message::View(ViewMessage::RunCatalog(key)) => {
                 self.catalog.open_from_floor = false;
                 let Some(index) = self.catalog_index(&key) else {
-                    return Task::none();
+                    // A Cube read from another network, or one whose network
+                    // is still being checked: switch, then open it once the
+                    // checked list confirms it.
+                    return self
+                        .select_on_other_network(&key, launcher_catalog::PendingIntent::Open)
+                        .unwrap_or_else(Task::none);
                 };
                 Message::View(ViewMessage::Run(index))
             }
             Message::View(ViewMessage::RunFloorCatalog(key)) => {
                 self.catalog.open_from_floor = false;
                 let Some(index) = self.catalog_index(&key) else {
-                    return Task::none();
+                    return self
+                        .select_on_other_network(&key, launcher_catalog::PendingIntent::Open)
+                        .unwrap_or_else(Task::none);
                 };
                 self.catalog.open_from_floor = self.catalog.selected.as_ref() == Some(&key)
                     && self.catalog.mode == launcher_catalog::LauncherMode::Cubes;
@@ -1841,6 +1932,7 @@ impl Home {
                 Message::Checked { .. }
                 | Message::CubeLimitsLoaded(_)
                 | Message::RemoteCubesLoaded { .. }
+                | Message::NetworkCatalogLoaded { .. }
                 | Message::ConnectSignedInBubble
                 | Message::CatchUpSyncFinished(_)
                 | Message::CubeRemoteRegistered { .. }
@@ -2601,6 +2693,31 @@ impl Home {
             }
             #[cfg(not(target_os = "macos"))]
             Message::NativePasskeyTick => Task::none(),
+            Message::NetworkCatalogLoaded {
+                generation,
+                chain,
+                cubes,
+            } => {
+                // A read superseded by a newer load, or for a network that
+                // has since become current or stopped being listed, is
+                // dropped: it describes nothing on screen.
+                if generation != self.network_catalog_generation
+                    || !self.network_catalog_requested.contains(&chain)
+                {
+                    return Task::none();
+                }
+                self.network_catalog_unread.retain(|c| *c != chain);
+                match cubes {
+                    Ok(cubes) => match self.network_catalog.iter_mut().find(|(c, _)| *c == chain) {
+                        Some((_, list)) => *list = cubes,
+                        None => self.network_catalog.push((chain, cubes)),
+                    },
+                    // Keep whatever was last read; the menu says the
+                    // network is unavailable rather than showing 0 Cubes.
+                    Err(_) => self.network_catalog_unread.push(chain),
+                }
+                Task::none()
+            }
             Message::RemoteCubesLoaded { request_id, result } => {
                 // Superseded by a newer fetch, or invalidated by logout. Drop
                 // it: applying it would either roll the list back to an older
@@ -2867,10 +2984,12 @@ impl Home {
                     tracing::debug!(
                         "Ignoring SelectNetwork action because developer mode is disabled"
                     );
+                    self.catalog.pending_select = None;
                     return Task::none();
                 }
                 if let Some(reason) = self.chain_availability(network).reason() {
                     self.set_error(reason.to_string());
+                    self.catalog.pending_select = None;
                     return Task::none();
                 }
                 self.network = network;
@@ -3016,6 +3135,7 @@ impl Home {
                     Task::none()
                 }
                 Err(e) => {
+                    self.catalog.pending_select = None;
                     self.error = Some(e.to_string());
                     Task::none()
                 }
@@ -3035,6 +3155,18 @@ impl Home {
                         self.remote_cubes
                             .retain(|rc| !local_ids.contains(rc.uuid.as_str()));
                     }
+                    // The list this replaces keeps showing as another
+                    // network's, so the floor does not lose those Cubes while
+                    // they are read again from disk.
+                    if let State::Cubes { cubes, source, .. } = &self.state {
+                        if *source != self.network {
+                            let (source, cubes) = (*source, cubes.clone());
+                            match self.network_catalog.iter_mut().find(|(c, _)| *c == source) {
+                                Some((_, list)) => *list = cubes,
+                                None => self.network_catalog.push((source, cubes)),
+                            }
+                        }
+                    }
                     self.state = state;
                     self.liquid_on_disk = matches!(self.state, State::Cubes { .. })
                         && !self.network.is_blake2b()
@@ -3050,7 +3182,27 @@ impl Home {
                             return self.update_inner(Message::View(ViewMessage::Run(index)));
                         }
                     }
-                    Task::none()
+                    // A Cube picked on another network made that network
+                    // current; now that its list is checked, select it.
+                    // Open replays as `RunCatalog`, which resolves the Cube
+                    // through `catalog_index` on this checked list again.
+                    let select = match self.catalog.pending_select.take() {
+                        Some((key, intent)) if key.chain == self.network => {
+                            Task::done(Message::View(match intent {
+                                launcher_catalog::PendingIntent::Select => ViewMessage::Catalog(
+                                    launcher_catalog::CatalogMessage::SelectFloor(key),
+                                ),
+                                launcher_catalog::PendingIntent::Open => {
+                                    ViewMessage::RunCatalog(key)
+                                }
+                            }))
+                        }
+                        _ => Task::none(),
+                    };
+                    match self.refresh_network_catalog(true) {
+                        Some(load) => Task::batch([select, load]),
+                        None => select,
+                    }
                 }
             },
             Message::View(ViewMessage::ClaimBlake2b(index)) => {
@@ -6829,6 +6981,12 @@ pub enum Message {
         request_id: u64,
         result: Result<Vec<RemoteCube>, String>,
     },
+    /// Another network's Cubes, read without touching its directory.
+    NetworkCatalogLoaded {
+        generation: u64,
+        chain: ChainId,
+        cubes: Result<Vec<CubeSettings>, String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -7478,6 +7636,30 @@ fn probe_network_datadir<C: Into<crate::chain::ChainId>>(
     })
 }
 
+/// Another network's Cubes for the Launcher's all-network view. Strictly
+/// read-only: unlike [`check_network_datadir`] it creates no directory or
+/// config, so browsing never writes to a network. Records that claim another
+/// chain are left out, as the open path would refuse them.
+async fn read_network_catalog(
+    chain: ChainId,
+    dir: NetworkDirectory,
+) -> Result<Vec<CubeSettings>, String> {
+    if !dir.path().join(settings::SETTINGS_FILE_NAME).exists() {
+        return Ok(Vec::new());
+    }
+    match settings::Settings::from_file(&dir) {
+        Ok(settings) => Ok(settings
+            .cubes
+            .into_iter()
+            .filter(|cube| cube.network == chain)
+            .collect()),
+        Err(e) => {
+            tracing::warn!("Couldn't read the {} Cube list: {}", chain, e);
+            Err(e.to_string())
+        }
+    }
+}
+
 /// Probe `path` — the directory of `source` — and load the Cubes stored there.
 /// The returned [`State::Cubes`] carries `source` so nothing downstream has to
 /// trust a record's own `network` field about where it lives.
@@ -7573,6 +7755,49 @@ async fn check_network_datadir(
         }
         Err(settings::SettingsError::NotFound) => Ok(State::NoCube { create_cube: false }),
         Err(e) => Err(format!("Failed to read settings: {}", e)),
+    }
+}
+
+#[cfg(test)]
+mod network_catalog_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn reading_another_network_never_writes_to_it() {
+        let root = std::env::temp_dir().join(format!("catalog-{}", uuid::Uuid::new_v4()));
+        let datadir = CoincubeDirectory::new(root.clone());
+        let dir = datadir.network_directory(ChainId::Testnet4);
+        assert!(read_network_catalog(ChainId::Testnet4, dir.clone())
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(
+            !dir.path().exists(),
+            "browsing must not create the network's directory"
+        );
+
+        std::fs::create_dir_all(dir.path()).unwrap();
+        let settings = settings::Settings {
+            cubes: vec![
+                CubeSettings::new_with_raw_id("t1".into(), "Lab".into(), ChainId::Testnet4),
+                // A record claiming another chain is left out, as opening would.
+                CubeSettings::new_with_raw_id("x".into(), "Stray".into(), ChainId::Bitcoin),
+            ],
+            ..Default::default()
+        };
+        std::fs::write(
+            dir.path().join(settings::SETTINGS_FILE_NAME),
+            serde_json::to_vec(&settings).unwrap(),
+        )
+        .unwrap();
+        let cubes = read_network_catalog(ChainId::Testnet4, dir.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            cubes.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            ["t1"]
+        );
+        std::fs::remove_dir_all(root).ok();
     }
 }
 

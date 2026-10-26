@@ -1337,6 +1337,7 @@ impl GUI {
         self.focus = Some(pane_id);
         self.preferences_sheet = None;
         self.connect_sheet = None;
+        self.publish_preferences_sheet();
         crate::app::session::close();
         crate::app::claim_intent::clear();
         crate::app::split_intent::clear();
@@ -1469,6 +1470,22 @@ impl GUI {
         }
     }
 
+    /// Mark the Launcher under an open App preferences sheet so its top-bar
+    /// entry draws as current; every other Launcher draws it at rest.
+    fn publish_preferences_sheet(&mut self) {
+        let origin = self
+            .preferences_sheet
+            .as_ref()
+            .map(|sheet| (sheet.origin.pane, sheet.origin.tab_id));
+        for (pane_id, pane) in self.panes.iter_mut() {
+            for tab in &mut pane.tabs {
+                if let tab::State::Home(home) = &mut tab.state {
+                    home.app_preferences_open = origin == Some((*pane_id, tab.id));
+                }
+            }
+        }
+    }
+
     fn publish_balance_privacy(&mut self) {
         let chrome = Some(Self::privacy_chrome_for(&self.preferences));
         for (_, pane) in self.panes.iter_mut() {
@@ -1552,6 +1569,7 @@ impl GUI {
         let Some(sheet) = self.preferences_sheet.take() else {
             return Task::none();
         };
+        self.publish_preferences_sheet();
         if self.overlay_origin_is_current(&sheet.origin) {
             if let Some(focus) = sheet.origin.focus {
                 return iced_runtime::task::widget(
@@ -1622,6 +1640,7 @@ impl GUI {
             )
         });
         self.preferences_sheet = None;
+        self.publish_preferences_sheet();
         self.connect_sheet = Some(ConnectSheet {
             origin: origin.clone(),
             page: ConnectSheetPage::Sections(section),
@@ -1920,6 +1939,7 @@ impl GUI {
             .is_some_and(|sheet| !self.overlay_origin_is_current(&sheet.origin))
         {
             self.preferences_sheet = None;
+            self.publish_preferences_sheet();
         }
         if self
             .connect_sheet
@@ -3046,6 +3066,7 @@ impl GUI {
                     page: PreferencesPageState::default(),
                 });
                 self.connect_sheet = None;
+                self.publish_preferences_sheet();
                 iced_runtime::task::widget(iced::advanced::widget::operation::focusable::focus(
                     iced::advanced::widget::Id::new("tenshu.preferences.close"),
                 ))
@@ -4113,7 +4134,13 @@ impl GUI {
             if self.overlay_origin_is_current(&sheet.origin) {
                 let foreground = preferences_view::view(&sheet.page, self.preferences_view_model())
                     .map(Message::PreferencesSheet);
-                return compose_overlay(background, foreground, false);
+                // P-AppPrefs keeps the Launcher's top bar above the sheet;
+                // over an open Cube (P-AppPrefs-InCube) the sheet covers it.
+                return compose_overlay(
+                    background,
+                    foreground,
+                    matches!(sheet.origin.source, tab::PreferencesSource::Home),
+                );
             }
         }
         if let Some(sheet) = &self.connect_sheet {
@@ -4316,7 +4343,8 @@ pub fn compose_overlay<'a, M: 'a>(
     .width(iced::Length::Fill)
     .height(iced::Length::Fill)
     .center_x(iced::Length::Fill)
-    .padding(if preserve_top_bar { 16 } else { 24 })
+    // `.sheet`: 28px above and below, over the stage or the whole window.
+    .padding([28, 24])
     .style(
         |theme: &coincube_ui::theme::Theme| iced::widget::container::Style {
             background: Some(iced::Background::Color(theme.colors.shell.shadow)),
@@ -4420,6 +4448,49 @@ mod app_preferences_sheet_tests {
             connect_sheet: None,
             preferences: PreferencesOwner::new(GlobalSettings::path(root), &receipt),
         }
+    }
+
+    /// P-AppPrefs draws the Launcher's App preferences entry as current
+    /// (`.tbtn.on`) only while the sheet is open over that Launcher.
+    #[test]
+    fn launcher_entry_shows_open_preferences_sheet() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path = std::env::temp_dir().join(format!(
+            "tenshu-preferences-entry-state-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        let root = CoincubeDirectory::new(path.clone());
+        GlobalSettings::load_or_initialize_preferences(&root).unwrap();
+        let mut gui = launcher_gui(&root);
+        let pane_id = gui.focus.unwrap();
+        let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
+        let open = |gui: &GUI| match &gui.panes.get(pane_id).unwrap().tabs[0].state {
+            tab::State::Home(home) => home.app_preferences_open,
+            _ => panic!("launcher tab"),
+        };
+        assert!(!open(&gui));
+        let _ = gui.update(Message::Pane(
+            pane_id,
+            pane::Message::Tab(
+                tab_id,
+                Box::new(tab::Message::OpenAppPreferences(
+                    tab::PreferencesSource::Home,
+                )),
+            ),
+        ));
+        assert!(gui.preferences_sheet.is_some());
+        assert!(open(&gui));
+        let _ = gui.update(Message::PreferencesSheet(
+            preferences_view::Message::Action(preferences_view::Action::Close),
+        ));
+        assert!(gui.preferences_sheet.is_none());
+        assert!(!open(&gui));
+        let _ = std::fs::remove_dir_all(path);
     }
 
     #[test]

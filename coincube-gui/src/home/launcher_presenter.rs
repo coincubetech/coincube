@@ -524,6 +524,48 @@ fn face_fact<'a>(label: &'static str, value: Element<'a, ViewMessage>) -> Elemen
         .into()
 }
 
+/// "No Cubes match these filters", the hidden count and Clear filters.
+fn filtered_out<'a>(hidden: usize) -> Element<'a, ViewMessage> {
+    use coincube_ui::font;
+    Column::new()
+        .spacing(8)
+        .align_x(Alignment::Center)
+        .push(face_words(
+            "No Cubes match these filters",
+            20.0,
+            font::SEMIBOLD,
+            false,
+        ))
+        .push(
+            Row::new()
+                .spacing(4)
+                .align_y(Alignment::Center)
+                .push(face_words(
+                    format!(
+                        "{} {} hidden.",
+                        hidden,
+                        if hidden == 1 { "Cube" } else { "Cubes" }
+                    ),
+                    14.0,
+                    font::REGULAR,
+                    true,
+                ))
+                .push(
+                    Action::new(
+                        launcher_catalog::clear_filters_empty_id(),
+                        face_link_label("Clear filters"),
+                        focus,
+                    )
+                    .padding([2.0, 4.0])
+                    .style(face_link_style)
+                    .on_press(ViewMessage::Catalog(CatalogMessage::Filter(
+                        launcher_catalog::NetworkFilter::All,
+                    ))),
+                ),
+        )
+        .into()
+}
+
 /// `.linkbtn`: ink text with a 1px accent underline 3px below it. A Stack
 /// takes its first layer's size, so the underline spans exactly the label.
 pub(crate) fn face_link_label<'a, M: 'a>(label: &'static str) -> Element<'a, M> {
@@ -836,7 +878,9 @@ fn list_layout<'a>(
                 .on_press(ViewMessage::Catalog(CatalogMessage::ClearQuery))
         }));
     let mut list = Column::new().spacing(8).width(Length::Fill).push(search);
-    if projection.no_matches() {
+    if projection.no_matches() && projection.query.trim().is_empty() {
+        list = list.push(tenshu::card(filtered_out(projection.hidden)));
+    } else if projection.no_matches() {
         list = list.push(tenshu::card(
             Column::new()
                 .spacing(8)
@@ -909,8 +953,8 @@ pub(super) fn list_body(home: &Home) -> Element<'_, ViewMessage> {
         coincube_ui::theme::palette::ThemeMode::Light
     );
     let fallback = (home.catalog.mode == LauncherMode::Cubes
-        && projection.local_total > launcher_catalog::FLOOR_MAX_CUBES)
-        .then(|| tenshu::caption("List view for more than 20 Cubes on this network."));
+        && projection.filtered_total > launcher_catalog::FLOOR_MAX_CUBES)
+        .then(|| tenshu::caption("List view for more than 20 Cubes."));
     Column::new()
         .spacing(8)
         .push(fallback)
@@ -1419,6 +1463,28 @@ pub(super) fn floor_body_in(home: &Home, available: f32) -> Element<'_, ViewMess
     let projection = launcher_catalog::project(home);
     if !projection.floor_eligible(home.catalog.mode) {
         return list_body(home);
+    }
+    // Only Connect restore rows are left: the List shows them.
+    if projection.locals.is_empty() && !projection.no_matches() {
+        return list_body(home);
+    }
+    // P-Launcher's `.empty` state: every Cube is filtered out. Placed at
+    // `top: 32%` of the stage, where the floor would be.
+    if projection.locals.is_empty() {
+        let height = if available.is_finite() {
+            available
+        } else {
+            launcher_scene::DESIGN_STAGE_HEIGHT
+        };
+        return Container::new(filtered_out(projection.hidden))
+            .width(Length::Fill)
+            .height(Length::Fixed(height))
+            .padding(iced::Padding {
+                top: height * 0.32,
+                ..iced::Padding::ZERO
+            })
+            .center_x(Length::Fill)
+            .into();
     }
     let page = home.catalog.page;
     let light = matches!(
@@ -2912,6 +2978,11 @@ mod tests {
             cube_limit: 10,
             tier: "Free",
             has_local_list: true,
+            hidden: 0,
+            filtered_total: 3,
+            unread: Vec::new(),
+            network_counts: vec![(ChainId::Bitcoin, 3)],
+            filter: launcher_catalog::NetworkFilter::All,
         };
         let scene = project_catalog(&catalog);
         assert_eq!((scene.local_total, scene.remote_total), (3, 2));
