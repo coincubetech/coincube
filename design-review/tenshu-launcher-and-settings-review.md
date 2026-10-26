@@ -755,3 +755,35 @@ While exporting, two regressions of mine surfaced. (1) Removing the cross-tab li
 **Robert:** make a PR with the updated designs exported so Codex can work with them.
 
 **Applied:** `screens/dark/` (34 boards, device settings at their defaults) and `screens/light/` (the Light theme page, 33 boards including the Launcher List view), indexed in `screens/README.md`, and linked from `HANDOFF.md`. The canvas sources in `canvas/` match canvas v113.
+
+## Activity header, Settings scopes, balance eye (2026-10-24, canvas v114–v117)
+
+**Robert:** the Activity header is messy; move Ready, Loading and Failed to the right of the search field.
+
+**Applied:** the title row now holds only the title, the Cube line and, on the right, the result count with "N filters active · Clear filters" when filters are on. The Spark history prototype states (Ready, Loading, Failed) sit at the end of the filter row, after Search. The search placeholder is shortened to "Label, txid, hash or swap ID" so it fits.
+
+**Robert:** the "This device" Settings scope is unnecessary; remove it.
+
+**Applied:** Settings scopes are now Cube, Vault and Spark. The scope held only a link to App preferences (reachable from the Cube top bar on every screen) and a Stable Balance status that duplicates Spark › Stable Balance. Removed from Settings, the Overview settings index, Members and the Recovery Kit gap screen. Device-wide preferences live only in App preferences.
+
+**Robert:** the eye for showing and hiding balances is missing from the top bar on some screens.
+
+**Applied:** the Overview, the one Cube screen without it, now has the top-bar eye; it hides every balance on the page, and the Total and Wallets section eyes remain as finer controls. Every Cube screen's top bar now reads: account chip, Cube service chip, eye, App preferences. For Codex: implement it as one Cube-wide hide-balances flag shared by every screen; the prototype keeps it per board.
+
+## Settings apply as they change; more AI clients (2026-10-24, canvas v118–v120)
+
+**Robert:** the Settings design has a "Save changes" button; confirm whether the app needs one, and if not remove it from every settings design.
+
+**Checked in the app:** it doesn't. `coincube-gui/src/app/state/settings/general.rs` persists each display setting from its own change handler (`update_unit_setting`, `update_price_setting`, the direction-badges toggle), with no save step. The only explicit commits are text fields: the Vault wallet and key aliases (`app/view/vault/settings/mod.rs`, "Update") and local-signing fallback rows ("Save").
+
+**Applied:** Settings › Display & appearance and Vault › Wallet & signers no longer have Save/Discard bars. Toggles, segmented controls and selects apply at once, and a quiet "Saved" confirms it. Text fields (Cube name, Vault name, signer names) save when you press Return or leave the field, and say so. A failed write still shows the alert with Try again (the `saveFailure` lever). Buttons that finish a flow or dialog are unchanged (Save contact, Apply a key, save a coin label or PSBT, Save permissions).
+
+**Robert:** add Codex/ChatGPT, and support Grok.
+
+**Applied:** AI access and Settings › AI access list a paired "Codex · ChatGPT" client (Spark only, read plus prepare unsigned transactions), and the pairing step offers Claude Desktop, Codex · ChatGPT, Maple AI Desktop, Grok and Other MCP host. The pairing step's radio buttons now select correctly (they always showed the last option).
+
+## Fix: Strict mode text overlapped the caption (2026-10-24, canvas v121)
+
+**Robert:** the text under Strict mode in Payment checks needs cleanup.
+
+**Cause and fix:** four Settings rows that align to the top used the class `top`, which is also the top bar's class, so those rows were forced to the top bar's 56 px height and panel background and their descriptions spilled over the next text. The modifier is now `atop`. Strict mode and the other three rows now grow with their text. For Codex: nothing to carry over beyond rows that size to their content.

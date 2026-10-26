@@ -465,19 +465,21 @@ class Component extends DCLogic {
     const picker=(name,opts)=>opts.map(([v,l])=>({label:l,on:lev(name)===v?'true':'false',pick:()=>self.setState({[name]:{for:P[name],v:v}})}));
 
     const mode=lev('state');
-    const picks=picker('state',[['two','Two clients'],['one','One client'],['none','No clients'],['pairing','Pairing'],['editing','Edit permissions'],['revoking','Revoke']]);
+    const picks=picker('state',[['two','Several clients'],['one','One client'],['none','No clients'],['pairing','Pairing'],['editing','Edit permissions'],['revoking','Revoke']]);
     const S=this.state, m=S.mode&&S.mode.for===mode?S.mode.v:mode;
     const setMode=(v)=>self.setState({mode:{for:mode,v:v}});
     const sc=Object.assign({vault:true,spark:false,liquid:false,future:false},S.sc||{});
     const pm=Object.assign({read:true,setup:true,prep:false},S.pm||{});
     const tog=(k,obj,key)=>()=>{const n=Object.assign({},obj);n[k]=!obj[k];self.setState({[key]:n});};
     const step=S.pairStep||1;
-    const hosts=[['claude','Claude Desktop','Pairs with a one-time code'],['maple','Maple AI Desktop','Pairs with a one-time code'],['other','Other MCP host','Manual configuration, under Advanced']].map(([id,name,line])=>({name,line,on:(S.host||'claude')===id?'true':'false',pick:()=>self.setState({host:id})}));
-    const hostName=(hosts.find((h)=>h.on==='true')||hosts[0]).name;
+    const hosts=[['claude','Claude Desktop','Pairs with a one-time code'],['codex','Codex · ChatGPT','Pairs with a one-time code'],['maple','Maple AI Desktop','Pairs with a one-time code'],['grok','Grok','Pairs with a one-time code'],['other','Other MCP host','Manual configuration, under Advanced']].map(([id,name,line])=>({name,line,on:(S.host||'claude')===id,pick:()=>self.setState({host:id})}));
+    const hostName=(hosts.find((h)=>h.on)||hosts[0]).name;
     const perm=(label,on,stat)=>({label,cls:on?'':'off',stat:stat,statCls:stat==='Today'?'today':'plan'});
     const C=[
       {name:'Claude Desktop',scope:'Everyday · Vault · Family savings, Spark · Daily spending',avail:'Available',avCls:'ok',avOk:true,avWarn:false,last:'Last activity · read balances · 2 minutes ago · 14 reads today',
        busy:true,perms:[perm('Read wallet information',true,'Today'),perm('Manage wallet setup',true,'Planned'),perm('Prepare unsigned transactions',false,'Planned')]},
+      {name:'Codex · ChatGPT',scope:'Everyday · Spark · Daily spending',avail:'Available',avCls:'ok',avOk:true,avWarn:false,last:'Last activity · read recent payments · Oct 22, 11:40',
+       busy:false,perms:[perm('Read wallet information',true,'Today'),perm('Manage wallet setup',false,'Planned'),perm('Prepare unsigned transactions',true,'Planned')]},
       {name:'Maple AI Desktop',scope:'Everyday · Vault · Family savings',avail:'Paused · Cube was locked',avCls:'warn',avOk:false,avWarn:true,last:'Last activity · read policy summary · Oct 19, 17:40',
        busy:false,perms:[perm('Read wallet information',true,'Today'),perm('Manage wallet setup',false,'Planned'),perm('Prepare unsigned transactions',false,'Planned')]}
     ].map((c)=>Object.assign(c,{edit:()=>self.setState({mode:{for:mode,v:'editing'},who:c.name}),revoke:()=>self.setState({mode:{for:mode,v:'revoking'},who:c.name})}));
