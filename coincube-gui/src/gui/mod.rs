@@ -286,6 +286,59 @@ mod seed_export_duress_gui_tests {
         drop(gui);
         std::fs::remove_dir_all(path).ok();
     }
+
+    #[test]
+    fn ordinary_pin_result_releases_last_tab_window_hold() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let _guard = crate::app::session::test_guard();
+        let path =
+            std::env::temp_dir().join(format!("seed-export-close-wrong-{}", uuid::Uuid::new_v4()));
+        let (app, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+        let (home, startup) = home::Home::new_for_chain(app.datadir().clone(), None);
+        drop(startup);
+        let mut gui = GUI::reviewer_app_home_gui(app, home);
+        let pane_id = gui.focus.unwrap();
+        let generation = gui.panes.get(pane_id).unwrap().tabs[0]
+            .app_generation_token()
+            .unwrap();
+        drop(gui.update(Message::Pane(
+            pane_id,
+            pane::Message::View(pane::ViewMessage::CloseTab(1)),
+        )));
+        gui.panes.get_mut(pane_id).unwrap().tabs[0].mark_seed_export_trial_pending_for_test();
+        drop(gui.update(Message::Pane(
+            pane_id,
+            pane::Message::View(pane::ViewMessage::CloseTab(0)),
+        )));
+        assert_eq!(gui.panes.get(pane_id).unwrap().tabs[0].id, usize::MAX);
+        let stale = Message::Pane(
+            pane_id,
+            pane::Message::tab(
+                1,
+                tab::Message::AppAsync(
+                    generation,
+                    Box::new(tab::Message::Run(AppMessage::View(
+                        crate::app::view::Message::Settings(
+                            crate::app::view::SettingsMessage::BackupMasterSeed(
+                                crate::app::view::BackupWalletMessage::PinVerifiedAttempt(
+                                    crate::app::cache::AppGeneration::next(),
+                                    Err("Incorrect PIN".into()),
+                                ),
+                            ),
+                        ),
+                    ))),
+                ),
+            ),
+        );
+        drop(gui.update(stale));
+        assert!(gui.panes.get(pane_id).is_none());
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
 }
 
 use iced::window::Id;
