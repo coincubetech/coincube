@@ -6,8 +6,8 @@ use super::{pairings, Message, Settings};
 use crate::app::view;
 use coincube_ui::font;
 use coincube_ui::theme::{self, tenshu::Tone};
-use coincube_ui::widget::{action::Action, Element};
-use iced::widget::{checkbox, column, container, row, text, text_input, Column, Row, Space};
+use coincube_ui::widget::{action::Action, modal::Modal, Element};
+use iced::widget::{column, container, row, text, text_input, Column, Row, Space};
 use iced::{Alignment, Background, Border, Length};
 use std::sync::atomic::Ordering;
 
@@ -102,6 +102,25 @@ fn action<'a>(
     .into()
 }
 
+fn selection<'a>(id: &'static str, label: &'static str, checked: bool, intent: Message) -> Ui<'a> {
+    use theme::tenshu::button::{action, ActionKind, ActionShape};
+    Action::new(
+        id,
+        text(format!(
+            "{} {label} · {}",
+            if checked { "☑" } else { "☐" },
+            if checked { "Selected" } else { "Not selected" }
+        ))
+        .size(13),
+        view::Message::FocusAction,
+    )
+    .padding([8, 12])
+    .focus_radius(8.0)
+    .style(move |theme, status| action(theme, status, ActionKind::Secondary, ActionShape::Compact))
+    .on_press(message(intent))
+    .into()
+}
+
 fn section_title<'a>(title: &'static str, status: &'static str, tone: Tone) -> Ui<'a> {
     row![heading(title), chip(status, tone)]
         .spacing(9)
@@ -146,11 +165,59 @@ pub(super) fn view_for_cube(settings: &Settings, supported: bool) -> Ui<'_> {
         .push(planned_card())
         .push(muted("Today · Persistent per-client read access to one active embedded Vault. Planned · Guided pairing, multiple wallets, managed setup and general transaction preparation."));
 
-    container(page)
+    let content: Ui<'_> = container(page)
         .width(Length::Fill)
         .max_width(930)
         .padding([20, 24])
+        .into();
+    let Some(id) = settings.revoke_confirmation.as_ref() else {
+        return content;
+    };
+    let Some(client) = settings
+        .pairing_store
+        .as_ref()
+        .and_then(|store| store.clients().iter().find(|client| &client.id == id))
+    else {
+        return content;
+    };
+    Modal::new(content, revoke_confirmation(&client.name, id))
+        .on_blur(Some(message(Message::CancelRevokePair)))
         .into()
+}
+
+pub(super) fn revoke_confirmation<'a>(client_name: &str, id: &str) -> Ui<'a> {
+    container(column![
+        heading("Revoke this client's access?"),
+        muted(format!("{client_name} will lose access immediately. This cannot be undone; pairing again creates a new private configuration.")),
+        muted("Information already read may remain with the AI provider. Revocation cannot erase data it has retained."),
+        row![
+            action(
+                "tenshu.ai-access.revoke.keep",
+                "Keep paired",
+                Some(message(Message::CancelRevokePair)),
+                theme::tenshu::button::ActionKind::Secondary,
+            ),
+            action(
+                "tenshu.ai-access.revoke.confirm",
+                "Revoke access",
+                Some(message(Message::RevokePair(id.to_owned()))),
+                theme::tenshu::button::ActionKind::Destructive,
+            ),
+        ].spacing(8),
+    ].spacing(14))
+    .width(Length::Fixed(460.0))
+    .padding(22)
+    .style(|theme: &theme::Theme| iced::widget::container::Style {
+        text_color: Some(theme.colors.shell.ink),
+        background: Some(Background::Color(theme.colors.shell.panel)),
+        border: Border {
+            color: theme.colors.shell.line,
+            width: 1.0,
+            radius: 12.0.into(),
+        },
+        ..Default::default()
+    })
+    .into()
 }
 
 fn pairing_card(settings: &Settings) -> Ui<'_> {
@@ -159,9 +226,12 @@ fn pairing_card(settings: &Settings) -> Ui<'_> {
         .width(Length::Fill)
         .push(heading("Choose this client's access"))
         .push(muted("Each client needs a name, this Vault, and at least one read permission. Nothing is selected automatically for the next client."))
-        .push(checkbox(settings.enabled)
-            .label("Enable AI access for this Cube")
-            .on_toggle(|value| message(Message::Enable(value))));
+        .push(selection(
+            "tenshu.ai-access.enable",
+            "Enable AI access for this Cube",
+            settings.enabled,
+            Message::Enable(!settings.enabled),
+        ));
 
     if settings.enabled {
         body = body
@@ -170,11 +240,12 @@ fn pairing_card(settings: &Settings) -> Ui<'_> {
                     .on_input(|value| message(Message::ClientName(value))),
             )
             .push(muted("This label is not a verified application identity."))
-            .push(
-                checkbox(settings.wallet_allowed)
-                    .label("This Cube · active embedded Vault")
-                    .on_toggle(|value| message(Message::Wallet(value))),
-            )
+            .push(selection(
+                "tenshu.ai-access.wallet",
+                "This Cube · active embedded Vault",
+                settings.wallet_allowed,
+                Message::Wallet(!settings.wallet_allowed),
+            ))
             .push(muted(
                 "Read wallet information · choose exactly which data this client may see:",
             ));
@@ -183,11 +254,17 @@ fn pairing_card(settings: &Settings) -> Ui<'_> {
             .iter()
             .enumerate()
         {
-            body = body.push(
-                checkbox(settings.capabilities[index])
-                    .label(*label)
-                    .on_toggle(move |value| message(Message::Capability(index, value))),
-            );
+            let id = [
+                "tenshu.ai-access.permission.balances",
+                "tenshu.ai-access.permission.history",
+                "tenshu.ai-access.permission.policy",
+            ][index];
+            body = body.push(selection(
+                id,
+                label,
+                settings.capabilities[index],
+                Message::Capability(index, !settings.capabilities[index]),
+            ));
         }
 
         #[cfg(feature = "mcp-transactions")]
@@ -197,9 +274,12 @@ fn pairing_card(settings: &Settings) -> Ui<'_> {
             .is_some_and(|location| location.chain_matches(crate::chain::ChainId::Regtest))
         {
             body = body
-                .push(checkbox(settings.transactions_allowed)
-                    .label("Experimental · prepare unsigned Regtest transactions (separate scope)")
-                    .on_toggle(|value| message(Message::Transactions(value))))
+                .push(selection(
+                    "tenshu.ai-access.transactions",
+                    "Experimental · prepare unsigned Regtest transactions (separate scope)",
+                    settings.transactions_allowed,
+                    Message::Transactions(!settings.transactions_allowed),
+                ))
                 .push(muted("Exact satoshi recipients and fee limits only. Native review and signing remain in Tenshu. No self-send, recovery selection or fiat conversion; up to eight construction attempts per client and unlock."));
         }
 
@@ -357,7 +437,7 @@ pub(super) fn paired_clients(settings: &Settings) -> Ui<'_> {
                             client.id
                         )),
                         "Revoke",
-                        Some(message(Message::RevokePair(client.id.clone()))),
+                        Some(message(Message::RequestRevokePair(client.id.clone()))),
                         theme::tenshu::button::ActionKind::Destructive
                     ),
                 ]

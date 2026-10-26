@@ -72,9 +72,15 @@ pub enum Message {
     Transactions(bool),
     /// Native-only opening of the exact prepared unsigned PSBT.
     #[cfg(feature = "mcp-transactions")]
-    ReviewTransaction { client_id: String, draft_id: String },
+    ReviewTransaction {
+        client_id: String,
+        draft_id: String,
+    },
     /// Revoke one stored client; ordinary locks never perform this action.
     RevokePair(String),
+    /// Show the durable-pairing revocation decision before changing storage.
+    RequestRevokePair(String),
+    CancelRevokePair,
     /// Copy a stable private configuration for a stored client.
     CopyPair(String),
     /// Explicit separate consent for an empty Regtest Cube's proposal session.
@@ -115,6 +121,7 @@ pub struct Settings {
     pairing_error: Option<&'static str>,
     pairing_poisoned: bool,
     pairing_generation: Option<u64>,
+    revoke_confirmation: Option<String>,
 }
 pub(crate) struct PairingContext<'a> {
     pub root: &'a std::path::Path,
@@ -135,6 +142,7 @@ impl Settings {
     /// Stop the server and clear its approved display label synchronously.
     pub fn revoke(&mut self) {
         // Runtime suspension only. Explicit durable revocation is RevokePair.
+        self.revoke_confirmation = None;
         self.paired.clear();
         self.revoke_legacy();
     }
@@ -578,12 +586,28 @@ impl Settings {
                 return None;
             }
             Message::RevokePair(id) => {
+                if self.revoke_confirmation.as_deref() != Some(id.as_str()) {
+                    return None;
+                }
+                self.revoke_confirmation = None;
                 self.paired.retain(|runtime| runtime.id != id);
                 if let Some(store) = &mut self.pairing_store {
                     if store.remove(&id).is_err() {
                         self.persistence_failed();
                     }
                 }
+                return None;
+            }
+            Message::RequestRevokePair(id) => {
+                self.revoke_confirmation = self
+                    .pairing_store
+                    .as_ref()
+                    .and_then(|store| store.clients().iter().find(|client| client.id == id))
+                    .map(|_| id);
+                return None;
+            }
+            Message::CancelRevokePair => {
+                self.revoke_confirmation = None;
                 return None;
             }
             Message::CopyPair(id) => {
@@ -1271,7 +1295,52 @@ mod tests {
             }
         };
         render("r23-empty", &empty);
+        let empty_focus = capture::inspect(
+            "r23-empty-focus",
+            empty.view_for_cube(true, false),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(empty_focus
+            .focus
+            .iter()
+            .any(|(id, _)| { id == &iced::advanced::widget::Id::from("tenshu.ai-access.enable") }));
+        for key in [
+            iced::keyboard::key::Named::Enter,
+            iced::keyboard::key::Named::Space,
+        ] {
+            let emitted = capture::activate_with_key(
+                empty.view_for_cube(true, false),
+                iced::advanced::widget::Id::from("tenshu.ai-access.enable"),
+                (1024, 768),
+                false,
+                key,
+            );
+            assert!(emitted
+                .iter()
+                .any(|intent| matches!(intent, view::Message::LocalMcp(Message::Enable(true)))));
+        }
         render("r23-paired", &paired);
+        let paired_focus = capture::inspect(
+            "r23-paired-focus",
+            paired.view_for_cube(true, false),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        for id in [
+            "tenshu.ai-access.enable",
+            "tenshu.ai-access.wallet",
+            "tenshu.ai-access.permission.balances",
+            "tenshu.ai-access.permission.history",
+            "tenshu.ai-access.permission.policy",
+        ] {
+            assert!(paired_focus
+                .focus
+                .iter()
+                .any(|(focus_id, _)| focus_id == &iced::advanced::widget::Id::from(id)));
+        }
         let client_id = paired.pairing_store.as_ref().unwrap().clients()[0]
             .id
             .clone();
@@ -1301,8 +1370,133 @@ mod tests {
             true,
         );
         assert!(emitted.iter().any(|intent| matches!(intent,
-            view::Message::LocalMcp(Message::RevokePair(id)) if id == &client_id
+            view::Message::LocalMcp(Message::RequestRevokePair(id)) if id == &client_id
         )));
+        for (id, expected) in [
+            ("tenshu.ai-access.enable", Message::Enable(false)),
+            ("tenshu.ai-access.wallet", Message::Wallet(true)),
+            (
+                "tenshu.ai-access.permission.balances",
+                Message::Capability(0, true),
+            ),
+            (
+                "tenshu.ai-access.permission.history",
+                Message::Capability(1, true),
+            ),
+            (
+                "tenshu.ai-access.permission.policy",
+                Message::Capability(2, true),
+            ),
+        ] {
+            for key in [
+                iced::keyboard::key::Named::Enter,
+                iced::keyboard::key::Named::Space,
+            ] {
+                let emitted = capture::activate_with_key(
+                    paired.view_for_cube(true, false),
+                    iced::advanced::widget::Id::from(id),
+                    (1024, 768),
+                    false,
+                    key,
+                );
+                assert!(emitted.iter().any(|intent| matches!(intent,
+                    view::Message::LocalMcp(actual) if match (actual, &expected) {
+                        (Message::Enable(actual), Message::Enable(expected)) => actual == expected,
+                        (Message::Wallet(actual), Message::Wallet(expected)) => actual == expected,
+                        (Message::Capability(actual_index, actual_value), Message::Capability(expected_index, expected_value)) => actual_index == expected_index && actual_value == expected_value,
+                        _ => false,
+                    }
+                )), "{id} should respond to {key:?}");
+            }
+        }
+        paired.wallet_allowed = true;
+        paired.capabilities[0] = true;
+        paired.client_name = "Next synthetic client".into();
+        for key in [
+            iced::keyboard::key::Named::Enter,
+            iced::keyboard::key::Named::Space,
+        ] {
+            let emitted = capture::activate_with_key(
+                paired.view_for_cube(true, false),
+                iced::advanced::widget::Id::from("tenshu.ai-access.pair"),
+                (1024, 768),
+                false,
+                key,
+            );
+            assert!(emitted
+                .iter()
+                .any(|intent| matches!(intent, view::Message::LocalMcp(Message::Pair))));
+        }
+        let original_count = paired.pairing_store.as_ref().unwrap().clients().len();
+        paired.update(
+            Message::RequestRevokePair(client_id.clone()),
+            None,
+            None,
+            true,
+            cube,
+        );
+        assert_eq!(
+            paired.pairing_store.as_ref().unwrap().clients().len(),
+            original_count
+        );
+        for (size, appearance, palette) in [
+            ((1024, 768), "dark", theme::Theme::dark()),
+            ((1024, 768), "light", theme::Theme::light()),
+            ((1440, 900), "dark", theme::Theme::dark()),
+            ((1440, 900), "light", theme::Theme::light()),
+        ] {
+            let inspection = capture::inspect(
+                "r23-revoke-confirm",
+                presentation::revoke_confirmation("Synthetic local client", &client_id),
+                size,
+                appearance,
+                palette,
+            );
+            assert!(inspection.contains("Revoke this client's access?"));
+            assert!(inspection.contains("Information already read may remain"));
+        }
+        for (id, expected) in [
+            ("tenshu.ai-access.revoke.keep", false),
+            ("tenshu.ai-access.revoke.confirm", true),
+        ] {
+            for key in [
+                iced::keyboard::key::Named::Enter,
+                iced::keyboard::key::Named::Space,
+            ] {
+                let emitted = capture::activate_with_key(
+                    presentation::revoke_confirmation("Synthetic local client", &client_id),
+                    iced::advanced::widget::Id::from(id),
+                    (1024, 768),
+                    false,
+                    key,
+                );
+                assert!(
+                    emitted.iter().any(|intent| matches!(intent,
+                        view::Message::LocalMcp(Message::RevokePair(_)) if expected
+                    ) || matches!(intent,
+                        view::Message::LocalMcp(Message::CancelRevokePair) if !expected
+                    )),
+                    "{id} should respond to {key:?}"
+                );
+            }
+        }
+        paired.update(Message::CancelRevokePair, None, None, true, cube);
+        assert!(paired.revoke_confirmation.is_none());
+        assert_eq!(
+            paired.pairing_store.as_ref().unwrap().clients().len(),
+            original_count
+        );
+        paired.update(
+            Message::RevokePair(client_id.clone()),
+            None,
+            None,
+            true,
+            cube,
+        );
+        assert_eq!(
+            paired.pairing_store.as_ref().unwrap().clients().len(),
+            original_count
+        );
         paired.revoke();
         super::super::session::close();
         render("r23-locked", &paired);
@@ -1315,6 +1509,19 @@ mod tests {
         );
         assert!(!locked.focus.iter().any(|(id, _)| id == &copy_id));
         assert!(locked.focus.iter().any(|(id, _)| id == &revoke_id));
+        paired.update(
+            Message::RequestRevokePair(client_id.clone()),
+            None,
+            None,
+            true,
+            cube,
+        );
+        assert_eq!(
+            paired.revoke_confirmation.as_deref(),
+            Some(client_id.as_str())
+        );
+        paired.update(Message::RevokePair(client_id), None, None, true, cube);
+        assert!(paired.pairing_store.as_ref().unwrap().clients().is_empty());
         drop(paired);
         runtime.block_on(daemon.stop()).unwrap();
         drop(daemon);
@@ -1495,6 +1702,13 @@ mod tests {
                 wire::ipc::call(&socket, token, wire::Request::Summary(input(&opaque)))
                     .await
                     .is_ok()
+            );
+            settings.update(
+                Message::RequestRevokePair(first.clone()),
+                None,
+                None,
+                true,
+                "mcp-paired-fixture",
             );
             settings.update(
                 Message::RevokePair(first),
@@ -2172,6 +2386,13 @@ mod proposal_consent_tests {
                 .unwrap()
                 .id
                 .clone();
+            settings.update(
+                Message::RequestRevokePair(b.clone()),
+                None,
+                None,
+                true,
+                cube,
+            );
             settings.update(Message::RevokePair(b), None, None, true, cube);
             refresh(&mut settings);
             let wire::Response::Proposal(retrieved) = wire::ipc::call(
