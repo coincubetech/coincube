@@ -28,11 +28,20 @@ use super::{card_style, format_date};
 /// rendered at the bottom.
 pub fn cube_members_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCubeMessage> {
     let panel = &state.members;
+    let ready = state.client.is_some() && state.server_cube_id.is_some();
 
     let header = Row::new()
         .push(
             Column::new()
                 .push(text::h4_bold("Members").style(theme::text::primary))
+                .push(
+                    text::p2_regular(format!(
+                        "{} · {}",
+                        state.cube_name,
+                        network_name(&state.cube_network)
+                    ))
+                    .color(color::GREY_3),
+                )
                 .push(
                     text::p2_regular("People who can view this Cube and contribute signing keys.")
                         .color(color::GREY_3),
@@ -42,9 +51,11 @@ pub fn cube_members_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCu
         .push(iced::widget::Space::new().width(Length::Fill))
         .push(
             button::secondary(None, "Refresh")
-                .on_press(ConnectCubeMessage::Members(
-                    ConnectCubeMembersMessage::Reload,
-                ))
+                .on_press_maybe(
+                    (ready && !panel.loading).then_some(ConnectCubeMessage::Members(
+                        ConnectCubeMembersMessage::Reload,
+                    )),
+                )
                 .width(Length::Shrink),
         )
         .align_y(Alignment::Center);
@@ -52,20 +63,46 @@ pub fn cube_members_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCu
     let mut col = Column::new()
         .push(header)
         .push(iced::widget::Space::new().height(Length::Fixed(16.0)))
-        .push(invite_form(panel))
-        .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
         .spacing(0)
         .width(Length::Fill);
+
+    // The server Cube id is the boundary for every membership operation. A
+    // registering Cube must not present an invite form that cannot submit.
+    if !ready {
+        let reason = if state.owned_by_other_account {
+            "This Cube is registered to a different Connect account."
+        } else if state.registration_error.is_some() {
+            "This Cube could not be registered with Connect. Try again after registration succeeds."
+        } else if state.client.is_none() {
+            "Sign in to Connect to manage this Cube's members."
+        } else {
+            "Not ready — the Cube is still registering."
+        };
+        return col
+            .push(
+                container(text::p1_regular(reason))
+                    .padding(20)
+                    .style(card_style)
+                    .width(Length::Fill),
+            )
+            .into();
+    }
+
+    col = col
+        .push(text::p1_bold("Add Member").style(theme::text::primary))
+        .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
+        .push(invite_form(panel))
+        .push(iced::widget::Space::new().height(Length::Fixed(20.0)));
 
     // Pending invites section
     if !panel.pending_invites.is_empty() {
         col = col.push(text::p1_bold("Pending Invites").style(theme::text::primary));
         col = col.push(iced::widget::Space::new().height(Length::Fixed(8.0)));
+        col = col.push(iced::widget::rule::horizontal(1));
         for invite in &panel.pending_invites {
             col = col.push(pending_invite_card(invite));
-            col = col.push(iced::widget::Space::new().height(Length::Fixed(6.0)));
         }
-        col = col.push(iced::widget::Space::new().height(Length::Fixed(16.0)));
+        col = col.push(iced::widget::Space::new().height(Length::Fixed(24.0)));
     }
 
     // Members list. Skip the "No members yet" placeholder when there's
@@ -81,10 +118,10 @@ pub fn cube_members_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCu
     } else if !panel.members.is_empty() {
         col = col.push(text::p1_bold("Members").style(theme::text::primary));
         col = col.push(iced::widget::Space::new().height(Length::Fixed(8.0)));
+        col = col.push(iced::widget::rule::horizontal(1));
         let vault_created_at = panel.vault_created_at.as_deref();
         for member in &panel.members {
             col = col.push(member_card(member, vault_created_at));
-            col = col.push(iced::widget::Space::new().height(Length::Fixed(6.0)));
         }
     } else if panel.loading {
         col = col.push(text::p1_regular("Loading\u{2026}").color(color::GREY_3));
@@ -159,23 +196,19 @@ fn invite_form<'a>(
         .push(submit)
         .align_y(Alignment::Center);
 
-    container(
-        Column::new()
-            .push(
-                text::p2_regular(
-                    "Invite by email. Existing contacts are added immediately; new emails \
-                     get an invite and join on accept.",
-                )
-                .color(color::GREY_3),
+    Column::new()
+        .push(
+            text::p2_regular(
+                "Invite by email. Existing contacts are added immediately; new emails \
+                 get an invite and join on accept.",
             )
-            .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
-            .push(row)
-            .padding(16)
-            .spacing(0),
-    )
-    .style(card_style)
-    .width(Length::Fill)
-    .into()
+            .color(color::GREY_3),
+        )
+        .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
+        .push(row)
+        .spacing(0)
+        .width(Length::Fill)
+        .into()
 }
 
 // =============================================================================
@@ -194,13 +227,13 @@ fn member_card<'a>(
         .to_uppercase()
         .to_string();
 
-    let avatar = container(text::p1_bold(initial).color(color::WHITE))
+    let avatar = container(text::p1_bold(initial).style(theme::text::primary))
         .width(Length::Fixed(36.0))
         .height(Length::Fixed(36.0))
         .center_x(Length::Fixed(36.0))
         .center_y(Length::Fixed(36.0))
-        .style(|_t| container::Style {
-            background: Some(iced::Background::Color(color::ORANGE)),
+        .style(|t| container::Style {
+            background: Some(iced::Background::Color(t.colors.cards.simple.background)),
             border: iced::Border {
                 radius: 18.0.into(),
                 ..Default::default()
@@ -244,19 +277,20 @@ fn member_card<'a>(
         ConnectCubeMembersMessage::RemoveMember(member_id),
     ));
 
-    container(
-        Row::new()
-            .push(avatar)
-            .push(iced::widget::Space::new().width(Length::Fixed(12.0)))
-            .push(info)
-            .push(iced::widget::Space::new().width(Length::Fill))
-            .push(remove_btn)
-            .align_y(Alignment::Center)
-            .padding(12),
-    )
-    .style(card_style)
-    .width(Length::Fill)
-    .into()
+    Column::new()
+        .push(
+            Row::new()
+                .push(avatar)
+                .push(iced::widget::Space::new().width(Length::Fixed(12.0)))
+                .push(info)
+                .push(iced::widget::Space::new().width(Length::Fill))
+                .push(remove_btn)
+                .align_y(Alignment::Center)
+                .padding([12, 0]),
+        )
+        .push(iced::widget::rule::horizontal(1))
+        .width(Length::Fill)
+        .into()
 }
 
 fn pending_invite_card<'a>(invite: &'a CubeInviteSummary) -> Element<'a, ConnectCubeMessage> {
@@ -274,25 +308,22 @@ fn pending_invite_card<'a>(invite: &'a CubeInviteSummary) -> Element<'a, Connect
         .spacing(2);
 
     let invite_id = invite.id;
-    let actions = Row::new()
-        .push(
+    let mut row = Row::new()
+        .push(info)
+        .push(iced::widget::Space::new().width(Length::Fill));
+    if invite.status == "pending" {
+        row = row.push(
             button::secondary(None, "Revoke").on_press(ConnectCubeMessage::Members(
                 ConnectCubeMembersMessage::RevokeInvite(invite_id),
             )),
-        )
-        .align_y(Alignment::Center);
+        );
+    }
 
-    container(
-        Row::new()
-            .push(info)
-            .push(iced::widget::Space::new().width(Length::Fill))
-            .push(actions)
-            .align_y(Alignment::Center)
-            .padding(12),
-    )
-    .style(card_style)
-    .width(Length::Fill)
-    .into()
+    Column::new()
+        .push(row.align_y(Alignment::Center).padding([12, 0]))
+        .push(iced::widget::rule::horizontal(1))
+        .width(Length::Fill)
+        .into()
 }
 
 // =============================================================================
@@ -397,6 +428,19 @@ fn status_color(status: &str) -> iced::Color {
         "accepted" => color::GREEN,
         "revoked" | "expired" => color::GREY_3,
         _ => color::GREY_3,
+    }
+}
+
+fn network_name(network: &str) -> &str {
+    match network {
+        "mainnet" => "Bitcoin mainnet",
+        "testnet" => "Bitcoin testnet",
+        "testnet4" => "Bitcoin testnet4",
+        "signet" => "Bitcoin signet",
+        "regtest" => "Bitcoin regtest",
+        "bitcoin-blake2b" => "Bitcoin Blake2b mainnet",
+        "bitcoin-blake2b-testnet4" => "Bitcoin Blake2b testnet4",
+        other => other,
     }
 }
 
