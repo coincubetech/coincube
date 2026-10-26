@@ -3,7 +3,7 @@
 //! re-checks, never a permission.
 
 use iced::{
-    widget::{scrollable, Column, Container, Row, Space},
+    widget::{rule, scrollable, Column, Container, Row, Space},
     Alignment, Length,
 };
 
@@ -390,13 +390,6 @@ fn funding_view<'a>(
     let verified = panel.funding_review().is_some();
     let signing_available = crate::services::claim_ancestry_gate::authorization().is_some();
     let expanded = panel.deposit_details_expanded();
-    let details = Column::new().spacing(12)
-        .push(p1_regular("Send BTC to the Bitcoin address and BTCB2 to the Blake2b address. Keep both Cubes open under the same Connect account."))
-        .push(p1_bold(format!("Bitcoin · minimum {} sats", format_u64_as_string(addresses.bitcoin_minimum_sats, ","))))
-        .push(address_row(addresses.bitcoin_deposit.clone(), "Copied Bitcoin deposit address to clipboard"))
-        .push(p1_bold(format!("Bitcoin Blake2b · minimum {} sats", format_u64_as_string(addresses.btcb2_minimum_sats, ","))))
-        .push(address_row(addresses.btcb2_deposit.clone(), "Copied BTCB2 deposit address to clipboard"))
-        .push(p1_regular(format!("Minimums cover estimated fees at {} sat/vB on Bitcoin and {} sat/vB on BTCB2. Fees may change. Each deposit must be confirmed and verified as chain-specific.", addresses.bitcoin_rate_sat_vb, addresses.btcb2_rate_sat_vb)).style(theme::text::secondary));
     let controls = Row::new()
         .spacing(10)
         .align_y(Alignment::Center)
@@ -418,11 +411,8 @@ fn funding_view<'a>(
         }));
     let deposits = Column::new().spacing(12)
         .push(p1_bold("Claim checks"))
-        .push(deposit_status_view(panel, addresses.bitcoin_minimum_sats, addresses.btcb2_minimum_sats, cache.balance_amounts_masked()))
-        .push(button::secondary_compact(Some(if expanded { icon::collapsed_icon() } else { icon::collapse_icon() }),
-            if expanded { "Hide deposit addresses" } else { "Deposit addresses" })
-            .on_press(Message::Claim(ClaimMessage::ToggleDepositDetails)))
-        .push_maybe(expanded.then(|| Container::new(details).padding(18).style(theme::card::simple).width(Length::Fill)))
+        .push(funding_checks(panel, cache))
+        .push(deposit_status_view(panel, addresses, expanded, cache.balance_amounts_masked()))
         .push_maybe(panel.funding_error().filter(|_| !panel.funding_inline_error()).map(|error| card::warning(error.to_string())))
         .push_maybe((!panel.paired_vault_ready()).then(|| card::warning(
             "Open and unlock the paired BTCB2 Cube under the same Connect account. Verification continues here automatically.".into())))
@@ -593,57 +583,83 @@ fn deposit_heading(status: Option<&DepositStatus>, verified: bool) -> &'static s
 /// replay-protected coin rows, even if the retained search hint is PathFound.
 fn deposit_status_view<'a>(
     panel: &ClaimStep1Panel,
-    bitcoin_minimum: u64,
-    btcb2_minimum: u64,
+    addresses: &crate::services::claim_workflow::CheckedClaimFundingAddresses,
+    expanded: bool,
     balance_masked: bool,
 ) -> Element<'a, Message> {
     let status = panel.deposit_status();
     let review = panel.funding_review();
-    Container::new(
-        Column::new()
-            .spacing(12)
-            .push(p1_bold(deposit_heading(status, review.is_some())))
-            .push(match review {
-                Some(review) => coin_input_row(
-                    &review.bitcoin.funding,
-                    "Bitcoin-only deposit — replay protected",
-                    Some(review.bitcoin_confirmations),
-                    balance_masked,
-                ),
-                None => deposit_row(
-                    "Bitcoin",
-                    status.map(|status| &status.bitcoin),
-                    bitcoin_minimum,
-                    panel.funding_proof_status(ChainId::Bitcoin),
-                    panel.funding_checking(),
-                    balance_masked,
-                ),
-            })
-            .push(match review {
-                Some(review) => coin_input_row(
-                    &review.fork.funding,
-                    "BTCB2-only deposit — replay protected",
-                    Some(review.fork_confirmations),
-                    balance_masked,
-                ),
-                None => deposit_row(
-                    "Bitcoin Blake2b",
-                    status.map(|status| &status.btcb2),
-                    btcb2_minimum,
-                    panel.funding_proof_status(ChainId::BitcoinBlake2b),
-                    panel.funding_checking(),
-                    balance_masked,
-                ),
-            })
-            .push_maybe(
-                (panel.deposit_polling() && status.is_some())
-                    .then(|| p2_regular("Refreshing deposit status…")),
+    let bitcoin = Column::new()
+        .spacing(8)
+        .push(p1_bold(format!(
+            "Bitcoin · minimum {} sats",
+            format_u64_as_string(addresses.bitcoin_minimum_sats, ",")
+        )))
+        .push_maybe(expanded.then(|| {
+            address_row(
+                addresses.bitcoin_deposit.clone(),
+                "Copied Bitcoin deposit address to clipboard",
+            )
+        }))
+        .push(match review {
+            Some(review) => coin_input_row(
+                &review.bitcoin.funding,
+                "Bitcoin-only deposit — replay protected",
+                Some(review.bitcoin_confirmations),
+                balance_masked,
             ),
-    )
-    .padding(20)
-    .style(theme::card::simple)
-    .width(Length::Fill)
-    .into()
+            None => deposit_row(
+                "Bitcoin",
+                status.map(|status| &status.bitcoin),
+                addresses.bitcoin_minimum_sats,
+                panel.funding_proof_status(ChainId::Bitcoin),
+                panel.funding_checking(),
+                balance_masked,
+            ),
+        })
+        .push(rule::horizontal(1));
+    let btcb2 = Column::new()
+        .spacing(8)
+        .push(p1_bold(format!(
+            "Bitcoin Blake2b · minimum {} sats",
+            format_u64_as_string(addresses.btcb2_minimum_sats, ",")
+        )))
+        .push_maybe(expanded.then(|| {
+            address_row(
+                addresses.btcb2_deposit.clone(),
+                "Copied BTCB2 deposit address to clipboard",
+            )
+        }))
+        .push(match review {
+            Some(review) => coin_input_row(
+                &review.fork.funding,
+                "BTCB2-only deposit — replay protected",
+                Some(review.fork_confirmations),
+                balance_masked,
+            ),
+            None => deposit_row(
+                "Bitcoin Blake2b",
+                status.map(|status| &status.btcb2),
+                addresses.btcb2_minimum_sats,
+                panel.funding_proof_status(ChainId::BitcoinBlake2b),
+                panel.funding_checking(),
+                balance_masked,
+            ),
+        })
+        .push(rule::horizontal(1));
+    Column::new()
+        .spacing(12)
+        .push(p1_bold("Deposit addresses"))
+        .push(p1_regular("Send BTC to the Bitcoin address and BTCB2 to the Blake2b address. Keep both Cubes open under the same Connect account.").style(theme::text::secondary))
+        .push(button::secondary_compact(Some(if expanded { icon::collapsed_icon() } else { icon::collapse_icon() }),
+            if expanded { "Hide deposit addresses" } else { "Show deposit addresses" })
+            .on_press(Message::Claim(ClaimMessage::ToggleDepositDetails)))
+        .push(bitcoin)
+        .push(btcb2)
+        .push_maybe(expanded.then(|| p2_regular(format!("Minimums cover estimated fees at {} sat/vB on Bitcoin and {} sat/vB on BTCB2. Fees may change. Each deposit must be confirmed and verified as chain-specific.", addresses.bitcoin_rate_sat_vb, addresses.btcb2_rate_sat_vb)).style(theme::text::secondary)))
+        .push(p1_bold(deposit_heading(status, review.is_some())))
+        .push_maybe((panel.deposit_polling() && status.is_some()).then(|| p2_regular("Refreshing deposit status…")))
+        .into()
 }
 
 /// Render one chain's address observation and its separate proof diagnostic.
@@ -787,7 +803,7 @@ fn check_row<'a>(label: &'static str, ok: Option<bool>, detail: String) -> Eleme
             .style(theme::text::warning)
             .width(Length::Fixed(110.0))
             .into(),
-        None => p2_regular("Checking")
+        None => p2_regular("Pending")
             .style(theme::text::secondary)
             .width(Length::Fixed(110.0))
             .into(),
@@ -797,17 +813,67 @@ fn check_row<'a>(label: &'static str, ok: Option<bool>, detail: String) -> Eleme
         Some(false) => icon::warning_icon().style(theme::text::warning),
         None => icon::reload_icon().style(theme::text::secondary),
     };
-    Row::new()
-        .spacing(10)
-        .align_y(Alignment::Center)
-        .push(mark)
-        .push(p1_regular(label).width(Length::Fixed(145.0)))
+    Column::new()
+        .spacing(0)
         .push(
-            p1_regular(detail)
-                .style(theme::text::secondary)
-                .width(Length::Fill),
+            Row::new()
+                .spacing(10)
+                .align_y(Alignment::Center)
+                .padding([11, 0])
+                .push(mark)
+                .push(p1_regular(label).width(Length::Fixed(145.0)))
+                .push(
+                    p1_regular(detail)
+                        .style(theme::text::secondary)
+                        .width(Length::Fill),
+                )
+                .push(status),
         )
-        .push(status)
+        .push(rule::horizontal(1))
+        .into()
+}
+
+/// Funding keeps its own live safety boundary. These are display readings
+/// available on the panel, not a replay-protection or signing verdict.
+fn funding_checks<'a>(panel: &ClaimStep1Panel, cache: &Cache) -> Element<'a, Message> {
+    let coins = panel.coins();
+    Column::new()
+        .spacing(0)
+        .push(check_row(
+            "Claim target",
+            Some(panel.paired_vault_ready()),
+            if panel.paired_vault_ready() {
+                "The paired Blake2b Cube is open under this session.".into()
+            } else {
+                "Open the paired Blake2b Cube under the same Connect account.".into()
+            },
+        ))
+        .push(check_row(
+            "Vault",
+            Some(panel.wallet().inheritance_descriptor().is_some()),
+            "This Bitcoin Vault supplies the claim policy.".into(),
+        ))
+        .push(check_row(
+            "Node backend",
+            None,
+            "Both chain readings are checked with each deposit verification.".into(),
+        ))
+        .push(check_row(
+            "Coins to split",
+            coins.map(|coins| !coins.pre_fork.is_empty()),
+            coins.map_or_else(
+                || "Coin classification is checked before signing.".into(),
+                |coins| coins_detail(coins, cache),
+            ),
+        ))
+        .push(check_row(
+            "Fee rate",
+            panel.feerate_vb().map(|_| true),
+            panel.feerate_vb().map_or_else(
+                || "The fee is checked again before signing.".into(),
+                |rate| format!("{rate} sat/vB (about an hour)."),
+            ),
+        ))
         .into()
 }
 
@@ -888,6 +954,7 @@ fn preconditions_view<'a>(
             Column::new()
                 .spacing(12)
                 .push(p1_bold("Before you start"))
+                .push(checklist)
                 .push_maybe(summary.map(p1_regular))
                 .push_maybe(problem.as_ref().map(|reason| card::warning(reason.clone())))
                 .push_maybe((problem.is_none()).then(|| {
@@ -926,18 +993,13 @@ fn preconditions_view<'a>(
                         } else {
                             icon::collapse_icon()
                         }),
-                        "Wallet details",
+                        if panel.setup_details_expanded() { "Hide setup note" } else { "Setup note" },
                     )
                     .on_press(Message::Claim(ClaimMessage::ToggleSetupDetails)),
                 )
-                .push_maybe(
-                    panel.setup_details_expanded().then_some(
-                        Container::new(checklist)
-                            .padding(20)
-                            .style(theme::card::simple)
-                            .width(Length::Fill),
-                    ),
-                ),
+                .push_maybe(panel.setup_details_expanded().then(|| p2_regular(
+                    "These checks describe the current setup. Deposits still need chain-specific replay protection before signing."
+                ).style(theme::text::secondary))),
         );
     }
 
@@ -1562,108 +1624,100 @@ mod tests {
     use crate::app::view::vault::ancestry_coins::{CoinPairReview, CoinRow};
 
     #[test]
-    fn mounted_claim_checks_and_deposit_states_fit_both_viewports() {
-        use crate::services::{
-            claim_observation::http::FundingProofStatus,
-            foreign_scan::{AddressFunds, ScanError},
-        };
-        use std::time::Duration;
+    fn mounted_live_claim_pages_show_checks_addresses_and_actions() {
+        use crate::{app::wallet::Wallet, dir::CoincubeDirectory};
+        use coincube_core::descriptors::CoincubeDescriptor;
+        use std::{str::FromStr, sync::Arc};
+        use tokio::sync::watch;
 
+        // A native SegWit Vault fixture. The presenter only reads this wallet;
+        // no daemon, Connect client, signer or chain observation is created.
+        const DESCRIPTOR: &str = "wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#d72le4dr";
+        let root = std::env::temp_dir().join(format!("claim-ui-{}", uuid::Uuid::new_v4()));
+        let panel = ClaimStep1Panel::new(
+            Arc::new(Wallet::new(
+                CoincubeDescriptor::from_str(DESCRIPTOR).unwrap(),
+            )),
+            CoincubeDirectory::new(root),
+            "bitcoin-cube".into(),
+            watch::channel(1).1,
+            None,
+        );
+        let cache = Cache::default();
+        let addresses = crate::services::claim_workflow::CheckedClaimFundingAddresses {
+            bitcoin_deposit: "bc1qsyntheticbitcoinaddress".into(),
+            btcb2_deposit: "bc1qsyntheticblake2baddress".into(),
+            bitcoin_minimum_sats: 100_000,
+            btcb2_minimum_sats: 50_000,
+            bitcoin_rate_sat_vb: 4,
+            btcb2_rate_sat_vb: 2,
+        };
         for (width, height) in [(1440, 900), (1024, 768)] {
             for (appearance, palette) in [
                 ("dark", theme::Theme::dark()),
                 ("light", theme::Theme::light()),
             ] {
-                let checks = Column::new()
-                    .spacing(10)
-                    .push(check_row(
-                        "Claim target",
-                        Some(true),
-                        "Paired Cube found.".into(),
-                    ))
-                    .push(check_row(
-                        "Vault",
-                        Some(true),
-                        "Native SegWit Vault.".into(),
-                    ))
-                    .push(check_row(
-                        "Node backend",
-                        None,
-                        "Checking both chains…".into(),
-                    ))
-                    .push(check_row(
-                        "Coins to split",
-                        Some(false),
-                        "Fork status unavailable.".into(),
-                    ))
-                    .push(check_row(
-                        "Fee rate",
-                        Some(true),
-                        "4 sat/vB (about an hour).".into(),
-                    ));
-                let mounted = capture::inspect(
-                    "claim-five-checks",
-                    workflow_page(0, checks),
+                let StageView::Preconditions(pre, refusal) = panel.stage() else {
+                    panic!("fixture should begin at preconditions");
+                };
+                let preconditions = capture::inspect(
+                    "claim-preconditions-full",
+                    preconditions_view(&cache, &panel, pre, refusal),
                     (width, height),
                     appearance,
                     palette,
                 );
                 for label in [
-                    "Deposits",
-                    "Review and sign",
-                    "Broadcast and confirm",
                     "Claim target",
                     "Vault",
                     "Node backend",
                     "Coins to split",
                     "Fee rate",
-                    "Needs attention",
                 ] {
                     assert!(
-                        mounted.contains(label),
+                        preconditions.contains(label),
                         "missing {} at {} {}",
                         label,
                         width,
                         appearance
                     );
                 }
+                assert!(preconditions.contains("Check again"));
+                assert!(preconditions.contains("Setup note"));
 
-                let waiting = Ok(AddressFunds {
-                    pending_sats: 75_000,
-                    ..AddressFunds::default()
-                });
-                let limited = Err(ScanError::RateLimited(Duration::from_secs(120)));
-                let deposits = Column::new()
-                    .spacing(12)
-                    .push(p1_bold("Claim checks"))
-                    .push(deposit_row(
-                        "Bitcoin",
-                        Some(&waiting),
-                        100_000,
-                        FundingProofStatus::Pending,
-                        false,
-                        true,
-                    ))
-                    .push(deposit_row(
-                        "Bitcoin Blake2b",
-                        Some(&limited),
-                        100_000,
-                        FundingProofStatus::Pending,
-                        false,
-                        true,
-                    ));
-                let mounted = capture::inspect(
-                    "claim-deposit-waiting-and-rate-limited",
-                    workflow_page(0, deposits),
+                // Mount the exact FundingDeposits presenter with synthetic
+                // addresses. Its action still comes from the panel's own gate.
+                let funding = capture::inspect(
+                    "claim-funding-full",
+                    funding_view(&cache, &panel, &addresses),
                     (width, height),
                     appearance,
                     palette,
                 );
-                assert!(mounted.contains("Bitcoin Blake2b"));
-                assert!(mounted.contains("awaiting confirmation"));
-                assert!(mounted.contains("Indexer rate limited"));
-                assert!(mounted.contains("Replay protection not verified yet"));
-                assert!(!mounted.contains("75,000"));
+                for label in [
+                    "Claim target",
+                    "Vault",
+                    "Node backend",
+                    "Coins to split",
+                    "Fee rate",
+                    "Bitcoin · minimum",
+                    "Bitcoin Blake2b · minimum",
+                    "bc1qsyntheticbitcoinaddress",
+                    "bc1qsyntheticblake2baddress",
+                    "Copy address",
+                    "Replay protection not verified yet",
+                    "Pause checks",
+                ] {
+                    assert!(
+                        funding.contains(label),
+                        "missing {} at {} {}",
+                        label,
+                        width,
+                        appearance
+                    );
+                }
+                assert!(!funding.contains("Both deposits verified for replay protection"));
+                assert!(!funding.contains("Sign with this Vault's keys"));
             }
         }
     }
