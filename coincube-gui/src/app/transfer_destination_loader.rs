@@ -531,12 +531,11 @@ async fn destination_daemon(
     if socket.exists() {
         return Ok((
             Arc::new(client::Coincubed::new(client::jsonrpc::JsonRPCClient::new(
-                socket.to_path_buf(),
+                socket,
             ))),
             BackendLease(None),
         ));
     }
-    let runtime = tokio::runtime::Handle::try_current().ok();
     let config = config.clone();
     // The owned guard is constructed inside the blocking task. If the async
     // caller cancels before receiving its result, dropping the result still
@@ -545,7 +544,6 @@ async fn destination_daemon(
         EmbeddedDaemon::start(config)
             .map(|daemon| OwnedEmbeddedDestination {
                 daemon: Arc::new(daemon),
-                runtime,
             })
             .map_err(|_| Refusal::BackendUnavailable)
     })
@@ -557,7 +555,6 @@ async fn destination_daemon(
 
 struct OwnedEmbeddedDestination {
     daemon: Arc<EmbeddedDaemon>,
-    runtime: Option<tokio::runtime::Handle>,
 }
 
 impl OwnedDestinationResource for OwnedEmbeddedDestination {
@@ -569,20 +566,16 @@ impl OwnedDestinationResource for OwnedEmbeddedDestination {
 impl Drop for OwnedEmbeddedDestination {
     fn drop(&mut self) {
         let daemon = Arc::clone(&self.daemon);
-        let runtime = self.runtime.clone();
-        let result = std::thread::spawn(move || match runtime {
-            Some(handle) => handle
-                .block_on(async { daemon.stop().await })
-                .map_err(|error| error.to_string()),
-            None => match tokio::runtime::Builder::new_current_thread()
+        // Use an independent runtime: an abandoned async request can be
+        // dropped while the caller's runtime is shutting down.
+        let result = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-            {
-                Ok(handle) => handle
-                    .block_on(async { daemon.stop().await })
-                    .map_err(|error| error.to_string()),
-                Err(error) => Err(error.to_string()),
-            },
+                .map_err(|error| error.to_string())?;
+            runtime
+                .block_on(async { daemon.stop().await })
+                .map_err(|error| error.to_string())
         })
         .join();
         match result {
