@@ -67,6 +67,11 @@ mod seed_export_duress_gui_tests {
 
     #[test]
     fn stale_app_callback_carries_verified_duress_after_switch() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
         let _guard = crate::app::session::test_guard();
         crate::app::session::close();
         let path = std::env::temp_dir().join(format!("seed-export-gui-{}", uuid::Uuid::new_v4()));
@@ -108,6 +113,70 @@ mod seed_export_duress_gui_tests {
                 ),
             ),
         )));
+        assert!(matches!(
+            gui.panes.get(pane_id).unwrap().tabs[0].state,
+            tab::State::DuressActive(_)
+        ));
+        assert!(!crate::app::session::is_open());
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn closed_origin_tab_routes_only_same_root_verified_duress_to_surviving_home() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let _guard = crate::app::session::test_guard();
+        let path = std::env::temp_dir().join(format!("seed-export-close-{}", uuid::Uuid::new_v4()));
+        let (app, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+        let root = app.datadir().clone();
+        let cube_id = app.cube_settings().id.clone();
+        let chain = app.cube_settings().network;
+        let app_generation = app.cache().app_generation;
+        let (home, startup) = home::Home::new_for_chain(root, None);
+        drop(startup);
+        let mut gui = GUI::reviewer_app_home_gui(app, home);
+        let pane_id = gui.focus.unwrap();
+        let generation = gui.panes.get(pane_id).unwrap().tabs[0]
+            .app_generation_token()
+            .unwrap();
+        gui.panes.get_mut(pane_id).unwrap().close_tab(0);
+        assert_eq!(gui.panes.get(pane_id).unwrap().tabs.len(), 1);
+        let unrelated = crate::services::unlock::throttle::verified_seed_export_duress_for_test(
+            std::env::temp_dir().join("unrelated-root"),
+            cube_id.clone(),
+            chain,
+            app_generation,
+        );
+        let deliver = |proof| {
+            Message::Pane(
+                pane_id,
+                pane::Message::tab(
+                    1,
+                    tab::Message::AppAsync(
+                        generation,
+                        Box::new(tab::Message::Run(AppMessage::View(
+                            crate::app::view::Message::DuressActivateLocal(proof),
+                        ))),
+                    ),
+                ),
+            )
+        };
+        drop(gui.update(deliver(unrelated)));
+        assert!(matches!(
+            gui.panes.get(pane_id).unwrap().tabs[0].state,
+            tab::State::Home(_)
+        ));
+        let proof = crate::services::unlock::throttle::verified_seed_export_duress_for_test(
+            path.clone(),
+            cube_id,
+            chain,
+            app_generation,
+        );
+        drop(gui.update(deliver(proof)));
         assert!(matches!(
             gui.panes.get(pane_id).unwrap().tabs[0].state,
             tab::State::DuressActive(_)
@@ -490,6 +559,50 @@ fn unresolved_test_preferences() -> PreferencesOwner {
 }
 
 impl GUI {
+    /// A verified marker is an emergency after the originating settings tab
+    /// closes as well. The proof is private to the locked PIN classifier; the
+    /// GUI data directory is the final owner boundary before local activation.
+    fn route_verified_seed_export_duress(
+        &mut self,
+        pane_id: pane_grid::Pane,
+        tab_id: usize,
+        proof: crate::services::unlock::throttle::VerifiedSeedExportDuress,
+    ) -> Task<Message> {
+        let (root, cube_id, _chain, _app) = proof.origin();
+        if cube_id.is_empty()
+            || !crate::chain::same_path(root, self.config.coincube_directory.path())
+        {
+            return Task::none();
+        }
+        if self
+            .panes
+            .get(pane_id)
+            .is_some_and(|pane| pane.tabs.iter().any(|tab| tab.id == tab_id))
+        {
+            return self.update(Message::Pane(
+                pane_id,
+                pane::Message::tab(tab_id, tab::Message::LocalDuress(proof)),
+            ));
+        }
+        let target = self
+            .panes
+            .iter()
+            .find_map(|(id, pane)| pane.tabs.first().map(|tab| (*id, tab.id)));
+        let Some((target_pane, target_tab)) = target else {
+            return Task::none();
+        };
+        let task = self
+            .panes
+            .get_mut(target_pane)
+            .unwrap()
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id == target_tab)
+            .unwrap()
+            .activate_unhosted_seed_export_duress(proof);
+        task.map(move |message| Message::Pane(target_pane, pane::Message::tab(target_tab, message)))
+    }
+
     /// The process owns one secret session and idle clock. A new public Cube
     /// admission must retire every old secret-bearing surface before its
     /// constructor or unlock callback can run, even when no App tab remains.
@@ -1104,23 +1217,13 @@ impl GUI {
                     crate::app::view::Message::DuressActivateLocal(_),
                 )) = message.as_ref()
                 {
-                    let exists = self
-                        .panes
-                        .get(pane_id)
-                        .is_some_and(|pane| pane.tabs.iter().any(|tab| tab.id == tab_id));
-                    if !exists {
-                        return Task::none();
-                    }
                     let tab::Message::Run(AppMessage::View(
                         crate::app::view::Message::DuressActivateLocal(proof),
                     )) = *message
                     else {
                         unreachable!()
                     };
-                    return self.update(Message::Pane(
-                        pane_id,
-                        pane::Message::tab(tab_id, tab::Message::LocalDuress(proof)),
-                    ));
+                    return self.route_verified_seed_export_duress(pane_id, tab_id, proof);
                 }
                 let current = self
                     .panes
@@ -1143,23 +1246,13 @@ impl GUI {
                     crate::app::view::Message::DuressActivateLocal(_),
                 )) = message.as_ref()
                 {
-                    let exists = self
-                        .panes
-                        .get(pane_id)
-                        .is_some_and(|pane| pane.tabs.iter().any(|tab| tab.id == tab_id));
-                    if !exists {
-                        return Task::none();
-                    }
                     let tab::Message::Run(AppMessage::View(
                         crate::app::view::Message::DuressActivateLocal(proof),
                     )) = *message
                     else {
                         unreachable!()
                     };
-                    return self.update(Message::Pane(
-                        pane_id,
-                        pane::Message::tab(tab_id, tab::Message::LocalDuress(proof)),
-                    ));
+                    return self.route_verified_seed_export_duress(pane_id, tab_id, proof);
                 }
                 let current = self
                     .panes

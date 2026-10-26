@@ -30,6 +30,8 @@ pub enum OwnerEscrowError {
     Escrow(EscrowError),
     /// A Connect call failed (fetch vault / upload / monitoring).
     Connect(CoincubeError),
+    /// The owner left the Full-Cube PIN flow before the escrow PUT began.
+    Cancelled,
 }
 
 impl std::fmt::Display for OwnerEscrowError {
@@ -37,6 +39,7 @@ impl std::fmt::Display for OwnerEscrowError {
         match self {
             Self::Escrow(e) => write!(f, "{}", e),
             Self::Connect(e) => write!(f, "{}", e),
+            Self::Cancelled => f.write_str("Full-Cube enrollment was cancelled"),
         }
     }
 }
@@ -83,11 +86,44 @@ pub async fn enroll_escrow(
     descriptor_json: Vec<u8>,
     seed_json: Option<Zeroizing<Vec<u8>>>,
 ) -> Result<VaultMonitoringStatus, OwnerEscrowError> {
+    enroll_escrow_cancelable(
+        client,
+        server_cube_id,
+        cube_enc_key,
+        network,
+        descriptor_json,
+        seed_json,
+        || false,
+    )
+    .await
+}
+
+/// Full-Cube PIN flow variant. Cancellation is checked after the awaited
+/// keyholder fetch and immediately before the escrow PUT. Once that PUT starts,
+/// monitoring must still be enabled to preserve escrow ⟹ heartbeat.
+pub async fn enroll_escrow_cancelable<F>(
+    client: &CoincubeClient,
+    server_cube_id: u64,
+    cube_enc_key: Option<&CubeEncryptionKey>,
+    network: Network,
+    descriptor_json: Vec<u8>,
+    seed_json: Option<Zeroizing<Vec<u8>>>,
+    should_cancel: F,
+) -> Result<VaultMonitoringStatus, OwnerEscrowError>
+where
+    F: Fn() -> bool + Send + Sync,
+{
+    if should_cancel() {
+        return Err(OwnerEscrowError::Cancelled);
+    }
     // 1. Resolve the current keyholders + xpubs, then build the envelope set
     //    locally (the server never sees plaintext). The `Zeroizing` seed buffer
     //    is owned here so it's wiped when this fn returns; `build_escrow_set`
     //    only borrows the bytes to seal them, so it needs no `Zeroizing` itself.
     let vault = client.get_connect_vault(server_cube_id).await?;
+    if should_cancel() {
+        return Err(OwnerEscrowError::Cancelled);
+    }
     let keyholders = keyholders_from_vault(&vault, cube_enc_key, server_cube_id, network)?;
     let set = build_escrow_set(
         &keyholders,
@@ -95,6 +131,9 @@ pub async fn enroll_escrow(
         &descriptor_json,
         seed_json.as_ref().map(|s| s.as_slice()),
     )?;
+    if should_cancel() {
+        return Err(OwnerEscrowError::Cancelled);
+    }
 
     // 2. Upload the opaque ciphertext set (cube-scoped).
     client.put_vault_escrow(server_cube_id, set).await?;
@@ -219,12 +258,55 @@ mod tests {
     use httpmock::{Method, MockServer};
     use serde_json::json;
     use std::str::FromStr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn test_xpub(seed: &[u8]) -> Xpub {
         let secp = Secp256k1::new();
         let master = Xpriv::new_master(Network::Bitcoin, seed).unwrap();
         let path = DerivationPath::from_str("m/48'/0'/0'/2'").unwrap();
         Xpub::from_priv(&secp, &master.derive_priv(&secp, &path).unwrap())
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_keyholder_fetch_sends_no_seed_escrow_put() {
+        let server = MockServer::start();
+        let vault = server.mock(|when, then| {
+            when.method(Method::GET)
+                .path("/api/v1/connect/cubes/42/vault");
+            then.status(200).json_body(json!({
+                "success": true,
+                "data": {
+                    "id": 9, "cubeId": 42, "timelockDays": 365,
+                    "timelockExpiresAt": "2027-06-22T00:00:00Z",
+                    "lastResetAt": "2026-06-22T00:00:00Z", "status": "active",
+                    "members": [],
+                    "createdAt": "2026-06-22T00:00:00Z",
+                    "updatedAt": "2026-06-22T00:00:00Z"
+                }
+            }));
+        });
+        let put = server.mock(|when, then| {
+            when.method(Method::PUT)
+                .path("/api/v1/connect/cubes/42/vault/escrow");
+            then.status(200)
+                .json_body(json!({"success": true, "data": {}}));
+        });
+        let client = CoincubeClient::for_test(server.base_url());
+        let checks = AtomicUsize::new(0);
+        let result = enroll_escrow_cancelable(
+            &client,
+            42,
+            None,
+            Network::Bitcoin,
+            b"descriptor".to_vec(),
+            Some(Zeroizing::new(b"synthetic-seed".to_vec())),
+            || checks.fetch_add(1, Ordering::AcqRel) > 0,
+        )
+        .await;
+        assert!(matches!(result, Err(OwnerEscrowError::Cancelled)));
+        assert_eq!(checks.load(Ordering::Acquire), 2);
+        vault.assert();
+        put.assert_hits(0);
     }
 
     #[tokio::test]

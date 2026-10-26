@@ -1454,6 +1454,18 @@ impl Tab {
         ) {
             return Task::done(message);
         }
+        let preserve_seed_export_trial = matches!(
+            &message,
+            Message::Run(app::Message::View(app::view::Message::Settings(
+                app::view::SettingsMessage::BackupMasterSeed(
+                    app::view::BackupWalletMessage::VerifyPin
+                ) | app::view::SettingsMessage::RecoveryKit(
+                    app::view::RecoveryKitMessage::VerifyPin
+                ) | app::view::SettingsMessage::RecoveryAlerts(
+                    app::view::RecoveryAlertsMessage::ConfirmFullCube
+                )
+            )))
+        );
         let was_app = matches!(&self.state, State::App(_));
         let was_fork_app =
             matches!(&self.state, State::App(app) if app.cube_settings().network.is_blake2b());
@@ -1503,7 +1515,15 @@ impl Tab {
             }
         }
         if matches!(&self.state, State::App(app) if app.cube_settings().network.is_blake2b()) {
-            self.guard_fork_task(result)
+            if preserve_seed_export_trial {
+                // A confirmed duress marker is an emergency even when this
+                // fork App is cancelled while Argon2 is running. Ordinary
+                // words/JSON still pass through ForkAsync's stale fence.
+                let generation = self.fork_session_generation;
+                result.map(move |message| Message::ForkAsync(generation, Box::new(message)))
+            } else {
+                self.guard_fork_task(result)
+            }
         } else {
             if was_fork_app {
                 self.fork_session_generation = self.fork_session_generation.wrapping_add(1);
@@ -1538,6 +1558,23 @@ impl Tab {
         {
             return Task::none();
         }
+        self.activate_trusted_seed_export_duress(proof)
+    }
+
+    /// The originating tab can be closed while its PIN task finishes. GUI
+    /// checks the private proof against its own data directory before handing
+    /// it to a surviving tab; that tab has no historical App origin to match.
+    pub(super) fn activate_unhosted_seed_export_duress(
+        &mut self,
+        proof: crate::services::unlock::throttle::VerifiedSeedExportDuress,
+    ) -> Task<Message> {
+        self.activate_trusted_seed_export_duress(proof)
+    }
+
+    fn activate_trusted_seed_export_duress(
+        &mut self,
+        proof: crate::services::unlock::throttle::VerifiedSeedExportDuress,
+    ) -> Task<Message> {
         let Some((root, cube_id, chain, _app, account_id)) = proof.claim() else {
             return Task::none();
         };

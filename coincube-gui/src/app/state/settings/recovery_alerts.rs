@@ -43,7 +43,8 @@ use crate::{
         VaultMonitoringStatus,
     },
     services::inheritance::{
-        disable_alerts, disable_escrow, enable_alerts, enroll_escrow, EscrowTier,
+        disable_alerts, disable_escrow, enable_alerts, enroll_escrow, enroll_escrow_cancelable,
+        EscrowTier,
     },
     services::recovery::{SeedBlob, SeedBlobCube, SeedBlobMnemonic, BLOB_VERSION},
 };
@@ -670,13 +671,14 @@ pub fn update(
                     if cancelled.load(Ordering::Acquire) {
                         return Err("Full-Cube enrollment was cancelled.".into());
                     }
-                    enroll_escrow(
+                    enroll_escrow_cancelable(
                         &client,
                         server_cube_id,
                         cube_enc_key.as_deref(),
                         network.bitcoin_network(),
                         descriptor_json,
                         Some(seed_json),
+                        || cancelled.load(Ordering::Acquire),
                     )
                     .await
                     .map_err(|e| e.to_string())
