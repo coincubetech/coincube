@@ -1094,6 +1094,7 @@ impl ImportedBitcoinPanel {
         match message {
             ImportMessage::Source(message) => {
                 let task = match message {
+                    wallet_source_form::Message::Focus(id) => iced::widget::operation::focus(id),
                     wallet_source_form::Message::SourceSelected(source) => {
                         if self.source.select_source(source) {
                             self.invalidate();
@@ -3126,6 +3127,82 @@ impl State for ImportedBitcoinPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_source_keyboard_actions_keep_import_setup_operable() {
+        use crate::app::view::shared::landing::capture;
+        use iced::{advanced::widget::Id, keyboard::key::Named};
+
+        let directory = NetworkDirectory::new(
+            std::env::temp_dir().join(format!("import-source-keyboard-{}", uuid::Uuid::new_v4())),
+        );
+        let mut panel =
+            ImportedBitcoinPanel::new(directory, "keyboard".into(), BitcoinImport::pending());
+        let size = (1024, 768);
+        let mounted = capture::inspect_full_window(
+            "import-source-keyboard",
+            panel.setup_view(),
+            size,
+            "light",
+            theme::Theme::light(),
+        );
+        for id in [
+            "tenshu.source.descriptor",
+            "tenshu.source.hardware",
+            "tenshu.source.receive",
+            "tenshu.source.change",
+        ] {
+            assert!(
+                mounted.has_focus(Id::new(id)),
+                "import source focus: {}",
+                id
+            );
+        }
+        for key in [Named::Enter, Named::Space] {
+            assert!(matches!(
+                capture::activate_with_key(
+                    panel.setup_view(),
+                    Id::new("tenshu.source.hardware"),
+                    size,
+                    false,
+                    key
+                )
+                .as_slice(),
+                [view::Message::ImportedBitcoin(ImportMessage::Source(
+                    wallet_source_form::Message::SourceSelected(Source::Hardware)
+                ))]
+            ));
+        }
+        let focus = panel.update_view(
+            ImportMessage::Source(wallet_source_form::Message::Focus(Id::new(
+                "tenshu.source.hardware",
+            ))),
+            None,
+            0,
+        );
+        assert!(focus.units() > 0);
+        assert_eq!(
+            panel.source.source(),
+            Source::Descriptor,
+            "focus never changes import source"
+        );
+        let _ = panel.update_view(
+            ImportMessage::Source(wallet_source_form::Message::SourceSelected(
+                Source::Hardware,
+            )),
+            None,
+            0,
+        );
+        let hardware = capture::inspect_full_window(
+            "import-source-keyboard-hardware",
+            panel.setup_view(),
+            size,
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(hardware.has_focus(Id::new("tenshu.hardware.purpose.bip84")));
+        assert!(hardware.has_focus(Id::new("tenshu.hardware.account")));
+    }
 
     use coincube_core::miniscript::bitcoin::{
         absolute::LockTime,

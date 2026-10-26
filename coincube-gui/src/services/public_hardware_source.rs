@@ -19,11 +19,13 @@ use coincube_core::miniscript::bitcoin::{
     bip32::{ChildNumber, DerivationPath, Fingerprint, Xpub},
     Network, NetworkKind,
 };
+use coincube_ui::theme::tenshu::button::ActionKind;
 use coincube_ui::{
-    component::{button, text::*},
+    component::{tenshu::ActionButton, text::*},
     theme,
     widget::{Column, Element, Row},
 };
+use iced::advanced::widget::Id;
 use iced::{widget::text_input, Alignment, Length, Subscription, Task};
 
 use crate::{
@@ -215,11 +217,16 @@ pub async fn read_account(
 
 #[derive(Debug, Clone)]
 pub enum HardwareMessage {
+    Focus(Id),
     Devices(HardwareWalletMessage),
     PurposeSelected(Purpose),
     AccountEdited(String),
     Read(String),
     Loaded(Result<Arc<HardwareAccount>, HardwareSourceError>, u64),
+}
+
+fn focus(id: Id) -> HardwareMessage {
+    HardwareMessage::Focus(id)
 }
 
 #[derive(Debug, Clone)]
@@ -312,6 +319,7 @@ impl HardwareSource {
     /// material (and so any scan built from it) was invalidated.
     pub fn update(&mut self, message: HardwareMessage) -> (Task<HardwareMessage>, bool) {
         match message {
+            HardwareMessage::Focus(id) => (iced::widget::operation::focus(id), false),
             HardwareMessage::Devices(message) => {
                 let Some(devices) = self.devices.as_mut() else {
                     return (Task::none(), false);
@@ -418,8 +426,14 @@ pub fn view(source: &HardwareSource) -> Element<'_, HardwareMessage> {
                     .width(Length::Fill),
                 )
                 .push(
-                    button::secondary(None, "Read account")
-                        .on_press_maybe((!reading).then(|| HardwareMessage::Read(id.clone()))),
+                    ActionButton::new(
+                        Id::from(format!("tenshu.hardware.read:{}:{}", id.len(), id)),
+                        "Read account",
+                        ActionKind::Secondary,
+                        focus,
+                    )
+                    .compact()
+                    .on_press_maybe((!reading).then(|| HardwareMessage::Read(id.clone()))),
                 ),
             HardwareWallet::Locked {
                 kind, pairing_code, ..
@@ -456,16 +470,39 @@ pub fn view(source: &HardwareSource) -> Element<'_, HardwareMessage> {
         .spacing(12)
         .push(p1_bold("Address type"))
         .push(
-            iced::widget::pick_list(
-                PURPOSES,
-                Some(source.purpose),
-                HardwareMessage::PurposeSelected,
-            )
-            .width(Length::Fill),
+            PURPOSES
+                .iter()
+                .copied()
+                .fold(Column::new().spacing(6), |choices, purpose| {
+                    let id = match purpose {
+                        Purpose::Bip84 => "tenshu.hardware.purpose.bip84",
+                        Purpose::Bip49 => "tenshu.hardware.purpose.bip49",
+                        Purpose::Bip44 => "tenshu.hardware.purpose.bip44",
+                    };
+                    choices.push(
+                        ActionButton::new(
+                            id,
+                            format!(
+                                "{}{}",
+                                if purpose == source.purpose {
+                                    "Selected: "
+                                } else {
+                                    ""
+                                },
+                                purpose
+                            ),
+                            ActionKind::Secondary,
+                            focus,
+                        )
+                        .compact()
+                        .on_press(HardwareMessage::PurposeSelected(purpose)),
+                    )
+                }),
         )
         .push(p1_bold("Account"))
         .push(
             text_input("0", &source.account)
+                .id("tenshu.hardware.account")
                 .on_input(HardwareMessage::AccountEdited)
                 .padding(10),
         )
@@ -582,6 +619,53 @@ pub(crate) mod tests {
         let mut source = HardwareSource::default();
         add_device(&mut source, device, root);
         source
+    }
+
+    #[test]
+    fn hardware_source_actions_are_keyboard_operable_without_changing_read_semantics() {
+        use crate::app::view::shared::landing::capture;
+        use iced::keyboard::key::Named;
+
+        let root = temp_root();
+        let mut source = source_with(fake(Network::Bitcoin, None), &root);
+        let size = (1024, 768);
+        let mounted = capture::inspect_full_window(
+            "split-hardware-keyboard",
+            view(&source),
+            size,
+            "light",
+            theme::Theme::light(),
+        );
+        let read_id = Id::from("tenshu.hardware.read:5:dev-1".to_string());
+        assert!(mounted.has_focus(read_id.clone()));
+        for id in [
+            "tenshu.hardware.purpose.bip84",
+            "tenshu.hardware.purpose.bip49",
+            "tenshu.hardware.purpose.bip44",
+            "tenshu.hardware.account",
+        ] {
+            assert!(mounted.has_focus(Id::new(id)), "missing focus: {}", id);
+        }
+        for key in [Named::Enter, Named::Space] {
+            assert!(matches!(
+                capture::activate_with_key(view(&source), read_id.clone(), size, false, key).as_slice(),
+                [HardwareMessage::Read(id)] if id == "dev-1"
+            ));
+            assert!(matches!(
+                capture::activate_with_key(
+                    view(&source),
+                    Id::new("tenshu.hardware.purpose.bip44"),
+                    size,
+                    false,
+                    key
+                )
+                .as_slice(),
+                [HardwareMessage::PurposeSelected(Purpose::Bip44)]
+            ));
+        }
+        let (_, invalidated) = source.update(HardwareMessage::Focus(read_id));
+        assert!(!invalidated, "focus must not clear account material");
+        let _ = fs::remove_dir(root);
     }
 
     /// Lists a supported fake device as `dev-1` so a `Read` would start a task.
