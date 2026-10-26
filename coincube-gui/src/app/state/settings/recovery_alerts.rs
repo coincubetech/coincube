@@ -34,7 +34,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     app::{cache::Cache, message::Message, settings, view, wallet::Wallet},
@@ -972,7 +972,7 @@ fn build_seed_blob_json(
         }
     };
     let phrase = Zeroizing::new(words.join(" "));
-    let blob = SeedBlob {
+    let mut blob = SeedBlob {
         version: BLOB_VERSION,
         cube,
         mnemonic: SeedBlobMnemonic {
@@ -980,7 +980,9 @@ fn build_seed_blob_json(
             language: "en".to_string(),
         },
     };
-    serde_json::to_vec(&blob)
+    let serialized = serde_json::to_vec(&blob);
+    blob.mnemonic.phrase.zeroize();
+    serialized
         .map(Zeroizing::new)
         .map(SeedBlobOutcome::Ready)
         .map_err(|e| format!("seed blob: {}", e))

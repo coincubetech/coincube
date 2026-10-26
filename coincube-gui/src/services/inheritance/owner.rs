@@ -128,12 +128,16 @@ where
         return Err(OwnerEscrowError::Cancelled);
     }
     let keyholders = keyholders_from_vault(&vault, cube_enc_key, server_cube_id, network)?;
+    let includes_seed = seed_json.is_some();
     let set = build_escrow_set(
         &keyholders,
         server_cube_id,
         &descriptor_json,
         seed_json.as_ref().map(|s| s.as_slice()),
     )?;
+    // Ciphertext is complete. Wipe the plaintext before the PUT or heartbeat
+    // awaits can retain this task for an unbounded network delay.
+    drop(seed_json);
     // The caller atomically elects upload or cancellation here. A cancel that
     // wins first refuses the PUT; once upload wins, monitoring must complete.
     if should_cancel() || !start_upload() {
@@ -162,7 +166,7 @@ where
     // guess), so this makes the card reflect the enrolment immediately and stays
     // correct even against an API that doesn't yet echo the field on this
     // response. The next `LoadStatus` reconciles against the server's own report.
-    status.escrowed_artifacts = Some(if seed_json.is_some() {
+    status.escrowed_artifacts = Some(if includes_seed {
         vec!["descriptor".to_string(), "seed".to_string()]
     } else {
         vec!["descriptor".to_string()]

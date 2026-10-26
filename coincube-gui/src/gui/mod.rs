@@ -253,10 +253,21 @@ mod seed_export_duress_gui_tests {
                 ),
             )
         });
-        let pane = gui.panes.get_mut(pane_id).unwrap();
-        pane.close_tab(1);
-        pane.close_tab(0);
-        assert!(pane.tabs.is_empty());
+        drop(gui.update(Message::Pane(
+            pane_id,
+            pane::Message::View(pane::ViewMessage::CloseTab(1)),
+        )));
+        gui.panes.get_mut(pane_id).unwrap().tabs[0].mark_seed_export_trial_pending_for_test();
+        drop(gui.update(Message::Pane(
+            pane_id,
+            pane::Message::View(pane::ViewMessage::CloseTab(0)),
+        )));
+        let pane = gui
+            .panes
+            .get(pane_id)
+            .expect("PIN trial keeps window alive");
+        assert_eq!(pane.tabs.len(), 1);
+        assert_eq!(pane.tabs[0].id, usize::MAX);
         release.send(proof).unwrap();
         let delivered = runtime.block_on(async {
             let mut stream = iced_runtime::task::into_stream(pending).unwrap();
@@ -635,6 +646,22 @@ fn route_guarded_tab_result(
     Message::Pane(pane_id, pane::Message::View(view))
 }
 
+fn is_seed_export_trial_result(message: &tab::Message) -> bool {
+    matches!(
+        message,
+        tab::Message::Run(AppMessage::View(crate::app::view::Message::Settings(
+            crate::app::view::SettingsMessage::BackupMasterSeed(
+                crate::app::view::BackupWalletMessage::PinVerifiedAttempt(..)
+            ) | crate::app::view::SettingsMessage::RecoveryKit(
+                crate::app::view::RecoveryKitMessage::PinVerifiedAttempt(..)
+            ) | crate::app::view::SettingsMessage::RecoveryAlerts(
+                crate::app::view::RecoveryAlertsMessage::FullCubePinReady(..)
+                    | crate::app::view::RecoveryAlertsMessage::FullCubePinFailed(..)
+            )
+        )))
+    )
+}
+
 #[cfg(test)]
 fn unresolved_test_preferences() -> PreferencesOwner {
     PreferencesOwner::new(
@@ -649,6 +676,27 @@ fn unresolved_test_preferences() -> PreferencesOwner {
 }
 
 impl GUI {
+    fn finish_closed_seed_export_trial(&mut self, pane_id: pane_grid::Pane) -> Task<Message> {
+        let Some(pane) = self.panes.get_mut(pane_id) else {
+            return Task::none();
+        };
+        let Some(index) = pane.tabs.iter().position(|tab| tab.id == usize::MAX) else {
+            return Task::none();
+        };
+        pane.close_tab(index);
+        if pane.tabs.is_empty() {
+            self.panes.close(pane_id);
+            if self.focus == Some(pane_id) {
+                self.focus = None;
+            }
+        }
+        if !self.panes.iter().any(|(_, pane)| !pane.tabs.is_empty()) {
+            iced::window::latest().and_then(iced::window::close)
+        } else {
+            Task::none()
+        }
+    }
+
     /// A verified marker is an emergency after the originating settings tab
     /// closes as well. The proof is private to the locked PIN classifier; the
     /// GUI data directory is the final owner boundary before local activation.
@@ -1347,8 +1395,13 @@ impl GUI {
                     .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == tab_id))
                     .is_some_and(|tab| tab.accepts_app_generation(generation));
                 if !current {
+                    let closed_trial_finished = is_seed_export_trial_result(message.as_ref());
                     tab::discard_closed_loader_result(*message);
-                    return Task::none();
+                    return if closed_trial_finished {
+                        self.finish_closed_seed_export_trial(pane_id)
+                    } else {
+                        Task::none()
+                    };
                 }
                 route_guarded_tab_result(pane_id, tab_id, *message)
             }
@@ -1376,8 +1429,13 @@ impl GUI {
                     .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == tab_id))
                     .is_some_and(|tab| tab.accepts_fork_generation(generation));
                 if !current {
+                    let closed_trial_finished = is_seed_export_trial_result(message.as_ref());
                     tab::discard_closed_loader_result(*message);
-                    return Task::none();
+                    return if closed_trial_finished {
+                        self.finish_closed_seed_export_trial(pane_id)
+                    } else {
+                        Task::none()
+                    };
                 }
                 route_guarded_tab_result(pane_id, tab_id, *message)
             }
@@ -2457,12 +2515,33 @@ impl GUI {
             Message::Pane(_, pane::Message::View(pane::ViewMessage::SplitTab(_))) => Task::none(),
             Message::Pane(pane_id, pane::Message::View(pane::ViewMessage::CloseTab(i))) => {
                 if let Some(pane) = self.panes.get_mut(pane_id) {
+                    if pane.tabs.get(i).is_some_and(|tab| tab.id == usize::MAX) {
+                        return Task::none();
+                    }
+                    let await_seed_trial = pane
+                        .tabs
+                        .get(i)
+                        .is_some_and(tab::Tab::has_pending_seed_export_trial);
                     let _ = pane
                         .update(
                             pane::Message::View(pane::ViewMessage::CloseTab(i)),
                             &self.config,
                         )
                         .map(move |msg| Message::Pane(pane_id, msg));
+                    if pane.tabs.is_empty() && await_seed_trial {
+                        // Closing the final tab must not close the Iced runtime
+                        // before a submitted PIN can classify as Duress. Keep
+                        // a neutral tab alive; a non-duress result closes it.
+                        let (home, startup) = home::Home::new(
+                            self.config.coincube_directory.clone(),
+                            self.config.network,
+                        );
+                        drop(startup);
+                        pane.tabs
+                            .push(tab::Tab::new(usize::MAX, tab::State::Home(home)));
+                        pane.focused_tab = 0;
+                        self.focus = Some(pane_id);
+                    }
                     if pane.tabs.is_empty() {
                         self.panes.close(pane_id);
                         if self.focus == Some(pane_id) {

@@ -844,6 +844,7 @@ pub struct Tab {
         String,
         crate::chain::ChainId,
     )>,
+    pending_seed_export_trial: bool,
     claim_open: Option<home::ClaimOpenIntent>,
     fork_session_generation: u64,
     fork_save_task: Option<iced::task::Handle>,
@@ -905,6 +906,7 @@ impl Tab {
             pending_unlock_warnings: Vec::new(),
             app_generation: 0,
             seed_export_origins: Vec::new(),
+            pending_seed_export_trial: false,
             claim_open: None,
             fork_session_generation: 0,
             fork_save_task: None,
@@ -1276,6 +1278,15 @@ impl Tab {
         matches!(self.state, State::App(_)).then_some(self.app_generation)
     }
 
+    pub(crate) fn has_pending_seed_export_trial(&self) -> bool {
+        self.pending_seed_export_trial
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_seed_export_trial_pending_for_test(&mut self) {
+        self.pending_seed_export_trial = true;
+    }
+
     pub(crate) fn preferences_source(&self) -> Option<PreferencesSource> {
         match &self.state {
             State::Home(_) => Some(PreferencesSource::Home),
@@ -1466,10 +1477,28 @@ impl Tab {
                 )
             )))
         );
+        if matches!(
+            &message,
+            Message::Run(app::Message::View(app::view::Message::Settings(
+                app::view::SettingsMessage::BackupMasterSeed(
+                    app::view::BackupWalletMessage::PinVerifiedAttempt(..)
+                ) | app::view::SettingsMessage::RecoveryKit(
+                    app::view::RecoveryKitMessage::PinVerifiedAttempt(..)
+                ) | app::view::SettingsMessage::RecoveryAlerts(
+                    app::view::RecoveryAlertsMessage::FullCubePinReady(..)
+                        | app::view::RecoveryAlertsMessage::FullCubePinFailed(..)
+                )
+            )))
+        ) {
+            self.pending_seed_export_trial = false;
+        }
         let was_app = matches!(&self.state, State::App(_));
         let was_fork_app =
             matches!(&self.state, State::App(app) if app.cube_settings().network.is_blake2b());
         let mut result = self.update_inner(message);
+        if preserve_seed_export_trial && result.units() > 0 {
+            self.pending_seed_export_trial = true;
+        }
         if !matches!(self.state, State::PinEntry(_) | State::PasskeyUnlock(_))
             || matches!(&self.state, State::PinEntry(pin) if pin.is_loading())
             || matches!(&self.state, State::PasskeyUnlock(passkey) if passkey.is_opening())
@@ -1593,6 +1622,7 @@ impl Tab {
             ),
         );
         self.seed_export_origins.clear();
+        self.pending_seed_export_trial = false;
         crate::app::session::close();
         Task::perform(
             async move {
