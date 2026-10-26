@@ -1465,25 +1465,15 @@ fn node_option_card<'a>(
     .into()
 }
 
-fn node_install_toggle<'a>(
-    ui_instance: u64,
-    install_node: bool,
-    label: &'static str,
-) -> Element<'a, Message> {
-    Action::new(
-        format!("tenshu.installer.node.{}.install", ui_instance),
-        p1_regular(format!(
-            "{} {}",
-            if install_node { "☑" } else { "☐" },
-            label
-        )),
-        Message::FocusAction,
-    )
-    .style(theme::button::transparent)
-    .on_press(Message::SelectBitcoindType(
-        message::SelectBitcoindTypeMsg::ToggleInstallNode,
-    ))
-    .into()
+fn node_install_toggle<'a>(install_node: bool, label: &'static str) -> Element<'a, Message> {
+    checkbox(install_node)
+        .label(label)
+        .spacing(8)
+        .style(theme::checkbox::primary)
+        .on_toggle(|_| {
+            Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::ToggleInstallNode)
+        })
+        .into()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1507,7 +1497,7 @@ pub fn select_bitcoind_type<'a>(
             choices = choices
                 .push(text("Use COINCUBE | Connect").bold())
                 .push(text(format!("Use the hosted {chain_name} node while a local node syncs, or use Connect alone.")))
-                .push(node_install_toggle(ui_instance, install_node, "Also install a pruned node on my device"))
+                .push(node_install_toggle(install_node, "Also install a pruned node on my device"))
                 .push(Action::new(format!("tenshu.installer.node.{}.blake2b-connect", ui_instance), p1_regular("Use Connect"), Message::FocusAction)
                     .style(theme::button::primary)
                     .on_press(Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::ContinueWithConnect)));
@@ -1592,7 +1582,6 @@ pub fn select_bitcoind_type<'a>(
                     (backed by Bitcoin Knots). No setup required.",
             ))
             .push(node_install_toggle(
-                ui_instance,
                 install_node,
                 "Also install a pruned Bitcoin node on my device",
             ));
@@ -3740,6 +3729,66 @@ mod node_management_chain_tests {
     }
 
     #[test]
+    fn node_install_checkbox_keeps_checked_state_and_toggles_from_both_values() {
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        ))
+        .expect("software renderer");
+
+        for label in [
+            "Also install a pruned node on my device",
+            "Also install a pruned Bitcoin node on my device",
+        ] {
+            for checked in [false, true] {
+                let mut element = node_install_toggle(checked, label);
+                let mut tree = Tree::new(element.as_widget());
+                let node = element.as_widget_mut().layout(
+                    &mut tree,
+                    &renderer,
+                    &layout::Limits::new(Size::ZERO, Size::new(620.0, 80.0)),
+                );
+                let mut labels = Labels::default();
+                element.as_widget_mut().operate(
+                    &mut tree,
+                    Layout::new(&node),
+                    &renderer,
+                    &mut labels,
+                );
+                assert!(
+                    labels.0.iter().any(|value| value == label),
+                    "native checkbox must retain its label: {:?}",
+                    labels.0
+                );
+                let mut messages = Vec::new();
+                element.as_widget_mut().update(
+                    &mut tree,
+                    &Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                    Layout::new(&node),
+                    mouse::Cursor::Available(iced::Point::new(8.0, 8.0)),
+                    &renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut iced::advanced::Shell::new(&mut messages),
+                    &Rectangle::with_size(Size::new(620.0, 80.0)),
+                );
+                assert!(
+                    matches!(
+                        messages.as_slice(),
+                        [Message::SelectBitcoindType(
+                            message::SelectBitcoindTypeMsg::ToggleInstallNode
+                        )]
+                    ),
+                    "checked={} label={}: {:?}",
+                    checked,
+                    label,
+                    messages
+                );
+            }
+        }
+    }
+
+    #[test]
     #[allow(clippy::type_complexity)]
     fn node_choices_activate_with_enter_and_space() {
         use keyboard::key::Named;
@@ -3783,12 +3832,6 @@ mod node_management_chain_tests {
                     )
                 },
             ),
-            (ChainId::Bitcoin, true, false, true, "install", |m| {
-                matches!(
-                    m,
-                    Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::ToggleInstallNode)
-                )
-            }),
             (ChainId::Bitcoin, true, false, true, "flavor.core", |m| {
                 matches!(
                     m,
