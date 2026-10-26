@@ -118,6 +118,27 @@ impl SparkOverview {
         view::dashboard(menu, cache, content)
     }
 
+    /// The address confirmation must cover the full Spark page, rather than
+    /// inherit the compact address row's bounds as its modal viewport.
+    pub fn view_with_address_overlay<'a>(
+        &'a self,
+        menu: &'a Menu,
+        cache: &'a Cache,
+        address: Element<'a, view::Message>,
+        confirmation: Option<Element<'a, view::Message>>,
+    ) -> Element<'a, view::Message> {
+        let page = self.view_with_address(menu, cache, Some(address));
+        if let Some(confirmation) = confirmation {
+            coincube_ui::widget::modal::Modal::new(page, confirmation)
+                .on_blur(Some(view::Message::ConnectCube(
+                    view::ConnectCubeMessage::DismissChangeConfirmation,
+                )))
+                .into()
+        } else {
+            page
+        }
+    }
+
     /// A save result is routed through App even if the user left this panel.
     pub fn finish_stable_balance_save(&mut self) {
         self.stable_balance_saving = false;

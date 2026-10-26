@@ -14,7 +14,7 @@ use crate::app::wallets::DomainPaymentStatus;
 use coincube_ui::component::text::Text;
 use coincube_ui::{
     color,
-    component::{amount::*, text::*},
+    component::{amount::*, button, text::*},
     icon::receipt_icon,
     theme,
     widget::*,
@@ -25,6 +25,7 @@ use iced::{
 };
 
 use crate::app::settings::display::DisplayMode;
+use crate::app::state::connect::ConnectCubePanel;
 use crate::app::state::spark::overview::SparkBalanceSnapshot;
 use crate::app::view::shared::activity_row::{
     activity_row, ActivityDirection, ActivityIdentity, ActivityRow,
@@ -33,8 +34,12 @@ use crate::app::view::shared::landing::{
     amount_cell, landing_balance_section, landing_button, landing_control_id,
     landing_subtle_button_style, AmountCell, AmountTier,
 };
+use crate::app::view::spark::settings::lightning_address::{
+    lightning_address_body, LN_ADDRESS_DOMAIN,
+};
 use crate::app::view::vault::fiat::FiatAmount;
 use crate::app::view::wallet_header::{wallet_header, HeaderVariant, SyncState, WalletHeaderProps};
+use crate::app::view::ConnectCubeMessage;
 use crate::app::view::{FiatAmountConverter, SparkOverviewMessage};
 
 /// High-level status of the Spark backend for the current cube.
@@ -114,6 +119,57 @@ pub struct SparkOverviewView<'a> {
     pub btc_usd_price: Option<f64>,
     pub display_mode: DisplayMode,
     pub mask_amounts: bool,
+}
+
+/// Ready-address row for the Overview footprint. Editing, claiming and
+/// confirmation use the existing Connect-owned component unchanged.
+pub fn spark_landing_address<'a>(
+    state: &'a ConnectCubePanel,
+) -> Element<'a, crate::app::view::Message> {
+    let address = state
+        .lightning_address
+        .as_ref()
+        .and_then(|value| value.lightning_address.as_deref());
+    if state.ln_editing
+        || state.ln_change_confirm_pending.is_some()
+        || state.ln_reconcile_needs_reregister.is_some()
+        || address.is_none()
+    {
+        return lightning_address_body(state).map(crate::app::view::Message::ConnectCube);
+    }
+
+    let raw_address = address.expect("checked above");
+    let address = if raw_address.contains('@') {
+        raw_address.to_owned()
+    } else {
+        format!("{raw_address}{LN_ADDRESS_DOMAIN}")
+    };
+    let short_address = crate::utils::truncate_middle(&address, 15, 12);
+    let row: Element<'a, ConnectCubeMessage> = Container::new(
+        Row::new()
+            .spacing(12)
+            .align_y(Alignment::Center)
+            .push(
+                Column::new()
+                    .spacing(4)
+                    .width(Length::Fill)
+                    .push(h4_bold("Lightning Address"))
+                    .push(text(short_address).size(P2_SIZE)),
+            )
+            .push(
+                button::secondary(None, "Copy")
+                    .on_press(ConnectCubeMessage::CopyToClipboard(address)),
+            )
+            .push(
+                button::secondary(None, "Change")
+                    .on_press(ConnectCubeMessage::BeginEditLightningAddress),
+            ),
+    )
+    .padding(16)
+    .width(Length::Fill)
+    .style(crate::app::view::shared::landing::landing_card_style)
+    .into();
+    row.map(crate::app::view::Message::ConnectCube)
 }
 
 /// Context below Spark's recent activity. The address form is supplied by the
@@ -606,8 +662,8 @@ mod tests {
     use super::*;
     use crate::app::view::shared::landing::capture;
     use crate::app::{
-        state::connect::ConnectCubePanel,
-        view::{self, spark::settings::lightning_address::lightning_address_ux},
+        state::connect::ConnectCubePanel, view,
+        view::spark::settings::lightning_address::lightning_address_confirmation,
     };
     use crate::services::coincube::LightningAddress;
 
@@ -623,15 +679,36 @@ mod tests {
         connect.lightning_address = Some(LightningAddress {
             lightning_address: Some("sats@coincube.io".into()),
         });
+        let snapshot = SparkBalanceSnapshot {
+            balance_sats: 25_053,
+            stable_balance: None,
+        };
         for (appearance, theme) in [
             ("dark", theme::Theme::dark()),
             ("light", theme::Theme::light()),
         ] {
             for size in [(1024, 768), (1440, 900)] {
-                let address = lightning_address_ux(&connect).map(view::Message::ConnectCube);
+                let address = spark_landing_address(&connect);
                 let mounted = capture::inspect(
                     "spark-context-ready",
-                    spark_landing_context(address, Some(true), false, true, "synthetic-cube"),
+                    Column::new()
+                        .push(
+                            synthetic_overview(
+                                SparkStatus::Connected(snapshot.clone()),
+                                &[],
+                                Some(true),
+                                None,
+                                None,
+                            )
+                            .map(view::Message::SparkOverview),
+                        )
+                        .push(spark_landing_context(
+                            address,
+                            Some(true),
+                            false,
+                            true,
+                            "synthetic-cube",
+                        )),
                     size,
                     appearance,
                     theme,
@@ -647,24 +724,196 @@ mod tests {
                 connect.ln_editing = true;
                 connect.ln_username_input = "newname".into();
                 connect.ln_change_confirm_pending = Some("newname".into());
-                let modal = capture::inspect(
-                    "spark-context-address-confirm",
-                    spark_landing_context(
-                        lightning_address_ux(&connect).map(view::Message::ConnectCube),
-                        Some(true),
-                        true,
-                        true,
-                        "synthetic-cube",
-                    ),
+                let editing = capture::inspect(
+                    "spark-context-address-editing",
+                    Column::new()
+                        .push(
+                            synthetic_overview(
+                                SparkStatus::Connected(snapshot.clone()),
+                                &[],
+                                Some(true),
+                                None,
+                                None,
+                            )
+                            .map(view::Message::SparkOverview),
+                        )
+                        .push(spark_landing_context(
+                            spark_landing_address(&connect),
+                            Some(true),
+                            true,
+                            true,
+                            "synthetic-cube",
+                        )),
                     size,
                     appearance,
                     theme,
                 );
-                assert!(modal.contains("Change your Lightning Address?"));
-                assert!(modal.contains("Yes, change it"));
-                assert!(modal.contains("Saving…"));
+                assert!(editing.contains("Change your Lightning Address"));
+                assert!(editing.contains("Saving…"));
+                let confirmation = capture::inspect(
+                    "spark-context-address-confirmation",
+                    lightning_address_confirmation(&connect)
+                        .expect("pending address confirmation")
+                        .map(view::Message::ConnectCube),
+                    size,
+                    appearance,
+                    theme,
+                );
+                assert!(confirmation.contains("Change your Lightning Address?"));
+                assert!(confirmation.contains("Yes, change it"));
                 connect.ln_editing = false;
                 connect.ln_change_confirm_pending = None;
+            }
+        }
+    }
+
+    #[test]
+    fn address_confirmation_overlays_the_whole_spark_page() {
+        use iced::advanced::{layout, overlay, renderer::Headless, widget::Tree, Layout};
+        use iced::{Rectangle, Size, Vector};
+
+        let mut connect = ConnectCubePanel::new(
+            None,
+            "synthetic-cube".into(),
+            "Test Cube".into(),
+            "bitcoin".into(),
+            false,
+        );
+        connect.lightning_address = Some(LightningAddress {
+            lightning_address: Some("sats@coincube.io".into()),
+        });
+        connect.ln_editing = true;
+        connect.ln_change_confirm_pending = Some("newname".into());
+        let snapshot = SparkBalanceSnapshot {
+            balance_sats: 25_053,
+            stable_balance: None,
+        };
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            for (width, height) in [(1024, 768), (1440, 900)] {
+                let body = Column::new()
+                    .push(
+                        synthetic_overview(
+                            SparkStatus::Connected(snapshot.clone()),
+                            &[],
+                            Some(true),
+                            None,
+                            None,
+                        )
+                        .map(view::Message::SparkOverview),
+                    )
+                    .push(spark_landing_context(
+                        spark_landing_address(&connect),
+                        Some(true),
+                        false,
+                        true,
+                        "synthetic-cube",
+                    ));
+                let page = iced::widget::scrollable(body)
+                    .width(Length::Fill)
+                    .height(Length::Fill);
+                let dialog = lightning_address_confirmation(&connect)
+                    .expect("pending change")
+                    .map(view::Message::ConnectCube);
+                let mut element: Element<'_, view::Message> =
+                    coincube_ui::widget::modal::Modal::new(page, dialog)
+                        .on_blur(Some(view::Message::ConnectCube(
+                            ConnectCubeMessage::DismissChangeConfirmation,
+                        )))
+                        .into();
+                let size = Size::new(width as f32, height as f32);
+                let viewport = Rectangle::with_size(size);
+                let mut renderer =
+                    iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+                        coincube_ui::font::REGULAR,
+                        iced::Pixels(14.0),
+                        Some("tiny-skia"),
+                    ))
+                    .expect("software renderer");
+                let mut tree = Tree::new(element.as_widget());
+                let node = element.as_widget_mut().layout(
+                    &mut tree,
+                    &renderer,
+                    &layout::Limits::new(Size::ZERO, size),
+                );
+                assert_eq!(node.size(), size, "modal base fills Spark page");
+
+                let mut modal = element
+                    .as_widget_mut()
+                    .overlay(
+                        &mut tree,
+                        Layout::new(&node),
+                        &renderer,
+                        &viewport,
+                        Vector::ZERO,
+                    )
+                    .map(overlay::Nested::new)
+                    .expect("address confirmation overlay");
+                let overlay_node = modal.layout(&renderer, size);
+                let dialog_bounds = overlay_node
+                    .children()
+                    .next()
+                    .expect("dialog layout")
+                    .bounds();
+                assert_eq!(overlay_node.size(), size, "whole-page scrim");
+                assert!(dialog_bounds.x > 100.0 && dialog_bounds.y > 50.0);
+                assert!(dialog_bounds.x + dialog_bounds.width < size.width);
+                assert!(dialog_bounds.y + dialog_bounds.height < size.height);
+                drop(modal);
+
+                if let Ok(directory) = std::env::var("R06A_CAPTURE_DIR") {
+                    std::fs::create_dir_all(&directory).expect("capture directory");
+                    iced::advanced::Renderer::reset(&mut renderer, viewport);
+                    let style = iced::advanced::renderer::Style {
+                        text_color: theme.colors.text.primary,
+                    };
+                    element.as_widget().draw(
+                        &tree,
+                        &mut renderer,
+                        &theme,
+                        &style,
+                        Layout::new(&node),
+                        iced::mouse::Cursor::Unavailable,
+                        &viewport,
+                    );
+                    if let Some(mut modal) = element
+                        .as_widget_mut()
+                        .overlay(
+                            &mut tree,
+                            Layout::new(&node),
+                            &renderer,
+                            &viewport,
+                            Vector::ZERO,
+                        )
+                        .map(overlay::Nested::new)
+                    {
+                        let overlay_node = modal.layout(&renderer, size);
+                        modal.draw(
+                            &mut renderer,
+                            &theme,
+                            &style,
+                            Layout::new(&overlay_node),
+                            iced::mouse::Cursor::Unavailable,
+                        );
+                    }
+                    let pixels = renderer.screenshot(
+                        Size::new(width, height),
+                        1.0,
+                        theme.colors.general.background,
+                    );
+                    image::save_buffer(
+                        std::path::Path::new(&directory).join(format!(
+                            "spark-address-modal-{appearance}-{width}x{height}-synthetic.png"
+                        )),
+                        &pixels,
+                        width,
+                        height,
+                        image::ColorType::Rgba8,
+                    )
+                    .expect("save modal capture");
+                }
             }
         }
     }
