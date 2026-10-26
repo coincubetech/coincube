@@ -62,6 +62,69 @@ fn recovery_timing_known(coin: &Coin, tip: u32) -> bool {
             .is_some_and(|height| height >= 0 && (height as u32) <= tip)
 }
 
+fn coin_label(coin: &Coin, labels: &HashMap<String, String>) -> String {
+    let outpoint = coin.outpoint.to_string();
+    let txid = coin.outpoint.txid.to_string();
+    if let Some(label) = labels.get(&outpoint).filter(|label| !label.is_empty()) {
+        label.clone()
+    } else if let Some(label) = labels.get(&txid).filter(|label| !label.is_empty()) {
+        format!("From {label}")
+    } else {
+        "—".to_string()
+    }
+}
+
+fn short_address(address: &str) -> String {
+    if address.chars().count() <= 22 {
+        address.to_string()
+    } else {
+        let start: String = address.chars().take(12).collect();
+        let end: String = address
+            .chars()
+            .rev()
+            .take(6)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+        format!("{start}…{end}")
+    }
+}
+
+fn coin_table_header<'a>() -> Container<'a, Message> {
+    Container::new(
+        Row::new()
+            .spacing(12)
+            .align_y(Alignment::Center)
+            .push(
+                Container::new(p2_regular("Amount").bold().style(theme::text::secondary))
+                    .width(Length::FillPortion(2)),
+            )
+            .push(
+                Container::new(
+                    p2_regular("Confirmations")
+                        .bold()
+                        .style(theme::text::secondary),
+                )
+                .width(Length::FillPortion(2)),
+            )
+            .push(
+                Container::new(p2_regular("Label").bold().style(theme::text::secondary))
+                    .width(Length::FillPortion(2)),
+            )
+            .push(
+                Container::new(p2_regular("Address").bold().style(theme::text::secondary))
+                    .width(Length::FillPortion(2)),
+            )
+            .push(
+                Container::new(p2_regular("Details").bold().style(theme::text::secondary))
+                    .width(Length::Fixed(85.0)),
+            ),
+    )
+    .padding(14)
+    .width(Length::Fill)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn coins_view<'a>(
     cache: &Cache,
@@ -75,8 +138,12 @@ pub fn coins_view<'a>(
 ) -> Element<'a, Message> {
     Column::new()
         .push(Container::new(h3("Coin control").bold()).width(Length::Fill))
-        .push(p1_regular("Inspect coins, labels, confirmations and recovery timing before choosing inputs for a spend.")
-            .style(theme::text::secondary))
+        .push(
+            p1_regular(
+                "Inspect coin balances, labels, confirmations, replay status and recovery timing.",
+            )
+            .style(theme::text::secondary),
+        )
         .push(coins.is_empty().then(|| {
             placeholder(
                 coins_icon().size(80),
@@ -84,30 +151,36 @@ pub fn coins_view<'a>(
                 "Coins will appear here after this Vault receives bitcoin.",
             )
         }))
-        .push(
-            Column::new()
-                .spacing(10)
-                .push(coins.iter().enumerate().fold(
-                    Column::new().spacing(10),
-                    |col, (i, coin)| {
-                        col.push(coin_list_view(
-                            coin,
-                            timelock,
-                            cache.blockheight().max(0) as u32,
-                            i,
-                            selected.contains(&i),
-                            labels,
-                            labels_editing,
-                            bitcoin_unit,
-                            cache.balance_amounts_masked(),
-                            blake2b.then(|| cache.entanglement_of(&coin.outpoint.txid)),
-                            cache.split_deposit.is_some_and(|(outpoint, expires)| {
-                                outpoint == coin.outpoint && std::time::Instant::now() < expires
-                            }),
-                        ))
-                    },
-                )),
-        )
+        .push((!coins.is_empty()).then(|| {
+            Container::new(
+                Column::new()
+                    .push(coin_table_header())
+                    .push(coins.iter().enumerate().fold(
+                        Column::new().spacing(0),
+                        |col, (i, coin)| {
+                            col.push(iced::widget::rule::horizontal(1))
+                                .push(coin_list_view(
+                                    coin,
+                                    timelock,
+                                    cache.blockheight().max(0) as u32,
+                                    i,
+                                    selected.contains(&i),
+                                    labels,
+                                    labels_editing,
+                                    bitcoin_unit,
+                                    cache.balance_amounts_masked(),
+                                    blake2b.then(|| cache.entanglement_of(&coin.outpoint.txid)),
+                                    cache.split_deposit.is_some_and(|(outpoint, expires)| {
+                                        outpoint == coin.outpoint
+                                            && std::time::Instant::now() < expires
+                                    }),
+                                ))
+                        },
+                    )),
+            )
+            .style(theme::card::simple)
+            .width(Length::Fill)
+        }))
         .align_x(Alignment::Center)
         .spacing(35)
         .into()
@@ -136,107 +209,100 @@ fn coin_list_view<'a>(
     } else {
         amount_with_unit(&coin.amount, bitcoin_unit).into()
     };
+    let status = if coin.spend_info.is_some() {
+        Some(badge::spent())
+    } else if coin.block_height.is_none() {
+        Some(badge::unconfirmed())
+    } else if let Some(timelock) = timelock {
+        Some(if recovery_timing_known(coin, blockheight) {
+            coin_sequence_label(
+                remaining_sequence(coin, blockheight, timelock),
+                timelock as u32,
+            )
+        } else {
+            badge::badge_pill(
+                "Recovery timing unavailable",
+                "The chain tip is not available yet. Recovery timing will appear after sync.",
+            )
+        })
+    } else if !coin.is_immature {
+        Some(badge::badge_pill(
+            "Spendable",
+            "This confirmed coin can use the primary spending path with its required signatures.",
+        ))
+    } else {
+        None
+    };
+    let replay = if verified_deposit {
+        Some(badge::badge_pill(
+            "  Replay-protected split deposit  ",
+            "The open split wizard verified this exact coin's chain-specific ancestry. It will be combined with the shared coins in a self-transfer. The app rechecks it before signing.",
+        ))
+    } else {
+        entangled.and_then(entangled_badge)
+    };
     Container::new(
         Column::new()
             .push(
                 Button::new(
-                    Row::new()
+                    Column::new()
+                        .spacing(10)
                         .push(
                             Row::new()
-                                .push(badge::bitcoin_logo())
-                                .push(if !collapsed {
-                                    if let Some(label) = labels.get(&outpoint) {
-                                        if !label.is_empty() {
-                                            Container::new(p1_regular(label)).width(Length::Fill)
-                                        } else if let Some(label) = labels.get(&txid) {
-                                            Container::new(
-                                                Row::new()
-                                                    .spacing(5)
-                                                    .push(
-                                                        // It is not possible to know if a coin is a
-                                                        // change coin or not so for now, From is
-                                                        // enough
-                                                        p1_regular("From")
-                                                            .style(theme::text::secondary),
-                                                    )
-                                                    .push(p1_regular(label)),
-                                            )
-                                            .width(Length::Fill)
-                                        } else {
-                                            Container::new(Space::new().width(Length::Fill))
-                                                .width(Length::Fill)
-                                        }
-                                    } else if let Some(label) = labels.get(&txid) {
-                                        Container::new(
-                                            Row::new()
-                                                .spacing(5)
-                                                .push(
-                                                    // It is not possible to know if a coin is a
-                                                    // change coin or not so for now, From is
-                                                    // enough
-                                                    p1_regular("From")
-                                                        .style(theme::text::secondary),
-                                                )
-                                                .push(p1_regular(label)),
-                                        )
-                                        .width(Length::Fill)
-                                    } else {
-                                        Container::new(Space::new().width(Length::Fill))
-                                            .width(Length::Fill)
-                                    }
-                                } else {
-                                    Container::new(Space::new().width(Length::Fill))
-                                        .width(Length::Fill)
-                                })
-                                .push_maybe(if coin.spend_info.is_some() {
-                                    Some(badge::spent())
-                                } else if coin.block_height.is_none() {
-                                    Some(badge::unconfirmed())
-                                } else if let Some(timelock) = timelock {
-                                    Some(if recovery_timing_known(coin, blockheight) {
-                                        coin_sequence_label(
-                                            remaining_sequence(coin, blockheight, timelock),
-                                            timelock as u32,
-                                        )
-                                    } else {
-                                        badge::badge_pill(
-                                            "Recovery timing unavailable",
-                                            "The chain tip is not available yet. Recovery timing will appear after sync.",
-                                        )
-                                    })
-                                } else if !coin.is_immature {
-                                    Some(badge::badge_pill(
-                                        "Spendable",
-                                        "This confirmed coin can use the primary spending path with its required signatures.",
-                                    ))
-                                } else {
-                                    None
-                                })
-                                .push_maybe(if verified_deposit {
-                                    Some(badge::badge_pill("  Replay-protected split deposit  ",
-                                        "The open split wizard verified this exact coin's chain-specific ancestry. It will be combined with the shared coins in a self-transfer. The app rechecks it before signing."))
-                                } else {
-                                    entangled.and_then(entangled_badge)
-                                })
-                                .spacing(10)
+                                .spacing(12)
                                 .align_y(Alignment::Center)
-                                .width(Length::Fill),
+                                .push(Container::new(amount).width(Length::FillPortion(2)))
+                                .push(
+                                    Container::new(
+                                        p2_regular(confirmation_status(
+                                            coin.block_height,
+                                            blockheight,
+                                        ))
+                                        .style(theme::text::secondary),
+                                    )
+                                    .width(Length::FillPortion(2)),
+                                )
+                                .push(
+                                    Container::new(p1_regular(coin_label(coin, labels)))
+                                        .width(Length::FillPortion(2)),
+                                )
+                                .push(
+                                    Container::new(
+                                        p2_regular(short_address(&address))
+                                            .style(theme::text::secondary),
+                                    )
+                                    .width(Length::FillPortion(2)),
+                                )
+                                .push(
+                                    Container::new(
+                                        p2_regular(if collapsed {
+                                            "Hide details"
+                                        } else {
+                                            "Details ▾"
+                                        })
+                                        .style(theme::text::secondary),
+                                    )
+                                    .width(Length::Fixed(85.0)),
+                                ),
                         )
                         .push(
-                            Column::new()
-                                .align_x(Alignment::End)
-                                .spacing(3)
-                                .push(amount)
-                                .push(p2_regular(confirmation_status(coin.block_height, blockheight))
-                                    .style(theme::text::secondary)),
-                        )
-                        .push(p2_regular(if collapsed { "Hide details" } else { "Details ▾" })
-                            .style(theme::text::secondary))
-                        .align_y(Alignment::Center)
-                        .spacing(20),
+                            Row::new()
+                                .spacing(8)
+                                .align_y(Alignment::Center)
+                                .push(p2_regular("Status:").style(theme::text::secondary))
+                                .push_maybe(status)
+                                .push(p2_regular("Chains:").style(theme::text::secondary))
+                                .push_maybe(replay)
+                                .push(if entangled.is_none() && !verified_deposit {
+                                    p2_regular("Bitcoin").style(theme::text::secondary)
+                                } else {
+                                    p2_regular("")
+                                }),
+                        ),
                 )
                 .style(theme::button::transparent_border)
-                .padding(10)
+                .padding(14)
+                .width(Length::Fill)
                 .on_press(Message::Select(index)),
             )
             .push(if collapsed {
@@ -259,8 +325,10 @@ fn coin_list_view<'a>(
                         .push(if coin.spend_info.is_none() {
                             if let (Some(_), Some(timelock)) = (coin.block_height, timelock) {
                                 if !recovery_timing_known(coin, blockheight) {
-                                    Some(Container::new(p1_regular("Recovery timing unavailable")
-                                        .style(theme::text::secondary)))
+                                    Some(Container::new(
+                                        p1_regular("Recovery timing unavailable")
+                                            .style(theme::text::secondary),
+                                    ))
                                 } else if remaining_sequence(coin, blockheight, timelock) == 0 {
                                     Some(Container::new(
                                         p1_bold("One or more recovery paths are available")
@@ -410,8 +478,8 @@ fn coin_list_view<'a>(
                                         (Some(icon::arrow_repeat()), "Refresh coin");
                                     let refresh_btn = if recovery_timing_known(coin, blockheight)
                                         && timelock.is_some_and(|timelock| {
-                                        remaining_sequence(coin, blockheight, timelock) == 0
-                                    }) {
+                                            remaining_sequence(coin, blockheight, timelock) == 0
+                                        }) {
                                         button::primary(icon, label)
                                     } else {
                                         button::secondary(icon, label)
@@ -429,7 +497,7 @@ fn coin_list_view<'a>(
                 None
             }),
     )
-    .style(theme::card::simple)
+    .width(Length::Fill)
 }
 
 pub fn coin_sequence_label<'a, T: 'a>(seq: u32, timelock: u32) -> Container<'a, T> {
@@ -593,6 +661,10 @@ mod tests {
                 theme::Theme::dark(),
             );
             assert!(mounted.contains("Coin control"));
+            assert!(mounted.contains("Confirmations"));
+            assert!(mounted.contains("Address"));
+            assert!(mounted.contains("Status:"));
+            assert!(mounted.contains("Chains:"));
             assert!(mounted.contains("Details ▾"));
             assert!(mounted.contains("Spendable"));
             assert!(mounted.contains("Confirmed · confirmations unavailable"));
@@ -604,6 +676,147 @@ mod tests {
                 mounted.contains("••••••"),
                 privacy == BalancePrivacy::Hidden
             );
+        }
+    }
+
+    #[test]
+    fn coin_row_uses_outpoint_label_then_deposit_label_and_short_address() {
+        let coin = confirmed_coin(100);
+        let mut labels = HashMap::new();
+        assert_eq!(coin_label(&coin, &labels), "—");
+        labels.insert(coin.outpoint.txid.to_string(), "Payroll".into());
+        assert_eq!(coin_label(&coin, &labels), "From Payroll");
+        labels.insert(coin.outpoint.to_string(), "Reserve".into());
+        assert_eq!(coin_label(&coin, &labels), "Reserve");
+        assert_eq!(
+            short_address("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"),
+            "bc1qw508d6qe…v8f3t4"
+        );
+    }
+
+    #[test]
+    fn coin_table_mounts_at_minimum_and_wide_desktop_widths_in_both_themes() {
+        let coins = [confirmed_coin(100)];
+        let labels = HashMap::new();
+        let cache = Cache::default();
+        for (size, appearance, theme) in [
+            ((1024, 768), "dark", theme::Theme::dark()),
+            ((1024, 768), "light", theme::Theme::light()),
+            ((1440, 900), "dark", theme::Theme::dark()),
+            ((1440, 900), "light", theme::Theme::light()),
+        ] {
+            let mounted = capture::inspect(
+                "vault-coin-table",
+                coins_view(
+                    &cache,
+                    &coins,
+                    None,
+                    &[],
+                    &labels,
+                    &HashMap::new(),
+                    BitcoinDisplayUnit::Sats,
+                    false,
+                ),
+                size,
+                appearance,
+                theme,
+            );
+            assert!(mounted.contains("Details ▾"));
+            assert!(mounted.contains("bc1qw508d6qe…v8f3t4"));
+        }
+    }
+
+    #[test]
+    fn coin_table_captures_empty_and_long_label_states() {
+        let coins = [confirmed_coin(100)];
+        let cache = Cache::default();
+        let labels = HashMap::new();
+        let empty = capture::inspect(
+            "vault-coin-empty",
+            coins_view(
+                &cache,
+                &[],
+                None,
+                &[],
+                &labels,
+                &HashMap::new(),
+                BitcoinDisplayUnit::Sats,
+                false,
+            ),
+            (1024, 768),
+            "light",
+            theme::Theme::light(),
+        );
+        assert!(empty.contains("No coins yet"));
+        assert!(!empty.contains("Confirmations"));
+
+        let mut labels = HashMap::new();
+        labels.insert(
+            coins[0].outpoint.to_string(),
+            "Long reserve label for a time-locked deposit held for a shared treasury".into(),
+        );
+        let long_label = capture::inspect(
+            "vault-coin-long-label",
+            coins_view(
+                &cache,
+                &coins,
+                None,
+                &[],
+                &labels,
+                &HashMap::new(),
+                BitcoinDisplayUnit::Sats,
+                false,
+            ),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(long_label.contains("Long reserve label"));
+        assert!(long_label.contains("Details ▾"));
+    }
+
+    #[test]
+    fn coin_table_captures_unknown_sync_and_each_replay_status() {
+        let coins = [confirmed_coin(100)];
+        let labels = HashMap::new();
+        for (answer, expected, scenario) in [
+            (
+                Entanglement::Unknown,
+                "Replay status not checked",
+                "vault-coin-replay-unknown",
+            ),
+            (
+                Entanglement::Entangled,
+                "Seen on both chains",
+                "vault-coin-replay-both",
+            ),
+            (
+                Entanglement::NotEntangled,
+                "Replay protection unverified",
+                "vault-coin-replay-unverified",
+            ),
+        ] {
+            let mut cache = Cache::default();
+            cache.record_entanglement(coins[0].outpoint.txid, answer, std::time::Instant::now());
+            let mounted = capture::inspect(
+                scenario,
+                coins_view(
+                    &cache,
+                    &coins,
+                    Some(1008),
+                    &[0],
+                    &labels,
+                    &HashMap::new(),
+                    BitcoinDisplayUnit::Sats,
+                    true,
+                ),
+                (1024, 768),
+                "light",
+                theme::Theme::light(),
+            );
+            assert!(mounted.contains(expected));
+            assert!(mounted.contains("Recovery timing unavailable"));
+            assert!(mounted.contains("Hide details"));
         }
     }
 
