@@ -161,6 +161,7 @@ pub fn psbt_view<'a>(
     bitcoin_unit: BitcoinDisplayUnit,
     replay: Option<ReplayPill<'a>>,
     broadcast_ready: bool,
+    recipient_identities: &'a [(usize, crate::services::branta::LookupResult)],
 ) -> Element<'a, Message> {
     dashboard(
         &Menu::Vault(VaultSubMenu::PSBTs(None)),
@@ -171,7 +172,7 @@ pub fn psbt_view<'a>(
                 Row::new()
                     .align_y(Alignment::Center)
                     .spacing(10)
-                    .push(Container::new(h3("PSBT").bold()).width(Length::Fill))
+                    .push(Container::new(h3("PSBT proposal").bold()).width(Length::Fill))
                     .push(if !tx.sigs.recovery_paths().is_empty() {
                         Some(badge::recovery())
                     } else {
@@ -204,7 +205,7 @@ pub fn psbt_view<'a>(
                         labels_editing,
                         bitcoin_unit,
                     ))
-                    .push(outputs_view(
+                    .push(outputs_view_with_identities(
                         &tx.psbt.unsigned_tx,
                         network,
                         &tx.change_indexes,
@@ -213,6 +214,8 @@ pub fn psbt_view<'a>(
                         bitcoin_unit,
                         tx.is_single_payment().is_some(),
                         false,
+                        recipient_identities,
+                        cache.theme_mode,
                     )),
             )
             .push(if saved {
@@ -2008,6 +2011,8 @@ fn border_wallet_recon_phrase_view(
         .spacing(12)
         .push(header)
         .push(p1_regular(prompt))
+        .push(p1_regular("Reconstruction needs the recovery phrase, your exact 11-cell pattern in order, and the checksum word you recorded when enrolling this key.")
+            .style(theme::text::secondary))
         .push(word_rows);
 
     if recon.phrase_prefilled {
@@ -2138,6 +2143,8 @@ fn border_wallet_recon_grid_view(recon: &BorderWalletReconstructionState) -> Ele
         .push(p1_regular(
             "Select 11 cells from the grid in order \u{2014} the same pattern you used during enrollment.",
         ))
+        .push(p1_regular("The pattern must rebuild the enrolled key before any signature is added.")
+            .style(theme::text::secondary))
         .push(
             Row::new()
                 .spacing(10)

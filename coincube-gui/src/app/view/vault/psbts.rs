@@ -41,13 +41,13 @@ pub fn psbts_view(
             Row::new()
                 .align_y(Alignment::Center)
                 .spacing(10)
-                .push(Container::new(h3("PSBTs").bold()).width(Length::Fill))
+                .push(Container::new(h3("PSBT proposals").bold()).width(Length::Fill))
                 .push(
-                    button::secondary(Some(icon::restore_icon()), "Import")
+                    button::secondary(Some(icon::restore_icon()), "Import PSBT")
                         .on_press(Message::ImportPsbt),
                 )
                 .push(
-                    button::secondary(Some(icon::plus_icon()), "New")
+                    button::secondary(Some(icon::plus_icon()), "Create PSBT")
                         .on_press(Message::Menu(Menu::Vault(VaultSubMenu::Send))),
                 ),
         )
@@ -55,7 +55,7 @@ pub fn psbts_view(
             placeholder(
                 receipt_icon().size(80),
                 "No PSBTs yet",
-                "Your pending spend transactions will appear here once you create or import PSBTs.",
+                "Create a proposal or import a PSBT from another signer. Imported signatures are checked before they can be broadcast.",
             )
         }))
         .push(

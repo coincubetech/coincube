@@ -1163,6 +1163,7 @@ impl PsbtState {
             cache.bitcoin_unit,
             self.replay_presentation(cache),
             self.broadcast_ready(cache),
+            self.recipient_identities(),
         );
         if let Some(modal) = &self.modal {
             modal.as_ref().view(content)
