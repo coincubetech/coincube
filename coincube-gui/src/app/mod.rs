@@ -10156,6 +10156,7 @@ impl App {
             Message::View(view::Message::SparkSettings(
                 view::SparkSettingsMessage::StableBalanceSaved(Ok(enabled)),
             )) => {
+                self.panels.spark_overview.finish_stable_balance_save();
                 let record = self.record_spark_stable_balance(enabled);
                 let panel = self.panels.spark_settings.update(
                     self.daemon.clone(),
@@ -10164,7 +10165,40 @@ impl App {
                         view::SparkSettingsMessage::StableBalanceSaved(Ok(enabled)),
                     )),
                 );
-                return Task::batch([record, panel]);
+                return Task::batch([record, panel, self.panels.spark_overview.reload(None, None)]);
+            }
+            // Overview shares the same Settings save owner. Route both the
+            // request and failed settlement there even when Overview is active.
+            Message::View(view::Message::SparkSettings(
+                view::SparkSettingsMessage::StableBalanceToggled(enabled),
+            )) => {
+                if !self.panels.spark_overview.try_start_stable_balance_save() {
+                    return Task::none();
+                }
+                return self.panels.spark_settings.update(
+                    self.daemon.clone(),
+                    &self.cache,
+                    Message::View(view::Message::SparkSettings(
+                        view::SparkSettingsMessage::StableBalanceToggled(enabled),
+                    )),
+                );
+            }
+            Message::View(view::Message::SparkSettings(
+                view::SparkSettingsMessage::StableBalanceSaved(Err(err)),
+            )) => {
+                self.panels.spark_overview.finish_stable_balance_save();
+                let panel = self.panels.spark_settings.update(
+                    self.daemon.clone(),
+                    &self.cache,
+                    Message::View(view::Message::SparkSettings(
+                        view::SparkSettingsMessage::StableBalanceSaved(Err(err.clone())),
+                    )),
+                );
+                return Task::batch([
+                    panel,
+                    self.panels.spark_overview.reload(None, None),
+                    Task::done(Message::View(view::Message::ShowError(err))),
+                ]);
             }
             Message::View(view::Message::FlipDisplayMode) => {
                 if !self.cache.fiat_toggle_allowed() {
@@ -11313,6 +11347,35 @@ impl App {
                 &self.panels.current,
                 &self.cache,
                 view::feature_unavailable_panel(reason),
+            )
+        } else if matches!(
+            self.panels.current,
+            Menu::Spark(menu::SparkSubMenu::Overview)
+        ) {
+            // The Spark landing reuses the Connect-owned address form and its
+            // confirmation. No second address or auth state lives in Overview.
+            let address = if self.panels.connect.account.is_authenticated() {
+                view::spark::overview::spark_landing_address(&self.panels.connect.cube)
+            } else {
+                view::connect::sign_in_prompt::sign_in_prompt("claim a Lightning Address")
+            };
+            let confirmation = self
+                .panels
+                .connect
+                .account
+                .is_authenticated()
+                .then(|| {
+                    view::spark::settings::lightning_address::lightning_address_confirmation(
+                        &self.panels.connect.cube,
+                    )
+                })
+                .flatten()
+                .map(|dialog| dialog.map(view::Message::ConnectCube));
+            self.panels.spark_overview.view_with_address_overlay(
+                &self.panels.current,
+                &self.cache,
+                address,
+                confirmation,
             )
         } else if let Some(content) = self.connect_settings_content() {
             // Connect-dependent settings sub-pages (Spark → Settings →
