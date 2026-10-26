@@ -396,6 +396,9 @@ pub struct RecoveryKit {
     /// True while a `LoadStatus` round-trip is in flight. Card can
     /// show a skeleton while this is set.
     pub status_loading: bool,
+    /// A failed refresh leaves the last response visible for context, but it
+    /// must not be presented as current or used to start a mutation.
+    pub status_stale: bool,
     /// Wizard state; `None` when the card is visible.
     pub flow: RecoveryKitState,
     /// PIN widget — separate from `backup_pin` so the two flows can
@@ -423,6 +426,7 @@ impl RecoveryKit {
         Self {
             status: None,
             status_loading: false,
+            status_stale: false,
             flow: RecoveryKitState::None,
             pin: PinInput::new(),
             nudge_on_next_status_load: false,
@@ -494,6 +498,25 @@ pub fn update_with_imported(
         };
         return Task::none();
     }
+    // UI buttons are disabled while status is unknown or stale, but messages
+    // can already be queued when a refresh fails (especially ConfirmRemove).
+    // Enforce the same gate at the reducer before collecting a PIN or issuing
+    // any destructive request.
+    if matches!(
+        &msg,
+        RecoveryKitMessage::Start(_)
+            | RecoveryKitMessage::Remove
+            | RecoveryKitMessage::ConfirmRemove
+    ) && (rk.status_loading || rk.status_stale || rk.status.is_none())
+    {
+        rk.reset_flow();
+        let guidance = if rk.status_loading {
+            "Wait for the Recovery Kit status check to finish before making changes."
+        } else {
+            "Recovery Kit status is unavailable. Refresh it before making changes."
+        };
+        return Task::done(Message::View(view::Message::ShowError(guidance.to_owned())));
+    }
     match msg {
         RecoveryKitMessage::LoadStatus => load_status(rk, client, server_cube_id),
 
@@ -502,6 +525,7 @@ pub fn update_with_imported(
             match res {
                 Ok(Some(s)) => {
                     rk.status = Some(s);
+                    rk.status_stale = false;
                 }
                 Ok(None) => {
                     // 404 — no kit on the server; render card in
@@ -515,6 +539,7 @@ pub fn update_with_imported(
                         updated_at: None,
                         owner_self: None,
                     });
+                    rk.status_stale = false;
                 }
                 Err(e) => {
                     tracing::warn!("get_recovery_kit_status failed: {}", e);
@@ -524,6 +549,14 @@ pub fn update_with_imported(
                     // flag — we don't want to defer the toast
                     // indefinitely because of a transient error.
                     rk.nudge_on_next_status_load = false;
+                    rk.status_stale = true;
+                    // A confirmation prepared from the old delete set can no
+                    // longer be trusted. Dismiss it even if its Confirm event
+                    // was already queued; the reducer gate above also catches
+                    // that late event.
+                    if matches!(rk.flow, RecoveryKitState::ConfirmRemove) {
+                        rk.reset_flow();
+                    }
                     return Task::done(Message::View(view::Message::ShowError(kit_toast(
                         "Couldn't load your Recovery Kit",
                         "Check your internet connection and try again.",
@@ -969,6 +1002,12 @@ pub fn update_with_imported(
         }
 
         RecoveryKitMessage::ConfirmRemove => {
+            // Only the review screen may authorize deletion. A delayed or
+            // duplicated confirm event must not start a new removal after
+            // Cancel or a failed status refresh closed that screen.
+            if !matches!(rk.flow, RecoveryKitState::ConfirmRemove) {
+                return Task::none();
+            }
             let Some(client) = client else {
                 return Task::done(Message::View(view::Message::ShowError(
                     "Sign in to Connect to remove your Recovery Kit.".to_string(),
@@ -2459,6 +2498,119 @@ fn clear_recovery_kit_state(cache: &Cache, local_cube_id: &str) -> Task<Message>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_status_refresh_marks_cached_kit_stale() {
+        let mut kit = RecoveryKit::new();
+        kit.status = Some(status_complete());
+        kit.status_loading = true;
+        let _ = update(
+            &mut kit,
+            RecoveryKitMessage::StatusLoaded(Err("offline".into())),
+            &Cache::default(),
+            "fixture-cube",
+            SeedSource::Mnemonic,
+            None,
+            None,
+            None,
+        );
+        assert!(!kit.status_loading);
+        assert!(kit.status_stale);
+        assert!(kit.status.is_some());
+    }
+
+    #[test]
+    fn failed_refresh_dismisses_old_removal_and_rejects_late_mutations() {
+        let mut kit = RecoveryKit::new();
+        kit.status = Some(status_complete());
+        kit.flow = RecoveryKitState::ConfirmRemove;
+        kit.status_loading = true;
+        let cache = Cache::default();
+        let _ = update(
+            &mut kit,
+            RecoveryKitMessage::StatusLoaded(Err("offline".into())),
+            &cache,
+            "fixture-cube",
+            SeedSource::Mnemonic,
+            None,
+            None,
+            None,
+        );
+        assert!(kit.status_stale);
+        assert!(matches!(kit.flow, RecoveryKitState::None));
+
+        let _ = update(
+            &mut kit,
+            RecoveryKitMessage::ConfirmRemove,
+            &cache,
+            "fixture-cube",
+            SeedSource::Mnemonic,
+            Some(CoincubeClient::new()),
+            Some(42),
+            None,
+        );
+        assert!(matches!(kit.flow, RecoveryKitState::None));
+
+        let _ = update(
+            &mut kit,
+            RecoveryKitMessage::Start(RecoveryKitMode::Create),
+            &cache,
+            "fixture-cube",
+            SeedSource::Mnemonic,
+            Some(CoincubeClient::new()),
+            Some(42),
+            None,
+        );
+        assert!(matches!(kit.flow, RecoveryKitState::None));
+    }
+
+    #[test]
+    fn loading_status_rejects_removal_before_confirmation() {
+        let mut kit = RecoveryKit::new();
+        kit.status = Some(status_complete());
+        kit.status_loading = true;
+        let _ = update(
+            &mut kit,
+            RecoveryKitMessage::Remove,
+            &Cache::default(),
+            "fixture-cube",
+            SeedSource::Mnemonic,
+            Some(CoincubeClient::new()),
+            Some(42),
+            None,
+        );
+        assert!(matches!(kit.flow, RecoveryKitState::None));
+        kit.status_loading = false;
+        kit.status = None;
+        let _ = update(
+            &mut kit,
+            RecoveryKitMessage::Start(RecoveryKitMode::Create),
+            &Cache::default(),
+            "fixture-cube",
+            SeedSource::Mnemonic,
+            Some(CoincubeClient::new()),
+            Some(42),
+            None,
+        );
+        assert!(matches!(kit.flow, RecoveryKitState::None));
+    }
+
+    #[test]
+    fn direct_confirm_without_review_screen_cannot_remove_a_fresh_kit() {
+        let mut kit = RecoveryKit::new();
+        kit.status = Some(status_complete());
+        let _ = update(
+            &mut kit,
+            RecoveryKitMessage::ConfirmRemove,
+            &Cache::default(),
+            "fixture-cube",
+            SeedSource::Mnemonic,
+            Some(CoincubeClient::new()),
+            Some(42),
+            None,
+        );
+        assert!(matches!(kit.flow, RecoveryKitState::None));
+    }
 
     fn imported_test_descriptor() -> ImportedWalletDescriptor {
         use coincube_core::miniscript::bitcoin::{

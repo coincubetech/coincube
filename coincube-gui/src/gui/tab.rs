@@ -5177,6 +5177,7 @@ pub fn create_app_with_remote_backend(
             // Remote backend implies an authenticated Connect session from the
             // start, even before the Connect panel reaches its Dashboard step.
             has_connect_session: true,
+            restorable_connect_session: false,
             has_vault: true,
             has_imported_bitcoin: false,
             cube_name: cube_settings.name.clone(),
