@@ -70,7 +70,9 @@ a{color:#f3821d}a:hover{color:#ffa54d}
 .phd h1{font-size:22px;font-weight:600;line-height:1.25}
 .idl{color:var(--muted);font-size:13px;margin-top:4px;display:flex;align-items:center;gap:6px}
 .idl>img{width:16px;height:16px;display:block}
-.count{margin-left:auto;font-size:13px;color:var(--muted)}
+.phd{justify-content:space-between}
+.phr{display:flex;align-items:center;gap:10px;white-space:nowrap}
+.count{font-size:13px;color:var(--muted)}
 .pre{font-size:13px;color:var(--muted);padding:6px 24px 0}
 .filters{flex:none;display:flex;align-items:flex-end;gap:12px;padding:16px 24px;border-bottom:1px solid var(--line)}
 .f{display:flex;flex-direction:column;gap:4px}
@@ -79,8 +81,8 @@ a{color:#f3821d}a:hover{color:#ffa54d}
 .ctl:hover{border-color:var(--muted)}
 select.ctl{padding-right:6px;cursor:pointer}
 .f.w{width:180px}.f.d{width:140px}.f.s{width:140px}.f.r{width:168px}.f.q{flex:1;min-width:150px;max-width:280px}
+.f.pst{margin-left:auto;flex:none}.f.pst .flab{font-size:12px;font-weight:500;color:var(--muted)}.pbs{display:flex;align-items:center;gap:6px;height:36px}
 .f .ctl{width:100%}
-.fend{margin-left:auto;display:flex;align-items:center;gap:10px;height:36px;white-space:nowrap}
 .fcount{font-size:13px;font-weight:500}
 .lbtn{border:0;background:none;padding:4px 6px;color:var(--acc-ink);font-weight:600;cursor:pointer;border-radius:6px;font-size:13px}
 .lbtn:hover{background:var(--hover)}
@@ -173,8 +175,6 @@ select.ctl{padding-right:6px;cursor:pointer}
 
 /* prototype links */
 .tenshu a.chip{color:var(--ink);text-decoration:none}.tenshu a.chip:hover{background:var(--hover,var(--selected))}.tenshu a.ni,.tenshu a.row{color:var(--ink);text-decoration:none}.tenshu a.pill,.tenshu a.rlink,.tenshu a.attn{text-decoration:none}.tenshu span.mini{display:inline-flex;align-items:center}
-.proto{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin-top:12px}
-.proto .pl{font-size:12px;color:var(--muted);margin-right:4px}
 .pb{height:26px;padding:0 10px;border:1px dashed var(--line);border-radius:6px;background:transparent;color:var(--muted);font-size:12px;cursor:pointer}
 .pb[aria-pressed="true"]{color:var(--ink);border-style:solid}
 .av{display:inline-grid;place-items:center;width:32px;height:32px;border-radius:50%;background:var(--panel);color:var(--ink);flex:none}
@@ -201,9 +201,8 @@ select.ctl{padding-right:6px;cursor:pointer}
 .side .lockq p,.side .lockask>span{margin:0;flex:1 1 100%}
 .side .lockgrp{display:contents}
 a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color:var(--acc-ink)}
-/* declutter (Robert, 2026-10-23): one amount cell, lighter detail panel, prototype strip under the title */
+/* declutter (Robert, 2026-10-23): one amount cell, lighter detail panel; prototype states sit at the end of the filter row */
 .amt .fx{display:block;font-size:12px;font-weight:400;color:var(--muted);margin-top:1px}
-.proto.strip{padding:0 24px 10px;margin-top:-6px}
 .cpy{height:28px;width:28px;padding:0;justify-content:center;border-radius:6px}
 .ids li{padding:8px 0}
 .dl>div{padding:8px 0}
@@ -265,11 +264,13 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
           <h1>Activity</h1>
           <p class="idl"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Everyday · Bitcoin mainnet</p>
         </div>
-        <p class="count" role="status">{{ countText }}</p>
-      </div>
-      <div class="proto strip" role="group" aria-label="Prototype states">
-        <span class="pl">Prototype · Spark history</span>
-        <sc-for list="{{ shOpts }}" as="o" hint-placeholder-count="3"><button type="button" class="pb" aria-pressed="{{ o.on }}" onClick="{{ o.pick }}">{{ o.label }}</button></sc-for>
+        <div class="phr">
+          <sc-if value="{{ hasFilters }}" hint-placeholder-val="{{ false }}">
+            <span class="fcount">{{ activeText }}</span>
+            <button type="button" class="lbtn" onClick="{{ clear }}">Clear filters</button>
+          </sc-if>
+          <p class="count" role="status">{{ countText }}</p>
+        </div>
       </div>
       <sc-if value="{{ preNote.show }}" hint-placeholder-val="{{ false }}"><p class="pre">{{ preNote.text }}</p></sc-if>
 
@@ -292,13 +293,11 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
         </div>
         <div class="f q">
           <label for="flt-q">Search label or id</label>
-          <input id="flt-q" class="ctl" type="search" autocomplete="off" placeholder="Label, txid, payment hash, swap ID" value="{{ f.q }}" onInput="{{ on.q }}">
+          <input id="flt-q" class="ctl" type="search" autocomplete="off" placeholder="Label, txid, hash or swap ID" value="{{ f.q }}" onInput="{{ on.q }}">
         </div>
-        <div class="fend">
-          <sc-if value="{{ hasFilters }}" hint-placeholder-val="{{ false }}">
-            <span class="fcount">{{ activeText }}</span>
-            <button type="button" class="lbtn" onClick="{{ clear }}">Clear filters</button>
-          </sc-if>
+        <div class="f pst" role="group" aria-label="Prototype states for Spark history">
+          <span class="flab">Prototype · Spark history</span>
+          <div class="pbs"><sc-for list="{{ shOpts }}" as="o" hint-placeholder-count="3"><button type="button" class="pb" aria-pressed="{{ o.on }}" onClick="{{ o.pick }}">{{ o.label }}</button></sc-for></div>
         </div>
       </form>
       <sc-if value="{{ dateErr }}" hint-placeholder-val="{{ false }}"><p class="ferr" id="flt-dates-err" style="padding:6px 24px 0">Use October 2026 days, like “Oct 15 – Oct 22”.</p></sc-if>
