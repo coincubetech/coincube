@@ -1,9 +1,11 @@
+use coincube_ui::widget::action::Action;
 use coincube_ui::{
     component::{button, card, form, text::*},
     icon, theme,
     widget::*,
 };
 use iced::{
+    advanced::widget::Id,
     widget::{column, container, row, Space},
     Alignment, Length,
 };
@@ -67,132 +69,143 @@ impl P2POrder {
     }
 }
 
-pub fn order_card<'a>(order: &'a P2POrder) -> Button<'a, view::Message> {
-    let badge_style = match order.order_type {
-        OrderType::Buy => theme::pill::success as fn(&_) -> _,
-        OrderType::Sell => theme::pill::warning as fn(&_) -> _,
-    };
+/// Columns shared by the heading and every order button at wide widths.
+fn book_columns<'a>(
+    side: impl Into<Element<'a, view::Message>>,
+    amount: impl Into<Element<'a, view::Message>>,
+    payment: impl Into<Element<'a, view::Message>>,
+    price: impl Into<Element<'a, view::Message>>,
+    reputation: impl Into<Element<'a, view::Message>>,
+    trailing: impl Into<Element<'a, view::Message>>,
+) -> Row<'a, view::Message> {
+    row![
+        container(side).width(Length::FillPortion(2)),
+        container(amount).width(Length::FillPortion(2)),
+        container(payment).width(Length::FillPortion(3)),
+        container(price).width(Length::FillPortion(2)),
+        container(reputation).width(Length::FillPortion(2)),
+        container(trailing).width(Length::Fixed(16.0)),
+    ]
+    .spacing(12)
+    .align_y(iced::alignment::Vertical::Center)
+    .width(Length::Fill)
+}
 
-    // Colored premium text
-    let premium_style = match order.premium_percent {
-        Some(p) if p > 0.0 => theme::text::success as fn(&_) -> _,
-        Some(p) if p < 0.0 => theme::text::warning as fn(&_) -> _,
-        _ => theme::text::secondary as fn(&_) -> _,
-    };
+pub fn order_table_header<'a>() -> Element<'a, view::Message> {
+    container(book_columns(
+        caption("Side"),
+        caption("Amount"),
+        caption("Payment Method"),
+        caption("Market Price"),
+        caption("Creator Reputation"),
+        caption(""),
+    ))
+    .padding([8, 12])
+    .width(Length::Fill)
+    .into()
+}
 
-    let pill_label = if order.is_mine {
-        match order.order_type {
-            OrderType::Buy => "YOU ARE BUYING",
-            OrderType::Sell => "YOU ARE SELLING",
-        }
+fn book_amount(order: &P2POrder) -> String {
+    let amount = match (order.min_amount, order.max_amount) {
+        (Some(min), Some(max)) => format!(
+            "{} – {}",
+            format_f64_as_string(min, ",", 0, false),
+            format_f64_as_string(max, ",", 0, false)
+        ),
+        _ => format_f64_as_string(order.fiat_amount, ",", 2, false),
+    };
+    format!("{} {}", amount, order.fiat_currency)
+}
+
+fn book_price(order: &P2POrder) -> String {
+    if let Some(sats) = order.sats_amount.filter(|sats| *sats > 0) {
+        format!("Fixed · {} sats", format_with_separators(sats))
     } else {
-        order.order_type_label()
+        match order.premium_percent {
+            Some(premium) if premium > 0.0 => format!("Market +{}%", premium),
+            Some(premium) if premium < 0.0 => format!("Market {}%", premium),
+            _ => "Market".to_string(),
+        }
+    }
+}
+
+fn book_reputation(order: &P2POrder) -> String {
+    match (order.seller_rating, order.seller_days_old) {
+        (Some(rating), Some(days)) => format!("★ {:.1} · {} days", rating, days),
+        (Some(rating), None) => format!("★ {:.1}", rating),
+        (None, Some(days)) => format!("No rating · {} days", days),
+        (None, None) => "No rating".to_string(),
+    }
+}
+
+fn book_side_label(order_type: &OrderType) -> &'static str {
+    match order_type {
+        OrderType::Sell => "BUYING",
+        OrderType::Buy => "SELLING",
+    }
+}
+
+/// A single keyboard-actionable order entry. The label describes the taker's
+/// action, while `order_type` remains the maker's side for selection/trading.
+pub fn order_card<'a>(order: &'a P2POrder, compact: bool) -> Element<'a, view::Message> {
+    let side = book_side_label(&order.order_type);
+    let side_style = match order.order_type {
+        OrderType::Sell => theme::text::success as fn(&_) -> _,
+        OrderType::Buy => theme::text::warning as fn(&_) -> _,
+    };
+    let payment = if order.payment_methods.is_empty() {
+        "Unavailable".to_string()
+    } else {
+        order.payment_methods.join(", ")
+    };
+    let amount = book_amount(order);
+    let price = book_price(order);
+    let reputation = book_reputation(order);
+    let content: Element<'a, view::Message> = if compact {
+        column![
+            row![
+                p2_bold(side).style(side_style),
+                Space::new().width(Length::Fill),
+                p2_bold(amount),
+                p2_regular("›").style(theme::text::secondary),
+            ]
+            .spacing(8)
+            .align_y(iced::alignment::Vertical::Center),
+            p2_regular(payment),
+            row![
+                p2_regular(price).style(theme::text::secondary),
+                Space::new().width(Length::Fill),
+                p2_regular(reputation).style(theme::text::secondary),
+            ]
+            .spacing(8),
+        ]
+        .spacing(6)
+        .into()
+    } else {
+        book_columns(
+            p2_bold(side).style(side_style),
+            p2_bold(amount),
+            p2_regular(payment),
+            p2_regular(price),
+            p2_regular(reputation),
+            p2_regular("›").style(theme::text::secondary),
+        )
+        .into()
     };
 
-    let content = card::simple(
-        column![
-            // Header: Order type badge and timestamp
-            row!(
-                container(p2_regular(pill_label))
-                    .padding([4, 12])
-                    .style(badge_style),
-                Space::new().width(Length::Fill),
-                p2_regular(&order.time_ago).style(theme::text::secondary)
-            )
-            .spacing(10)
-            .align_y(iced::alignment::Vertical::Center),
-            // Amount and currency — prominent h1
-            if order.is_range_order() {
-                row!(
-                    h1(format!(
-                        "{} - {}",
-                        format_f64_as_string(order.min_amount.unwrap_or(0.0), ",", 0, false),
-                        format_f64_as_string(order.max_amount.unwrap_or(0.0), ",", 0, false)
-                    ))
-                    .style(theme::text::primary),
-                    h3(format!(" {}", order.fiat_currency)).style(theme::text::secondary)
-                )
-                .spacing(8)
-                .align_y(iced::alignment::Vertical::Center)
-            } else {
-                row!(
-                    h1(format_f64_as_string(order.fiat_amount, ",", 2, false))
-                        .style(theme::text::primary),
-                    h3(format!(" {}", order.fiat_currency)).style(theme::text::secondary)
-                )
-                .spacing(8)
-                .align_y(iced::alignment::Vertical::Center)
-            },
-            // Sats amount or market price
-            if order.is_fixed_price() {
-                row![
-                    p2_regular("for").style(theme::text::secondary),
-                    p2_bold(format!(
-                        "{} sats",
-                        format_with_separators(order.sats_amount.unwrap_or(0))
-                    ))
-                ]
-                .spacing(8)
-            } else {
-                row![
-                    p2_regular("Market Price").style(theme::text::secondary),
-                    p2_bold(order.premium_text()).style(premium_style)
-                ]
-                .spacing(8)
-            },
-            // Payment methods with icon
-            container(
-                row![
-                    icon::cash_icon().style(theme::text::secondary),
-                    p2_regular(order.payment_methods.join(", "))
-                ]
-                .spacing(8)
-                .align_y(iced::alignment::Vertical::Center)
-            )
-            .padding(12)
-            .width(Length::Fill)
-            .style(theme::container::background),
-            // Rating with icons
-            if let (Some(rating), Some(reviews), Some(days)) = (
-                order.seller_rating,
-                order.seller_reviews,
-                order.seller_days_old
-            ) {
-                row![
-                    row![
-                        icon::star_fill_icon().style(theme::text::secondary),
-                        p2_bold(format!("{:.1}", rating)),
-                    ]
-                    .spacing(4)
-                    .align_y(iced::alignment::Vertical::Center),
-                    row![
-                        icon::person_icon().style(theme::text::secondary),
-                        p2_regular(format!("{}", reviews)).style(theme::text::secondary),
-                    ]
-                    .spacing(4)
-                    .align_y(iced::alignment::Vertical::Center),
-                    row![
-                        icon::calendar_icon().style(theme::text::secondary),
-                        p2_regular(format!("{}", days)).style(theme::text::secondary),
-                    ]
-                    .spacing(4)
-                    .align_y(iced::alignment::Vertical::Center),
-                ]
-                .spacing(16)
-            } else {
-                row![p2_regular("No rating").style(theme::text::secondary)].spacing(8)
-            },
-        ]
-        .spacing(12),
+    Action::new(
+        Id::from(format!("p2p-book-order-{}", order.id)),
+        container(content).padding([10, 12]).width(Length::Fill),
+        view::Message::FocusAction,
     )
-    .width(Length::Fill);
-
-    Button::new(content)
-        .style(theme::button::container)
-        .on_press(view::Message::P2P(P2PMessage::SelectOrder(
-            order.id.clone(),
-        )))
-        .width(Length::Fill)
+    .style(theme::button::transparent)
+    .padding(0)
+    .focus_radius(0.0)
+    .on_press(view::Message::P2P(P2PMessage::SelectOrder(
+        order.id.clone(),
+    )))
+    .width(Length::Fill)
+    .into()
 }
 
 /// Detail view for a selected order.
@@ -543,4 +556,46 @@ pub fn order_detail<'a>(
     }
 
     container(detail_col).width(Length::Fill)
+}
+
+#[cfg(test)]
+mod book_tests {
+    use super::*;
+
+    fn order(order_type: OrderType) -> P2POrder {
+        P2POrder {
+            id: "order-1".into(),
+            order_type,
+            fiat_amount: 100.0,
+            fiat_currency: "EUR".into(),
+            min_amount: Some(50.0),
+            max_amount: Some(200.0),
+            sats_amount: None,
+            premium_percent: Some(2.0),
+            payment_methods: vec!["SEPA instant".into()],
+            seller_rating: None,
+            seller_reviews: None,
+            seller_days_old: Some(3),
+            created_at: String::new(),
+            created_at_ts: 0,
+            time_ago: String::new(),
+            is_mine: false,
+        }
+    }
+
+    #[test]
+    fn book_labels_taker_side_and_only_displays_known_values() {
+        let sell = order(OrderType::Sell);
+        assert_eq!(book_side_label(&sell.order_type), "BUYING");
+        assert_eq!(book_amount(&sell), "50 – 200 EUR");
+        assert_eq!(book_price(&sell), "Market +2%");
+        assert_eq!(book_reputation(&sell), "No rating · 3 days");
+
+        let mut buy = order(OrderType::Buy);
+        buy.sats_amount = Some(450_000);
+        buy.seller_rating = Some(4.8);
+        assert_eq!(book_side_label(&buy.order_type), "SELLING");
+        assert_eq!(book_price(&buy), "Fixed · 450,000 sats");
+        assert_eq!(book_reputation(&buy), "★ 4.8 · 3 days");
+    }
 }

@@ -71,8 +71,12 @@ pub struct OrderFilterState<'a> {
     pub filtered_count: usize,
 }
 
-/// Left sidebar with buy/sell tabs, currency, payment methods, and reputation filters.
-pub fn order_filter_sidebar<'a>(state: OrderFilterState<'a>) -> Container<'a, view::Message> {
+/// Compact book filters. At narrow widths the presenter stacks this full-width
+/// above the order list instead of squeezing a fixed sidebar beside the rows.
+pub fn order_filter_sidebar<'a>(
+    state: OrderFilterState<'a>,
+    compact: bool,
+) -> Container<'a, view::Message> {
     let buy_label = format!("BUY BTC ({})", state.buy_count);
     let sell_label = format!("SELL BTC ({})", state.sell_count);
 
@@ -108,10 +112,8 @@ pub fn order_filter_sidebar<'a>(state: OrderFilterState<'a>) -> Container<'a, vi
     )))
     .width(Length::Fill);
 
-    let tabs_bar = container(row![buy_tab, sell_tab].spacing(4).width(Length::Fill))
-        .padding(4)
-        .width(Length::Fill)
-        .style(theme::container::foreground_rounded);
+    let tabs_bar =
+        container(row![buy_tab, sell_tab].spacing(4).width(Length::Fill)).width(Length::Fill);
 
     // --- Currency filter ---
     let currency_combo = combo_box(
@@ -125,9 +127,7 @@ pub fn order_filter_sidebar<'a>(state: OrderFilterState<'a>) -> Container<'a, vi
 
     let currency_section = column![
         p2_bold("CURRENCY").style(theme::text::secondary),
-        container(currency_combo)
-            .style(theme::container::foreground_rounded)
-            .width(Length::Fill),
+        container(currency_combo).width(Length::Fill),
     ]
     .spacing(8);
 
@@ -199,7 +199,7 @@ pub fn order_filter_sidebar<'a>(state: OrderFilterState<'a>) -> Container<'a, vi
         (false, false) => "Showing all traders regardless of reputation.".to_string(),
     };
 
-    let reputation_card = container(
+    let reputation_filters = container(
         column![
             row![
                 icon::shield_icon().style(theme::text::warning),
@@ -237,8 +237,6 @@ pub fn order_filter_sidebar<'a>(state: OrderFilterState<'a>) -> Container<'a, vi
         ]
         .spacing(12),
     )
-    .padding(15)
-    .style(theme::container::balance_header)
     .width(Length::Fill);
 
     // --- Results count ---
@@ -253,15 +251,17 @@ pub fn order_filter_sidebar<'a>(state: OrderFilterState<'a>) -> Container<'a, vi
             tabs_bar,
             currency_section,
             payment_methods_section,
-            reputation_card,
+            reputation_filters,
             results_pill,
         ]
-        .spacing(16)
+        .spacing(14)
         .width(Length::Fill),
     )
-    .padding(20)
-    .style(theme::container::balance_header)
-    .width(Length::Fixed(420.0))
+    .width(if compact {
+        Length::Fill
+    } else {
+        Length::Fixed(232.0)
+    })
 }
 
 pub fn trade_status_filter<'a>(
