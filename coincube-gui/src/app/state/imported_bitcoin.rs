@@ -3200,8 +3200,12 @@ mod tests {
             "dark",
             theme::Theme::dark(),
         );
-        assert!(hardware.has_focus(Id::new("tenshu.hardware.purpose.bip84")));
-        assert!(hardware.has_focus(Id::new("tenshu.hardware.account")));
+        assert!(hardware.has_focus(
+            panel
+                .source
+                .hardware_action_id("tenshu.hardware.purpose.bip84")
+        ));
+        assert!(hardware.has_focus(panel.source.hardware_action_id("tenshu.hardware.account")));
     }
 
     #[test]
@@ -3210,7 +3214,6 @@ mod tests {
             add_fake_device, assert_focus_task, loaded_for_test, unique_temp_root,
         };
         use crate::split_hardware::HardwareMessage;
-        use iced::advanced::widget::Id;
 
         let root = unique_temp_root("import-keyboard-read-return");
         for succeeds in [true, false] {
@@ -3229,7 +3232,9 @@ mod tests {
             assert_focus_task(
                 reading,
                 panel.setup_view().map(Message::View),
-                Id::new("tenshu.hardware.purpose.bip84"),
+                panel
+                    .source
+                    .hardware_action_id("tenshu.hardware.purpose.bip84"),
             );
             let generation = panel.source.hardware_mut().generation_for_test();
             let loaded = panel.update_view(
@@ -3242,7 +3247,9 @@ mod tests {
             assert_focus_task(
                 loaded,
                 panel.setup_view().map(Message::View),
-                Id::from("tenshu.hardware.read:5:dev-1".to_string()),
+                panel
+                    .source
+                    .hardware_action_id("tenshu.hardware.read:5:dev-1"),
             );
             assert_eq!(panel.source.hardware_account().is_some(), succeeds);
             if succeeds {
@@ -3264,6 +3271,109 @@ mod tests {
                 assert!(panel.source.hardware_account().is_none());
             }
         }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn hardware_result_from_one_import_tab_cannot_focus_another() {
+        use crate::services::public_hardware_source::tests::{
+            add_fake_device, assert_focus_task, assert_focus_task_outcome, loaded_for_test,
+            unique_temp_root,
+        };
+        use crate::split_hardware::HardwareMessage;
+
+        let root = unique_temp_root("import-hardware-focus-ownership");
+        let mut first = ImportedBitcoinPanel::new(
+            NetworkDirectory::new(root.join("first")),
+            "same-cube".into(),
+            BitcoinImport::pending(),
+        );
+        let mut second = ImportedBitcoinPanel::new(
+            NetworkDirectory::new(root.join("second")),
+            "same-cube".into(),
+            BitcoinImport::pending(),
+        );
+        for panel in [&mut first, &mut second] {
+            panel.source.select_source(Source::Hardware);
+            add_fake_device(panel.source.hardware_mut(), &root);
+        }
+        let first_read = first
+            .source
+            .hardware_action_id("tenshu.hardware.read:5:dev-1");
+        let second_read = second
+            .source
+            .hardware_action_id("tenshu.hardware.read:5:dev-1");
+        assert_ne!(first_read, second_read);
+        let _ = first.update_view(
+            ImportMessage::Source(wallet_source_form::Message::Hardware(
+                HardwareMessage::Read("dev-1".into()),
+            )),
+            None,
+            0,
+        );
+        let generation = first.source.hardware_mut().generation_for_test();
+        let completion = || {
+            ImportMessage::Source(wallet_source_form::Message::Hardware(loaded_for_test(
+                generation, true,
+            )))
+        };
+        assert_focus_task_outcome(
+            first.update_view(completion(), None, 0),
+            second.setup_view().map(Message::View),
+            None,
+            None,
+        );
+        // Re-enter Reading to get another matching completion for the focused case.
+        let _ = first.update_view(
+            ImportMessage::Source(wallet_source_form::Message::Hardware(
+                HardwareMessage::Read("dev-1".into()),
+            )),
+            None,
+            0,
+        );
+        let generation = first.source.hardware_mut().generation_for_test();
+        let loaded = first.update_view(
+            ImportMessage::Source(wallet_source_form::Message::Hardware(loaded_for_test(
+                generation, true,
+            ))),
+            None,
+            0,
+        );
+        assert_focus_task_outcome(
+            loaded,
+            second.setup_view().map(Message::View),
+            Some(second_read.clone()),
+            Some(second_read),
+        );
+        let _ = first.update_view(
+            ImportMessage::Source(wallet_source_form::Message::Hardware(
+                HardwareMessage::Read("dev-1".into()),
+            )),
+            None,
+            0,
+        );
+        let generation = first.source.hardware_mut().generation_for_test();
+        let loaded = first.update_view(
+            ImportMessage::Source(wallet_source_form::Message::Hardware(loaded_for_test(
+                generation, true,
+            ))),
+            None,
+            0,
+        );
+        assert_focus_task(loaded, first.setup_view().map(Message::View), first_read);
+        let recreated = ImportedBitcoinPanel::new(
+            NetworkDirectory::new(root.join("recreated")),
+            "same-cube".into(),
+            BitcoinImport::pending(),
+        );
+        assert_ne!(
+            recreated
+                .source
+                .hardware_action_id("tenshu.hardware.read:5:dev-1"),
+            first
+                .source
+                .hardware_action_id("tenshu.hardware.read:5:dev-1")
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
