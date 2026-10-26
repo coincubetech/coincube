@@ -3123,7 +3123,10 @@ impl Tab {
                         // can log out and sign back in.
                         Task::done(Message::OpenConnectSignIn)
                     }
-                    app::Message::View(app::view::Message::OpenPlanBilling) => {
+                    app::Message::View(
+                        app::view::Message::OpenPlanBilling
+                        | app::view::Message::OpenPlanBillingFrom(_),
+                    ) => {
                         // Pure navigation: bubble to the pane so it focuses the
                         // Home tab on Connect → Plan & Billing (the "View plans"
                         // CTA on a paid-feature locked card outside Connect).

@@ -651,13 +651,41 @@ impl GUI {
             return Task::none();
         };
         if self.overlay_origin_is_current(&sheet.origin) {
-            if let Some(focus) = sheet.origin.focus {
+            if let Some(focus) = self.connect_return_focus(&sheet.origin) {
                 return iced_runtime::task::widget(
                     iced::advanced::widget::operation::focusable::focus(focus),
                 );
             }
         }
         Task::none()
+    }
+
+    fn connect_return_focus(&self, origin: &OverlayOrigin) -> Option<iced::advanced::widget::Id> {
+        let saved = origin.focus.as_ref()?;
+        let tab = self
+            .panes
+            .get(origin.pane)?
+            .tabs
+            .iter()
+            .find(|tab| tab.id == origin.tab_id)?;
+        match &tab.state {
+            // The Launcher renders one of two Connect controls in each mode.
+            // Authentication may have replaced the control while the sheet was open.
+            tab::State::Home(home) => home.connect_sheet_return_id(saved),
+            tab::State::App(app)
+                if *saved == iced::advanced::widget::Id::new("tenshu.connect.sign-in")
+                    || *saved == iced::advanced::widget::Id::new("tenshu.connect.account") =>
+            {
+                Some(iced::advanced::widget::Id::new(
+                    if app.cache().sidebar_connect_signed_in {
+                        "tenshu.connect.account"
+                    } else {
+                        "tenshu.connect.sign-in"
+                    },
+                ))
+            }
+            _ => Some(saved.clone()),
+        }
     }
 
     fn open_connect_sheet(
@@ -750,11 +778,22 @@ impl GUI {
                 if let Some(sheet) = &mut self.connect_sheet {
                     sheet.page = ConnectSheetPage::Authentication;
                 }
-                self.connect_sheet_message(ConnectSheetMessage::Account(if create_account {
-                    crate::app::view::ConnectAccountMessage::CreateAccount
-                } else {
-                    crate::app::view::ConnectAccountMessage::Init
-                }))
+                let update =
+                    self.connect_sheet_message(ConnectSheetMessage::Account(if create_account {
+                        crate::app::view::ConnectAccountMessage::CreateAccount
+                    } else {
+                        crate::app::view::ConnectAccountMessage::Init
+                    }));
+                Task::batch([
+                    update,
+                    iced_runtime::task::widget(
+                        iced::advanced::widget::operation::focusable::focus(
+                            iced::advanced::widget::Id::new(
+                                crate::app::view::connect::EMAIL_INPUT_ID,
+                            ),
+                        ),
+                    ),
+                ])
             }
             ConnectSheetMessage::Account(message) => {
                 let origin = sheet.origin.clone();
@@ -765,9 +804,13 @@ impl GUI {
                         | crate::app::view::ConnectAccountMessage::RenewCurrentPlan
                 );
                 let inner = match origin.source {
-                    tab::PreferencesSource::Home => tab::Message::Launch(home::Message::View(
-                        home::ViewMessage::ConnectAccount(message),
-                    )),
+                    tab::PreferencesSource::Home => {
+                        tab::Message::Launch(home::Message::View(if plan_navigation {
+                            home::ViewMessage::ConnectSheetAccount(message)
+                        } else {
+                            home::ViewMessage::ConnectAccount(message)
+                        }))
+                    }
                     tab::PreferencesSource::App(_) => tab::Message::Run(AppMessage::View(
                         crate::app::view::Message::ConnectAccount(message),
                     )),
@@ -1807,14 +1850,23 @@ impl GUI {
             Message::Pane(pane_id, pane::Message::Tab(tab_id, inner))
                 if matches!(
                     inner.as_ref(),
-                    tab::Message::Run(AppMessage::View(crate::app::view::Message::OpenPlanBilling))
+                    tab::Message::Run(AppMessage::View(
+                        crate::app::view::Message::OpenPlanBilling
+                            | crate::app::view::Message::OpenPlanBillingFrom(_)
+                    ))
                 ) && self.connect_overlay_eligible(pane_id) =>
             {
+                let focus = match inner.as_ref() {
+                    tab::Message::Run(AppMessage::View(
+                        crate::app::view::Message::OpenPlanBillingFrom(id),
+                    )) => Some(iced::advanced::widget::Id::new(id)),
+                    _ => None,
+                };
                 self.open_connect_sheet_from(
                     pane_id,
                     tab_id,
                     ConnectSheetSection::PlanBilling,
-                    None,
+                    focus,
                 )
             }
             Message::Pane(pane_id, pane::Message::Tab(tab_id, inner))
@@ -1836,6 +1888,17 @@ impl GUI {
                 else {
                     unreachable!();
                 };
+                let Some(origin_focus) = self
+                    .panes
+                    .get(pane_id)
+                    .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == tab_id))
+                    .and_then(|tab| match &tab.state {
+                        tab::State::Home(home) => Some(home.connect_sheet_origin_id()),
+                        _ => None,
+                    })
+                else {
+                    return Task::none();
+                };
                 let section = match sub {
                     crate::app::menu::ConnectSubMenu::Overview => ConnectSheetSection::Account,
                     crate::app::menu::ConnectSubMenu::PlanBilling => {
@@ -1847,7 +1910,34 @@ impl GUI {
                     crate::app::menu::ConnectSubMenu::Contacts => ConnectSheetSection::Contacts,
                     crate::app::menu::ConnectSubMenu::Duress => unreachable!(),
                 };
-                self.open_connect_sheet_from(pane_id, tab_id, section, None)
+                let signed_out_launcher = section == ConnectSheetSection::Account
+                    && self.overlay_origin(None).is_some_and(|origin| {
+                        origin.pane == pane_id
+                            && origin.tab_id == tab_id
+                            && matches!(origin.source, tab::PreferencesSource::Home)
+                            && self
+                                .connect_panel(&origin)
+                                .is_some_and(|account| !account.is_authenticated())
+                    });
+                let open =
+                    self.open_connect_sheet_from(pane_id, tab_id, section, Some(origin_focus));
+                if signed_out_launcher {
+                    if let Some(sheet) = &mut self.connect_sheet {
+                        sheet.page = ConnectSheetPage::Authentication;
+                    }
+                    Task::batch([
+                        open,
+                        iced_runtime::task::widget(
+                            iced::advanced::widget::operation::focusable::focus(
+                                iced::advanced::widget::Id::new(
+                                    crate::app::view::connect::EMAIL_INPUT_ID,
+                                ),
+                            ),
+                        ),
+                    ])
+                } else {
+                    open
+                }
             }
             Message::Pane(pane_id, pane::Message::View(pane::ViewMessage::OpenConnectSignIn))
                 if self.connect_overlay_eligible(pane_id) =>
@@ -2930,7 +3020,7 @@ impl GUI {
             if self.overlay_origin_is_current(&sheet.origin) {
                 let foreground = preferences_view::view(&sheet.page, self.preferences_view_model())
                     .map(Message::PreferencesSheet);
-                return compose_overlay(background, foreground);
+                return compose_overlay(background, foreground, false);
             }
         }
         if let Some(sheet) = &self.connect_sheet {
@@ -2938,7 +3028,11 @@ impl GUI {
                 if let Some(account) = self.connect_panel(&sheet.origin) {
                     let foreground = crate::app::view::connect::connect_sheet(account, sheet.page)
                         .map(Message::ConnectSheet);
-                    return compose_overlay(background, foreground);
+                    return compose_overlay(
+                        background,
+                        foreground,
+                        matches!(sheet.origin.source, tab::PreferencesSource::App(_)),
+                    );
                 }
             }
         }
@@ -2994,14 +3088,9 @@ impl GUI {
     fn connect_overlay_eligible(&self, pane_id: pane_grid::Pane) -> bool {
         self.visible_pane().is_some_and(|(id, pane)| {
             id == pane_id
-                && pane
-                    .tabs
-                    .get(pane.focused_tab)
-                    .is_some_and(|tab| match &tab.state {
-                        tab::State::Home(_) => true,
-                        tab::State::App(app) => app.can_restore_connect_session(),
-                        _ => false,
-                    })
+                && pane.tabs.get(pane.focused_tab).is_some_and(|tab| {
+                    matches!(&tab.state, tab::State::Home(_) | tab::State::App(_))
+                })
         })
     }
 
@@ -3120,29 +3209,47 @@ impl<'a, M> iced::advanced::Widget<M, coincube_ui::theme::Theme, iced::Renderer>
 pub fn compose_overlay<'a, M: 'a>(
     background: Element<'a, M>,
     sheet: Element<'a, M>,
+    preserve_top_bar: bool,
 ) -> Element<'a, M> {
+    let overlay = iced::widget::container(
+        iced::widget::container(sheet)
+            .max_width(1040)
+            .width(iced::Length::Fill)
+            .height(iced::Length::Fill)
+            .center_x(iced::Length::Fill),
+    )
+    .width(iced::Length::Fill)
+    .height(iced::Length::Fill)
+    .center_x(iced::Length::Fill)
+    .padding(if preserve_top_bar { 16 } else { 24 })
+    .style(
+        |theme: &coincube_ui::theme::Theme| iced::widget::container::Style {
+            background: Some(iced::Background::Color(theme.colors.shell.shadow)),
+            ..Default::default()
+        },
+    );
+    if preserve_top_bar {
+        return iced::widget::stack![
+            Element::new(InertBackground {
+                content: background
+            }),
+            iced::widget::Column::new()
+                .push(iced::widget::Space::new().height(64))
+                .push(overlay),
+        ]
+        .into();
+    }
     iced::widget::stack![
         Element::new(InertBackground {
             content: background
         }),
-        iced::widget::container(
-            iced::widget::container(sheet)
-                .max_width(1040)
-                .height(iced::Length::Fill),
-        )
-        .width(iced::Length::Fill)
-        .height(iced::Length::Fill)
-        .center_x(iced::Length::Fill)
-        .padding(24)
-        .style(|theme: &coincube_ui::theme::Theme| {
-            iced::widget::container::Style {
-                background: Some(iced::Background::Color(theme.colors.shell.shadow)),
-                ..Default::default()
-            }
-        }),
+        overlay,
     ]
     .into()
 }
+
+#[cfg(test)]
+mod connect_sheet_followup_tests;
 
 #[cfg(test)]
 mod app_preferences_sheet_tests {
@@ -4430,15 +4537,17 @@ mod fork_auth_dispatch_tests {
                     .unwrap();
                 assert!(matches!(&tab.state, tab::State::Home(home) if home.is_checked_for_test()));
             }
-            // Ordinary pane dispatch still returns its task through the wrapper.
-            let task = gui.update(Message::Pane(
+            // The focused Launcher dispatch is intercepted by the Connect
+            // sheet, while the invalidated installers above still receive
+            // their own startup completions.
+            drop(gui.update(Message::Pane(
                 source,
                 pane::Message::View(pane::ViewMessage::OpenConnectSignIn),
-            ));
-            let mut stream = iced_runtime::task::into_stream(task).expect("pane task retained");
-            assert!(matches!(stream.next().await,
-                Some(iced_runtime::Action::Output(Message::Pane(id,
-                    pane::Message::Tab(1, inner)))) if id == source && matches!(inner.as_ref(), tab::Message::Launch(_))));
+            )));
+            let sheet = gui.connect_sheet.as_ref().expect("focused Launcher sheet");
+            assert_eq!(sheet.origin.pane, source);
+            assert_eq!(sheet.origin.tab_id, 1);
+            assert!(matches!(sheet.origin.source, tab::PreferencesSource::Home));
             std::fs::remove_dir_all(root_path).unwrap();
         }
     }
