@@ -4,8 +4,15 @@ use crate::app::{self, view};
 use iced::futures::StreamExt;
 
 fn launcher_gui(root: &CoincubeDirectory) -> GUI {
-    let (home, startup) = home::Home::new_for_chain(root.clone(), None);
+    let (mut home, startup) = home::Home::new_for_chain(root.clone(), None);
     drop(startup);
+    // A fresh install's mandatory advisory modal owns focus until dismissed.
+    // Connect is reachable only after that queue has been acknowledged.
+    for _ in crate::hw_advisory::ADVISORIES {
+        drop(home.update(home::Message::View(
+            home::ViewMessage::DismissAdvisoryNotice,
+        )));
+    }
     let pane = pane::Pane::new_with_tab(tab::State::Home(home));
     let (panes, focus) = pane_grid::State::new(pane);
     GUI {
@@ -54,6 +61,95 @@ fn home_section(gui: &GUI, pane_id: pane_grid::Pane) -> String {
         tab::State::Home(home) => format!("{:?}", home.active_section),
         _ => "not Home".into(),
     }
+}
+
+/// Mount the actual post-Close GUI tree and prove that the recorded control
+/// accepts whole-tree focus. A queued focus task alone cannot establish that.
+fn assert_focus_target_mounted(gui: &GUI, id: iced::advanced::widget::Id) {
+    use iced::advanced::widget::operation::Focusable;
+    use iced::advanced::widget::operation::{self, focusable, Operation, Outcome};
+    use iced::advanced::{layout, renderer::Headless, widget::Tree, Layout};
+    use iced::Rectangle;
+    for bytes in [
+        coincube_ui::font::REGULAR_BYTES,
+        coincube_ui::font::MEDIUM_BYTES,
+        coincube_ui::font::BOLD_BYTES,
+        coincube_ui::font::BOOTSTRAP_ICONS_BYTE,
+    ] {
+        iced::advanced::graphics::text::font_system()
+            .write()
+            .unwrap()
+            .load_font(std::borrow::Cow::Borrowed(bytes));
+    }
+    let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+        coincube_ui::font::REGULAR,
+        iced::Pixels(14.0),
+        Some("tiny-skia"),
+    ))
+    .expect("software renderer");
+    let mut element = gui.view();
+    let mut tree = Tree::new(element.as_widget());
+    let node = element.as_widget_mut().layout(
+        &mut tree,
+        &renderer,
+        &layout::Limits::new(iced::Size::ZERO, iced::Size::new(1024.0, 768.0)),
+    );
+    #[derive(Default)]
+    struct FocusIds(Vec<iced::advanced::widget::Id>);
+    impl Operation for FocusIds {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+        fn focusable(
+            &mut self,
+            id: Option<&iced::advanced::widget::Id>,
+            _: Rectangle,
+            _: &mut dyn Focusable,
+        ) {
+            if let Some(id) = id {
+                self.0.push(id.clone());
+            }
+        }
+    }
+    let mut ids = FocusIds::default();
+    element
+        .as_widget_mut()
+        .operate(&mut tree, Layout::new(&node), &renderer, &mut ids);
+    assert!(
+        ids.0.contains(&id),
+        "return ID {id:?} absent from mounted tree: {:?}",
+        ids.0
+    );
+    // `focus` has a unit result, so run it before `find_focused`.
+    let mut focus: Box<dyn Operation<()>> = Box::new(focusable::focus(id.clone()));
+    loop {
+        element.as_widget_mut().operate(
+            &mut tree,
+            Layout::new(&node),
+            &renderer,
+            &mut operation::black_box(focus.as_mut()),
+        );
+        match focus.finish() {
+            Outcome::Chain(next) => focus = next,
+            Outcome::None | Outcome::Some(()) => break,
+        }
+    }
+    let mut find: Box<dyn Operation<iced::advanced::widget::Id>> =
+        Box::new(focusable::find_focused());
+    let found = loop {
+        element.as_widget_mut().operate(
+            &mut tree,
+            Layout::new(&node),
+            &renderer,
+            &mut operation::black_box(find.as_mut()),
+        );
+        match find.finish() {
+            Outcome::None => break None,
+            Outcome::Some(value) => break Some(value),
+            Outcome::Chain(next) => find = next,
+        }
+    };
+    assert_eq!(found, Some(id));
 }
 
 fn with_runtime(
@@ -153,12 +249,46 @@ fn probe_p2_launcher_entry_records_focus_origin() {
         launcher_connect_entry(&mut gui, pane_id, tab_id);
         let focus = gui.connect_sheet.as_ref().unwrap().origin.focus.clone();
         println!("P2 origin.focus={focus:?}");
-        assert!(
-            focus.is_some(),
-            "no focus target recorded for Launcher origin"
+        assert_eq!(
+            focus,
+            Some(iced::advanced::widget::Id::new(
+                "tenshu.launcher.legacy:connect:entry"
+            )),
+            "wrong no-Cube Launcher return target"
         );
         let close = gui.update(Message::KeyPressed(Key::Escape));
         assert!(close.units() > 0, "Escape restored no focus");
+        assert_focus_target_mounted(&gui, focus.expect("recorded return target"));
+    });
+}
+
+#[test]
+fn no_cube_signed_out_launcher_close_focuses_mounted_sign_in() {
+    with_runtime("connect-no-cube-focus", |path, _| {
+        let root = CoincubeDirectory::new(path.to_path_buf());
+        let mut gui = launcher_gui(&root);
+        let pane_id = gui.focus.unwrap();
+        let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
+        if let tab::State::Home(home) = &mut gui.panes.get_mut(pane_id).unwrap().tabs[0].state {
+            home.connect_account.step = crate::app::state::connect::ConnectFlowStep::Login {
+                email: String::new(),
+                loading: false,
+            };
+        }
+        launcher_connect_entry(&mut gui, pane_id, tab_id);
+        let focus = gui.connect_sheet.as_ref().unwrap().origin.focus.clone();
+        assert_eq!(
+            focus,
+            Some(iced::advanced::widget::Id::new(
+                "tenshu.launcher.legacy:connect:sign-in"
+            ))
+        );
+        assert!(
+            gui.update(Message::ConnectSheet(ConnectSheetMessage::Close))
+                .units()
+                > 0
+        );
+        assert_focus_target_mounted(&gui, focus.unwrap());
     });
 }
 

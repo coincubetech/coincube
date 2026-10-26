@@ -1,4 +1,5 @@
 use iced::{
+    advanced::widget::Id,
     alignment::Horizontal,
     widget::{pick_list, scrollable, Space, Stack, Toggler},
     Alignment, Length, Subscription, Task,
@@ -8,7 +9,9 @@ use coincube_core::{bip39, miniscript::bitcoin::Network};
 use coincube_ui::{
     component::{button, card, network_banner, notification, spinner, text::*},
     icon, image, theme,
-    widget::{modal::Modal, CheckBox, Column, Container, Element, Row},
+    widget::{
+        action::Action as FocusableAction, modal::Modal, CheckBox, Column, Container, Element, Row,
+    },
 };
 use coincubed::config::ConfigError;
 use tokio::runtime::Handle;
@@ -5173,6 +5176,22 @@ impl Home {
         )
     }
 
+    /// Return the ID of the Connect control actually mounted by this Launcher
+    /// mode. The no-Cube creation form uses the legacy rail, not the catalog.
+    pub(crate) fn connect_sheet_origin_id(&self) -> Id {
+        if launcher_catalog::catalog_visible(self) {
+            return if self.connect_account.is_authenticated() {
+                launcher_catalog::connect_id()
+            } else {
+                launcher_catalog::sign_in_id()
+            };
+        }
+        if !self.connect_account.is_authenticated() {
+            return Id::new(LEGACY_CONNECT_SIGN_IN_ID);
+        }
+        Id::new(LEGACY_CONNECT_ENTRY_ID)
+    }
+
     pub fn view(&self) -> Element<Message> {
         // The visible Launcher List has its own compact chrome and owns its
         // body scrolling. Every other Home screen keeps the legacy frame.
@@ -5625,6 +5644,15 @@ fn global_settings_view(home: &Home) -> Element<Message> {
     content.into()
 }
 
+const LEGACY_CONNECT_SIGN_IN_ID: &str = "tenshu.launcher.legacy:connect:sign-in";
+const LEGACY_CONNECT_ENTRY_ID: &str = "tenshu.launcher.legacy:connect:entry";
+
+fn legacy_connect_focus(id: Id) -> Message {
+    Message::View(ViewMessage::Catalog(
+        launcher_catalog::CatalogMessage::Focus(id),
+    ))
+}
+
 fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
     use coincube_ui::{component::button as btn, icon as ic};
 
@@ -5663,7 +5691,8 @@ fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
         } else {
             ic::down_icon()
         };
-        let connect_button: Element<Message> = iced::widget::Button::new(
+        let connect_button: Element<Message> = FocusableAction::new(
+            LEGACY_CONNECT_ENTRY_ID,
             Container::new(
                 Row::new()
                     .spacing(10)
@@ -5678,6 +5707,7 @@ fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
             .align_x(Alignment::Start)
             .width(Length::Fill)
             .padding(15),
+            legacy_connect_focus,
         )
         .width(Length::Fill)
         .style(coincube_ui::theme::button::menu)
@@ -5795,11 +5825,18 @@ fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
     } else {
         bottom_col = bottom_col.push(
             Container::new(
-                btn::primary(None, "Sign In")
-                    .on_press(msg(ViewMessage::GoToSection(HomeSection::Connect(
-                        app::menu::ConnectSubMenu::Overview,
-                    ))))
-                    .width(Length::Fill),
+                FocusableAction::new(
+                    LEGACY_CONNECT_SIGN_IN_ID,
+                    Container::new(p1_bold("Sign In"))
+                        .center_x(Length::Fill)
+                        .padding(5),
+                    legacy_connect_focus,
+                )
+                .on_press(msg(ViewMessage::GoToSection(HomeSection::Connect(
+                    app::menu::ConnectSubMenu::Overview,
+                ))))
+                .style(theme::button::primary)
+                .width(Length::Fill),
             )
             .padding(10)
             .width(Length::Fill),

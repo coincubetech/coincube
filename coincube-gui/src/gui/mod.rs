@@ -1856,6 +1856,17 @@ impl GUI {
                 else {
                     unreachable!();
                 };
+                let Some(origin_focus) = self
+                    .panes
+                    .get(pane_id)
+                    .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == tab_id))
+                    .and_then(|tab| match &tab.state {
+                        tab::State::Home(home) => Some(home.connect_sheet_origin_id()),
+                        _ => None,
+                    })
+                else {
+                    return Task::none();
+                };
                 let section = match sub {
                     crate::app::menu::ConnectSubMenu::Overview => ConnectSheetSection::Account,
                     crate::app::menu::ConnectSubMenu::PlanBilling => {
@@ -1876,11 +1887,6 @@ impl GUI {
                                 .connect_panel(&origin)
                                 .is_some_and(|account| !account.is_authenticated())
                     });
-                let origin_focus = iced::advanced::widget::Id::new(if signed_out_launcher {
-                    "tenshu.launcher.catalog:control:sign-in"
-                } else {
-                    "tenshu.launcher.catalog:control:connect"
-                });
                 let open =
                     self.open_connect_sheet_from(pane_id, tab_id, section, Some(origin_focus));
                 if signed_out_launcher {
