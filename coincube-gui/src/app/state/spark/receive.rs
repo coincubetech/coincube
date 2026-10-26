@@ -234,6 +234,7 @@ impl State for SparkReceive {
                 claim_error: self.claim_error.as_deref(),
                 pending_deposit_confirmations: &self.pending_deposit_confirmations,
                 network: cache.network,
+                cube_name: &cache.cube_name,
                 received_amount_display: &self.received_amount_display,
                 received_celebration_context: &self.received_celebration_context,
                 received_quote: &self.received_quote,
@@ -383,6 +384,9 @@ impl State for SparkReceive {
                 // A Bitcoin rail: clear any cross-network flow, set the method,
                 // close the picker.
                 self.sender_picker_open = false;
+                if self.sideshift_flow.is_none() && self.method == method {
+                    return Task::none();
+                }
                 self.sideshift_flow = None;
                 self.method = method;
                 self.phase = SparkReceivePhase::Idle;
@@ -1199,6 +1203,34 @@ mod tests {
         assert!(matches!(panel.phase(), SparkReceivePhase::Idle));
         assert!(panel.qr_data.is_none());
         assert!(panel.displayed_invoice.is_none());
+    }
+
+    #[test]
+    fn selecting_current_bitcoin_kind_keeps_generated_request_and_qr() {
+        for (method, request) in [
+            (SparkReceiveMethod::Bolt11, "lnbc1invoice"),
+            (SparkReceiveMethod::Spark, "sp1qaddress"),
+            (SparkReceiveMethod::OnchainBitcoin, "bc1qaddress"),
+        ] {
+            let mut panel = SparkReceive::new(None);
+            panel.method = method;
+            update(
+                &mut panel,
+                SparkReceiveMessage::GenerateSucceeded(receive_ok(request)),
+            );
+            assert!(panel.qr_data.is_some());
+
+            update(&mut panel, SparkReceiveMessage::SelectSenderRail(method));
+
+            assert_eq!(panel.method, method);
+            assert!(
+                matches!(panel.phase(), SparkReceivePhase::Generated(ok) if ok.payment_request == request)
+            );
+            assert!(panel.qr_data.is_some());
+            if method == SparkReceiveMethod::Bolt11 {
+                assert_eq!(panel.displayed_invoice.as_deref(), Some(request));
+            }
+        }
     }
 
     #[test]

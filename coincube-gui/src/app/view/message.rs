@@ -1120,6 +1120,8 @@ pub enum SendPopupMessage {
 
 #[derive(Debug, Clone)]
 pub enum LiquidReceiveMessage {
+    FocusAction(iced::advanced::widget::Id),
+    BackToOverview,
     ToggleMethod(ReceiveMethod),
     Copy,
     ShowQrCode,
