@@ -532,6 +532,7 @@ where
 }
 
 /// Inline wallet choice matching P-Transfer's From and To rows.
+#[allow(clippy::too_many_arguments)]
 fn transfer_wallet_row<'a>(
     cube_id: &str,
     side: PickerSide,
