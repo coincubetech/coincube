@@ -125,8 +125,8 @@ impl EmbeddedDaemon {
         }
     }
 
-    /// Only the disposable-node integration driver can supply this fixture handle.
-    #[cfg(all(test, feature = "regtest-harness"))]
+    /// Tests can supply a disposable daemon handle without a production backend.
+    #[cfg(test)]
     pub(crate) fn from_regtest_handle(config: Config, handle: DaemonHandle) -> Self {
         Self {
             config,

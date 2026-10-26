@@ -122,6 +122,7 @@ pub enum VaultReceiveMessage {
 #[derive(Debug, Clone)]
 pub enum Message {
     Activity(crate::app::view::activity::ActivityMessage),
+    LocalMcp(crate::app::local_mcp::Message),
     ImportedBitcoin(crate::app::state::imported_bitcoin::ImportMessage),
     /// Close the read-only foreign-wallet sweep review and destroy its
     /// session-only evidence.

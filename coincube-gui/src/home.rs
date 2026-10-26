@@ -7190,6 +7190,17 @@ impl DeleteCubeModal {
 
                 self.warning = None;
 
+                // Pairing is identifying authorization material. Remove it
+                // before deleting the Cube, while its exact identity is known.
+                if let Err(error) =
+                    crate::app::local_mcp::remove_cube_pairings(&self.datadir_root, &self.cube)
+                {
+                    self.warning = Some(DeleteError::Settings(
+                        settings::SettingsError::WritingFile(error.to_string()),
+                    ));
+                    return Task::none();
+                }
+
                 // Imported wallets have no Vault id. Their database and
                 // journal belong to an exact Cube/import operation, so use
                 // the ownership-checked removal path rather than the generic

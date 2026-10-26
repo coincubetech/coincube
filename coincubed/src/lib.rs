@@ -5,8 +5,11 @@ pub mod connect;
 mod database;
 pub mod datadir;
 mod jsonrpc;
+#[cfg(feature = "test-utils")]
+pub mod mcp_test_fixture;
 pub mod poison_broadcast;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
+#[allow(dead_code)]
 mod testutils;
 
 pub use bdk_electrum::electrum_client;
