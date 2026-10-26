@@ -10,10 +10,11 @@ use coincube_ui::{
     icon::*,
     image::coincube_wordmark,
     theme,
-    widget::*,
+    widget::{action::Action as FocusableAction, *},
 };
 use iced::{
-    widget::{container, QRCode},
+    advanced::widget::Id,
+    widget::{container, scrollable, QRCode},
     Alignment, Length,
 };
 
@@ -136,6 +137,315 @@ pub fn connect_account_panel<'a>(
         .push(text::h5_regular(" | CONNECT").color(color::GREY_3))
         .align_y(Alignment::Center);
 
+    let body = connect_account_body(acct);
+
+    let is_auth_step = !matches!(
+        acct.step,
+        ConnectFlowStep::Dashboard | ConnectFlowStep::DuressRecovery { .. }
+    );
+    let col_align = if is_auth_step {
+        Alignment::Center
+    } else {
+        Alignment::Start
+    };
+
+    Column::new()
+        .push(header)
+        .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
+        .push(body)
+        .spacing(0)
+        .align_x(col_align)
+        .width(Length::Fill)
+        .into()
+}
+
+/// Intents owned by the shell that mounts the Connect sheet. The account panel
+/// continues to own authentication, billing and security operations; the shell
+/// owns the origin, section route and Close lifecycle.
+#[derive(Debug, Clone)]
+pub enum ConnectSheetMessage {
+    Account(ConnectAccountMessage),
+    FocusAction(Id),
+    SelectSection(ConnectSheetSection),
+    OpenAuthentication { create_account: bool },
+    Close,
+}
+
+pub const CLOSE_ID: &str = "tenshu.connect.close";
+pub const CONTENT_SCROLL_ID: &str = "tenshu.connect.content-scroll";
+
+/// The five account-wide sections shown in the Connect sheet. Recovery
+/// services has its own section here without changing the older Home menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectSheetSection {
+    Account,
+    PlanBilling,
+    Contacts,
+    DevicesSecurity,
+    RecoveryServices,
+}
+
+/// The sheet's account navigation and the separate email/token flow. Its
+/// owner retains this page while the underlying account state changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectSheetPage {
+    Sections(ConnectSheetSection),
+    Authentication,
+}
+
+/// Connect's content inside an origin-preserving sheet. The caller draws the
+/// retained Launcher or Cube behind it and routes Close to that exact origin.
+/// This view never creates another account state or signs out on Close.
+pub fn connect_sheet<'a>(
+    acct: &'a ConnectAccountPanel,
+    page: ConnectSheetPage,
+) -> Element<'a, ConnectSheetMessage> {
+    let blocked = acct.requires_authenticated_reopen();
+    let signed_in = matches!(acct.step, ConnectFlowStep::Dashboard) && !blocked;
+    // Once token entry or duress verification begins, keep the real auth flow
+    // visible even if a stale caller page still names an account section.
+    let auth_in_progress = matches!(
+        acct.step,
+        ConnectFlowStep::OtpVerification { .. }
+            | ConnectFlowStep::CheckingDuress { .. }
+            | ConnectFlowStep::DuressRecovery { .. }
+    );
+    let show_auth =
+        !signed_in && (matches!(page, ConnectSheetPage::Authentication) || auth_in_progress);
+    let active_section = match page {
+        ConnectSheetPage::Sections(section) => section,
+        ConnectSheetPage::Authentication => ConnectSheetSection::Account,
+    };
+    let title = if signed_in {
+        "Connect account"
+    } else {
+        "Connect"
+    };
+    let identity = signed_in
+        .then_some(acct.user.as_ref())
+        .flatten()
+        .map(|user| user.email.as_str());
+    let mut heading = Row::new()
+        .push(text::h4_bold(title).style(theme::text::primary))
+        .spacing(16)
+        .align_y(Alignment::Center)
+        .width(Length::Fill);
+    if let Some(email) = identity {
+        heading = heading.push(
+            text::p2_regular(email)
+                .style(theme::text::secondary)
+                .width(Length::Fill),
+        );
+    } else {
+        heading = heading.push(iced::widget::Space::new().width(Length::Fill));
+    }
+    heading = heading.push(
+        FocusableAction::new(
+            CLOSE_ID,
+            text::p2_regular("Close"),
+            ConnectSheetMessage::FocusAction,
+        )
+        .padding(10)
+        .style(theme::button::secondary)
+        .on_press(ConnectSheetMessage::Close),
+    );
+
+    let content: Element<ConnectSheetMessage> = if blocked {
+        text::p1_regular("Connect authorization ended. Close and reopen this Cube through authenticated Connect startup to reconnect.").into()
+    } else if show_auth {
+        connect_account_body(acct).map(ConnectSheetMessage::Account)
+    } else if acct.is_checking_session() {
+        text::p1_regular("Loading your Connect account…").into()
+    } else if signed_in {
+        let section_content = match active_section {
+            ConnectSheetSection::Account => overview_ux(acct),
+            ConnectSheetSection::PlanBilling => plan_billing_ux(acct),
+            ConnectSheetSection::Contacts => contacts::contacts_ux(acct),
+            ConnectSheetSection::DevicesSecurity => security_ux(acct),
+            ConnectSheetSection::RecoveryServices => recovery_services_ux(acct),
+        };
+        let mut column = Column::new().spacing(12);
+        if let Some(error) = acct.error.as_ref() {
+            column = column.push(account_error_card(error));
+        }
+        let content: Element<ConnectAccountMessage> = column.push(section_content).into();
+        content.map(ConnectSheetMessage::Account)
+    } else if active_section == ConnectSheetSection::Account {
+        signed_out_account_ux()
+    } else {
+        signed_out_section_ux(active_section)
+    };
+    let body: Element<ConnectSheetMessage> = if !show_auth {
+        let sections = [
+            (
+                "Account",
+                "tenshu.connect.section.account",
+                ConnectSheetSection::Account,
+            ),
+            (
+                "Plan & billing",
+                "tenshu.connect.section.plan",
+                ConnectSheetSection::PlanBilling,
+            ),
+            (
+                "Contacts",
+                "tenshu.connect.section.contacts",
+                ConnectSheetSection::Contacts,
+            ),
+            (
+                "Devices & security",
+                "tenshu.connect.section.security",
+                ConnectSheetSection::DevicesSecurity,
+            ),
+            (
+                "Recovery services",
+                "tenshu.connect.section.recovery",
+                ConnectSheetSection::RecoveryServices,
+            ),
+        ];
+        let mut navigation = Column::new().spacing(8).width(Length::Fixed(210.0));
+        for (label, id, section) in sections {
+            let selected = section == active_section;
+            let style = if selected {
+                theme::button::primary
+            } else {
+                theme::button::secondary
+            };
+            navigation = navigation.push(
+                FocusableAction::new(
+                    id,
+                    text::p2_regular(label),
+                    ConnectSheetMessage::FocusAction,
+                )
+                .width(Length::Fill)
+                .padding(10)
+                .style(style)
+                .on_press(ConnectSheetMessage::SelectSection(section)),
+            );
+        }
+        navigation = navigation.push(
+            text::p2_regular(
+                "Account-wide. Each Cube's service connection is in its own Settings.",
+            )
+            .style(theme::text::secondary),
+        );
+        container(
+            Row::new()
+                .push(navigation)
+                .push(
+                    scrollable(content)
+                        .id(CONTENT_SCROLL_ID)
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                )
+                .spacing(24)
+                .height(Length::Fill),
+        )
+        .padding(16)
+        .height(Length::Fill)
+        .into()
+    } else {
+        container(
+            scrollable(content)
+                .id(CONTENT_SCROLL_ID)
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
+        .max_width(600)
+        .center_x(Length::Fill)
+        .height(Length::Fill)
+        .padding(16)
+        .into()
+    };
+
+    container(
+        Column::new()
+            .push(container(heading).padding(20))
+            .push(body)
+            .spacing(0)
+            .height(Length::Fill),
+    )
+    .padding(12)
+    .max_width(if show_auth { 600 } else { 1040 })
+    .height(Length::Fill)
+    .style(card_style)
+    .into()
+}
+
+fn signed_out_account_ux<'a>() -> Element<'a, ConnectSheetMessage> {
+    Column::new()
+        .push(text::h4_bold("Account").style(theme::text::primary))
+        .push(
+            text::p1_regular(
+                "Your Cubes stay usable while signed out. Sign in for Connect account services.",
+            )
+            .style(theme::text::secondary),
+        )
+        .push(iced::widget::Space::new().height(Length::Fixed(14.0)))
+        .push(connect_benefits().map(ConnectSheetMessage::Account))
+        .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
+        .push(
+            Row::new()
+                .push(
+                    FocusableAction::new(
+                        "tenshu.connect.sign-in",
+                        text::p2_regular("Sign in"),
+                        ConnectSheetMessage::FocusAction,
+                    )
+                    .padding(10)
+                    .style(theme::button::primary)
+                    .on_press(ConnectSheetMessage::OpenAuthentication {
+                        create_account: false,
+                    }),
+                )
+                .push(
+                    FocusableAction::new(
+                        "tenshu.connect.create-account",
+                        text::p2_regular("Create account"),
+                        ConnectSheetMessage::FocusAction,
+                    )
+                    .padding(10)
+                    .style(theme::button::secondary)
+                    .on_press(ConnectSheetMessage::OpenAuthentication {
+                        create_account: true,
+                    }),
+                )
+                .spacing(10),
+        )
+        .spacing(8)
+        .width(Length::Fill)
+        .into()
+}
+
+fn signed_out_section_ux<'a>(section: ConnectSheetSection) -> Element<'a, ConnectSheetMessage> {
+    let title = match section {
+        ConnectSheetSection::Account => "Account",
+        ConnectSheetSection::PlanBilling => "Plan & billing",
+        ConnectSheetSection::Contacts => "Contacts",
+        ConnectSheetSection::DevicesSecurity => "Devices & security",
+        ConnectSheetSection::RecoveryServices => "Recovery services",
+    };
+    Column::new()
+        .push(text::h4_bold(title).style(theme::text::primary))
+        .push(text::p1_regular("Sign in to see this").style(theme::text::secondary))
+        .push(
+            FocusableAction::new(
+                "tenshu.connect.gate.sign-in",
+                text::p2_regular("Sign in"),
+                ConnectSheetMessage::FocusAction,
+            )
+            .padding(10)
+            .style(theme::button::primary)
+            .on_press(ConnectSheetMessage::OpenAuthentication {
+                create_account: false,
+            }),
+        )
+        .spacing(12)
+        .width(Length::Fill)
+        .into()
+}
+
+fn connect_account_body<'a>(acct: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMessage> {
     let body: Element<ConnectAccountMessage> = match &acct.step {
         ConnectFlowStep::CheckingSession => Column::new()
             .push(text::p1_regular("Loading…").color(color::GREY_3))
@@ -179,8 +489,6 @@ pub fn connect_account_panel<'a>(
     };
 
     let mut col = Column::new()
-        .push(header)
-        .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
         .spacing(0)
         .align_x(col_align)
         .width(Length::Fill);
@@ -3109,10 +3417,7 @@ mod renewal_banner_tests {
     };
 
     /// Collect text from laid-out production widgets, including button labels.
-    fn visible_labels(
-        mut element: Element<'_, ConnectAccountMessage>,
-        renderer: &iced::Renderer,
-    ) -> Vec<String> {
+    fn visible_labels<M>(mut element: Element<'_, M>, renderer: &iced::Renderer) -> Vec<String> {
         use iced::advanced::{
             layout,
             widget::{Id, Operation, Tree},
@@ -3142,6 +3447,99 @@ mod renewal_banner_tests {
             .as_widget_mut()
             .operate(&mut tree, Layout::new(&node), renderer, &mut labels);
         labels.0
+    }
+
+    #[tokio::test]
+    async fn connect_sheet_fits_compact_window_in_auth_and_account_sections() {
+        use iced::advanced::{layout, renderer::Headless, widget::Tree};
+
+        let renderer = <iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer for Connect sheet");
+        let size = iced::Size::new(1000.0, 712.0);
+        let mut account = ConnectAccountPanel::new();
+
+        for (name, step, page) in [
+            (
+                "sign-in",
+                ConnectFlowStep::Login {
+                    email: String::new(),
+                    loading: false,
+                },
+                ConnectSheetPage::Authentication,
+            ),
+            (
+                "sign-up",
+                ConnectFlowStep::Register {
+                    email: String::new(),
+                    loading: false,
+                },
+                ConnectSheetPage::Authentication,
+            ),
+            (
+                "signed-out-account",
+                ConnectFlowStep::Login {
+                    email: String::new(),
+                    loading: false,
+                },
+                ConnectSheetPage::Sections(ConnectSheetSection::Account),
+            ),
+            (
+                "signed-out-plan-gate",
+                ConnectFlowStep::Login {
+                    email: String::new(),
+                    loading: false,
+                },
+                ConnectSheetPage::Sections(ConnectSheetSection::PlanBilling),
+            ),
+            (
+                "plan",
+                ConnectFlowStep::Dashboard,
+                ConnectSheetPage::Sections(ConnectSheetSection::PlanBilling),
+            ),
+            (
+                "security",
+                ConnectFlowStep::Dashboard,
+                ConnectSheetPage::Sections(ConnectSheetSection::DevicesSecurity),
+            ),
+            (
+                "recovery",
+                ConnectFlowStep::Dashboard,
+                ConnectSheetPage::Sections(ConnectSheetSection::RecoveryServices),
+            ),
+        ] {
+            account.step = step;
+            if matches!(account.step, ConnectFlowStep::Dashboard) {
+                account.user = Some(user());
+            }
+            let mut element = connect_sheet(&account, page);
+            let mut tree = Tree::new(element.as_widget());
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(iced::Size::ZERO, size),
+            );
+            assert!(node.size().width <= size.width, "{} overflows width", name);
+            assert!(
+                node.size().height <= size.height,
+                "{} overflows height",
+                name
+            );
+            if name == "signed-out-account" {
+                let labels = visible_labels(connect_sheet(&account, page), &renderer);
+                assert!(labels.iter().any(|label| label == "Create account"));
+                assert!(labels.iter().any(|label| label == "Recovery services"));
+            }
+            if name == "signed-out-plan-gate" {
+                let labels = visible_labels(connect_sheet(&account, page), &renderer);
+                assert!(labels.iter().any(|label| label == "Sign in to see this"));
+                assert!(labels.iter().any(|label| label == "Account"));
+            }
+        }
     }
 
     fn plan(tier: PlanTier, status: PlanStatus, renewal_at: Option<&str>) -> ConnectPlan {
