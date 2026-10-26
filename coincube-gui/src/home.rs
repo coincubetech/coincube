@@ -1688,8 +1688,10 @@ impl Home {
             message => self.update_lifecycle(message),
         };
         self.reconcile_catalog();
-        // Once the catalog is in use, read the networks such a change lists.
-        if connect && self.network_catalog_generation > 0 {
+        // Once the current list is checked, read the networks such a change
+        // lists. A Bitcoin-only start never claims a generation, so the
+        // generation cannot stand for "in use".
+        if connect && matches!(self.state, State::Cubes { .. }) {
             if let Some(load) = self.refresh_network_catalog(false) {
                 return Task::batch([task, load]);
             }
@@ -3174,6 +3176,9 @@ impl Home {
                             self.datadir_path.path(),
                             self.network.bitcoin_network(),
                         );
+                    // Taken before the import's own Open returns early, so
+                    // a pending pick never outlives this checked list.
+                    let pending = self.catalog.pending_select.take();
                     if let (Some(id), State::Cubes { cubes, .. }) =
                         (&self.open_created_import_cube, &self.state)
                     {
@@ -3186,7 +3191,7 @@ impl Home {
                     // current; now that its list is checked, select it.
                     // Open replays as `RunCatalog`, which resolves the Cube
                     // through `catalog_index` on this checked list again.
-                    let select = match self.catalog.pending_select.take() {
+                    let select = match pending {
                         Some((key, intent)) if key.chain == self.network => {
                             Task::done(Message::View(match intent {
                                 launcher_catalog::PendingIntent::Select => ViewMessage::Catalog(
@@ -3513,6 +3518,11 @@ impl Home {
 
             Message::View(ViewMessage::GoToSection(section)) => {
                 self.catalog.dismiss_popovers();
+                // A pick or Open on another network belongs to the Launcher;
+                // its replay must not start an unlock from another section.
+                if !matches!(section, HomeSection::Cubes) {
+                    self.catalog.pending_select = None;
+                }
                 // Duress launch kill-switch backstop: a deep-linked or otherwise
                 // programmatic navigation to the Duress section while it's gated
                 // off (the nav hides the entry, so a click can't produce this)
