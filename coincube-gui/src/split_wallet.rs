@@ -148,7 +148,7 @@ pub enum Message {
     InternalEdited(String),
     TargetSelected(TargetCube),
     Scan,
-    Scanned(Result<Arc<ScanEvidence>, String>, u64, u64),
+    Scanned(Result<Arc<ScanEvidence>, String>, u64, u64, u64),
     Continue,
     Cancel,
     Focus(Id),
@@ -512,6 +512,7 @@ impl SplitWalletPanel {
                 };
                 self.generation = self.generation.wrapping_add(1);
                 let generation = self.generation;
+                let action_scope = self.action_scope;
                 let _ = self.cancel.send(generation);
                 let receiver = self.cancel.subscribe();
                 let external = plan.branches[0].descriptor.clone();
@@ -537,11 +538,16 @@ impl SplitWalletPanel {
                             .and_then(|two| ScanEvidence::new(two, external, internal))
                             .map(Arc::new)
                     },
-                    move |result| Message::Scanned(result, generation, session_generation),
+                    move |result| {
+                        Message::Scanned(result, generation, session_generation, action_scope)
+                    },
                 );
                 Task::batch([scan, self.focus_task(CANCEL_ACTION_ID)])
             }
-            Message::Scanned(result, generation, fired_session) => {
+            Message::Scanned(result, generation, fired_session, action_scope) => {
+                if action_scope != self.action_scope {
+                    return Task::none();
+                }
                 if self.imported_source.is_some() && !matches!(self.status, Status::Scanning) {
                     return Task::none();
                 }
@@ -1924,7 +1930,12 @@ mod tests {
         }
         panel.status = Status::Scanning;
         let task = panel.update(
-            Message::Scanned(Err("synthetic scan failure".into()), panel.generation, 0),
+            Message::Scanned(
+                Err("synthetic scan failure".into()),
+                panel.generation,
+                0,
+                panel.action_scope,
+            ),
             None,
             0,
         );
@@ -1968,8 +1979,9 @@ mod tests {
                     .hardware_action_id("tenshu.hardware.purpose.bip84"),
             );
             let generation = panel.hardware_mut().generation_for_test();
+            let action_scope = panel.hardware_mut().action_scope_for_test();
             let loaded = panel.update(
-                Message::Hardware(loaded_for_test(generation, succeeds)),
+                Message::Hardware(loaded_for_test(generation, succeeds, action_scope)),
                 None,
                 0,
             );
@@ -1996,7 +2008,7 @@ mod tests {
         panel.set_targets(vec![target()]);
         let generation = panel.generation;
         let result = panel.update(
-            Message::Scanned(Err("failed".into()), generation, 0),
+            Message::Scanned(Err("failed".into()), generation, 0, panel.action_scope),
             None,
             0,
         );
@@ -2012,13 +2024,18 @@ mod tests {
         );
 
         let mounted = panel.update(
-            Message::Scanned(Err("failed".into()), generation, 0),
+            Message::Scanned(Err("failed".into()), generation, 0, panel.action_scope),
             None,
             0,
         );
         assert_focus_task(mounted, view(&panel), panel.action_id(SCAN_ACTION_ID));
         let stale = panel.update(
-            Message::Scanned(Err("stale".into()), generation.wrapping_sub(1), 0),
+            Message::Scanned(
+                Err("stale".into()),
+                generation.wrapping_sub(1),
+                0,
+                panel.action_scope,
+            ),
             None,
             0,
         );
@@ -2048,8 +2065,9 @@ mod tests {
         let second_scan = second.action_id(SCAN_ACTION_ID);
         assert_ne!(first_scan, second_scan);
         let generation = first.generation;
+        let action_scope = first.action_scope;
 
-        let completion = || Message::Scanned(Err("failed".into()), generation, 0);
+        let completion = || Message::Scanned(Err("failed".into()), generation, 0, action_scope);
         assert_focus_task_outcome(
             first.update(completion(), None, 0),
             view(&second),
@@ -2071,10 +2089,13 @@ mod tests {
         // Moving a panel keeps its focus identity; recreating it gets a new one.
         let moved = first;
         assert_eq!(moved.action_id(SCAN_ACTION_ID), first_scan);
-        assert_ne!(
-            SplitWalletPanel::new().action_id(SCAN_ACTION_ID),
-            first_scan
-        );
+        let mut recreated = SplitWalletPanel::new();
+        recreated.set_targets(vec![target()]);
+        assert_ne!(recreated.action_id(SCAN_ACTION_ID), first_scan);
+        assert_eq!(recreated.generation, generation);
+        let stale_owner = recreated.update(completion(), None, 0);
+        assert_focus_task_outcome(stale_owner, view(&recreated), None, None);
+        assert_eq!(recreated.status(), &Status::Editing);
     }
 
     /// Check source-first layout and action dispatch at narrow and standard
@@ -2312,7 +2333,7 @@ mod tests {
         assert!(panel.evidence.is_none());
         assert_eq!(panel.status(), &Status::Editing);
         let _ = panel.update(
-            Message::Scanned(Err("stale".into()), stale_generation, 0),
+            Message::Scanned(Err("stale".into()), stale_generation, 0, panel.action_scope),
             None,
             0,
         );
@@ -2379,7 +2400,11 @@ mod tests {
         assert!(!panel.imported_evidence_matches(&short));
         let short_for_handoff = short.clone();
         panel.status = Status::Scanning;
-        let _ = panel.update(Message::Scanned(Ok(short), generation, 0), None, 0);
+        let _ = panel.update(
+            Message::Scanned(Ok(short), generation, 0, panel.action_scope),
+            None,
+            0,
+        );
         assert!(
             matches!(panel.status(), Status::Failed(copy) if copy.contains("did not cover every saved receive and change address"))
         );
@@ -2425,7 +2450,7 @@ mod tests {
         panel.status = Status::Scanning;
         let generation = panel.generation;
         let _ = panel.update(
-            Message::Scanned(Err("old account".into()), generation, 3),
+            Message::Scanned(Err("old account".into()), generation, 3, panel.action_scope),
             None,
             4,
         );
@@ -2455,7 +2480,7 @@ mod tests {
             assert_eq!(panel.status(), &Status::Editing);
 
             let _ = panel.update(
-                Message::Scanned(Err("stale".into()), stale_generation, 7),
+                Message::Scanned(Err("stale".into()), stale_generation, 7, panel.action_scope),
                 None,
                 7,
             );
@@ -2669,7 +2694,11 @@ mod tests {
         panel.generation = 9;
         panel.status = Status::Scanning;
         // Delivered under the current generation tag but carrying older evidence.
-        let _ = panel.update(Message::Scanned(Ok(stale), 9, 1), None, 1);
+        let _ = panel.update(
+            Message::Scanned(Ok(stale), 9, 1, panel.action_scope),
+            None,
+            1,
+        );
         assert!(panel.evidence.is_none());
         assert_eq!(panel.status(), &Status::Editing);
         assert_eq!(panel.generation, 10);
@@ -2686,7 +2715,11 @@ mod tests {
             ChainId::Bitcoin,
             ScanError::RangeLimit,
         ));
-        let _ = panel.update(Message::Scanned(Err(copy), generation, 2), None, 2);
+        let _ = panel.update(
+            Message::Scanned(Err(copy), generation, 2, panel.action_scope),
+            None,
+            2,
+        );
         assert!(
             matches!(panel.status(), Status::Failed(copy) if copy.starts_with("Bitcoin chain:") && copy.contains("No zero-balance conclusion"))
         );
@@ -3121,7 +3154,12 @@ mod tests {
         let generation = panel.generation;
 
         let _ = panel.update(
-            Message::Scanned(Ok(completed_evidence(generation)), generation, 9),
+            Message::Scanned(
+                Ok(completed_evidence(generation)),
+                generation,
+                9,
+                panel.action_scope,
+            ),
             None,
             9,
         );
@@ -3149,7 +3187,12 @@ mod tests {
         panel.hardware_mut().ready_for_test(hardware_account());
         let generation = panel.generation;
         let _ = panel.update(
-            Message::Scanned(Ok(completed_evidence(generation)), generation, 0),
+            Message::Scanned(
+                Ok(completed_evidence(generation)),
+                generation,
+                0,
+                panel.action_scope,
+            ),
             None,
             0,
         );

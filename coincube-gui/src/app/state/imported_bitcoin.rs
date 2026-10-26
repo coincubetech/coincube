@@ -3237,9 +3237,12 @@ mod tests {
                     .hardware_action_id("tenshu.hardware.purpose.bip84"),
             );
             let generation = panel.source.hardware_mut().generation_for_test();
+            let action_scope = panel.source.hardware_mut().action_scope_for_test();
             let loaded = panel.update_view(
                 ImportMessage::Source(wallet_source_form::Message::Hardware(loaded_for_test(
-                    generation, succeeds,
+                    generation,
+                    succeeds,
+                    action_scope,
                 ))),
                 None,
                 0,
@@ -3312,9 +3315,13 @@ mod tests {
             0,
         );
         let generation = first.source.hardware_mut().generation_for_test();
+        let action_scope = first.source.hardware_mut().action_scope_for_test();
+        let first_generation = generation;
         let completion = || {
             ImportMessage::Source(wallet_source_form::Message::Hardware(loaded_for_test(
-                generation, true,
+                generation,
+                true,
+                action_scope,
             )))
         };
         assert_focus_task_outcome(
@@ -3332,9 +3339,12 @@ mod tests {
             0,
         );
         let generation = first.source.hardware_mut().generation_for_test();
+        let action_scope = first.source.hardware_mut().action_scope_for_test();
         let loaded = first.update_view(
             ImportMessage::Source(wallet_source_form::Message::Hardware(loaded_for_test(
-                generation, true,
+                generation,
+                true,
+                action_scope,
             ))),
             None,
             0,
@@ -3353,15 +3363,18 @@ mod tests {
             0,
         );
         let generation = first.source.hardware_mut().generation_for_test();
+        let action_scope = first.source.hardware_mut().action_scope_for_test();
         let loaded = first.update_view(
             ImportMessage::Source(wallet_source_form::Message::Hardware(loaded_for_test(
-                generation, true,
+                generation,
+                true,
+                action_scope,
             ))),
             None,
             0,
         );
         assert_focus_task(loaded, first.setup_view().map(Message::View), first_read);
-        let recreated = ImportedBitcoinPanel::new(
+        let mut recreated = ImportedBitcoinPanel::new(
             NetworkDirectory::new(root.join("recreated")),
             "same-cube".into(),
             BitcoinImport::pending(),
@@ -3374,6 +3387,39 @@ mod tests {
                 .source
                 .hardware_action_id("tenshu.hardware.read:5:dev-1")
         );
+        recreated.source.select_source(Source::Hardware);
+        add_fake_device(recreated.source.hardware_mut(), &root);
+        let _ = recreated.update_view(
+            ImportMessage::Source(wallet_source_form::Message::Hardware(
+                HardwareMessage::Read("dev-1".into()),
+            )),
+            None,
+            0,
+        );
+        assert_eq!(
+            recreated.source.hardware_mut().generation_for_test(),
+            first_generation
+        );
+        let old_owner = recreated.update_view(
+            ImportMessage::Source(wallet_source_form::Message::Hardware(loaded_for_test(
+                first_generation,
+                true,
+                action_scope,
+            ))),
+            None,
+            0,
+        );
+        assert_focus_task_outcome(
+            old_owner,
+            recreated.setup_view().map(Message::View),
+            None,
+            None,
+        );
+        assert!(matches!(
+            recreated.source.hardware_mut().status(),
+            crate::split_hardware::HardwareStatus::Reading(_)
+        ));
+        assert!(recreated.source.hardware_account().is_none());
         let _ = std::fs::remove_dir_all(root);
     }
 

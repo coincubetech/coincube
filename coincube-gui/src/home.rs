@@ -7905,9 +7905,14 @@ mod tests {
             ))));
             if change == "storage" {
                 // A late result also avoids wallet I/O while retaining the
-                // panel's own generation checks for stale scan evidence.
+                // panel's owner and generation checks for stale scan evidence.
                 drop(home.update(Message::View(ViewMessage::SplitWallet(
-                    split_wallet::Message::Scanned(Err("stale result".into()), u64::MAX, u64::MAX),
+                    split_wallet::Message::Scanned(
+                        Err("stale result".into()),
+                        u64::MAX,
+                        u64::MAX,
+                        u64::MAX,
+                    ),
                 ))));
                 assert_eq!(home.active_section, HomeSection::SplitWallet);
                 assert!(home.imported_claim.is_some());
