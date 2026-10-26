@@ -13,7 +13,7 @@ fn mounted_focus_after(
     task: Task<Message>,
     target_present: bool,
     initially_focused: Option<&'static str>,
-    target: &'static str,
+    target: impl Into<iced::advanced::widget::Id>,
 ) -> Option<iced::advanced::widget::Id> {
     use iced::advanced::{
         layout,
@@ -35,6 +35,7 @@ fn mounted_focus_after(
         Some("tiny-skia"),
     ))
     .unwrap();
+    let target = target.into();
     let control = |id| {
         coincube_ui::component::button::secondary_action(
             id,
@@ -45,7 +46,7 @@ fn mounted_focus_after(
         .on_press(view::Message::Claim(view::ClaimMessage::Refresh))
     };
     let mut column = iced::widget::Column::new()
-        .push(control("unrelated.focus"))
+        .push(control(iced::advanced::widget::Id::new("unrelated.focus")))
         .push(
             iced::widget::text_input("Search", "")
                 .id(iced::advanced::widget::Id::new("unrelated.input"))
@@ -115,12 +116,12 @@ fn async_claim_focus_returns_only_to_mounted_safe_controls_when_no_other_surface
         "tenshu.claim.funding.retry",
     ] {
         assert_eq!(
-            mounted_focus_after(restore_claim_focus(target), true, None, target),
+            mounted_focus_after(restore_claim_focus(Id::new(target)), true, None, target),
             Some(Id::new(target))
         );
         assert_eq!(
             mounted_focus_after(
-                restore_claim_focus(target),
+                restore_claim_focus(Id::new(target)),
                 true,
                 Some("unrelated.focus"),
                 target
@@ -129,7 +130,7 @@ fn async_claim_focus_returns_only_to_mounted_safe_controls_when_no_other_surface
         );
         assert_eq!(
             mounted_focus_after(
-                restore_claim_focus(target),
+                restore_claim_focus(Id::new(target)),
                 true,
                 Some("unrelated.input"),
                 target
@@ -137,12 +138,12 @@ fn async_claim_focus_returns_only_to_mounted_safe_controls_when_no_other_surface
             Some(Id::new("unrelated.input"))
         );
         assert_eq!(
-            mounted_focus_after(restore_claim_focus(target), false, None, target),
+            mounted_focus_after(restore_claim_focus(Id::new(target)), false, None, target),
             None
         );
         assert_eq!(
             mounted_focus_after(
-                restore_claim_focus(target),
+                restore_claim_focus(Id::new(target)),
                 false,
                 Some("unrelated.focus"),
                 target
@@ -150,6 +151,82 @@ fn async_claim_focus_returns_only_to_mounted_safe_controls_when_no_other_surface
             Some(Id::new("unrelated.focus"))
         );
     }
+}
+
+#[test]
+fn async_result_from_one_claim_tab_cannot_focus_same_action_in_another_cube_tab() {
+    let root = std::env::temp_dir().join(format!("claim-focus-tabs-{}", uuid::Uuid::new_v4()));
+    let wallet = wallet(SINGLE_WSH);
+    let make_panel = || {
+        ClaimStep1Panel::new(
+            wallet.clone(),
+            CoincubeDirectory::new(root.clone()),
+            "same-bitcoin-cube".into(),
+            watch::channel(1).1,
+            None,
+        )
+    };
+    let mut first = make_panel();
+    let second = make_panel();
+    assert_eq!(first.bitcoin_cube, second.bitcoin_cube);
+    for name in [
+        "tenshu.claim.bitcoin.back",
+        "tenshu.claim.btcb2.back",
+        "tenshu.claim.recovery.close",
+        "tenshu.claim.pair.tab.bitcoin",
+        "tenshu.claim.funding.addresses",
+        "tenshu.claim.funding.retry",
+    ] {
+        let first_id = first.action_id(name);
+        let second_id = second.action_id(name);
+        assert_ne!(
+            first_id, second_id,
+            "Claim tab IDs must be distinct: {name}"
+        );
+        assert_eq!(first_id, first.action_id(name), "ID must survive rerenders");
+        assert_eq!(
+            mounted_focus_after(
+                restore_claim_focus(first_id.clone()),
+                true,
+                None,
+                second_id.clone()
+            ),
+            None,
+            "a result from hidden Claim tab A focused visible Claim tab B: {name}"
+        );
+        assert_eq!(
+            mounted_focus_after(
+                restore_claim_focus(first_id),
+                true,
+                Some("unrelated.input"),
+                second_id
+            ),
+            Some(iced::advanced::widget::Id::new("unrelated.input"))
+        );
+    }
+    first.connect = Some(ConnectSession {
+        client: CoincubeClient::new(),
+        account: "account".into(),
+    });
+    first.paired_broadcast_seq = 1;
+    first.stage = Stage::PairedBitcoinReviewing(recovery_for_focus_test());
+    let completed = first.apply(ClaimEvent::PairedBitcoinReviewed(
+        1,
+        1,
+        0,
+        Err("review failed".into()),
+    ));
+    assert!(matches!(first.stage, Stage::PairedRecovery(_)));
+    assert_eq!(
+        mounted_focus_after(
+            completed,
+            true,
+            None,
+            second.action_id("tenshu.claim.recovery.close"),
+        ),
+        None,
+        "the accepted result from tab A must not focus tab B's recovery Close"
+    );
 }
 
 fn recovery_for_focus_test() -> PairedClaimRecovery {
@@ -167,7 +244,6 @@ fn recovery_for_focus_test() -> PairedClaimRecovery {
 
 #[test]
 fn paired_review_results_restore_back_or_close_after_the_pending_control_disappears() {
-    use iced::advanced::widget::Id;
     let (bitcoin, fork, _) = crate::services::claim_pair_signing::tests::fixture();
     let review = InitialPairReviewSnapshot {
         bitcoin: bitcoin.psbt().unsigned_tx.clone(),
@@ -203,9 +279,10 @@ fn paired_review_results_restore_back_or_close_after_the_pending_control_disappe
                 (true, true) => "tenshu.claim.btcb2.back",
                 (_, false) => "tenshu.claim.recovery.close",
             };
+            let target = p.action_id(target);
             assert_eq!(
-                mounted_focus_after(task, true, None, target),
-                Some(Id::new(target))
+                mounted_focus_after(task, true, None, target.clone()),
+                Some(target)
             );
         }
     }
@@ -213,7 +290,6 @@ fn paired_review_results_restore_back_or_close_after_the_pending_control_disappe
 
 #[test]
 fn direct_funding_result_restores_safe_control_but_passive_and_stale_results_do_not() {
-    use iced::advanced::widget::Id;
     let progress = || ClaimDepositProgress {
         bitcoin_candidate: false,
         btcb2_candidate: false,
@@ -249,9 +325,10 @@ fn direct_funding_result_restores_safe_control_but_passive_and_stale_results_do_
         } else {
             "tenshu.claim.funding.addresses"
         };
+        let target = p.action_id(target);
         assert_eq!(
-            mounted_focus_after(task, true, None, target),
-            direct.then(|| Id::new(target))
+            mounted_focus_after(task, true, None, target.clone()),
+            direct.then_some(target)
         );
         assert!(!p.funding_focus_return);
     }
@@ -259,7 +336,12 @@ fn direct_funding_result_restores_safe_control_but_passive_and_stale_results_do_
     p.funding_focus_return = true;
     let stale = p.apply(ClaimEvent::FundingChecked(99, 1, 0, Ok(progress())));
     assert_eq!(
-        mounted_focus_after(stale, true, None, "tenshu.claim.funding.addresses"),
+        mounted_focus_after(
+            stale,
+            true,
+            None,
+            p.action_id("tenshu.claim.funding.addresses")
+        ),
         None
     );
 }
@@ -267,7 +349,6 @@ fn direct_funding_result_restores_safe_control_but_passive_and_stale_results_do_
 #[test]
 fn paired_sign_preparation_returns_focus_to_pair_tab_or_deposit_toggle() {
     use crate::app::view::vault::ancestry_coins::{CoinPairReview, VerifiedCoinPairReview};
-    use iced::advanced::widget::Id;
 
     for fails in [false, true] {
         let (bitcoin, fork, _) = crate::services::claim_pair_signing::tests::fixture();
@@ -348,9 +429,10 @@ fn paired_sign_preparation_returns_focus_to_pair_tab_or_deposit_toggle() {
             }),
         ));
         assert!(p.funding_review().is_some());
+        let addresses = p.action_id("tenshu.claim.funding.addresses");
         assert_eq!(
-            mounted_focus_after(verified, true, None, "tenshu.claim.funding.addresses"),
-            Some(Id::new("tenshu.claim.funding.addresses"))
+            mounted_focus_after(verified, true, None, addresses.clone()),
+            Some(addresses)
         );
         p.paired_signing_pending = true;
         p.paired_sign_seq = 7;
@@ -360,9 +442,10 @@ fn paired_sign_preparation_returns_focus_to_pair_tab_or_deposit_toggle() {
         } else {
             "tenshu.claim.pair.tab.bitcoin"
         };
+        let target = p.action_id(target);
         assert_eq!(
-            mounted_focus_after(task, true, None, target),
-            Some(Id::new(target))
+            mounted_focus_after(task, true, None, target.clone()),
+            Some(target)
         );
         assert_eq!(matches!(p.stage, Stage::FundingDeposits(_)), fails);
     }

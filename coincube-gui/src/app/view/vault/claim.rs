@@ -44,7 +44,7 @@ use crate::{
 const TITLE: &str = "Claim Bitcoin Blake2b";
 
 fn primary<'a>(
-    id: &'static str,
+    id: impl Into<iced::advanced::widget::Id>,
     icon: Option<UiText<'a>>,
     label: &'static str,
 ) -> Action<'a, Message> {
@@ -52,7 +52,7 @@ fn primary<'a>(
 }
 
 fn secondary<'a>(
-    id: &'static str,
+    id: impl Into<iced::advanced::widget::Id>,
     icon: Option<UiText<'a>>,
     label: &'static str,
 ) -> Action<'a, Message> {
@@ -60,7 +60,7 @@ fn secondary<'a>(
 }
 
 fn secondary_compact<'a>(
-    id: &'static str,
+    id: impl Into<iced::advanced::widget::Id>,
     icon: Option<UiText<'a>>,
     label: &'static str,
 ) -> Action<'a, Message> {
@@ -183,8 +183,12 @@ pub fn view<'a>(
                             }),
                     )
                     .push(
-                        secondary("tenshu.claim.recovery.close", None, "Close")
-                            .on_press(Message::Claim(ClaimMessage::Cancel)),
+                        secondary(
+                            panel.action_id("tenshu.claim.recovery.close"),
+                            None,
+                            "Close",
+                        )
+                        .on_press(Message::Claim(ClaimMessage::Cancel)),
                     ),
             ),
         ),
@@ -211,7 +215,7 @@ pub fn view<'a>(
                     p2_regular(format!("{} sats to {}", output.amount_sats, output.destination))
                 }))
                 .push_maybe(outputs.is_none().then(|| card::warning("Cannot display both signed destinations. Review again before broadcasting.".to_string())))
-                .push(secondary("tenshu.claim.bitcoin.back", None, "Back").on_press(Message::Claim(ClaimMessage::BackPairedBitcoin)))
+                .push(secondary(panel.action_id("tenshu.claim.bitcoin.back"), None, "Back").on_press(Message::Claim(ClaimMessage::BackPairedBitcoin)))
                 .push_maybe(outputs.is_some().then(|| primary("tenshu.claim.bitcoin.broadcast", None, "Broadcast Transaction").on_press(Message::Claim(ClaimMessage::ConfirmPairedBitcoin))))
             )
         }),
@@ -250,7 +254,7 @@ pub fn view<'a>(
                     p2_regular(format!("{} sats to {}", output.amount_sats, output.destination))
                 }))
                 .push_maybe(outputs.is_none().then(|| card::warning("Cannot display both signed destinations. Review again before broadcasting.".to_string())))
-                .push(secondary("tenshu.claim.btcb2.back", None, "Back").on_press(Message::Claim(ClaimMessage::BackPairedFork)))
+                .push(secondary(panel.action_id("tenshu.claim.btcb2.back"), None, "Back").on_press(Message::Claim(ClaimMessage::BackPairedFork)))
                 .push_maybe(outputs.is_some().then(|| primary("tenshu.claim.btcb2.broadcast", None, "Broadcast Transaction").on_press(Message::Claim(ClaimMessage::ConfirmPairedFork))))
             )
         }),
@@ -275,7 +279,7 @@ pub fn view<'a>(
             recording,
             error,
         } => paired_sign_view(
-            menu, cache, bitcoin, fork, session, active, recording, error,
+            menu, cache, panel, bitcoin, fork, session, active, recording, error,
         ),
         StageView::Plan(built) => dashboard(menu, cache, plan_view(cache, panel, built)),
         StageView::CheckingSign => dashboard(
@@ -434,7 +438,7 @@ fn funding_view<'a>(
                 && !panel.funding_checking())
             .then(|| {
                 secondary_compact(
-                    "tenshu.claim.funding.retry",
+                    panel.action_id("tenshu.claim.funding.retry"),
                     Some(icon::reload_icon()),
                     "Retry verification",
                 )
@@ -701,7 +705,7 @@ fn deposit_status_view<'a>(
         .spacing(12)
         .push(p1_bold("Deposit addresses"))
         .push(p1_regular("Send BTC to the Bitcoin address and BTCB2 to the Blake2b address. Keep both Cubes open under the same Connect account.").style(theme::text::secondary))
-        .push(secondary_compact("tenshu.claim.funding.addresses", Some(if expanded { icon::collapsed_icon() } else { icon::collapse_icon() }),
+        .push(secondary_compact(panel.action_id("tenshu.claim.funding.addresses"), Some(if expanded { icon::collapsed_icon() } else { icon::collapse_icon() }),
             if expanded { "Hide deposit addresses" } else { "Deposit addresses" })
             .on_press(Message::Claim(ClaimMessage::ToggleDepositDetails)))
         .push_maybe(expanded.then_some(bitcoin))
@@ -1365,6 +1369,7 @@ fn sign_view<'a>(
 fn paired_sign_view<'a>(
     menu: &'a Menu,
     cache: &'a Cache,
+    panel: &ClaimStep1Panel,
     bitcoin: &'a PsbtState,
     fork: &'a PsbtState,
     session: u64,
@@ -1395,8 +1400,8 @@ fn paired_sign_view<'a>(
             .push(p1_regular("Sign both transfers with this Vault’s normal keys. You will review each broadcast separately."))
             .push_maybe(shared_count.map(|count| p1_regular(format!("Each transfer includes {count} shared coin{} and one verified chain-specific deposit.", if count == 1 { "" } else { "s" })).style(theme::text::secondary)))
             .push(Row::new().spacing(10)
-                .push(secondary("tenshu.claim.pair.tab.bitcoin", None, "Bitcoin transaction").on_press(Message::Claim(ClaimMessage::ShowPairBitcoin)))
-                .push(secondary("tenshu.claim.pair.tab.btcb2", None, "Bitcoin Blake2b transaction").on_press(Message::Claim(ClaimMessage::ShowPairBtcb2))))
+                .push(secondary(panel.action_id("tenshu.claim.pair.tab.bitcoin"), None, "Bitcoin transaction").on_press(Message::Claim(ClaimMessage::ShowPairBitcoin)))
+                .push(secondary(panel.action_id("tenshu.claim.pair.tab.btcb2"), None, "Bitcoin Blake2b transaction").on_press(Message::Claim(ClaimMessage::ShowPairBtcb2))))
             .push(p1_bold(if active == coincube_core::chain::ChainId::Bitcoin {
                 "Bitcoin — return to this Vault"
             } else {
