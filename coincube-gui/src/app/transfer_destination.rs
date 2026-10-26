@@ -30,6 +30,16 @@ pub(crate) enum WalletIdentity {
     Spark(String),
 }
 
+impl WalletIdentity {
+    /// WalletId includes a timestamp. Two restored Vaults can therefore have
+    /// different IDs while referring to the same descriptor and address set.
+    pub(crate) fn shares_vault_descriptor(&self, other: &Self) -> bool {
+        matches!((self, other), (Self::Vault(a), Self::Vault(b))
+            if !a.descriptor_checksum.is_empty()
+                && a.descriptor_checksum == b.descriptor_checksum)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Destination {
     pub cube_id: String,
@@ -50,6 +60,7 @@ pub(crate) struct DestinationEvidence {
 pub(crate) enum Refusal {
     SourceChanged,
     SelfCube,
+    SameWallet,
     UnsupportedChain,
     ChainChanged,
     WalletChanged,
@@ -65,6 +76,9 @@ impl Refusal {
         match self {
             Self::SourceChanged => "The source Cube changed. Start the transfer again.",
             Self::SelfCube => "Choose another Cube as the destination.",
+            Self::SameWallet => {
+                "The destination uses the same Vault wallet. Choose a different wallet."
+            }
             Self::UnsupportedChain => "Cross-Cube transfer is available only on Bitcoin mainnet.",
             Self::ChainChanged => "The destination Cube's network changed. Select it again.",
             Self::WalletChanged => "The destination wallet changed. Select it again.",
@@ -93,6 +107,9 @@ fn admit(
     }
     if selected.cube_id.is_empty() || source.cube_id == selected.cube_id {
         return Err(Refusal::SelfCube);
+    }
+    if source.wallet == selected.wallet || source.wallet.shares_vault_descriptor(&selected.wallet) {
+        return Err(Refusal::SameWallet);
     }
     if source.chain != ChainId::Bitcoin || selected.chain != ChainId::Bitcoin {
         return Err(Refusal::UnsupportedChain);
@@ -355,6 +372,7 @@ mod tests {
         let source = fixture().0;
         let cases = [
             Refusal::SelfCube,
+            Refusal::SameWallet,
             Refusal::UnsupportedChain,
             Refusal::ChainChanged,
             Refusal::WalletChanged,
@@ -367,6 +385,10 @@ mod tests {
             let (_, mut destination, mut evidence) = fixture();
             match expected {
                 Refusal::SelfCube => destination.cube_id = source.cube_id.clone(),
+                Refusal::SameWallet => {
+                    destination.wallet = source.wallet.clone();
+                    evidence.identity = destination.clone();
+                }
                 Refusal::UnsupportedChain => destination.chain = ChainId::BitcoinBlake2b,
                 Refusal::ChainChanged => evidence.identity.chain = ChainId::Testnet4,
                 Refusal::WalletChanged => {
@@ -392,6 +414,27 @@ mod tests {
             assert_eq!(result.err(), Some(expected));
             assert_eq!(count.load(Ordering::SeqCst), 1);
         }
+    }
+
+    #[test]
+    fn restored_vault_with_new_timestamp_cannot_receive_from_its_own_descriptor() {
+        let (source, mut destination, _) = fixture();
+        let WalletIdentity::Vault(source_id) = &source.wallet else {
+            unreachable!();
+        };
+        destination.wallet = WalletIdentity::Vault(WalletId {
+            timestamp: Some(99),
+            descriptor_checksum: source_id.descriptor_checksum.clone(),
+        });
+        assert_ne!(source.wallet, destination.wallet);
+        let evidence = DestinationEvidence {
+            identity: destination.clone(),
+            ready: true,
+        };
+        assert_eq!(
+            admit(&source, &destination, &source, &evidence),
+            Err(Refusal::SameWallet)
+        );
     }
 
     #[test]
