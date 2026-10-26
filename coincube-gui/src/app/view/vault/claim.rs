@@ -15,7 +15,7 @@ use coincube_core::{
 use coincube_ui::{
     component::{amount::*, button, card, text::*},
     icon, theme,
-    widget::{ColumnExt, Element},
+    widget::{ColumnExt, Element, RowExt},
 };
 
 use crate::{
@@ -313,11 +313,7 @@ fn workflow_parts<'a>(
     active: usize,
     bodies: [Option<Element<'a, Message>>; 3],
 ) -> Element<'a, Message> {
-    let labels = [
-        "1. Deposits",
-        "2. Review and sign",
-        "3. Broadcast and confirm",
-    ];
+    let labels = ["Deposits", "Review and sign", "Broadcast and confirm"];
     let summaries = [
         "Deposits selected in your paired Vaults.",
         if active > 1 {
@@ -327,11 +323,46 @@ fn workflow_parts<'a>(
         },
         "Broadcast Bitcoin, then BTCB2 after six Bitcoin confirmations.",
     ];
-    let mut page = Column::new().spacing(28).max_width(1100).push(header(
-        "Separate Bitcoin and BTCB2 with transfers back to your own Vaults.",
-    ));
+    let mut steps = Row::new().spacing(10).width(Length::Fill);
+    for (index, label) in labels.iter().enumerate() {
+        let current = index == active;
+        let number = format!("{}", index + 1);
+        let marker: Element<'a, Message> = if index < active {
+            icon::check_icon().style(theme::text::success).into()
+        } else if current {
+            p1_bold(number).into()
+        } else {
+            p1_regular(number).style(theme::text::secondary).into()
+        };
+        let title: Element<'a, Message> = if current {
+            p1_bold(*label).into()
+        } else {
+            p1_regular(*label).style(theme::text::secondary).into()
+        };
+        let step = Row::new()
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .push(marker)
+            .push(title);
+        steps = steps.push(
+            Container::new(step)
+                .padding(12)
+                .width(Length::FillPortion(1))
+                .style(theme::card::simple),
+        );
+    }
+    let mut page = Column::new()
+        .spacing(22)
+        .max_width(1100)
+        .push(header(
+            "Separate Bitcoin and BTCB2 with transfers back to your own Vaults.",
+        ))
+        .push(steps);
     for (index, body) in IntoIterator::into_iter(bodies).enumerate() {
-        let mut section = Column::new().spacing(12).push(p1_bold(labels[index]));
+        let mut section =
+            Column::new()
+                .spacing(12)
+                .push(p1_bold(format!("{}. {}", index + 1, labels[index])));
         if let Some(body) = body {
             section = section.push(body);
         } else {
@@ -366,22 +397,37 @@ fn funding_view<'a>(
         .push(p1_bold(format!("Bitcoin Blake2b · minimum {} sats", format_u64_as_string(addresses.btcb2_minimum_sats, ","))))
         .push(address_row(addresses.btcb2_deposit.clone(), "Copied BTCB2 deposit address to clipboard"))
         .push(p1_regular(format!("Minimums cover estimated fees at {} sat/vB on Bitcoin and {} sat/vB on BTCB2. Fees may change. Each deposit must be confirmed and verified as chain-specific.", addresses.bitcoin_rate_sat_vb, addresses.btcb2_rate_sat_vb)).style(theme::text::secondary));
+    let controls = Row::new()
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .push_maybe(
+            ((panel.funding_error().is_some() || panel.funding_proof_needs_retry())
+                && !panel.funding_checking())
+            .then(|| {
+                button::secondary_compact(Some(icon::reload_icon()), "Retry verification")
+                    .on_press(Message::Claim(ClaimMessage::CheckFunding))
+            }),
+        )
+        .push_maybe(panel.verification_report().map(|_| {
+            button::secondary_compact(None, "Copy verification report")
+                .on_press(Message::Claim(ClaimMessage::CopyVerificationReport))
+        }))
+        .push_maybe((!verified).then(|| {
+            button::secondary_compact(None, "Pause checks")
+                .on_press(Message::Claim(ClaimMessage::Cancel))
+        }));
     let deposits = Column::new().spacing(12)
+        .push(p1_bold("Claim checks"))
         .push(deposit_status_view(panel, addresses.bitcoin_minimum_sats, addresses.btcb2_minimum_sats, cache.balance_amounts_masked()))
         .push(button::secondary_compact(Some(if expanded { icon::collapsed_icon() } else { icon::collapse_icon() }),
             if expanded { "Hide deposit addresses" } else { "Deposit addresses" })
             .on_press(Message::Claim(ClaimMessage::ToggleDepositDetails)))
-        .push_maybe(expanded.then_some(details))
+        .push_maybe(expanded.then(|| Container::new(details).padding(18).style(theme::card::simple).width(Length::Fill)))
         .push_maybe(panel.funding_error().filter(|_| !panel.funding_inline_error()).map(|error| card::warning(error.to_string())))
         .push_maybe((!panel.paired_vault_ready()).then(|| card::warning(
             "Open and unlock the paired BTCB2 Cube under the same Connect account. Verification continues here automatically.".into())))
         .push_maybe(panel.funding_checking().then(|| p1_regular(panel.funding_status().unwrap_or("Verifying deposits…")).style(theme::text::secondary)))
-        .push_maybe(((panel.funding_error().is_some() || panel.funding_proof_needs_retry()) && !panel.funding_checking()).then(|| button::secondary_compact(Some(icon::reload_icon()), "Retry verification")
-            .on_press(Message::Claim(ClaimMessage::CheckFunding))))
-        .push_maybe(panel.verification_report().map(|_| button::secondary_compact(None, "Copy verification report")
-            .on_press(Message::Claim(ClaimMessage::CopyVerificationReport))))
-        .push_maybe((!verified).then(|| button::secondary_compact(None, "Pause checks")
-            .on_press(Message::Claim(ClaimMessage::Cancel))));
+        .push(controls);
     let review = verified.then(|| {
         let mut body = Column::new().spacing(12)
             .push(p1_regular("Review the coins, return addresses and fees. Both transfers return funds to your Vaults, minus network fees."));
@@ -732,6 +778,20 @@ pub(crate) fn deposit_proof_detail(
 }
 
 fn check_row<'a>(label: &'static str, ok: Option<bool>, detail: String) -> Element<'a, Message> {
+    let status: Element<'a, Message> = match ok {
+        Some(true) => p2_regular("Ready")
+            .style(theme::text::success)
+            .width(Length::Fixed(110.0))
+            .into(),
+        Some(false) => p2_regular("Needs attention")
+            .style(theme::text::warning)
+            .width(Length::Fixed(110.0))
+            .into(),
+        None => p2_regular("Checking")
+            .style(theme::text::secondary)
+            .width(Length::Fixed(110.0))
+            .into(),
+    };
     let mark = match ok {
         Some(true) => icon::check_icon().style(theme::text::success),
         Some(false) => icon::warning_icon().style(theme::text::warning),
@@ -741,8 +801,13 @@ fn check_row<'a>(label: &'static str, ok: Option<bool>, detail: String) -> Eleme
         .spacing(10)
         .align_y(Alignment::Center)
         .push(mark)
-        .push(p1_regular(label).width(Length::Fixed(170.0)))
-        .push(p1_regular(detail).style(theme::text::secondary))
+        .push(p1_regular(label).width(Length::Fixed(145.0)))
+        .push(
+            p1_regular(detail)
+                .style(theme::text::secondary)
+                .width(Length::Fill),
+        )
+        .push(status)
         .into()
 }
 
@@ -822,6 +887,7 @@ fn preconditions_view<'a>(
             0,
             Column::new()
                 .spacing(12)
+                .push(p1_bold("Before you start"))
                 .push_maybe(summary.map(p1_regular))
                 .push_maybe(problem.as_ref().map(|reason| card::warning(reason.clone())))
                 .push_maybe((problem.is_none()).then(|| {
@@ -864,7 +930,14 @@ fn preconditions_view<'a>(
                     )
                     .on_press(Message::Claim(ClaimMessage::ToggleSetupDetails)),
                 )
-                .push_maybe(panel.setup_details_expanded().then_some(checklist)),
+                .push_maybe(
+                    panel.setup_details_expanded().then_some(
+                        Container::new(checklist)
+                            .padding(20)
+                            .style(theme::card::simple)
+                            .width(Length::Fill),
+                    ),
+                ),
         );
     }
 
@@ -1487,6 +1560,113 @@ mod tests {
     use crate::app::state::preferences::{BalancePrivacy, BalancePrivacyChrome};
     use crate::app::view::shared::landing::capture;
     use crate::app::view::vault::ancestry_coins::{CoinPairReview, CoinRow};
+
+    #[test]
+    fn mounted_claim_checks_and_deposit_states_fit_both_viewports() {
+        use crate::services::{
+            claim_observation::http::FundingProofStatus,
+            foreign_scan::{AddressFunds, ScanError},
+        };
+        use std::time::Duration;
+
+        for (width, height) in [(1440, 900), (1024, 768)] {
+            for (appearance, palette) in [
+                ("dark", theme::Theme::dark()),
+                ("light", theme::Theme::light()),
+            ] {
+                let checks = Column::new()
+                    .spacing(10)
+                    .push(check_row(
+                        "Claim target",
+                        Some(true),
+                        "Paired Cube found.".into(),
+                    ))
+                    .push(check_row(
+                        "Vault",
+                        Some(true),
+                        "Native SegWit Vault.".into(),
+                    ))
+                    .push(check_row(
+                        "Node backend",
+                        None,
+                        "Checking both chains…".into(),
+                    ))
+                    .push(check_row(
+                        "Coins to split",
+                        Some(false),
+                        "Fork status unavailable.".into(),
+                    ))
+                    .push(check_row(
+                        "Fee rate",
+                        Some(true),
+                        "4 sat/vB (about an hour).".into(),
+                    ));
+                let mounted = capture::inspect(
+                    "claim-five-checks",
+                    workflow_page(0, checks),
+                    (width, height),
+                    appearance,
+                    palette,
+                );
+                for label in [
+                    "Deposits",
+                    "Review and sign",
+                    "Broadcast and confirm",
+                    "Claim target",
+                    "Vault",
+                    "Node backend",
+                    "Coins to split",
+                    "Fee rate",
+                    "Needs attention",
+                ] {
+                    assert!(
+                        mounted.contains(label),
+                        "missing {} at {} {}",
+                        label,
+                        width,
+                        appearance
+                    );
+                }
+
+                let waiting = Ok(AddressFunds {
+                    pending_sats: 75_000,
+                    ..AddressFunds::default()
+                });
+                let limited = Err(ScanError::RateLimited(Duration::from_secs(120)));
+                let deposits = Column::new()
+                    .spacing(12)
+                    .push(p1_bold("Claim checks"))
+                    .push(deposit_row(
+                        "Bitcoin",
+                        Some(&waiting),
+                        100_000,
+                        FundingProofStatus::Pending,
+                        false,
+                        true,
+                    ))
+                    .push(deposit_row(
+                        "Bitcoin Blake2b",
+                        Some(&limited),
+                        100_000,
+                        FundingProofStatus::Pending,
+                        false,
+                        true,
+                    ));
+                let mounted = capture::inspect(
+                    "claim-deposit-waiting-and-rate-limited",
+                    workflow_page(0, deposits),
+                    (width, height),
+                    appearance,
+                    palette,
+                );
+                assert!(mounted.contains("Bitcoin Blake2b"));
+                assert!(mounted.contains("awaiting confirmation"));
+                assert!(mounted.contains("Indexer rate limited"));
+                assert!(mounted.contains("Replay protection not verified yet"));
+                assert!(!mounted.contains("75,000"));
+            }
+        }
+    }
 
     #[test]
     fn active_funding_review_shows_exact_inputs_while_passive_deposit_stays_hidden() {
