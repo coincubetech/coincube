@@ -26,7 +26,7 @@ your system to follow the guide if you are running a Linux that isn't Debian- or
 - GUI requirements, see the link to projects below to search for the name of your distribution's packages.
   - [`fontconfig`](https://www.freedesktop.org/wiki/Software/fontconfig/)
   - [Libudev](https://www.freedesktop.org/software/systemd/man/libudev.html)
-- Running binaries requires GLIBC >= 2.33 (Ubuntu >= 22.04 or Debian >= 12)
+- Running binaries requires GLIBC >= 2.35 (Ubuntu >= 22.04, Linux Mint >= 21 or Debian >= 12)
 
 We'll use basic tools which should already be present on your system, such as:
 
@@ -56,7 +56,7 @@ Get Tenshu for your system from the [Coincube website](https://coincube.io) or t
 
 A note for **Linux users only**: released binaries may not be working on your system if it is
 running a too old glibc. In this case you may have to build from source. See the [short section
-about this in the README](../README.md#a-note-on-linux-binaries-and-glibc-version).
+about this in the usage guide](USAGE.md#a-note-on-linux-binaries-and-glibc-version).
 
 The Linux archive extracts to a `tenshu-<version>-<target>/` directory holding two executables:
 `coincube` and `coincube-spark-bridge`. Keep them together — Tenshu looks for the Spark bridge next

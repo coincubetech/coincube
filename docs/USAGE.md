@@ -34,15 +34,15 @@ makepkg -si
 
 _Skip this section if you are not running Linux or don't plan on using a released binary._
 
-Due to technical limitations in our reproducible builds system, the Linux binaries currently link
-against `glibc` version `2.33`. This means you can't run a released Linux binary if your system has
-an older glibc. This is the case most notably of Ubuntu 20 (Focal) and below, and Debian 11
-(Bullseye) and below.
+The Linux binaries are built on Ubuntu 22.04 and need `glibc` version `2.35` or newer. This means
+you can't run a released Linux binary if your system has an older glibc. This is the case most
+notably of Ubuntu 20.04 (Focal) and below, Debian 11 (Bullseye) and below, and Red Hat Enterprise
+Linux 9 and its rebuilds (Rocky, AlmaLinux), which also lack the WebKitGTK 4.1 library the app needs.
+
+You can check your version with `ldd --version`.
 
 The simplest workaround is to simply build the project yourself. Fear not, it's really trivial if
 you are a Linux user. Instructions [here](BUILD.md).
-
-See [this issue](https://github.com/wizardsardine/coincube/issues/414) for details.
 
 #### Apple, Windows, codesigned and notarized binaries
 
