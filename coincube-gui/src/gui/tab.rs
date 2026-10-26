@@ -3093,6 +3093,55 @@ impl Tab {
                         self.state = State::DuressActive(screen);
                         Task::none()
                     }
+                    app::Message::View(app::view::Message::DuressActivateLocal {
+                        app: origin,
+                        cube_id,
+                        chain,
+                    }) => {
+                        // Only the App and Cube that issued this settings PIN
+                        // trial may trigger the local wipe. AppAsync already
+                        // fences a result after tab replacement; this checks
+                        // the inner origin if the same tab opened another App.
+                        if origin != app.cache().app_generation
+                            || cube_id != app.cube_settings().id
+                            || chain != app.cube_settings().network
+                            || crate::app::session::current_cube_id().as_deref()
+                                != Some(cube_id.as_str())
+                        {
+                            return Task::none();
+                        }
+                        let datadir = app.datadir().clone();
+                        let network = app.cache().network;
+                        let root = datadir.path().to_path_buf();
+                        let account_id = crate::services::duress::DuressLocalState::load(&root)
+                            .map(|state| state.account_id)
+                            .unwrap_or(None);
+                        // Replace the App first, dropping every displayed seed
+                        // and pending settings flow before the wipe starts.
+                        self.state = State::DuressActive(
+                            crate::app::view::duress::active_screen::DuressActiveScreen::with_context(
+                                datadir.clone(),
+                                Some(network),
+                            ),
+                        );
+                        crate::app::session::close();
+                        Task::perform(
+                            async move {
+                                run_local_duress_activation(&root, account_id).await;
+                                let queue_pending =
+                                    crate::services::duress::queue::DuressQueue::new(&root)
+                                        .is_empty()
+                                        .map(|empty| !empty)
+                                        .unwrap_or(false);
+                                (datadir, network, queue_pending)
+                            },
+                            |(datadir, network, queue_pending)| Message::DuressActivated {
+                                datadir,
+                                network,
+                                queue_pending,
+                            },
+                        )
+                    }
                     app::Message::View(app::view::Message::OpenConnectSignIn) => {
                         // Re-check this tab's ConnectAccountPanel against
                         // the keyring before deciding whether to bubble

@@ -570,6 +570,8 @@ pub enum RecoveryAlertsMessage {
     ConfirmFullCube,
     /// Abandon the in-progress Full-Cube PIN entry.
     CancelFullCube,
+    /// The exact Full-Cube PIN trial matched the local duress marker.
+    FullCubePinDuress(crate::app::cache::AppGeneration, u64),
     /// Async result of a level change — the updated status. The `u64` is the
     /// spawn-time `session_generation` (see `StatusLoaded`); a stale result is
     /// dropped rather than clobbering a newer session's state. The trailing
@@ -1290,6 +1292,13 @@ pub enum BackupWalletMessage {
     /// final one stashed in state was `Zeroizing`. Matches
     /// `RecoveryKitMessage::PinVerified`, which already did this.
     PinVerified(Result<zeroize::Zeroizing<Vec<String>>, String>),
+    /// PIN-only result fenced to the exact prompt; passkey keeps `PinVerified`.
+    PinVerifiedAttempt(
+        crate::app::cache::AppGeneration,
+        Result<zeroize::Zeroizing<Vec<String>>, String>,
+    ),
+    /// The exact PIN trial matched the local duress marker; no words travel.
+    PinDuress(crate::app::cache::AppGeneration),
     /// Async result of persisting `backed_up = true` to settings.json after
     /// the user successfully completed the verification step.
     BackupSaveResult(Result<(), String>),
@@ -1317,6 +1326,12 @@ impl std::fmt::Debug for BackupWalletMessage {
                 .debug_tuple("PinVerified")
                 .field(&Err::<(), _>(e))
                 .finish(),
+            Self::PinVerifiedAttempt(_, Ok(_)) => write!(f, "PinVerifiedAttempt(Ok(<redacted>))"),
+            Self::PinVerifiedAttempt(_, Err(e)) => f
+                .debug_tuple("PinVerifiedAttempt")
+                .field(&Err::<(), _>(e))
+                .finish(),
+            Self::PinDuress(_) => write!(f, "PinDuress"),
             Self::BackupSaveResult(res) => f.debug_tuple("BackupSaveResult").field(res).finish(),
         }
     }
@@ -1413,6 +1428,13 @@ pub enum RecoveryKitMessage {
     /// the wrap, a plain `Vec<String>` with the phrase bytes would
     /// linger on the heap past the message cycle.
     PinVerified(Result<zeroize::Zeroizing<Vec<String>>, String>),
+    /// PIN-only result fenced to the exact prompt; passkey keeps `PinVerified`.
+    PinVerifiedAttempt(
+        crate::app::cache::AppGeneration,
+        Result<zeroize::Zeroizing<Vec<String>>, String>,
+    ),
+    /// The exact PIN trial matched the local duress marker; no words travel.
+    PinDuress(crate::app::cache::AppGeneration),
     /// Recovery password input changed. Wrapped in `Zeroizing` at
     /// the message level (not just on the state field) because
     /// Iced's runtime clones messages between update/task/view —
@@ -1552,6 +1574,12 @@ impl std::fmt::Debug for RecoveryKitMessage {
                 .debug_tuple("PinVerified")
                 .field(&Err::<(), _>(e))
                 .finish(),
+            Self::PinVerifiedAttempt(_, Ok(_)) => write!(f, "PinVerifiedAttempt(Ok(<redacted>))"),
+            Self::PinVerifiedAttempt(_, Err(e)) => f
+                .debug_tuple("PinVerifiedAttempt")
+                .field(&Err::<(), _>(e))
+                .finish(),
+            Self::PinDuress(_) => write!(f, "PinDuress"),
             Self::PasswordChanged(_) => f
                 .debug_tuple("PasswordChanged")
                 .field(&"<redacted>")

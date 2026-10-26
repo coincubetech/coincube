@@ -406,6 +406,7 @@ pub struct RecoveryKit {
     /// they won't be, but keeping them isolated avoids accidental
     /// coupling).
     pub pin: PinInput,
+    pin_attempt: Option<crate::app::cache::AppGeneration>,
     /// One-shot flag: when the next `StatusLoaded` message resolves
     /// (regardless of which code path fired the corresponding
     /// `LoadStatus`), emit the post-vault-creation nudge toast iff
@@ -429,6 +430,7 @@ impl RecoveryKit {
             status_stale: false,
             flow: RecoveryKitState::None,
             pin: PinInput::new(),
+            pin_attempt: None,
             nudge_on_next_status_load: false,
             also_phone_seal: false,
         }
@@ -439,6 +441,7 @@ impl RecoveryKit {
     pub fn reset_flow(&mut self) {
         self.flow = RecoveryKitState::None;
         self.pin.clear();
+        self.pin_attempt = None;
         self.also_phone_seal = false;
     }
 }
@@ -599,6 +602,7 @@ pub fn update_with_imported(
 
         RecoveryKitMessage::Start(mode) => {
             rk.pin.clear();
+            rk.pin_attempt = None;
             if let Some(error) =
                 imported_backup_source_error(cache, local_cube_id, imported.as_ref())
             {
@@ -703,8 +707,42 @@ pub fn update_with_imported(
 
         RecoveryKitMessage::VerifyPin => verify_pin(rk, cache, local_cube_id),
 
+        RecoveryKitMessage::PinDuress(attempt) => {
+            if rk.pin_attempt != Some(attempt)
+                || !matches!(rk.flow, RecoveryKitState::PinEntry { .. })
+            {
+                return Task::none();
+            }
+            rk.reset_flow();
+            Task::done(Message::View(view::Message::DuressActivateLocal {
+                app: cache.app_generation,
+                cube_id: local_cube_id.to_string(),
+                chain: cache.chain(),
+            }))
+        }
+
+        RecoveryKitMessage::PinVerifiedAttempt(attempt, result) => {
+            if rk.pin_attempt != Some(attempt)
+                || !matches!(rk.flow, RecoveryKitState::PinEntry { .. })
+            {
+                return Task::none();
+            }
+            update_with_imported(
+                rk,
+                RecoveryKitMessage::PinVerified(result),
+                cache,
+                local_cube_id,
+                seed_source,
+                client,
+                server_cube_id,
+                wallet,
+                imported,
+            )
+        }
+
         RecoveryKitMessage::PinVerified(res) => {
             rk.pin.clear();
+            rk.pin_attempt = None;
             // Both unlock shapes land here. `PasskeyReauth` has no input to
             // restore on failure, so it is tracked separately below.
             let (mode, from_passkey) = match &rk.flow {
@@ -1180,6 +1218,8 @@ fn verify_pin(rk: &mut RecoveryKit, cache: &Cache, local_cube_id: &str) -> Task<
     // second route to the same permanent secret, so guesses accumulate against
     // the shared per-Cube unlock counter rather than starting fresh here.
     let throttle_root = datadir.clone();
+    let attempt = crate::app::cache::AppGeneration::next();
+    rk.pin_attempt = Some(attempt);
     Task::perform(
         async move {
             // Wrap the decrypted mnemonic in `Zeroizing` at the
@@ -1197,9 +1237,10 @@ fn verify_pin(rk: &mut RecoveryKit, cache: &Cache, local_cube_id: &str) -> Task<
                 // authenticated when a session can answer, the seed file's GCM
                 // tag when it cannot. The cheap `verify_pin` hash that used to
                 // gate this is gone (I1).
-                crate::services::unlock::throttle::classify_verification(
+                crate::services::unlock::throttle::classify_seed_export_cube(
                     &throttle_root,
-                    &cube_id,
+                    &cube,
+                    &pin,
                     || {
                         super::general::load_mnemonic_words(
                             &datadir,
@@ -1208,18 +1249,42 @@ fn verify_pin(rk: &mut RecoveryKit, cache: &Cache, local_cube_id: &str) -> Task<
                             &pin,
                             &cube_id,
                         )
-                        .map(Zeroizing::new)
                     },
-                    super::general::is_wrong_pin,
                 )
-                .unwrap_or_else(|e| Err(e.to_string()))
             })
             .await
             .map_err(|e| format!("PIN verification task failed: {}", e))?
         },
         |res| {
+            let outcome = match res {
+                Ok(crate::services::unlock::throttle::SeedExportAttempt::Words(words)) => {
+                    RecoveryKitMessage::PinVerifiedAttempt(attempt, Ok(words))
+                }
+                Ok(crate::services::unlock::throttle::SeedExportAttempt::Duress) => {
+                    RecoveryKitMessage::PinDuress(attempt)
+                }
+                Ok(crate::services::unlock::throttle::SeedExportAttempt::Wrong(penalty)) => {
+                    RecoveryKitMessage::PinVerifiedAttempt(
+                        attempt,
+                        Err(if penalty.is_zero() {
+                            "Incorrect PIN. Please try again.".into()
+                        } else {
+                            crate::services::unlock::throttle::lockout_message(penalty)
+                        }),
+                    )
+                }
+                Ok(crate::services::unlock::throttle::SeedExportAttempt::Locked(remaining)) => {
+                    RecoveryKitMessage::PinVerifiedAttempt(
+                        attempt,
+                        Err(crate::services::unlock::throttle::lockout_message(
+                            remaining,
+                        )),
+                    )
+                }
+                Err(error) => RecoveryKitMessage::PinVerifiedAttempt(attempt, Err(error)),
+            };
             Message::View(view::Message::Settings(view::SettingsMessage::RecoveryKit(
-                RecoveryKitMessage::PinVerified(res),
+                outcome,
             )))
         },
     )

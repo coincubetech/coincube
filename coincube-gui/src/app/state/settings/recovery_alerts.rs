@@ -93,6 +93,9 @@ pub struct RecoveryAlerts {
     /// each keystroke's previous buffer is wiped. Cleared as soon as it's
     /// consumed (or the flow is cancelled).
     pub pin: EscrowPin,
+    /// One Full-Cube PIN submission. Cancelling or choosing another tier
+    /// invalidates its late duress result before any local wipe is requested.
+    pin_attempt: Option<crate::app::cache::AppGeneration>,
 }
 
 impl Default for RecoveryAlerts {
@@ -117,6 +120,7 @@ impl RecoveryAlerts {
             confirming_alerts_off: false,
             awaiting_pin: false,
             pin: EscrowPin::default(),
+            pin_attempt: None,
         }
     }
 
@@ -459,6 +463,7 @@ pub fn update(
             }
             ra.awaiting_pin = false;
             ra.pin.clear();
+            ra.pin_attempt = None;
             if !escrow_entitled {
                 ra.error =
                     Some("An encrypted recovery kit is part of the Estate plan.".to_string());
@@ -569,8 +574,25 @@ pub fn update(
         RecoveryAlertsMessage::CancelFullCube => {
             ra.awaiting_pin = false;
             ra.pin.clear();
+            ra.pin_attempt = None;
             ra.error = None;
             Task::none()
+        }
+        RecoveryAlertsMessage::FullCubePinDuress(attempt, generation) => {
+            if generation != session_generation || ra.pin_attempt != Some(attempt) || !ra.submitting
+            {
+                return Task::none();
+            }
+            ra.pin_attempt = None;
+            ra.submitting = false;
+            ra.awaiting_pin = false;
+            ra.pin.clear();
+            ra.error = None;
+            Task::done(Message::View(view::Message::DuressActivateLocal {
+                app: cache.app_generation,
+                cube_id: local_cube_id.to_string(),
+                chain: cache.chain(),
+            }))
         }
         RecoveryAlertsMessage::ConfirmFullCube => {
             // Full-Cube is an escrow tier, so it's gated on `inheritanceEscrow`.
@@ -618,9 +640,11 @@ pub fn update(
             ra.submitting = true;
             ra.awaiting_pin = false;
             ra.error = None;
+            let attempt = crate::app::cache::AppGeneration::next();
+            ra.pin_attempt = Some(attempt);
             Task::perform(
                 async move {
-                    let seed_json = tokio::task::spawn_blocking(move || {
+                    let seed_trial = tokio::task::spawn_blocking(move || {
                         build_seed_blob_json(
                             &network_dir,
                             &datadir,
@@ -631,24 +655,35 @@ pub fn update(
                         )
                     })
                     .await
-                    .map_err(|e| format!("PIN task failed: {}", e))??;
-                    enroll_escrow(
-                        &client,
-                        server_cube_id,
-                        cube_enc_key.as_deref(),
-                        network.bitcoin_network(),
-                        descriptor_json,
-                        Some(seed_json),
-                    )
-                    .await
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| format!("PIN task failed: {}", e));
+                    match seed_trial {
+                        Ok(Ok(SeedBlobOutcome::Duress)) => FullCubeTaskResult::Duress,
+                        Ok(Ok(SeedBlobOutcome::Ready(seed_json))) => FullCubeTaskResult::Change(
+                            enroll_escrow(
+                                &client,
+                                server_cube_id,
+                                cube_enc_key.as_deref(),
+                                network.bitcoin_network(),
+                                descriptor_json,
+                                Some(seed_json),
+                            )
+                            .await
+                            .map_err(|e| e.to_string()),
+                        ),
+                        Ok(Err(error)) | Err(error) => FullCubeTaskResult::Change(Err(error)),
+                    }
                 },
                 move |res| {
-                    ra_msg(RecoveryAlertsMessage::ChangeResult(
-                        res,
-                        session_generation,
-                        Some(EscrowTier::FullCube),
-                    ))
+                    ra_msg(match res {
+                        FullCubeTaskResult::Duress => {
+                            RecoveryAlertsMessage::FullCubePinDuress(attempt, session_generation)
+                        }
+                        FullCubeTaskResult::Change(result) => RecoveryAlertsMessage::ChangeResult(
+                            result,
+                            session_generation,
+                            Some(EscrowTier::FullCube),
+                        ),
+                    })
                 },
             )
         }
@@ -659,6 +694,9 @@ pub fn update(
                 return Task::none();
             }
             ra.submitting = false;
+            if tier_change == Some(EscrowTier::FullCube) {
+                ra.pin_attempt = None;
+            }
             // Fold the result into state: caches the status on success, or
             // surfaces the error and re-shows the PIN entry on a failed
             // Full-Cube enrol.
@@ -717,6 +755,25 @@ fn seed_blob_cube(cache: &Cache, local_cube_id: &str) -> Result<SeedBlobCube, St
 /// is built, and the serialised JSON — which itself contains the plaintext seed
 /// — is returned in a `Zeroizing` buffer so it's wiped once escrow sealing is
 /// done rather than lingering on the heap.
+enum SeedBlobOutcome {
+    Ready(Zeroizing<Vec<u8>>),
+    Duress,
+}
+
+impl std::fmt::Debug for SeedBlobOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ready(_) => f.write_str("Ready(<redacted>)"),
+            Self::Duress => f.write_str("Duress"),
+        }
+    }
+}
+
+enum FullCubeTaskResult {
+    Change(Result<VaultMonitoringStatus, String>),
+    Duress,
+}
+
 fn build_seed_blob_json(
     network_dir: &crate::dir::NetworkDirectory,
     datadir: &std::path::Path,
@@ -724,7 +781,7 @@ fn build_seed_blob_json(
     local_cube_id: &str,
     pin: &str,
     cube: SeedBlobCube,
-) -> Result<Zeroizing<Vec<u8>>, String> {
+) -> Result<SeedBlobOutcome, String> {
     let network = network.into();
     if cube.network != network.api_str() || cube.uuid != local_cube_id {
         return Err("Cube recovery identity mismatch.".to_string());
@@ -742,16 +799,30 @@ fn build_seed_blob_json(
     // `load_mnemonic_words` is the PIN check: the PIN the unlock authenticated
     // when a session can answer, the seed file's GCM tag when it cannot. The
     // cheap `verify_pin` hash that used to gate this is gone (I1).
-    let words = crate::services::unlock::throttle::classify_verification(
+    let trial = crate::services::unlock::throttle::classify_seed_export_cube(
         datadir,
-        local_cube_id,
-        || {
-            super::general::load_mnemonic_words(datadir, network, fingerprint, pin, local_cube_id)
-                .map(Zeroizing::new)
-        },
-        super::general::is_wrong_pin,
-    )
-    .map_err(|e| e.to_string())??;
+        cube_settings,
+        pin,
+        || super::general::load_mnemonic_words(datadir, network, fingerprint, pin, local_cube_id),
+    )?;
+    let words = match trial {
+        crate::services::unlock::throttle::SeedExportAttempt::Words(words) => words,
+        crate::services::unlock::throttle::SeedExportAttempt::Duress => {
+            return Ok(SeedBlobOutcome::Duress);
+        }
+        crate::services::unlock::throttle::SeedExportAttempt::Wrong(penalty) => {
+            return Err(if penalty.is_zero() {
+                "Incorrect PIN. Please try again.".into()
+            } else {
+                crate::services::unlock::throttle::lockout_message(penalty)
+            });
+        }
+        crate::services::unlock::throttle::SeedExportAttempt::Locked(remaining) => {
+            return Err(crate::services::unlock::throttle::lockout_message(
+                remaining,
+            ));
+        }
+    };
     let phrase = Zeroizing::new(words.join(" "));
     let blob = SeedBlob {
         version: BLOB_VERSION,
@@ -763,6 +834,7 @@ fn build_seed_blob_json(
     };
     serde_json::to_vec(&blob)
         .map(Zeroizing::new)
+        .map(SeedBlobOutcome::Ready)
         .map_err(|e| format!("seed blob: {}", e))
 }
 
