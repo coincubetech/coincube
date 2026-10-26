@@ -1094,6 +1094,7 @@ impl ImportedBitcoinPanel {
         match message {
             ImportMessage::Source(message) => {
                 let task = match message {
+                    wallet_source_form::Message::Focus(id) => iced::widget::operation::focus(id),
                     wallet_source_form::Message::SourceSelected(source) => {
                         if self.source.select_source(source) {
                             self.invalidate();
@@ -3126,6 +3127,145 @@ impl State for ImportedBitcoinPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_source_keyboard_actions_keep_import_setup_operable() {
+        use crate::app::view::shared::landing::capture;
+        use iced::{advanced::widget::Id, keyboard::key::Named};
+
+        let directory = NetworkDirectory::new(
+            std::env::temp_dir().join(format!("import-source-keyboard-{}", uuid::Uuid::new_v4())),
+        );
+        let mut panel =
+            ImportedBitcoinPanel::new(directory, "keyboard".into(), BitcoinImport::pending());
+        let size = (1024, 768);
+        let mounted = capture::inspect_full_window(
+            "import-source-keyboard",
+            panel.setup_view(),
+            size,
+            "light",
+            theme::Theme::light(),
+        );
+        for id in [
+            "tenshu.source.descriptor",
+            "tenshu.source.hardware",
+            "tenshu.source.receive",
+            "tenshu.source.change",
+        ] {
+            assert!(
+                mounted.has_focus(Id::new(id)),
+                "import source focus: {}",
+                id
+            );
+        }
+        for key in [Named::Enter, Named::Space] {
+            assert!(matches!(
+                capture::activate_with_key(
+                    panel.setup_view(),
+                    Id::new("tenshu.source.hardware"),
+                    size,
+                    false,
+                    key
+                )
+                .as_slice(),
+                [view::Message::ImportedBitcoin(ImportMessage::Source(
+                    wallet_source_form::Message::SourceSelected(Source::Hardware)
+                ))]
+            ));
+        }
+        let focus = panel.update_view(
+            ImportMessage::Source(wallet_source_form::Message::Focus(Id::new(
+                "tenshu.source.hardware",
+            ))),
+            None,
+            0,
+        );
+        assert!(focus.units() > 0);
+        assert_eq!(
+            panel.source.source(),
+            Source::Descriptor,
+            "focus never changes import source"
+        );
+        let _ = panel.update_view(
+            ImportMessage::Source(wallet_source_form::Message::SourceSelected(
+                Source::Hardware,
+            )),
+            None,
+            0,
+        );
+        let hardware = capture::inspect_full_window(
+            "import-source-keyboard-hardware",
+            panel.setup_view(),
+            size,
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(hardware.has_focus(Id::new("tenshu.hardware.purpose.bip84")));
+        assert!(hardware.has_focus(Id::new("tenshu.hardware.account")));
+    }
+
+    #[test]
+    fn imported_setup_hardware_read_restores_focus_after_loaded_result() {
+        use crate::services::public_hardware_source::tests::{
+            add_fake_device, assert_focus_task, loaded_for_test, unique_temp_root,
+        };
+        use crate::split_hardware::HardwareMessage;
+        use iced::advanced::widget::Id;
+
+        let root = unique_temp_root("import-keyboard-read-return");
+        for succeeds in [true, false] {
+            let directory = NetworkDirectory::new(root.join(format!("import-{succeeds}")));
+            let mut panel =
+                ImportedBitcoinPanel::new(directory, "keyboard".into(), BitcoinImport::pending());
+            panel.source.select_source(Source::Hardware);
+            add_fake_device(panel.source.hardware_mut(), &root);
+            let reading = panel.update_view(
+                ImportMessage::Source(wallet_source_form::Message::Hardware(
+                    HardwareMessage::Read("dev-1".into()),
+                )),
+                None,
+                0,
+            );
+            assert_focus_task(
+                reading,
+                panel.setup_view().map(Message::View),
+                Id::new("tenshu.hardware.purpose.bip84"),
+            );
+            let generation = panel.source.hardware_mut().generation_for_test();
+            let loaded = panel.update_view(
+                ImportMessage::Source(wallet_source_form::Message::Hardware(loaded_for_test(
+                    generation, succeeds,
+                ))),
+                None,
+                0,
+            );
+            assert_focus_task(
+                loaded,
+                panel.setup_view().map(Message::View),
+                Id::from("tenshu.hardware.read:5:dev-1".to_string()),
+            );
+            assert_eq!(panel.source.hardware_account().is_some(), succeeds);
+            if succeeds {
+                let _ = panel.update_view(
+                    ImportMessage::Source(wallet_source_form::Message::Hardware(
+                        HardwareMessage::PurposeSelected(crate::split_hardware::Purpose::Bip84),
+                    )),
+                    None,
+                    0,
+                );
+                assert!(panel.source.hardware_account().is_some());
+                let _ = panel.update_view(
+                    ImportMessage::Source(wallet_source_form::Message::Hardware(
+                        HardwareMessage::PurposeSelected(crate::split_hardware::Purpose::Bip49),
+                    )),
+                    None,
+                    0,
+                );
+                assert!(panel.source.hardware_account().is_none());
+            }
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     use coincube_core::miniscript::bitcoin::{
         absolute::LockTime,

@@ -6,11 +6,13 @@
 //! poison-split actions remain unavailable until the shared Claim ancestry,
 //! finalisation and reorg primitives are merged.
 
+use coincube_ui::theme::tenshu::button::ActionKind;
 use coincube_ui::{
-    component::{amount::format_u64_as_string, button, card, text::*},
+    component::{amount::format_u64_as_string, card, tenshu::ActionButton, text::*},
     theme,
     widget::{Column, Container, Element, Row, RowExt},
 };
+use iced::advanced::widget::Id;
 use iced::{Alignment, Length, Subscription, Task};
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -133,6 +135,7 @@ impl From<wallet_source_form::Message> for Message {
             wallet_source_form::Message::Hardware(message) => Self::Hardware(message),
             wallet_source_form::Message::ExternalEdited(value) => Self::ExternalEdited(value),
             wallet_source_form::Message::InternalEdited(value) => Self::InternalEdited(value),
+            wallet_source_form::Message::Focus(id) => Self::Focus(id),
         }
     }
 }
@@ -148,6 +151,19 @@ pub enum Message {
     Scanned(Result<Arc<ScanEvidence>, String>, u64, u64),
     Continue,
     Cancel,
+    Focus(Id),
+}
+
+const SCAN_ACTION_ID: &str = "tenshu.split.scan";
+const CANCEL_ACTION_ID: &str = "tenshu.split.cancel";
+const CONTINUE_ACTION_ID: &str = "tenshu.split.continue";
+
+fn focus(id: Id) -> Message {
+    Message::Focus(id)
+}
+
+fn focus_task(id: &'static str) -> Task<Message> {
+    iced::widget::operation::focus(Id::new(id))
 }
 
 #[derive(Debug, Clone)]
@@ -391,6 +407,7 @@ impl SplitWalletPanel {
         session_generation: u64,
     ) -> Task<Message> {
         match message {
+            Message::Focus(id) => iced::widget::operation::focus(id),
             Message::SourceSelected(source) => {
                 if self.imported_source.is_some() {
                     return Task::none();
@@ -437,6 +454,9 @@ impl SplitWalletPanel {
                 if self.imported_source.is_some() {
                     return Task::none();
                 }
+                if self.selected_target_id() == Some(target.id.as_str()) {
+                    return Task::none();
+                }
                 if self
                     .targets
                     .iter()
@@ -450,7 +470,7 @@ impl SplitWalletPanel {
             }
             Message::Cancel => {
                 self.cancel();
-                Task::none()
+                focus_task(SCAN_ACTION_ID)
             }
             Message::Scan => {
                 let Some(client) = client else {
@@ -493,7 +513,7 @@ impl SplitWalletPanel {
                     .map(|range| range.descriptor.clone());
                 self.status = Status::Scanning;
                 let imported = self.imported_source.is_some();
-                Task::perform(
+                let scan = Task::perform(
                     async move {
                         let result = if imported {
                             foreign_split_inventory::scan_imported(
@@ -509,7 +529,8 @@ impl SplitWalletPanel {
                             .map(Arc::new)
                     },
                     move |result| Message::Scanned(result, generation, session_generation),
-                )
+                );
+                Task::batch([scan, focus_task(CANCEL_ACTION_ID)])
             }
             Message::Scanned(result, generation, fired_session) => {
                 if self.imported_source.is_some() && !matches!(self.status, Status::Scanning) {
@@ -546,7 +567,14 @@ impl SplitWalletPanel {
                         self.status = Status::Failed(error);
                     }
                 }
-                Task::none()
+                let reviewable = matches!(&self.status, Status::Complete(summary) if summary.reviewable() && (self.imported_source.is_none() || summary.inventory.splittable > 0));
+                crate::services::public_hardware_source::focus_if_unfocused(Id::new(
+                    if reviewable {
+                        CONTINUE_ACTION_ID
+                    } else {
+                        SCAN_ACTION_ID
+                    },
+                ))
             }
             Message::Continue => Task::none(),
         }
@@ -757,13 +785,36 @@ pub fn view_with_privacy(panel: &SplitWalletPanel, mask_amounts: bool) -> Elemen
             )
     };
 
-    let target = iced::widget::pick_list(
-        panel.targets.clone(),
-        panel.selected.clone(),
-        Message::TargetSelected,
-    )
-    .placeholder("Choose a Bitcoin Blake2b Cube")
-    .width(Length::Fill);
+    let target = panel.targets.iter().fold(
+        Column::new()
+            .spacing(6)
+            .push(caption("Choose a Bitcoin Blake2b Cube").style(theme::text::secondary)),
+        |choices, candidate| {
+            let selected = panel
+                .selected
+                .as_ref()
+                .is_some_and(|target| target.id == candidate.id);
+            choices.push(
+                ActionButton::new(
+                    Id::from(format!(
+                        "tenshu.split.target:{}:{}",
+                        candidate.id.len(),
+                        candidate.id
+                    )),
+                    format!(
+                        "{}{}",
+                        if selected { "Selected: " } else { "" },
+                        candidate.name
+                    ),
+                    ActionKind::Secondary,
+                    focus,
+                )
+                .compact()
+                .width(Length::Fill)
+                .on_press(Message::TargetSelected(candidate.clone())),
+            )
+        },
+    );
 
     let form = if let Some(source) = imported {
         Column::new()
@@ -954,36 +1005,47 @@ pub fn view_with_privacy(panel: &SplitWalletPanel, mask_amounts: bool) -> Elemen
 
     let scanning = matches!(panel.status, Status::Scanning);
     let reviewable = matches!(&panel.status, Status::Complete(summary) if summary.reviewable() && (imported.is_none() || summary.inventory.splittable > 0));
-    let scan_button = if imported.is_some() && reviewable {
-        button::secondary(None, "Scan again")
-    } else if imported.is_some() {
-        button::primary_compact(
-            None,
-            if scanning {
-                "Checking availability…"
-            } else {
-                "Check BTCB2 availability"
-            },
-        )
-    } else if reviewable {
-        button::secondary(None, "Scan again")
+    let scan_button = ActionButton::new(
+        SCAN_ACTION_ID,
+        if reviewable {
+            "Scan again"
+        } else if imported.is_some() && scanning {
+            "Checking availability…"
+        } else if imported.is_some() {
+            "Check BTCB2 availability"
+        } else if scanning {
+            "Scanning…"
+        } else {
+            "Scan wallet"
+        },
+        if reviewable {
+            ActionKind::Secondary
+        } else {
+            ActionKind::Primary
+        },
+        focus,
+    );
+    let scan_button = if imported.is_some() {
+        scan_button.compact()
     } else {
-        button::primary(
-            None,
-            if scanning {
-                "Scanning…"
-            } else {
-                "Scan wallet"
-            },
-        )
+        scan_button
     };
     let actions = Row::new()
         .spacing(10)
         .align_y(Alignment::Center)
         .push(scan_button.on_press_maybe((!scanning).then_some(Message::Scan)))
-        .push_maybe(scanning.then(|| button::secondary(None, "Cancel").on_press(Message::Cancel)));
+        .push_maybe(scanning.then(|| {
+            ActionButton::new(CANCEL_ACTION_ID, "Cancel", ActionKind::Secondary, focus)
+                .on_press(Message::Cancel)
+        }));
     let actions = actions.push_maybe(reviewable.then(|| {
-        button::primary(None, "Continue to destination Cube").on_press(Message::Continue)
+        ActionButton::new(
+            CONTINUE_ACTION_ID,
+            "Continue to destination Cube",
+            ActionKind::Primary,
+            focus,
+        )
+        .on_press(Message::Continue)
     }));
 
     let content = if imported.is_some() {
@@ -1494,6 +1556,451 @@ mod tests {
         }
     }
 
+    #[test]
+    fn keyboard_actions_cover_foreign_and_imported_split_without_bypassing_gates() {
+        use crate::app::view::shared::landing::capture;
+        use iced::keyboard::key::Named;
+
+        fn apply<T: 'static>(
+            element: &mut Element<'_, Message>,
+            tree: &mut iced::advanced::widget::Tree,
+            node: &iced::advanced::layout::Node,
+            renderer: &iced::Renderer,
+            mut operation: Box<dyn iced::advanced::widget::Operation<T>>,
+        ) -> Option<T> {
+            use iced::advanced::{widget::operation, Layout};
+            loop {
+                element.as_widget_mut().operate(
+                    tree,
+                    Layout::new(node),
+                    renderer,
+                    &mut operation::black_box(operation.as_mut()),
+                );
+                match operation.finish() {
+                    operation::Outcome::None => return None,
+                    operation::Outcome::Some(result) => return Some(result),
+                    operation::Outcome::Chain(next) => operation = next,
+                }
+            }
+        }
+
+        fn first_tab_stops(mut element: Element<'_, Message>, count: usize) -> Vec<Id> {
+            use iced::advanced::{
+                layout,
+                renderer::Headless,
+                widget::{operation::focusable, Tree},
+            };
+            for bytes in coincube_ui::font::load() {
+                iced::advanced::graphics::text::font_system()
+                    .write()
+                    .unwrap()
+                    .load_font(bytes);
+            }
+            let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+                coincube_ui::font::REGULAR,
+                iced::Pixels(16.0),
+                Some("tiny-skia"),
+            ))
+            .unwrap();
+            let mut tree = Tree::new(element.as_widget());
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(iced::Size::ZERO, iced::Size::new(760.0, 3000.0)),
+            );
+            let mut ids = Vec::new();
+            for _ in 0..count {
+                apply(
+                    &mut element,
+                    &mut tree,
+                    &node,
+                    &renderer,
+                    Box::new(focusable::focus_next::<()>()),
+                );
+                ids.push(
+                    apply(
+                        &mut element,
+                        &mut tree,
+                        &node,
+                        &renderer,
+                        Box::new(focusable::find_focused()),
+                    )
+                    .expect("Tab focuses a control"),
+                );
+            }
+            ids
+        }
+
+        let _guard = crate::app::session::test_guard();
+        let mut panel = SplitWalletPanel::new();
+        panel.set_targets(vec![target()]);
+        let size = (1024, 768);
+        let mounted = capture::inspect_full_window(
+            "foreign-split-keyboard-ready",
+            view(&panel),
+            size,
+            "dark",
+            theme::Theme::dark(),
+        );
+        let target_id = Id::from(format!(
+            "tenshu.split.target:{}:{}",
+            target().id.len(),
+            target().id
+        ));
+        assert_eq!(
+            first_tab_stops(view(&panel), 6),
+            vec![
+                target_id.clone(),
+                Id::new("tenshu.source.descriptor"),
+                Id::new("tenshu.source.hardware"),
+                Id::new("tenshu.source.receive"),
+                Id::new("tenshu.source.change"),
+                Id::new(SCAN_ACTION_ID),
+            ]
+        );
+        for id in [
+            target_id.clone(),
+            Id::new("tenshu.source.descriptor"),
+            Id::new("tenshu.source.hardware"),
+            Id::new("tenshu.source.receive"),
+            Id::new("tenshu.source.change"),
+            Id::new(SCAN_ACTION_ID),
+        ] {
+            assert!(mounted.has_focus(id), "missing keyboard stop");
+        }
+        let order = |id: Id| {
+            mounted
+                .focus
+                .iter()
+                .position(|(candidate, _)| candidate == &id)
+                .unwrap()
+        };
+        assert!(order(target_id.clone()) < order(Id::new("tenshu.source.descriptor")));
+        assert!(
+            order(Id::new("tenshu.source.descriptor")) < order(Id::new("tenshu.source.hardware"))
+        );
+        assert!(order(Id::new("tenshu.source.hardware")) < order(Id::new("tenshu.source.receive")));
+        assert!(order(Id::new("tenshu.source.receive")) < order(Id::new("tenshu.source.change")));
+        assert!(order(Id::new("tenshu.source.change")) < order(Id::new(SCAN_ACTION_ID)));
+        assert!(!mounted.has_focus(Id::new(CANCEL_ACTION_ID)));
+        assert!(!mounted.has_focus(Id::new(CONTINUE_ACTION_ID)));
+        for key in [Named::Enter, Named::Space] {
+            assert!(matches!(
+                capture::activate_with_key(view(&panel), target_id.clone(), size, false, key)
+                    .as_slice(),
+                [Message::TargetSelected(_)]
+            ));
+            assert!(matches!(
+                capture::activate_with_key(
+                    view(&panel),
+                    Id::new("tenshu.source.hardware"),
+                    size,
+                    false,
+                    key
+                )
+                .as_slice(),
+                [Message::SourceSelected(Source::Hardware)]
+            ));
+            assert!(matches!(
+                capture::activate_with_key(view(&panel), Id::new(SCAN_ACTION_ID), size, false, key)
+                    .as_slice(),
+                [Message::Scan]
+            ));
+        }
+
+        panel.source_form.select_source(Source::Hardware);
+        let hardware = capture::inspect_full_window(
+            "foreign-split-keyboard-hardware",
+            view(&panel),
+            size,
+            "light",
+            theme::Theme::light(),
+        );
+        for id in [
+            "tenshu.hardware.purpose.bip84",
+            "tenshu.hardware.purpose.bip49",
+            "tenshu.hardware.purpose.bip44",
+            "tenshu.hardware.account",
+        ] {
+            assert!(
+                hardware.has_focus(Id::new(id)),
+                "missing hardware keyboard stop: {}",
+                id
+            );
+        }
+        for key in [Named::Enter, Named::Space] {
+            assert!(matches!(
+                capture::activate_with_key(
+                    view(&panel),
+                    Id::new("tenshu.hardware.purpose.bip49"),
+                    size,
+                    false,
+                    key
+                )
+                .as_slice(),
+                [Message::Hardware(HardwareMessage::PurposeSelected(
+                    crate::split_hardware::Purpose::Bip49
+                ))]
+            ));
+        }
+
+        panel.status = Status::Scanning;
+        let busy = capture::inspect_full_window(
+            "foreign-split-keyboard-scanning",
+            view(&panel),
+            size,
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(!busy.has_focus(Id::new(SCAN_ACTION_ID)));
+        assert!(busy.has_focus(Id::new(CANCEL_ACTION_ID)));
+        assert!(!busy.has_focus(Id::new(CONTINUE_ACTION_ID)));
+        for key in [Named::Enter, Named::Space] {
+            assert!(matches!(
+                capture::activate_with_key(
+                    view(&panel),
+                    Id::new(CANCEL_ACTION_ID),
+                    size,
+                    false,
+                    key
+                )
+                .as_slice(),
+                [Message::Cancel]
+            ));
+        }
+        assert!(
+            panel.update(Message::Cancel, None, 0).units() > 0,
+            "cancel restores scan focus"
+        );
+        assert!(capture::inspect_full_window(
+            "foreign-split-keyboard-return",
+            view(&panel),
+            size,
+            "dark",
+            theme::Theme::dark()
+        )
+        .has_focus(Id::new(SCAN_ACTION_ID)));
+
+        let eligible = ScanSummary {
+            generation: panel.generation,
+            addresses: 40,
+            coins: 1,
+            confirmed: 1,
+            sats: 123_000,
+            pre_fork: 1,
+            pre_fork_sats: 123_000,
+            post_fork: 0,
+            unclassified: 0,
+            signable: true,
+            tip: "synthetic-btcb2-tip".into(),
+            inventory: InventorySummary {
+                fork_height: 100,
+                bitcoin_tip: "synthetic-bitcoin-tip".into(),
+                splittable: 1,
+                splittable_sats: 123_000,
+                spent_on_bitcoin: 0,
+                spent_on_btcb2: 0,
+                btcb2_post_fork: 0,
+                bitcoin_only_candidates: 0,
+                btcb2_only_candidates: 0,
+                pending: 0,
+                fresh_receive: FreshIndex::NotProven,
+            },
+        };
+        panel.status = Status::Complete(eligible.clone());
+        let ready = capture::inspect_full_window(
+            "foreign-split-keyboard-eligible",
+            view(&panel),
+            size,
+            "light",
+            theme::Theme::light(),
+        );
+        assert!(ready.has_focus(Id::new(CONTINUE_ACTION_ID)));
+        for key in [Named::Enter, Named::Space] {
+            assert!(matches!(
+                capture::activate_with_key(
+                    view(&panel),
+                    Id::new(CONTINUE_ACTION_ID),
+                    size,
+                    false,
+                    key
+                )
+                .as_slice(),
+                [Message::Continue]
+            ));
+        }
+        let mut unsafe_result = eligible.clone();
+        unsafe_result.signable = false;
+        panel.status = Status::Complete(unsafe_result);
+        assert!(!capture::inspect_full_window(
+            "foreign-split-keyboard-taproot",
+            view(&panel),
+            size,
+            "dark",
+            theme::Theme::dark()
+        )
+        .has_focus(Id::new(CONTINUE_ACTION_ID)));
+
+        panel.set_imported_source(imported_source(240)).unwrap();
+        let imported = capture::inspect_full_window(
+            "imported-claim-keyboard-ready",
+            view(&panel),
+            size,
+            "light",
+            theme::Theme::light(),
+        );
+        assert!(imported.has_focus(Id::new(SCAN_ACTION_ID)));
+        assert!(!imported.has_focus(target_id));
+        assert!(!imported.has_focus(Id::new("tenshu.source.descriptor")));
+        assert!(!imported.has_focus(Id::new(CONTINUE_ACTION_ID)));
+        for key in [Named::Enter, Named::Space] {
+            assert!(matches!(
+                capture::activate_with_key(view(&panel), Id::new(SCAN_ACTION_ID), size, false, key)
+                    .as_slice(),
+                [Message::Scan]
+            ));
+        }
+        let mut no_splittable = eligible.clone();
+        no_splittable.inventory.splittable = 0;
+        no_splittable.inventory.splittable_sats = 0;
+        panel.status = Status::Complete(no_splittable);
+        assert!(!capture::inspect_full_window(
+            "imported-claim-keyboard-no-splittable",
+            view(&panel),
+            size,
+            "dark",
+            theme::Theme::dark()
+        )
+        .has_focus(Id::new(CONTINUE_ACTION_ID)));
+        panel.status = Status::Complete(eligible);
+        assert!(capture::inspect_full_window(
+            "imported-claim-keyboard-eligible",
+            view(&panel),
+            size,
+            "light",
+            theme::Theme::light()
+        )
+        .has_focus(Id::new(CONTINUE_ACTION_ID)));
+        for key in [Named::Enter, Named::Space] {
+            assert!(matches!(
+                capture::activate_with_key(
+                    view(&panel),
+                    Id::new(CONTINUE_ACTION_ID),
+                    size,
+                    false,
+                    key
+                )
+                .as_slice(),
+                [Message::Continue]
+            ));
+        }
+        panel.status = Status::Scanning;
+        let task = panel.update(
+            Message::Scanned(Err("synthetic scan failure".into()), panel.generation, 0),
+            None,
+            0,
+        );
+        assert!(
+            task.units() > 0,
+            "completed scan restores a mounted action's focus"
+        );
+        assert!(capture::inspect_full_window(
+            "imported-claim-keyboard-failed-return",
+            view(&panel),
+            size,
+            "dark",
+            theme::Theme::dark()
+        )
+        .has_focus(Id::new(SCAN_ACTION_ID)));
+    }
+
+    #[test]
+    fn split_hardware_read_restores_focus_after_loaded_result() {
+        use crate::services::public_hardware_source::tests::{
+            add_fake_device, assert_focus_task, loaded_for_test, unique_temp_root,
+        };
+
+        let _guard = crate::app::session::test_guard();
+        let root = unique_temp_root("split-keyboard-read-return");
+        for succeeds in [true, false] {
+            let mut panel = SplitWalletPanel::new();
+            panel.set_targets(vec![target()]);
+            panel.source_form.select_source(Source::Hardware);
+            add_fake_device(panel.hardware_mut(), &root);
+            let reading = panel.update(
+                Message::Hardware(HardwareMessage::Read("dev-1".into())),
+                None,
+                0,
+            );
+            assert_focus_task(
+                reading,
+                view(&panel),
+                Id::new("tenshu.hardware.purpose.bip84"),
+            );
+            let generation = panel.hardware_mut().generation_for_test();
+            let loaded = panel.update(
+                Message::Hardware(loaded_for_test(generation, succeeds)),
+                None,
+                0,
+            );
+            assert_focus_task(
+                loaded,
+                view(&panel),
+                Id::from("tenshu.hardware.read:5:dev-1".to_string()),
+            );
+            assert_eq!(panel.source_form.hardware_account().is_some(), succeeds);
+        }
+        let _ = std::fs::remove_dir(root);
+    }
+
+    #[test]
+    fn scan_completion_preserves_focus_in_another_tab_and_ignores_stale_result() {
+        use crate::services::public_hardware_source::tests::{
+            assert_focus_task, assert_focus_task_from,
+        };
+
+        let _guard = crate::app::session::test_guard();
+        let mut panel = SplitWalletPanel::new();
+        panel.set_targets(vec![target()]);
+        let generation = panel.generation;
+        let result = panel.update(
+            Message::Scanned(Err("failed".into()), generation, 0),
+            None,
+            0,
+        );
+        let other = Id::new("other-tab.pin");
+        assert_focus_task_from(
+            result,
+            iced::widget::text_input("PIN", "")
+                .id(other.clone())
+                .on_input(Message::ExternalEdited)
+                .into(),
+            Some(other.clone()),
+            other.clone(),
+        );
+
+        let mounted = panel.update(
+            Message::Scanned(Err("failed".into()), generation, 0),
+            None,
+            0,
+        );
+        assert_focus_task(mounted, view(&panel), Id::new(SCAN_ACTION_ID));
+        let stale = panel.update(
+            Message::Scanned(Err("stale".into()), generation.wrapping_sub(1), 0),
+            None,
+            0,
+        );
+        assert_focus_task_from(
+            stale,
+            iced::widget::text_input("PIN", "")
+                .id(other.clone())
+                .on_input(Message::ExternalEdited)
+                .into(),
+            Some(other.clone()),
+            other,
+        );
+    }
+
     /// Check source-first layout and action dispatch at narrow and standard
     /// widths in both themes, including busy and failed states. Optional preview
     /// output uses the same layout that the bounds and input assertions inspect.
@@ -1687,14 +2194,20 @@ mod tests {
                             );
                         }
                         if expected_cancel {
-                            assert!(matches!(messages.as_slice(), [Message::Cancel]));
+                            assert!(matches!(
+                                messages.as_slice(),
+                                [Message::Focus(_), Message::Cancel]
+                            ));
                         } else if state == "scanning" {
                             assert!(
                                 messages.is_empty(),
                                 "busy action must not start another check"
                             );
                         } else {
-                            assert!(matches!(messages.as_slice(), [Message::Scan]));
+                            assert!(matches!(
+                                messages.as_slice(),
+                                [Message::Focus(_), Message::Scan]
+                            ));
                         }
                     }
                 }
@@ -2538,9 +3051,50 @@ mod tests {
         );
 
         assert!(matches!(panel.status(), Status::Complete(_)));
-        // The state machine intentionally has no authorize/sign/broadcast
-        // state. A completed discovery can only be invalidated back to Editing.
+        // The state machine intentionally has no authorize/sign/broadcast state.
+        // Re-activating the selected target keeps the completed evidence.
         let _ = panel.update(Message::TargetSelected(target()), None, 9);
+        assert!(matches!(panel.status(), Status::Complete(_)));
+        let other = TargetCube {
+            id: "cube-2".into(),
+            name: "Other Vault".into(),
+        };
+        panel.targets.push(other.clone());
+        let _ = panel.update(Message::TargetSelected(other), None, 9);
         assert_eq!(panel.status(), &Status::Editing);
+    }
+
+    #[test]
+    fn choosing_current_hardware_purpose_keeps_completed_scan_and_ready_account() {
+        let _guard = crate::app::session::test_guard();
+        let mut panel = SplitWalletPanel::new();
+        panel.set_targets(vec![target()]);
+        panel.source_form.select_source(Source::Hardware);
+        panel.hardware_mut().ready_for_test(hardware_account());
+        let generation = panel.generation;
+        let _ = panel.update(
+            Message::Scanned(Ok(completed_evidence(generation)), generation, 0),
+            None,
+            0,
+        );
+        assert!(matches!(panel.status(), Status::Complete(_)));
+        let _ = panel.update(
+            Message::Hardware(HardwareMessage::PurposeSelected(
+                split_hardware::Purpose::Bip84,
+            )),
+            None,
+            0,
+        );
+        assert!(matches!(panel.status(), Status::Complete(_)));
+        assert!(panel.source_form.hardware_account().is_some());
+        let _ = panel.update(
+            Message::Hardware(HardwareMessage::PurposeSelected(
+                split_hardware::Purpose::Bip49,
+            )),
+            None,
+            0,
+        );
+        assert_eq!(panel.status(), &Status::Editing);
+        assert!(panel.source_form.hardware_account().is_none());
     }
 }
