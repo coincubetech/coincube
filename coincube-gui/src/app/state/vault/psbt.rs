@@ -5733,7 +5733,7 @@ mod tests {
             state.tx.psbt = unified(&f.psbt, &f.signers[0]);
             let task = state.update(focus_daemon(), &cache, Message::Reconcile);
             let close = picker_close_id(&state);
-            assert_eq!(focus_after_restore(task, close, false, false), None);
+            assert_eq!(focus_after_restore(task, close, true, false), None);
             assert!(state.signer_focus_return);
 
             // The satisfying merge closes the picker and returns to Broadcast.
