@@ -1311,7 +1311,9 @@ fn render_at_width<'a>(
             .spacing(DETAIL_GAP)
             .into()
         } else {
-            main.into()
+            // Keep the row's widget tag stable when selection adds detail;
+            // otherwise Iced discards the list's current scroll offset.
+            row![main].into()
         };
         column![heading, split].spacing(16).into()
     } else {
@@ -1698,23 +1700,6 @@ mod tests {
             &cache,
             crate::app::message::Message::ActivitySparkLoaded(0, Ok((payments, false))),
         ));
-        activity.selected_id = Some(selected_id.clone());
-        for (appearance, theme) in [
-            ("dark", coincube_ui::theme::Theme::dark()),
-            ("light", coincube_ui::theme::Theme::light()),
-        ] {
-            let mounted = capture::inspect_wide_content(
-                "r09-activity-deep-wide-detail",
-                render_at_width(&activity, &cache, 1144.0),
-                (1440, 900),
-                appearance,
-                theme,
-                1144,
-            );
-            assert!(mounted.contains("Payment 20"));
-            assert!(mounted.contains("× Close"));
-        }
-
         for bytes in font::load() {
             iced::advanced::graphics::text::font_system()
                 .write()
@@ -1754,10 +1739,7 @@ mod tests {
                 .expect("independent Activity pane")
         }
         let (_, list_bounds, list_content, _) = pane(&before, ACTIVITY_LIST_SCROLL_ID);
-        let (_, detail_bounds, _, detail_before) = pane(&before, ACTIVITY_DETAIL_SCROLL_ID);
         assert!(list_content.height > list_bounds.height + 500.0);
-        assert!((list_bounds.y - detail_bounds.y).abs() < 1.0);
-        assert!(detail_bounds.y + detail_bounds.height <= 800.0);
         let row_bounds = before
             .rows
             .iter()
@@ -1776,14 +1758,62 @@ mod tests {
         element
             .as_widget_mut()
             .operate(&mut tree, Layout::new(&node), &renderer, &mut scroll);
-        let after = inspect(&mut element, &mut tree);
-        let (_, _, _, list_after) = pane(&after, ACTIVITY_LIST_SCROLL_ID);
-        let (_, _, _, detail_after) = pane(&after, ACTIVITY_DETAIL_SCROLL_ID);
-        assert!(list_after.y > 500.0);
-        assert_eq!(detail_before.y, detail_after.y);
-        let selected_visible_y = row_bounds.y - list_after.y;
-        assert!(selected_visible_y >= list_bounds.y);
-        assert!(selected_visible_y < list_bounds.y + list_bounds.height);
+        let scrolled = inspect(&mut element, &mut tree);
+        let (_, _, _, list_scrolled) = pane(&scrolled, ACTIVITY_LIST_SCROLL_ID);
+        assert!(list_scrolled.y > 500.0);
+        drop(element);
+
+        // Match the real no-selection → selection rerender. The list scroll
+        // state must survive Iced's tree diff when the detail pane appears.
+        activity.selected_id = Some(selected_id.clone());
+        let mut selected_element: Element<'_, Message> =
+            scrollable(render_at_width(&activity, &cache, 1144.0))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into();
+        tree.diff(selected_element.as_widget());
+        let selected_node = selected_element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, Size::new(1144.0, 800.0)),
+        );
+        let mut after = Probe::default();
+        selected_element.as_widget_mut().operate(
+            &mut tree,
+            Layout::new(&selected_node),
+            &renderer,
+            &mut after,
+        );
+        let (_, selected_list_bounds, _, list_after) = pane(&after, ACTIVITY_LIST_SCROLL_ID);
+        let (_, detail_bounds, _, detail_after) = pane(&after, ACTIVITY_DETAIL_SCROLL_ID);
+        assert!((list_after.y - list_scrolled.y).abs() < 1.0);
+        assert_eq!(detail_after.y, 0.0);
+        assert!((selected_list_bounds.y - detail_bounds.y).abs() < 1.0);
+        assert!(detail_bounds.y + detail_bounds.height <= 800.0);
+        let selected_row = after
+            .rows
+            .iter()
+            .find(|(id, _)| *id == row_focus_id(&selected_id))
+            .expect("selected row after tree diff")
+            .1;
+        let selected_visible_y = selected_row.y - list_after.y;
+        assert!(selected_visible_y >= selected_list_bounds.y);
+        assert!(selected_visible_y < selected_list_bounds.y + selected_list_bounds.height);
+        for (appearance, theme) in [
+            ("dark", coincube_ui::theme::Theme::dark()),
+            ("light", coincube_ui::theme::Theme::light()),
+        ] {
+            let mounted = capture::inspect_wide_content(
+                "r09-activity-deep-wide-detail",
+                render_at_width(&activity, &cache, 1144.0),
+                (1440, 900),
+                appearance,
+                theme,
+                1144,
+            );
+            assert!(mounted.contains("Payment 20"));
+            assert!(mounted.contains("× Close"));
+        }
     }
 
     #[test]
