@@ -513,6 +513,7 @@ mod tests {
             direction: direction.to_string(),
             method: method.to_string(),
             description: None,
+            details: Default::default(),
         }
     }
 

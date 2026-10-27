@@ -1348,6 +1348,7 @@ mod tests {
             direction: "send".into(),
             method: "lightning".into(),
             description: Some("Coffee".into()),
+            details: Default::default(),
         }
     }
 

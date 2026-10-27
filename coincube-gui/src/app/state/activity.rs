@@ -510,6 +510,7 @@ mod tests {
             direction: "receive".into(),
             method: "lightning".into(),
             description: None,
+            details: Default::default(),
         }
     }
 
