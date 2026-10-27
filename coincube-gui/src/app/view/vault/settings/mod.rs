@@ -5,8 +5,7 @@ pub mod general;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 
-use iced::alignment::{Horizontal, Vertical};
-use iced::widget::{container, pick_list, Column, Toggler};
+use iced::widget::{pick_list, Column};
 use iced::{
     alignment,
     widget::{radio, scrollable, tooltip as iced_tooltip, Space},
@@ -26,7 +25,7 @@ use coincube_ui::{
     component::{badge, button, card, date_picker, form, separation, text::*},
     icon,
     theme::{self},
-    widget::{Button, ColumnExt, Container, Element, ProgressBar, Row, RowExt, TextInput},
+    widget::{Button, Container, Element, ProgressBar, Row, TextInput},
 };
 
 use crate::{
@@ -50,34 +49,6 @@ fn header<'a>(title: &'a str, _msg: SettingsMessage) -> Row<'a, Message> {
     // padding. The tertiary rail already surfaces the active sub-page,
     // so no breadcrumb is rendered here.
     Row::new().push(h3(title).bold())
-}
-
-fn export_section<'a>(
-    title: &'a str,
-    description: &'a str,
-    icon: coincube_ui::widget::Text<'static>,
-    msg: Message,
-) -> Container<'a, Message> {
-    Container::new(
-        Button::new(
-            Row::new()
-                .push(badge::badge(icon))
-                .push(
-                    Column::new()
-                        .push(text(title).bold())
-                        .push(caption(description)),
-                )
-                .padding(10)
-                .spacing(20)
-                .align_y(Alignment::Center)
-                .width(Length::Fill),
-        )
-        .width(Length::Fill)
-        .style(theme::button::transparent_border)
-        .on_press(msg),
-    )
-    .width(Length::Fill)
-    .style(theme::card::simple)
 }
 
 pub fn list<'a>(
@@ -122,18 +93,11 @@ pub fn bitcoind_settings<'a>(
     cache: &'a Cache,
     settings: Vec<Element<'a, Message>>,
 ) -> Element<'a, Message> {
-    let header = header("Node", SettingsMessage::EditBitcoindSettings);
-
+    // Each panel is a titled group that carries its own 32px top margin.
     dashboard(
         menu,
         cache,
-        Column::new()
-            .spacing(20)
-            .push(header)
-            .push(p1_regular(
-                "Review the active Bitcoin backend and sync status before changing node settings. Backend switches and rescans require an explicit action.",
-            ))
-            .push(Column::with_children(settings).spacing(20)),
+        Column::with_children(settings).width(Length::Fill),
     )
 }
 
@@ -142,97 +106,196 @@ pub fn import_export<'a>(
     cache: &'a Cache,
     supports_inheritance: bool,
 ) -> Element<'a, Message> {
-    let header = header("Data & exports", SettingsMessage::ImportExportSection);
-
-    let description = p1_regular(
-        "Backups, wallet files, and records serve different purposes. Records do not replace recovery material.",
-    );
+    use crate::app::view::settings::page;
+    let settings = |m: SettingsMessage| Some(Message::Settings(m));
 
     // Recovery Kit belongs to Cube → Backup & protection. Navigate to its
     // rendered owner; never start its wizard from this Vault panel.
-    let backup_to_connect = export_section(
-        "Recovery Kit",
-        "Open Backup & protection to review the Connect Recovery Kit.",
-        icon::backup_icon(),
-        Message::Menu(Menu::Cube(CubeSubMenu::Settings(
-            CubeSettingsOption::Recovery,
-        ))),
-    );
+    let mut protection: Vec<Element<'a, Message>> = vec![page::row("Recovery Kit")
+        .description("Part of Cube backup.")
+        .control(page::button(
+            "tenshu.settings.vault-data.backup",
+            "Open Backup & protection",
+            Some(Message::Menu(Menu::Cube(CubeSubMenu::Settings(
+                CubeSettingsOption::Recovery,
+            )))),
+        ))
+        .into()];
+    if supports_inheritance {
+        protection.push(
+            page::row("Encrypted descriptor")
+                .description("Needed with the keys to restore this Vault. Decrypts with one of your signing devices or xpubs.")
+                .control(page::button(
+                    "tenshu.settings.vault-data.encrypted",
+                    "Export encrypted…",
+                    settings(SettingsMessage::ExportEncryptedDescriptor),
+                ))
+                .into(),
+        );
+    }
 
-    let export_encrypted_descriptor = export_section(
-        "Encrypted descriptor",
-        ".bed file, can be decrypted with one of your signing devices or xpubs.",
-        icon::backup_icon(),
-        Message::Settings(SettingsMessage::ExportEncryptedDescriptor),
-    );
+    let mut content = Column::new().width(Length::Fill).push(page::group(
+        "Protection material",
+        Some("Anyone holding this can see every address and balance in the Vault.".into()),
+        page::rows(protection),
+    ));
 
-    let export_descriptor = export_section(
-        "Plaintext descriptor",
-        "Unencrypted wallet descriptor for use with other wallets. Anyone with this file can see your wallet policy and public keys.",
-        icon::backup_icon(),
-        Message::Settings(SettingsMessage::ReviewPlaintextDescriptorExport),
-    );
+    let mut portability: Vec<Element<'a, Message>> = Vec::new();
+    if supports_inheritance {
+        portability.push(
+            page::row("Wallet file")
+                .description("Unencrypted. Moves wallet information to another device; imports are checked against this network first.")
+                .control(page::button(
+                    "tenshu.settings.vault-data.export-wallet",
+                    "Export…",
+                    settings(SettingsMessage::ExportWallet),
+                ))
+                .control(page::button(
+                    "tenshu.settings.vault-data.import-wallet",
+                    "Import…",
+                    settings(SettingsMessage::ImportWallet),
+                ))
+                .into(),
+        );
+    }
+    let mut formats: Vec<Element<'a, Message>> = vec![
+        page::row("Labels")
+            .description("BIP 329 format other wallets can read.")
+            .control(page::button(
+                "tenshu.settings.vault-data.labels",
+                "Export…",
+                settings(SettingsMessage::ExportLabels),
+            ))
+            .into(),
+        page::row("Transactions")
+            .description("CSV of past transactions. Fiat uses this Cube's rate source.")
+            .control(page::button(
+                "tenshu.settings.vault-data.transactions",
+                "Export…",
+                settings(SettingsMessage::ExportTransactions),
+            ))
+            .into(),
+    ];
+    if supports_inheritance {
+        formats.push(
+            page::row("Plaintext descriptor")
+                .description("For hardware registration or other wallets. Reveals the wallet policy and public keys.")
+                .control(page::button(
+                    "tenshu.settings.vault-data.plaintext",
+                    "Export…",
+                    settings(SettingsMessage::ReviewPlaintextDescriptorExport),
+                ))
+                .into(),
+        );
+    }
+    let mut records = Column::new().width(Length::Fill);
+    if !portability.is_empty() {
+        records = records.push(page::rows(portability)).push(
+            Container::new(
+                Row::new()
+                    .spacing(12)
+                    .align_y(Alignment::Center)
+                    .push(Container::new(page::rule()).width(Length::Fill))
+                    .push(coincube_ui::component::tenshu::caption("Other formats"))
+                    .push(Container::new(page::rule()).width(Length::Fill)),
+            )
+            .padding(iced::Padding::default().top(24.0).bottom(12.0)),
+        );
+    }
+    records = records.push(page::rows(formats));
+    content = content.push(page::group(
+        "Portability and records",
+        Some("Plaintext files reveal the Vault's full history. They hold no private keys, and records do not replace recovery material.".into()),
+        records,
+    ));
 
-    let export_transactions = export_section(
-        "Transaction table",
-        "CSV file of past transactions for your records.",
-        icon::backup_icon(),
-        Message::Settings(SettingsMessage::ExportTransactions),
-    );
+    dashboard(menu, cache, content)
+}
 
-    let export_labels = export_section(
-        "BIP 329 labels",
-        "Bip 329 label export, compatible with other wallets.",
-        icon::backup_icon(),
-        Message::Settings(SettingsMessage::ExportLabels),
-    );
-
-    let export_wallet = export_section(
-        "Export wallet",
-        "Unencrypted wallet file for transferring wallet information to another device.",
-        icon::backup_icon(),
-        Message::Settings(SettingsMessage::ExportWallet),
-    );
-
-    let import_wallet = export_section(
-        "Import wallet",
-        "Choose a wallet file to update wallet information on this device.",
-        icon::restore_icon(),
-        Message::Settings(SettingsMessage::ImportWallet),
-    );
-
-    let group = |title: &'static str, note: &'static str| {
-        Column::new()
-            .spacing(5)
-            .push(h4_bold(title))
-            .push(caption(note))
+/// Vault → Settings → Connections: the Connect account, the Cube service
+/// session and the node backend, with the Node tab one click away.
+pub fn connections<'a>(cache: &'a Cache) -> Element<'a, Message> {
+    use crate::app::view::settings::page;
+    use crate::app::ConnectionStatus;
+    let account = Row::new()
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .push(page::muted("Connect account"))
+        .push(if cache.connect_authenticated {
+            page::status(page::Status::Ok, "Signed in")
+        } else {
+            page::status(page::Status::Unknown, "Signed out")
+        })
+        .push(Space::new().width(Length::Fill))
+        .push(page::link(
+            "tenshu.settings.vault-connections.connect",
+            if cache.connect_authenticated {
+                "Manage in Connect"
+            } else {
+                "Sign in"
+            },
+            Message::OpenConnectSignIn,
+        ));
+    let session = match (&cache.connect_stream_status, cache.connect_authenticated) {
+        (_, false) => page::row("Cube service session")
+            .accessory(page::status(page::Status::Unknown, "Not checked"))
+            .description("Checked after sign-in."),
+        (ConnectionStatus::Connected, true) => page::row("Cube service session")
+            .accessory(page::status(page::Status::Ok, "Connected"))
+            .description("Registered with Connect."),
+        (ConnectionStatus::Error(e), true) => page::row("Cube service session")
+            .accessory(page::status(page::Status::Bad, "Reconnect required"))
+            .description(e.clone()),
+        (_, true) => page::row("Cube service session")
+            .accessory(page::status(page::Status::Busy, "Connecting…"))
+            .description("Re-authenticates this Cube only. Never rescans."),
     };
-
-    dashboard(
-        menu,
-        cache,
-        Column::new()
-            .spacing(20)
-            .push(header)
-            .push(description)
-            .push(group(
-                "Protection material",
-                "Store recovery material securely. Encrypted export still needs a signing device or xpub to decrypt.",
+    let progress = cache.sync_progress();
+    let node = if progress >= 1.0 {
+        page::row("Node backend & sync")
+            .accessory(page::status(page::Status::Ok, "Synced"))
+            .description(format!("Block {}.", cache.blockheight()))
+    } else {
+        page::row("Node backend & sync")
+            .accessory(page::status(
+                page::Status::Busy,
+                format!("Syncing {:.1}%", progress * 100.0),
             ))
-            .push(backup_to_connect)
-            .push_maybe(supports_inheritance.then_some(export_encrypted_descriptor))
-            .push(group(
-                "Wallet portability",
-                "Move wallet information between devices; inspect unencrypted files before sharing.",
+            .description(format!(
+                "Block {}. Balances may be out of date.",
+                cache.blockheight()
             ))
-            .push_maybe(supports_inheritance.then_some(export_wallet))
-            .push_maybe(supports_inheritance.then_some(import_wallet))
-            .push_maybe(supports_inheritance.then_some(export_descriptor))
-            .push(group("Records", "Labels and transactions are records, not backups."))
-            .push(export_labels)
-            .push(export_transactions)
-            .width(Length::Fill),
-    )
+    };
+    // The App wraps this in the dashboard (`connect_settings_content`).
+    Column::new()
+        .width(Length::Fill)
+        .push(page::note(
+            coincube_ui::component::tenshu::Tone::Muted,
+            account,
+            None,
+        ))
+        .push(page::group(
+            "Health",
+            None,
+            page::rows([session.into(), node.into()]),
+        ))
+        .push(page::group(
+            "Node",
+            None,
+            page::rows(
+                [page::row("Backend, sync status, Tor, resources and rescan")
+                    .description("Node settings live in the Node tab of this Vault's Settings.")
+                    .control(page::button(
+                        "tenshu.settings.vault-connections.node",
+                        "Open Node",
+                        Some(Message::Menu(Menu::Vault(VaultSubMenu::Settings(Some(
+                            crate::app::menu::SettingsOption::Node,
+                        ))))),
+                    ))
+                    .into()],
+            ),
+        ))
+        .into()
 }
 
 pub fn plaintext_export_review<'a>() -> Element<'a, Message> {
@@ -1058,120 +1121,80 @@ pub fn rescan<'a>(
     past_possible_height: bool,
     future_date: bool,
 ) -> Element<'a, SettingsEditMessage> {
-    card::simple(Container::new(
+    use crate::app::view::settings::page;
+    use coincube_ui::component::tenshu::ActionKind;
+    let field = |label: &'static str,
+                 placeholder: &'static str,
+                 value: &form::Value<String>,
+                 key: &'static str| {
         Column::new()
-            .push(h4_bold("Maintenance"))
-            .push(caption("A rescan rebuilds wallet history. It does not repair Connect sign-in or node connectivity."))
+            .spacing(4)
+            .width(Length::Fixed(96.0))
+            .push(page::muted(label))
             .push(
-                Row::new()
-                    .push(badge::badge(icon::block_icon()))
-                    .push(text("Blockchain rescan").bold().width(Length::Fill))
-                    .push(if success {
-                        Some(
-                            text("Successfully rescanned the blockchain")
-                                .style(theme::text::success),
-                        )
-                    } else {
-                        None
-                    })
-                    .spacing(20)
-                    .align_y(Alignment::Center)
-                    .width(Length::Fill),
+                form::Form::new_trimmed(placeholder, value, move |value| {
+                    SettingsEditMessage::FieldEdited(key, value)
+                })
+                .size(14)
+                .padding(6),
             )
-            .push(separation().width(Length::Fill))
-            .push(if let Some(p) = scan_progress {
-                Container::new(
-                    Column::new()
-                        .width(Length::Fill)
-                        .push(ProgressBar::new(0.0..=1.0, p as f32).length(Length::Fill))
-                        .push(text(format!("Rescanning...{:.2}%", p * 100.0))),
-                )
-            } else {
-                Container::new(
-                    Column::new()
-                        .spacing(10)
-                        .push(
-                            Row::new()
-                                .push(text("Year:").bold().small())
-                                .push(
-                                    form::Form::new_trimmed("2022", year, |value| {
-                                        SettingsEditMessage::FieldEdited("rescan_year", value)
-                                    })
-                                    .size(P1_SIZE)
-                                    .padding(5),
-                                )
-                                .push(text("Month:").bold().small())
-                                .push(
-                                    form::Form::new_trimmed("12", month, |value| {
-                                        SettingsEditMessage::FieldEdited("rescan_month", value)
-                                    })
-                                    .size(P1_SIZE)
-                                    .padding(5),
-                                )
-                                .push(text("Day:").bold().small())
-                                .push(
-                                    form::Form::new_trimmed("31", day, |value| {
-                                        SettingsEditMessage::FieldEdited("rescan_day", value)
-                                    })
-                                    .size(P1_SIZE)
-                                    .padding(5),
-                                )
-                                .align_y(Alignment::Center)
-                                .spacing(10),
-                        )
-                        .push(if invalid_date {
-                            Some(p1_regular("Provided date is invalid").style(theme::text::error))
-                        } else {
-                            None
-                        })
-                        .push(if past_possible_height {
-                            Some(
-                                p1_regular("Provided date earlier than the node prune height")
-                                    .style(theme::text::error),
-                            )
-                        } else {
-                            None
-                        })
-                        .push(if future_date {
-                            Some(
-                                p1_regular("Provided date is in the future")
-                                    .style(theme::text::error),
-                            )
-                        } else {
-                            None
-                        })
-                        .push(
-                            if can_edit
-                                && !invalid_date
-                                && !processing
-                                && (is_ok_and(&u32::from_str(&year.value), |&v| v > 0)
-                                    && is_ok_and(&u32::from_str(&month.value), |&v| {
-                                        v > 0 && v <= 12
-                                    })
-                                    && is_ok_and(&u32::from_str(&day.value), |&v| v > 0 && v <= 31))
-                            {
-                                Row::new().push(Column::new().width(Length::Fill)).push(
-                                    button::primary(None, "Start rescan")
-                                        .on_press(SettingsEditMessage::Confirm)
-                                        .width(Length::Shrink),
-                                )
-                            } else if processing {
-                                Row::new().push(Column::new().width(Length::Fill)).push(
-                                    button::secondary(None, "Starting rescan...")
-                                        .width(Length::Shrink),
-                                )
-                            } else {
-                                Row::new().push(Column::new().width(Length::Fill)).push(
-                                    button::secondary(None, "Start rescan").width(Length::Shrink),
-                                )
-                            },
-                        ),
-                )
-            })
-            .spacing(20),
-    ))
-    .width(Length::Fill)
-    .into()
+    };
+    let ready = can_edit
+        && !invalid_date
+        && !processing
+        && is_ok_and(&u32::from_str(&year.value), |&v| v > 0)
+        && is_ok_and(&u32::from_str(&month.value), |&v| v > 0 && v <= 12)
+        && is_ok_and(&u32::from_str(&day.value), |&v| v > 0 && v <= 31);
+    let mut body = Column::new().spacing(8).width(Length::Fill);
+    if let Some(p) = scan_progress {
+        body = body
+            .push(page::status(
+                page::Status::Busy,
+                format!("Rescanning… {:.2}%", p * 100.0),
+            ))
+            .push(ProgressBar::new(0.0..=1.0, p as f32).length(Length::Fill));
+    } else {
+        body = body.push(
+            Row::new()
+                .spacing(12)
+                .align_y(Alignment::End)
+                .push(field("Year", "2022", year, "rescan_year"))
+                .push(field("Month", "12", month, "rescan_month"))
+                .push(field("Day", "31", day, "rescan_day"))
+                .push(page::plain_button(
+                    if processing {
+                        "Starting rescan…"
+                    } else {
+                        "Start rescan"
+                    },
+                    ActionKind::Secondary,
+                    ready.then_some(SettingsEditMessage::Confirm),
+                ))
+                .wrap(),
+        );
+        for (show, error) in [
+            (invalid_date, "Provided date is invalid"),
+            (
+                past_possible_height,
+                "Provided date earlier than the node prune height",
+            ),
+            (future_date, "Provided date is in the future"),
+        ] {
+            if show {
+                body = body.push(text(error).size(13).style(theme::text::error));
+            }
+        }
+    }
+    if success {
+        body = body.push(page::status(
+            page::Status::Ok,
+            "Successfully rescanned the blockchain",
+        ));
+    }
+    body = body.push(page::muted(
+        "A rescan rebuilds wallet history. It does not repair Connect sign-in or node connectivity.",
+    ));
+    page::group("Blockchain rescan", None, body)
 }
 
 fn is_ok_and<T, E>(res: &Result<T, E>, f: impl FnOnce(&T) -> bool) -> bool {
@@ -1180,6 +1203,130 @@ fn is_ok_and<T, E>(res: &Result<T, E>, f: impl FnOnce(&T) -> bool) -> bool {
     } else {
         false
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub const VAULT_NAME_ID: &str = "tenshu.settings.vault.name";
+pub const VAULT_RECOVERY_TOOLS_ID: &str = "tenshu.settings.vault.recovery-tools";
+pub const VAULT_PAIR_ID: &str = "tenshu.settings.vault.pair";
+pub const VAULT_ADVANCED_ID: &str = "tenshu.settings.vault.advanced";
+pub const VAULT_COPY_ID: &str = "tenshu.settings.vault.descriptor-copy";
+pub const VAULT_EXPORT_ID: &str = "tenshu.settings.vault.descriptor-export";
+pub const VAULT_REGISTER_ID: &str = "tenshu.settings.vault.register";
+pub const VAULT_TOOLS_ID: &str = "tenshu.settings.vault.tools";
+
+/// A signer's display name: its alias, else its fingerprint.
+fn signer_name(
+    fingerprint: &Fingerprint,
+    keys_aliases: &[(Fingerprint, form::Value<String>)],
+) -> String {
+    keys_aliases
+        .iter()
+        .find(|(fg, alias)| fg == fingerprint && !alias.value.is_empty())
+        .map(|(_, alias)| alias.value.clone())
+        .unwrap_or_else(|| fingerprint.to_string())
+}
+
+/// "N of M signers approve" or "Alice approves", naming each signer.
+fn quorum_sentence(
+    threshold: usize,
+    keys: &[Fingerprint],
+    keys_aliases: &[(Fingerprint, form::Value<String>)],
+    verb: &str,
+) -> String {
+    let names: Vec<String> = keys.iter().map(|k| signer_name(k, keys_aliases)).collect();
+    if keys.len() == 1 {
+        format!("{} {}s.", names[0], verb)
+    } else {
+        format!(
+            "Any {} of {} signers {}: {}.",
+            threshold,
+            keys.len(),
+            verb,
+            names.join(", ")
+        )
+    }
+}
+
+/// The policy as artboard rows (`#h-vid`): normal spending, then one row per
+/// recovery path with its timelock.
+fn policy_rows<'a>(
+    policy: CoincubePolicy,
+    keys_aliases: &'a [(Fingerprint, form::Value<String>)],
+    provider_keys: &'a HashMap<Fingerprint, ProviderKey>,
+) -> Vec<Element<'a, Message>> {
+    use crate::app::view::settings::page;
+    let (primary_threshold, primary_keys) = policy.primary_path().thresh_origins();
+    // HashMap order changes between renders; sort for a stable sentence.
+    let mut primary_keys: Vec<Fingerprint> = primary_keys.into_keys().collect();
+    primary_keys.sort();
+    let mut rows: Vec<Element<'a, Message>> = vec![page::row("Normal spending")
+        .description(quorum_sentence(
+            primary_threshold,
+            &primary_keys,
+            keys_aliases,
+            "approve",
+        ))
+        .into()];
+    let recovery_paths = policy.recovery_paths();
+    let several = recovery_paths.len() > 1;
+    for (i, (sequence, recovery_path)) in recovery_paths.iter().enumerate() {
+        let (threshold, recovery_keys) = recovery_path.thresh_origins();
+        let mut recovery_keys: Vec<Fingerprint> = recovery_keys.into_keys().collect();
+        recovery_keys.sort();
+        // A maximum timelock held only by provider keys is the Safety Net.
+        let label = if *sequence == u16::MAX
+            && recovery_keys
+                .iter()
+                .all(|fg| provider_keys.contains_key(fg))
+        {
+            "Safety Net path".to_string()
+        } else if several {
+            format!("Recovery path #{}", i + 1)
+        } else {
+            "Recovery path".to_string()
+        };
+        let detail = format!(
+            "After {} blocks (~{}) without spending. {}",
+            sequence,
+            expire_message_units(*sequence as u32).join(","),
+            quorum_sentence(threshold, &recovery_keys, keys_aliases, "spend")
+                .replace("signers spend", "signers can spend")
+                .replace("spends.", "can spend."),
+        );
+        rows.push(
+            page::row(label)
+                .description(detail)
+                .control_maybe((i == 0).then(|| {
+                    page::button(
+                        VAULT_RECOVERY_TOOLS_ID,
+                        "Open recovery tools",
+                        Some(Message::Menu(Menu::Vault(VaultSubMenu::Recovery))),
+                    )
+                }))
+                .into(),
+        );
+    }
+    rows
+}
+
+/// Which spending paths a signer belongs to, for its row.
+fn signer_paths(policy: &CoincubePolicy, fingerprint: &Fingerprint) -> String {
+    let mut paths = Vec::new();
+    if policy
+        .primary_path()
+        .thresh_origins()
+        .1
+        .contains_key(fingerprint)
+    {
+        paths.push("Normal spending".to_string());
+    }
+    for (i, (_, path)) in policy.recovery_paths().iter().enumerate() {
+        if path.thresh_origins().1.contains_key(fingerprint) {
+            paths.push(format!("Recovery path #{}", i + 1));
+        }
+    }
+    paths.join(", ")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1196,221 +1343,190 @@ pub fn wallet_settings<'a>(
     hardware_registration_allowed: bool,
     expert_open: bool,
 ) -> Element<'a, Message> {
+    use crate::app::view::settings::page;
+    use coincube_ui::component::tenshu::{self as tenshu_ui, FieldSize};
     let vault = descriptor.as_vault();
-    let header = header("Wallet & signers", SettingsMessage::EditWalletSettings);
-    let identity = card::simple(
-        Column::new()
-            .spacing(8)
-            .push(h4_bold("Identity"))
-            .push(text(if vault.is_some() {
-                "Vault"
-            } else {
-                "Imported wallet"
-            }))
-            .push(text("Wallet name").bold())
-            .push(
-                form::Form::new("Name", wallet_alias, move |msg| {
-                    Message::Settings(SettingsMessage::WalletAliasEdited(msg))
-                })
-                .warning("Please enter a shorter name")
-                .size(P1_SIZE)
-                .padding(10),
-            )
-            .push(
-                Row::new()
-                    .spacing(10)
-                    .align_y(Alignment::Center)
-                    .push(caption("Save changes before leaving this page."))
-                    .push(Space::new().width(Length::Fill))
-                    .push(if updated {
-                        Some(text("Names saved").style(theme::text::success))
-                    } else {
-                        None
-                    })
-                    .push(if processing {
-                        button::secondary(None, "Saving names…")
-                    } else if wallet_alias.valid {
-                        button::secondary(None, "Save names")
-                            .on_press(Message::Settings(SettingsMessage::Save))
-                    } else {
-                        button::secondary(None, "Save names")
-                    }),
-            )
-            .push(text(format!("Network: {}", cache.network)))
-            .push(text(format!(
-                "{}: {}",
-                if vault.is_some() {
-                    "Vault ID"
-                } else {
-                    "Wallet ID"
-                },
-                vault_id
-            )))
-            .push_maybe(vault.is_none().then(|| {
-                caption(
-                    "Imported wallet · Pair with Keychain is unavailable because this wallet has no Keychain-eligible key in Tenshu.",
-                )
-            })),
-    )
-    .width(Length::Fill);
-    let r = Row::new().spacing(10).align_y(Vertical::Center)
-        .push(icon::backup_icon())
-        .push(text("Back up encrypted descriptor"))
-        .push(
+    let save =
+        (!processing && wallet_alias.valid).then_some(Message::Settings(SettingsMessage::Save));
 
-    Container::new(
-        iced::widget::tooltip::Tooltip::new(
-            icon::tooltip_icon(),
-            "An encrypted descriptor file (.bed) you can store anywhere. To decrypt it, you need one of your signing devices or xpubs.",
-            iced::widget::tooltip::Position::Bottom,
+    let name_field = tenshu_ui::text_field(
+        VAULT_NAME_ID,
+        if vault.is_some() {
+            "Vault name"
+        } else {
+            "Wallet name"
+        },
+        &wallet_alias.value,
+        Message::FocusAction,
+    )
+    .hide_label()
+    .size(FieldSize::Compact)
+    .width(Length::Fixed(280.0))
+    .error_maybe((!wallet_alias.valid).then_some("Please enter a shorter name"))
+    .on_input(|value| Message::Settings(SettingsMessage::WalletAliasEdited(value)));
+    let name_field = match save.clone() {
+        Some(save) => name_field.on_submit(save),
+        None => name_field,
+    };
+
+    let mut identity: Vec<Element<'a, Message>> = vec![page::row(if vault.is_some() {
+        "Vault name"
+    } else {
+        "Wallet name"
+    })
+    .description(format!(
+        "{} ID {} · {}",
+        if vault.is_some() { "Vault" } else { "Wallet" },
+        vault_id,
+        crate::app::view::nav::shell::network_label(cache.chain())
+    ))
+    .control(Container::new(name_field).width(Length::Fixed(280.0)))
+    .into()];
+    if let Some(vault) = vault {
+        identity.extend(policy_rows(vault.policy(), keys_aliases, provider_keys));
+    }
+
+    let mut content = Column::new().width(Length::Fill);
+    if vault.is_none() {
+        content = content.push(page::note(
+            coincube_ui::component::tenshu::Tone::Muted,
+            Row::new()
+                .spacing(4)
+                .push(text("Imported wallet · no local keys.").size(13).bold())
+                .push(text("Signing needs the external signers below.").size(13))
+                .wrap(),
+            None,
+        ));
+    }
+    content = content.push(page::group(
+        "Identity and policy",
+        None,
+        page::rows(identity),
+    ));
+
+    let policy = vault.map(|v| v.policy());
+    let signer_rows = keys_aliases.iter().map(|(fingerprint, name)| {
+        let fg = *fingerprint;
+        let mut detail = fg.to_string();
+        if let Some(policy) = &policy {
+            let paths = signer_paths(policy, &fg);
+            if !paths.is_empty() {
+                detail = format!("{} · {}", detail, paths);
+            }
+        }
+        if provider_keys.contains_key(&fg) {
+            detail = format!("{} · Provider key", detail);
+        }
+        let field = tenshu_ui::text_field(
+            iced::advanced::widget::Id::from(format!("tenshu.settings.vault.signer.{}", fg)),
+            "Signer name",
+            &name.value,
+            Message::FocusAction,
         )
-        .style(theme::card::simple),
-    )
-        );
-    let back_up_encrypted_descriptor =
-        Button::new(container(r).align_x(Horizontal::Center).padding(5))
-            .on_press(Message::Settings(
-                SettingsMessage::ExportEncryptedDescriptor,
-            ))
-            .style(theme::button::secondary);
+        .hide_label()
+        .size(FieldSize::Compact)
+        .width(Length::Fixed(280.0))
+        .error_maybe((!name.valid).then_some("Please enter correct alias"))
+        .on_input(move |value| {
+            Message::Settings(SettingsMessage::FingerprintAliasEdited(fg, value))
+        });
+        let field = match save.clone() {
+            Some(save) => field.on_submit(save),
+            None => field,
+        };
+        page::row(signer_name(&fg, keys_aliases))
+            .line(tenshu_ui::mono(detail))
+            .control(Container::new(field).width(Length::Fixed(280.0)))
+            .into()
+    });
+    content = content
+        .push(page::group(
+            "Signers",
+            Some("Names save when you press Return.".into()),
+            page::rows(signer_rows),
+        ))
+        .push(page::saved_line(updated));
 
-    let descr = card::simple(
-        Column::new()
-            .push(h4_bold("Expert · descriptor and hardware"))
-            .push(text(
-                "Descriptor hidden · copying exposes wallet policy and public keys to other apps.",
-            ))
-            .push(
-                Row::new()
-                    .spacing(10)
-                    .width(Length::Fill)
-                    .push_maybe(vault.map(|_| back_up_encrypted_descriptor))
-                    .push(
-                        button::secondary(Some(icon::clipboard_icon()), "Review copy…")
-                            .on_press(Message::Settings(SettingsMessage::ReviewDescriptorCopy)),
-                    )
-                    .push_maybe(hardware_registration_allowed.then(|| {
-                        button::secondary(Some(icon::chip_icon()), "Register on hardware device")
-                            .on_press(Message::Settings(SettingsMessage::RegisterWallet))
-                    }))
-                    .wrap()
-                    .vertical_spacing(10)
-                    .align_x(Alignment::End),
-            )
-            .spacing(10),
-    )
-    .width(Length::Fill);
+    let pair_row = page::row("Pair with Keychain").description(if vault.is_some() {
+        "Same Wi-Fi. No Connect account needed."
+    } else {
+        "Unavailable: this wallet has no Keychain-eligible key in Tenshu."
+    });
+    let pair_row = if vault.is_some() {
+        pair_row.control(page::button(
+            VAULT_PAIR_ID,
+            "Open Pair with Keychain",
+            Some(Message::Menu(Menu::Vault(VaultSubMenu::Settings(Some(
+                crate::app::menu::SettingsOption::LocalSigning,
+            ))))),
+        ))
+    } else {
+        pair_row.control(page::status(page::Status::Off, "Unavailable"))
+    };
+    content = content.push(page::group(
+        "Phone signing and members",
+        None,
+        page::rows([
+            pair_row.into(),
+            page::row("Members")
+                .accessory(page::status(page::Status::Off, "Not enabled"))
+                .description("For eligible Connect Vaults only.")
+                .into(),
+        ]),
+    ));
 
-    let aliases = card::simple(
-        Column::new()
-            .push(h4_bold("Signers"))
-            .push(caption("Name each signer so you can recognize it during review. Fingerprints identify the keys."))
-            .push(keys_aliases.iter().fold(
-                Column::new().spacing(10),
-                |col, (fingerprint, name)| {
-                    let fg = *fingerprint;
-                    col.push(
-                        Row::new()
-                            .spacing(10)
-                            .align_y(Alignment::Center)
-                            .push(text(fg.to_string()).bold().width(Length::Fixed(100.0)))
-                            .push(
-                                form::Form::new("Alias", name, move |msg| {
-                                    Message::Settings(SettingsMessage::FingerprintAliasEdited(
-                                        fg, msg,
-                                    ))
-                                })
-                                .warning("Please enter correct alias")
-                                .size(P1_SIZE)
-                                .padding(10),
-                            ),
-                    )
-                },
-            ))
-            .push(
-                Row::new()
-                    .align_y(Alignment::Center)
-                    .push(Space::new().width(Length::Fill))
-                    .push(if updated {
-                        Some(
-                            Row::new()
-                                .align_y(Alignment::Center)
-                                .push(icon::square_check_icon().style(theme::text::success))
-                                .push(text("Names saved").style(theme::text::success)),
-                        )
-                    } else {
-                        None
-                    })
-                    .push(if processing {
-                        button::secondary(None, "Saving names…")
-                    } else if wallet_alias.valid {
-                        button::secondary(None, "Save names")
-                            .on_press(Message::Settings(SettingsMessage::Save))
-                    } else {
-                        button::secondary(None, "Save names")
-                    }),
-            )
-            .spacing(10),
-    )
-    .width(Length::Fill);
+    content = content.push(page::disclosure(
+        VAULT_ADVANCED_ID,
+        "Advanced",
+        Some("· descriptor, keys, hardware"),
+        expert_open,
+        Message::Settings(SettingsMessage::ToggleWalletExpert),
+    ));
+    if expert_open {
+        let mut descriptor_row = page::row("Descriptor")
+            .description("Hidden. Copying exposes the wallet policy and public keys to other apps.")
+            .control(page::button(
+                VAULT_COPY_ID,
+                "Copy…",
+                Some(Message::Settings(SettingsMessage::ReviewDescriptorCopy)),
+            ));
+        if vault.is_some() {
+            descriptor_row = descriptor_row.control(page::button(
+                VAULT_EXPORT_ID,
+                "Export encrypted…",
+                Some(Message::Settings(
+                    SettingsMessage::ExportEncryptedDescriptor,
+                )),
+            ));
+        }
+        let mut advanced: Vec<Element<'a, Message>> = vec![descriptor_row.into()];
+        if hardware_registration_allowed {
+            advanced.push(
+                page::row("Hardware registration")
+                    .description("Register this wallet on a hardware device. Re-register after policy changes.")
+                    .control(page::button(
+                        VAULT_REGISTER_ID,
+                        "Register on device…",
+                        Some(Message::Settings(SettingsMessage::RegisterWallet)),
+                    ))
+                    .into(),
+            );
+        }
+        if vault.is_some() {
+            advanced.push(
+                page::row("Recovery path, coin control and PSBTs")
+                    .control(page::button(
+                        VAULT_TOOLS_ID,
+                        "Open Vault tools",
+                        Some(Message::Menu(Menu::Vault(VaultSubMenu::Recovery))),
+                    ))
+                    .into(),
+            );
+        }
+        content = content.push(page::disclosure_body(advanced));
+    }
 
-    dashboard(
-        menu,
-        cache,
-        Column::new()
-            .spacing(20)
-            .push(header)
-            .push(identity)
-            .push_maybe(vault.map(|vault| {
-                card::simple(
-                    Column::new()
-                        .spacing(10)
-                        .push(h4_bold("Policy"))
-                        .push(display_policy(vault.policy(), keys_aliases, provider_keys))
-                        .push(
-                            button::link(None, "Open recovery tools")
-                                .on_press(Message::Menu(Menu::Vault(VaultSubMenu::Recovery))),
-                        ),
-                )
-                .width(Length::Fill)
-            }))
-            .push(aliases)
-            .push(
-                card::simple(
-                    Column::new()
-                        .spacing(8)
-                        .push(h4_bold("Phone signing and members"))
-                        .push(text(
-                            "Pair with Keychain · Same Wi-Fi. No Connect account needed.",
-                        ))
-                        .push(if vault.is_some() {
-                            button::secondary(None, "Open Pair with Keychain").on_press(
-                                Message::Menu(Menu::Vault(VaultSubMenu::Settings(Some(
-                                    crate::app::menu::SettingsOption::LocalSigning,
-                                )))),
-                            )
-                        } else {
-                            button::secondary(None, "Pair with Keychain unavailable")
-                        })
-                        .push(caption(
-                            "Members · Available for eligible Connect Vaults when enabled.",
-                        )),
-                )
-                .width(Length::Fill),
-            )
-            .push(
-                button::secondary(
-                    None,
-                    if expert_open {
-                        "Hide Expert · descriptor and hardware"
-                    } else {
-                        "Show Expert · descriptor and hardware"
-                    },
-                )
-                .on_press(Message::Settings(SettingsMessage::ToggleWalletExpert)),
-            )
-            .push_maybe(expert_open.then_some(descr)),
-    )
+    dashboard(menu, cache, content)
 }
 
 pub fn descriptor_copy_review<'a>() -> Element<'a, Message> {
@@ -1435,158 +1551,6 @@ pub fn descriptor_copy_review<'a>() -> Element<'a, Message> {
             ),
     )
     .into()
-}
-
-fn display_policy<'a>(
-    policy: CoincubePolicy,
-    keys_aliases: &'a [(Fingerprint, form::Value<String>)],
-    provider_keys: &'a HashMap<Fingerprint, ProviderKey>,
-) -> Element<'a, Message> {
-    let (primary_threshold, primary_keys) = policy.primary_path().thresh_origins();
-    let recovery_paths = policy.recovery_paths();
-
-    // The iteration over an HashMap keys can have a different order at each refresh
-    let mut primary_keys: Vec<Fingerprint> = primary_keys.into_keys().collect();
-    primary_keys.sort();
-
-    let mut col = Column::new().push(
-        Row::new()
-            .spacing(5)
-            .push(
-                text(format!(
-                    "{} signature{}",
-                    primary_threshold,
-                    if primary_threshold > 1 { "s" } else { "" }
-                ))
-                .bold(),
-            )
-            .push(if primary_keys.len() > 1 {
-                text(format!("out of {} by", primary_keys.len()))
-            } else {
-                text("by")
-            })
-            .push(
-                primary_keys
-                    .iter()
-                    .enumerate()
-                    .fold(Row::new().spacing(5), |row, (i, k)| {
-                        let content = if let Some(alias) = keys_aliases
-                            .iter()
-                            .find(|(fg, a)| fg == k && !a.value.is_empty())
-                            .map(|(_, f)| &f.value)
-                        {
-                            Container::new(
-                                iced_tooltip::Tooltip::new(
-                                    text(alias).bold(),
-                                    text(k.to_string()),
-                                    iced_tooltip::Position::Bottom,
-                                )
-                                .style(theme::card::simple),
-                            )
-                        } else {
-                            Container::new(text(format!("[{}]", k)).bold())
-                        };
-                        if primary_keys.len() == 1 || i == primary_keys.len() - 1 {
-                            row.push(content)
-                        } else if i <= primary_keys.len() - 2 {
-                            row.push(content).push(text("and"))
-                        } else {
-                            row.push(content).push(text(","))
-                        }
-                    })
-                    .wrap()
-                    .vertical_spacing(5),
-            )
-            .push(text("can always spend this wallet's funds (Primary path)"))
-            .wrap()
-            .vertical_spacing(5),
-    );
-    for (i, (sequence, recovery_path)) in recovery_paths.iter().enumerate() {
-        let (threshold, recovery_keys) = recovery_path.thresh_origins();
-
-        // The iteration over an HashMap keys can have a different order at each refresh
-        let mut recovery_keys: Vec<Fingerprint> = recovery_keys.into_keys().collect();
-        recovery_keys.sort();
-
-        col = col.push(
-            Row::new()
-                .spacing(5)
-                .push(
-                    text(format!(
-                        "{} signature{}",
-                        threshold,
-                        if threshold > 1 { "s" } else { "" }
-                    ))
-                    .bold(),
-                )
-                .push(if recovery_keys.len() > 1 {
-                    text(format!("out of {} by", recovery_keys.len()))
-                } else {
-                    text("by")
-                })
-                .push(
-                    recovery_keys
-                        .iter()
-                        .enumerate()
-                        .fold(Row::new().spacing(5), |row, (i, k)| {
-                            let content = if let Some(alias) = keys_aliases
-                                .iter()
-                                .find(|(fg, a)| fg == k && !a.value.is_empty())
-                                .map(|(_, f)| &f.value)
-                            {
-                                Container::new(
-                                    iced_tooltip::Tooltip::new(
-                                        text(alias).bold(),
-                                        text(k.to_string()),
-                                        iced_tooltip::Position::Bottom,
-                                    )
-                                    .style(theme::card::simple),
-                                )
-                            } else {
-                                Container::new(text(format!("[{}]", k)).bold())
-                            };
-                            if recovery_keys.len() == 1 || i == recovery_keys.len() - 1 {
-                                row.push(content)
-                            } else if i <= recovery_keys.len() - 2 {
-                                row.push(content).push(text("and"))
-                            } else {
-                                row.push(content).push(text(","))
-                            }
-                        })
-                        .wrap()
-                        .vertical_spacing(5),
-                )
-                .push(text("can spend coins after a relative timelock of"))
-                .push(
-                    text(format!(
-                        "{} blocks (~{})",
-                        sequence,
-                        expire_message_units(*sequence as u32).join(",")
-                    ))
-                    .bold(),
-                )
-                .push(text(
-                    // If max timelock and all keys are from provider, then it's a safety net path.
-                    if *sequence == u16::MAX
-                        && recovery_keys
-                            .iter()
-                            .all(|fg| provider_keys.contains_key(fg))
-                    {
-                        "(Safety Net path)".to_string()
-                    } else {
-                        format!("(Recovery path #{})", i + 1)
-                    },
-                ))
-                .wrap()
-                .vertical_spacing(5),
-        );
-    }
-    Column::new()
-        .spacing(10)
-        .push(text("The wallet policy:").bold())
-        .push(col.width(Length::Fill))
-        .width(Length::Fill)
-        .into()
 }
 
 /// returns y,m,d
@@ -1660,51 +1624,70 @@ pub fn node_backend_status<'a>(
     let catching_up =
         !initial_syncing && local_heights.is_some_and(|(blocks, headers)| blocks < headers);
     let still_syncing = initial_syncing || catching_up;
-    let mut col = Column::new().spacing(15).push(h4_bold("Backend & sync"));
-
-    col = col.push(
-        card::simple(Container::new(
-            Row::new()
-                .push(badge::badge(active_icon))
-                .push(
-                    Column::new()
-                        .push(caption("Active backend"))
-                        .push(text(active_backend).bold())
-                        .spacing(2),
-                )
-                .spacing(15)
-                .align_y(Alignment::Center),
-        ))
-        .padding(15)
-        .width(Length::Fill),
-    );
+    use crate::app::view::settings::page;
+    use coincube_ui::component::tenshu::{ActionKind, Tone};
+    let _ = active_icon;
+    let mut col = Column::new()
+        .width(Length::Fill)
+        .push(Space::new().height(Length::Fixed(page::GROUP_GAP)))
+        .push(page::heading(format!(
+            "Active backend · {}",
+            active_backend
+        )));
 
     // Surface an in-flight backend switch so the disabled buttons read as
     // "busy" rather than broken. This covers the promotion/rescan window
     // after the pending node reports synced. Keep blockchain progress visible
     // separately from the wallet switch so neither status obscures the other.
     if switch_in_progress {
-        col = col.push(
-            Container::new(
-                Column::new()
-                    .spacing(8)
-                    .push(caption("Switching backend"))
-                    .push(text("Applying your node change…"))
-                    .push(
-                        p2_regular(
-                            "Tenshu is stopping the previous wallet backend and loading the new one. \
-                             This can take a while if a wallet scan is still running. \
-                             Local blockchain progress is shown separately below.",
-                        )
-                        .style(theme::text::secondary),
-                    ),
-            )
-            .padding(15)
-            .width(Length::Fill)
-            .style(theme::card::border),
-        );
+        col = col.push(page::note(
+            Tone::Muted,
+            Column::new()
+                .spacing(2)
+                .push(page::status(
+                    page::Status::Busy,
+                    "Applying your node change…",
+                ))
+                .push(page::muted(
+                    "Tenshu is stopping the previous wallet backend and loading the new one. \
+                     This can take a while if a wallet scan is still running. \
+                     Local blockchain progress is shown separately below.",
+                )),
+            None,
+        ));
     }
 
+    // Switch actions, shown beside the blockchain status.
+    let mut actions: Vec<Element<'a, NodeSettingsMessage>> = Vec::new();
+    if can_switch_to_connect {
+        actions.push(page::plain_button(
+            "Switch to COINCUBE | Connect",
+            ActionKind::Secondary,
+            (!processing).then_some(NodeSettingsMessage::SwitchToConnect),
+        ));
+    }
+    // A switch cannot run during wallet history recovery or while the pending
+    // node is in IBD, so omit its button in those states. When IBD status is
+    // still unknown, keep the button visible: the action guard can explain
+    // why switching is not yet available.
+    let show_switch_to_bitcoind_btn =
+        can_switch_to_bitcoind && pending_ibd != Some(true) && !recovery_in_progress;
+    if show_switch_to_bitcoind_btn {
+        actions.push(page::plain_button(
+            "Switch to local node",
+            ActionKind::Secondary,
+            (!processing).then_some(NodeSettingsMessage::SwitchToBitcoind),
+        ));
+    }
+    if can_setup_local_node {
+        actions.push(page::plain_button(
+            "Set up local node",
+            ActionKind::Secondary,
+            (!processing).then_some(NodeSettingsMessage::SetupLocalNode),
+        ));
+    }
+
+    let mut status_block: Option<coincube_ui::widget::Column<'a, NodeSettingsMessage>> = None;
     if let Some(progress) = pending_progress {
         let pace = if progress > 0.98 {
             "This may take a few minutes, depending on the last time it was done, your internet connection, and your computer performance."
@@ -1713,17 +1696,10 @@ pub fn node_backend_status<'a>(
         } else {
             "A full synchronisation typically takes a few days and is resource-intensive. Once the initial synchronisation is done, the next ones will be much faster."
         };
-        // Mirror the wording from `internal_node_setup_panel` so the user
-        // sees the same promise from both entry points: a freshly installed
-        // managed node, and a pending node we previously set aside when
-        // toggling to Connect. Including the *name*: this said "Bitcoin Core"
-        // unconditionally, which told every Knots user their node choice had
-        // been ignored.
-        // A pending node is not necessarily one of ours: switching to Connect parks
-        // whichever Bitcoind backend was active, and that can be an external node
-        // running any client. So the name is only used for a subversion we
-        // actually recognise — naming an unknown client "Bitcoin Core" would be
-        // the same kind of invention this sentence used to make unconditionally.
+        // A pending node is not necessarily one of ours: switching to Connect
+        // parks whichever Bitcoind backend was active, and that can be an
+        // external node running any client. So the name is only used for a
+        // subversion we actually recognise.
         let name = pending_subversion
             .and_then(|sv| {
                 let flavor = crate::node::bitcoind::recognized_flavor(sv)?.display_name();
@@ -1753,98 +1729,74 @@ pub fn node_backend_status<'a>(
             format!("{name} has finished initial blockchain sync.")
         };
 
-        let mut sync_col = Column::new()
-            .spacing(8)
-            .push(caption(if catching_up {
-                "Local node catching up"
-            } else if initial_syncing {
-                "Local node syncing"
+        let mut block = Column::new()
+            .spacing(6)
+            .width(Length::Fill)
+            .push(if still_syncing {
+                page::status(
+                    page::Status::Busy,
+                    format!(
+                        "{} {:.1}%",
+                        if catching_up {
+                            "Catching up"
+                        } else {
+                            "Syncing"
+                        },
+                        100.0 * progress
+                    ),
+                )
             } else {
-                "Local blockchain status"
-            }))
-            .push(text(if still_syncing {
-                format!("Progress {:.1}%", 100.0 * progress)
-            } else {
-                "Initial blockchain sync complete".to_string()
-            }));
+                page::status(page::Status::Ok, "Initial blockchain sync complete")
+            });
         if still_syncing {
-            sync_col =
-                sync_col.push(ProgressBar::new(0.0..=1.0, progress as f32).length(Length::Fill));
+            block = block.push(ProgressBar::new(0.0..=1.0, progress as f32).length(Length::Fill));
         }
         if let Some((blocks, headers)) = local_heights {
-            sync_col = sync_col.push(p2_regular(format!(
-                "Verified blocks: {blocks} / {headers} known headers · {} blocks remaining",
-                headers.saturating_sub(blocks),
-            )));
+            block = block.push(
+                text(format!(
+                    "Verified blocks: {blocks} / {headers} known headers · {} blocks remaining",
+                    headers.saturating_sub(blocks),
+                ))
+                .size(14),
+            );
         }
-        sync_col = sync_col.push(p2_regular(desc).style(theme::text::secondary));
-
+        block = block.push(page::muted(desc));
         if let Some(log) = pending_bitcoind_log {
-            sync_col = sync_col.push(p2_regular(log).style(theme::text::secondary));
+            block = block.push(coincube_ui::component::tenshu::mono(log).size(12));
         }
-
-        col = col.push(
-            Container::new(sync_col)
-                .padding(15)
-                .width(Length::Fill)
-                .style(theme::card::border),
-        );
+        status_block = Some(block);
+    } else if can_switch_to_bitcoind || active_backend == "Local Node" {
+        status_block = Some(Column::new().push(page::status(
+            page::Status::Busy,
+            "Waiting for the local node to report sync progress…",
+        )));
     }
 
-    if pending_progress.is_none() && (can_switch_to_bitcoind || active_backend == "Local Node") {
-        col = col.push(
-            Container::new(
-                Column::new()
-                    .spacing(8)
-                    .push(caption("Local blockchain status"))
-                    .push(
-                        p2_regular("Waiting for the local node to report sync progress…")
-                            .style(theme::text::secondary),
-                    ),
-            )
-            .padding(15)
-            .width(Length::Fill)
-            .style(theme::card::border),
-        );
+    match status_block {
+        Some(block) => {
+            let row = actions
+                .into_iter()
+                .fold(page::row("").line(block).top(), |row, action| {
+                    row.control(action)
+                });
+            col = col.push(page::group(
+                "Local blockchain status",
+                None,
+                page::rows([row.into()]),
+            ));
+        }
+        None if !actions.is_empty() => {
+            col = col.push(Space::new().height(Length::Fixed(12.0))).push(
+                actions
+                    .into_iter()
+                    .fold(Row::new().spacing(8), |row, action| row.push(action)),
+            );
+        }
+        None => {}
     }
 
     if let Some(w) = warning {
-        col = col.push(text(w).style(theme::text::warning));
-    }
-
-    let mut btn_row = Row::new().spacing(10);
-    if can_switch_to_connect {
-        let btn = button::secondary(None, "Switch to COINCUBE | Connect").padding([8, 15]);
-        btn_row = btn_row.push(if processing {
-            btn
-        } else {
-            btn.on_press(NodeSettingsMessage::SwitchToConnect)
-        });
-    }
-    // A switch cannot run during wallet history recovery or while the pending
-    // node is in IBD, so omit its button in those states. When IBD status is
-    // still unknown, keep the button visible: the action guard can explain
-    // why switching is not yet available.
-    let show_switch_to_bitcoind_btn =
-        can_switch_to_bitcoind && pending_ibd != Some(true) && !recovery_in_progress;
-    if show_switch_to_bitcoind_btn {
-        let btn = button::secondary(None, "Switch to local node").padding([8, 15]);
-        btn_row = btn_row.push(if processing {
-            btn
-        } else {
-            btn.on_press(NodeSettingsMessage::SwitchToBitcoind)
-        });
-    }
-    if can_setup_local_node {
-        let btn = button::secondary(None, "Set up local node").padding([8, 15]);
-        btn_row = btn_row.push(if processing {
-            btn
-        } else {
-            btn.on_press(NodeSettingsMessage::SetupLocalNode)
-        });
-    }
-    if can_switch_to_connect || show_switch_to_bitcoind_btn || can_setup_local_node {
-        col = col.push(btn_row);
+        col = col.push(page::note(Tone::Warn, text(w).size(13), None));
     }
 
     col.into()
@@ -2236,6 +2188,16 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
+fn node_message(message: NodeSettingsMessage) -> Message {
+    Message::Settings(SettingsMessage::NodeSettings(message))
+}
+
+pub const TOR_INBOUND_ID: &str = "tenshu.settings.node.tor-inbound";
+pub const TOR_LIMIT_ID: &str = "tenshu.settings.node.tor-limit";
+pub const TOR_OUTBOUND_ID: &str = "tenshu.settings.node.tor-outbound";
+pub const NODE_RESTART_ID: &str = "tenshu.settings.node.restart";
+pub const NODE_RESOURCES_APPLY_ID: &str = "tenshu.settings.node.resources-apply";
+
 pub fn inbound_tor_section<'a>(
     enabled: bool,
     outbound_via_tor: bool,
@@ -2244,110 +2206,85 @@ pub fn inbound_tor_section<'a>(
     onion_active: bool,
     supported: bool,
     stats: Option<&crate::app::cache::NodeNetStats>,
-) -> Element<'a, NodeSettingsMessage> {
-    let mut col = Column::new()
-        .spacing(15)
-        .push(text("Inbound connections").bold().size(18))
-        .push(
-            text(
-                "Let other peers reach your node over Tor — a private onion \
-                 service, no port-forwarding needed. Your node then serves blocks \
-                 and transactions to them, instead of only downloading from \
-                 others.",
-            )
-            .size(13)
-            .style(theme::text::secondary),
-        );
-
+) -> Element<'a, Message> {
+    use crate::app::view::settings::page;
+    use coincube_ui::component::tenshu::toggle;
+    let intro = "Let other peers reach your node over Tor — a private onion service, no \
+                 port-forwarding needed. Your node then serves blocks and transactions to them, \
+                 instead of only downloading from others.";
     if !supported {
-        col = col.push(
-            text("Not available on this platform.")
-                .size(13)
-                .style(theme::text::secondary),
+        return page::group(
+            "Inbound connections",
+            Some(intro.into()),
+            page::rows([page::row("Accept inbound connections over Tor")
+                .control(page::status(
+                    page::Status::Off,
+                    "Not available on this platform",
+                ))
+                .into()]),
         );
-        return card::simple(col).width(Length::Fill).into();
     }
 
-    col = col.push(
-        Row::new()
-            .spacing(20)
-            .align_y(Alignment::Center)
-            .push(
-                text("Accept inbound connections over Tor")
-                    .bold()
-                    .width(Length::Fill),
+    let mut rows: Vec<Element<'a, Message>> =
+        vec![page::row("Accept inbound connections over Tor")
+            .control(
+                toggle(TOR_INBOUND_ID, enabled, Message::FocusAction)
+                    .on_toggle(|on| node_message(NodeSettingsMessage::InboundTorToggled(on))),
             )
-            .push(
-                Toggler::new(enabled)
-                    .on_toggle(NodeSettingsMessage::InboundTorToggled)
-                    .width(50)
-                    .style(theme::toggler::orange),
-            ),
-    );
-
+            .into()];
     if enabled {
-        col = col
-            .push(
-                text(
-                    "Uploads up to ~1 GB/day. Turn off the limit only if your \
-                     internet connection isn't metered.",
+        rows.push(
+            page::row("Limit upload to ~1 GB/day")
+                .description("Uploads up to ~1 GB/day. Turn off the limit only if your internet connection isn't metered.")
+                .control(
+                    toggle(TOR_LIMIT_ID, limit_upload, Message::FocusAction).on_toggle(|on| {
+                        node_message(NodeSettingsMessage::InboundTorLimitUploadToggled(on))
+                    }),
                 )
-                .size(12)
-                .style(theme::text::secondary),
-            )
-            .push(
-                Row::new()
-                    .spacing(20)
-                    .align_y(Alignment::Center)
-                    .push(text("Limit upload to ~1 GB/day").width(Length::Fill))
-                    .push(
-                        Toggler::new(limit_upload)
-                            .on_toggle(NodeSettingsMessage::InboundTorLimitUploadToggled)
-                            .width(50)
-                            .style(theme::toggler::orange),
+                .into(),
+        );
+        rows.push(
+            page::row("Also route outbound connections through Tor")
+                .control(
+                    toggle(TOR_OUTBOUND_ID, outbound_via_tor, Message::FocusAction).on_toggle(
+                        |on| node_message(NodeSettingsMessage::InboundTorOutboundToggled(on)),
                     ),
-            )
-            .push(
-                Row::new()
-                    .spacing(20)
-                    .align_y(Alignment::Center)
-                    .push(text("Also route outbound connections through Tor").width(Length::Fill))
-                    .push(
-                        Toggler::new(outbound_via_tor)
-                            .on_toggle(NodeSettingsMessage::InboundTorOutboundToggled)
-                            .width(50)
-                            .style(theme::toggler::orange),
-                    ),
-            );
+                )
+                .into(),
+        );
     }
 
-    // Live participation stats (connections / onion / shared) — visible whether
-    // or not inbound is on, so the user can see their node is actually taking
-    // part in the network.
+    // Live participation stats — visible whether or not inbound is on, so the
+    // user can see their node is actually taking part in the network.
     if let Some(s) = stats {
-        col = col.push(separation().width(Length::Fill)).push(
-            text(format!(
-                "Connections: {} inbound · {} outbound",
-                s.connections_in, s.connections_out
-            ))
-            .size(12)
-            .style(theme::text::secondary),
+        rows.push(
+            page::row("Connections")
+                .control(
+                    text(format!(
+                        "{} inbound · {} outbound",
+                        s.connections_in, s.connections_out
+                    ))
+                    .size(14),
+                )
+                .into(),
         );
         if let Some(onion) = &s.onion_address {
-            col = col.push(
-                Row::new()
-                    .spacing(8)
-                    .align_y(Alignment::Center)
-                    .push(
-                        text(format!("Onion address: {onion}"))
-                            .size(12)
-                            .style(theme::text::secondary),
+            rows.push(
+                page::row("Onion address")
+                    .control(
+                        Row::new()
+                            .spacing(8)
+                            .align_y(Alignment::Center)
+                            .push(coincube_ui::component::tenshu::mono(onion.clone()))
+                            .push(
+                                Button::new(icon::clipboard_icon().size(14))
+                                    .style(theme::button::transparent_border)
+                                    .on_press(node_message(NodeSettingsMessage::CopyToClipboard(
+                                        onion.clone(),
+                                    ))),
+                            ),
                     )
-                    .push(
-                        Button::new(icon::clipboard_icon())
-                            .style(theme::button::transparent_border)
-                            .on_press(NodeSettingsMessage::CopyToClipboard(onion.clone())),
-                    ),
+                    .into(),
             );
         }
         if enabled {
@@ -2356,68 +2293,60 @@ pub fn inbound_tor_section<'a>(
             } else {
                 "unlimited".to_string()
             };
-            col = col.push(
-                text(format!(
-                    "Shared today: {} of {}",
-                    human_bytes(s.upload_used),
-                    cap
-                ))
-                .size(12)
-                .style(theme::text::secondary),
+            rows.push(
+                page::row("Shared today")
+                    .control(text(format!("{} of {}", human_bytes(s.upload_used), cap)).size(14))
+                    .into(),
             );
         }
     }
 
-    // Status + apply-now. Every change above (including turning the feature off)
-    // only reaches the running node when it restarts, so offer a one-click
-    // restart alongside the status.
-    col = col.push(separation().width(Length::Fill)).push(
-        Row::new()
-            .spacing(15)
-            .align_y(Alignment::Center)
-            .push(
-                text(if tor_running && onion_active {
-                    // Tor is up AND bitcoind has an onion key it re-publishes
-                    // on start. (The key file persists when the feature is
-                    // off, so we require a running tor too — otherwise a
-                    // just-disabled node would still read as "reachable".)
-                    "Tor is running — your node is reachable as an onion service."
-                } else if tor_running && enabled {
-                    // Tor is up but bitcoind hasn't published the onion yet
-                    // (it applies its listen/onion config only on start).
-                    "Tor is running — restart the node to publish your onion service."
-                } else if enabled {
-                    "Not reachable over Tor yet — restart the node to apply."
-                } else {
-                    "Inbound over Tor is off."
-                })
-                .size(12)
-                .style(theme::text::secondary)
-                .width(Length::Fill),
-            )
-            .push(
-                button::secondary(None, "Restart node to apply")
-                    .padding([8, 14])
-                    .on_press(NodeSettingsMessage::RestartNodeToApply),
-            ),
-    );
-
-    // Set expectations: the node only serves while the app is open and the
-    // machine is awake. Minimizing is fine (bitcoind/tor run independently);
-    // sleeping drops connections but they reconnect automatically on wake.
-    if enabled {
-        col = col.push(
-            text(
-                "Your node is reachable while Tenshu is open and your computer is awake. \
-                 Minimizing is fine; if the computer sleeps, connections reconnect \
-                 automatically on wake.",
-            )
-            .size(11)
-            .style(theme::text::secondary),
+    // Status + apply-now. Every change above (including turning the feature
+    // off) only reaches the running node when it restarts.
+    let (kind, status) = if tor_running && onion_active {
+        // Tor is up AND bitcoind has an onion key it re-publishes on start.
+        (
+            page::Status::Ok,
+            "Tor is running — your node is reachable as an onion service.",
+        )
+    } else if tor_running && enabled {
+        (
+            page::Status::Warn,
+            "Tor is running — restart the node to publish your onion service.",
+        )
+    } else if enabled {
+        (
+            page::Status::Warn,
+            "Not reachable over Tor yet — restart the node to apply.",
+        )
+    } else {
+        (page::Status::Off, "Inbound over Tor is off.")
+    };
+    let mut content = Column::new()
+        .width(Length::Fill)
+        .push(page::rows(rows))
+        .push(Space::new().height(Length::Fixed(12.0)))
+        .push(
+            Row::new()
+                .spacing(16)
+                .align_y(Alignment::Center)
+                .push(Container::new(page::status(kind, status)).width(Length::Fill))
+                .push(page::button(
+                    NODE_RESTART_ID,
+                    "Restart node to apply",
+                    Some(node_message(NodeSettingsMessage::RestartNodeToApply)),
+                )),
         );
+    // Set expectations: the node only serves while the app is open and the
+    // machine is awake.
+    if enabled {
+        content = content.push(page::caption(
+            "Your node is reachable while Tenshu is open and your computer is awake. \
+             Minimizing is fine; if the computer sleeps, connections reconnect \
+             automatically on wake.",
+        ));
     }
-
-    card::simple(col).width(Length::Fill).into()
+    page::group("Inbound connections", Some(intro.into()), content)
 }
 
 /// The "Your own Esplora" panel (`PLAN-connect-blinding` PR D5).
@@ -2677,63 +2606,183 @@ pub fn node_resources_section<'a>(
     prune: &'a form::Value<String>,
     max_mempool: &'a form::Value<String>,
     processing: bool,
-) -> Element<'a, NodeSettingsMessage> {
-    let controls = crate::installer::node_resources_controls(
-        prune,
-        max_mempool,
-        NodeSettingsMessage::NodeResourcePruneEdited,
-        NodeSettingsMessage::NodeResourceMaxMempoolEdited,
-        NodeSettingsMessage::NodeResourceSmallComputer,
-        NodeSettingsMessage::NodeResourceRegularComputer,
-    );
-
-    let apply: Element<'_, NodeSettingsMessage> = if processing {
-        button::secondary(None, "Restarting node…").into()
+) -> Element<'a, Message> {
+    use crate::app::view::settings::page;
+    use crate::node::bitcoind::{
+        estimated_total_disk_gb, MAX_MEMPOOL_DEFAULT_MB, MAX_MEMPOOL_SMALL_MB, PRUNE_COMPACT_MB,
+        PRUNE_DEFAULT, PRUNE_MINIMAL_MB,
+    };
+    let nm = node_message;
+    // Current values back the honest disk/memory estimate. A blank or
+    // unparseable field falls back to the default so the line stays
+    // meaningful; a below-floor value is caught by validation on apply.
+    let prune_mb = prune.value.parse::<u32>().unwrap_or(PRUNE_DEFAULT);
+    let mem_is_default = max_mempool.value.is_empty();
+    let mem_mb = if mem_is_default {
+        MAX_MEMPOOL_DEFAULT_MB
     } else {
-        button::secondary(None, "Restart node to apply")
-            .padding([8, 14])
-            .on_press(NodeSettingsMessage::NodeResourceApply)
-            .into()
+        max_mempool
+            .value
+            .parse::<u32>()
+            .unwrap_or(MAX_MEMPOOL_DEFAULT_MB)
+    };
+    let mem_is_small = max_mempool.value.parse::<u32>().ok() == Some(MAX_MEMPOOL_SMALL_MB);
+    let prune_msg = |mb: u32| nm(NodeSettingsMessage::NodeResourcePruneEdited(mb.to_string()));
+    let mem_msg = |v: String| nm(NodeSettingsMessage::NodeResourceMaxMempoolEdited(v));
+
+    let custom = |value: &'a form::Value<String>,
+                  placeholder: &'static str,
+                  on: fn(String) -> NodeSettingsMessage| {
+        Row::new()
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .push(text("Custom (MB):").size(13))
+            .push(
+                Container::new(Element::<NodeSettingsMessage>::from(
+                    form::Form::new_amount_sats(placeholder, value, on)
+                        .size(14)
+                        .padding(6),
+                ))
+                .width(Length::Fixed(120.0)),
+            )
+    };
+    let block = |label: &'static str,
+                 description: &'static str,
+                 controls: Element<'a, Message>|
+     -> Element<'a, Message> {
+        Container::new(
+            Column::new()
+                .spacing(2)
+                .width(Length::Fill)
+                .push(coincube_ui::component::tenshu::label(label))
+                .push(page::muted(description))
+                .push(Space::new().height(Length::Fixed(8.0)))
+                .push(controls),
+        )
+        .padding([12, 0])
+        .width(Length::Fill)
+        .into()
     };
 
-    let col = Column::new()
-        .spacing(15)
-        .push(text("Node resources").bold().size(18))
-        .push(controls)
-        .push(separation().width(Length::Fill))
-        // Honesty copy — one sentence each, same plain voice as the inbound-Tor
-        // lines. Changing prune has irreversible and asymmetric effects.
+    let prune_controls: Element<'a, Message> = Row::new()
+        .spacing(12)
+        .align_y(Alignment::Center)
+        .push(page::plain_segments([
+            (
+                "Minimal",
+                prune_mb == PRUNE_MINIMAL_MB,
+                prune_msg(PRUNE_MINIMAL_MB),
+            ),
+            (
+                "Compact",
+                prune_mb == PRUNE_COMPACT_MB,
+                prune_msg(PRUNE_COMPACT_MB),
+            ),
+            (
+                "Default",
+                prune_mb == PRUNE_DEFAULT,
+                prune_msg(PRUNE_DEFAULT),
+            ),
+        ]))
         .push(
-            text(
-                "Lowering the target prunes more block data now, and that can't \
-                 be undone.",
-            )
-            .size(12)
-            .style(theme::text::secondary),
+            Element::from(custom(
+                prune,
+                "15000",
+                NodeSettingsMessage::NodeResourcePruneEdited,
+            ))
+            .map(nm),
         )
-        .push(
-            text(
-                "Raising it keeps more blocks from now on — blocks already pruned \
-                 don't come back.",
-            )
-            .size(12)
-            .style(theme::text::secondary),
-        )
-        .push(
-            text(
-                "Restoring an old wallet may require re-downloading blocks below \
-                 the prune depth.",
-            )
-            .size(12)
-            .style(theme::text::secondary),
-        )
+        .wrap()
+        .into();
+    let mem_controls: Element<'a, Message> = Column::new()
+        .spacing(6)
         .push(
             Row::new()
-                .push(Column::new().width(Length::Fill))
-                .push(apply),
-        );
+                .spacing(12)
+                .align_y(Alignment::Center)
+                .push(page::plain_segments([
+                    (
+                        "Small (100 MB)",
+                        mem_is_small,
+                        mem_msg(MAX_MEMPOOL_SMALL_MB.to_string()),
+                    ),
+                    ("Default (300 MB)", mem_is_default, mem_msg(String::new())),
+                ]))
+                .push(
+                    Element::from(custom(
+                        max_mempool,
+                        "300",
+                        NodeSettingsMessage::NodeResourceMaxMempoolEdited,
+                    ))
+                    .map(nm),
+                )
+                .wrap(),
+        )
+        .push(coincube_ui::component::tenshu::caption(
+            "Leave blank for the default (300 MB).",
+        ))
+        .into();
 
-    card::simple(col).width(Length::Fill).into()
+    let notes = Column::new()
+        .spacing(2)
+        .width(Length::Fill)
+        .push(
+            text(format!(
+                "Estimated total: about {} GB of disk, and up to {} MB of memory for the mempool.",
+                estimated_total_disk_gb(prune_mb),
+                mem_mb,
+            ))
+            .size(14),
+        )
+        .push(Space::new().height(Length::Fixed(6.0)))
+        .push(page::muted(
+            "• Lowering the target prunes more block data now, and that can't be undone.",
+        ))
+        .push(page::muted(
+            "• Raising it keeps more blocks from now on — blocks already pruned don't come back.",
+        ))
+        .push(page::muted(
+            "• Restoring an old wallet may require re-downloading blocks below the prune depth.",
+        ));
+
+    let rows = page::rows([
+        block(
+            "Node data to keep",
+            "How much block data your node keeps on disk. The chainstate (~14 GB) is always kept and can't be pruned, so total disk use is always higher than this number.",
+            prune_controls,
+        ),
+        page::rule(),
+        block(
+            "Mempool memory cap",
+            "Memory reserved for unconfirmed transactions. During heavy congestion a small cap can delay when small incoming payments first appear, until they confirm.",
+            mem_controls,
+        ),
+        page::rule(),
+        page::row("Computer size")
+            .control(page::plain_segments([
+                (
+                    "Small computer",
+                    prune_mb == PRUNE_MINIMAL_MB && mem_is_small,
+                    nm(NodeSettingsMessage::NodeResourceSmallComputer),
+                ),
+                (
+                    "Regular computer",
+                    prune_mb == PRUNE_DEFAULT && mem_is_default,
+                    nm(NodeSettingsMessage::NodeResourceRegularComputer),
+                ),
+            ]))
+            .into(),
+        page::row("")
+            .line(notes)
+            .control(page::button(
+                NODE_RESOURCES_APPLY_ID,
+                if processing { "Restarting node…" } else { "Restart node to apply" },
+                (!processing).then_some(nm(NodeSettingsMessage::NodeResourceApply)),
+            ))
+            .top()
+            .into(),
+    ]);
+    page::group("Node resources", None, rows)
 }
 
 pub fn register_wallet_modal<'a>(
@@ -3070,7 +3119,7 @@ mod tests {
                 true,
                 false,
                 890000,
-                "Progress 97.5%",
+                "Syncing 97.5%",
             ),
             (
                 Some(0.999),
@@ -3088,7 +3137,7 @@ mod tests {
                 false,
                 false,
                 890000,
-                "Progress 97.5%",
+                "Syncing 97.5%",
             ),
             (
                 Some(0.999),
@@ -3097,7 +3146,7 @@ mod tests {
                 false,
                 false,
                 899990,
-                "Local node catching up",
+                "Catching up 99.9%",
             ),
             (
                 None,

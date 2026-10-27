@@ -6451,9 +6451,21 @@ impl App {
                 // ConnectCubePanel, mirroring the per-Cube Connect arm.
                 match option {
                     menu::CubeSettingsOption::Avatar => {
-                        return iced::Task::done(Message::View(view::Message::ConnectCube(
-                            view::ConnectCubeMessage::Avatar(view::AvatarMessage::Enter),
-                        )));
+                        // Display & appearance stays underneath the flow.
+                        let daemon = self.daemon.clone();
+                        let display = self.panels.global_settings.update(
+                            daemon,
+                            &self.cache,
+                            Message::View(view::Message::Settings(
+                                view::SettingsMessage::GeneralSection,
+                            )),
+                        );
+                        return Task::batch([
+                            display,
+                            iced::Task::done(Message::View(view::Message::ConnectCube(
+                                view::ConnectCubeMessage::Avatar(view::AvatarMessage::Enter),
+                            ))),
+                        ]);
                     }
                     menu::CubeSettingsOption::Members
                         if self.panels.connect.account.is_authenticated() =>
@@ -6504,6 +6516,12 @@ impl App {
                                 }
                             }
                         }
+                        // Connections renders from the App (see
+                        // `connect_settings_content`); no section to install.
+                        menu::VaultSubMenu::Settings(Some(menu::SettingsOption::Connections)) => {
+                            self.panels.current = menu.clone();
+                            return Task::none();
+                        }
                         menu::VaultSubMenu::Settings(Some(setting)) => {
                             if let Some(daemon) = &self.daemon {
                                 self.panels.current = menu.clone();
@@ -6521,7 +6539,8 @@ impl App {
                                             menu::SettingsOption::ImportExport => {
                                                 view::SettingsMessage::ImportExportSection
                                             }
-                                            menu::SettingsOption::LocalSigning => {
+                                            menu::SettingsOption::LocalSigning
+                                            | menu::SettingsOption::Connections => {
                                                 view::SettingsMessage::LocalSigningSection
                                             }
                                         })),
@@ -7305,8 +7324,10 @@ impl App {
                         .is_some_and(|(_, pending)| pending == id) =>
                 {
                     Some(iced::advanced::widget::Id::from(
-                        if self.mcp_supported() || self.mcp_proposals_supported() {
+                        if self.mcp_proposals_supported() {
                             "tenshu.ai-access.enable"
+                        } else if self.mcp_supported() {
+                            "tenshu.ai-access.open"
                         } else {
                             view::nav::shell::CUBE_SWITCHER_ID
                         },
@@ -10005,6 +10026,13 @@ impl App {
                 // Sync avatar handle to cache for sidebar display across all panels.
                 // Only update when Some to avoid blinking during in-flight image loads.
                 // Clear on logout when auth state transitions from true to false.
+                self.cache.avatar_regenerations_remaining = self
+                    .panels
+                    .connect
+                    .cube
+                    .avatar_data
+                    .as_ref()
+                    .map(|data| data.regenerations_remaining);
                 if let Some(handle) = self.panels.connect.cube.get_active_avatar_handle() {
                     self.cache.avatar_handle = Some(handle);
                 } else if was_authenticated && !self.cache.connect_authenticated {
@@ -10917,6 +10945,111 @@ impl App {
             // descriptor, and the `recovery_alerts` entitlement — none plumbed
             // through `State::update`. The keyholder list is *not* injected:
             // it's derived from the vault the handler's own load fetches.
+            // Inline Cube rename on Settings → Display & appearance. Mirrors
+            // the Launcher: write this device's Cube settings first (marked
+            // unsynced, so catch-up retries), then update Connect.
+            Message::View(view::Message::Settings(view::SettingsMessage::CubeNameSubmitted(
+                name,
+            ))) => {
+                let name = name.trim().to_owned();
+                if name.is_empty() || name == self.cube_settings.name {
+                    let daemon = self.daemon.clone();
+                    return self.panels.global_settings.update(
+                        daemon,
+                        &self.cache,
+                        Message::View(view::Message::Settings(
+                            view::SettingsMessage::CubeNameSubmitted(name),
+                        )),
+                    );
+                }
+                let network_dir = self.datadir.network_directory(self.cube_settings.network);
+                let cube_id = self.cube_settings.id.clone();
+                return Task::perform(
+                    async move {
+                        let saved = name.clone();
+                        settings::update_settings_file(&network_dir, move |mut s| {
+                            if let Some(c) = s.cubes.iter_mut().find(|c| c.id == cube_id) {
+                                c.name = saved;
+                                c.remote_synced = false;
+                            }
+                            Some(s)
+                        })
+                        .await
+                        .map(|_| name)
+                        .map_err(|e| e.to_string())
+                    },
+                    Message::CubeNameSaved,
+                );
+            }
+            Message::CubeNameSaved(result) => {
+                let name = match result {
+                    Ok(name) => name,
+                    Err(e) => {
+                        return Task::done(Message::View(view::Message::ShowError(format!(
+                            "Couldn't save the Cube name: {}",
+                            e
+                        ))));
+                    }
+                };
+                self.cube_settings.name = name.clone();
+                self.cache.cube_name = name.clone();
+                let daemon = self.daemon.clone();
+                let settle = self.panels.global_settings.update(
+                    daemon,
+                    &self.cache,
+                    Message::View(view::Message::Settings(
+                        view::SettingsMessage::CubeNameSubmitted(name.clone()),
+                    )),
+                );
+                let (Some(client), Some(server_id)) = (
+                    self.authenticated_coincube_client(),
+                    self.panels.connect.cube.server_cube_id,
+                ) else {
+                    return settle;
+                };
+                let cube_id = self.cube_settings.id.clone();
+                let network_dir = self.datadir.network_directory(self.cube_settings.network);
+                let request = crate::services::coincube::UpdateCubeRequest {
+                    name: Some(name),
+                    status: None,
+                    // Name-only rename: leave server Vault presence and the
+                    // Spark Stable Balance record untouched.
+                    has_vault: None,
+                    spark_stable_balance: None,
+                };
+                let remote = Task::perform(
+                    {
+                        let cube_id = cube_id.clone();
+                        async move {
+                            client
+                                .update_cube(&server_id.to_string(), request)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                            settings::update_settings_file(&network_dir, move |mut s| {
+                                if let Some(c) = s.cubes.iter_mut().find(|c| c.id == cube_id) {
+                                    c.remote_synced = true;
+                                }
+                                Some(s)
+                            })
+                            .await
+                            .map(|_| ())
+                            .map_err(|e| e.to_string())
+                        }
+                    },
+                    move |result| Message::CubeNameSynced {
+                        cube_id: cube_id.clone(),
+                        result,
+                    },
+                );
+                return Task::batch([settle, remote]);
+            }
+            Message::CubeNameSynced { cube_id, result } => {
+                // Left unsynced on failure; the Launcher's catch-up retries it.
+                if let Err(e) = result {
+                    warn!("Cube {} rename not yet synced to Connect: {}", cube_id, e);
+                }
+                return Task::none();
+            }
             Message::View(view::Message::Settings(view::SettingsMessage::RecoveryAlerts(msg))) => {
                 let client = self.authenticated_coincube_client();
                 let server_cube_id = self.panels.connect.cube.server_cube_id;
@@ -11240,24 +11373,49 @@ impl App {
             Menu::Cube(menu::CubeSubMenu::Settings(menu::CubeSettingsOption::AiAccess)) => {
                 Some(self.local_mcp.view_for_cube(self.mcp_supported(), false))
             }
-            Menu::Spark(menu::SparkSubMenu::Settings(Some(
-                menu::SparkSettingsOption::LightningAddress,
-            ))) => Some(if authenticated {
-                view::spark::settings::lightning_address::lightning_address_ux(
-                    &self.panels.connect.cube,
+            Menu::Vault(menu::VaultSubMenu::Settings(Some(menu::SettingsOption::Connections))) => {
+                Some(view::vault::settings::connections(&self.cache))
+            }
+            // The Spark tab: Stable Balance, then Lightning Address.
+            Menu::Spark(menu::SparkSubMenu::Settings(
+                None
+                | Some(menu::SparkSettingsOption::General)
+                | Some(menu::SparkSettingsOption::LightningAddress),
+            )) => {
+                let address = if authenticated {
+                    view::spark::settings::lightning_address::lightning_address_ux(
+                        &self.panels.connect.cube,
+                    )
+                    .map(view::Message::ConnectCube)
+                } else {
+                    sign_in_prompt::sign_in_prompt("claim a Lightning Address")
+                };
+                Some(
+                    iced::widget::Column::new()
+                        .width(iced::Length::Fill)
+                        .push(self.panels.spark_settings.spark_content())
+                        .push(view::settings::page::group(
+                            "Lightning Address",
+                            None,
+                            address,
+                        ))
+                        .into(),
                 )
-                .map(view::Message::ConnectCube)
-            } else {
-                sign_in_prompt::sign_in_prompt("claim a Lightning Address")
-            }),
+            }
+            // The avatar flow opens inline under Cube identity on Display &
+            // appearance, rather than replacing the page.
             Menu::Cube(menu::CubeSubMenu::Settings(menu::CubeSettingsOption::Avatar)) => {
-                Some(if !authenticated {
+                let flow = if !authenticated {
                     sign_in_prompt::sign_in_prompt("set up an Avatar")
                 } else if !has_ln_address {
                     sign_in_prompt::claim_ln_address_prompt()
                 } else {
                     view::connect::avatar_ux(&self.panels.connect.cube)
                         .map(view::Message::ConnectCube)
+                };
+                Some(match self.panels.global_settings.general() {
+                    Some(general) => general.display_content(&self.cache, Some(flow)),
+                    None => flow,
                 })
             }
             Menu::Cube(menu::CubeSubMenu::Settings(menu::CubeSettingsOption::Members)) => {
@@ -18521,8 +18679,8 @@ mod settings_navigation_integration_tests {
             ui_theme::Theme::dark(),
         );
         assert!(mounted.contains("Wallet & signers"));
-        assert!(mounted.contains("Wallet name"));
-        assert!(mounted.contains("Save names"));
+        assert!(mounted.contains("Identity and policy"));
+        assert!(mounted.contains("Signers"));
         assert!(!mounted.contains("Open Wallet & signers to review"));
         let _ = std::fs::remove_dir_all(root);
     }

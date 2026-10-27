@@ -34,6 +34,14 @@ use crate::{
 
 #[derive(Debug)]
 pub enum Message {
+    /// The Cube name typed in Settings was written to this device's Cube
+    /// settings (`Ok(name)`) or could not be.
+    CubeNameSaved(Result<String, String>),
+    /// Connect accepted (`Ok`) or refused the renamed Cube.
+    CubeNameSynced {
+        cube_id: String,
+        result: Result<(), String>,
+    },
     ActivityVaultLoaded(u64, Result<(Vec<HistoryTransaction>, bool), String>),
     ActivityPsbtLoaded(u64, Result<Vec<SpendTx>, String>),
     ActivitySparkLoaded(

@@ -216,10 +216,11 @@ fn node_panel<'a>(fixture: &'a Fixture, offline: bool) -> Element<'a, Message> {
     .map(|msg| Message::Settings(SettingsMessage::NodeSettings(msg)));
     let mut panels = vec![status];
     if !offline {
-        panels.push(
-            node_resources_section(&fixture.prune, &fixture.max_mempool, false)
-                .map(|msg| Message::Settings(SettingsMessage::NodeSettings(msg))),
-        );
+        panels.push(node_resources_section(
+            &fixture.prune,
+            &fixture.max_mempool,
+            false,
+        ));
         panels.push(
             rescan(
                 &fixture.year,
@@ -382,7 +383,7 @@ fn load_fonts() {
 fn assert_labels(scenario: &str, labels: &Labels, width: u32) {
     let expected = match scenario {
         "wallet_default" | "wallet_imported" => "Wallet & signers",
-        "node_local" | "node_offline" => "Backend & sync",
+        "node_local" | "node_offline" => "Node",
         "data_rows" => "Protection material",
         "data_conflict" => "Import wallet",
         "pair_idle" | "pair_picker" | "pair_wait" | "pair_error" | "pair_paired" => "Pair a phone",
@@ -395,7 +396,7 @@ fn assert_labels(scenario: &str, labels: &Labels, width: u32) {
         expected
     );
     if scenario == "node_local" {
-        for lower_control in ["Node resources", "Maintenance"] {
+        for lower_control in ["Node resources", "Blockchain rescan"] {
             assert!(
                 labels.0.iter().any(|(label, _)| label == lower_control),
                 "node capture did not mount {}",
@@ -488,12 +489,10 @@ fn assert_mounted_wallet_policy(labels: &Labels, width: u32) {
     let heading = labels
         .0
         .iter()
-        .find(|(text, _)| text == "Policy")
+        .find(|(text, _)| text == "Identity and policy")
         .expect("mounted policy heading")
         .1;
-    // The shell's vertical scrollable is the actual content viewport. The
-    // older nested horizontal strip starts below this heading, so it cannot
-    // be mistaken for the shell viewport.
+    // The shell's vertical scrollable is the actual content viewport.
     let viewport = labels
         .1
         .iter()
@@ -507,7 +506,7 @@ fn assert_mounted_wallet_policy(labels: &Labels, width: u32) {
     let start = labels
         .0
         .iter()
-        .position(|(text, _)| text == "Policy")
+        .position(|(text, _)| text == "Identity and policy")
         .unwrap();
     let end = labels
         .0
@@ -515,25 +514,28 @@ fn assert_mounted_wallet_policy(labels: &Labels, width: u32) {
         .position(|(text, _)| text == "Signers")
         .unwrap();
     let policy_labels = &labels.0[start..end];
-    for required in [
-        "The wallet policy:",
-        "can always spend this wallet's funds (Primary path)",
-        "(Recovery path #1)",
-        "(Recovery path #2)",
+    for required in ["Normal spending", "Recovery path #1", "Recovery path #2"] {
+        assert!(
+            policy_labels.iter().any(|(text, _)| text == required),
+            "missing policy row: {}",
+            required
+        );
+    }
+    for signer in [
         "Synthetic first recovery signer with a long display name",
         "Synthetic second recovery signer with a long display name",
         "Synthetic primary signer with a long display name",
     ] {
         assert!(
-            policy_labels.iter().any(|(text, _)| text == required),
-            "missing complete policy fragment: {}",
-            required
+            policy_labels.iter().any(|(text, _)| text.contains(signer)),
+            "policy does not name signer: {}",
+            signer
         );
     }
     assert_eq!(
         policy_labels
             .iter()
-            .filter(|(text, _)| text == "can spend coins after a relative timelock of")
+            .filter(|(text, _)| text.contains("without spending"))
             .count(),
         2,
         "both recovery clauses must mount"
@@ -813,7 +815,7 @@ async fn actual_vault_settings_capture_matrix() {
                     let target = if scenario == "pair_idle" {
                         "Pair phone"
                     } else {
-                        "Recovery Kit"
+                        "Open Backup & protection"
                     };
                     let bounds = labels
                         .0
@@ -839,18 +841,19 @@ async fn actual_vault_settings_capture_matrix() {
                         );
                     }
                     if scenario == "pair_idle" {
+                        // A Tenshu action may focus itself before its intent.
                         assert!(matches!(
-                            messages.as_slice(),
-                            [Message::Settings(SettingsMessage::LocalSigning(
+                            messages.last(),
+                            Some(Message::Settings(SettingsMessage::LocalSigning(
                                 LocalSigningMessage::StartPairing
-                            ))]
+                            )))
                         ));
                     } else {
                         assert!(matches!(
-                            messages.as_slice(),
-                            [Message::Menu(Menu::Cube(CubeSubMenu::Settings(
+                            messages.last(),
+                            Some(Message::Menu(Menu::Cube(CubeSubMenu::Settings(
                                 CubeSettingsOption::Recovery
-                            )))]
+                            ))))
                         ));
                     }
                 }

@@ -5558,6 +5558,7 @@ pub fn create_app_with_remote_backend(
             show_direction_badges: true,
             lightning_address: None,
             avatar_handle: None,
+            avatar_regenerations_remaining: None,
             cube_id: cube_settings.id.clone(),
             current_cube_server_id: None,
             current_descriptor_fingerprint: None,

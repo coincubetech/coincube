@@ -4,6 +4,7 @@ pub mod frame;
 pub mod general;
 pub mod install_stats;
 pub mod local_signing;
+pub mod page;
 pub mod recovery_kit;
 
 use coincube_ui::component::text::Text;

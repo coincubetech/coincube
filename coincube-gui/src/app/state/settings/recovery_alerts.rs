@@ -105,6 +105,9 @@ pub struct RecoveryAlerts {
     /// never silent: when a recovery kit is escrowed the dialog discloses that
     /// it will also be deleted (escrow can't outlive alerts).
     pub confirming_alerts_off: bool,
+    /// Whether the alerts controls are open under the Recovery alerts row on
+    /// Backup & protection ("Manage alerts").
+    pub managing: bool,
     /// True while the card is collecting the owner's PIN to unlock the seed for
     /// a Full-Cube enrolment (the only tier that escrows the seed).
     pub awaiting_pin: bool,
@@ -148,6 +151,7 @@ impl RecoveryAlerts {
             no_vault: false,
             loaded_once: false,
             confirming_alerts_off: false,
+            managing: false,
             awaiting_pin: false,
             pin: EscrowPin::default(),
             pin_attempt: None,
@@ -323,6 +327,10 @@ pub fn update(
     ra.entitled = entitled;
     ra.escrow_entitled = escrow_entitled;
     match msg {
+        RecoveryAlertsMessage::ToggleManage => {
+            ra.managing = !ra.managing;
+            Task::none()
+        }
         RecoveryAlertsMessage::LoadStatus => {
             ra.error = None;
 

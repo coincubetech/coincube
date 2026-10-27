@@ -2987,7 +2987,7 @@ impl ImportedBitcoinPanel {
     fn settings_view(&self, option: Option<SettingsOption>) -> Element<'_, view::Message> {
         let mut content = Column::new().spacing(16).push(h2("Vault settings"));
         match option.unwrap_or(SettingsOption::Node) {
-            SettingsOption::Node => {
+            SettingsOption::Node | SettingsOption::Connections => {
                 content = content
                     .push(p1_bold("Bitcoin server"))
                     .push(p1_regular(if self.provider_known {

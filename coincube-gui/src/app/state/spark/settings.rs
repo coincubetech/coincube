@@ -59,22 +59,41 @@ impl SparkSettings {
     }
 }
 
+impl SparkSettings {
+    /// The Spark tab's Stable Balance group without the dashboard, so the
+    /// App can add the Lightning Address group beneath it.
+    pub fn spark_content<'a>(&'a self) -> Element<'a, crate::app::view::Message> {
+        SparkSettingsView {
+            status: self.status.clone(),
+            stable_balance_active: self.stable_balance_active,
+            stable_balance_saving: self.stable_balance_saving,
+        }
+        .render()
+    }
+}
+
 impl State for SparkSettings {
     fn view<'a>(
         &'a self,
         menu: &'a Menu,
         cache: &'a Cache,
     ) -> Element<'a, crate::app::view::Message> {
-        crate::app::view::dashboard(
+        let view = SparkSettingsView {
+            status: self.status.clone(),
+            stable_balance_active: self.stable_balance_active,
+            stable_balance_saving: self.stable_balance_saving,
+        };
+        let content = if matches!(
             menu,
-            cache,
-            SparkSettingsView {
-                status: self.status.clone(),
-                stable_balance_active: self.stable_balance_active,
-                stable_balance_saving: self.stable_balance_saving,
-            }
-            .render(),
-        )
+            Menu::Spark(crate::app::menu::SparkSubMenu::Settings(Some(
+                crate::app::menu::SparkSettingsOption::Connections
+            )))
+        ) {
+            view.render_connections(cache)
+        } else {
+            view.render()
+        };
+        crate::app::view::dashboard(menu, cache, content)
     }
 
     fn reload(

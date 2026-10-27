@@ -18,17 +18,16 @@ pub mod lightning_address;
 
 use coincube_ui::{
     color,
-    component::{
-        button,
-        text::{h3, h4_bold, p1_regular, p2_regular, Text as _},
-    },
-    theme,
-    widget::{Column, Container, Element, Row},
+    component::tenshu::toggle,
+    widget::{Column, Element, Row},
 };
 use iced::widget::Space;
 use iced::{Alignment, Length};
 
+use crate::app::cache::Cache;
+use crate::app::view::settings::page;
 use crate::app::view::{Message, SparkSettingsMessage};
+use crate::app::ConnectionStatus;
 
 /// Coarse status the panel knows about. Only "Unavailable" needs
 /// its own rendering branch; the other variants all render the
@@ -58,104 +57,125 @@ pub struct SparkSettingsView {
     pub stable_balance_saving: bool,
 }
 
+pub const STABLE_BALANCE_ID: &str = "tenshu.settings.spark.stable-balance";
+
 impl SparkSettingsView {
-    /// Render the General sub-page. The Lightning Address sub-page is
-    /// dispatched at the App level (see [`super::lightning_address`])
-    /// because it needs a borrow of `ConnectCubePanel` that the
-    /// `State::view` trait signature can't provide.
+    /// The Spark tab's Stable Balance group. The App adds the Lightning
+    /// Address group beneath it, because that form needs `ConnectCubePanel`,
+    /// which the `State::view` signature can't reach.
     pub fn render<'a>(self) -> Element<'a, Message> {
-        // Match the Cube/Vault settings pages: plain `h3` heading, no
-        // container wrapper. The rail already shows Spark → Settings.
-        let heading = h3("Settings").bold();
-
         if matches!(self.status, SparkSettingsStatus::Unavailable) {
-            let body = Column::new()
-                .spacing(10)
-                .push(p1_regular(
-                    "Spark is not configured for this cube, or the bridge \
-                     subprocess failed to spawn.",
-                ))
-                .push(p2_regular(
-                    "Configure a Spark signer on this cube and restart the \
-                     app to connect. If you already have one configured, \
-                     check the stderr logs from coincube-spark-bridge to \
-                     see why the spawn failed — the bridge binary must be \
-                     locatable via COINCUBE_SPARK_BRIDGE_PATH or sit \
-                     alongside the main coincube binary.",
-                ));
-            return Column::new().spacing(20).push(heading).push(body).into();
+            return page::group(
+                "Spark isn't available",
+                Some(
+                    "Spark is not configured for this Cube, or the bridge subprocess failed to \
+                     spawn. Configure a Spark signer on this Cube and restart the app to connect."
+                        .into(),
+                ),
+                Space::new(),
+            );
         }
-
         let bridge_reachable = matches!(self.status, SparkSettingsStatus::Connected);
-        let stable_balance_card = stable_balance_card(
+        stable_balance_group(
             self.stable_balance_active,
             self.stable_balance_saving,
             bridge_reachable,
-        );
-        let bridge_status_card = bridge_status_card(&self.status);
+        )
+    }
 
+    /// The Connections tab: the Connect account, the Cube service session and
+    /// the Spark bridge, then the bridge diagnostics.
+    pub fn render_connections<'a>(self, cache: &'a Cache) -> Element<'a, Message> {
+        let account = Row::new()
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .push(page::muted("Connect account"))
+            .push(if cache.connect_authenticated {
+                page::status(page::Status::Ok, "Signed in")
+            } else {
+                page::status(page::Status::Unknown, "Signed out")
+            })
+            .push(Space::new().width(Length::Fill))
+            .push(page::link(
+                "tenshu.settings.spark.manage-connect",
+                if cache.connect_authenticated {
+                    "Manage in Connect"
+                } else {
+                    "Sign in"
+                },
+                Message::OpenConnectSignIn,
+            ));
+        let session = match (&cache.connect_stream_status, cache.connect_authenticated) {
+            (_, false) => page::row("Cube service session")
+                .accessory(page::status(page::Status::Unknown, "Not checked"))
+                .description("Checked after sign-in."),
+            (ConnectionStatus::Connected, true) => page::row("Cube service session")
+                .accessory(page::status(page::Status::Ok, "Connected"))
+                .description("Registered with Connect."),
+            (ConnectionStatus::Error(e), true) => page::row("Cube service session")
+                .accessory(page::status(page::Status::Bad, "Reconnect required"))
+                .description(e.clone()),
+            (_, true) => page::row("Cube service session")
+                .accessory(page::status(page::Status::Busy, "Connecting…"))
+                .description("Re-authenticates this Cube only. Never rescans."),
+        };
+        let (_, _, headline, detail) = bridge_status_copy(&self.status);
+        let kind = match self.status {
+            SparkSettingsStatus::Connected => page::Status::Ok,
+            SparkSettingsStatus::Loading => page::Status::Busy,
+            SparkSettingsStatus::Error(_) | SparkSettingsStatus::Unavailable => page::Status::Bad,
+        };
+        let bridge = page::row("Spark bridge")
+            .accessory(page::status(kind, headline))
+            .description(detail);
         Column::new()
-            .spacing(20)
-            .push(heading)
-            .push(stable_balance_card)
-            .push(bridge_status_card)
+            .width(Length::Fill)
+            .push(page::note(
+                coincube_ui::component::tenshu::Tone::Muted,
+                account,
+                None,
+            ))
+            .push(page::group(
+                "Health",
+                None,
+                page::rows([session.into(), bridge.into()]),
+            ))
             .into()
     }
 }
 
-fn stable_balance_card<'a>(
+fn stable_balance_group<'a>(
     active: Option<bool>,
     saving: bool,
     spark_available: bool,
 ) -> Element<'a, Message> {
-    let status_line: Element<'_, Message> =
-        p2_regular(stable_balance_status_text(active, spark_available)).into();
-
-    let toggle = stable_balance_toggle_state(active, saving, spark_available);
-    let toggle_btn = button::primary(None, toggle.button_label).width(Length::Fixed(140.0));
-    let toggle_btn: Element<'_, Message> = if toggle.can_toggle {
-        toggle_btn
-            .on_press(Message::SparkSettings(
-                SparkSettingsMessage::StableBalanceToggled(toggle.next_state),
-            ))
-            .into()
-    } else {
-        toggle_btn.on_press_maybe(None).into()
+    let toggle_state = stable_balance_toggle_state(active, saving, spark_available);
+    let (kind, word) = match (active, spark_available) {
+        (_, false) => (page::Status::Bad, "Bridge unavailable"),
+        (None, true) => (page::Status::Busy, "Loading…"),
+        (Some(true), true) => (page::Status::Ok, "On"),
+        (Some(false), true) => (page::Status::Off, "Off"),
     };
-
-    Container::new(
-        Column::new()
-            .spacing(10)
-            .push(h4_bold("Stable Balance"))
-            .push(p2_regular(
-                "Keep a portion of your Bitcoin balance pegged to \
-                 USD. Your spendable balance stays stable against \
-                 fiat even as BTC price moves. You can still send \
-                 Bitcoin normally — the wallet automatically \
-                 converts between the stable and Bitcoin balances \
-                 as needed.",
-            ))
-            .push(
-                Row::new()
-                    .spacing(12)
-                    .align_y(Alignment::Center)
-                    .push(status_line)
-                    .push(Space::new().width(Length::Fill))
-                    .push(toggle_btn),
-            ),
-    )
-    .padding(12)
-    .style(theme::card::simple)
-    .into()
-}
-
-fn stable_balance_status_text(active: Option<bool>, spark_available: bool) -> &'static str {
-    match (active, spark_available) {
-        (_, false) => "Spark bridge unavailable — toggle disabled.",
-        (None, true) => "Loading…",
-        (Some(true), true) => "Stable Balance is ON",
-        (Some(false), true) => "Stable Balance is OFF",
-    }
+    let row = page::row("Stable Balance")
+        .accessory(page::status(kind, word))
+        .description(
+            "Keeps your spendable balance pegged to USD as USDB. Turning it on converts sats \
+             above a small threshold to USDB; turning it off converts USDB back to bitcoin. \
+             Conversions can retry after a failure and the amount can differ slightly from the \
+             estimate. No peg is guaranteed.",
+        )
+        .control(
+            toggle(
+                STABLE_BALANCE_ID,
+                active.unwrap_or(false),
+                Message::FocusAction,
+            )
+            .on_toggle_maybe(toggle_state.can_toggle.then_some(|on| {
+                Message::SparkSettings(SparkSettingsMessage::StableBalanceToggled(on))
+            })),
+        )
+        .top();
+    page::group("Stable Balance", None, page::rows([row.into()]))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -182,34 +202,6 @@ fn stable_balance_toggle_state(
         next_state,
         can_toggle,
     }
-}
-
-/// Small live diagnostic card — shows whether the Spark bridge
-/// subprocess is reachable. Green check for a healthy round-trip,
-/// red X for an error, a neutral dot while loading.
-fn bridge_status_card<'a>(status: &SparkSettingsStatus) -> Element<'a, Message> {
-    let (indicator_char, indicator_color, headline, detail) = bridge_status_copy(status);
-
-    Container::new(
-        Column::new()
-            .spacing(8)
-            .push(h4_bold("Bridge status"))
-            .push(
-                Row::new()
-                    .spacing(8)
-                    .align_y(Alignment::Center)
-                    .push(iced::widget::text(indicator_char).size(18).style(
-                        move |_: &theme::Theme| iced::widget::text::Style {
-                            color: Some(indicator_color),
-                        },
-                    ))
-                    .push(p1_regular(headline)),
-            )
-            .push(p2_regular(detail)),
-    )
-    .padding(12)
-    .style(theme::card::simple)
-    .into()
 }
 
 fn bridge_status_copy(
@@ -254,23 +246,6 @@ fn bridge_status_copy(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn stable_balance_status_text_covers_loading_on_off_and_unavailable() {
-        assert_eq!(
-            stable_balance_status_text(None, false),
-            "Spark bridge unavailable — toggle disabled."
-        );
-        assert_eq!(stable_balance_status_text(None, true), "Loading…");
-        assert_eq!(
-            stable_balance_status_text(Some(true), true),
-            "Stable Balance is ON"
-        );
-        assert_eq!(
-            stable_balance_status_text(Some(false), true),
-            "Stable Balance is OFF"
-        );
-    }
 
     #[test]
     fn stable_balance_toggle_state_only_enables_when_loaded_available_and_idle() {

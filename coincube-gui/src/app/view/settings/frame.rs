@@ -1,11 +1,10 @@
 //! Route-derived Settings navigation, kept inside page content.
 
-use coincube_ui::component::text::*;
-use coincube_ui::font;
-use coincube_ui::theme;
-use coincube_ui::widget::{action::Action, Element};
-use iced::widget::{pick_list, responsive, rule, Column, Row};
-use iced::{Length, Size};
+use coincube_ui::component::tenshu::{self, choice_chips, segment, tabs};
+use coincube_ui::icon;
+use coincube_ui::widget::{Column, Container, Element, Row};
+use iced::widget::Space;
+use iced::Length;
 
 use crate::app::cache::Cache;
 use crate::app::features;
@@ -92,11 +91,20 @@ fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
                 (CubeSettingsOption::PaymentChecks, "Payment checks", "payment-checks"),
                 (CubeSettingsOption::AiAccess, "AI access", "ai-access"),
                 (CubeSettingsOption::DataExports, "Data & exports", "data"),
-                (CubeSettingsOption::Stats, "Download stats", "stats"),
-                (CubeSettingsOption::About, "About", "about"),
             ];
             if crate::feature_flags::CUBE_MEMBERS_UI_ENABLED {
                 sections.push((CubeSettingsOption::Members, "Members", "members"));
+            }
+            // Download stats and About moved to App preferences. Their routes
+            // stay reachable, so show a tab for one only while it is open.
+            match menu {
+                Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Stats)) => {
+                    sections.push((CubeSettingsOption::Stats, "Download stats", "stats"))
+                }
+                Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::About)) => {
+                    sections.push((CubeSettingsOption::About, "About", "about"))
+                }
+                _ => {}
             }
             sections
                 .into_iter()
@@ -113,7 +121,11 @@ fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
                     },
                     label: label.to_owned(),
                     intent: Message::Menu(Menu::Cube(CubeSubMenu::Settings(section))),
-                    selected: matches!(menu, Menu::Cube(CubeSubMenu::Settings(current)) if *current == section),
+                    // The avatar flow belongs to Cube identity on Display.
+                    selected: matches!(menu, Menu::Cube(CubeSubMenu::Settings(current))
+                        if *current == section
+                            || (*current == CubeSettingsOption::Avatar
+                                && section == CubeSettingsOption::General)),
                     enabled: true,
                 })
                 .collect()
@@ -123,13 +135,10 @@ fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
             (SettingsOption::Node, "Node", "node"),
             (
                 SettingsOption::LocalSigning,
-                if cache.has_imported_bitcoin {
-                    "Pair with Keychain · Unavailable for imported wallets"
-                } else {
-                    "Pair with Keychain"
-                },
+"Pair with Keychain",
                 "pair",
             ),
+            (SettingsOption::Connections, "Connections", "connections"),
             (SettingsOption::ImportExport, "Data & exports", "data"),
         ]
         .iter()
@@ -142,6 +151,7 @@ fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
                 "wallet" => "tenshu.settings.route.vault.wallet",
                 "node" => "tenshu.settings.route.vault.node",
                 "pair" => "tenshu.settings.route.vault.pair",
+                "connections" => "tenshu.settings.route.vault.connections",
                 _ => "tenshu.settings.route.vault.data",
             },
             label: label.to_owned(),
@@ -154,11 +164,7 @@ fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
         .collect(),
         Some(RouteScope::Spark) => [
             (SparkSettingsOption::General, "Spark", "general"),
-            (
-                SparkSettingsOption::LightningAddress,
-                "Lightning Address",
-                "lightning-address",
-            ),
+            (SparkSettingsOption::Connections, "Connections", "connections"),
         ]
         .iter()
         .copied()
@@ -166,13 +172,22 @@ fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
             id: if id == "general" {
                 "tenshu.settings.route.spark.general"
             } else {
-                "tenshu.settings.route.spark.lightning-address"
+                "tenshu.settings.route.spark.connections"
             },
             label: label.to_owned(),
             intent: Message::Menu(Menu::Spark(SparkSubMenu::Settings(Some(section)))),
-            selected: matches!(menu, Menu::Spark(SparkSubMenu::Settings(Some(current))) if *current == section)
-                || (section == SparkSettingsOption::General
-                    && matches!(menu, Menu::Spark(SparkSubMenu::Settings(None)))),
+            // Lightning Address lives on the Spark tab.
+            selected: match menu {
+                Menu::Spark(SparkSubMenu::Settings(Some(current))) => {
+                    *current == section
+                        || (section == SparkSettingsOption::General
+                            && *current == SparkSettingsOption::LightningAddress)
+                }
+                Menu::Spark(SparkSubMenu::Settings(None)) => {
+                    section == SparkSettingsOption::General
+                }
+                _ => false,
+            },
             enabled: true,
         })
         .collect(),
@@ -180,94 +195,86 @@ fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
     }
 }
 
-/// The Settings scope and section choices live in page content on every route.
+fn scope_icon(scope: &str) -> coincube_ui::widget::Text<'static> {
+    match scope {
+        "tenshu.settings.route.scope.vault" => icon::vault_icon(),
+        "tenshu.settings.route.scope.spark" => icon::lightning_outline_icon(),
+        _ => icon::cube_icon(),
+    }
+}
+
+/// The Settings heading, its scope line, the scope chips and the section tabs
+/// (`.ph`, `.idl`, `.scopes`, `.tabs`). The tabs keep one row at the 1024px
+/// minimum window, so there is no narrow-window substitute.
 pub fn in_content_navigation(menu: &Menu, cache: &Cache) -> Option<Element<'static, Message>> {
     let scope = route_scope(menu)?;
     let scopes = route_choices(menu, cache);
     let sections = section_routes(menu, cache);
-    let context = match scope {
-        RouteScope::Cube => "Applies to this Cube.",
-        RouteScope::Vault => "Applies to this Vault in the current Cube.",
-        RouteScope::Spark => "Applies to this Cube's Spark wallet.",
-    };
-    Some(
-        responsive(move |size: Size| {
-            let mut content = Column::new()
-                .spacing(12)
-                .width(Length::Fill)
-                .push(text("Settings").size(H2_SIZE).font(font::SEMIBOLD))
-                .push(text(context).size(P2_SIZE));
-            if size.width < 760.0 {
-                content = content
-                    .push(compact_choice("Scope", scopes.clone()))
-                    .push(compact_choice("Section", sections.clone()));
-            } else {
-                content = content
-                    .push(route_choice_row(scopes.clone()))
-                    .push(route_choice_row(sections.clone()));
-            }
-            content.push(rule::horizontal(1)).into()
-        })
-        .height(Length::Shrink)
-        .into(),
-    )
-}
-
-fn compact_choice(label: &'static str, choices: Vec<RouteChoice>) -> Element<'static, Message> {
-    let selected = choices
+    let network = crate::app::view::nav::shell::network_label(cache.chain());
+    let scope_name = scopes
         .iter()
         .find(|choice| choice.selected)
-        .map(|choice| choice.label.clone());
-    let labels: Vec<String> = choices
-        .iter()
-        .filter(|choice| choice.enabled)
         .map(|choice| choice.label.clone())
-        .collect();
-    let fallback = choices
-        .iter()
-        .find(|choice| choice.selected)
-        .or_else(|| choices.first())
-        .map(|choice| choice.intent.clone());
-    Row::new()
-        .spacing(12)
+        .unwrap_or_else(|| match scope {
+            RouteScope::Cube => "Cube".to_owned(),
+            RouteScope::Vault => "Vault".to_owned(),
+            RouteScope::Spark => "Spark".to_owned(),
+        });
+    let light = matches!(
+        cache.theme_mode,
+        coincube_ui::theme::palette::ThemeMode::Light
+    );
+    let coin = iced::widget::Svg::new(iced::widget::svg::Handle::from_memory(
+        crate::home::launcher_coin::widget_source(cache.chain(), 16.0, 1.0, light).into_bytes(),
+    ))
+    .width(Length::Fixed(16.0))
+    .height(Length::Fixed(16.0));
+    let scope_line = Row::new()
+        .spacing(6)
         .align_y(iced::Alignment::Center)
-        .push(text(label).size(P2_SIZE).width(Length::Fixed(64.0)))
         .push(
-            pick_list(labels, selected, move |selected| {
-                choices
-                    .iter()
-                    .find(|choice| choice.label == selected && choice.enabled)
-                    .map(|choice| choice.intent.clone())
-                    .or_else(|| fallback.clone())
-                    .expect("settings choice list is nonempty")
-            })
-            .width(Length::Fill)
-            .style(theme::pick_list::primary),
+            Container::new(coin)
+                .width(Length::Fixed(18.0))
+                .height(Length::Fixed(18.0))
+                .center_x(Length::Fixed(18.0))
+                .center_y(Length::Fixed(18.0)),
         )
-        .into()
-}
+        .push(tenshu::caption(format!("{} · {}", scope_name, network)).size(13));
 
-fn route_choice_row(choices: Vec<RouteChoice>) -> Element<'static, Message> {
-    let mut row = Row::new().spacing(8);
-    for choice in choices {
-        let action = Action::new(
-            choice.id,
-            text(choice.label).size(P2_SIZE).font(font::MEDIUM),
-            Message::FocusAction,
-        )
-        .padding([8, 16])
-        .style(if choice.selected {
-            theme::button::primary
-        } else {
-            theme::button::secondary
-        });
-        row = row.push(if choice.enabled {
-            action.on_press(choice.intent)
-        } else {
-            action
-        });
-    }
-    row.wrap().vertical_spacing(8).into()
+    let scope_intents: Vec<Message> = scopes.iter().map(|c| c.intent.clone()).collect();
+    let chips = choice_chips(
+        scopes.iter().enumerate().map(|(index, choice)| {
+            segment(choice.id, index, choice.label.clone())
+                .icon(scope_icon(choice.id))
+                .enabled(choice.enabled)
+        }),
+        scopes.iter().position(|choice| choice.selected),
+        Message::FocusAction,
+    )
+    .on_select(move |index| scope_intents[index].clone());
+
+    let section_intents: Vec<Message> = sections.iter().map(|c| c.intent.clone()).collect();
+    let tab_row = tabs(
+        sections.iter().enumerate().map(|(index, choice)| {
+            segment(choice.id, index, choice.label.clone()).enabled(choice.enabled)
+        }),
+        sections.iter().position(|choice| choice.selected),
+        Message::FocusAction,
+    )
+    .on_select(move |index| section_intents[index].clone());
+
+    Some(
+        Column::new()
+            .width(Length::Fill)
+            .push(tenshu::title("Settings").size(24))
+            .push(Space::new().height(Length::Fixed(4.0)))
+            .push(scope_line)
+            .push(Space::new().height(Length::Fixed(20.0)))
+            .push(chips)
+            .push(Space::new().height(Length::Fixed(16.0)))
+            .push(tab_row)
+            .into(),
+    )
 }
 
 #[cfg(test)]
