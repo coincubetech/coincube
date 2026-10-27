@@ -476,15 +476,10 @@ fn refundable_row<'a>(
     let time_ago = format_time_ago(refundable.timestamp.into());
 
     // This is a recoverable amount, not money already received. Keep it
-    // unsigned and name the broadcast state.
-    let status = match in_flight {
-        Some(InFlightRefund {
-            refund_txid: Some(txid),
-            ..
-        }) => format!("Refund broadcast · {}", truncate_middle(txid, 6, 6)),
-        Some(_) => "Refund broadcasting…".to_string(),
-        None => "Refundable".to_string(),
-    };
+    // unsigned and report submission until the SDK returns a broadcast txid.
+    let status = in_flight
+        .map(|entry| refund_status(false, Some(entry)))
+        .unwrap_or_else(|| "Refundable".to_owned());
 
     let amount = if mask_amounts {
         "••••••".to_owned()
@@ -877,7 +872,7 @@ fn refund_status(refunding: bool, in_flight: Option<&InFlightRefund>) -> String 
             refund_txid: Some(txid),
             ..
         }) => format!("Refund broadcast · {}", truncate_middle(txid, 6, 6)),
-        Some(_) => "Refund broadcasting…".to_owned(),
+        Some(_) => "Submitting refund…".to_owned(),
         None if refunding => "Submitting refund…".to_owned(),
         None => "This swap can be refunded".to_owned(),
     }
@@ -1295,7 +1290,8 @@ mod tests {
             refund_txid: None,
             submitted_at: Instant::now(),
         };
-        assert_eq!(refund_status(true, Some(&pending)), "Refund broadcasting…");
+        assert_eq!(refund_status(true, Some(&pending)), "Submitting refund…");
+        assert_eq!(refund_status(false, Some(&pending)), "Submitting refund…");
         let broadcast = InFlightRefund {
             refund_txid: Some("synthetic-refund-txid".to_owned()),
             submitted_at: Instant::now(),
