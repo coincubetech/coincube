@@ -142,6 +142,9 @@ a{color:#f3821d}a:hover{color:#ffa54d}
 .side .lockq p,.side .lockask>span{margin:0;flex:1 1 100%}
 .side .lockgrp{display:contents}
 a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color:var(--acc-ink)}
+/* page shell (Robert, 2026-10-27): every Cube page starts one gutter from the side menu; only its right edge varies. Reading pages cap at --page-max; Activity is wide. */
+.tenshu{--gutter:clamp(24px,3vw,48px);--page-max:1120px}
+.main .pg{margin:0;max-width:calc(var(--page-max) + 2 * var(--gutter));padding:28px var(--gutter) 48px}
 </style>
 </helmet>
 <div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
