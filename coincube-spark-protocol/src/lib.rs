@@ -709,6 +709,29 @@ pub struct PaymentSummary {
     /// Spark-native transfers.
     #[serde(default)]
     pub description: Option<String>,
+    /// Identifiers and destination for the payment's detail view. Empty
+    /// when the bridge predates them, so an old bridge still decodes.
+    #[serde(default)]
+    pub details: PaymentDetailSummary,
+}
+
+/// The parts of a Spark `PaymentDetails` that Activity shows. The HTLC
+/// preimage is left out: the SDK redacts it from logs, and this type is
+/// logged with `Debug`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaymentDetailSummary {
+    /// Lightning HTLC payment hash.
+    #[serde(default)]
+    pub payment_hash: Option<String>,
+    /// BOLT11/BOLT12 invoice, or the Spark invoice a transfer fulfilled.
+    #[serde(default)]
+    pub invoice: Option<String>,
+    /// Lightning address of an LNURL-pay send.
+    #[serde(default)]
+    pub lightning_address: Option<String>,
+    /// Bitcoin txid of a deposit or withdrawal, or a token transaction hash.
+    #[serde(default)]
+    pub tx_id: Option<String>,
 }
 
 /// High-level classification of a user-supplied destination string,
@@ -1382,6 +1405,7 @@ mod tests {
         assert_eq!(payment.token_ticker, None);
         assert_eq!(payment.method, "");
         assert_eq!(payment.description, None);
+        assert_eq!(payment.details, PaymentDetailSummary::default());
     }
 
     #[derive(Debug, PartialEq, Serialize, Deserialize)]

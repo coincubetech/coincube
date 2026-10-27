@@ -316,6 +316,28 @@ pub(crate) mod capture {
         inspect_at_width(scenario, content, outer, appearance, theme, content_width)
     }
 
+    /// A screen that fills its area (Activity's pinned header over its
+    /// own scrolling panes), laid out at `width` × `height` with no outer
+    /// scroll, which would collapse its fill height.
+    pub fn inspect_filled<M: 'static>(
+        scenario: &str,
+        content: Element<'_, M>,
+        outer: (u32, u32),
+        appearance: &str,
+        theme: theme::Theme,
+        (width, height): (u32, u32),
+    ) -> Inspection {
+        inspect_sized(
+            scenario,
+            content,
+            outer,
+            appearance,
+            theme,
+            (width, height),
+            false,
+        )
+    }
+
     fn inspect_at_width<M: 'static>(
         scenario: &str,
         content: Element<'_, M>,
@@ -324,24 +346,48 @@ pub(crate) mod capture {
         theme: theme::Theme,
         width: u32,
     ) -> Inspection {
+        let height = outer.1.saturating_sub(100).max(1);
+        inspect_sized(
+            scenario,
+            content,
+            outer,
+            appearance,
+            theme,
+            (width, height),
+            true,
+        )
+    }
+
+    fn inspect_sized<M: 'static>(
+        scenario: &str,
+        content: Element<'_, M>,
+        outer: (u32, u32),
+        appearance: &str,
+        theme: theme::Theme,
+        (width, height): (u32, u32),
+        scroll: bool,
+    ) -> Inspection {
         for bytes in font::load() {
             iced::advanced::graphics::text::font_system()
                 .write()
                 .unwrap()
                 .load_font(bytes);
         }
-        let height = outer.1.saturating_sub(100).max(1);
-        let size = Size::new(width as f32, height as f32);
+        let size = Size::new(width as f32, height.max(1) as f32);
         let mut renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
             font::REGULAR,
             iced::Pixels(16.0),
             Some("tiny-skia"),
         ))
         .expect("software renderer for a synthetic R06a presenter");
-        let mut element: Element<'_, M> = iced::widget::scrollable(content)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into();
+        let mut element: Element<'_, M> = if scroll {
+            iced::widget::scrollable(content)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        } else {
+            content
+        };
         let mut tree = Tree::new(element.as_widget());
         let node = element.as_widget_mut().layout(
             &mut tree,

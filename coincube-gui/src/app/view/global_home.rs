@@ -13,7 +13,7 @@ use coincube_ui::{
     widget::{action::Action, *},
 };
 use iced::{
-    widget::{Button, Column, Space, Stack},
+    widget::{Button, Column, Space},
     Alignment, Length,
 };
 
@@ -531,168 +531,156 @@ where
     }
 }
 
-/// One of the two clickable wallet-summary cards on the amount-entry screen.
-/// Pressing it opens the wallet-picker popup to edit the named side.
-fn balance_summary_card<'a>(
+/// Inline wallet choice matching P-Transfer's From and To rows.
+#[allow(clippy::too_many_arguments)]
+fn transfer_wallet_row<'a>(
+    cube_id: &str,
+    side: PickerSide,
     kind: WalletKind,
-    balance: &Amount,
+    selected: bool,
+    balance: Amount,
     fiat_converter: Option<FiatAmountConverter>,
-    bitcoin_unit: crate::app::settings::unit::BitcoinDisplayUnit,
+    bitcoin_unit: BitcoinDisplayUnit,
     balance_masked: bool,
-    on_press: Message,
 ) -> Element<'a, Message> {
     let fiat_balance = (!balance_masked)
-        .then(|| fiat_converter.as_ref().map(|c| c.convert(*balance)))
+        .then(|| fiat_converter.as_ref().map(|c| c.convert(balance)))
         .flatten();
-    let name = kind.label();
-
-    let content = Column::new()
+    let balance_text = if balance_masked {
+        "••••••".to_string()
+    } else {
+        balance.to_formatted_string_with_unit(bitcoin_unit)
+    };
+    let selection_mark = if selected { "◉" } else { "○" };
+    let content = Row::new()
         .spacing(12)
+        .align_y(Alignment::Center)
+        .push(text(selection_mark).size(18))
+        .push(wallet_kind_icon::<Message>(kind, 18.0))
+        .push(text(kind.label()).size(P1_SIZE).bold())
+        .push(Space::new().width(Length::Fill))
         .push(
-            Row::new()
-                .spacing(8)
-                .align_y(Alignment::Center)
-                .push(wallet_kind_icon::<Message>(kind, 16.0))
-                .push(text(name).color(color::GREY_2).size(14)),
-        )
-        .push(
-            Row::new().align_y(Alignment::Center).push(
-                Column::new()
-                    .spacing(4)
-                    .push(if balance_masked {
-                        Row::new().push(text("••••••").size(H2_SIZE))
-                    } else {
-                        amount_with_size_and_unit(balance, H2_SIZE, bitcoin_unit)
-                    })
-                    .push_maybe(
-                        fiat_balance
-                            .map(|fiat| fiat.to_text().size(P1_SIZE).style(theme::text::secondary)),
-                    ),
-            ),
+            Column::new()
+                .align_x(Alignment::End)
+                .push(text(balance_text).size(P2_SIZE))
+                .push_maybe(
+                    fiat_balance
+                        .map(|fiat| fiat.to_text().size(P2_SIZE).style(theme::text::secondary)),
+                ),
         );
-
-    // Orange-outlined style for Liquid (matches the historic home-card treatment);
-    // plain card style for Spark/Vault.
-    let is_liquid = matches!(kind, WalletKind::Liquid);
-    let card = Container::new(content)
-        .padding(20)
+    let row = Container::new(content)
+        .padding([12, 14])
         .width(Length::Fill)
-        .style(move |t| {
-            if is_liquid {
-                iced::widget::container::Style {
-                    border: iced::Border {
-                        color: color::ORANGE,
-                        width: 0.2,
-                        radius: 25.0.into(),
-                    },
-                    background: Some(iced::Background::Color(t.colors.cards.simple.background)),
-                    ..Default::default()
-                }
-            } else {
-                theme::card::simple(t)
-            }
+        .style(move |t| iced::widget::container::Style {
+            background: selected.then_some(iced::Background::Color(t.colors.shell.selected)),
+            border: iced::Border {
+                radius: 8.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
         });
-
-    Button::new(card)
-        .padding(0)
-        .width(Length::Fill)
-        .style(theme::button::transparent_border)
-        .on_press(on_press)
-        .into()
+    Action::new(
+        landing_control_id(
+            cube_id,
+            kind.label(),
+            match side {
+                PickerSide::From => "transfer-from",
+                PickerSide::To => "transfer-to",
+            },
+        ),
+        row,
+        Message::FocusAction,
+    )
+    .padding(0)
+    .width(Length::Fill)
+    .style(theme::button::transparent)
+    .on_press(Message::Home(HomeMessage::SelectTransferWallet(side, kind)))
+    .into()
 }
 
-/// Popup content for the wallet-picker modal. Lists each available wallet as a
-/// `picker_row`; the row matching the opposite side is disabled (non-pressable)
-/// to prevent the illegal same-wallet selection.
+/// The selected source remains in the From list; To excludes that wallet so
+/// the user cannot choose a same-wallet transfer. Selecting a source that was
+/// previously the destination swaps the pair in the state layer.
 #[allow(clippy::too_many_arguments)]
-fn wallet_selector_popup<'a>(
-    from: Option<WalletKind>,
-    to: Option<WalletKind>,
-    editing: PickerSide,
+fn transfer_wallet_section<'a>(
+    cube_id: &str,
+    side: PickerSide,
+    direction: TransferDirection,
     has_vault: bool,
     has_spark: bool,
     has_liquid: bool,
     liquid_balance: Amount,
     spark_balance: Amount,
     vault_balance: Amount,
+    fiat_converter: Option<FiatAmountConverter>,
     bitcoin_unit: BitcoinDisplayUnit,
     balance_masked: bool,
 ) -> Element<'a, Message> {
-    let title_label = match editing {
-        PickerSide::From => "FROM",
-        PickerSide::To => "TO",
+    let selected = match side {
+        PickerSide::From => direction.from_kind(),
+        PickerSide::To => direction.to_kind(),
     };
-
-    let current = match editing {
-        PickerSide::From => from,
-        PickerSide::To => to,
-    };
-
-    // When editing the TO side, hide whatever wallet is currently set as FROM —
-    // listing it disabled is noise when the user already knows they're
-    // transferring *from* it. When editing the FROM side, show all three: the
-    // user may want to swap which wallet is the source, and seeing the current
-    // TO wallet in the FROM list is useful for that (picking it implicitly
-    // swaps sides in the state layer).
-    let hidden = match editing {
-        PickerSide::From => None,
-        PickerSide::To => from,
-    };
-
-    let row_for = |kind: WalletKind, balance: Amount| -> Element<'a, Message> {
-        let is_selected = current == Some(kind);
-        let balance_str = if balance_masked {
-            "••••••".into()
-        } else {
-            balance.to_formatted_string_with_unit(bitcoin_unit)
-        };
-        let icon_elem = wallet_kind_icon::<Message>(kind, 36.0);
-        crate::app::view::shared::picker::picker_row(
-            icon_elem,
-            kind.label(),
-            &balance_str,
-            kind.badge(),
-            is_selected,
-            Message::Home(HomeMessage::SelectWalletInPicker(kind)),
-        )
-    };
-
-    let mut col = Column::new()
-        .spacing(16)
-        .padding(24)
-        .max_width(420)
-        .push(text(title_label).size(H4_SIZE).bold());
-
-    if has_liquid && hidden != Some(WalletKind::Liquid) {
-        col = col.push(row_for(WalletKind::Liquid, liquid_balance));
+    let mut col = Column::new().spacing(4).push(
+        text(match side {
+            PickerSide::From => "From",
+            PickerSide::To => "To",
+        })
+        .size(P1_SIZE)
+        .bold(),
+    );
+    for (kind, balance, available) in [
+        (WalletKind::Spark, spark_balance, has_spark),
+        (WalletKind::Vault, vault_balance, has_vault),
+        (WalletKind::Liquid, liquid_balance, has_liquid),
+    ] {
+        if available && (side == PickerSide::From || kind != direction.from_kind()) {
+            col = col.push(transfer_wallet_row(
+                cube_id,
+                side,
+                kind,
+                kind == selected,
+                balance,
+                fiat_converter,
+                bitcoin_unit,
+                balance_masked,
+            ));
+        }
     }
-    if has_spark && hidden != Some(WalletKind::Spark) {
-        col = col.push(row_for(WalletKind::Spark, spark_balance));
-    }
-    if has_vault && hidden != Some(WalletKind::Vault) {
-        col = col.push(row_for(WalletKind::Vault, vault_balance));
-    }
-
     col.into()
 }
 
 fn enter_amount_card<'a>(
     direction: TransferDirection,
     amount: &'a form::Value<String>,
+    fiat_converter: Option<FiatAmountConverter>,
     onchain_send_limit: Option<(u64, u64)>,
     onchain_receive_limit: Option<(u64, u64)>,
     bitcoin_unit: BitcoinDisplayUnit,
 ) -> Element<'a, Message> {
+    let denomination = match bitcoin_unit {
+        BitcoinDisplayUnit::BTC => Denomination::Bitcoin,
+        BitcoinDisplayUnit::Sats => Denomination::Satoshi,
+    };
+    let fiat_estimate = if amount.valid && !amount.value.is_empty() {
+        fiat_converter.and_then(|converter| {
+            Amount::from_str_in(&amount.value, denomination)
+                .ok()
+                .map(|parsed| {
+                    let fiat = converter.convert(parsed);
+                    format!("{} {}", fiat.to_formatted_string(), fiat.currency())
+                })
+        })
+    } else {
+        None
+    };
     let content = Column::new()
-        .push(text("Enter Amount").bold().size(H2_SIZE))
-        .push(Space::new().height(Length::Fixed(10.0)))
+        .push(text("Amount").bold().size(P1_SIZE))
         .push(
             Row::new()
                 .spacing(4)
                 .push(text("Sending from"))
                 .push(text(direction.display()).bold()),
         )
-        .push(Space::new().height(Length::Fixed(80.0)))
         .push(
             Column::new()
                 .push(
@@ -748,7 +736,10 @@ fn enter_amount_card<'a>(
                                 .size(12),
                             )
                             .padding(7)
-                        }),
+                        })
+                        .push_maybe(fiat_estimate.map(|estimate| {
+                            text(estimate).size(P2_SIZE).style(theme::text::secondary)
+                        })),
                 )
                 .push(button::primary(None, "Next").on_press_maybe(
                     if amount.value.is_empty() || !amount.valid {
@@ -757,26 +748,28 @@ fn enter_amount_card<'a>(
                         Some(Message::Home(HomeMessage::NextStep))
                     },
                 ))
-                .spacing(40)
-                .width(Length::Fixed(460.0)),
+                .spacing(16)
+                .width(Length::Fill),
         )
         .width(Length::Fill)
         .align_x(Alignment::Center);
 
     Container::new(content)
-        .padding([40, 20])
-        .height(Length::Fixed(400.0))
+        .padding(0)
         .width(Length::Fill)
-        .style(theme::card::simple)
         .into()
 }
 
 #[allow(clippy::too_many_arguments)]
 fn enter_amount_view<'a>(
+    cube_id: &str,
     direction: TransferDirection,
-    liquid_balance: &Amount,
-    spark_balance: &Amount,
-    vault_balance: &Amount,
+    liquid_balance: Amount,
+    spark_balance: Amount,
+    vault_balance: Amount,
+    has_vault: bool,
+    has_spark: bool,
+    has_liquid: bool,
     fiat_converter: Option<FiatAmountConverter>,
     entered_amount: &'a form::Value<String>,
     bitcoin_unit: crate::app::settings::unit::BitcoinDisplayUnit,
@@ -784,98 +777,68 @@ fn enter_amount_view<'a>(
     onchain_receive_limit: Option<(u64, u64)>,
     balance_masked: bool,
 ) -> Element<'a, Message> {
-    let balance_for = |kind: WalletKind| -> &Amount {
-        match kind {
-            WalletKind::Liquid => liquid_balance,
-            WalletKind::Spark => spark_balance,
-            WalletKind::Vault => vault_balance,
-        }
-    };
-
-    let from_kind = direction.from_kind();
-    let to_kind = direction.to_kind();
-
-    let cards_row = Row::new()
-        .spacing(20)
-        .push(balance_summary_card(
-            from_kind,
-            balance_for(from_kind),
-            fiat_converter,
-            bitcoin_unit,
-            balance_masked,
-            Message::Home(HomeMessage::OpenWalletPicker(PickerSide::From)),
-        ))
-        .push(balance_summary_card(
-            to_kind,
-            balance_for(to_kind),
-            fiat_converter,
-            bitcoin_unit,
-            balance_masked,
-            Message::Home(HomeMessage::OpenWalletPicker(PickerSide::To)),
-        ));
-
     let content = Column::new()
-        .push(Space::new().height(Length::Fixed(60.0)))
-        .spacing(20)
+        .spacing(16)
         .push(
-            Column::new()
-                .push(
-                    Row::new()
-                        .push(
-                            button::secondary(None, "< Back")
-                                .width(Length::Fixed(150.0))
-                                .on_press(Message::Home(HomeMessage::PreviousStep)),
-                        )
-                        .push(
-                            text("Transfer Between Wallets")
-                                .bold()
-                                .size(H2_SIZE)
-                                .width(Length::Fill)
-                                .align_x(Alignment::Center),
-                        )
-                        .push(Space::new().width(Length::Fixed(150.0))),
-                )
-                .width(Length::Fill),
+            button::secondary(None, "‹ Overview")
+                .on_press(Message::Home(HomeMessage::PreviousStep)),
+        )
+        .push(text("Transfer").bold().size(H2_SIZE))
+        .push(
+            text("1  Wallets & amount     2  Review     3  Done")
+                .size(P2_SIZE)
+                .style(theme::text::secondary),
         )
         .push(
-            Stack::new().push(cards_row).push(
-                Container::new(
-                    Container::new(
-                        arrow_right()
-                            .width(Length::Fill)
-                            .height(Length::Fill)
-                            .align_x(Alignment::Center)
-                            .align_y(Alignment::Center),
-                    )
-                    .style(|t| iced::widget::container::Style {
-                        border: iced::Border {
-                            color: color::ORANGE,
-                            radius: 30.0.into(),
-                            width: 0.5,
-                        },
-                        background: Some(iced::Background::Color(t.colors.cards.simple.background)),
-                        text_color: Some(color::ORANGE),
-                        ..Default::default()
-                    })
-                    .height(Length::Fixed(40.0))
-                    .width(Length::Fixed(40.0)),
-                )
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .align_x(Alignment::Center)
-                .align_y(Alignment::Center),
-            ),
+            Container::new(
+                Column::new()
+                    .spacing(18)
+                    .push(text("Transfer between wallets").bold().size(H4_SIZE))
+                    .push(transfer_wallet_section(
+                        cube_id,
+                        PickerSide::From,
+                        direction,
+                        has_vault,
+                        has_spark,
+                        has_liquid,
+                        liquid_balance,
+                        spark_balance,
+                        vault_balance,
+                        fiat_converter,
+                        bitcoin_unit,
+                        balance_masked,
+                    ))
+                    .push(iced::widget::rule::horizontal(1))
+                    .push(transfer_wallet_section(
+                        cube_id,
+                        PickerSide::To,
+                        direction,
+                        has_vault,
+                        has_spark,
+                        has_liquid,
+                        liquid_balance,
+                        spark_balance,
+                        vault_balance,
+                        fiat_converter,
+                        bitcoin_unit,
+                        balance_masked,
+                    ))
+                    .push(iced::widget::rule::horizontal(1))
+                    .push(enter_amount_card(
+                        direction,
+                        entered_amount,
+                        fiat_converter,
+                        onchain_send_limit,
+                        onchain_receive_limit,
+                        bitcoin_unit,
+                    )),
+            )
+            .padding(24)
+            .width(Length::Fill)
+            .style(landing_card_style),
         )
-        .push(enter_amount_card(
-            direction,
-            entered_amount,
-            onchain_send_limit,
-            onchain_receive_limit,
-            bitcoin_unit,
-        ))
-        .padding(20)
-        .width(Length::Fill)
-        .align_x(Alignment::Center);
+        .max_width(760)
+        .width(Length::Fill);
 
     Container::new(content)
         .width(Length::Fill)
@@ -1709,9 +1672,9 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
         has_liquid,
         current_view,
         transfer_direction,
-        transfer_from,
-        transfer_to,
-        wallet_picker,
+        transfer_from: _,
+        transfer_to: _,
+        wallet_picker: _,
         entered_amount,
         receive_address,
         destination_ready,
@@ -1743,11 +1706,15 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
     match current_view.step {
         1 => {
             if let Some(direction) = transfer_direction {
-                let amount_view = enter_amount_view(
+                return enter_amount_view(
+                    cube_id,
                     direction,
-                    &liquid_balance,
-                    &spark_balance,
-                    &vault_balance,
+                    liquid_balance,
+                    spark_balance,
+                    vault_balance,
+                    has_vault,
+                    has_spark,
+                    has_liquid,
                     fiat_converter,
                     entered_amount,
                     bitcoin_unit,
@@ -1755,25 +1722,6 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
                     onchain_receive_limit,
                     balance_masked,
                 );
-                if let Some(editing) = wallet_picker {
-                    let popup = wallet_selector_popup(
-                        transfer_from,
-                        transfer_to,
-                        editing,
-                        has_vault,
-                        has_spark,
-                        has_liquid,
-                        liquid_balance,
-                        spark_balance,
-                        vault_balance,
-                        bitcoin_unit,
-                        balance_masked,
-                    );
-                    return coincube_ui::widget::modal::Modal::new(amount_view, popup)
-                        .on_blur(Some(Message::Home(HomeMessage::CloseWalletPicker)))
-                        .into();
-                }
-                return amount_view;
             }
         }
         2 => {
@@ -3239,20 +3187,20 @@ mod tests {
             theme::Theme::dark(),
         );
         assert!(entered.contains("12,000"));
-        // Modal::operate only visits its base, so inspect the actual popup
-        // presenter rather than mistaking the amount summary for picker text.
+        // The inline source list keeps the corroborated Spark amount visible.
         let selected = capture::inspect(
-            "hub-transfer-trusted-picker",
-            wallet_selector_popup(
-                Some(WalletKind::Spark),
-                Some(WalletKind::Vault),
+            "hub-transfer-trusted-source",
+            transfer_wallet_section(
+                "test-cube",
                 PickerSide::From,
+                TransferDirection::SparkToVault,
                 true,
                 true,
                 false,
                 Amount::from_sat(0),
                 trusted.spark_balance,
                 Amount::from_sat(375_000),
+                None,
                 BitcoinDisplayUnit::Sats,
                 false,
             ),
@@ -3260,13 +3208,13 @@ mod tests {
             "dark",
             theme::Theme::dark(),
         );
-        assert!(selected.contains("FROM"));
+        assert!(selected.contains("From"));
         assert!(selected.contains("Spark"));
         assert!(selected.contains("12,000"));
     }
 
     #[test]
-    fn transfer_wallet_cards_and_picker_follow_global_balance_mask() {
+    fn transfer_wallet_rows_follow_global_balance_mask() {
         use crate::app::view::shared::landing::capture;
 
         let fixture = ViewFixture::new();
@@ -3290,19 +3238,20 @@ mod tests {
         assert!(shown.contains("125,000"));
         assert!(shown.contains("250,000"));
 
-        let render_picker = |masked| {
+        let render_source_rows = |masked| {
             capture::inspect(
-                "hub-transfer-privacy-picker",
-                wallet_selector_popup(
-                    Some(WalletKind::Liquid),
-                    Some(WalletKind::Spark),
+                "hub-transfer-privacy-source",
+                transfer_wallet_section(
+                    "test-cube",
                     PickerSide::From,
+                    TransferDirection::LiquidToSpark,
                     true,
                     true,
                     true,
                     Amount::from_sat(125_000),
                     Amount::from_sat(250_000),
                     Amount::from_sat(375_000),
+                    None,
                     BitcoinDisplayUnit::Sats,
                     masked,
                 ),
@@ -3311,7 +3260,7 @@ mod tests {
                 theme::Theme::dark(),
             )
         };
-        let hidden_picker = render_picker(true);
+        let hidden_picker = render_source_rows(true);
         assert!(hidden_picker.contains("••••••"));
         for balance in ["125,000", "250,000", "375,000"] {
             assert!(
@@ -3320,13 +3269,82 @@ mod tests {
                 balance
             );
         }
-        let shown_picker = render_picker(false);
+        let shown_picker = render_source_rows(false);
         for balance in ["125,000", "250,000", "375,000"] {
             assert!(
                 shown_picker.contains(balance),
                 "shown picker balance {}",
                 balance
             );
+        }
+    }
+
+    #[test]
+    fn transfer_form_layout_and_synthetic_capture_matrix() {
+        let fixture = ViewFixture::new();
+        for (width, height) in [(1024, 768), (1440, 900)] {
+            for (appearance, theme) in [
+                ("dark", theme::Theme::dark()),
+                ("light", theme::Theme::light()),
+            ] {
+                let snapshot = capture::inspect(
+                    "transfer-wallets-amount",
+                    global_home_view(fixture.config(
+                        1,
+                        Some(TransferDirection::SparkToVault),
+                        None,
+                    )),
+                    (width, height),
+                    appearance,
+                    theme,
+                );
+                for label in ["Transfer between wallets", "From", "To", "Amount"] {
+                    assert!(
+                        snapshot.contains(label),
+                        "{} {}: {}",
+                        appearance,
+                        width,
+                        label
+                    );
+                }
+                assert!(snapshot.contains("250,000"));
+                assert!(snapshot.contains("375,000"));
+                assert!(snapshot.contains("25.00 USD"));
+            }
+        }
+    }
+
+    #[test]
+    fn transfer_wallet_rows_activate_by_enter_and_space() {
+        use iced::keyboard::key::Named;
+
+        let fixture = ViewFixture::new();
+        for key in [Named::Enter, Named::Space] {
+            let content =
+                global_home_view(fixture.config(1, Some(TransferDirection::SparkToVault), None));
+            let messages = capture::activate_with_key(
+                content,
+                landing_control_id("test-cube", "Vault", "transfer-from"),
+                (1024, 768),
+                false,
+                key,
+            );
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(|message| {
+                        matches!(
+                            message,
+                            Message::Home(HomeMessage::SelectTransferWallet(
+                                PickerSide::From,
+                                WalletKind::Vault
+                            ))
+                        )
+                    })
+                    .count(),
+                1,
+            );
+            assert_eq!(fixture.entered_amount.value, "50000");
         }
     }
 
@@ -3475,28 +3493,16 @@ mod tests {
     }
 
     #[test]
-    fn global_home_amount_step_builds_every_direction_and_wallet_picker() {
+    fn global_home_transfer_form_builds_every_direction_and_available_pair() {
         let fixture = ViewFixture::new();
 
         for direction in directions() {
             let _ = global_home_view(fixture.config(1, Some(direction), None));
         }
 
-        let _ = global_home_view(fixture.config(
-            1,
-            Some(TransferDirection::LiquidToVault),
-            Some(PickerSide::From),
-        ));
-
-        let mut picker_without_liquid = fixture.config(
-            1,
-            Some(TransferDirection::VaultToSpark),
-            Some(PickerSide::To),
-        );
-        picker_without_liquid.has_liquid = false;
-        picker_without_liquid.transfer_from = Some(WalletKind::Vault);
-        picker_without_liquid.transfer_to = Some(WalletKind::Spark);
-        let _ = global_home_view(picker_without_liquid);
+        let mut no_liquid = fixture.config(1, Some(TransferDirection::VaultToSpark), None);
+        no_liquid.has_liquid = false;
+        let _ = global_home_view(no_liquid);
     }
 
     #[test]

@@ -2342,6 +2342,8 @@ pub enum HomeMessage {
     /// Commit a wallet selection from the popup; the state layer applies it to
     /// the side currently being edited and recomputes `transfer_direction`.
     SelectWalletInPicker(WalletKind),
+    /// Choose a source or destination directly from the Transfer form.
+    SelectTransferWallet(PickerSide, WalletKind),
     AmountEdited(String),
     NextStep,
     PreviousStep,

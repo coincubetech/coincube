@@ -955,6 +955,7 @@ mod tests {
             direction: "receive".to_string(),
             method: "spark".to_string(),
             description: None,
+            details: Default::default(),
         }
     }
 
