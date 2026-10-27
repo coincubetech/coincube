@@ -726,7 +726,7 @@ mod rbf_view_tests {
         let activate = |cancel, rate: &form::Value<String>, created, target: &str| {
             capture::activate(
                 create_rbf_modal(cancel, &none, rate, created, false),
-                Id::new(target),
+                Id::from(target.to_owned()),
                 (1440, 900),
                 false,
             )
