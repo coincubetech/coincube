@@ -1379,20 +1379,10 @@ impl DaemonControl {
             .checked_sub(total_out)
             .filter(|fee| *fee > 0)
             .ok_or(CommandError::FeeMeasurement)?;
-        let satisfaction = match &self.config.main_descriptor {
-            WalletDescriptor::Vault(vault) => vault.max_sat_weight(true) as u64,
+        let vsize = match &self.config.main_descriptor {
+            WalletDescriptor::Vault(vault) => vault.unsigned_tx_max_vbytes(&psbt.unsigned_tx, true),
             WalletDescriptor::Imported(_) => return Err(CommandError::FeeMeasurement),
         };
-        let extra = satisfaction
-            .checked_mul(psbt.inputs.len() as u64)
-            .ok_or(CommandError::FeeMeasurement)?;
-        let weight = psbt
-            .unsigned_tx
-            .weight()
-            .to_wu()
-            .checked_add(extra)
-            .ok_or(CommandError::FeeMeasurement)?;
-        let vsize = weight.div_ceil(4);
         if vsize == 0 {
             return Err(CommandError::FeeMeasurement);
         }
@@ -2608,6 +2598,60 @@ mod tests {
     use std::{collections::BTreeMap, str::FromStr};
 
     const DUST: u64 = DUST_OUTPUT_SATS;
+
+    #[test]
+    fn capped_spend_fee_rate_includes_segwit_framing() {
+        let daemon = DummyCoincube::new(DummyBitcoind::new(), DummyDatabase::new());
+        let control = daemon.control();
+        let vault = control.config.main_descriptor.as_vault().unwrap();
+        // Pick an input count where the 2 WU marker/flag crosses a vbyte
+        // boundary. The previous witness-empty calculation then overstates
+        // a fee of exactly one sat/vB as two sats/vB.
+        let mut boundary = None;
+        for count in 1..=4u32 {
+            let tx = Transaction {
+                version: TxVersion::TWO,
+                lock_time: absolute::LockTime::ZERO,
+                input: (0..count)
+                    .map(|vout| TxIn {
+                        previous_output: OutPoint {
+                            vout,
+                            ..OutPoint::null()
+                        },
+                        script_sig: ScriptBuf::new(),
+                        sequence: Sequence::MAX,
+                        witness: Witness::new(),
+                    })
+                    .collect(),
+                output: vec![TxOut {
+                    value: Amount::from_sat(1),
+                    script_pubkey: ScriptBuf::new(),
+                }],
+            };
+            let vsize = vault.unsigned_tx_max_vbytes(&tx, true);
+            let without_framing = (tx.weight().to_wu()
+                + vault.max_sat_weight(true) as u64 * count as u64)
+                .div_ceil(4);
+            if vsize > without_framing {
+                boundary = Some((tx, vsize, without_framing));
+                break;
+            }
+        }
+        let (mut tx, vsize, without_framing) = boundary.expect("SegWit framing boundary");
+        tx.output[0].value = Amount::from_sat(20_000 * tx.input.len() as u64 - vsize);
+        let mut psbt = Psbt::from_unsigned_tx(tx).unwrap();
+        for input in &mut psbt.inputs {
+            input.witness_utxo = Some(TxOut {
+                value: Amount::from_sat(20_000),
+                script_pubkey: ScriptBuf::new(),
+            });
+        }
+        let (fee, measured_vsize) = control.fee_and_vsize(&psbt).unwrap();
+        assert_eq!((fee, measured_vsize), (vsize, vsize));
+        assert_eq!(fee.div_ceil(measured_vsize), 1);
+        assert_eq!(fee.div_ceil(without_framing), 2);
+        daemon.shutdown();
+    }
 
     struct ConflictDatabase {
         inner: DummyDatabase,

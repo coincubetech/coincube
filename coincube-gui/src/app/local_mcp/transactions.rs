@@ -415,19 +415,8 @@ fn validate(
     if fee > input.max_fee_sats {
         return Err(Error::FeeLimitExceeded);
     }
-    // The unsigned witness is empty. Include the same maximum satisfaction
-    // weight the spend engine used, or every valid draft looks over rate.
-    let satisfaction = descriptor.max_sat_weight(true) as u64;
-    let extra = satisfaction
-        .checked_mul(psbt.inputs.len() as u64)
-        .ok_or(Error::Unavailable)?;
-    let vsize = psbt
-        .unsigned_tx
-        .weight()
-        .to_wu()
-        .checked_add(extra)
-        .ok_or(Error::Unavailable)?
-        .div_ceil(4);
+    // Match the spend engine's maximum signed size, including SegWit framing.
+    let vsize = descriptor.unsigned_tx_max_vbytes(&psbt.unsigned_tx, true);
     if vsize == 0 {
         return Err(Error::Unavailable);
     }
@@ -590,6 +579,34 @@ mod tests {
                     summary.change_sats,
                     summary.fee_rate_sat_vb
                 )
+            );
+            let mut one_sat_per_vbyte = native.psbt.clone();
+            let max_vsize = service
+                .descriptor
+                .unsigned_tx_max_vbytes(&one_sat_per_vbyte.unsigned_tx, true);
+            let total_in: u64 = native.coins.iter().map(|coin| coin.amount.to_sat()).sum();
+            let recipient_script = Address::from_str(&input().recipients[0].address)
+                .unwrap()
+                .assume_checked()
+                .script_pubkey();
+            let change = one_sat_per_vbyte
+                .unsigned_tx
+                .output
+                .iter_mut()
+                .find(|output| output.script_pubkey != recipient_script)
+                .unwrap();
+            let change_sats = total_in - input().recipients[0].amount_sats - max_vsize;
+            change.value = Amount::from_sat(change_sats);
+            let mut one_sat_request = input();
+            one_sat_request.fee_rate_sat_vb = 1;
+            assert_eq!(
+                validate(
+                    &one_sat_request,
+                    &one_sat_per_vbyte,
+                    &native.coins,
+                    &service.descriptor
+                ),
+                Ok((max_vsize, change_sats, 1))
             );
             let mut cases = Vec::new();
             let mut signed = native.psbt.clone();
