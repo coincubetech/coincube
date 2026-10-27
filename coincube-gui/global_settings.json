@@ -1,0 +1,17 @@
+{
+  "account_tier": "free",
+  "balance_privacy_initialized": false,
+  "bitbox": null,
+  "bitcoin_blake2b_beta": false,
+  "developer_mode": false,
+  "dismissed_hw_advisories": [],
+  "hide_balances": false,
+  "launcher_style": "cubes",
+  "motion_preference": "follow_system",
+  "recipient_identity_checks": true,
+  "seen_advisory_notices": [],
+  "show_direction_badges": false,
+  "theme_mode": "dark",
+  "theme_preference": "system",
+  "window_config": null
+}

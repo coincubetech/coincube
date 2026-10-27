@@ -117,8 +117,10 @@ pub enum SparkSubMenu {
 pub enum SparkSettingsOption {
     /// Stable Balance toggle + Bridge status diagnostics.
     General,
-    /// Lightning Address claim / manage page.
+    /// Lightning Address claim / manage page. Shown on the Spark tab.
     LightningAddress,
+    /// Connect account, Cube service session and Spark bridge health.
+    Connections,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,6 +154,8 @@ pub enum SettingsOption {
     /// this vault specifically (the persisted record is scoped to the
     /// vault's id fingerprint).
     LocalSigning,
+    /// Connect account, Cube service session and node backend health.
+    Connections,
 }
 
 /// Discriminant for the primary (left-most) nav rail. Derived from `Menu`
