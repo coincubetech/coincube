@@ -1195,7 +1195,7 @@ mod presentation_tests {
             )
             .unwrap()
             .generate_grid();
-            let wizard = BorderWalletWizard {
+            let mut wizard = BorderWalletWizard {
                 network: Network::Regtest,
                 coordinates: Vec::new(),
                 step: WizardStep::Grid,
