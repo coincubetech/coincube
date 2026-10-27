@@ -10939,12 +10939,6 @@ impl App {
                 );
             }
 
-            // Vault Recovery Alerts dispatch (Estate Notifications — PR 2).
-            // Like the Recovery Kit above, the handler needs the
-            // authenticated client, the Connect cube id, the live wallet
-            // descriptor, and the `recovery_alerts` entitlement — none plumbed
-            // through `State::update`. The keyholder list is *not* injected:
-            // it's derived from the vault the handler's own load fetches.
             // Inline Cube rename on Settings → Display & appearance. Mirrors
             // the Launcher: write this device's Cube settings first (marked
             // unsynced, so catch-up retries), then update Connect.
@@ -10993,6 +10987,8 @@ impl App {
                 };
                 self.cube_settings.name = name.clone();
                 self.cache.cube_name = name.clone();
+                // A later registration retry submits the panel's name.
+                self.panels.connect.cube.cube_name = name.clone();
                 let daemon = self.daemon.clone();
                 let settle = self.panels.global_settings.update(
                     daemon,
@@ -11009,6 +11005,7 @@ impl App {
                 };
                 let cube_id = self.cube_settings.id.clone();
                 let network_dir = self.datadir.network_directory(self.cube_settings.network);
+                let synced_name = name.clone();
                 let request = crate::services::coincube::UpdateCubeRequest {
                     name: Some(name),
                     status: None,
@@ -11026,7 +11023,13 @@ impl App {
                                 .await
                                 .map_err(|e| e.to_string())?;
                             settings::update_settings_file(&network_dir, move |mut s| {
-                                if let Some(c) = s.cubes.iter_mut().find(|c| c.id == cube_id) {
+                                // A newer rename may have been written while
+                                // this one was in flight; leave it unsynced.
+                                if let Some(c) = s
+                                    .cubes
+                                    .iter_mut()
+                                    .find(|c| c.id == cube_id && c.name == synced_name)
+                                {
                                     c.remote_synced = true;
                                 }
                                 Some(s)
@@ -11050,6 +11053,12 @@ impl App {
                 }
                 return Task::none();
             }
+            // Vault Recovery Alerts dispatch (Estate Notifications — PR 2).
+            // Like the Recovery Kit above, the handler needs the
+            // authenticated client, the Connect cube id, the live wallet
+            // descriptor, and the `recovery_alerts` entitlement — none plumbed
+            // through `State::update`. The keyholder list is *not* injected:
+            // it's derived from the vault the handler's own load fetches.
             Message::View(view::Message::Settings(view::SettingsMessage::RecoveryAlerts(msg))) => {
                 let client = self.authenticated_coincube_client();
                 let server_cube_id = self.panels.connect.cube.server_cube_id;

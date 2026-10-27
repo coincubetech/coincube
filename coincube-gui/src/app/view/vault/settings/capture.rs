@@ -323,7 +323,8 @@ impl Fixture {
                 false,
                 false,
                 false,
-                false,
+                // Advanced open, so the imported-wallet check sees its body.
+                scenario == "wallet_imported",
             ),
             "node_local" => node_panel(self, false),
             "node_offline" => node_panel(self, true),
@@ -409,7 +410,7 @@ fn assert_labels(scenario: &str, labels: &Labels, width: u32) {
             !labels
                 .0
                 .iter()
-                .any(|(label, _)| label == "Back up encrypted descriptor"),
+                .any(|(label, _)| label == "Export encrypted…"),
             "imported wallet offered a Vault-only export"
         );
     }

@@ -171,7 +171,12 @@ fn idle_body<'a>(state: &'a LocalSigningState) -> Element<'a, Message> {
             .into()]);
     }
     let ready = state.wallet_fingerprint.is_some() && state.selected_key.is_some();
-    page::rows([page::row("Open Keychain on the phone first.")
+    let hint = if state.selected_key.is_none() {
+        "Select a key above, then open Keychain on the phone."
+    } else {
+        "Open Keychain on the phone first."
+    };
+    page::rows([page::row(hint)
         .control(page::primary(
             PAIR_ID,
             "Pair phone",
@@ -249,11 +254,8 @@ fn picker_body<'a>(
     for (i, d) in discovered.iter().enumerate() {
         let fp8 = d.cert_fp8.clone();
         let press = Some(local(LocalSigningMessage::PickPhone(fp8)));
-        let id: &'static str = if i == 0 {
-            "tenshu.settings.pair.phone.first"
-        } else {
-            "tenshu.settings.pair.phone.other"
-        };
+        let id =
+            iced::advanced::widget::Id::from(format!("tenshu.settings.pair.phone.{}", d.cert_fp8));
         rows.push(
             page::row(format!("Phone {}", d.cert_fp8))
                 .description(d.addr.to_string())

@@ -234,15 +234,25 @@ pub fn connections<'a>(cache: &'a Cache) -> Element<'a, Message> {
             } else {
                 "Sign in"
             },
-            Message::OpenConnectSignIn,
+            if cache.connect_authenticated {
+                Message::OpenConnectSwitchAccount
+            } else {
+                Message::OpenConnectSignIn
+            },
         ));
     let session = match (&cache.connect_stream_status, cache.connect_authenticated) {
         (_, false) => page::row("Cube service session")
             .accessory(page::status(page::Status::Unknown, "Not checked"))
             .description("Checked after sign-in."),
+        // The realtime stream says nothing about registration; that comes
+        // from the Cube's Connect id.
         (ConnectionStatus::Connected, true) => page::row("Cube service session")
             .accessory(page::status(page::Status::Ok, "Connected"))
-            .description("Registered with Connect."),
+            .description(if cache.current_cube_server_id.is_some() {
+                "Realtime connection open. This Cube is registered with Connect."
+            } else {
+                "Realtime connection open. This Cube is not registered with Connect yet."
+            }),
         (ConnectionStatus::Error(e), true) => page::row("Cube service session")
             .accessory(page::status(page::Status::Bad, "Reconnect required"))
             .description(e.clone()),
@@ -1274,18 +1284,7 @@ fn policy_rows<'a>(
         let (threshold, recovery_keys) = recovery_path.thresh_origins();
         let mut recovery_keys: Vec<Fingerprint> = recovery_keys.into_keys().collect();
         recovery_keys.sort();
-        // A maximum timelock held only by provider keys is the Safety Net.
-        let label = if *sequence == u16::MAX
-            && recovery_keys
-                .iter()
-                .all(|fg| provider_keys.contains_key(fg))
-        {
-            "Safety Net path".to_string()
-        } else if several {
-            format!("Recovery path #{}", i + 1)
-        } else {
-            "Recovery path".to_string()
-        };
+        let label = recovery_path_label(i, several, *sequence, &recovery_keys, provider_keys);
         let detail = format!(
             "After {} blocks (~{}) without spending. {}",
             sequence,
@@ -1310,8 +1309,31 @@ fn policy_rows<'a>(
     rows
 }
 
-/// Which spending paths a signer belongs to, for its row.
-fn signer_paths(policy: &CoincubePolicy, fingerprint: &Fingerprint) -> String {
+/// A recovery path's row label, shared by the policy and signer rows so
+/// they name a path the same way. A maximum timelock held only by provider
+/// keys is the Safety Net.
+fn recovery_path_label(
+    index: usize,
+    several: bool,
+    sequence: u16,
+    keys: &[Fingerprint],
+    provider_keys: &HashMap<Fingerprint, ProviderKey>,
+) -> String {
+    if sequence == u16::MAX && keys.iter().all(|fg| provider_keys.contains_key(fg)) {
+        "Safety Net path".to_string()
+    } else if several {
+        format!("Recovery path #{}", index + 1)
+    } else {
+        "Recovery path".to_string()
+    }
+}
+
+/// Which spending paths a signer belongs to, named as the policy rows are.
+fn signer_paths(
+    policy: &CoincubePolicy,
+    fingerprint: &Fingerprint,
+    provider_keys: &HashMap<Fingerprint, ProviderKey>,
+) -> String {
     let mut paths = Vec::new();
     if policy
         .primary_path()
@@ -1321,9 +1343,20 @@ fn signer_paths(policy: &CoincubePolicy, fingerprint: &Fingerprint) -> String {
     {
         paths.push("Normal spending".to_string());
     }
-    for (i, (_, path)) in policy.recovery_paths().iter().enumerate() {
-        if path.thresh_origins().1.contains_key(fingerprint) {
-            paths.push(format!("Recovery path #{}", i + 1));
+    let recovery_paths = policy.recovery_paths();
+    let several = recovery_paths.len() > 1;
+    for (i, (sequence, path)) in recovery_paths.iter().enumerate() {
+        let keys = path.thresh_origins().1;
+        if keys.contains_key(fingerprint) {
+            let mut keys: Vec<Fingerprint> = keys.into_keys().collect();
+            keys.sort();
+            paths.push(recovery_path_label(
+                i,
+                several,
+                *sequence,
+                &keys,
+                provider_keys,
+            ));
         }
     }
     paths.join(", ")
@@ -1409,7 +1442,7 @@ pub fn wallet_settings<'a>(
         let fg = *fingerprint;
         let mut detail = fg.to_string();
         if let Some(policy) = &policy {
-            let paths = signer_paths(policy, &fg);
+            let paths = signer_paths(policy, &fg, provider_keys);
             if !paths.is_empty() {
                 detail = format!("{} · {}", detail, paths);
             }

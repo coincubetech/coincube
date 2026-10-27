@@ -103,15 +103,25 @@ impl SparkSettingsView {
                 } else {
                     "Sign in"
                 },
-                Message::OpenConnectSignIn,
+                if cache.connect_authenticated {
+                    Message::OpenConnectSwitchAccount
+                } else {
+                    Message::OpenConnectSignIn
+                },
             ));
         let session = match (&cache.connect_stream_status, cache.connect_authenticated) {
             (_, false) => page::row("Cube service session")
                 .accessory(page::status(page::Status::Unknown, "Not checked"))
                 .description("Checked after sign-in."),
+            // The realtime stream says nothing about registration; that comes
+            // from the Cube's Connect id.
             (ConnectionStatus::Connected, true) => page::row("Cube service session")
                 .accessory(page::status(page::Status::Ok, "Connected"))
-                .description("Registered with Connect."),
+                .description(if cache.current_cube_server_id.is_some() {
+                    "Realtime connection open. This Cube is registered with Connect."
+                } else {
+                    "Realtime connection open. This Cube is not registered with Connect yet."
+                }),
             (ConnectionStatus::Error(e), true) => page::row("Cube service session")
                 .accessory(page::status(page::Status::Bad, "Reconnect required"))
                 .description(e.clone()),
