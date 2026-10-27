@@ -7880,6 +7880,9 @@ mod plan_lifecycle_tests {
         panel.plan = Some(duress_entitled_plan());
         panel.features = Some(features_with_duress(Some(true)));
         panel.duress_cubes = Some(Vec::new());
+        // StartEnrollment reads the active Cube inventory. The test-only
+        // datadir is intentionally absent until a fixture creates it.
+        std::fs::create_dir_all(crate::dir::CoincubeDirectory::active().unwrap().path()).unwrap();
         let task = panel.update_duress(DuressMessage::StartEnrollment);
         drop(task);
         assert!(panel.duress_enroll.is_some());
