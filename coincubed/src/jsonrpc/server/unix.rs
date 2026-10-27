@@ -796,12 +796,14 @@ mod tests {
             crate::testutils::DummyBitcoind::new(),
             crate::testutils::DummyDatabase::new(),
         );
-        // Derive the socket path exactly as the daemon does. The server no
-        // longer binds inside the datadir: `coincubed_rpc_socket_path` hashes
-        // the datadir into a short `$TMPDIR/cc<hash>.sock` name so it fits
-        // sun_path. Hard-coding `<datadir>/coincubed_rpc` here meant waiting
-        // on a file that is never created — and the unbounded loop below then
-        // hung CI until the 6-hour job timeout.
+        // Derive the socket path exactly as the daemon does. The server binds a
+        // random `$TMPDIR/cc-<hex>.sock` and publishes it in `rpc.socket`.
+        // `coincubed_rpc_socket_path` returns that path only while something is
+        // listening; before the bind it falls back to the legacy hash, which
+        // is not created, so this loop keeps waiting. Hard-coding
+        // `<datadir>/coincubed_rpc` meant waiting on a file that is never
+        // created — and an unbounded loop then hung CI until the 6-hour job
+        // timeout.
         let data_directory: path::PathBuf = [
             ms.tmp_dir.as_path(),
             path::Path::new("d"),

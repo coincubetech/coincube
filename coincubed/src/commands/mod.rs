@@ -792,12 +792,16 @@ impl DaemonControl {
     ///
     /// Change index 0 is accepted even when it is not stored yet. The desktop
     /// uses that address to size a preview without reserving a fresh index.
+    /// Any change script at an index this wallet has already reached is also
+    /// owned: the address table can miss it (the in-memory test database never
+    /// stores addresses) and a row in that table is not itself proof.
     fn authorize_vault_change(
         &self,
         change: &SpendOutputAddress,
         destinations: &[(SpendOutputAddress, bitcoin::Amount)],
+        last_change: bip32::ChildNumber,
     ) -> Result<(), CommandError> {
-        if self.change_script_is_owned(change) {
+        if self.change_script_is_owned(change, last_change) {
             return Ok(());
         }
         if destinations.is_empty() {
@@ -806,7 +810,11 @@ impl DaemonControl {
         Err(CommandError::ExternalChangeNotAllowed)
     }
 
-    fn change_script_is_owned(&self, change: &SpendOutputAddress) -> bool {
+    fn change_script_is_owned(
+        &self,
+        change: &SpendOutputAddress,
+        last_change: bip32::ChildNumber,
+    ) -> bool {
         let script = change.addr.script_pubkey();
         let matches_index = |index: u32| -> bool {
             let Ok(derived) = self
@@ -827,12 +835,16 @@ impl DaemonControl {
             is_change: true,
         }) = change.info
         {
+            // Re-derive the claimed index. A database row cannot bless a script
+            // this descriptor does not produce.
             if matches_index(u32::from(index)) {
                 return true;
             }
         }
-        // Preview spends pass change index 0 before the database has stored it.
-        matches_index(0)
+        // Index 0 covers a preview. The rest covers a change address this
+        // wallet already derived, including one the address table does not list.
+        let last = u32::from(last_change).min(10_000);
+        (0..=last).any(matches_index)
     }
 
     // If we detect the given address as ours, and it has a higher derivation index than our last
@@ -1522,7 +1534,8 @@ impl DaemonControl {
             None => self.next_change_addr(&mut db_conn)?,
         };
         if self.config.main_descriptor.as_vault().is_some() {
-            self.authorize_vault_change(&change_address, &destinations_checked)?;
+            let last_change = db_conn.change_index();
+            self.authorize_vault_change(&change_address, &destinations_checked, last_change)?;
         }
 
         // The candidate coins will be either all optional or all mandatory.

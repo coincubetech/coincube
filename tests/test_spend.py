@@ -596,8 +596,8 @@ def test_coin_selection_changeless(coincubed, bitcoind):
 
 def test_sweep(coincubed, bitcoind):
     """
-    Test we can leverage the change_address parameter to partially or completely sweep
-    the wallet's coins.
+    A vault can send an external address as change only when that address is the
+    sole output. With other payments, the remainder is a named destination.
     """
 
     # Get a bunch of coins. Don't even confirm them.
@@ -628,9 +628,9 @@ def test_sweep(coincubed, bitcoind):
         )
     )
 
-    # Create a partial sweep and specify some destinations to be set before the
-    # sweep output. To make it even more confusing, set one such destination as
-    # an internal (but receive) address.
+    # Pay two destinations from one coin and send the remainder to an external
+    # address. That address is a named output, not change. One destination is
+    # an internal receive address so the wallet still sees part of the coin.
     destinations = {
         coincubed.rpc.getnewaddress()["address"]: 0.5,
         coincubed.rpc.getnewaddress()["address"]: 0.2,
@@ -647,8 +647,48 @@ def test_sweep(coincubed, bitcoind):
         ),
         coincubed.rpc.getnewaddress()["address"]: int(0.3 * COIN),
     }
-    res = coincubed.rpc.createspend(destinations, [spent_coin["outpoint"]], 1, change_addr)
-    psbt = PSBT.from_base64(res["psbt"])
+    # Destinations plus an external change address is the change-theft shape.
+    with pytest.raises(RpcError, match="sole output"):
+        coincubed.rpc.createspend(
+            destinations, [spent_coin["outpoint"]], 1, change_addr
+        )
+
+    def script_for(addr):
+        return bytes.fromhex(bitcoind.rpc.validateaddress(addr)["scriptPubKey"])
+
+    named_scripts = {script_for(addr) for addr in destinations}
+    probe = PSBT.from_base64(
+        coincubed.rpc.createspend(destinations, [spent_coin["outpoint"]], 1)["psbt"]
+    )
+    wallet_change = [
+        out for out in probe.tx.vout if out.scriptPubKey not in named_scripts
+    ]
+    assert len(wallet_change) == 1
+    remainder = wallet_change[0].nValue
+    external_script = script_for(change_addr)
+    psbt = None
+    for _ in range(6):
+        trial = dict(destinations)
+        trial[change_addr] = remainder
+        try:
+            res = coincubed.rpc.createspend(trial, [spent_coin["outpoint"]], 1)
+        except RpcError:
+            remainder -= 100
+            if remainder <= 546:
+                raise
+            continue
+        candidate = PSBT.from_base64(res["psbt"])
+        extra = [
+            out
+            for out in candidate.tx.vout
+            if out.scriptPubKey not in named_scripts
+            and out.scriptPubKey != external_script
+        ]
+        if not extra:
+            psbt = candidate
+            break
+        remainder += extra[0].nValue
+    assert psbt is not None
     assert len(psbt.tx.vout) == 3
     sign_and_broadcast_psbt(coincubed, psbt)
     wait_for(lambda: len(coincubed.rpc.listcoins(["unconfirmed"])["coins"]) == 1)

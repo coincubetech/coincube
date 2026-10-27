@@ -1233,6 +1233,7 @@ mod local_drop_tests {
                 rpcserver_shutdown: shutdown.clone(),
                 rpcserver_handle: std::thread::spawn(|| Ok(())),
                 scan_abort: abort.clone(),
+                datadir_lock: None,
             }))),
         };
         drop(daemon);

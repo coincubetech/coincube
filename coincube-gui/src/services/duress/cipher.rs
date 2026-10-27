@@ -126,9 +126,7 @@ pub fn seal_json(coincube_dir: &Path, json: &str, create_key: bool) -> io::Resul
     };
     match key {
         Some(key) => {
-            let sealed = key
-                .encrypt(json)
-                .map_err(io::Error::other)?;
+            let sealed = key.encrypt(json).map_err(io::Error::other)?;
             Ok(sealed.into_bytes())
         }
         None => Ok(json.as_bytes().to_vec()),
