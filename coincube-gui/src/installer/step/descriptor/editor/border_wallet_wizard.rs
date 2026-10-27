@@ -23,6 +23,7 @@ use iced::{
     widget::{scrollable, Space},
     Length, Task,
 };
+use rand::{rngs::OsRng, seq::SliceRandom};
 use zeroize::{Zeroize, Zeroizing};
 
 use coincube_ui::{
@@ -107,8 +108,8 @@ pub struct BorderWalletWizard {
     // Grid + pattern
     grid: Option<WordGrid>,
     pattern: OrderedPattern,
-    // Opaque, stable focus IDs: coordinate-bearing IDs would reveal the
-    // pattern if a future generic message logger recorded FocusAction events.
+    // Opaque, stable focus IDs. Their allocation order is shuffled so numeric
+    // ID deltas do not encode grid coordinates if FocusAction is ever logged.
     grid_focus_ids: Vec<Id>,
 
     // Derived data — only the checksum word is retained, never the full mnemonic.
@@ -133,6 +134,12 @@ pub struct BorderWalletWizard {
 }
 
 impl BorderWalletWizard {
+    fn grid_focus_ids() -> Vec<Id> {
+        let mut ids: Vec<_> = (0..WordGrid::TOTAL_CELLS).map(|_| Id::unique()).collect();
+        ids.shuffle(&mut OsRng);
+        ids
+    }
+
     pub fn new(
         network: Network,
         coordinates: Vec<(usize, usize)>,
@@ -147,9 +154,7 @@ impl BorderWalletWizard {
             phrase_valid: false,
             grid: None,
             pattern: OrderedPattern::new(),
-            grid_focus_ids: (0..WordGrid::ROWS * WordGrid::COLS)
-                .map(|_| Id::unique())
-                .collect(),
+            grid_focus_ids: Self::grid_focus_ids(),
             checksum_word: None,
             enrollment: None,
             allow_random_grid_phrase,
@@ -697,7 +702,8 @@ impl BorderWalletWizard {
         .width(Length::Shrink);
 
         let grid_content: Element<Message> = if let Some(grid) = &self.grid {
-            let mut grid_col = Column::new().spacing(4);
+            // Reserve the focus ring outset at both scroll endpoints.
+            let mut grid_col = Column::new().spacing(4).push(Space::new().height(4));
 
             let mut column_numbers = Row::new().spacing(4).push(Space::new().width(24));
             for col_idx in 0..WordGrid::COLS {
@@ -751,13 +757,17 @@ impl BorderWalletWizard {
                 }
                 grid_col = grid_col.push(row_widget);
             }
+            grid_col = grid_col.push(Space::new().height(4));
             Column::new()
                 .spacing(4)
                 .push(column_numbers)
                 .push(
                     scrollable(grid_col)
                         .id(BORDER_WALLET_GRID_SCROLL_ID)
-                        .height(320),
+                        // Embed the scrollbar beside the last column instead
+                        // of floating over its text and focus ring.
+                        .spacing(4)
+                        .height(360),
                 )
                 .into()
         } else {
@@ -1121,8 +1131,42 @@ mod presentation_tests {
         }
     }
 
+    fn capture(
+        path: &std::path::Path,
+        element: &Element<'_, Message>,
+        tree: &Tree,
+        node: &layout::Node,
+        renderer: &mut iced::Renderer,
+        theme: &theme::Theme,
+        size: Size,
+    ) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        iced::advanced::Renderer::reset(renderer, Rectangle::with_size(size));
+        let style = iced::advanced::renderer::Style {
+            text_color: theme.colors.shell.ink,
+        };
+        element.as_widget().draw(
+            tree,
+            renderer,
+            theme,
+            &style,
+            Layout::new(node),
+            iced::mouse::Cursor::Unavailable,
+            &Rectangle::with_size(size),
+        );
+        let pixels = renderer.screenshot(Size::new(1024, 768), 1.0, theme.colors.shell.background);
+        image::save_buffer(path, &pixels, 1024, 768, image::ColorType::Rgba8).unwrap();
+    }
+
     #[tokio::test]
     async fn tab_reveals_below_viewport_grid_cell_at_1024_in_both_themes() {
+        assert_eq!(
+            format!(
+                "{:?}",
+                BorderWalletWizardMessage::ToggleCellSelection(127, 15)
+            ),
+            "ToggleCellSelection(<redacted>)"
+        );
         for (name, theme) in [
             ("dark", theme::Theme::dark()),
             ("light", theme::Theme::light()),
@@ -1140,7 +1184,7 @@ mod presentation_tests {
             )
             .unwrap()
             .generate_grid();
-            let wizard = BorderWalletWizard {
+            let mut wizard = BorderWalletWizard {
                 network: Network::Regtest,
                 coordinates: Vec::new(),
                 step: WizardStep::Grid,
@@ -1148,7 +1192,7 @@ mod presentation_tests {
                 phrase_valid: false,
                 grid: Some(grid),
                 pattern: OrderedPattern::new(),
-                grid_focus_ids: (0..WordGrid::TOTAL_CELLS).map(|_| Id::unique()).collect(),
+                grid_focus_ids: BorderWalletWizard::grid_focus_ids(),
                 checksum_word: None,
                 enrollment: None,
                 allow_random_grid_phrase: true,
@@ -1190,6 +1234,43 @@ mod presentation_tests {
                 "border-wallet.pattern.next",
             ] {
                 assert!(!targets.0.contains(&Id::new(disabled)));
+            }
+            let first_cell = wizard.grid_focus_ids[0].clone();
+            operate(
+                &mut element,
+                &mut tree,
+                &node,
+                &renderer,
+                focusable::focus::<()>(first_cell.clone()),
+            );
+            apply_focus_task(
+                action::reveal_focused(BORDER_WALLET_GRID_SCROLL_ID),
+                &mut element,
+                &mut tree,
+                &mut node,
+                &renderer,
+                size,
+            )
+            .await;
+            let mut top = GridViewport::new(first_cell);
+            element
+                .as_widget_mut()
+                .operate(&mut tree, Layout::new(&node), &renderer, &mut top);
+            let first_bounds = top.screen_bounds();
+            let top_viewport = top.viewport.unwrap();
+            assert!(first_bounds.y >= top_viewport.y + 4.0);
+            if let Ok(directory) = std::env::var("BORDER_WALLET_CAPTURE_DIR") {
+                capture(
+                    &std::path::Path::new(&directory).join(format!(
+                        "border-wallet-synthetic-top-left-{name}-1024x768.png"
+                    )),
+                    &element,
+                    &tree,
+                    &node,
+                    &mut renderer,
+                    &theme,
+                    size,
+                );
             }
             operate(
                 &mut element,
@@ -1279,32 +1360,135 @@ mod presentation_tests {
                 "Enter must activate the visible focused cell once"
             );
 
+            // Tab into the final row through the same reveal chain used by
+            // the GUI, then inspect the last cell's scrollbar clearance.
+            let penultimate_row_end =
+                wizard.grid_focus_ids[WordGrid::TOTAL_CELLS - WordGrid::COLS - 1].clone();
+            let final_row_start =
+                wizard.grid_focus_ids[WordGrid::TOTAL_CELLS - WordGrid::COLS].clone();
+            operate(
+                &mut element,
+                &mut tree,
+                &node,
+                &renderer,
+                focusable::focus::<()>(penultimate_row_end.clone()),
+            );
+            apply_focus_task(
+                action::reveal_focused(BORDER_WALLET_GRID_SCROLL_ID),
+                &mut element,
+                &mut tree,
+                &mut node,
+                &renderer,
+                size,
+            )
+            .await;
+            let mut penultimate = GridViewport::new(penultimate_row_end);
+            element.as_widget_mut().operate(
+                &mut tree,
+                Layout::new(&node),
+                &renderer,
+                &mut penultimate,
+            );
+            let mut final_row = GridViewport::new(final_row_start);
+            apply_focus_task(
+                action::focus_next_visible(crate::app::view::nav::shell::MIDDLE_SCROLL_ID)
+                    .chain(action::reveal_focused(BORDER_WALLET_GRID_SCROLL_ID)),
+                &mut element,
+                &mut tree,
+                &mut node,
+                &renderer,
+                size,
+            )
+            .await;
+            element.as_widget_mut().operate(
+                &mut tree,
+                Layout::new(&node),
+                &renderer,
+                &mut final_row,
+            );
+            assert!(final_row.offset > penultimate.offset);
+            let final_row_bounds = final_row.screen_bounds();
+            let final_row_viewport = final_row.viewport.unwrap();
+            assert!(final_row_bounds.y >= final_row_viewport.y + 4.0);
+            assert!(
+                final_row_bounds.y + final_row_bounds.height
+                    <= final_row_viewport.y + final_row_viewport.height - 4.0
+            );
+
+            let last_cell = wizard.grid_focus_ids[WordGrid::TOTAL_CELLS - 1].clone();
+            operate(
+                &mut element,
+                &mut tree,
+                &node,
+                &renderer,
+                focusable::focus::<()>(last_cell.clone()),
+            );
+            apply_focus_task(
+                action::reveal_focused(BORDER_WALLET_GRID_SCROLL_ID),
+                &mut element,
+                &mut tree,
+                &mut node,
+                &renderer,
+                size,
+            )
+            .await;
+            let mut bottom = GridViewport::new(last_cell);
+            element
+                .as_widget_mut()
+                .operate(&mut tree, Layout::new(&node), &renderer, &mut bottom);
+            assert!(bottom.offset > after.offset);
+            let focused = bottom.screen_bounds();
+            let viewport = bottom.viewport.unwrap();
+            assert!(focused.y >= viewport.y + 4.0);
+            assert!(focused.y + focused.height <= viewport.y + viewport.height - 4.0);
+            assert!(
+                focused.x + focused.width + 4.0 <= viewport.x + viewport.width - 10.0,
+                "column 16 focus ring must clear the 10 px embedded scrollbar"
+            );
+
             if let Ok(directory) = std::env::var("BORDER_WALLET_CAPTURE_DIR") {
-                std::fs::create_dir_all(&directory).unwrap();
-                let style = iced::advanced::renderer::Style {
-                    text_color: theme.colors.shell.ink,
-                };
-                element.as_widget().draw(
+                capture(
+                    &std::path::Path::new(&directory).join(format!(
+                        "border-wallet-synthetic-bottom-right-{name}-1024x768.png"
+                    )),
+                    &element,
                     &tree,
+                    &node,
                     &mut renderer,
                     &theme,
-                    &style,
-                    Layout::new(&node),
-                    iced::mouse::Cursor::Unavailable,
-                    &Rectangle::with_size(size),
+                    size,
                 );
-                let pixels =
-                    renderer.screenshot(Size::new(1024, 768), 1.0, theme.colors.shell.background);
-                image::save_buffer(
-                    std::path::Path::new(&directory).join(format!(
-                        "border-wallet-synthetic-focus-row13-{name}-1024x768.png"
+            }
+
+            drop(element);
+            wizard.error = Some(
+                "Your pattern already has all 11 cells. Deselect one before choosing another."
+                    .to_string(),
+            );
+            let mut error_element: Element<'_, Message> = Container::new(wizard.view_grid())
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .into();
+            let mut error_tree = Tree::new(error_element.as_widget());
+            let error_node = error_element.as_widget_mut().layout(
+                &mut error_tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, size),
+            );
+            let error_modal = error_node.children()[0].bounds();
+            assert!(error_modal.y >= 0.0 && error_modal.y + error_modal.height <= size.height);
+            if let Ok(directory) = std::env::var("BORDER_WALLET_CAPTURE_DIR") {
+                capture(
+                    &std::path::Path::new(&directory).join(format!(
+                        "border-wallet-synthetic-error-line-{name}-1024x768.png"
                     )),
-                    &pixels,
-                    1024,
-                    768,
-                    image::ColorType::Rgba8,
-                )
-                .unwrap();
+                    &error_element,
+                    &error_tree,
+                    &error_node,
+                    &mut renderer,
+                    &theme,
+                    size,
+                );
             }
         }
     }
