@@ -693,7 +693,8 @@ mod rbf_view_tests {
         let row_delta = feerate_top(2) - feerate_top(1);
         assert!(
             (32.0..=48.0).contains(&row_delta),
-            "one extra row: {row_delta}"
+            "one extra row: {row_delta}",
+            row_delta = row_delta
         );
         assert!((feerate_top(5) - feerate_top(3)).abs() <= 1.0);
         let five: HashSet<_> = "abcde".chars().map(txid).collect();
