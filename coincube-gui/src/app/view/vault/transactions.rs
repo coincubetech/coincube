@@ -34,6 +34,29 @@ use crate::{
     export::ImportExportMessage,
 };
 
+pub const RBF_DESCENDANTS_SCROLL_ID: &str = "vault-rbf-descendants";
+pub const RBF_BUMP_TRIGGER_ID: &str = "vault-rbf-bump-trigger";
+pub const RBF_CANCEL_TRIGGER_ID: &str = "vault-rbf-cancel-trigger";
+
+fn rbf_trigger(is_cancel: bool) -> Action<'static, Message> {
+    button::secondary_action(
+        Id::new(if is_cancel {
+            RBF_CANCEL_TRIGGER_ID
+        } else {
+            RBF_BUMP_TRIGGER_ID
+        }),
+        None,
+        if is_cancel {
+            "Cancel transaction"
+        } else {
+            "Bump fee"
+        },
+        Message::FocusAction,
+    )
+    .width(Length::Fixed(200.0))
+    .on_press(Message::CreateRbf(CreateRbfMessage::New(is_cancel)))
+}
+
 pub fn transactions_view<'a>(
     menu: &'a Menu,
     cache: &'a Cache,
@@ -337,9 +360,10 @@ pub fn create_rbf_modal<'a>(
         if !descendant_txids.is_empty() {
             let mut descendants: Vec<_> = descendant_txids.iter().collect();
             descendants.sort();
-            let list = descendants
-                .into_iter()
-                .fold(Column::new().spacing(6), |col, txid| {
+            let visible_rows = descendant_txids.len().min(3);
+            let list = descendants.into_iter().fold(
+                Column::new().spacing(6).padding([4, 4]),
+                |col, txid| {
                     let id = txid.to_string();
                     col.push(
                         Row::new()
@@ -361,7 +385,8 @@ pub fn create_rbf_modal<'a>(
                                 .style(theme::button::transparent_border),
                             ),
                     )
-                });
+                },
+            );
             body = body.push(Container::new(Row::new()
                 .spacing(10)
                 .push(icon::warning_icon())
@@ -369,11 +394,13 @@ pub fn create_rbf_modal<'a>(
                     "Replacing this transaction will invalidate {} later {} when the replacement is broadcast. Transactions depending on them may also be dropped.",
                     descendant_txids.len(),
                     if descendant_txids.len() == 1 { "payment" } else { "payments" },
-                )).width(Length::Fill).wrapping(Wrapping::WordOrGlyph)))
+                )).width(Length::Fill).wrapping(Wrapping::WordOrGlyph).style(theme::text::warning)))
                 .padding(12)
                 .width(Length::Fill)
                 .style(theme::card::warning))
-                .push(scrollable(list).height(Length::Fixed((descendant_txids.len().min(3) * 56) as f32)));
+                .push(scrollable(list)
+                    .id(Id::new(RBF_DESCENDANTS_SCROLL_ID))
+                    .height(Length::Fixed((visible_rows * 31 + (visible_rows - 1) * 6 + 8) as f32)));
         }
 
         body = body.push(if is_cancel {
@@ -521,15 +548,11 @@ pub fn transaction_detail_view<'a>(
                 Some(
                     Row::new()
                         .push(
-                            button::secondary(None, "Bump fee")
-                                .width(Length::Fixed(200.0))
-                                .on_press(Message::CreateRbf(super::super::CreateRbfMessage::New(false))),
+                            rbf_trigger(false),
                         )
                         .push(
                             tooltip::Tooltip::new(
-                                button::secondary(None, "Cancel transaction")
-                                .width(Length::Fixed(200.0))
-                                .on_press(Message::CreateRbf(super::super::CreateRbfMessage::New(true))),
+                                rbf_trigger(true),
                                 "Best effort attempt at double spending an unconfirmed outgoing transaction",
                                 tooltip::Position::Top,
                             )
@@ -615,6 +638,75 @@ mod rbf_view_tests {
             valid,
             warning: None,
         }
+    }
+
+    #[test]
+    fn rbf_warning_text_meets_light_theme_body_contrast() {
+        let light = theme::Theme::light();
+        let card = theme::card::warning(&light);
+        let text = theme::text::warning(&light)
+            .color
+            .expect("warning text color");
+        let iced::Background::Color(background) = card.background.expect("warning background")
+        else {
+            panic!("warning background must be a solid color");
+        };
+        assert!(theme::tenshu::contrast(text, background) >= 4.5);
+        assert!(card.border.width > 0.0, "warning border remains visible");
+    }
+
+    #[test]
+    fn rbf_detail_triggers_activate_with_keyboard() {
+        for (is_cancel, trigger) in [(false, RBF_BUMP_TRIGGER_ID), (true, RBF_CANCEL_TRIGGER_ID)] {
+            let messages = capture::activate(
+                rbf_trigger(is_cancel).into(),
+                Id::new(trigger),
+                (1024, 768),
+                false,
+            );
+            assert!(messages.iter().any(|message| matches!(
+                message,
+                Message::CreateRbf(CreateRbfMessage::New(value)) if *value == is_cancel
+            )));
+        }
+    }
+
+    #[test]
+    fn rbf_descendant_list_tracks_row_height_and_caps_visible_rows() {
+        let inspect = |count: usize| {
+            let descendants: HashSet<_> = "abcdef".chars().take(count).map(txid).collect();
+            capture::inspect_full_window(
+                "vault-rbf-descendant-height",
+                create_rbf_modal(false, &descendants, &rate("12", true), None, false),
+                (1024, 768),
+                "light",
+                theme::Theme::light(),
+            )
+        };
+        let feerate_top = |count| {
+            inspect(count)
+                .text
+                .iter()
+                .find_map(|(value, bounds)| (value == "Feerate (sats/vbyte)").then_some(bounds.y))
+                .expect("feerate label")
+        };
+        let row_delta = feerate_top(2) - feerate_top(1);
+        assert!(
+            (32.0..=48.0).contains(&row_delta),
+            "one extra row: {row_delta}"
+        );
+        assert!((feerate_top(5) - feerate_top(3)).abs() <= 1.0);
+        let five: HashSet<_> = "abcde".chars().map(txid).collect();
+        let last = txid('e');
+        assert!(inspect(5).has_focus(Id::from(format!("vault-rbf-copy-{last}"))));
+        assert!(capture::activate(
+            create_rbf_modal(false, &five, &rate("12", true), None, false),
+            Id::from(format!("vault-rbf-copy-{last}")),
+            (1024, 768),
+            false,
+        )
+        .iter()
+        .any(|message| matches!(message, Message::Clipboard(id) if id == &last.to_string())));
     }
 
     #[test]

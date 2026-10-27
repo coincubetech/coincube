@@ -14,7 +14,7 @@ use coincube_ui::{
     widget::{modal::Modal, Element},
 };
 use coincubed::commands::CoinStatus;
-use iced::Task;
+use iced::{advanced::widget::Id, Task};
 
 /// Bump to a larger value (e.g. 50) once Prev/Next pagination is verified
 /// end-to-end on real wallets. Kept low during rollout so QA can exercise
@@ -402,7 +402,17 @@ impl State for VaultTransactionsPanel {
                 // hide the result of an in-flight replacement PSBT.
                 if !matches!(&self.modal, VaultTransactionsModal::CreateRbf(modal) if modal.processing)
                 {
+                    let trigger = match &self.modal {
+                        VaultTransactionsModal::CreateRbf(modal) if modal.is_cancel => {
+                            view::vault::transactions::RBF_CANCEL_TRIGGER_ID
+                        }
+                        VaultTransactionsModal::CreateRbf(_) => {
+                            view::vault::transactions::RBF_BUMP_TRIGGER_ID
+                        }
+                        _ => return Task::none(),
+                    };
                     self.modal = VaultTransactionsModal::None;
+                    return iced::widget::operation::focus(Id::new(trigger));
                 }
             }
             Message::View(view::Message::CreateRbf(view::CreateRbfMessage::New(is_cancel))) => {

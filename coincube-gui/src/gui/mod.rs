@@ -2643,6 +2643,11 @@ impl GUI {
                 focus.chain(action::reveal_focused(
                     crate::installer::step::descriptor::editor::border_wallet_wizard::BORDER_WALLET_GRID_SCROLL_ID,
                 ))
+                // The RBF warning has its own clipped descendant list. Tab can
+                // reach every copy action, including those below its viewport.
+                .chain(action::reveal_focused(
+                    crate::app::view::vault::transactions::RBF_DESCENDANTS_SCROLL_ID,
+                ))
             }
             Message::KeyPressed(Key::Escape) => {
                 if self.preferences_sheet.is_some() {
