@@ -936,7 +936,7 @@ pub fn create_spend_tx<'a>(
                 .push(balance_context)
                 .push(compose_card),
         )
-        .center_x(Length::Fill),
+        .width(Length::Fill),
     )
 }
 

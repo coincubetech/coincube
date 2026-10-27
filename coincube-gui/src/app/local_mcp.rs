@@ -53,6 +53,10 @@ impl Drop for PairedRuntime {
 /// Actions emitted only by the trusted desktop AI access settings.
 #[derive(Debug, Clone)]
 pub enum Message {
+    /// Open or close one paired client's controls under its row.
+    ManageClient(String),
+    /// Open or close the pairing form under "Pair a client".
+    TogglePairing,
     /// Enable or disable MCP for the current unlocked session.
     Enable(bool),
     /// Select whether the current Vault may be shared.
@@ -125,6 +129,10 @@ pub struct Settings {
     pairing_generation: Option<u64>,
     revoke_confirmation: Option<String>,
     last_poll_at_startup: Option<u32>,
+    /// The paired client whose controls are open on AI access.
+    managing: Option<String>,
+    /// Whether the pairing form is open on AI access.
+    pairing_open: bool,
 }
 pub(crate) struct PairingContext<'a> {
     pub root: &'a std::path::Path,
@@ -585,6 +593,18 @@ impl Settings {
         cube_id: &str,
     ) -> Option<String> {
         match message {
+            Message::ManageClient(id) => {
+                self.managing = if self.managing.as_deref() == Some(id.as_str()) {
+                    None
+                } else {
+                    Some(id)
+                };
+                return None;
+            }
+            Message::TogglePairing => {
+                self.pairing_open = !self.pairing_open;
+                return None;
+            }
             #[cfg(feature = "mcp-transactions")]
             Message::ReviewTransaction { .. } => return None,
             Message::Enable(value) => {
@@ -658,6 +678,9 @@ impl Settings {
                 return None;
             }
             Message::RequestRevokePair(id) => {
+                // Keep the client's controls open so focus can return to its
+                // Revoke action when the dialog is dismissed.
+                self.managing = Some(id.clone());
                 self.revoke_confirmation = self
                     .pairing_store
                     .as_ref()
@@ -666,7 +689,11 @@ impl Settings {
                 return None;
             }
             Message::CancelRevokePair => {
-                self.revoke_confirmation = None;
+                // Return to the client's open controls, where focus lands
+                // back on its Revoke action.
+                if let Some(id) = self.revoke_confirmation.take() {
+                    self.managing = Some(id);
+                }
                 return None;
             }
             Message::CopyPair(id) => {
@@ -1485,7 +1512,7 @@ mod tests {
         apply_task(&mut ui, &renderer, confirm);
         assert_eq!(
             focused(&mut ui, &renderer),
-            Some(Id::from("tenshu.ai-access.enable"))
+            Some(Id::from("tenshu.ai-access.open"))
         );
         drop(ui);
         drop(app);
@@ -1670,9 +1697,13 @@ mod tests {
         let location = pairings::Location::new(&root, chain, cube).unwrap();
         super::super::session::open_without_pin(cube);
 
-        let empty = Settings::default();
+        let empty = Settings {
+            pairing_open: true,
+            ..Settings::default()
+        };
         let mut paired = Settings {
             enabled: true,
+            pairing_open: true,
             pairing_location: Some(location.clone()),
             pairing_store: Some(
                 pairings::Store::open(location, zeroize::Zeroizing::new([51; 32]), true).unwrap(),
@@ -1704,6 +1735,11 @@ mod tests {
             last_poll_at_startup: None,
         });
         assert_eq!(paired.paired.len(), 1);
+        paired.managing = Some(
+            paired.pairing_store.as_ref().unwrap().clients()[0]
+                .id
+                .clone(),
+        );
         let render = |scenario: &str, settings: &Settings| {
             for (size, appearance, palette) in [
                 ((1024, 768), "dark", theme::Theme::dark()),
@@ -1718,9 +1754,8 @@ mod tests {
                     appearance,
                     palette,
                 );
-                assert!(inspection.contains("Today · Persistent per-client read access"));
-                assert!(inspection.contains("Your AI provider may receive financial information"));
-                assert!(inspection.contains("Guided pairing · Planned"));
+                assert!(inspection.contains("Pair a client"));
+                assert!(inspection.contains("A local connection is not a private one"));
                 assert!(!inspection.contains("TENSHU_MCP_CREDENTIAL"));
             }
         };
@@ -2196,7 +2231,7 @@ mod tests {
         apply_task(&mut ui, &renderer, confirm);
         assert_eq!(
             focused(&mut ui, &renderer),
-            Some(Id::from("tenshu.ai-access.enable"))
+            Some(Id::from("tenshu.ai-access.open"))
         );
         drop(ui);
         drop(app);

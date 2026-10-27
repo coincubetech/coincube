@@ -7,8 +7,8 @@ use crate::app::view;
 use coincube_ui::font;
 use coincube_ui::theme::{self, tenshu::Tone};
 use coincube_ui::widget::{action::Action, Element};
-use iced::widget::{column, container, row, text, text_input, Column, Row, Space};
-use iced::{Alignment, Background, Border, Length};
+use iced::widget::{column, container, row, text, text_input, Column, Space};
+use iced::{Background, Border, Length};
 use std::sync::atomic::Ordering;
 
 type Ui<'a> = Element<'a, view::Message>;
@@ -63,26 +63,6 @@ fn notice<'a>(content: impl Into<Ui<'a>>, tone: Tone) -> Ui<'a> {
         .into()
 }
 
-fn chip<'a>(label: impl iced::widget::text::IntoFragment<'a>, tone: Tone) -> Ui<'a> {
-    container(
-        text(label)
-            .size(12)
-            .style(move |theme: &theme::Theme| iced::widget::text::Style {
-                color: Some(tone.color(theme)),
-            }),
-    )
-    .padding([4, 9])
-    .style(|theme: &theme::Theme| iced::widget::container::Style {
-        border: Border {
-            color: theme.colors.shell.line,
-            width: 1.0,
-            radius: 12.0.into(),
-        },
-        ..Default::default()
-    })
-    .into()
-}
-
 fn action<'a>(
     id: impl Into<iced::advanced::widget::Id>,
     label: &'static str,
@@ -121,54 +101,251 @@ fn selection<'a>(id: &'static str, label: &'static str, checked: bool, intent: M
     .into()
 }
 
-fn section_title<'a>(title: &'static str, status: &'static str, tone: Tone) -> Ui<'a> {
-    row![heading(title), chip(status, tone)]
-        .spacing(9)
-        .align_y(Alignment::Center)
-        .into()
+pub(super) fn view_for_cube(settings: &Settings, supported: bool) -> Ui<'_> {
+    use crate::app::view::settings::page;
+    let mut rows: Vec<Ui<'_>> = paired_client_rows(settings);
+    let available = cfg!(any(unix, windows)) && supported;
+    rows.push(
+        page::row("Pair a client")
+            .description("Pair once; access lasts until you revoke it. Each client gets only the Vault and permissions you choose.")
+            .control(if settings.pairing_open {
+                page::button(PAIR_OPEN_ID, "Close", Some(message(Message::TogglePairing)))
+            } else {
+                page::primary(
+                    PAIR_OPEN_ID,
+                    "Open AI access",
+                    available.then(|| message(Message::TogglePairing)),
+                )
+            })
+            .into(),
+    );
+    let mut content = Column::new().width(Length::Fill);
+    if let Some(error) = settings.pairing_error {
+        content = content.push(page::note(Tone::Bad, text(error).size(13), None));
+        content = content.push(Space::new().height(Length::Fixed(12.0)));
+    }
+    content = content.push(page::note(
+        Tone::Warn,
+        column![
+            heading("Your AI provider may receive financial information"),
+            muted("The connection is local, but your AI client may send what it reads to its provider. History shares activity order, coarse type and confirmed status, but omits exact transaction amounts, times, block heights and chain ids. This reduces metadata; it does not guarantee anonymity. Balances and policy shape are included when selected. Pair only a client you trust. Never paste its private configuration into a chat."),
+        ]
+        .spacing(5),
+        None,
+    ));
+    content = content.push(page::rows(rows));
+    if !available {
+        content = content.push(page::note(
+            Tone::Warn,
+            text("AI access currently supports a Bitcoin Vault served by the embedded daemon on macOS, Linux and Windows. This wallet is unavailable for MCP.").size(13),
+            None,
+        ));
+    } else if settings.pairing_open {
+        content = content.push(
+            container(pairing_card(settings))
+                .padding(iced::Padding::default().top(16.0))
+                .width(Length::Fill),
+        );
+    }
+    content = content.push(page::caption(
+        "A local connection is not a private one: anything a paired client reads can be sent to its AI provider. Locking this Cube pauses a client; its pairing stays until you revoke it.",
+    ));
+    page::group(
+        "AI access",
+        Some("Let the AI you already use read this Cube through Tenshu's local connection. Access is scoped to one active embedded Vault. Seeds, keys, PINs, passwords and passkeys never enter the conversation.".into()),
+        content,
+    )
 }
 
-pub(super) fn view_for_cube(settings: &Settings, supported: bool) -> Ui<'_> {
-    let mut page = Column::new()
-        .spacing(16)
-        .width(Length::Fill)
-        .push(text("AI access").size(22).font(font::SEMIBOLD))
-        .push(muted("Connect a local AI client to this Cube. Access is scoped to one active embedded Vault and lasts until you revoke that client."))
-        .push(notice(
-            column![
-                heading("Your AI provider may receive financial information"),
-                muted("The connection is local, but your AI client may send what it reads to its provider. History shares activity order, coarse type and confirmed status, but omits exact transaction amounts, times, block heights and chain ids. This reduces metadata; it does not guarantee anonymity. Balances and policy shape are included when selected. Pair only a client you trust. Never paste its private configuration into a chat."),
-            ]
-            .spacing(5),
-            Tone::Warn,
-        ))
-        .push(paired_clients(settings))
-        .push(card(
-            column![
-                heading("Paired is not the same as available"),
-                muted("Locking this Cube pauses protected operations; its pairing stays. After a normal unlock or relaunch, an eligible client reconnects without another approval. A client can never unlock a Cube."),
-            ]
-            .spacing(6),
-        ))
-        .push(section_title("Pair a client", "Today · manual configuration", Tone::Good));
+const PAIR_OPEN_ID: &str = "tenshu.ai-access.open";
 
-    if !cfg!(any(unix, windows)) || !supported {
-        page = page.push(notice(
-            text("AI access currently supports a Bitcoin Vault served by the embedded daemon on macOS, Linux and Windows. This wallet is unavailable for MCP.").size(13),
-            Tone::Warn,
-        ));
-    } else {
-        page = page.push(pairing_card(settings));
+/// One ruled row per paired client: its name, scope, permissions and state,
+/// with "Manage" opening its controls beneath.
+fn paired_client_rows(settings: &Settings) -> Vec<Ui<'_>> {
+    use crate::app::view::settings::page;
+    let Some(store) = &settings.pairing_store else {
+        return Vec::new();
+    };
+    let mut rows = Vec::new();
+    for client in store.clients() {
+        let runtime = settings
+            .paired
+            .iter()
+            .find(|runtime| runtime.id == client.id);
+        let available =
+            settings.enabled && runtime.is_some_and(|runtime| runtime.server.grant.active());
+        let status = if !settings.enabled {
+            "Paused, AI access is off"
+        } else if available {
+            "Available"
+        } else {
+            "Paused, Cube locked or wallet unavailable"
+        };
+        let scope = match &client.scope {
+            pairings::Scope::Read { .. } => "Vault · Read wallet information",
+            pairings::Scope::TransactionPreparation { .. } => {
+                "Vault · Prepare unsigned Regtest transactions"
+            }
+            pairings::Scope::Proposal => "Regtest wallet proposal experiment",
+            pairings::Scope::WalletCreation => "Regtest public-key wallet preparation",
+        };
+        let mut detail = scope.to_owned();
+        if let pairings::Scope::Read { capabilities, .. } = &client.scope {
+            let granted: Vec<&str> = capabilities
+                .iter()
+                .zip(["Balances", "Confirmed history", "Policy summary"])
+                .filter(|(enabled, _)| **enabled)
+                .map(|(_, label)| label)
+                .collect();
+            if !granted.is_empty() {
+                detail.push_str(&format!(" ({})", granted.join(", ")));
+            }
+        }
+        detail.push_str(&format!(" · {}", status));
+        let open = settings.managing.as_deref() == Some(client.id.as_str())
+            || settings.revoke_confirmation.as_deref() == Some(client.id.as_str());
+        rows.push(
+            page::row(client.name.clone())
+                .description(detail)
+                .control(
+                    Action::new(
+                        iced::advanced::widget::Id::from(format!(
+                            "tenshu.ai-access.client.{}.manage",
+                            client.id
+                        )),
+                        text(if open { "Close" } else { "Manage" })
+                            .size(13)
+                            .font(font::MEDIUM),
+                        view::Message::FocusAction,
+                    )
+                    .padding([0, 12])
+                    .height(Length::Fixed(32.0))
+                    .focus_radius(8.0)
+                    .style(|theme, status| {
+                        theme::tenshu::button::action(
+                            theme,
+                            status,
+                            theme::tenshu::button::ActionKind::Secondary,
+                            theme::tenshu::button::ActionShape::Compact,
+                        )
+                    })
+                    .on_press(message(Message::ManageClient(client.id.clone()))),
+                )
+                .into(),
+        );
+        if open {
+            rows.push(client_controls(settings, client, runtime, available));
+        }
     }
+    rows
+}
 
-    page = page
-        .push(planned_card())
-        .push(muted("Today · Persistent per-client read access. Experimental Regtest setup and unsigned transaction preparation require separate enablement and consent. Planned · Guided pairing, multiple wallets and general transaction preparation."));
-
-    container(page)
+/// A paired client's controls, inset under its row: session use, copying
+/// its private configuration and revoking it.
+fn client_controls<'a>(
+    settings: &'a Settings,
+    client: &'a pairings::Client,
+    runtime: Option<&'a super::PairedRuntime>,
+    available: bool,
+) -> Ui<'a> {
+    use crate::app::view::settings::page;
+    #[allow(unused_mut)]
+    let mut body = Column::new()
+        .spacing(9)
         .width(Length::Fill)
-        .max_width(930)
-        .padding([20, 24])
+        .push(muted("A private configuration can impersonate its client until revoked. Client names are labels for your reference."))
+        .push(muted(format!(
+            "Successful operations this session: {}",
+            runtime.map_or(0, |runtime| runtime
+                .server
+                .grant
+                .successful_calls
+                .load(Ordering::Relaxed))
+        )))
+        .push(
+            row![
+                action(
+                    iced::advanced::widget::Id::from(format!(
+                        "tenshu.ai-access.client.{}.copy",
+                        client.id
+                    )),
+                    "Copy private configuration",
+                    (!settings.pairing_poisoned && available)
+                        .then(|| message(Message::CopyPair(client.id.clone()))),
+                    theme::tenshu::button::ActionKind::Secondary
+                ),
+                action(
+                    iced::advanced::widget::Id::from(format!(
+                        "tenshu.ai-access.client.{}.revoke",
+                        client.id
+                    )),
+                    "Revoke",
+                    Some(message(Message::RequestRevokePair(client.id.clone()))),
+                    theme::tenshu::button::ActionKind::Destructive
+                ),
+            ]
+            .spacing(8),
+        );
+
+    #[cfg(feature = "mcp-transactions")]
+    if let Some(service) = runtime
+        .filter(|_| available)
+        .and_then(|runtime| runtime.transactions.as_ref())
+    {
+        for draft in service.summaries() {
+            body = body
+                .push(muted(format!("Unsigned transaction: {} sats to {} recipient(s), fee {} sats. Review every address and amount before signing.", draft.amount_sats, draft.recipients.len(), draft.fee_sats)))
+                .push(action(iced::advanced::widget::Id::from(format!("tenshu.ai-access.client.{}.transaction.{}", client.id, draft.draft_id)), "Review prepared transaction in Tenshu", Some(message(Message::ReviewTransaction { client_id: client.id.clone(), draft_id: draft.draft_id })), theme::tenshu::button::ActionKind::Secondary));
+        }
+    }
+    #[cfg(feature = "mcp-proposals")]
+    if let Some(proposal) = runtime
+        .filter(|_| available)
+        .and_then(|runtime| runtime.proposals.as_ref())
+        .and_then(|store| store.pending().ok())
+        .flatten()
+    {
+        let keys_ready = runtime
+            .and_then(|runtime| runtime.proposals.as_ref())
+            .is_some_and(|store| {
+                store
+                    .creation_input(&proposal.proposal_id)
+                    .ok()
+                    .flatten()
+                    .is_some()
+            });
+        body = body
+            .push(muted(format!(
+                "3-of-5 primary, recovery {}-of-{} after {} blocks. {}",
+                proposal.topology.recovery.quorum.threshold,
+                proposal.topology.recovery.quorum.key_count,
+                proposal.topology.recovery.relative_delay_blocks,
+                if keys_ready {
+                    "Public keys and descriptor validated. Verify device ownership and backups."
+                } else {
+                    "Keys are not yet selected."
+                }
+            )))
+            .push(action(
+                iced::advanced::widget::Id::from(format!(
+                    "tenshu.ai-access.client.{}.proposal",
+                    client.id
+                )),
+                if keys_ready {
+                    "Review prepared wallet in Tenshu"
+                } else {
+                    "Review proposal and select keys"
+                },
+                Some(message(Message::ReviewPairedProposal(client.id.clone()))),
+                theme::tenshu::button::ActionKind::Secondary,
+            ));
+    }
+    Column::new()
+        .push(page::disclosure_body([container(body)
+            .padding([12, 0])
+            .width(Length::Fill)
+            .into()]))
+        .push(page::rule())
         .into()
 }
 
@@ -331,183 +508,8 @@ fn pairing_card(settings: &Settings) -> Ui<'_> {
     card(body)
 }
 
+/// The paired-client rows on their own, for the Regtest proposal view.
+#[cfg(feature = "mcp-proposals")]
 pub(super) fn paired_clients(settings: &Settings) -> Ui<'_> {
-    let mut section = Column::new()
-        .spacing(12)
-        .width(Length::Fill)
-        .push(section_title("Paired clients", "Today", Tone::Good))
-        .push(muted("A private configuration can impersonate its client until revoked. Client names are labels for your reference."));
-    if let Some(error) = settings.pairing_error {
-        section = section.push(notice(text(error).size(13), Tone::Bad));
-    }
-    let Some(store) = &settings.pairing_store else {
-        return section.push(empty_card()).into();
-    };
-    if store.clients().is_empty() {
-        return section.push(empty_card()).into();
-    }
-
-    for client in store.clients() {
-        let runtime = settings
-            .paired
-            .iter()
-            .find(|runtime| runtime.id == client.id);
-        let available =
-            settings.enabled && runtime.is_some_and(|runtime| runtime.server.grant.active());
-        let status = if !settings.enabled {
-            "Paused · AI access is off"
-        } else if available {
-            "Available while unlocked"
-        } else {
-            "Paused · Cube locked or wallet unavailable"
-        };
-        let status_tone = if available { Tone::Good } else { Tone::Warn };
-        let scope = match &client.scope {
-            pairings::Scope::Read { .. } => "This Cube · active embedded Vault",
-            pairings::Scope::TransactionPreparation { .. } => {
-                "This Cube · unsigned Regtest transaction preparation"
-            }
-            pairings::Scope::Proposal => "This Cube · Regtest wallet proposal experiment",
-            pairings::Scope::WalletCreation => "This Cube · Regtest public-key wallet preparation",
-        };
-        let mut body = Column::new()
-            .spacing(9)
-            .width(Length::Fill)
-            .push(
-                row![
-                    heading(client.name.clone()),
-                    Space::new().width(Length::Fill),
-                    chip(status, status_tone),
-                ]
-                .spacing(10)
-                .align_y(Alignment::Center),
-            )
-            .push(muted(scope));
-
-        if let pairings::Scope::Read { capabilities, .. } = &client.scope {
-            let mut chips = Row::new().spacing(6);
-            for (enabled, label) in
-                capabilities
-                    .iter()
-                    .zip(["Balances", "Confirmed history", "Policy summary"])
-            {
-                if *enabled {
-                    chips = chips.push(chip(label, Tone::Neutral));
-                }
-            }
-            body = body.push(chips.wrap());
-        }
-        body = body
-            .push(muted(format!(
-                "Successful operations this session: {}",
-                runtime.map_or(0, |runtime| runtime
-                    .server
-                    .grant
-                    .successful_calls
-                    .load(Ordering::Relaxed))
-            )))
-            .push(
-                row![
-                    action(
-                        iced::advanced::widget::Id::from(format!(
-                            "tenshu.ai-access.client.{}.copy",
-                            client.id
-                        )),
-                        "Copy private configuration",
-                        (!settings.pairing_poisoned && available)
-                            .then(|| message(Message::CopyPair(client.id.clone()))),
-                        theme::tenshu::button::ActionKind::Secondary
-                    ),
-                    action(
-                        iced::advanced::widget::Id::from(format!(
-                            "tenshu.ai-access.client.{}.revoke",
-                            client.id
-                        )),
-                        "Revoke",
-                        Some(message(Message::RequestRevokePair(client.id.clone()))),
-                        theme::tenshu::button::ActionKind::Destructive
-                    ),
-                ]
-                .spacing(8),
-            );
-
-        #[cfg(feature = "mcp-transactions")]
-        if let Some(service) = runtime
-            .filter(|_| available)
-            .and_then(|runtime| runtime.transactions.as_ref())
-        {
-            for draft in service.summaries() {
-                body = body
-                    .push(muted(format!("Unsigned transaction: {} sats to {} recipient(s), fee {} sats. Review every address and amount before signing.", draft.amount_sats, draft.recipients.len(), draft.fee_sats)))
-                    .push(action(iced::advanced::widget::Id::from(format!("tenshu.ai-access.client.{}.transaction.{}", client.id, draft.draft_id)), "Review prepared transaction in Tenshu", Some(message(Message::ReviewTransaction { client_id: client.id.clone(), draft_id: draft.draft_id })), theme::tenshu::button::ActionKind::Secondary));
-            }
-        }
-        #[cfg(feature = "mcp-proposals")]
-        if let Some(proposal) = runtime
-            .filter(|_| available)
-            .and_then(|runtime| runtime.proposals.as_ref())
-            .and_then(|store| store.pending().ok())
-            .flatten()
-        {
-            let keys_ready = runtime
-                .and_then(|runtime| runtime.proposals.as_ref())
-                .is_some_and(|store| {
-                    store
-                        .creation_input(&proposal.proposal_id)
-                        .ok()
-                        .flatten()
-                        .is_some()
-                });
-            body = body
-                .push(muted(format!(
-                    "3-of-5 primary, recovery {}-of-{} after {} blocks. {}",
-                    proposal.topology.recovery.quorum.threshold,
-                    proposal.topology.recovery.quorum.key_count,
-                    proposal.topology.recovery.relative_delay_blocks,
-                    if keys_ready {
-                        "Public keys and descriptor validated. Verify device ownership and backups."
-                    } else {
-                        "Keys are not yet selected."
-                    }
-                )))
-                .push(action(
-                    iced::advanced::widget::Id::from(format!(
-                        "tenshu.ai-access.client.{}.proposal",
-                        client.id
-                    )),
-                    if keys_ready {
-                        "Review prepared wallet in Tenshu"
-                    } else {
-                        "Review proposal and select keys"
-                    },
-                    Some(message(Message::ReviewPairedProposal(client.id.clone()))),
-                    theme::tenshu::button::ActionKind::Secondary,
-                ));
-        }
-        section = section.push(card(body));
-    }
-    section.into()
-}
-
-fn empty_card<'a>() -> Ui<'a> {
-    card(column![
-        heading("No clients paired"),
-        muted("Pair one client with a name and explicit permissions. Its access lasts until you revoke it."),
-    ]
-    .spacing(5))
-}
-
-fn planned_card<'a>() -> Ui<'a> {
-    card(column![
-        section_title("More ways to work with AI", "Planned", Tone::Muted),
-        muted("Guided pairing with a one-time code, multiple wallet scopes, editing permissions, and general unsigned transaction preparation are planned. Regtest wallet setup uses a separate native flow."),
-        Row::new()
-            .spacing(6)
-            .push(chip("Guided pairing · Planned", Tone::Muted))
-            .push(chip("Multiple wallets · Planned", Tone::Muted))
-            .push(chip("General wallet setup · Planned", Tone::Muted))
-            .push(chip("General transactions · Planned", Tone::Muted))
-            .wrap(),
-    ]
-    .spacing(9))
+    crate::app::view::settings::page::rows(paired_client_rows(settings))
 }

@@ -292,6 +292,8 @@ pub struct Cache {
     /// Cached Lightning Address for display in the sidebar across all panels
     pub lightning_address: Option<String>,
     /// Cached avatar image handle for display in the sidebar across all panels
+    /// Avatar regenerations the Connect account has left, when known.
+    pub avatar_regenerations_remaining: Option<i32>,
     pub avatar_handle: Option<iced::widget::image::Handle>,
     /// Id of the current Cube.
     pub cube_id: String,
@@ -446,6 +448,7 @@ impl std::default::Default for Cache {
             show_direction_badges: true,
             lightning_address: None,
             avatar_handle: None,
+            avatar_regenerations_remaining: None,
             cube_id: String::new(),
             current_cube_server_id: None,
             current_descriptor_fingerprint: None,

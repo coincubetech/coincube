@@ -152,6 +152,7 @@ pub struct Segmented<'a, T, M> {
     segments: Vec<Segment<'a, T>>,
     selected: Option<T>,
     look: Look,
+    outlined: bool,
     focus_intent: fn(Id) -> M,
     on_select: Option<Box<dyn Fn(T) -> M + 'a>>,
 }
@@ -166,6 +167,7 @@ fn choice<'a, T, M>(
         segments: segments.into_iter().collect(),
         selected,
         look,
+        outlined: true,
         focus_intent,
         on_select: None,
     }
@@ -260,6 +262,13 @@ where
         self
     }
 
+    /// Drop the selected segment's accent outline: the Settings artboard
+    /// marks the selection with the selected fill and semibold ink only.
+    pub fn plain(mut self) -> Self {
+        self.outlined = false;
+        self
+    }
+
     pub fn on_select(mut self, on_select: impl Fn(T) -> M + 'a) -> Self {
         self.on_select = Some(Box::new(on_select));
         self
@@ -338,6 +347,7 @@ where
             segments,
             selected,
             look,
+            outlined,
             focus_intent,
             on_select,
         } = group;
@@ -393,7 +403,12 @@ where
                         let segment_radius = size.segment_radius();
                         Action::new(id, content, focus_intent)
                             .style(move |theme, status| {
-                                style::segment(theme, status, is_selected, segment_radius)
+                                let mut style =
+                                    style::segment(theme, status, is_selected, segment_radius);
+                                if !outlined {
+                                    style.border.width = 0.0;
+                                }
+                                style
                             })
                             .height(Length::Fixed(size.height()))
                             .padding([0.0, size.padding_x()])

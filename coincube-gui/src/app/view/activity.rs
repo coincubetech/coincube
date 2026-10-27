@@ -799,9 +799,17 @@ fn vault_confirmation_detail(height: i32, tip: i32) -> String {
 }
 
 // `.cols`: Time 44, Wallet 112, Details (at least 180 here), Amount 128 and
-// Status 132, 12px apart, inside the row's 12px and the list's 16px insets.
-const MIN_ACTIVITY_LIST_WIDTH: f32 =
-    44.0 + 112.0 + 180.0 + 128.0 + 132.0 + 4.0 * 12.0 + 2.0 * 12.0 + 2.0 * 16.0;
+// Status 132, 12px apart, inside the row's 12px insets. The list's own side
+// insets come from the page gutter (`list_inset`).
+const MIN_ACTIVITY_ROWS_WIDTH: f32 = 44.0 + 112.0 + 180.0 + 128.0 + 132.0 + 4.0 * 12.0 + 2.0 * 12.0;
+// `.row`'s side padding: row text lands on the page gutter.
+const ROW_INSET: f32 = 12.0;
+
+/// `.lst`'s side inset at a content width: the page gutter less the row's own
+/// 12px, so day headings and row text start on the gutter like every page title.
+fn list_inset(width: f32) -> f32 {
+    super::page_gutter(width) - ROW_INSET
+}
 // `.det { width: 420px }`.
 const SELECTED_DETAIL_WIDTH: f32 = 420.0;
 const ACTIVITY_LIST_SCROLL_ID: &str = "tenshu.activity.list.scroll";
@@ -809,7 +817,7 @@ const ACTIVITY_DETAIL_SCROLL_ID: &str = "tenshu.activity.detail.scroll";
 const ROW_HEIGHT: f32 = 56.0;
 
 fn detail_beside_list(width: f32) -> bool {
-    width >= MIN_ACTIVITY_LIST_WIDTH + SELECTED_DETAIL_WIDTH
+    width >= MIN_ACTIVITY_ROWS_WIDTH + 2.0 * list_inset(width) + SELECTED_DETAIL_WIDTH
 }
 
 /// `.day`: a relative name, then the date in the muted ink.
@@ -1157,7 +1165,9 @@ fn filters_bar<'a>(activity: &'a Activity, width: f32) -> Element<'a, Message> {
             .into()
     };
     column![
-        container(controls).padding([16, 24]).width(Length::Fill),
+        container(controls)
+            .padding([16.0, super::page_gutter(width)])
+            .width(Length::Fill),
         rule::horizontal(1)
     ]
     .into()
@@ -1231,12 +1241,14 @@ fn header<'a>(
             .align_y(Alignment::End)
             .into()
     };
+    // `.phd`: the page's 28px top and gutter, as on every Cube page.
+    let gutter = super::page_gutter(width);
     container(body)
         .padding(iced::Padding {
-            top: 24.0,
-            right: 24.0,
+            top: 28.0,
+            right: gutter,
             bottom: 0.0,
-            left: 24.0,
+            left: gutter,
         })
         .into()
 }
@@ -1928,12 +1940,12 @@ fn render_at_width<'a>(
         }
         list = list.push(container(more).padding([16, 12]));
     }
-    // `.lst`: 16px side insets and 24px below the last row.
+    // `.lst`: gutter-aligned side insets and 24px below the last row.
     let list = scrollable(container(list).padding(iced::Padding {
         top: 0.0,
-        right: 16.0,
+        right: list_inset(width),
         bottom: 24.0,
-        left: 16.0,
+        left: list_inset(width),
     }))
     .id(Id::from(ACTIVITY_LIST_SCROLL_ID))
     .width(Length::Fill)
@@ -2192,13 +2204,23 @@ mod tests {
         assert!(detail_beside_list(activity_content(1440.0)));
         // The canvas's 1440px frame: a 248px rail, the list and the 420px pane.
         assert_eq!(activity_content(1440.0), 1192.0);
-        assert!(activity_content(1440.0) - SELECTED_DETAIL_WIDTH >= MIN_ACTIVITY_LIST_WIDTH);
-        assert!(detail_beside_list(
-            MIN_ACTIVITY_LIST_WIDTH + SELECTED_DETAIL_WIDTH
-        ));
-        assert!(!detail_beside_list(
-            MIN_ACTIVITY_LIST_WIDTH + SELECTED_DETAIL_WIDTH - 1.0
-        ));
+        // Rows and their gutter insets fit beside the pane at 1440 (1150.4px
+        // needed of 1192), not at a 1100px pane (1144.9px needed).
+        let needed =
+            |pane: f32| MIN_ACTIVITY_ROWS_WIDTH + 2.0 * list_inset(pane) + SELECTED_DETAIL_WIDTH;
+        assert!(needed(1192.0) <= 1192.0);
+        assert!(!detail_beside_list(1100.0));
+        assert!(needed(1100.0) > 1100.0);
+    }
+
+    #[test]
+    fn activity_rows_start_on_the_page_gutter() {
+        for pane in [816.0, 952.0, 1192.0, 2312.0] {
+            assert_eq!(
+                list_inset(pane) + ROW_INSET,
+                super::super::page_gutter(pane)
+            );
+        }
     }
 
     #[test]
