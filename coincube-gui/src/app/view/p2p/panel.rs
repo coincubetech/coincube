@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::convert::{TryFrom, TryInto};
 use std::sync::Arc;
 
+use coincube_ui::component::tenshu::PageWidth;
 use coincube_ui::component::text::Text;
 use coincube_ui::{
     component::{button, card, form, text::*},
@@ -4289,10 +4290,8 @@ impl State for P2PPanel {
                             } else {
                                 None
                             };
-                            let detail_content = iced::widget::scrollable(row![
-                                Space::new().width(Length::FillPortion(1)),
+                            let detail_content = iced::widget::scrollable(view::page(
                                 column![
-                                    Space::new().height(Length::Fixed(30.0)),
                                     column![
                                         h3("Order Details").bold(),
                                         p2_regular("View order information")
@@ -4301,13 +4300,11 @@ impl State for P2PPanel {
                                     .spacing(8)
                                     .width(Length::Fill),
                                     container(order_detail(order, take_state)).width(Length::Fill),
-                                    Space::new().height(Length::Fixed(40.0)),
                                 ]
                                 .spacing(16)
-                                .width(Length::FillPortion(8))
-                                .max_width(1500),
-                                Space::new().width(Length::FillPortion(1)),
-                            ]);
+                                .width(Length::Fill),
+                                PageWidth::Reading,
+                            ));
 
                             return view::dashboard_shell(
                                 menu,
@@ -4316,7 +4313,7 @@ impl State for P2PPanel {
                                     .push(view::warn(None))
                                     .push(
                                         container(detail_content)
-                                            .center_x(Length::Fill)
+                                            .width(Length::Fill)
                                             .style(theme::container::background)
                                             .height(Length::Fill),
                                     )

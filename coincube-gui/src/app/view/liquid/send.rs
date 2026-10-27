@@ -332,7 +332,7 @@ fn send_page<'a>(
             .vertical_spacing(20),
     );
     Container::new(Container::new(page).width(Length::Fill).max_width(960.0))
-        .center_x(Length::Fill)
+        .width(Length::Fill)
         .into()
 }
 
@@ -782,10 +782,10 @@ pub fn liquid_send_view<'a>(
             .push(iced::widget::Space::new().height(Length::Fixed(40.0)));
     }
 
-    // Bound the form and recent transactions together, then center that
-    // bounded column in the dashboard's available width.
+    // Bound the form and recent transactions together; the column starts at
+    // the page gutter like every Cube page.
     Container::new(content.max_width(720))
-        .center_x(Length::Fill)
+        .width(Length::Fill)
         .into()
 }
 
@@ -2251,7 +2251,13 @@ mod privacy_tests {
                                 .1
                                 .x
                         };
-                        assert!(x("Last transactions") > 0.0);
+                        // Left-anchored: the bounded column starts at the
+                        // view's left edge; the Cube shell adds the gutter.
+                        assert!(
+                            x("Last transactions") >= 0.0 && x("Last transactions") < 1.0,
+                            "Last transactions at x = {}",
+                            x("Last transactions")
+                        );
                         assert!(
                             (x("Payment details") - x("Last transactions") - 24.0).abs() <= 4.0
                         );
