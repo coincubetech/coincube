@@ -1786,17 +1786,16 @@ impl DaemonControl {
         // Backfill them from the wallet before re-verifying.
         backfill_previous_transactions(&mut spend_psbt, &mut DbTxGetter::new(&self.db))?;
 
-        // CC-DESK-003: belt-and-suspenders re-verification of the spend's
-        // outputs, absolute fee and feerate immediately before broadcast. The
-        // same checks run at spend-creation time, but re-running them here — on
-        // the pre-finalization PSBT — means a PSBT mutated in-flight between
-        // creation and broadcast is rejected before it can hit the network.
-        // The preparation estimate uses the maximum witness. A shorter real
-        // signature makes this finalized transaction smaller, so re-apply the
-        // caller's requested rate to the transaction about to be broadcast.
+        // CC-DESK-003: recheck the fee against the reviewed preparation size.
+        // Actual ECDSA signatures may be shorter than the maximum witness used
+        // when the fee was selected. Dividing the unchanged fee by final vsize
+        // would reject an ordinary signed spend at the broadcast boundary.
         let fee_cap = spend::mcp_fee_cap(&spend_psbt);
-        let capped_input_value = if fee_cap.is_some() {
-            Some(Self::witness_input_value(&spend_psbt)?)
+        let capped_measurement = if fee_cap.is_some() {
+            Some((
+                Self::witness_input_value(&spend_psbt)?,
+                self.fee_and_vsize(&spend_psbt)?.1,
+            ))
         } else {
             None
         };
@@ -1818,7 +1817,9 @@ impl DaemonControl {
                 .clone()
             }
         };
-        if let (Some((max_fee, max_rate)), Some(total_in)) = (fee_cap, capped_input_value) {
+        if let (Some((max_fee, max_rate)), Some((total_in, prepared_vsize))) =
+            (fee_cap, capped_measurement)
+        {
             let total_out = final_tx
                 .output
                 .iter()
@@ -1830,11 +1831,10 @@ impl DaemonControl {
                 .checked_sub(total_out)
                 .filter(|fee| *fee > 0)
                 .ok_or(CommandError::FeeMeasurement)?;
-            let vsize = final_tx.vsize() as u64;
             if fee > max_fee {
                 return Err(CommandError::FeeCeilingExceeded);
             }
-            if spend::signed_fee_exceeds_cap(fee, vsize, max_fee, max_rate) {
+            if spend::signed_fee_exceeds_cap(fee, prepared_vsize, max_fee, max_rate) {
                 return Err(CommandError::FeeRateExceeded);
             }
         }
@@ -2700,6 +2700,70 @@ mod tests {
         assert_eq!((fee, measured_vsize), (vsize, vsize));
         assert_eq!(fee.div_ceil(measured_vsize), 1);
         assert_eq!(fee.div_ceil(without_framing), 2);
+        daemon.shutdown();
+    }
+
+    #[test]
+    fn capped_spend_shorter_final_witness_keeps_reviewed_fee_valid() {
+        let daemon = DummyCoincube::new(DummyBitcoind::new(), DummyDatabase::new());
+        let control = daemon.control();
+        let vault = control.config.main_descriptor.as_vault().unwrap();
+        let mut tx = Transaction {
+            version: TxVersion::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: (0..2)
+                .map(|vout| TxIn {
+                    previous_output: OutPoint {
+                        vout,
+                        ..OutPoint::null()
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                })
+                .collect(),
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        };
+        let prepared_vsize = vault.unsigned_tx_max_vbytes(&tx, true);
+        let fee = prepared_vsize * 2;
+        tx.output[0].value = Amount::from_sat(40_000 - fee);
+        let mut psbt = Psbt::from_unsigned_tx(tx).unwrap();
+        for input in &mut psbt.inputs {
+            input.witness_utxo = Some(TxOut {
+                value: Amount::from_sat(20_000),
+                script_pubkey: ScriptBuf::new(),
+            });
+        }
+        let (measured_fee, measured_vsize) = control.fee_and_vsize(&psbt).unwrap();
+        assert_eq!((measured_fee, measured_vsize), (fee, prepared_vsize));
+
+        // Sizing-only witness: a shorter signature changes network vsize but
+        // does not change the fee that was prepared and reviewed.
+        let mut finalized = psbt.unsigned_tx.clone();
+        for input in &mut finalized.input {
+            input.witness = Witness::from_slice(&[vec![0; 69], vec![0; 69]]);
+        }
+        assert!(
+            finalized.vsize() < prepared_vsize as usize,
+            "final={} prepared={}",
+            finalized.vsize(),
+            prepared_vsize
+        );
+        assert!(spend::signed_fee_exceeds_cap(
+            fee,
+            finalized.vsize() as u64,
+            1_000,
+            2
+        ));
+        assert!(!spend::signed_fee_exceeds_cap(
+            fee,
+            prepared_vsize,
+            1_000,
+            2
+        ));
         daemon.shutdown();
     }
 

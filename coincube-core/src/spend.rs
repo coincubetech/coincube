@@ -76,12 +76,12 @@ pub fn mcp_fee_cap(psbt: &Psbt) -> Option<(u64, u64)> {
     Some((max_fee, max_rate))
 }
 
-/// Whether a finalized transaction's fee breaks a stamped MCP cap.
+/// Whether the final fee exceeds the cap measured at preparation.
 ///
-/// `vsize` is the virtual size of the transaction that would be broadcast.
-/// A zero size cannot be rated and is treated as a breach.
-pub fn signed_fee_exceeds_cap(fee: u64, vsize: u64, max_fee: u64, max_rate: u64) -> bool {
-    vsize == 0 || fee > max_fee || fee.div_ceil(vsize) > max_rate
+/// `prepared_vsize` is the same maximum-witness estimate used to choose and
+/// review the fee. A shorter signature must not make an unchanged fee fail.
+pub fn signed_fee_exceeds_cap(fee: u64, prepared_vsize: u64, max_fee: u64, max_rate: u64) -> bool {
+    prepared_vsize == 0 || fee > max_fee || fee.div_ceil(prepared_vsize) > max_rate
 }
 
 /// Do not set locktime if tip age in seconds is older than this.
@@ -1689,10 +1689,12 @@ mod tests {
     }
 
     #[test]
-    fn finalized_size_can_exceed_the_maximum_witness_estimate() {
-        // 400 sats across 200 vB is exactly 2 sat/vB. One vbyte less rounds up to 3.
+    fn prepared_fee_cap_uses_the_reviewed_size() {
+        // 400 sats across the 200 vB preparation estimate is 2 sat/vB.
+        // A 199 vB final signature would have a higher apparent rate, but
+        // the same reviewed 400 sat fee must remain valid at broadcast.
         assert!(!signed_fee_exceeds_cap(400, 200, 1_000, 2));
-        assert!(signed_fee_exceeds_cap(400, 199, 1_000, 2));
+        assert!(signed_fee_exceeds_cap(401, 200, 1_000, 2));
         assert!(signed_fee_exceeds_cap(1_001, 200, 1_000, 2));
         assert!(signed_fee_exceeds_cap(400, 0, 1_000, 2));
         let tx = bitcoin::Transaction {
