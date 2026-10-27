@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use iced::advanced::widget::Id;
 use iced::{
     alignment::Horizontal,
-    widget::{checkbox, scrollable, tooltip, Space},
+    widget::{checkbox, scrollable, text::Wrapping, tooltip, Space},
     Alignment, Length,
 };
 
@@ -350,8 +350,14 @@ fn recipient_identity_summary<'a>(
             .push(
                 Row::new()
                     .spacing(10)
-                    .push(p2_regular(address.to_string()).style(theme::text::secondary))
-                    .push(amount_with_unit(&output.value, bitcoin_unit)),
+                    .align_y(Alignment::Start)
+                    .push(
+                        p2_regular(address.to_string())
+                            .style(theme::text::secondary)
+                            .wrapping(Wrapping::WordOrGlyph)
+                            .width(Length::Fill),
+                    )
+                    .push(amount_with_unit(&output.value, bitcoin_unit).width(Length::Shrink)),
             )
             .push(cards)
             .into(),
