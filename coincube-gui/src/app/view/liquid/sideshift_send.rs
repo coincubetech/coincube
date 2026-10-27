@@ -70,7 +70,7 @@ pub fn sideshift_send_view<'a>(
         | SendPhase::CreatingShift
         | SendPhase::Sending => loading_view(phase),
         SendPhase::Review => review_view(selected_network, shift, amount_input, error),
-        SendPhase::Sent => sent_view(selected_network, shift, shift_status),
+        SendPhase::Sent => sent_view(selected_network, shift, shift_status, mask_amounts),
         SendPhase::Failed => error_view(error),
     }
 }
@@ -655,24 +655,32 @@ fn sent_view<'a>(
     selected_network: Option<&SideshiftNetwork>,
     shift: Option<&'a ShiftResponse>,
     shift_status: Option<&'a ShiftStatusKind>,
+    mask_amounts: bool,
 ) -> Element<'a, SideshiftSendMessage> {
     let network = selected_network
         .copied()
         .unwrap_or(SideshiftNetwork::Ethereum);
 
-    let status_label = shift_status.map(|s| s.display()).unwrap_or("Processing…");
+    // Pending is also set locally as soon as the Liquid payment is sent. It is
+    // not evidence that SideShift has detected the deposit yet.
+    let status_label = match shift_status {
+        Some(ShiftStatusKind::Pending) => "Payment sent · checking swap",
+        Some(status) => status.display(),
+        None => "Checking swap…",
+    };
 
     let (status_color, status_icon) = match shift_status {
         Some(ShiftStatusKind::Settled) => (color::GREEN, "✓"),
         Some(ShiftStatusKind::Expired | ShiftStatusKind::Error | ShiftStatusKind::Refunded) => {
             (color::RED, "✗")
         }
+        Some(ShiftStatusKind::Review | ShiftStatusKind::Refunding) => (color::ORANGE, "!"),
         _ => (color::ORANGE, "⟳"),
     };
 
     let title = Column::new().spacing(4).push(h3("Swap Submitted")).push(
         text(format!(
-            "Your Liquid USDt is being swapped to {} USDt.",
+            "SideShift swap from Liquid USDt to {} USDt.",
             network.standard_label()
         ))
         .size(P1_SIZE)
@@ -689,7 +697,29 @@ fn sent_view<'a>(
     .padding([8, 16])
     .style(theme::card::simple);
 
-    let mut col = Column::new().spacing(20).push(title).push(status_badge);
+    let mut col = Column::new()
+        .spacing(20)
+        .push(title)
+        .push(status_badge)
+        .push(swap_timeline(shift_status));
+
+    let outcome_note = match shift_status {
+        Some(ShiftStatusKind::Review) => Some("SideShift has put this swap on hold for review. Contact SideShift with the swap ID for help."),
+        Some(ShiftStatusKind::Refunding) => Some("A refund is in progress. Check the swap status again later."),
+        Some(ShiftStatusKind::Refunded) => Some("This swap was refunded. The recipient was not paid."),
+        Some(ShiftStatusKind::Expired) => Some("This swap expired. Check the swap details before trying again."),
+        Some(ShiftStatusKind::Error) => Some("SideShift reported an error. Check the swap details before trying again."),
+        Some(ShiftStatusKind::Unknown(_)) => Some("SideShift returned an unrecognized status. Check the swap details before taking further action."),
+        _ => None,
+    };
+    if let Some(note) = outcome_note {
+        col = col.push(
+            Container::new(text(note).size(P2_SIZE).style(theme::text::secondary))
+                .padding([10, 14])
+                .width(Length::Fill)
+                .style(theme::card::simple),
+        );
+    }
 
     if let Some(shift) = shift {
         col = col.push(
@@ -723,6 +753,25 @@ fn sent_view<'a>(
                                 .width(Length::Fixed(80.0)),
                         )
                         .push(text(addr).size(P2_SIZE).font(iced::Font::MONOSPACE))
+                }))
+                .push_maybe(shift.settle_amount.as_ref().map(|amount| {
+                    Row::new()
+                        .spacing(8)
+                        .align_y(Alignment::Center)
+                        .push(
+                            text("Quoted recipient amount")
+                                .size(P2_SIZE)
+                                .style(theme::text::secondary)
+                                .width(Length::Fixed(170.0)),
+                        )
+                        .push(
+                            text(if mask_amounts {
+                                "••••••".to_string()
+                            } else {
+                                format!("{} {}", amount, network.display_name())
+                            })
+                            .size(P2_SIZE),
+                        )
                 })),
         );
     }
@@ -733,6 +782,52 @@ fn sent_view<'a>(
 
     Container::new(col.push(done_btn).max_width(520).width(Length::Fill))
         .center_x(Length::Fill)
+        .into()
+}
+
+fn swap_timeline(status: Option<&ShiftStatusKind>) -> Element<'static, SideshiftSendMessage> {
+    const STAGES: [&str; 5] = [
+        "Waiting for deposit",
+        "Deposit detected",
+        "Processing",
+        "Settling",
+        "Settled",
+    ];
+
+    let current = match status {
+        Some(ShiftStatusKind::Waiting | ShiftStatusKind::Pending) | None => Some(0),
+        Some(ShiftStatusKind::Processing) => Some(2),
+        Some(ShiftStatusKind::Settling) => Some(3),
+        Some(ShiftStatusKind::Settled) => Some(4),
+        // Holds, refunds, failures and unknown statuses are not forward progress.
+        _ => None,
+    };
+
+    let mut stages = Column::new().spacing(10).push(h4_bold("Swap status"));
+    for (index, label) in STAGES.iter().enumerate() {
+        let complete =
+            current.is_some_and(|step| index < step) || (index == 4 && current == Some(4));
+        let active = current == Some(index) && !complete;
+        let (marker, tone) = if complete {
+            ("✓", color::GREEN)
+        } else if active {
+            ("●", color::ORANGE)
+        } else {
+            ("○", color::GREY_3)
+        };
+        stages = stages.push(
+            Row::new()
+                .spacing(10)
+                .align_y(Alignment::Center)
+                .push(text(marker).size(P1_SIZE).color(tone))
+                .push(text(*label).size(P1_SIZE).color(tone)),
+        );
+    }
+
+    Container::new(stages)
+        .padding([12, 16])
+        .width(Length::Fill)
+        .style(theme::card::simple)
         .into()
 }
 
