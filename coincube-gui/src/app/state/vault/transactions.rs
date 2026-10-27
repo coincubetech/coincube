@@ -908,7 +908,7 @@ mod rbf_state_tests {
             if let VaultTransactionsModal::CreateRbf(modal) = &mut panel.modal {
                 modal.processing = false;
             }
-            panel.update(
+            let _ = panel.update(
                 Some(daemon.clone()),
                 &cache,
                 Message::View(view::Message::CreateRbf(view::CreateRbfMessage::Cancel)),
