@@ -32,7 +32,7 @@ use coincube_ui::{
         text::{p1_bold, p1_regular, text},
     },
     icon, theme,
-    widget::{Button, Column, Container, Element, Row, TextInput},
+    widget::{action::Action, Column, Container, Element, Row, TextInput},
 };
 
 use std::sync::{Arc, Mutex};
@@ -377,11 +377,9 @@ impl BorderWalletWizard {
             WizardStep::Checksum => 2,
             WizardStep::Confirm => 3,
         };
-        let mut steps = Row::new().spacing(16);
-        for (index, label) in ["Phrase", "Pattern", "Checksum", "Confirm"]
-            .iter()
-            .enumerate()
-        {
+        let labels = ["Phrase", "Pattern", "Checksum", "Confirm"];
+        let mut steps = Row::new().spacing(16).width(Length::Fill);
+        for (index, label) in labels.iter().enumerate() {
             let number =
                 text(format!("{}", index + 1))
                     .size(12)
@@ -389,7 +387,7 @@ impl BorderWalletWizard {
                         color: Some(if index < current {
                             theme.colors.shell.good
                         } else if index == current {
-                            theme.colors.shell.accent
+                            theme.colors.shell.accent_ink
                         } else {
                             theme.colors.shell.muted
                         }),
@@ -405,6 +403,9 @@ impl BorderWalletWizard {
             });
             steps = steps.push(Row::new().spacing(5).push(number).push(name));
         }
+        steps = steps
+            .push(Space::new().width(Length::Fill))
+            .push(p1_bold(format!("Step {} of 4 · {}", current + 1, labels[current])).size(12));
         steps.into()
     }
 
@@ -624,13 +625,16 @@ impl BorderWalletWizard {
 
                     let r = row_idx as u16;
                     let c = col_idx as u8;
-                    let cell_btn = Button::new(text(label).size(11).align_x(Horizontal::Center))
-                        .style(cell_style)
-                        .on_press(
-                            self.wizard_msg(BorderWalletWizardMessage::ToggleCellSelection(r, c)),
-                        )
-                        .width(46)
-                        .height(28);
+                    let cell_btn = Action::new(
+                        format!("border-wallet.grid.{row_idx}.{col_idx}"),
+                        text(label).size(11).align_x(Horizontal::Center),
+                        Message::FocusAction,
+                    )
+                    .style(cell_style)
+                    .focus_radius(4.0)
+                    .on_press(self.wizard_msg(BorderWalletWizardMessage::ToggleCellSelection(r, c)))
+                    .width(46)
+                    .height(28);
 
                     row_widget = row_widget.push(cell_btn);
                 }
