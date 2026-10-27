@@ -85,6 +85,8 @@ fn map_spend_command_error(error: CommandError) -> DaemonError {
             coincubed::commands::TX_BROADCAST_ERROR as i32,
             error.to_string(),
         ),
+        CommandError::FeeCeilingExceeded => DaemonError::FeeCeilingExceeded,
+        CommandError::FeeRateExceeded => DaemonError::FeeRateExceeded,
         other => DaemonError::Unexpected(other.to_string()),
     }
 }

@@ -39,6 +39,51 @@ pub const MAX_FEE: bitcoin::Amount = bitcoin::Amount::ONE_BTC;
 /// Assume that paying more than 1000sat/vb in feerate is a bug.
 pub const MAX_FEERATE: u64 = 1_000;
 
+const MCP_FEE_CAP_PREFIX: &[u8] = b"coincube";
+const MCP_FEE_CAP_SUBTYPE: u8 = 0xfc;
+const MCP_FEE_CAP_KEY: &[u8] = b"fee-cap";
+
+fn mcp_fee_cap_key() -> bitcoin::psbt::raw::ProprietaryKey {
+    bitcoin::psbt::raw::ProprietaryKey {
+        prefix: MCP_FEE_CAP_PREFIX.to_vec(),
+        subtype: MCP_FEE_CAP_SUBTYPE,
+        key: MCP_FEE_CAP_KEY.to_vec(),
+    }
+}
+
+/// Remember the caller's fee ceiling and requested sat/vB on the PSBT.
+///
+/// The value stored for the rate is the request, not an estimate. Broadcast
+/// reads it back and applies it to the finalized transaction.
+pub fn stamp_mcp_fee_cap(psbt: &mut Psbt, max_fee_sats: u64, max_fee_rate_sat_vb: u64) {
+    let mut value = Vec::with_capacity(16);
+    value.extend_from_slice(&max_fee_sats.to_le_bytes());
+    value.extend_from_slice(&max_fee_rate_sat_vb.to_le_bytes());
+    psbt.proprietary.insert(mcp_fee_cap_key(), value);
+}
+
+/// Fee ceiling and requested sat/vB previously stamped by [`stamp_mcp_fee_cap`].
+pub fn mcp_fee_cap(psbt: &Psbt) -> Option<(u64, u64)> {
+    let value = psbt.proprietary.get(&mcp_fee_cap_key())?;
+    if value.len() != 16 {
+        return None;
+    }
+    let max_fee = u64::from_le_bytes(value[0..8].try_into().ok()?);
+    let max_rate = u64::from_le_bytes(value[8..16].try_into().ok()?);
+    if max_fee == 0 || max_rate == 0 {
+        return None;
+    }
+    Some((max_fee, max_rate))
+}
+
+/// Whether a finalized transaction's fee breaks a stamped MCP cap.
+///
+/// `vsize` is the virtual size of the transaction that would be broadcast.
+/// A zero size cannot be rated and is treated as a breach.
+pub fn signed_fee_exceeds_cap(fee: u64, vsize: u64, max_fee: u64, max_rate: u64) -> bool {
+    vsize == 0 || fee > max_fee || fee.div_ceil(vsize) > max_rate
+}
+
 /// Do not set locktime if tip age in seconds is older than this.
 // See also https://github.com/bitcoin/bitcoin/blob/ecd23656db174adef61d3bd753d02698c3528192/src/wallet/spend.cpp#L906.
 pub const MAX_ANTI_FEE_SNIPING_TIP_AGE_SECS: u64 = 8 * 60 * 60; // 8 hours
@@ -1641,5 +1686,24 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn finalized_size_can_exceed_the_maximum_witness_estimate() {
+        // 400 sats across 200 vB is exactly 2 sat/vB. One vbyte less rounds up to 3.
+        assert!(!signed_fee_exceeds_cap(400, 200, 1_000, 2));
+        assert!(signed_fee_exceeds_cap(400, 199, 1_000, 2));
+        assert!(signed_fee_exceeds_cap(1_001, 200, 1_000, 2));
+        assert!(signed_fee_exceeds_cap(400, 0, 1_000, 2));
+        let tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: Vec::new(),
+        };
+        let mut psbt = Psbt::from_unsigned_tx(tx).unwrap();
+        assert_eq!(mcp_fee_cap(&psbt), None);
+        stamp_mcp_fee_cap(&mut psbt, 1_000, 2);
+        assert_eq!(mcp_fee_cap(&psbt), Some((1_000, 2)));
     }
 }

@@ -180,8 +180,7 @@ impl Service {
                 .map_err(|_| Error::InvalidInput)?
                 .require_network(Network::Regtest)
                 .map_err(|_| Error::InvalidInput)?;
-            if recipient.amount_sats < DUST_OUTPUT_SATS
-                || recipient.amount_sats < address.script_pubkey().minimal_non_dust().to_sat()
+            if output_below_floor(recipient.amount_sats, address.script_pubkey())
                 || destinations
                     .insert(address.into_unchecked(), recipient.amount_sats)
                     .is_some()
@@ -239,7 +238,7 @@ impl Service {
             }
             Err(_) => return Err(Error::Unavailable),
         };
-        let (psbt, warnings) = match result {
+        let (mut psbt, warnings) = match result {
             CreateSpendResult::Success { psbt, warnings } => (psbt, warnings),
             CreateSpendResult::InsufficientFunds { .. } => return Err(Error::InsufficientFunds),
         };
@@ -257,6 +256,13 @@ impl Service {
             .coins;
         let (fee_sats, change_sats, fee_rate_sat_vb) =
             validate(input, &psbt, &coins, &self.descriptor)?;
+        // The returned rate is the maximum-size estimate. Broadcast applies
+        // this requested rate to the finalized, shorter-or-equal transaction.
+        coincube_core::spend::stamp_mcp_fee_cap(
+            &mut psbt,
+            input.max_fee_sats,
+            input.fee_rate_sat_vb,
+        );
         if self.revoked.load(Ordering::SeqCst) {
             return Err(Error::AccessDenied);
         }
@@ -305,6 +311,16 @@ impl wire::Reader for Service {
             .map_err(|_| wire::Error::Unavailable)?
         })
     }
+}
+
+/// Tenshu's output floor is 500 sats, including when a script's network dust
+/// is lower. The binding minimum is the greater of that floor and the script
+/// dust limit, and an amount equal to the binding minimum is accepted.
+fn output_below_floor(
+    amount_sats: u64,
+    script: coincube_core::miniscript::bitcoin::ScriptBuf,
+) -> bool {
+    amount_sats < DUST_OUTPUT_SATS || amount_sats < script.minimal_non_dust().to_sat()
 }
 
 /// Independently verify the engine's public construction before exposing a summary.
@@ -379,9 +395,7 @@ fn validate(
     let mut change = 0u64;
     let mut changes = 0;
     for (n, output) in psbt.unsigned_tx.output.iter().enumerate() {
-        if output.value.to_sat() < DUST_OUTPUT_SATS
-            || output.value < output.script_pubkey.minimal_non_dust()
-        {
+        if output_below_floor(output.value.to_sat(), output.script_pubkey.clone()) {
             return Err(Error::Unavailable);
         }
         let is_own = change_indexes.iter().any(|c| c.index() == n);
@@ -1029,5 +1043,22 @@ mod tests {
             session::close();
             cleanup(root, service).await;
         });
+    }
+
+    #[test]
+    fn output_floor_accepts_the_binding_minimum() {
+        use coincube_core::miniscript::bitcoin::{hashes::Hash, PubkeyHash, WPubkeyHash};
+        let p2wpkh = ScriptBuf::new_p2wpkh(&WPubkeyHash::all_zeros());
+        let network_dust = p2wpkh.minimal_non_dust().to_sat();
+        assert!(network_dust < DUST_OUTPUT_SATS);
+        assert!(output_below_floor(network_dust, p2wpkh.clone()));
+        assert!(output_below_floor(DUST_OUTPUT_SATS - 1, p2wpkh.clone()));
+        assert!(!output_below_floor(DUST_OUTPUT_SATS, p2wpkh));
+
+        let p2pkh = ScriptBuf::new_p2pkh(&PubkeyHash::all_zeros());
+        let legacy_dust = p2pkh.minimal_non_dust().to_sat();
+        assert!(legacy_dust > DUST_OUTPUT_SATS);
+        assert!(output_below_floor(legacy_dust - 1, p2pkh.clone()));
+        assert!(!output_below_floor(legacy_dust, p2pkh));
     }
 }

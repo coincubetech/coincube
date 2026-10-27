@@ -1349,6 +1349,27 @@ impl DaemonControl {
         ListCoinsResult { coins }
     }
 
+    /// Sum of `witness_utxo` values. Used only when an MCP fee cap is present,
+    /// and refuses to invent a fee when an input has no witness UTXO.
+    fn witness_input_value(psbt: &Psbt) -> Result<u64, CommandError> {
+        if psbt.inputs.is_empty() || psbt.inputs.len() != psbt.unsigned_tx.input.len() {
+            return Err(CommandError::FeeMeasurement);
+        }
+        let mut total = 0u64;
+        for input in &psbt.inputs {
+            let value = input
+                .witness_utxo
+                .as_ref()
+                .ok_or(CommandError::FeeMeasurement)?
+                .value
+                .to_sat();
+            total = total
+                .checked_add(value)
+                .ok_or(CommandError::FeeMeasurement)?;
+        }
+        Ok(total)
+    }
+
     /// Fee and virtual size of an unsigned PSBT. The virtual size includes the
     /// descriptor's maximum witness satisfaction, because the unsigned
     /// transaction's witness is still empty. Failure means the caller must
@@ -1770,6 +1791,15 @@ impl DaemonControl {
         // same checks run at spend-creation time, but re-running them here — on
         // the pre-finalization PSBT — means a PSBT mutated in-flight between
         // creation and broadcast is rejected before it can hit the network.
+        // The preparation estimate uses the maximum witness. A shorter real
+        // signature makes this finalized transaction smaller, so re-apply the
+        // caller's requested rate to the transaction about to be broadcast.
+        let fee_cap = spend::mcp_fee_cap(&spend_psbt);
+        let capped_input_value = if fee_cap.is_some() {
+            Some(Self::witness_input_value(&spend_psbt)?)
+        } else {
+            None
+        };
         let final_tx = match &self.config.main_descriptor {
             WalletDescriptor::Vault(vault) => {
                 spend::reverify_spend_before_broadcast(vault, &spend_psbt)?;
@@ -1788,6 +1818,26 @@ impl DaemonControl {
                 .clone()
             }
         };
+        if let (Some((max_fee, max_rate)), Some(total_in)) = (fee_cap, capped_input_value) {
+            let total_out = final_tx
+                .output
+                .iter()
+                .try_fold(0u64, |total, output| {
+                    total.checked_add(output.value.to_sat())
+                })
+                .ok_or(CommandError::FeeMeasurement)?;
+            let fee = total_in
+                .checked_sub(total_out)
+                .filter(|fee| *fee > 0)
+                .ok_or(CommandError::FeeMeasurement)?;
+            let vsize = final_tx.vsize() as u64;
+            if fee > max_fee {
+                return Err(CommandError::FeeCeilingExceeded);
+            }
+            if spend::signed_fee_exceeds_cap(fee, vsize, max_fee, max_rate) {
+                return Err(CommandError::FeeRateExceeded);
+            }
+        }
         if self.config.main_descriptor.as_imported().is_some() {
             if let Some(recorded) = db_conn
                 .spend_broadcast_txid(txid)

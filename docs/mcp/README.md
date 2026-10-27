@@ -416,12 +416,19 @@ A draft rejected because the measured fee or sat/vB is above the request does no
 reserve an index. Preparation does not reserve the
 coins, save a spend, sign, broadcast, or guarantee future input availability.
 
-The returned `fee_sats` and `fee_rate_sat_vb` are measured from the unsigned
-PSBT. The rate is the fee divided by virtual size, rounded up. That virtual
-size includes the descriptor's maximum witness satisfaction, because the
-unsigned transaction's witness is still empty. Tenshu rejects
-the draft when that rate is above the requested rate or the fee is above the
-ceiling, before committing a change index. Tenshu verifies the actual inputs, recipient amounts, wallet-owned change,
+The returned `fee_sats` is the actual fee. `fee_rate_sat_vb` is an estimate:
+the fee divided by the maximum signed virtual size, rounded up. That size
+includes the descriptor's maximum witness satisfaction and the SegWit marker
+and flag, because the unsigned transaction's witness is still empty. A shorter
+real signature can make the broadcast rate higher than this estimate. Tenshu
+rejects a draft when the estimate is already above the requested rate or the
+fee is above the ceiling, before committing a change index. It stores the
+requested rate on the PSBT and refuses broadcast when the finalized
+transaction's own virtual size makes the rate, or the total fee, exceed the
+request. Recipient amounts must be at least the greater of Tenshu's 500-sat
+output floor and the script's network dust limit. The exact floor is accepted;
+a P2WPKH output at its 294-sat network dust is below the wallet floor and is
+rejected, by this check and by the spend engine. Tenshu verifies the actual inputs, recipient amounts, wallet-owned change,
 unsigned state and total fee before returning a minimized summary. The review
 screen stays view-only until the user chooses Sign in Tenshu. The raw PSBT,
 input identities and change address stay inside Tenshu. Request IDs are immutable
