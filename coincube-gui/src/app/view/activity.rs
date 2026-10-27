@@ -293,9 +293,14 @@ impl Entry {
         };
         // The title reads the single payment's label before the txid's, so
         // an edit is stored where the title will read it back.
+        // Edit the key the title reads: the payment's own label, else the
+        // transaction's, else (nothing stored yet) the payment's.
+        let has = |key: &str| tx.labels.get(key).is_some_and(|label| !label.is_empty());
         let label_key = match tx.is_single_payment() {
-            Some(outpoint) => LabelItem::OutPoint(outpoint),
-            None => LabelItem::Txid(tx.txid),
+            Some(outpoint) if has(&outpoint.to_string()) || !has(&tx.txid.to_string()) => {
+                LabelItem::OutPoint(outpoint)
+            }
+            _ => LabelItem::Txid(tx.txid),
         };
         let label = tx
             .is_single_payment()
@@ -741,9 +746,40 @@ impl Entry {
     }
 }
 
+const MASK: &str = "••••••";
+
+/// A Lightning invoice or offer: its prefix encodes the amount (`lnbc42u1…`
+/// is 4,200 sats), so it is hidden with the balances.
+fn shows_invoice(value: &str) -> bool {
+    value.split_whitespace().any(|word| {
+        let word = word.to_ascii_lowercase();
+        ["lnbc", "lntb", "lnsb", "lno1", "lni1"]
+            .iter()
+            .any(|prefix| word.starts_with(prefix))
+    })
+}
+
+/// The row's title while balances may be hidden.
+fn shown_title(entry: &Entry, masked: bool) -> String {
+    if masked && shows_invoice(&entry.title) {
+        "Lightning payment".to_owned()
+    } else {
+        entry.title.clone()
+    }
+}
+
+/// A detail value while balances may be hidden: amounts and invoices go.
+fn private_fact(key: &str, value: &str, masked: bool) -> String {
+    if masked && (key == "Refund amount" || shows_invoice(value)) {
+        MASK.to_owned()
+    } else {
+        value.to_owned()
+    }
+}
+
 fn fee_detail(fee: &str, amounts_masked: bool) -> String {
     if amounts_masked {
-        "••••••".to_owned()
+        MASK.to_owned()
     } else {
         fee.to_owned()
     }
@@ -1248,7 +1284,7 @@ fn activity_row<'a>(entry: &Entry, selected: bool, masked: bool) -> Element<'a, 
         details = details.push(glyph::glyph(mark, 16.0, glyph::muted));
     }
     details = details.push(one_line(words(
-        entry.title.clone(),
+        shown_title(entry, masked),
         14.0,
         font::REGULAR,
         glyph::ink,
@@ -1368,6 +1404,28 @@ fn identifier_row<'a>(index: usize, name: &'static str, value: &str) -> Element<
     .into()
 }
 
+/// What a row asks of the user next, handed to the owning wallet's screen,
+/// which keeps its signing, refund and replacement safeguards. Settled rows
+/// ask nothing; a PSBT still collecting signatures shows "Continue signing"
+/// with its signers instead.
+fn next_step(entry: &Entry) -> Option<&'static str> {
+    match &entry.target {
+        ActivityTarget::Refundable(_) => Some("Refund"),
+        ActivityTarget::Psbt(tx) => {
+            let path = tx.sigs.primary_path();
+            (path.sigs_count >= path.threshold).then_some("Review and broadcast")
+        }
+        // The Vault screen offers a replacement only while unconfirmed, and
+        // only with a known fee (otherwise coins may be missing).
+        ActivityTarget::Vault(tx) => {
+            (tx.time.is_none() && tx.fee_amount.is_some()).then_some("Bump fee or cancel")
+        }
+        ActivityTarget::Spark(_) | ActivityTarget::Liquid(_) => None,
+    }
+}
+
+pub const DETAIL_NEXT_STEP_ID: &str = "tenshu.activity.detail.next";
+
 fn detail_pane<'a>(activity: &'a Activity, entry: &Entry, cache: &'a Cache) -> Column<'a, Message> {
     let masked = cache.balance_amounts_masked();
     let needs_signatures = matches!(
@@ -1405,7 +1463,7 @@ fn detail_pane<'a>(activity: &'a Activity, entry: &Entry, cache: &'a Cache) -> C
     }
     heading = heading
         .push(
-            words(entry.title.clone(), 17.0, font::SEMIBOLD, glyph::ink)
+            words(shown_title(entry, masked), 17.0, font::SEMIBOLD, glyph::ink)
                 .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
                 .width(Length::Fill),
         )
@@ -1535,18 +1593,15 @@ fn detail_pane<'a>(activity: &'a Activity, entry: &Entry, cache: &'a Cache) -> C
         }
     }
     if let Some((key, value)) = &entry.peer {
-        detail = detail.push(fact(key, value.clone(), true));
+        detail = detail.push(fact(key, private_fact(key, value, masked), true));
     }
 
     // `.lblf`: wallets that store labels take an edit here.
     if entry.label_key.is_some() {
         let draft = activity.label_draft_for(&entry.id);
-        let stored = entry
-            .label_key
-            .as_ref()
-            .map_or("", |key| activity.stored_label(key));
+        let stored = activity.stored_label(entry);
         let value = draft.unwrap_or(stored);
-        let saving = activity.label_saving;
+        let saving = activity.label_saving_for(&entry.id);
         let mut field = column![
             words("Label", 13.5, font::SEMIBOLD, glyph::ink),
             tenshu::text_field(DETAIL_LABEL_ID, "Label", value, Message::FocusAction)
@@ -1562,11 +1617,8 @@ fn detail_pane<'a>(activity: &'a Activity, entry: &Entry, cache: &'a Cache) -> C
         type Tone = fn(&theme::Theme) -> iced::Color;
         let note: Option<(&str, Tone)> = if saving {
             Some(("Saving…", glyph::muted))
-        } else if activity.label_error.is_some() {
-            Some((
-                "The label couldn't be saved. Press Enter to retry.",
-                glyph::bad,
-            ))
+        } else if let Some(error) = activity.label_error_for(&entry.id) {
+            Some((error, glyph::bad))
         } else if draft.is_some_and(|draft| draft != stored) {
             Some(("Press Enter to save", glyph::muted))
         } else {
@@ -1621,9 +1673,24 @@ fn detail_pane<'a>(activity: &'a Activity, entry: &Entry, cache: &'a Cache) -> C
         detail = detail.push(rule::horizontal(1));
         if expanded {
             for (key, value) in facts {
-                detail = detail.push(fact(key, value.clone(), false));
+                detail = detail.push(fact(key, private_fact(key, value, masked), false));
             }
         }
+    }
+
+    if let Some(label) = next_step(entry) {
+        detail = detail.push(Space::new().height(Length::Fixed(16.0))).push(
+            Action::new(
+                DETAIL_NEXT_STEP_ID,
+                text(label).size(14).font(font::SEMIBOLD),
+                Message::FocusAction,
+            )
+            .style(theme::button::primary)
+            .padding([8, 16])
+            .on_press(Message::Activity(ActivityMessage::OpenDetail(
+                entry.target.clone(),
+            ))),
+        );
     }
 
     if let (Some(signer_status), ActivityTarget::Psbt(tx)) = (
@@ -2705,31 +2772,70 @@ mod tests {
         assert!(facts.contains(&("Block", "103".to_owned())));
     }
 
+    /// Every message a task emits, fed back through the panel.
+    fn settle(activity: &mut Activity, cache: &Cache, task: iced::Task<AppMessage>) {
+        use iced::futures::StreamExt;
+        let Some(stream) = iced_runtime::task::into_stream(task) else {
+            return;
+        };
+        let messages: Vec<_> = iced::futures::executor::block_on(
+            stream
+                .filter_map(|action| async move {
+                    match action {
+                        iced_runtime::Action::Output(message) => Some(message),
+                        _ => None,
+                    }
+                })
+                .collect(),
+        );
+        for message in messages {
+            drop(activity.update(None, cache, message));
+        }
+    }
+
+    type AppMessage = crate::app::message::Message;
+
+    fn edit(id: &str, label: &str) -> [AppMessage; 2] {
+        [
+            AppMessage::View(Message::Activity(ActivityMessage::Select(id.into()))),
+            AppMessage::View(Message::Activity(ActivityMessage::LabelEdited(
+                label.into(),
+            ))),
+        ]
+    }
+
+    fn label_daemon(
+        key: &str,
+        label: &str,
+    ) -> std::sync::Arc<dyn crate::daemon::Daemon + Sync + Send> {
+        use crate::utils::mock::Daemon as MockDaemon;
+        std::sync::Arc::new(crate::daemon::client::Coincubed::new(
+            MockDaemon::new(vec![(
+                Some(serde_json::json!({
+                    "method": "updatelabels",
+                    "params": [{ key: label }],
+                })),
+                Ok(serde_json::json!({})),
+            )])
+            .run(),
+        ))
+    }
+
     #[test]
-    fn a_saved_label_retitles_the_row_and_clears_the_draft() {
+    fn saving_a_label_writes_the_key_the_title_reads_and_retitles_the_row() {
         let cache = Cache::default();
         let mut activity = Activity::new(None, None);
         let tx = outgoing_vault_payment();
-        let txid = tx.txid;
+        let key = format!("{}:1", tx.txid);
         let id = Entry::vault(tx.clone()).id;
-        let apply = |activity: &mut Activity, message| drop(activity.update(None, &cache, message));
-        apply(
-            &mut activity,
-            crate::app::message::Message::ActivityVaultLoaded(0, Ok((vec![tx], false))),
-        );
-        apply(
-            &mut activity,
-            crate::app::message::Message::View(Message::Activity(ActivityMessage::Select(
-                id.clone(),
-            ))),
-        );
-        apply(
-            &mut activity,
-            crate::app::message::Message::View(Message::Activity(ActivityMessage::LabelEdited(
-                "Roof repair deposit".into(),
-            ))),
-        );
-        assert_eq!(activity.label_draft_for(&id), Some("Roof repair deposit"));
+        drop(activity.update(
+            None,
+            &cache,
+            AppMessage::ActivityVaultLoaded(0, Ok((vec![tx], false))),
+        ));
+        for message in edit(&id, "Roof repair deposit") {
+            drop(activity.update(None, &cache, message));
+        }
         let mounted = mount(
             "r09-activity-label-draft",
             render_at_width(&activity, &cache, 1192.0),
@@ -2741,17 +2847,14 @@ mod tests {
         assert!(mounted.has_focus(Id::from(DETAIL_LABEL_ID)));
         assert!(mounted.contains("Press Enter to save"));
 
-        apply(
-            &mut activity,
-            crate::app::message::Message::ActivityLabelSaved(
-                0,
-                Ok((
-                    id.clone(),
-                    format!("{txid}:1"),
-                    Some("Roof repair deposit".into()),
-                )),
-            ),
+        let task = activity.update(
+            Some(label_daemon(&key, "Roof repair deposit")),
+            &cache,
+            AppMessage::View(Message::Activity(ActivityMessage::SaveLabel)),
         );
+        assert!(activity.label_saving_for(&id));
+        settle(&mut activity, &cache, task);
+        assert!(!activity.label_saving_for(&id));
         assert_eq!(activity.label_draft_for(&id), None);
         let entry = activity
             .entries()
@@ -2759,34 +2862,171 @@ mod tests {
             .find(|entry| entry.id == id)
             .unwrap();
         assert_eq!(entry.title, "Roof repair deposit");
+        assert_eq!(activity.stored_label(&entry), "Roof repair deposit");
+    }
 
-        // Clearing the label returns the row to its kind.
-        apply(
-            &mut activity,
-            crate::app::message::Message::ActivityLabelSaved(
-                0,
-                Ok((id.clone(), format!("{txid}:1"), None)),
-            ),
+    #[test]
+    fn a_transaction_label_is_edited_where_the_title_reads_it() {
+        let mut tx = outgoing_vault_payment();
+        let txid = tx.txid.to_string();
+        tx.labels.insert(txid.clone(), "Rent".into());
+        let entry = Entry::vault(tx.clone());
+        assert_eq!(entry.title, "Rent");
+        assert_eq!(
+            entry.label_key.as_ref().map(ToString::to_string),
+            Some(txid)
         );
-        let entry = activity
-            .entries()
-            .into_iter()
-            .find(|entry| entry.id == id)
-            .unwrap();
-        assert_eq!(entry.title, "Sent Bitcoin");
+        let cache = Cache::default();
+        let mut activity = Activity::new(None, None);
+        drop(activity.update(
+            None,
+            &cache,
+            AppMessage::ActivityVaultLoaded(0, Ok((vec![tx], false))),
+        ));
+        assert_eq!(activity.stored_label(&entry), "Rent");
+    }
 
-        // A failed save keeps the draft and says so.
-        apply(
-            &mut activity,
-            crate::app::message::Message::View(Message::Activity(ActivityMessage::LabelEdited(
-                "Kept".into(),
+    #[test]
+    fn a_label_save_never_strands_the_field() {
+        let cache = Cache::default();
+        let mut activity = Activity::new(None, None);
+        let tx = outgoing_vault_payment();
+        let id = Entry::vault(tx.clone()).id;
+        let load = |activity: &mut Activity, tx: HistoryTransaction| {
+            drop(activity.update(
+                None,
+                &cache,
+                AppMessage::ActivityVaultLoaded(
+                    activity_generation(activity),
+                    Ok((vec![tx], false)),
+                ),
+            ))
+        };
+        load(&mut activity, tx.clone());
+
+        // Too long for the daemon: refused here, with the limit.
+        for message in edit(&id, &"x".repeat(101)) {
+            drop(activity.update(None, &cache, message));
+        }
+        drop(activity.update(
+            None,
+            &cache,
+            AppMessage::View(Message::Activity(ActivityMessage::SaveLabel)),
+        ));
+        assert_eq!(
+            activity.label_error_for(&id),
+            Some("Labels are limited to 100 characters.")
+        );
+        assert!(!activity.label_saving_for(&id));
+
+        // No daemon: said so, not silently dropped.
+        drop(activity.update(
+            None,
+            &cache,
+            AppMessage::View(Message::Activity(ActivityMessage::LabelEdited(
+                "Rent".into(),
             ))),
+        ));
+        assert_eq!(activity.label_error_for(&id), None);
+        drop(activity.update(
+            None,
+            &cache,
+            AppMessage::View(Message::Activity(ActivityMessage::SaveLabel)),
+        ));
+        assert!(activity.label_error_for(&id).is_some());
+
+        // A reload while a save is out (its answer went to another panel)
+        // leaves the field editable, and a late failure is not shown.
+        let key = format!("{}:1", tx.txid);
+        drop(activity.update(
+            Some(label_daemon(&key, "Rent")),
+            &cache,
+            AppMessage::View(Message::Activity(ActivityMessage::SaveLabel)),
+        ));
+        assert!(activity.label_saving_for(&id));
+        drop(activity.reload(None, None));
+        assert!(!activity.label_saving_for(&id));
+        assert_eq!(activity.label_draft_for(&id), None);
+        load(&mut activity, tx);
+        drop(activity.update(
+            None,
+            &cache,
+            AppMessage::ActivityLabelSaved(1, Err("late".into())),
+        ));
+        assert_eq!(activity.label_error_for(&id), None);
+    }
+
+    fn activity_generation(activity: &Activity) -> u64 {
+        // `reload` advances the generation once per call; tests start at 0.
+        activity.generation_for_tests()
+    }
+
+    #[test]
+    fn hidden_balances_hide_invoices_and_refund_amounts() {
+        let entry = Entry::spark(PaymentSummary {
+            details: coincube_spark_protocol::PaymentDetailSummary {
+                invoice: Some("lnbc42u1psyntheticinvoiceforactivitytests".into()),
+                ..Default::default()
+            },
+            ..lightning_send()
+        });
+        assert!(entry.title.starts_with("Lightning invoice · lnbc42u1"));
+        assert_eq!(shown_title(&entry, true), "Lightning payment");
+        assert_eq!(shown_title(&entry, false), entry.title);
+        let (_, destination) = entry.peer.clone().unwrap();
+        assert_eq!(private_fact("Destination", &destination, true), MASK);
+        assert_eq!(
+            private_fact("Destination", "shop@example.test", true),
+            "shop@example.test"
         );
-        apply(
-            &mut activity,
-            crate::app::message::Message::ActivityLabelSaved(0, Err("daemon offline".into())),
+        assert_eq!(private_fact("Refund amount", "1,000 SATS", true), MASK);
+        assert_eq!(
+            private_fact("Refund amount", "1,000 SATS", false),
+            "1,000 SATS"
         );
-        assert_eq!(activity.label_draft_for(&id), Some("Kept"));
-        assert!(activity.label_error.is_some());
+    }
+
+    #[test]
+    fn rows_that_need_the_user_offer_their_next_step() {
+        let refund = Entry::refundable(DomainRefundableSwap {
+            swap_address: "bc1qsyntheticswapaddress".into(),
+            timestamp: 1_760_000_000,
+            amount_sat: 20_000,
+        });
+        assert_eq!(next_step(&refund), Some("Refund"));
+        let mut unconfirmed = outgoing_vault_payment();
+        unconfirmed.time = None;
+        assert_eq!(
+            next_step(&Entry::vault(unconfirmed)),
+            Some("Bump fee or cancel")
+        );
+        assert_eq!(next_step(&Entry::vault(outgoing_vault_payment())), None);
+        assert_eq!(next_step(&Entry::spark(spark_payment())), None);
+
+        let cache = Cache::default();
+        let mut activity = Activity::new(None, None);
+        drop(activity.update(
+            None,
+            &cache,
+            AppMessage::ActivityRefundablesLoaded(
+                0,
+                Ok(vec![DomainRefundableSwap {
+                    swap_address: "bc1qsyntheticswapaddress".into(),
+                    timestamp: 1_760_000_000,
+                    amount_sat: 20_000,
+                }]),
+            ),
+        ));
+        activity.selected_id = Some(refund.id.clone());
+        let mounted = mount(
+            "r09-activity-refundable-detail",
+            render_at_width(&activity, &cache, 1192.0),
+            (1440, 900),
+            "dark",
+            coincube_ui::theme::Theme::dark(),
+            1192,
+        );
+        assert!(mounted.has_focus(Id::from(DETAIL_NEXT_STEP_ID)));
+        assert!(mounted.contains("Refund"));
     }
 }
