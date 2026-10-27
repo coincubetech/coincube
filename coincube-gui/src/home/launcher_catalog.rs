@@ -870,6 +870,12 @@ impl Home {
     /// exactly one listed Cube (removed, duplicated, reloaded from another
     /// chain). Never moves it to another Cube. Runs after every message.
     pub(super) fn reconcile_catalog(&mut self) {
+        // A pick or Open on another network belongs to the Launcher. Leaving
+        // it by any route (a nav click, a banner CTA, a handoff) drops it, so
+        // its replay cannot start an unlock from another section.
+        if !matches!(self.active_section, HomeSection::Cubes) {
+            self.catalog.pending_select = None;
+        }
         // The Key card belongs to the Key button, which needs a Cube the
         // filter shows.
         if project(self).filtered_total == 0 {
@@ -4509,6 +4515,29 @@ mod tests {
     }
 
     #[test]
+    fn a_connect_change_off_the_list_is_read_before_the_list_returns() {
+        // A creation backup returns to the list without another check.
+        let mut home = all_networks();
+        home.state = State::RecoveryInput;
+        home.network_catalog_requested
+            .retain(|chain| *chain != ChainId::Regtest);
+        let messages = run_task(home.update(Message::View(ViewMessage::ConnectAccount(
+            crate::app::view::ConnectAccountMessage::Init,
+        ))));
+        assert!(
+            messages.iter().any(|m| matches!(
+                m,
+                Message::NetworkCatalogLoaded {
+                    chain: ChainId::Regtest,
+                    ..
+                }
+            )),
+            "{:?}",
+            messages
+        );
+    }
+
+    #[test]
     fn a_filter_that_hides_every_local_cube_closes_the_key_card() {
         let mut home = all_networks();
         home.catalog.key.mode = KeyMode::Pinned;
@@ -4531,6 +4560,19 @@ mod tests {
         assert!(home.catalog.pending_select.is_some());
         drop(home.update(Message::View(ViewMessage::GoToSection(
             HomeSection::RecoverVault,
+        ))));
+        assert_eq!(home.catalog.pending_select, None);
+        // A direct section change, such as a Connect banner CTA, too.
+        let lab = CubeCatalogKey {
+            chain: ChainId::Testnet4,
+            cube_id: "t1".into(),
+        };
+        home.active_section = HomeSection::Cubes;
+        drop(home.update(Message::View(ViewMessage::RunCatalog(lab))));
+        assert!(home.catalog.pending_select.is_some());
+        home.active_section = HomeSection::Connect(crate::app::menu::ConnectSubMenu::Overview);
+        drop(home.update(Message::View(ViewMessage::Catalog(
+            CatalogMessage::NetworkMenu(false),
         ))));
         assert_eq!(home.catalog.pending_select, None);
     }
@@ -4562,7 +4604,7 @@ mod tests {
     }
 
     #[test]
-    fn the_pin_screen_dock_keeps_the_new_cubes_caption() {
+    fn the_pin_screen_snapshot_keeps_the_new_cubes_caption() {
         let home = all_networks();
         let chrome = super::super::launcher_chrome::snapshot(&home, &project(&home));
         assert_eq!(chrome.target.as_deref(), Some("New Cubes: Bitcoin mainnet"));

@@ -1688,10 +1688,12 @@ impl Home {
             message => self.update_lifecycle(message),
         };
         self.reconcile_catalog();
-        // Once the current list is checked, read the networks such a change
-        // lists. A Bitcoin-only start never claims a generation, so the
-        // generation cannot stand for "in use".
-        if connect && matches!(self.state, State::Cubes { .. }) {
+        // Once the first probe has finished, read the networks such a change
+        // lists, whatever screen Home is on: a creation backup or recovery
+        // returns to the list without another check. A Bitcoin-only start
+        // never claims a generation, so the generation cannot stand for
+        // "in use".
+        if connect && !matches!(self.state, State::Unchecked) {
             if let Some(load) = self.refresh_network_catalog(false) {
                 return Task::batch([task, load]);
             }
@@ -3518,11 +3520,6 @@ impl Home {
 
             Message::View(ViewMessage::GoToSection(section)) => {
                 self.catalog.dismiss_popovers();
-                // A pick or Open on another network belongs to the Launcher;
-                // its replay must not start an unlock from another section.
-                if !matches!(section, HomeSection::Cubes) {
-                    self.catalog.pending_select = None;
-                }
                 // Duress launch kill-switch backstop: a deep-linked or otherwise
                 // programmatic navigation to the Duress section while it's gated
                 // off (the nav hides the entry, so a click can't produce this)
