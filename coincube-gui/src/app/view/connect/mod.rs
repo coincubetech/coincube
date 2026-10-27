@@ -2987,7 +2987,8 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
                      of your Cubes, not just the one you opened. The device then shows a \
                      dead-end screen until you clear duress from another trusted device.",
                 )
-                .color(color::GREY_3),
+                .width(Length::Fill)
+                .style(theme::text::secondary),
             )
             .width(Length::Fill),
     );
@@ -3031,7 +3032,8 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
                          at any Cube's unlock screen triggers a duress wipe and locks your \
                          account.",
                     )
-                    .color(color::GREY_3),
+                    .width(Length::Fill)
+                    .style(theme::text::secondary),
                 )
                 .spacing(2)
                 .width(Length::Fill),
@@ -3063,7 +3065,8 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
                 text::p2_regular(
                     "Turns off duress on all your devices. You can re-enable it anytime.",
                 )
-                .color(color::GREY_3),
+                .width(Length::Fill)
+                .style(theme::text::secondary),
             );
         }
     } else if server_enrolled {
@@ -3085,7 +3088,8 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
                          entering your duress PIN here will not trigger a wipe. Manage duress \
                          mode from the device where you enabled it.",
                     )
-                    .color(color::GREY_3),
+                    .width(Length::Fill)
+                    .style(theme::text::secondary),
                 )
                 .spacing(2)
                 .width(Length::Fill),
@@ -3106,7 +3110,8 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
                 text::p2_regular(
                     "Turns off duress on all your devices. You can re-enable it anytime.",
                 )
-                .color(color::GREY_3),
+                .width(Length::Fill)
+                .style(theme::text::secondary),
             );
         }
     } else {
@@ -3125,7 +3130,8 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
                     text::p2_regular(
                         "• A duress PIN — one you don't use to unlock any of your Cubes.",
                     )
-                    .color(color::GREY_3),
+                    .width(Length::Fill)
+                    .style(theme::text::secondary),
                 )
                 .push(
                     text::p2_regular(format!(
@@ -3133,15 +3139,18 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
                          your account from a trusted device.",
                         MIN_ALL_CLEAR_LEN
                     ))
-                    .color(color::GREY_3),
+                    .width(Length::Fill)
+                    .style(theme::text::secondary),
                 )
                 .push(
                     text::p2_regular("• A duress recovery-kit password — covers all your Cubes.")
-                        .color(color::GREY_3),
+                        .width(Length::Fill)
+                        .style(theme::text::secondary),
                 )
                 .push(
                     text::p2_regular(format!("• An unlock delay: {}.", delays))
-                        .color(color::GREY_3),
+                        .width(Length::Fill)
+                        .style(theme::text::secondary),
                 )
                 .spacing(6)
                 .width(Length::Fill),
@@ -3172,7 +3181,8 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
                          Finish the Recovery Kit for each of your Vault Cubes before enabling \
                          duress mode.",
                     )
-                    .color(color::GREY_3),
+                    .width(Length::Fill)
+                    .style(theme::text::secondary),
                 );
             if let Some(list) = duress_recovery_kit_list(state) {
                 card_col = card_col
@@ -3199,7 +3209,8 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
                              Vault created on another device that hasn't synced yet may not \
                              appear here — open that device to confirm its Recovery Kit.",
                         )
-                        .color(color::GREY_3),
+                        .width(Length::Fill)
+                        .style(theme::text::secondary),
                     );
             }
             card_col.spacing(2).width(Length::Fill)
@@ -3234,7 +3245,11 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
             } else {
                 "Checking your Cubes' Recovery Kits…"
             };
-            col = col.push(text::p2_regular(gate_copy).color(color::GREY_3));
+            col = col.push(
+                text::p2_regular(gate_copy)
+                    .width(Length::Fill)
+                    .style(theme::text::secondary),
+            );
         } else {
             col = col.push(
                 button::primary(None, "Set up Duress Mode")
@@ -4765,6 +4780,70 @@ mod renewal_banner_tests {
             error: None,
         });
         let _ = duress_ux(&account);
+    }
+
+    #[test]
+    fn duress_status_fits_compact_connect_in_both_themes() {
+        use crate::app::view::shared::landing::capture;
+
+        let mut account = dashboard_panel();
+        account.active_sub = ConnectSubMenu::Duress;
+        account.plan.as_mut().unwrap().entitlements.duress = true;
+        account.plan.as_mut().unwrap().entitlements.duress_alerts = true;
+        account.duress_cubes = Some(Vec::new());
+        account.duress_contacts.contacts =
+            Some(vec![crate::services::coincube::DuressAlertContact {
+                id: 1,
+                display_name: "Synthetic emergency contact".to_string(),
+                phone: None,
+                email: Some("synthetic-contact@example.test".to_string()),
+                channels: vec!["email".to_string()],
+                intro_sent_at: None,
+                opted_out_at: None,
+                created_at: None,
+                updated_at: None,
+            }]);
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            // The Duress route is still outside the new Connect sheet until
+            // #870. Mount its production presenter inside the sheet's 40px
+            // horizontal content padding at the 1024px minimum instead of
+            // claiming this is a live sheet screenshot.
+            let sheet_padding = iced::Padding {
+                top: 28.0,
+                right: 40.0,
+                bottom: 40.0,
+                left: 40.0,
+            };
+            let inspection = capture::inspect_wide_content(
+                "duress-status-content-mount",
+                container(duress_ux(&account)).padding(sheet_padding).into(),
+                (1024, 768),
+                appearance,
+                theme,
+                711,
+            );
+            assert!(inspection.contains("What duress mode does"));
+            assert!(inspection.contains("Set up a Cube Recovery Kit for each Cube"));
+            assert!(inspection.contains("Set up Duress Mode"));
+            assert!(inspection.contains("Synthetic emergency contact"));
+            assert!(inspection.contains("Remove"));
+
+            let contacts = capture::inspect_wide_content(
+                "duress-contacts-content-mount",
+                container(duress_contacts::section(&account))
+                    .padding(sheet_padding)
+                    .into(),
+                (1024, 768),
+                appearance,
+                theme,
+                711,
+            );
+            assert!(contacts.contains("Synthetic emergency contact"));
+            assert!(contacts.contains("Intro message queued"));
+        }
     }
 
     #[test]

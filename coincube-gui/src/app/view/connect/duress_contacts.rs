@@ -82,7 +82,7 @@ pub fn section<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccount
                 "People we'll notify only if you activate duress mode. They get one intro \
                  message now, and nothing else unless an alert fires.",
             )
-            .color(color::GREY_3),
+            .style(theme::text::secondary),
         )
         .push(iced::widget::Space::new().height(Length::Fixed(14.0)))
         .width(Length::Fill);
@@ -109,7 +109,7 @@ fn locked_card<'a>() -> Element<'a, ConnectAccountMessage> {
                     "Emergency contacts are part of the Estate plan. Upgrade your Connect plan \
                      to let trusted people be alerted if you ever activate duress mode.",
                 )
-                .color(color::GREY_3),
+                .style(theme::text::secondary),
             )
             .push(iced::widget::Space::new().height(Length::Fixed(14.0)))
             .push(
@@ -134,18 +134,20 @@ fn explainer_cards<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAcc
             .push(text::p1_bold("What the alert says").style(theme::text::primary))
             .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
             .push(
-                container(text::p2_regular(alert_template_preview(&owner)).color(color::GREY_2))
-                    .padding(12)
-                    .width(Length::Fill)
-                    .style(|t| container::Style {
-                        background: Some(iced::Background::Color(t.colors.cards.simple.background)),
-                        border: iced::Border {
-                            color: color::GREY_5,
-                            width: 0.5,
-                            radius: 10.0.into(),
-                        },
-                        ..Default::default()
-                    }),
+                container(
+                    text::p2_regular(alert_template_preview(&owner)).style(theme::text::secondary),
+                )
+                .padding(12)
+                .width(Length::Fill)
+                .style(|t| container::Style {
+                    background: Some(iced::Background::Color(t.colors.cards.simple.background)),
+                    border: iced::Border {
+                        color: color::GREY_5,
+                        width: 0.5,
+                        radius: 10.0.into(),
+                    },
+                    ..Default::default()
+                }),
             )
             .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
             .push(
@@ -153,7 +155,7 @@ fn explainer_cards<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAcc
                     "It never includes your balances, addresses, or how COINCUBE works — only \
                      that you may need help.",
                 )
-                .color(color::GREY_3),
+                .style(theme::text::secondary),
             )
             .padding(20)
             .spacing(0),
@@ -165,14 +167,14 @@ fn explainer_cards<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAcc
         Column::new()
             .push(text::p1_bold("The one-time intro message").style(theme::text::primary))
             .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
-            .push(text::p2_regular(intro_template_preview(&owner)).color(color::GREY_2))
+            .push(text::p2_regular(intro_template_preview(&owner)).style(theme::text::secondary))
             .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
             .push(
                 text::p2_regular(
                     "Anyone can reply STOP at any time to opt out — we'll never message them \
                      again.",
                 )
-                .color(color::GREY_3),
+                .style(theme::text::secondary),
             )
             .padding(20)
             .spacing(0),
@@ -212,7 +214,7 @@ fn list_body<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
         )
         .push(iced::widget::Space::new().width(Length::Fill))
         .push(if dc.at_cap() {
-            Element::from(text::p2_regular("Maximum reached").color(color::GREY_3))
+            Element::from(text::p2_regular("Maximum reached").style(theme::text::secondary))
         } else {
             button::primary(None, "+ Add contact")
                 .on_press(msg(DuressContactsMessage::ShowAddForm))
@@ -226,7 +228,7 @@ fn list_body<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
 
     match &dc.contacts {
         None => {
-            col = col.push(text::p2_regular("Loading\u{2026}").color(color::GREY_3));
+            col = col.push(text::p2_regular("Loading\u{2026}").style(theme::text::secondary));
         }
         Some(list) if list.is_empty() => {
             col = col.push(
@@ -241,7 +243,7 @@ fn list_body<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
                                 "Add up to 5 people who should be alerted if you activate \
                                  duress mode.",
                             )
-                            .color(color::GREY_3),
+                            .style(theme::text::secondary),
                         )
                         .push(iced::widget::Space::new().height(Length::Fixed(14.0)))
                         .push(
@@ -290,7 +292,7 @@ fn contact_card<'a>(
         }
     }
     if !methods.is_empty() {
-        info = info.push(text::p2_regular(methods.join("  ·  ")).color(color::GREY_3));
+        info = info.push(text::p2_regular(methods.join("  ·  ")).style(theme::text::secondary));
     }
 
     // Channel badges.
@@ -304,11 +306,11 @@ fn contact_card<'a>(
             .into()
     } else if let Some(at) = c.intro_sent_at.as_deref() {
         text::p2_regular(format!("Intro sent {}", format_datetime(at)))
-            .color(color::GREY_3)
+            .style(theme::text::secondary)
             .into()
     } else {
         text::p2_regular("Intro message queued")
-            .color(color::GREY_3)
+            .style(theme::text::secondary)
             .into()
     };
     info = info.push(status);
@@ -361,7 +363,7 @@ fn channel_badges<'a>(c: &'a DuressAlertContact) -> Element<'a, ConnectAccountMe
         if c.has_channel(bit) {
             any = true;
             row = row.push(
-                container(text::caption(label).color(color::ORANGE))
+                container(text::caption(label).style(theme::text::adaptive(color::ORANGE)))
                     .padding(iced::Padding {
                         top: 2.0,
                         bottom: 2.0,
@@ -419,7 +421,7 @@ pub fn form_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccount
 
     // Name field.
     let name_field = Column::new()
-        .push(text::p2_regular("Name").color(color::GREY_3))
+        .push(text::p2_regular("Name").style(theme::text::secondary))
         .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
         .push(
             TextInput::new("e.g. Jane Doe", &dc.form_name)
@@ -431,7 +433,7 @@ pub fn form_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccount
 
     // Phone field + validity hint.
     let mut phone_col = Column::new()
-        .push(text::p2_regular("Phone (international format)").color(color::GREY_3))
+        .push(text::p2_regular("Phone (international format)").style(theme::text::secondary))
         .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
         .push(
             TextInput::new("+15551234567", &dc.form_phone)
@@ -451,7 +453,7 @@ pub fn form_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccount
 
     // Email field + validity hint.
     let mut email_col = Column::new()
-        .push(text::p2_regular("Email").color(color::GREY_3))
+        .push(text::p2_regular("Email").style(theme::text::secondary))
         .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
         .push(
             TextInput::new("jane@example.com", &dc.form_email)
@@ -488,7 +490,7 @@ pub fn form_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccount
     );
 
     let channels_section = Column::new()
-        .push(text::p2_regular("How should we reach them?").color(color::GREY_3))
+        .push(text::p2_regular("How should we reach them?").style(theme::text::secondary))
         .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
         .push(sms_box)
         .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
@@ -531,7 +533,7 @@ pub fn form_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccount
                 "Add a phone number, an email, or both — then pick at least one way to reach \
                  them.",
             )
-            .color(color::GREY_3),
+            .style(theme::text::secondary),
         )
         .push(iced::widget::Space::new().height(Length::Fixed(18.0)))
         .push(name_field)
@@ -582,7 +584,7 @@ fn channel_checkbox<'a>(
                 } else {
                     "add a phone first"
                 })
-                .color(color::GREY_3),
+                .style(theme::text::secondary),
             )
             .align_y(Alignment::Center)
             .into()
