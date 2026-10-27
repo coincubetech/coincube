@@ -328,7 +328,7 @@ impl<'a> SparkSendView<'a> {
                 .vertical_spacing(20),
         );
         Container::new(Container::new(page).width(Length::Fill).max_width(960.0))
-            .center_x(Length::Fill)
+            .width(Length::Fill)
             .into()
     }
 }

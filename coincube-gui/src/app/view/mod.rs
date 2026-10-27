@@ -35,6 +35,7 @@ use iced::{
     Alignment, Length,
 };
 
+use coincube_ui::component::tenshu::{gutter_for_window, PageWidth};
 use coincube_ui::component::text::Text;
 use coincube_ui::{
     color,
@@ -121,16 +122,7 @@ pub fn spark_notice_banner(notice: &SparkNotice) -> Element<'_, Message> {
     .width(Length::Fill)
     .style(theme::notification::warning);
 
-    container(row![
-        Space::new().width(Length::FillPortion(1)),
-        container(body)
-            .width(Length::FillPortion(8))
-            .max_width(1500),
-        Space::new().width(Length::FillPortion(1)),
-    ])
-    .padding([8, 0])
-    .width(Length::Fill)
-    .into()
+    page(body, PageWidth::Reading).vertical(8.0, 8.0).into()
 }
 
 pub fn dashboard<'a, T: Into<Element<'a, Message>>>(
@@ -148,10 +140,9 @@ pub fn dashboard<'a, T: Into<Element<'a, Message>>>(
     )
 }
 
-/// Activity needs the shell's full content area for its transaction list and
-/// 420px detail pane at the standard 1440px viewport.
-/// Activity fills the content area edge to edge (`.main`): its header and
-/// filters stay put while the list and the detail pane scroll on their own.
+/// Activity is the one wide page. It fills the content area edge to edge
+/// (`.main`) so its header and filters stay put while the list and the detail
+/// pane scroll on their own; `view::activity` insets them by [`page_gutter`].
 pub fn dashboard_activity<'a, T: Into<Element<'a, Message>>>(
     menu: &'a Menu,
     cache: &'a Cache,
@@ -181,9 +172,9 @@ pub fn dashboard_activity<'a, T: Into<Element<'a, Message>>>(
     )
 }
 
-/// Full-width content area for the bounded Send and Receive forms. Their
-/// 680px form and 240px context rail sit together at 1440px and wrap at the
-/// 1024px minimum window size.
+/// Send and Receive: a reading page. Their 680px form and 240px context rail
+/// sit together from the left edge at 1440px and wrap at the 1024px minimum
+/// window size.
 pub fn dashboard_payment<'a, T: Into<Element<'a, Message>>>(
     menu: &'a Menu,
     cache: &'a Cache,
@@ -196,11 +187,33 @@ pub fn dashboard_payment<'a, T: Into<Element<'a, Message>>>(
         &cache.cube_name,
         cache.avatar_handle.as_ref(),
         cache.lightning_address.as_deref(),
-        true,
+        PageWidth::Reading,
     )
 }
 
-pub(crate) const ACTIVITY_HORIZONTAL_PADDING: f32 = 24.0;
+/// The Cube shell's page gutter for a content pane `pane_width` wide.
+///
+/// The canvas rule is `clamp(24px, 3vw, 48px)` of the *window*; the pane is
+/// the window minus the side menu, whose width itself depends on the window
+/// (`nav::split::sidebar_width_for_window`), so add the menu back first.
+pub fn page_gutter(pane_width: f32) -> f32 {
+    let with_full_menu = pane_width + nav::shell::FULL_WIDTH;
+    let window = if nav::split::sidebar_width_for_window(with_full_menu) == nav::shell::FULL_WIDTH {
+        with_full_menu
+    } else {
+        pane_width + nav::shell::COMPACT_WIDTH
+    };
+    gutter_for_window(window)
+}
+
+/// Every Cube screen's page container (HANDOFF "Page layout"): left-anchored
+/// at [`page_gutter`], reading or wide.
+pub fn page<'a, T: Into<Element<'a, Message>>>(
+    content: T,
+    width: PageWidth,
+) -> coincube_ui::component::tenshu::Page<'a, Message> {
+    coincube_ui::component::tenshu::page(content, width, page_gutter)
+}
 
 pub fn dashboard_with_info<'a, T: Into<Element<'a, Message>>>(
     menu: &'a Menu,
@@ -217,7 +230,7 @@ pub fn dashboard_with_info<'a, T: Into<Element<'a, Message>>>(
         cube_name,
         avatar_handle,
         lightning_address,
-        false,
+        PageWidth::Reading,
     )
 }
 
@@ -228,42 +241,21 @@ fn dashboard_with_info_layout<'a, T: Into<Element<'a, Message>>>(
     cube_name: &'a str,
     avatar_handle: Option<&'a iced::widget::image::Handle>,
     lightning_address: Option<&'a str>,
-    wide: bool,
+    width: PageWidth,
 ) -> Element<'a, Message> {
-    let body = Column::new()
-        .push(Space::new().height(Length::Fixed(30.0)))
-        .push_maybe(settings::frame::in_content_navigation(menu, cache))
-        .push(content.into())
-        // Symmetric bottom breathing room so the last element of any
-        // screen does not sit flush against the viewport edge.
-        .push(Space::new().height(Length::Fixed(30.0)))
-        .width(if wide {
-            Length::Fill
-        } else {
-            Length::FillPortion(8)
-        })
-        .max_width(1500);
-    let body: Element<'_, Message> = if wide {
-        row![
-            Space::new().width(Length::Fixed(ACTIVITY_HORIZONTAL_PADDING)),
-            body,
-            Space::new().width(Length::Fixed(ACTIVITY_HORIZONTAL_PADDING))
-        ]
-        .into()
-    } else {
-        row![
-            Space::new().width(Length::FillPortion(1)),
-            body,
-            Space::new().width(Length::FillPortion(1))
-        ]
-        .into()
-    };
+    let body = page(
+        Column::new()
+            .push_maybe(settings::frame::in_content_navigation(menu, cache))
+            .push(content.into())
+            .width(Length::Fill),
+        width,
+    );
     let content_column: Element<'_, Message> = Column::new()
         .push(warn(None))
         .push_maybe(cache.spark_notice.as_ref().map(spark_notice_banner))
         .push(
             Container::new(scrollable(body).on_scroll(|w| Message::Scroll(w.absolute_offset().y)))
-                .center_x(Length::Fill)
+                .width(Length::Fill)
                 .style(theme::container::background)
                 .height(Length::Fill),
         )
@@ -461,10 +453,8 @@ pub fn feature_unavailable_panel(reason: String) -> Element<'static, Message> {
             .push(gate)
             .width(Length::Fill);
 
-        return Container::new(content)
-            .width(Length::Fill)
-            .padding([28, 48])
-            .into();
+        // The dashboard's page container supplies the 28px top and the gutter.
+        return Container::new(content).width(Length::Fill).into();
     }
 
     let content = Column::new()
@@ -790,6 +780,35 @@ mod unavailable_panel_tests {
                     }
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod page_tests {
+    use super::{nav::split::sidebar_width_for_window, page_gutter};
+    use coincube_ui::component::tenshu::gutter_for_window;
+
+    #[test]
+    fn page_gutter_is_the_window_clamp_seen_from_the_pane() {
+        // 1440 window: 248px menu, 1192px pane, 43.2px gutter.
+        assert_eq!(page_gutter(1192.0), gutter_for_window(1440.0));
+        // 1024 minimum window: compact 208px menu.
+        assert_eq!(page_gutter(816.0), gutter_for_window(1024.0));
+        // From 1600 the gutter stops growing.
+        assert_eq!(page_gutter(2560.0 - 248.0), 48.0);
+    }
+
+    #[test]
+    fn every_window_width_gets_its_own_gutter_within_a_pixel_and_a_bit() {
+        // The menu narrows at 1100, so windows 1060..=1100 (compact menu) and
+        // 1100..=1140 (full menu) share pane widths; the gutter is then read
+        // from the full-menu window, at most 40px * 3% = 1.2px off.
+        for window in 1024..=2560 {
+            let window = window as f32;
+            let pane = window - sidebar_width_for_window(window);
+            let off = (page_gutter(pane) - gutter_for_window(window)).abs();
+            assert!(off <= 1.21, "window {}: off by {}", window, off);
         }
     }
 }

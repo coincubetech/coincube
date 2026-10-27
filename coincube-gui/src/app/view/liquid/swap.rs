@@ -594,7 +594,7 @@ fn review_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMes
             );
         return Container::new(content)
             .width(Length::Fill)
-            .center_x(Length::Fill)
+            .width(Length::Fill)
             .into();
     };
 
@@ -706,7 +706,7 @@ fn review_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMes
 
     Container::new(content)
         .width(Length::Fill)
-        .center_x(Length::Fill)
+        .width(Length::Fill)
         .into()
 }
 

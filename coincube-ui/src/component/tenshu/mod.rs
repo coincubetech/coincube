@@ -12,6 +12,7 @@ pub mod chip;
 pub mod copy_field;
 pub mod disclosure;
 pub mod field;
+pub mod page;
 mod scope;
 pub mod segmented;
 pub mod select;
@@ -30,6 +31,7 @@ pub use chip::{status_badge, status_chip, StatusBadge, StatusChip};
 pub use copy_field::{copy_field, CopyField};
 pub use disclosure::{disclosure, Disclosure};
 pub use field::{search_field, text_field, FieldSize, TextField};
+pub use page::{gutter_for_window, page, Page, PageWidth, PAGE_MAX};
 pub use segmented::{
     choice_chips, nav_list, radio_list, segment, segmented, tabs, Segment, SegmentSize, Segmented,
 };
