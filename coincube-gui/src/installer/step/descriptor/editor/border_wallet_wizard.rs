@@ -369,6 +369,45 @@ impl BorderWalletWizard {
         Message::BorderWalletWizard(msg)
     }
 
+    /// The intro explains the flow; the four numbered stages start with Phrase.
+    fn progress(&self) -> Element<Message> {
+        let current = match self.step {
+            WizardStep::Intro | WizardStep::RecoveryPhrase => 0,
+            WizardStep::Grid => 1,
+            WizardStep::Checksum => 2,
+            WizardStep::Confirm => 3,
+        };
+        let mut steps = Row::new().spacing(16);
+        for (index, label) in ["Phrase", "Pattern", "Checksum", "Confirm"]
+            .iter()
+            .enumerate()
+        {
+            let number =
+                text(format!("{}", index + 1))
+                    .size(12)
+                    .style(move |theme: &theme::Theme| iced::widget::text::Style {
+                        color: Some(if index < current {
+                            theme.colors.shell.good
+                        } else if index == current {
+                            theme.colors.shell.accent
+                        } else {
+                            theme.colors.shell.muted
+                        }),
+                    });
+            let name = text(*label).size(12).style(move |theme: &theme::Theme| {
+                iced::widget::text::Style {
+                    color: Some(if index == current {
+                        theme.colors.shell.ink
+                    } else {
+                        theme.colors.shell.muted
+                    }),
+                }
+            });
+            steps = steps.push(Row::new().spacing(5).push(number).push(name));
+        }
+        steps.into()
+    }
+
     fn view_intro(&self) -> Element<Message> {
         let header = modal::header(Some("Border Wallet".to_string()), Some(|| Message::Close));
 
@@ -456,6 +495,14 @@ impl BorderWalletWizard {
                             idx, s,
                         ))
                     })
+                    .style(|theme: &theme::Theme, status| {
+                        let mut style = theme::text_input::primary(theme, status);
+                        if matches!(status, iced::widget::text_input::Status::Focused { .. }) {
+                            style.border.color = theme.colors.shell.focus;
+                            style.border.width = 2.0;
+                        }
+                        style
+                    })
                     .width(Length::Fill);
                 row_widget = row_widget.push(
                     Row::new()
@@ -484,6 +531,7 @@ impl BorderWalletWizard {
         let mut col = Column::new()
             .spacing(12)
             .push(header)
+            .push(self.progress())
             .push(p1_regular(
                 "Enter or generate the 12-word recovery phrase that will seed the word grid.",
             ))
@@ -531,8 +579,24 @@ impl BorderWalletWizard {
         let grid_content: Element<Message> = if let Some(grid) = &self.grid {
             let mut grid_col = Column::new().spacing(1);
 
+            let mut column_numbers = Row::new().spacing(1).push(Space::new().width(24));
+            for col_idx in 0..WordGrid::COLS {
+                column_numbers = column_numbers.push(
+                    text(format!("{}", col_idx + 1))
+                        .size(10)
+                        .width(46)
+                        .align_x(Horizontal::Center),
+                );
+            }
+            grid_col = grid_col.push(column_numbers);
+
             for row_idx in 0..WordGrid::ROWS {
-                let mut row_widget = Row::new().spacing(1);
+                let mut row_widget = Row::new().spacing(1).push(
+                    text(format!("{}", row_idx + 1))
+                        .size(10)
+                        .width(24)
+                        .align_x(Horizontal::Right),
+                );
                 for col_idx in 0..WordGrid::COLS {
                     let word = grid.word_at(row_idx, col_idx).unwrap_or("???");
                     let prefix = &word[..std::cmp::min(4, word.len())];
@@ -565,14 +629,14 @@ impl BorderWalletWizard {
                         .on_press(
                             self.wizard_msg(BorderWalletWizardMessage::ToggleCellSelection(r, c)),
                         )
-                        .width(50)
+                        .width(46)
                         .height(28);
 
                     row_widget = row_widget.push(cell_btn);
                 }
                 grid_col = grid_col.push(row_widget);
             }
-            scrollable(grid_col).height(400).into()
+            scrollable(grid_col).height(320).into()
         } else {
             p1_regular("No grid available").into()
         };
@@ -593,6 +657,7 @@ impl BorderWalletWizard {
         let mut col = Column::new()
             .spacing(10)
             .push(header)
+            .push(self.progress())
             .push(p1_regular(
                 "Select 11 cells from the grid in order. This pattern is your key \u{2014} remember it exactly.",
             ))
@@ -603,6 +668,11 @@ impl BorderWalletWizard {
                     .push(undo_btn)
                     .push(clear_btn),
             )
+            .push(p1_regular(format!(
+                "{} rows × {} columns · first four letters shown · selected numbers show order",
+                WordGrid::ROWS,
+                WordGrid::COLS
+            )))
             .push(grid_content);
 
         if let Some(err) = error_text {
@@ -649,6 +719,7 @@ impl BorderWalletWizard {
         let col = Column::new()
             .spacing(12)
             .push(header)
+            .push(self.progress())
             .push(p1_bold(format!("Checksum word: \"{}\"", checksum_word)))
             .push(p1_regular(
                 "This is the only word you need to memorize. The checksum word is \
@@ -712,6 +783,7 @@ impl BorderWalletWizard {
         let col = Column::new()
             .spacing(15)
             .push(header)
+            .push(self.progress())
             .push(warning)
             .push(Row::new().spacing(10).push(back_btn).push(confirm_btn))
             .width(500);
