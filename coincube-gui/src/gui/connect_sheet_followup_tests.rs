@@ -106,7 +106,27 @@ fn assert_duress_dialogs_scrubbed(gui: &GUI, pane_id: pane_grid::Pane) {
         unreachable!()
     };
     assert!(home.connect_account.duress_enroll.is_none());
+    assert!(!home.connect_account.duress_enroll_abandoned);
     assert!(home.connect_account.duress_disable.is_none());
+}
+
+fn deliver_enroll_failure(gui: &mut GUI, pane_id: pane_grid::Pane, tab_id: usize) {
+    let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[0].state else {
+        unreachable!()
+    };
+    let generation = home.connect_account.session_generation();
+    drop(gui.update(Message::Pane(
+        pane_id,
+        pane::Message::tab(
+            tab_id,
+            tab::Message::Launch(home::Message::View(home::ViewMessage::ConnectAccount(
+                view::ConnectAccountMessage::Duress(view::DuressMessage::EnrollResult(
+                    Err("synthetic server rejection".into()),
+                    generation,
+                )),
+            ))),
+        ),
+    )));
 }
 
 #[test]
@@ -272,6 +292,13 @@ fn leaving_duress_section_scrubs_pending_dialogs() {
                 .submitting
         );
         assert!(home.connect_account.duress_disable.is_none());
+        assert!(home.connect_account.duress_enroll_abandoned);
+        deliver_enroll_failure(&mut gui, pane_id, tab_id);
+        assert_duress_dialogs_scrubbed(&gui, pane_id);
+        assert_eq!(
+            gui.connect_sheet.as_ref().unwrap().page,
+            ConnectSheetPage::Sections(ConnectSheetSection::Account)
+        );
     });
 }
 
@@ -293,6 +320,22 @@ fn closing_duress_sheet_scrubs_pending_dialogs() {
         set_synthetic_duress_dialogs(&mut gui, pane_id, false);
 
         drop(gui.update(Message::ConnectSheet(ConnectSheetMessage::Close)));
+        assert!(gui.connect_sheet.is_none());
+        assert_duress_dialogs_scrubbed(&gui, pane_id);
+
+        launcher_connect_entry(&mut gui, pane_id, tab_id);
+        drop(
+            gui.update(Message::ConnectSheet(ConnectSheetMessage::SelectSection(
+                ConnectSheetSection::Duress,
+            ))),
+        );
+        set_synthetic_duress_dialogs(&mut gui, pane_id, true);
+        drop(gui.update(Message::ConnectSheet(ConnectSheetMessage::Close)));
+        let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[0].state else {
+            unreachable!()
+        };
+        assert!(home.connect_account.duress_enroll_abandoned);
+        deliver_enroll_failure(&mut gui, pane_id, tab_id);
         assert!(gui.connect_sheet.is_none());
         assert_duress_dialogs_scrubbed(&gui, pane_id);
     });

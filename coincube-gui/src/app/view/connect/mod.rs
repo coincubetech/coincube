@@ -2930,6 +2930,15 @@ fn checking_duress_ux<'a>(status: DuressGateStatus) -> Element<'a, ConnectAccoun
 fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMessage> {
     use crate::services::duress::enroll::{DuressDelay, MIN_ALL_CLEAR_LEN};
 
+    // A submission abandoned on another sheet route may still succeed. Keep
+    // its payload for local arming without resurfacing the entered secrets.
+    if state.duress_enroll_abandoned {
+        return Column::new()
+            .push(text::h4_bold("Duress Mode").style(theme::text::primary))
+            .push(text::p1_regular("Finishing enrollment…"))
+            .into();
+    }
+
     // Wizard takes over the panel while enrollment is in progress.
     if let Some(enroll) = &state.duress_enroll {
         return duress_enroll::enroll_ux(enroll);

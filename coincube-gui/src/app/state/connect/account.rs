@@ -934,6 +934,9 @@ pub struct ConnectAccountPanel {
     pub show_campaign_redeem: bool,
     /// Active duress enrollment wizard (Phases 2 & 8); `None` when closed.
     pub duress_enroll: Option<DuressEnrollState>,
+    /// A submitting wizard was hidden by leaving Duress. Retain its secrets
+    /// only until the server result can arm this device or reject enrollment.
+    pub duress_enroll_abandoned: bool,
     /// Active "Disable Duress Mode" step-up dialog (Issue 2); `None` when closed.
     pub duress_disable: Option<DuressDisableState>,
     /// Duress "Emergency contacts" section (Estate Notifications — PR 1).
@@ -1011,6 +1014,7 @@ impl ConnectAccountPanel {
             show_plan_comparison: false,
             show_campaign_redeem: false,
             duress_enroll: None,
+            duress_enroll_abandoned: false,
             duress_disable: None,
             duress_contacts: DuressContactsState::default(),
             duress_cubes: None,
@@ -2979,6 +2983,7 @@ impl ConnectAccountPanel {
     /// Completion paths clone the few values they forward into a `Zeroizing`
     /// payload first, then call this to scrub the originals.
     fn clear_duress_enroll(&mut self) {
+        self.duress_enroll_abandoned = false;
         if let Some(mut wizard) = self.duress_enroll.take() {
             wizard.zeroize_secrets();
         }
@@ -2996,7 +3001,9 @@ impl ConnectAccountPanel {
     /// - the step-up disable dialog is always taken and zeroized, matching
     ///   `DisableCancel`.
     pub fn scrub_duress_dialogs(&mut self) {
-        if self.duress_enroll.as_ref().is_none_or(|e| !e.submitting) {
+        if self.duress_enroll.as_ref().is_some_and(|e| e.submitting) {
+            self.duress_enroll_abandoned = true;
+        } else {
             self.clear_duress_enroll();
         }
         if let Some(mut d) = self.duress_disable.take() {
@@ -3383,6 +3390,11 @@ impl ConnectAccountPanel {
 
             // ── Enrollment wizard (Phases 2 & 8) ──
             DuressMessage::StartEnrollment => {
+                // An abandoned submission still owns the server response and
+                // its local arming payload; do not replace it with a new wizard.
+                if self.duress_enroll_abandoned {
+                    return iced::Task::none();
+                }
                 // Duress is a paid (Pro/Estate) feature behind a launch
                 // kill-switch. The nav hides the surface and the CTA for anyone
                 // who fails the show-rule (entitlement AND the launch gate);
@@ -3714,9 +3726,11 @@ impl ConnectAccountPanel {
                         );
                     }
                     Err(msg) => {
-                        // No local state was written — just surface the error
-                        // and keep the wizard open for a retry.
-                        if let Some(e) = &mut self.duress_enroll {
+                        // A hidden wizard has no retry surface. Scrub its
+                        // secrets as soon as the server has rejected it.
+                        if self.duress_enroll_abandoned {
+                            self.clear_duress_enroll();
+                        } else if let Some(e) = &mut self.duress_enroll {
                             e.submitting = false;
                             e.error = Some(msg);
                         }
@@ -7796,6 +7810,35 @@ mod plan_lifecycle_tests {
         panel.scrub_duress_dialogs();
 
         assert!(panel.duress_enroll.is_some());
+        assert!(panel.duress_enroll_abandoned);
+    }
+
+    #[test]
+    fn abandoned_enrollment_success_still_forwards_local_arming_payload() {
+        use iced::futures::StreamExt;
+
+        let mut panel = ConnectAccountPanel::new();
+        panel.open_enroll_wizard();
+        let wizard = panel.duress_enroll.as_mut().unwrap();
+        wizard.duress_pin = "1234".into();
+        wizard.pending_code = Some("synthetic-code".into());
+        wizard.submitting = true;
+        panel.scrub_duress_dialogs();
+
+        let task = panel.update_duress(DuressMessage::EnrollResult(
+            Ok(()),
+            panel.session_generation(),
+        ));
+        assert!(panel.duress_enroll.is_none());
+        assert!(!panel.duress_enroll_abandoned);
+        let mut stream = iced_runtime::task::into_stream(task).expect("local arming task");
+        let result = iced::futures::executor::block_on(stream.next());
+        let Some(iced_runtime::Action::Output(Message::CompleteDuressEnrollment(payload))) = result
+        else {
+            panic!("successful enrollment must arm this device");
+        };
+        assert_eq!(payload.duress_pin.as_str(), "1234");
+        assert_eq!(payload.duress_code.as_str(), "synthetic-code");
     }
 
     #[test]
