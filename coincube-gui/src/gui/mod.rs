@@ -2633,11 +2633,16 @@ impl GUI {
                     };
                 }
                 log::debug!("Tab pressed!");
-                if shift {
+                let focus = if shift {
                     action::focus_previous_visible(crate::app::view::nav::shell::MIDDLE_SCROLL_ID)
                 } else {
                     action::focus_next_visible(crate::app::view::nav::shell::MIDDLE_SCROLL_ID)
-                }
+                };
+                // The Border Wallet grid has its own clipped viewport. Revealing
+                // focus there is a no-op for every other screen.
+                focus.chain(action::reveal_focused(
+                    crate::installer::step::descriptor::editor::border_wallet_wizard::BORDER_WALLET_GRID_SCROLL_ID,
+                ))
             }
             Message::KeyPressed(Key::Escape) => {
                 if self.preferences_sheet.is_some() {
