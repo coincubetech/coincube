@@ -702,7 +702,8 @@ impl BorderWalletWizard {
         .width(Length::Shrink);
 
         let grid_content: Element<Message> = if let Some(grid) = &self.grid {
-            let mut grid_col = Column::new().spacing(4);
+            // Reserve the focus ring outset at both scroll endpoints.
+            let mut grid_col = Column::new().spacing(4).push(Space::new().height(4));
 
             let mut column_numbers = Row::new().spacing(4).push(Space::new().width(24));
             for col_idx in 0..WordGrid::COLS {
@@ -756,7 +757,6 @@ impl BorderWalletWizard {
                 }
                 grid_col = grid_col.push(row_widget);
             }
-            // Keep the last row's focus ring inside the scroll viewport.
             grid_col = grid_col.push(Space::new().height(4));
             Column::new()
                 .spacing(4)
@@ -1131,6 +1131,44 @@ mod presentation_tests {
         }
     }
 
+    fn capture(
+        directory: &str,
+        state: &str,
+        name: &str,
+        element: &Element<'_, Message>,
+        tree: &Tree,
+        node: &layout::Node,
+        renderer: &mut iced::Renderer,
+        theme: &theme::Theme,
+        size: Size,
+    ) {
+        std::fs::create_dir_all(directory).unwrap();
+        iced::advanced::Renderer::reset(renderer, Rectangle::with_size(size));
+        let style = iced::advanced::renderer::Style {
+            text_color: theme.colors.shell.ink,
+        };
+        element.as_widget().draw(
+            tree,
+            renderer,
+            theme,
+            &style,
+            Layout::new(node),
+            iced::mouse::Cursor::Unavailable,
+            &Rectangle::with_size(size),
+        );
+        let pixels = renderer.screenshot(Size::new(1024, 768), 1.0, theme.colors.shell.background);
+        image::save_buffer(
+            std::path::Path::new(directory).join(format!(
+                "border-wallet-synthetic-{state}-{name}-1024x768.png"
+            )),
+            &pixels,
+            1024,
+            768,
+            image::ColorType::Rgba8,
+        )
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn tab_reveals_below_viewport_grid_cell_at_1024_in_both_themes() {
         assert_eq!(
@@ -1207,6 +1245,43 @@ mod presentation_tests {
                 "border-wallet.pattern.next",
             ] {
                 assert!(!targets.0.contains(&Id::new(disabled)));
+            }
+            let first_cell = wizard.grid_focus_ids[0].clone();
+            operate(
+                &mut element,
+                &mut tree,
+                &node,
+                &renderer,
+                focusable::focus::<()>(first_cell.clone()),
+            );
+            apply_focus_task(
+                action::reveal_focused(BORDER_WALLET_GRID_SCROLL_ID),
+                &mut element,
+                &mut tree,
+                &mut node,
+                &renderer,
+                size,
+            )
+            .await;
+            let mut top = GridViewport::new(first_cell);
+            element
+                .as_widget_mut()
+                .operate(&mut tree, Layout::new(&node), &renderer, &mut top);
+            let first_bounds = top.screen_bounds();
+            let top_viewport = top.viewport.unwrap();
+            assert!(first_bounds.y >= top_viewport.y + 4.0);
+            if let Ok(directory) = std::env::var("BORDER_WALLET_CAPTURE_DIR") {
+                capture(
+                    &directory,
+                    "top-left",
+                    name,
+                    &element,
+                    &tree,
+                    &node,
+                    &mut renderer,
+                    &theme,
+                    size,
+                );
             }
             operate(
                 &mut element,
@@ -1383,31 +1458,48 @@ mod presentation_tests {
             );
 
             if let Ok(directory) = std::env::var("BORDER_WALLET_CAPTURE_DIR") {
-                std::fs::create_dir_all(&directory).unwrap();
-                let style = iced::advanced::renderer::Style {
-                    text_color: theme.colors.shell.ink,
-                };
-                element.as_widget().draw(
+                capture(
+                    &directory,
+                    "bottom-right",
+                    name,
+                    &element,
                     &tree,
+                    &node,
                     &mut renderer,
                     &theme,
-                    &style,
-                    Layout::new(&node),
-                    iced::mouse::Cursor::Unavailable,
-                    &Rectangle::with_size(size),
+                    size,
                 );
-                let pixels =
-                    renderer.screenshot(Size::new(1024, 768), 1.0, theme.colors.shell.background);
-                image::save_buffer(
-                    std::path::Path::new(&directory).join(format!(
-                        "border-wallet-synthetic-bottom-right-{name}-1024x768.png"
-                    )),
-                    &pixels,
-                    1024,
-                    768,
-                    image::ColorType::Rgba8,
-                )
-                .unwrap();
+            }
+
+            drop(element);
+            wizard.error = Some(
+                "Your pattern already has all 11 cells. Deselect one before choosing another."
+                    .to_string(),
+            );
+            let mut error_element: Element<'_, Message> = Container::new(wizard.view_grid())
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .into();
+            let mut error_tree = Tree::new(error_element.as_widget());
+            let error_node = error_element.as_widget_mut().layout(
+                &mut error_tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, size),
+            );
+            let error_modal = error_node.children()[0].bounds();
+            assert!(error_modal.y >= 0.0 && error_modal.y + error_modal.height <= size.height);
+            if let Ok(directory) = std::env::var("BORDER_WALLET_CAPTURE_DIR") {
+                capture(
+                    &directory,
+                    "error-line",
+                    name,
+                    &error_element,
+                    &error_tree,
+                    &error_node,
+                    &mut renderer,
+                    &theme,
+                    size,
+                );
             }
         }
     }
