@@ -821,3 +821,9 @@ While exporting, two regressions of mine surfaced. (1) Removing the cross-tab li
 Inner grids (Send, Receive, Buy/Sell) start at the left edge. The rule is written up in HANDOFF §4, "Page layout". Launcher, Opening, sign-in, Create, Restore and full-screen overlays (Connect, App preferences, Duress, Delete, Border Wallet) are not Cube pages and are unchanged.
 
 **For Codex:** add one page container in `coincube-ui` that implements the rule, with a reading variant and a wide variant. Replace each Cube screen's own padding and `max_width`/centering with it.
+
+## Connect benefits match what is enabled (2026-10-27, canvas v124)
+
+**Robert:** Duress mode is not enabled yet; it could say "Coming soon". Buy/Sell and P2P marketplace access is not enabled yet; remove it.
+
+**Applied:** "What Connect provides" now lists seven benefits on Connect › Account and on the sign-in screen, in both their signed-in and signed-out forms. The Duress row keeps its copy and gains a muted "Coming soon" badge, as the Pro plan tagline already says. The Buy/Sell and P2P row is removed. In the app this is `connect_benefit_rows` in `coincube-gui/src/app/view/connect/mod.rs`, using the Tenshu `status_badge` with the muted tone.
