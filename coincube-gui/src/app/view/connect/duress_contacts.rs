@@ -259,7 +259,7 @@ fn list_body<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
         Some(list) => {
             for c in list {
                 col = col.push(contact_card(dc, c));
-                col = col.push(iced::widget::Space::new().height(Length::Fixed(8.0)));
+                col = col.push(super::divider_line());
             }
         }
     }
@@ -274,7 +274,8 @@ fn contact_card<'a>(
 ) -> Element<'a, ConnectAccountMessage> {
     let mut info = Column::new()
         .push(text::p1_regular(c.display_name.as_str()).style(theme::text::primary))
-        .spacing(2);
+        .spacing(2)
+        .width(Length::Fill);
 
     // Contact methods line.
     let mut methods: Vec<String> = Vec::new();
@@ -333,12 +334,16 @@ fn contact_card<'a>(
     container(
         Row::new()
             .push(info)
-            .push(iced::widget::Space::new().width(Length::Fill))
             .push(actions)
+            .spacing(12)
             .align_y(Alignment::Center)
-            .padding(14),
+            .padding(iced::Padding {
+                top: 10.0,
+                bottom: 10.0,
+                left: 0.0,
+                right: 0.0,
+            }),
     )
-    .style(card_style)
     .width(Length::Fill)
     .into()
 }

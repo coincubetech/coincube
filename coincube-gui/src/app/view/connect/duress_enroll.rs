@@ -42,7 +42,7 @@ pub fn recovery_ux<'a>(
 ) -> Element<'a, ConnectAccountMessage> {
     let mut col = Column::new()
         .spacing(16)
-        .max_width(560)
+        .max_width(640)
         .push(text::h4_bold("Duress Mode").style(theme::text::primary));
 
     if cleared {
@@ -70,14 +70,14 @@ pub fn recovery_ux<'a>(
                     .to_string()
             })
             .unwrap_or_else(|| "later".to_string());
-        col = col.push(card(
+        col = col.push(
             Column::new()
-                .push(text::p1_bold("Account locked").style(theme::text::primary))
+                .push(text::p1_bold("Account locked").style(theme::text::warning))
                 .push(
                     text::p2_regular(format!("Account is locked until {when}. Come back then."))
                         .color(color::GREY_3),
                 ),
-        ));
+        );
         return col.width(Length::Fill).into();
     }
 
@@ -96,6 +96,7 @@ pub fn recovery_ux<'a>(
     col = col.push(card(
         Column::new()
             .push(text::p1_bold("Enter your all-clear passphrase").style(theme::text::primary))
+            .push(text::p2_regular("All-clear passphrase").color(color::GREY_3))
             .push(
                 TextInput::new("All-clear passphrase", passphrase)
                     .on_input(|v| msg(DuressMessage::RecoveryPassphraseChanged(v)))
@@ -104,10 +105,15 @@ pub fn recovery_ux<'a>(
                     .padding(15),
             )
             .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
-            .push(submit)
             .push(
-                button::transparent(None, "Forgot all-clear passphrase?")
-                    .on_press(msg(DuressMessage::ForgotAllClear)),
+                Row::new()
+                    .spacing(12)
+                    .align_y(iced::Alignment::Center)
+                    .push(submit)
+                    .push(
+                        button::transparent(None, "Forgot all-clear passphrase?")
+                            .on_press(msg(DuressMessage::ForgotAllClear)),
+                    ),
             ),
     ));
 
@@ -225,8 +231,12 @@ pub fn disable_ux(state: &DuressDisableState) -> Element<'_, ConnectAccountMessa
 
     let mut col = Column::new()
         .spacing(16)
-        .max_width(560)
+        .max_width(640)
         .push(text::h4_bold("Disable Duress Mode").style(theme::text::primary))
+        .push(
+            text::p2_regular("Turns off duress on all your devices. You can re-enable it anytime.")
+                .color(color::GREY_3),
+        )
         .push(card(body));
 
     if let Some(err) = &state.error {
@@ -268,8 +278,9 @@ pub fn enroll_ux(state: &DuressEnrollState) -> Element<'_, ConnectAccountMessage
 
     let mut col = Column::new()
         .spacing(16)
-        .max_width(560)
+        .max_width(640)
         .push(text::h4_bold("Set up Duress Mode").style(theme::text::primary))
+        .push(enrollment_progress(state.step))
         .push(body);
 
     if let Some(err) = &state.error {
@@ -284,13 +295,18 @@ pub fn enroll_ux(state: &DuressEnrollState) -> Element<'_, ConnectAccountMessage
         } else {
             button::primary(None, "Complete enrollment")
                 .width(Length::Fixed(200.0))
-                .on_press(msg(DuressMessage::SubmitEnrollment))
+                .on_press_maybe(
+                    state
+                        .memorized
+                        .then(|| msg(DuressMessage::SubmitEnrollment)),
+                )
         }
     } else {
-        // Each step advances freely; its own validation runs on press.
+        // Length and matching requirements are visible here; the state handler
+        // still runs the full credential and collision validation on press.
         button::primary(None, "Next")
             .width(Length::Fixed(120.0))
-            .on_press(msg(DuressMessage::EnrollNext))
+            .on_press_maybe(enrollment_step_ready(state).then(|| msg(DuressMessage::EnrollNext)))
     };
     col = col.push(
         Row::new()
@@ -317,6 +333,48 @@ pub fn enroll_ux(state: &DuressEnrollState) -> Element<'_, ConnectAccountMessage
     );
 
     col.width(Length::Fill).into()
+}
+
+/// Keep the five steps visible without exposing any entered credential. The
+/// current step is named in text as well as color for keyboard and low-vision
+/// users. A compact row fits within the Connect panel at its 1024px minimum.
+fn enrollment_progress(step: DuressEnrollStep) -> Element<'static, ConnectAccountMessage> {
+    let steps = [
+        (DuressEnrollStep::SetDuressPin, "PIN"),
+        (DuressEnrollStep::SetAllClear, "All-clear"),
+        (DuressEnrollStep::SetCrkPassword, "Kit password"),
+        (DuressEnrollStep::PickDelay, "Delay"),
+        (DuressEnrollStep::Confirm, "Confirm"),
+    ];
+    let mut row = Row::new().spacing(8).width(Length::Fill);
+    for (index, (item, label)) in steps.iter().enumerate() {
+        let current = *item == step;
+        let caption = if current {
+            format!("{}. {} (current)", index + 1, label)
+        } else {
+            format!("{}. {}", index + 1, label)
+        };
+        let label = if current {
+            text::caption(caption).style(theme::text::adaptive(color::ORANGE))
+        } else {
+            text::caption(caption).style(theme::text::secondary)
+        };
+        row = row.push(Container::new(label).width(Length::Fill));
+    }
+    row.into()
+}
+
+fn enrollment_step_ready(state: &DuressEnrollState) -> bool {
+    match state.step {
+        DuressEnrollStep::SetDuressPin => {
+            state.duress_pin.len() == 4 && state.duress_pin == state.duress_pin_confirm
+        }
+        DuressEnrollStep::SetAllClear => state.all_clear.chars().count() >= MIN_ALL_CLEAR_LEN,
+        // The state handler performs the full password and collision checks.
+        DuressEnrollStep::SetCrkPassword => state.crk_password.chars().count() >= MIN_ALL_CLEAR_LEN,
+        DuressEnrollStep::PickDelay => true,
+        DuressEnrollStep::Confirm => false,
+    }
 }
 
 fn duress_pin_step(state: &DuressEnrollState) -> Element<'_, ConnectAccountMessage> {
@@ -349,7 +407,7 @@ fn duress_pin_step(state: &DuressEnrollState) -> Element<'_, ConnectAccountMessa
                 .secure(true)
                 .padding(15),
         )
-        .push(text::caption("Must be exactly 4 digits.").color(hint_color))
+        .push(text::caption("Must be exactly 4 digits.").style(theme::text::adaptive(hint_color)))
         .push(text::p2_regular("Confirm duress PIN").color(color::GREY_3))
         .push(
             TextInput::new("Confirm duress PIN", &state.duress_pin_confirm)
@@ -359,7 +417,8 @@ fn duress_pin_step(state: &DuressEnrollState) -> Element<'_, ConnectAccountMessa
         );
 
     if !state.duress_pin_confirm.is_empty() && !confirm_valid {
-        col = col.push(text::caption("PINs do not match.").color(color::RED));
+        col =
+            col.push(text::caption("PINs do not match.").style(theme::text::adaptive(color::RED)));
     }
 
     card(col)
@@ -377,11 +436,16 @@ fn all_clear_step(state: &DuressEnrollState) -> Element<'_, ConnectAccountMessag
             ))
                 .color(color::GREY_3),
             )
+            .push(text::p2_regular("All-clear passphrase").color(color::GREY_3))
             .push(
                 TextInput::new("All-clear passphrase", &state.all_clear)
                     .on_input(|v| msg(DuressMessage::AllClearChanged(v)))
                     .secure(true)
                     .padding(15),
+            )
+            .push(
+                text::caption(format!("At least {MIN_ALL_CLEAR_LEN} characters."))
+                    .color(color::GREY_3),
             ),
     )
 }
@@ -399,11 +463,16 @@ fn crk_password_step(state: &DuressEnrollState) -> Element<'_, ConnectAccountMes
                 )
                 .color(color::GREY_3),
             )
+            .push(text::p2_regular("Duress recovery-kit password").color(color::GREY_3))
             .push(
                 TextInput::new("Duress recovery-kit password", &state.crk_password)
                     .on_input(|v| msg(DuressMessage::CrkPasswordChanged(v)))
                     .secure(true)
                     .padding(15),
+            )
+            .push(
+                text::caption(format!("At least {MIN_ALL_CLEAR_LEN} characters."))
+                    .color(color::GREY_3),
             ),
     )
 }
@@ -432,7 +501,11 @@ fn delay_step(state: &DuressEnrollState) -> Element<'_, ConnectAccountMessage> {
                 .color(color::GREY_3),
             )
             .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
-            .push(chips),
+            .push(chips)
+            .push(
+                text::caption(format!("Selected unlock delay: {}", state.delay.label()))
+                    .color(color::GREY_3),
+            ),
     )
 }
 
