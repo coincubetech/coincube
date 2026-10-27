@@ -13,11 +13,12 @@ use coincube_ui::{
         button, card, form,
         pagination::pagination_controls,
         quote_display::{self, Quote, QuoteDisplayProps},
+        tenshu::{segment, segmented, SegmentSize},
         text::*,
         transaction::{TransactionDirection, TransactionListItem},
     },
     icon, theme,
-    widget::{ColumnExt, Element},
+    widget::{action::Action, ColumnExt, Element, RowExt},
 };
 use iced::{
     widget::{scrollable, Column, Container, Row, Space},
@@ -34,6 +35,9 @@ use crate::app::view::message::{FeeratePriority, Message};
 use crate::app::view::FiatAmountConverter;
 use crate::export::ImportExportMessage;
 use crate::utils::{format_time_ago, format_timestamp, truncate_middle};
+
+const REFUND_BACK_ACTION_ID: &str = "liquid-refund-back";
+const REFUND_SUBMIT_ACTION_ID: &str = "liquid-refund-submit";
 
 /// Styled status cell for the payment detail card. For BTC onchain swap
 /// payments this routes through `classify_payment`, which gives us the full
@@ -153,22 +157,25 @@ pub fn liquid_transactions_view<'a>(
 
     // Keep the asset filter beside the title, as in the Liquid artboard.
     // The source state still owns selection, server filtering and paging.
-    let mut filter_row = Row::new().spacing(4);
-    for (label, filter) in [
-        ("All", AssetFilter::All),
-        ("L-BTC", AssetFilter::LbtcOnly),
-        ("USDt", AssetFilter::UsdtOnly),
-    ] {
-        filter_row = filter_row.push(
-            iced::widget::button(Container::new(text(label).size(P2_SIZE)).padding([6, 12]))
-                .on_press(Message::SetAssetFilter(filter))
-                .style(if asset_filter == filter {
-                    theme::button::primary
-                } else {
-                    theme::button::transparent_border
-                }),
-        );
-    }
+    let filter_row = segmented(
+        [
+            segment("liquid-transactions-filter-all", AssetFilter::All, "All"),
+            segment(
+                "liquid-transactions-filter-lbtc",
+                AssetFilter::LbtcOnly,
+                "L-BTC",
+            ),
+            segment(
+                "liquid-transactions-filter-usdt",
+                AssetFilter::UsdtOnly,
+                "USDt",
+            ),
+        ],
+        Some(asset_filter),
+        Message::FocusAction,
+    )
+    .size(SegmentSize::Compact)
+    .on_select(Message::SetAssetFilter);
     content = content.push(
         Row::new()
             .spacing(12)
@@ -189,22 +196,35 @@ pub fn liquid_transactions_view<'a>(
     // Put recoverable funds first so they are not buried after a paged list.
     if show_refundables {
         content = content.push(
-            Column::new()
-                .spacing(10)
-                .push(Container::new(h4_bold("Refundable Transactions")))
-                .push(refundables.iter().enumerate().fold(
-                    Column::new().spacing(10),
-                    |col, (i, refundable)| {
-                        col.push(refundable_row(
-                            i,
-                            refundable,
-                            in_flight_refunds.get(&refundable.swap_address),
-                            fiat_converter,
-                            bitcoin_unit,
-                            mask_amounts,
-                        ))
-                    },
-                )),
+            Container::new(
+                Column::new()
+                    .spacing(8)
+                    .push(Container::new(h4_bold("Refundable Transactions")))
+                    .push(refundables.iter().enumerate().fold(
+                        Column::new().spacing(0),
+                        |col, (i, refundable)| {
+                            col.push(refundable_row(
+                                i,
+                                refundable,
+                                in_flight_refunds.get(&refundable.swap_address),
+                                fiat_converter,
+                                bitcoin_unit,
+                                mask_amounts,
+                            ))
+                        },
+                    )),
+            )
+            .padding([10, 16])
+            .width(Length::Fill)
+            .style(|theme: &theme::Theme| iced::widget::container::Style {
+                background: Some(iced::Background::Color(theme.colors.shell.panel)),
+                border: iced::Border {
+                    color: theme.colors.shell.warn,
+                    width: 1.0,
+                    radius: 12.0.into(),
+                },
+                ..Default::default()
+            }),
         );
     }
 
@@ -459,15 +479,10 @@ fn refundable_row<'a>(
     let time_ago = format_time_ago(refundable.timestamp.into());
 
     // This is a recoverable amount, not money already received. Keep it
-    // unsigned and name the broadcast state.
-    let status = match in_flight {
-        Some(InFlightRefund {
-            refund_txid: Some(txid),
-            ..
-        }) => format!("Refund broadcast · {}", truncate_middle(txid, 6, 6)),
-        Some(_) => "Refund broadcasting…".to_string(),
-        None => "Refundable".to_string(),
-    };
+    // unsigned and report submission until the SDK returns a broadcast txid.
+    let status = in_flight
+        .map(|entry| refund_status(false, Some(entry)))
+        .unwrap_or_else(|| "Refundable".to_owned());
 
     let amount = if mask_amounts {
         "••••••".to_owned()
@@ -492,7 +507,7 @@ fn refundable_row<'a>(
     let row = Row::new()
         .spacing(12)
         .align_y(Alignment::Center)
-        .push(asset_network_logo::<Message>("lbtc", "liquid", 40.0))
+        .push(icon::warning_icon().style(theme::text::warning))
         .push(
             Column::new()
                 .spacing(4)
@@ -503,17 +518,15 @@ fn refundable_row<'a>(
                         .spacing(8)
                         .align_y(Alignment::Center)
                         .push(p2_regular(time_ago).style(theme::text::secondary))
-                        .push(status_badge(status, theme::text::warning)),
+                        .push(p2_regular(status).style(theme::text::warning)),
                 ),
         )
         .push(amount_column);
-    Container::new(
-        iced::widget::button(row.padding(10))
-            .on_press(Message::SelectRefundable(i))
-            .style(theme::button::transparent_border),
-    )
-    .style(theme::card::simple)
-    .into()
+    iced::widget::button(row.padding([10, 0]))
+        .width(Length::Fill)
+        .on_press(Message::SelectRefundable(i))
+        .style(theme::button::transparent)
+        .into()
 }
 
 pub fn transaction_detail_view<'a>(
@@ -809,38 +822,81 @@ pub fn transaction_detail_view<'a>(
         .into()
 }
 
-/// Low/Medium/High fee priority buttons. While an async fee fetch is in
-/// flight for a given priority, that button renders with a "…" label and is
-/// disabled, so the user can tell something is happening — before this, the
-/// buttons silently triggered a slow mempool fetch and the user was left
-/// wondering if they had actually been clicked.
-fn fee_priority_buttons(pending: Option<FeeratePriority>) -> Element<'static, Message> {
-    fn one(
-        label: &'static str,
-        priority: FeeratePriority,
-        width: f32,
-        pending: Option<FeeratePriority>,
-    ) -> Element<'static, Message> {
-        if pending == Some(priority) {
-            // Pending: show "…" and no on_press so the button is visually
-            // disabled while the async fee fetch resolves.
-            button::secondary(None, "…")
-                .width(Length::Fixed(width))
-                .into()
-        } else {
-            button::secondary(None, label)
-                .on_press(Message::RefundFeeratePrioritySelected(priority))
-                .width(Length::Fixed(width))
-                .into()
-        }
-    }
+/// The selected priority remains visible while its fee estimate loads. Each
+/// option is keyboard reachable and arrow keys move between enabled options.
+fn fee_priority_buttons(
+    pending: Option<FeeratePriority>,
+    refunding: bool,
+) -> Element<'static, Message> {
+    segmented(
+        [
+            segment(
+                "liquid-refund-fee-low",
+                FeeratePriority::Low,
+                if pending == Some(FeeratePriority::Low) {
+                    "Low…"
+                } else {
+                    "Low"
+                },
+            )
+            .enabled(pending != Some(FeeratePriority::Low)),
+            segment(
+                "liquid-refund-fee-medium",
+                FeeratePriority::Medium,
+                if pending == Some(FeeratePriority::Medium) {
+                    "Medium…"
+                } else {
+                    "Medium"
+                },
+            )
+            .enabled(pending != Some(FeeratePriority::Medium)),
+            segment(
+                "liquid-refund-fee-high",
+                FeeratePriority::High,
+                if pending == Some(FeeratePriority::High) {
+                    "High…"
+                } else {
+                    "High"
+                },
+            )
+            .enabled(pending != Some(FeeratePriority::High)),
+        ],
+        pending,
+        Message::FocusAction,
+    )
+    .size(SegmentSize::Compact)
+    .on_select_maybe((!refunding).then_some(Message::RefundFeeratePrioritySelected))
+    .into()
+}
 
-    Row::new()
-        .spacing(5)
-        .push(one("Low", FeeratePriority::Low, 80.0, pending))
-        .push(one("Medium", FeeratePriority::Medium, 100.0, pending))
-        .push(one("High", FeeratePriority::High, 80.0, pending))
-        .into()
+fn refund_status(refunding: bool, in_flight: Option<&InFlightRefund>) -> String {
+    match in_flight {
+        Some(InFlightRefund {
+            refund_txid: Some(txid),
+            ..
+        }) => format!("Refund broadcast · {}", truncate_middle(txid, 6, 6)),
+        Some(_) => "Submitting refund…".to_owned(),
+        None if refunding => "Submitting refund…".to_owned(),
+        None => "This swap can be refunded".to_owned(),
+    }
+}
+
+fn refund_can_submit(
+    refund_address: &form::Value<String>,
+    refund_feerate: &form::Value<String>,
+    refunding: bool,
+    in_flight: bool,
+) -> bool {
+    !refunding
+        && !in_flight
+        && refund_address.valid
+        && !refund_address.value.trim().is_empty()
+        && refund_feerate.valid
+        && refund_feerate
+            .value
+            .trim()
+            .parse::<u32>()
+            .is_ok_and(|rate| rate > 0)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -871,28 +927,26 @@ pub fn refundable_detail_view<'a>(
     let date_text =
         format_timestamp(refundable.timestamp as u64).unwrap_or_else(|| "Unknown".to_string());
 
-    let can_refund = refund_address.valid
-        && !refund_address.value.trim().is_empty()
-        && refund_feerate.valid
-        && !refund_feerate.value.trim().is_empty()
-        && refund_feerate.value.parse::<u32>().is_ok()
-        && in_flight.is_none();
+    let can_refund = pending_fee_priority.is_none()
+        && refund_can_submit(
+            refund_address,
+            refund_feerate,
+            refunding,
+            in_flight.is_some(),
+        );
 
-    let header_status = match in_flight {
-        Some(InFlightRefund {
-            refund_txid: Some(txid),
-            ..
-        }) => {
-            format!("Refund broadcast · {}", truncate_middle(txid, 6, 6))
-        }
-        Some(_) => "Refund broadcasting…".to_string(),
-        None => "This swap can be refunded".to_string(),
-    };
+    let header_status = refund_status(refunding, in_flight);
 
     Column::new()
         .spacing(20)
-        .push(detail_back_button())
-        .push(Container::new(h3("Refundable Swap")).width(Length::Fill))
+        .push(refund_back_button())
+        .push(
+            Row::new()
+                .spacing(12)
+                .align_y(Alignment::Center)
+                .push(icon::warning_icon().style(theme::text::warning))
+                .push(h3("Refundable Swap")),
+        )
         .push(
             Column::new()
                 .push(p1_regular(header_status).style(theme::text::warning))
@@ -993,7 +1047,7 @@ pub fn refundable_detail_view<'a>(
                 )
                 .spacing(15),
         ))
-        .push_maybe((in_flight.is_none() && !refunding).then(|| {
+        .push_maybe((in_flight.is_none() || refunding).then(|| {
             Column::new()
                 .spacing(15)
                 .push(Container::new(h4_bold("Refund Details")).width(Length::Fill))
@@ -1004,55 +1058,92 @@ pub fn refundable_detail_view<'a>(
                 .push(
                     Column::new()
                         .spacing(10)
-                        .push(text("Bitcoin Address").bold())
+                        .push(text("Bitcoin Address").size(P2_SIZE).bold())
                         .push(
-                            form::Form::new(
-                                "Enter Bitcoin address for refund",
-                                refund_address,
-                                Message::RefundAddressEdited,
-                            )
-                            .size(14)
-                            .padding(12),
-                        )
-                        .push_maybe(has_vault.then(|| {
-                            Row::new().spacing(8).push(
-                                button::transparent_border(None, "Use Vault address")
-                                    .on_press(Message::GenerateVaultRefundAddress)
-                                    .padding([6, 14]),
-                            )
-                        })),
+                            Row::new()
+                                .spacing(8)
+                                .align_y(Alignment::Center)
+                                .push(
+                                    if refunding {
+                                        form::Form::new_disabled(
+                                            "Enter Bitcoin address for refund",
+                                            refund_address,
+                                        )
+                                    } else {
+                                        form::Form::new(
+                                            "Enter Bitcoin address for refund",
+                                            refund_address,
+                                            Message::RefundAddressEdited,
+                                        )
+                                    }
+                                    .size(14)
+                                    .padding(12),
+                                )
+                                .push_maybe(has_vault.then(|| {
+                                    button::transparent_border(None, "Use Vault address")
+                                        .on_press_maybe(
+                                            (!refunding)
+                                                .then_some(Message::GenerateVaultRefundAddress),
+                                        )
+                                        .padding([6, 14])
+                                })),
+                        ),
                 )
                 .push(
                     Column::new()
                         .spacing(10)
-                        .push(text("Fee Rate (sat/vB)").bold())
+                        .push(text("Fee Rate (sat/vB)").size(P2_SIZE).bold())
                         .push(
                             Row::new()
                                 .spacing(10)
                                 .push(
-                                    form::Form::new_amount_sats(
-                                        "Enter fee rate",
-                                        refund_feerate,
-                                        Message::RefundFeerateEdited,
-                                    )
+                                    if refunding {
+                                        form::Form::new_disabled("Enter fee rate", refund_feerate)
+                                    } else {
+                                        form::Form::new_amount_sats(
+                                            "Enter fee rate",
+                                            refund_feerate,
+                                            Message::RefundFeerateEdited,
+                                        )
+                                    }
                                     .size(14)
                                     .padding(12),
                                 )
-                                .push(fee_priority_buttons(pending_fee_priority)),
+                                .push(fee_priority_buttons(pending_fee_priority, refunding)),
                         ),
                 )
                 .push(
                     Row::new().spacing(10).push(
-                        button::primary(None, "Refund")
-                            .on_press_maybe(can_refund.then_some(Message::SubmitRefund))
-                            .width(Length::Fill),
+                        button::primary_action(
+                            REFUND_SUBMIT_ACTION_ID,
+                            None,
+                            if refunding { "Refund…" } else { "Refund" },
+                            Message::FocusAction,
+                        )
+                        .on_press_maybe(can_refund.then_some(Message::SubmitRefund))
+                        .width(Length::Shrink),
                     ),
                 )
-                .push_maybe((!can_refund).then(|| {
-                    p2_regular("Enter a valid Bitcoin address and fee rate to enable Refund.")
-                        .style(theme::text::secondary)
-                }))
+                .push_maybe(
+                    (pending_fee_priority.is_some() && !refunding)
+                        .then(|| p2_regular("Fetching fee rate…").style(theme::text::secondary)),
+                )
+                .push_maybe(
+                    (!can_refund && !refunding && pending_fee_priority.is_none()).then(|| {
+                        p2_regular("Enter a valid Bitcoin address and fee rate to enable Refund.")
+                            .style(theme::text::secondary)
+                    }),
+                )
         }))
+        .into()
+}
+
+fn refund_back_button() -> Element<'static, Message> {
+    Action::new(REFUND_BACK_ACTION_ID, text("‹ Back"), Message::FocusAction)
+        .width(Length::Shrink)
+        .padding(5)
+        .on_press(Message::Close)
+        .style(theme::button::link)
         .into()
 }
 
@@ -1066,7 +1157,43 @@ fn detail_back_button() -> Element<'static, Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::view::shared::landing::capture;
     use crate::app::wallets::DomainPaymentDirection;
+    use coincube_ui::component::amount::BitcoinDisplayUnit;
+    use iced::advanced::widget::Id;
+    use iced::keyboard::key::Named;
+    use std::collections::HashSet;
+    use std::time::Instant;
+
+    fn synthetic_refund_list<'a>(
+        refund: &'a DomainRefundableSwap,
+        in_flight: &'a HashMap<String, InFlightRefund>,
+        balance: &'a Amount,
+        quote: &'a Quote,
+        image: &'a image::Handle,
+        swap_ids: &'a HashSet<String>,
+        mask_amounts: bool,
+    ) -> Element<'a, Message> {
+        liquid_transactions_view(
+            &[],
+            std::slice::from_ref(refund),
+            in_flight,
+            balance,
+            None,
+            false,
+            BitcoinDisplayUnit::Sats,
+            "synthetic-usdt",
+            AssetFilter::All,
+            false,
+            quote,
+            image,
+            0,
+            true,
+            false,
+            swap_ids,
+            mask_amounts,
+        )
+    }
 
     fn payment(status: DomainPaymentStatus, details: DomainPaymentDetails) -> DomainPayment {
         DomainPayment {
@@ -1205,5 +1332,250 @@ mod tests {
     fn zero_reported_lbtc_fee_does_not_claim_usdt_fee_payment() {
         assert_eq!(usdt_fee_caption(0), "No L-BTC fee reported");
         assert_eq!(usdt_fee_caption(42), "Fees (L-BTC)");
+    }
+
+    #[test]
+    fn refund_status_distinguishes_submission_and_broadcast() {
+        assert_eq!(refund_status(false, None), "This swap can be refunded");
+        assert_eq!(refund_status(true, None), "Submitting refund…");
+        let pending = InFlightRefund {
+            refund_txid: None,
+            submitted_at: Instant::now(),
+        };
+        assert_eq!(refund_status(true, Some(&pending)), "Submitting refund…");
+        assert_eq!(refund_status(false, Some(&pending)), "Submitting refund…");
+        let broadcast = InFlightRefund {
+            refund_txid: Some("synthetic-refund-txid".to_owned()),
+            submitted_at: Instant::now(),
+        };
+        assert!(refund_status(false, Some(&broadcast)).starts_with("Refund broadcast · "));
+    }
+
+    #[test]
+    fn refund_button_requires_valid_address_and_positive_fee() {
+        let mut address = form::Value::default();
+        let mut fee = form::Value::default();
+        address.value = "bc1qsyntheticrefund".to_owned();
+        fee.value = "2".to_owned();
+        assert!(refund_can_submit(&address, &fee, false, false));
+        assert!(!refund_can_submit(&address, &fee, true, false));
+        assert!(!refund_can_submit(&address, &fee, false, true));
+        address.valid = false;
+        assert!(!refund_can_submit(&address, &fee, false, false));
+        address.valid = true;
+        fee.value = "0".to_owned();
+        assert!(!refund_can_submit(&address, &fee, false, false));
+        fee.value = "not a fee".to_owned();
+        assert!(!refund_can_submit(&address, &fee, false, false));
+    }
+
+    #[test]
+    fn liquid_refund_capture_matrix() {
+        // The production presenters are mounted by the shared software
+        // renderer. R06A_CAPTURE_DIR optionally writes content-only PNGs.
+        let refund = DomainRefundableSwap {
+            swap_address: "bc1qsyntheticrefundaddressonly".to_owned(),
+            timestamp: 1_728_000_000,
+            amount_sat: 24_869,
+        };
+        let amount = Amount::from_sat(refund.amount_sat);
+        let exact_amount = amount.to_formatted_string_with_unit(BitcoinDisplayUnit::Sats);
+        let balance = Amount::ZERO;
+        let quote = quote_display::random_quote("empty-wallet");
+        let image = quote_display::image_handle_for_context("empty-wallet");
+        let swap_ids = HashSet::new();
+        let idle = HashMap::new();
+        let submitting_entry = InFlightRefund {
+            refund_txid: None,
+            submitted_at: Instant::now(),
+        };
+        let submitting = HashMap::from([(refund.swap_address.clone(), submitting_entry.clone())]);
+        let broadcast_entry = InFlightRefund {
+            refund_txid: Some("synthetic-refund-txid-1234567890".to_owned()),
+            submitted_at: Instant::now(),
+        };
+        let broadcast = HashMap::from([(refund.swap_address.clone(), broadcast_entry.clone())]);
+        let address = form::Value {
+            value: "bc1qsyntheticdestinationonly".to_owned(),
+            warning: None,
+            valid: true,
+        };
+        let fee = form::Value {
+            value: "2".to_owned(),
+            warning: None,
+            valid: true,
+        };
+        let invalid_fee = form::Value {
+            value: "0".to_owned(),
+            warning: None,
+            valid: true,
+        };
+        macro_rules! detail {
+            ($fee:expr, $refunding:expr, $in_flight:expr, $mask_amounts:expr) => {
+                refundable_detail_view(
+                    &refund,
+                    None,
+                    BitcoinDisplayUnit::Sats,
+                    &address,
+                    $fee,
+                    $refunding,
+                    None,
+                    $in_flight,
+                    true,
+                    $mask_amounts,
+                )
+            };
+        }
+
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            for outer in [(1024, 768), (1440, 900)] {
+                let list = capture::inspect(
+                    "liquid-refund-list",
+                    synthetic_refund_list(
+                        &refund, &idle, &balance, &quote, &image, &swap_ids, false,
+                    ),
+                    outer,
+                    appearance,
+                    theme,
+                );
+                assert!(list.contains("Refundable Transactions"));
+                assert!(list.contains(&exact_amount));
+                assert!(list.has_focus(Id::new("liquid-transactions-filter-usdt")));
+
+                let hidden = capture::inspect(
+                    "liquid-refund-list-hidden",
+                    synthetic_refund_list(
+                        &refund, &idle, &balance, &quote, &image, &swap_ids, true,
+                    ),
+                    outer,
+                    appearance,
+                    theme,
+                );
+                assert!(hidden.contains("••••••"));
+                assert!(!hidden.contains(&exact_amount));
+
+                let idle_detail = capture::inspect(
+                    "liquid-refund-detail-idle",
+                    detail!(&fee, false, None, true),
+                    outer,
+                    appearance,
+                    theme,
+                );
+                assert!(idle_detail.contains("This swap can be refunded"));
+                assert!(idle_detail.contains(&format!("Refund amount: {exact_amount}")));
+                assert!(idle_detail.contains("••••••"));
+                assert!(idle_detail.has_focus(Id::new(REFUND_BACK_ACTION_ID)));
+                assert!(idle_detail.has_focus(Id::new(REFUND_SUBMIT_ACTION_ID)));
+                assert!(idle_detail.has_focus(Id::new("liquid-refund-fee-high")));
+
+                let pending_detail = capture::inspect(
+                    "liquid-refund-detail-submitting",
+                    detail!(&fee, true, Some(&submitting_entry), false),
+                    outer,
+                    appearance,
+                    theme,
+                );
+                assert!(pending_detail.contains("Submitting refund…"));
+                assert!(pending_detail.contains("Refund Details"));
+                assert!(pending_detail.contains("Refund…"));
+                assert!(!pending_detail.contains("Refund broadcast"));
+                assert!(!pending_detail.has_focus(Id::new(REFUND_SUBMIT_ACTION_ID)));
+
+                let broadcast_detail = capture::inspect(
+                    "liquid-refund-detail-broadcast",
+                    detail!(&fee, false, Some(&broadcast_entry), false),
+                    outer,
+                    appearance,
+                    theme,
+                );
+                assert!(broadcast_detail.contains("Refund broadcast"));
+                assert!(!broadcast_detail.contains("Refund Details"));
+
+                let pending_list = capture::inspect(
+                    "liquid-refund-list-submitting",
+                    synthetic_refund_list(
+                        &refund,
+                        &submitting,
+                        &balance,
+                        &quote,
+                        &image,
+                        &swap_ids,
+                        false,
+                    ),
+                    outer,
+                    appearance,
+                    theme,
+                );
+                assert!(pending_list.contains("Submitting refund…"));
+                let broadcast_list = capture::inspect(
+                    "liquid-refund-list-broadcast",
+                    synthetic_refund_list(
+                        &refund, &broadcast, &balance, &quote, &image, &swap_ids, false,
+                    ),
+                    outer,
+                    appearance,
+                    theme,
+                );
+                assert!(broadcast_list.contains("Refund broadcast"));
+
+                let disabled = capture::inspect(
+                    "liquid-refund-detail-invalid-fee",
+                    detail!(&invalid_fee, false, None, false),
+                    outer,
+                    appearance,
+                    theme,
+                );
+                assert!(!disabled.has_focus(Id::new(REFUND_SUBMIT_ACTION_ID)));
+                assert!(disabled.contains("Enter a valid Bitcoin address and fee rate"));
+
+                for key in [Named::Enter, Named::Space] {
+                    let filter = capture::activate_with_key(
+                        synthetic_refund_list(
+                            &refund, &idle, &balance, &quote, &image, &swap_ids, false,
+                        ),
+                        Id::new("liquid-transactions-filter-usdt"),
+                        outer,
+                        false,
+                        key,
+                    );
+                    assert!(filter.iter().any(|message| matches!(
+                        message,
+                        Message::SetAssetFilter(AssetFilter::UsdtOnly)
+                    )));
+                    let priority = capture::activate_with_key(
+                        detail!(&fee, false, None, false),
+                        Id::new("liquid-refund-fee-high"),
+                        outer,
+                        false,
+                        key,
+                    );
+                    assert!(priority.iter().any(|message| matches!(
+                        message,
+                        Message::RefundFeeratePrioritySelected(FeeratePriority::High)
+                    )));
+                    let back = capture::activate_with_key(
+                        detail!(&fee, false, None, false),
+                        Id::new(REFUND_BACK_ACTION_ID),
+                        outer,
+                        false,
+                        key,
+                    );
+                    assert!(back.iter().any(|message| matches!(message, Message::Close)));
+                    let submit = capture::activate_with_key(
+                        detail!(&fee, false, None, false),
+                        Id::new(REFUND_SUBMIT_ACTION_ID),
+                        outer,
+                        false,
+                        key,
+                    );
+                    assert!(submit
+                        .iter()
+                        .any(|message| matches!(message, Message::SubmitRefund)));
+                }
+            }
+        }
     }
 }
