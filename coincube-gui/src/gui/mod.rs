@@ -1337,6 +1337,7 @@ impl GUI {
         self.focus = Some(pane_id);
         self.preferences_sheet = None;
         self.connect_sheet = None;
+        self.publish_preferences_sheet();
         crate::app::session::close();
         crate::app::claim_intent::clear();
         crate::app::split_intent::clear();
@@ -1469,6 +1470,22 @@ impl GUI {
         }
     }
 
+    /// Mark the Launcher under an open App preferences sheet so its top-bar
+    /// entry draws as current; every other Launcher draws it at rest.
+    fn publish_preferences_sheet(&mut self) {
+        let origin = self
+            .preferences_sheet
+            .as_ref()
+            .map(|sheet| (sheet.origin.pane, sheet.origin.tab_id));
+        for (pane_id, pane) in self.panes.iter_mut() {
+            for tab in &mut pane.tabs {
+                if let tab::State::Home(home) = &mut tab.state {
+                    home.app_preferences_open = origin == Some((*pane_id, tab.id));
+                }
+            }
+        }
+    }
+
     fn publish_balance_privacy(&mut self) {
         let chrome = Some(Self::privacy_chrome_for(&self.preferences));
         for (_, pane) in self.panes.iter_mut() {
@@ -1552,6 +1569,7 @@ impl GUI {
         let Some(sheet) = self.preferences_sheet.take() else {
             return Task::none();
         };
+        self.publish_preferences_sheet();
         if self.overlay_origin_is_current(&sheet.origin) {
             if let Some(focus) = sheet.origin.focus {
                 return iced_runtime::task::widget(
@@ -1566,6 +1584,12 @@ impl GUI {
         let Some(sheet) = self.connect_sheet.take() else {
             return Task::none();
         };
+        if matches!(
+            sheet.page,
+            ConnectSheetPage::Sections(ConnectSheetSection::Duress)
+        ) {
+            self.scrub_connect_sheet_duress(&sheet.origin);
+        }
         if self.overlay_origin_is_current(&sheet.origin) {
             if let Some(focus) = self.connect_return_focus(&sheet.origin) {
                 return iced_runtime::task::widget(
@@ -1612,9 +1636,16 @@ impl GUI {
         let Some(origin) = self.overlay_origin(focus) else {
             return Task::none();
         };
-        if self.connect_panel(&origin).is_none() {
+        let Some(account) = self.connect_panel(&origin) else {
             return Task::none();
-        }
+        };
+        let section = if section == ConnectSheetSection::Duress
+            && !(account.is_authenticated() && account.show_duress())
+        {
+            ConnectSheetSection::Account
+        } else {
+            section
+        };
         let initialize = self.connect_panel(&origin).is_some_and(|account| {
             matches!(
                 &account.step,
@@ -1622,6 +1653,7 @@ impl GUI {
             )
         });
         self.preferences_sheet = None;
+        self.publish_preferences_sheet();
         self.connect_sheet = Some(ConnectSheet {
             origin: origin.clone(),
             page: ConnectSheetPage::Sections(section),
@@ -1675,7 +1707,14 @@ impl GUI {
             return Task::none();
         };
         if !self.overlay_origin_is_current(&sheet.origin) {
-            self.connect_sheet = None;
+            if let Some(sheet) = self.connect_sheet.take() {
+                if matches!(
+                    sheet.page,
+                    ConnectSheetPage::Sections(ConnectSheetSection::Duress)
+                ) {
+                    self.scrub_connect_sheet_duress(&sheet.origin);
+                }
+            }
             return Task::none();
         }
         match message {
@@ -1685,12 +1724,35 @@ impl GUI {
             ConnectSheetMessage::Close => self.close_connect_sheet(),
             ConnectSheetMessage::SelectSection(section) => {
                 let origin = sheet.origin.clone();
+                let was_duress = matches!(
+                    sheet.page,
+                    ConnectSheetPage::Sections(ConnectSheetSection::Duress)
+                );
+                let section = if section == ConnectSheetSection::Duress
+                    && !self
+                        .connect_panel(&origin)
+                        .is_some_and(|account| account.is_authenticated() && account.show_duress())
+                {
+                    ConnectSheetSection::Account
+                } else {
+                    section
+                };
+                if was_duress && section != ConnectSheetSection::Duress {
+                    self.scrub_connect_sheet_duress(&origin);
+                }
                 if let Some(sheet) = &mut self.connect_sheet {
                     sheet.page = ConnectSheetPage::Sections(section);
                 }
                 self.load_connect_section(&origin, section)
             }
             ConnectSheetMessage::OpenAuthentication { create_account } => {
+                if matches!(
+                    sheet.page,
+                    ConnectSheetPage::Sections(ConnectSheetSection::Duress)
+                ) {
+                    let origin = sheet.origin.clone();
+                    self.scrub_connect_sheet_duress(&origin);
+                }
                 if let Some(sheet) = &mut self.connect_sheet {
                     sheet.page = ConnectSheetPage::Authentication;
                 }
@@ -1719,6 +1781,14 @@ impl GUI {
                         | crate::app::view::ConnectAccountMessage::ComparePlans(_)
                         | crate::app::view::ConnectAccountMessage::RenewCurrentPlan
                 );
+                if plan_navigation
+                    && matches!(
+                        sheet.page,
+                        ConnectSheetPage::Sections(ConnectSheetSection::Duress)
+                    )
+                {
+                    self.scrub_connect_sheet_duress(&origin);
+                }
                 let inner = match origin.source {
                     tab::PreferencesSource::Home => {
                         tab::Message::Launch(home::Message::View(if plan_navigation {
@@ -1745,6 +1815,60 @@ impl GUI {
         }
     }
 
+    fn scrub_connect_sheet_duress(&mut self, origin: &OverlayOrigin) {
+        let Some(tab) = self
+            .panes
+            .get_mut(origin.pane)
+            .and_then(|pane| pane.tabs.iter_mut().find(|tab| tab.id == origin.tab_id))
+        else {
+            return;
+        };
+        match &mut tab.state {
+            tab::State::Home(home) => home.connect_account.scrub_duress_dialogs(),
+            tab::State::App(app) => app.connect_sheet_account_mut().scrub_duress_dialogs(),
+            _ => {}
+        }
+    }
+
+    /// Feature, plan, and auth completions arrive through ordinary Pane
+    /// messages as well as sheet actions. Reconcile the retained sheet route
+    /// after every dispatch so a revoked Duress surface cannot reappear if a
+    /// later response turns its gate back on.
+    fn reconcile_connect_sheet_duress(&mut self) {
+        let Some(sheet) = self.connect_sheet.as_ref() else {
+            return;
+        };
+        if !matches!(
+            sheet.page,
+            ConnectSheetPage::Sections(ConnectSheetSection::Duress)
+        ) {
+            return;
+        }
+        let origin = sheet.origin.clone();
+        if self
+            .connect_panel(&origin)
+            .is_some_and(|account| account.is_authenticated() && account.show_duress())
+        {
+            return;
+        }
+        if let Some(sheet) = &mut self.connect_sheet {
+            sheet.page = ConnectSheetPage::Sections(ConnectSheetSection::Account);
+        }
+        self.scrub_connect_sheet_duress(&origin);
+        if let Some(tab) = self
+            .panes
+            .get_mut(origin.pane)
+            .and_then(|pane| pane.tabs.iter_mut().find(|tab| tab.id == origin.tab_id))
+        {
+            let account = match &mut tab.state {
+                tab::State::Home(home) => &mut home.connect_account,
+                tab::State::App(app) => app.connect_sheet_account_mut(),
+                _ => return,
+            };
+            account.active_sub = crate::app::menu::ConnectSubMenu::Overview;
+        }
+    }
+
     fn load_connect_section(
         &mut self,
         origin: &OverlayOrigin,
@@ -1764,6 +1888,13 @@ impl GUI {
                 tab::State::App(app) => (app.connect_sheet_account_mut(), true),
                 _ => return Task::none(),
             };
+            let section = if section == ConnectSheetSection::Duress
+                && !(account.is_authenticated() && account.show_duress())
+            {
+                ConnectSheetSection::Account
+            } else {
+                section
+            };
             account.active_sub = match section {
                 ConnectSheetSection::Account | ConnectSheetSection::RecoveryServices => {
                     ConnectSubMenu::Overview
@@ -1771,6 +1902,7 @@ impl GUI {
                 ConnectSheetSection::PlanBilling => ConnectSubMenu::PlanBilling,
                 ConnectSheetSection::Contacts => ConnectSubMenu::Contacts,
                 ConnectSheetSection::DevicesSecurity => ConnectSubMenu::Security,
+                ConnectSheetSection::Duress => ConnectSubMenu::Duress,
             };
             if !account.is_authenticated() {
                 return Task::none();
@@ -1784,6 +1916,11 @@ impl GUI {
                 ConnectSheetSection::DevicesSecurity => {
                     load_security_data(&account.client, account.session_generation())
                 }
+                ConnectSheetSection::Duress => Task::batch([
+                    account.reload_duress_contacts(),
+                    account.reload_duress_cubes(),
+                    account.reload_duress_state(),
+                ]),
             };
             (task, app)
         };
@@ -1920,13 +2057,21 @@ impl GUI {
             .is_some_and(|sheet| !self.overlay_origin_is_current(&sheet.origin))
         {
             self.preferences_sheet = None;
+            self.publish_preferences_sheet();
         }
         if self
             .connect_sheet
             .as_ref()
             .is_some_and(|sheet| !self.overlay_origin_is_current(&sheet.origin))
         {
-            self.connect_sheet = None;
+            if let Some(sheet) = self.connect_sheet.take() {
+                if matches!(
+                    sheet.page,
+                    ConnectSheetPage::Sections(ConnectSheetSection::Duress)
+                ) {
+                    self.scrub_connect_sheet_duress(&sheet.origin);
+                }
+            }
         }
         // A completed classifier is an emergency even if Back closed its
         // PinEntry or a different Cube reopened at the same tab id. The proof
@@ -2360,6 +2505,7 @@ impl GUI {
         // Dispatch may return early (notably for in-App account messages).
         // Keep those returns inside the helper so invalidation tasks always run.
         let routed = self.update_message(message);
+        self.reconcile_connect_sheet_duress();
         if let Some((pane_id, tab_id)) = unlock_duress_target {
             self.seal_verified_seed_export_duress_surface(pane_id, tab_id);
         }
@@ -2613,11 +2759,16 @@ impl GUI {
                     };
                 }
                 log::debug!("Tab pressed!");
-                if shift {
+                let focus = if shift {
                     action::focus_previous_visible(crate::app::view::nav::shell::MIDDLE_SCROLL_ID)
                 } else {
                     action::focus_next_visible(crate::app::view::nav::shell::MIDDLE_SCROLL_ID)
-                }
+                };
+                // The Border Wallet grid has its own clipped viewport. Revealing
+                // focus there is a no-op for every other screen.
+                focus.chain(action::reveal_focused(
+                    crate::installer::step::descriptor::editor::border_wallet_wizard::BORDER_WALLET_GRID_SCROLL_ID,
+                ))
             }
             Message::KeyPressed(Key::Escape) => {
                 if self.preferences_sheet.is_some() {
@@ -2939,6 +3090,7 @@ impl GUI {
                             crate::app::menu::ConnectSubMenu::Overview
                                 | crate::app::menu::ConnectSubMenu::PlanBilling
                                 | crate::app::menu::ConnectSubMenu::Security
+                                | crate::app::menu::ConnectSubMenu::Duress
                                 | crate::app::menu::ConnectSubMenu::Contacts
                         )
                     )))
@@ -2970,7 +3122,7 @@ impl GUI {
                         ConnectSheetSection::DevicesSecurity
                     }
                     crate::app::menu::ConnectSubMenu::Contacts => ConnectSheetSection::Contacts,
-                    crate::app::menu::ConnectSubMenu::Duress => unreachable!(),
+                    crate::app::menu::ConnectSubMenu::Duress => ConnectSheetSection::Duress,
                 };
                 let signed_out_launcher = section == ConnectSheetSection::Account
                     && self.overlay_origin(None).is_some_and(|origin| {
@@ -3046,6 +3198,7 @@ impl GUI {
                     page: PreferencesPageState::default(),
                 });
                 self.connect_sheet = None;
+                self.publish_preferences_sheet();
                 iced_runtime::task::widget(iced::advanced::widget::operation::focusable::focus(
                     iced::advanced::widget::Id::new("tenshu.preferences.close"),
                 ))
@@ -4113,7 +4266,13 @@ impl GUI {
             if self.overlay_origin_is_current(&sheet.origin) {
                 let foreground = preferences_view::view(&sheet.page, self.preferences_view_model())
                     .map(Message::PreferencesSheet);
-                return compose_overlay(background, foreground, false);
+                // P-AppPrefs keeps the Launcher's top bar above the sheet;
+                // over an open Cube (P-AppPrefs-InCube) the sheet covers it.
+                return compose_overlay(
+                    background,
+                    foreground,
+                    matches!(sheet.origin.source, tab::PreferencesSource::Home),
+                );
             }
         }
         if let Some(sheet) = &self.connect_sheet {
@@ -4316,7 +4475,8 @@ pub fn compose_overlay<'a, M: 'a>(
     .width(iced::Length::Fill)
     .height(iced::Length::Fill)
     .center_x(iced::Length::Fill)
-    .padding(if preserve_top_bar { 16 } else { 24 })
+    // `.sheet`: 28px above and below, over the stage or the whole window.
+    .padding([28, 24])
     .style(
         |theme: &coincube_ui::theme::Theme| iced::widget::container::Style {
             background: Some(iced::Background::Color(theme.colors.shell.shadow)),
@@ -4420,6 +4580,49 @@ mod app_preferences_sheet_tests {
             connect_sheet: None,
             preferences: PreferencesOwner::new(GlobalSettings::path(root), &receipt),
         }
+    }
+
+    /// P-AppPrefs draws the Launcher's App preferences entry as current
+    /// (`.tbtn.on`) only while the sheet is open over that Launcher.
+    #[test]
+    fn launcher_entry_shows_open_preferences_sheet() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path = std::env::temp_dir().join(format!(
+            "tenshu-preferences-entry-state-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        let root = CoincubeDirectory::new(path.clone());
+        GlobalSettings::load_or_initialize_preferences(&root).unwrap();
+        let mut gui = launcher_gui(&root);
+        let pane_id = gui.focus.unwrap();
+        let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
+        let open = |gui: &GUI| match &gui.panes.get(pane_id).unwrap().tabs[0].state {
+            tab::State::Home(home) => home.app_preferences_open,
+            _ => panic!("launcher tab"),
+        };
+        assert!(!open(&gui));
+        let _ = gui.update(Message::Pane(
+            pane_id,
+            pane::Message::Tab(
+                tab_id,
+                Box::new(tab::Message::OpenAppPreferences(
+                    tab::PreferencesSource::Home,
+                )),
+            ),
+        ));
+        assert!(gui.preferences_sheet.is_some());
+        assert!(open(&gui));
+        let _ = gui.update(Message::PreferencesSheet(
+            preferences_view::Message::Action(preferences_view::Action::Close),
+        ));
+        assert!(gui.preferences_sheet.is_none());
+        assert!(!open(&gui));
+        let _ = std::fs::remove_dir_all(path);
     }
 
     #[test]

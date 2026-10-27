@@ -1,8 +1,12 @@
-use iced::{Alignment, Length};
+use iced::{
+    widget::{rule, text::Wrapping},
+    Alignment, Length,
+};
 
+use coincube_core::descriptors::PathSpendInfo;
 use coincube_ui::component::amount::BitcoinDisplayUnit;
 use coincube_ui::{
-    component::{amount::*, badge, button, card, text::*},
+    component::{amount::*, button, card, text::*},
     icon::{self, receipt_icon},
     theme,
     widget::{Button, Column, ColumnExt, Container, Element, Row},
@@ -17,6 +21,12 @@ use crate::{
 };
 
 use super::super::message::*;
+
+const PROPOSAL_SHARE: u16 = 3;
+const AMOUNT_SHARE: u16 = 4;
+const RECIPIENTS_SHARE: u16 = 2;
+const SIGNATURES_SHARE: u16 = 3;
+const STATUS_SHARE: u16 = 4;
 
 pub fn import_psbt_success_view<'a>() -> Element<'a, Message> {
     Column::new()
@@ -47,7 +57,7 @@ pub fn psbts_view(
                         .on_press(Message::ImportPsbt),
                 )
                 .push(
-                    button::secondary(Some(icon::plus_icon()), "Create PSBT")
+                    button::primary(Some(icon::plus_icon()), "Create PSBT")
                         .on_press(Message::Menu(Menu::Vault(VaultSubMenu::Send))),
                 ),
         )
@@ -58,19 +68,66 @@ pub fn psbts_view(
                 "Create a proposal or import a PSBT from another signer. Imported signatures are checked before they can be broadcast.",
             )
         }))
-        .push(
-            Column::new().spacing(10).push(
-                spend_txs
-                    .iter()
-                    .enumerate()
-                    .fold(Column::new().spacing(10), |col, (i, tx)| {
-                        col.push(spend_tx_list_view(i, tx, bitcoin_unit, mask_amounts))
-                    }),
-            ),
-        )
+        .push((!spend_txs.is_empty()).then(|| {
+            Container::new(
+                Column::new().push(table_header()).push(
+                    spend_txs
+                        .iter()
+                        .enumerate()
+                        .fold(Column::new(), |col, (i, tx)| {
+                            col.push(rule::horizontal(1))
+                                .push(spend_tx_list_view(i, tx, bitcoin_unit, mask_amounts))
+                        }),
+                ),
+            )
+            .style(theme::card::simple)
+            .width(Length::Fill)
+        }))
         .align_x(Alignment::Center)
         .spacing(25)
         .into()
+}
+
+fn table_header<'a>() -> Container<'a, Message> {
+    Container::new(
+        Row::new()
+            .align_y(Alignment::Center)
+            .spacing(12)
+            .push(header_cell("Proposal", Length::FillPortion(PROPOSAL_SHARE)))
+            .push(header_cell("Amount", Length::FillPortion(AMOUNT_SHARE)))
+            .push(header_cell(
+                "Recipients",
+                Length::FillPortion(RECIPIENTS_SHARE),
+            ))
+            .push(header_cell(
+                "Signatures",
+                Length::FillPortion(SIGNATURES_SHARE),
+            ))
+            .push(header_cell("Status", Length::FillPortion(STATUS_SHARE))),
+    )
+    .padding(14)
+    .width(Length::Fill)
+}
+
+fn header_cell(label: &'static str, width: Length) -> Container<'static, Message> {
+    Container::new(p2_regular(label).bold().style(theme::text::secondary)).width(width)
+}
+
+fn most_signed_path<'a>(
+    primary: &'a PathSpendInfo,
+    recovery: impl Iterator<Item = &'a PathSpendInfo>,
+) -> &'a PathSpendInfo {
+    recovery.fold(primary, |best, path| {
+        // A recovery path can be further along with the same raw count when
+        // its threshold is lower. Keep primary only when progress really ties.
+        if path.sigs_count.saturating_mul(best.threshold)
+            > best.sigs_count.saturating_mul(path.threshold)
+        {
+            path
+        } else {
+            best
+        }
+    })
 }
 
 fn spend_tx_list_view(
@@ -79,89 +136,156 @@ fn spend_tx_list_view(
     bitcoin_unit: BitcoinDisplayUnit,
     mask_amounts: bool,
 ) -> Element<'_, Message> {
-    let spend_amount: Element<'_, Message> = if mask_amounts {
-        text("••••••").into()
-    } else {
-        amount_with_unit(&tx.spend_amount, bitcoin_unit).into()
+    let status: (
+        &'static str,
+        fn(&theme::Theme) -> iced::widget::container::Style,
+    ) = match tx.status {
+        SpendStatus::Pending if tx.path_ready().is_some() => ("Fully signed", theme::pill::success),
+        SpendStatus::Pending if !tx.signers().is_empty() => {
+            ("Partially signed", theme::pill::warning)
+        }
+        SpendStatus::Pending => ("Not signed", theme::pill::simple),
+        SpendStatus::Broadcast => ("Unconfirmed", theme::pill::warning),
+        SpendStatus::Spent => ("Spent", theme::pill::success),
+        SpendStatus::Deprecated => ("Deprecated", theme::pill::simple),
     };
-    let fee_amount: Option<Element<'_, Message>> = tx.fee_amount.as_ref().map(|fee| {
-        if mask_amounts {
-            text("••••••").size(P2_SIZE).into()
+    spend_tx_list_view_with_status(i, tx, bitcoin_unit, mask_amounts, status)
+}
+
+pub(crate) fn spend_tx_list_view_with_status<'a>(
+    i: usize,
+    tx: &'a SpendTx,
+    bitcoin_unit: BitcoinDisplayUnit,
+    mask_amounts: bool,
+    (status, status_style): (
+        &'static str,
+        fn(&theme::Theme) -> iced::widget::container::Style,
+    ),
+) -> Element<'a, Message> {
+    let txid = tx.psbt.unsigned_tx.compute_txid().to_string();
+    let proposal = tx
+        .is_single_payment()
+        .and_then(|outpoint| tx.labels.get(&outpoint.to_string()))
+        .filter(|label| !label.is_empty())
+        .or_else(|| tx.labels.get(&txid))
+        .filter(|label| !label.is_empty())
+        .cloned()
+        .unwrap_or_else(|| format!("PSBT {}…", &txid[..8]));
+    let amount: Element<'_, Message> = if tx.is_send_to_self() {
+        p2_regular("Self-transfer").into()
+    } else if mask_amounts {
+        p2_regular("••••••").into()
+    } else {
+        amount_with_size_and_unit(&tx.spend_amount, P2_SIZE, bitcoin_unit).into()
+    };
+    let fee: Option<Element<'_, Message>> = tx.fee_amount.as_ref().map(|fee| {
+        let fee_amount: Element<'_, Message> = if mask_amounts {
+            p2_regular("••••••").into()
         } else {
             amount_with_size_and_unit(fee, P2_SIZE, bitcoin_unit).into()
-        }
+        };
+        Row::new()
+            .spacing(4)
+            .push(p2_regular("Fee").style(theme::text::secondary))
+            .push(fee_amount)
+            .into()
     });
+    let recipients = tx
+        .psbt
+        .unsigned_tx
+        .output
+        .len()
+        .saturating_sub(tx.change_indexes.len());
+    let path = tx.path_ready().unwrap_or_else(|| {
+        most_signed_path(tx.sigs.primary_path(), tx.sigs.recovery_paths().values())
+    });
+    let signatures = format!(
+        "{} · {} of {}",
+        if std::ptr::eq(path, tx.sigs.primary_path()) {
+            "Primary"
+        } else {
+            "Recovery"
+        },
+        path.sigs_count.min(path.threshold),
+        path.threshold
+    );
     Container::new(
         Button::new(
             Row::new()
-                .push(
-                    Row::new()
-                        .push(if tx.is_send_to_self() {
-                            badge::cycle()
-                        } else {
-                            badge::spend()
-                        })
-                        .push(if !tx.sigs.recovery_paths().is_empty() {
-                            badge::recovery()
-                        } else {
-                            let sigs = tx.sigs.primary_path();
-                            Container::new(
-                                Row::new()
-                                    .spacing(5)
-                                    .align_y(Alignment::Center)
-                                    .push(
-                                        p2_regular(format!(
-                                            "{}/{}",
-                                            if sigs.sigs_count <= sigs.threshold {
-                                                sigs.sigs_count
-                                            } else {
-                                                sigs.threshold
-                                            },
-                                            sigs.threshold
-                                        ))
-                                        .style(theme::text::secondary),
-                                    )
-                                    .push(icon::key_icon().style(theme::text::secondary)),
-                            )
-                        })
-                        .push(
-                            tx.labels
-                                .get(&tx.psbt.unsigned_tx.compute_txid().to_string())
-                                .map(p1_regular),
-                        )
-                        .spacing(10)
-                        .align_y(Alignment::Center)
-                        .width(Length::Fill),
-                )
-                .push(if tx.is_batch() {
-                    Some(badge::batch())
-                } else {
-                    None
-                })
-                .push(match tx.status {
-                    SpendStatus::Deprecated => Some(badge::deprecated().width(120.0)),
-                    SpendStatus::Broadcast => Some(badge::unconfirmed().width(120.0)),
-                    SpendStatus::Spent => Some(badge::spent().width(120.0)),
-                    _ => None,
-                })
-                .push(
-                    Column::new()
-                        .align_x(Alignment::End)
-                        .push(if !tx.is_send_to_self() {
-                            Container::new(spend_amount)
-                        } else {
-                            Container::new(p1_regular("Self-transfer"))
-                        })
-                        .push_maybe(fee_amount)
-                        .width(Length::Fixed(140.0)),
-                )
                 .align_y(Alignment::Center)
-                .spacing(20),
+                .spacing(12)
+                .push(
+                    Container::new(
+                        Row::new()
+                            .align_y(Alignment::Center)
+                            .spacing(8)
+                            .push(icon::receipt_icon().size(P2_SIZE))
+                            .push(
+                                p2_regular(proposal)
+                                    .bold()
+                                    .wrapping(Wrapping::WordOrGlyph)
+                                    .width(Length::Fill),
+                            ),
+                    )
+                    .width(Length::FillPortion(PROPOSAL_SHARE)),
+                )
+                .push(
+                    Container::new(Column::new().spacing(4).push(amount).push_maybe(fee))
+                        .width(Length::FillPortion(AMOUNT_SHARE)),
+                )
+                .push(
+                    Container::new(p2_regular(recipients.to_string()))
+                        .width(Length::FillPortion(RECIPIENTS_SHARE)),
+                )
+                .push(
+                    Container::new(p2_regular(signatures))
+                        .width(Length::FillPortion(SIGNATURES_SHARE)),
+                )
+                .push(
+                    Container::new(
+                        Container::new(p2_regular(status))
+                            .padding([7, 10])
+                            .style(status_style),
+                    )
+                    .width(Length::FillPortion(STATUS_SHARE)),
+                ),
         )
-        .padding(10)
+        .padding(14)
+        .width(Length::Fill)
         .on_press(Message::Select(i))
         .style(theme::button::transparent_border),
     )
-    .style(theme::card::simple)
+    .width(Length::Fill)
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::most_signed_path;
+    use coincube_core::descriptors::PathSpendInfo;
+    use std::collections::HashMap;
+
+    fn path(sigs_count: usize, threshold: usize) -> PathSpendInfo {
+        PathSpendInfo {
+            threshold,
+            sigs_count,
+            signed_pubkeys: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn partial_recovery_signatures_are_visible_when_primary_has_none() {
+        let primary = path(0, 2);
+        let recovery = path(1, 2);
+        let displayed = most_signed_path(&primary, std::iter::once(&recovery));
+        assert_eq!((displayed.sigs_count, displayed.threshold), (1, 2));
+    }
+
+    #[test]
+    fn path_with_more_progress_wins_equal_signature_counts() {
+        let primary = path(1, 3);
+        let recovery = path(1, 2);
+        let displayed = most_signed_path(&primary, std::iter::once(&recovery));
+        assert!(std::ptr::eq(displayed, &recovery));
+    }
 }

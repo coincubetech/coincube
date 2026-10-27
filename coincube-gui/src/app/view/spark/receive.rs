@@ -830,7 +830,9 @@ fn route_card_style(theme: &theme::Theme) -> container::Style {
         border: iced::Border {
             color: shell.line,
             width: 1.0,
-            radius: 12.0.into(),
+            // The THEY SEND tile is a button, so the pair takes the square
+            // 8px corner (canvas v122), matching its hover outline.
+            radius: 8.0.into(),
         },
         ..Default::default()
     }

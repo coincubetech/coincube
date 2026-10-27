@@ -243,7 +243,8 @@ mod tests {
         // The shared PSBT is a self-transfer; make this rendering fixture an
         // outbound row with nonzero values so both amount fields are visible.
         tx.kind = TransactionKind::OutgoingPaymentBatch(vec![]);
-        tx.spend_amount = Amount::from_sat(123_456);
+        // Ten BTC in the default Sats unit exercises the narrow Amount cell.
+        tx.spend_amount = Amount::from_sat(1_000_000_000);
         tx.fee_amount = Some(Amount::from_sat(12_345));
         assert!(tx.spend_amount.to_sat() > 0);
         let raw_spend = tx
@@ -253,20 +254,58 @@ mod tests {
             .fee_amount
             .map(|amount| amount.to_formatted_string_with_unit(BitcoinDisplayUnit::Sats));
         let rows = [tx];
-        for masked in [true, false] {
-            let mounted = capture::inspect(
-                "vault-psbts-privacy",
-                view::vault::psbts::psbts_view(&rows, BitcoinDisplayUnit::Sats, masked),
-                (1024, 768),
-                "dark",
-                theme::Theme::dark(),
-            );
-            assert!(mounted.contains("PSBT proposals"));
-            assert_eq!(mounted.contains(&raw_spend), !masked);
-            if let Some(fee) = &fee {
-                assert_eq!(mounted.contains(fee), !masked);
+        for size in [(1024, 768), (1440, 900)] {
+            for (appearance, theme) in [
+                ("dark", theme::Theme::dark()),
+                ("light", theme::Theme::light()),
+            ] {
+                for masked in [true, false] {
+                    let mounted = capture::inspect(
+                        if masked {
+                            "vault-psbts-private"
+                        } else {
+                            "vault-psbts-shown"
+                        },
+                        view::vault::psbts::psbts_view(&rows, BitcoinDisplayUnit::Sats, masked),
+                        size,
+                        appearance,
+                        theme,
+                    );
+                    assert!(mounted.contains("PSBT proposals"));
+                    assert_eq!(mounted.contains(&raw_spend), !masked);
+                    if let Some(fee) = &fee {
+                        assert_eq!(mounted.contains(fee), !masked);
+                    }
+                    assert_eq!(mounted.contains("••••••"), masked);
+                    if size == (1024, 768) && !masked {
+                        let partial = capture::inspect(
+                            "vault-psbts-partially-signed",
+                            coincube_ui::widget::Container::new(
+                                view::vault::psbts::spend_tx_list_view_with_status(
+                                    0,
+                                    &rows[0],
+                                    BitcoinDisplayUnit::Sats,
+                                    false,
+                                    ("Partially signed", theme::pill::warning),
+                                ),
+                            )
+                            .width(iced::Length::Fixed(652.0))
+                            .into(),
+                            size,
+                            appearance,
+                            theme,
+                        );
+                        assert!(partial.contains("Partially signed"));
+                        let status_height = partial
+                            .text
+                            .iter()
+                            .find(|(value, _)| value == "Partially signed")
+                            .map(|(_, bounds)| bounds.height)
+                            .expect("captured status label");
+                        assert!(status_height <= 24.0, "status pill text wrapped");
+                    }
+                }
             }
-            assert_eq!(mounted.contains("••••••"), masked);
         }
     }
 

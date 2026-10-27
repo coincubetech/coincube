@@ -110,7 +110,7 @@ pub(crate) struct LauncherSceneContext {
     pub selected_slot: usize,
     pub backup: &'static str,
     pub connect: String,
-    pub wallets: &'static str,
+    pub wallets: String,
     pub peers: Vec<LauncherScenePeer>,
     /// Floor pages, for the arrows and dots that stay up under the face.
     pub pages: usize,
@@ -232,6 +232,12 @@ pub(super) struct CatalogState {
     pub(super) key: KeyCard,
     /// The top bar's network menu is open.
     pub(super) network_menu: bool,
+    /// Which networks' Cubes the Launcher shows (P-Launcher's chips and
+    /// Network menu). Presentation only; it never changes a Cube's network.
+    pub(super) filter: NetworkFilter,
+    /// A Cube picked or opened on another network, replayed once that
+    /// network is current and its list is checked.
+    pub(super) pending_select: Option<(CubeCatalogKey, PendingIntent)>,
     /// Each floor Open gets a distinct origin carried by its queued Run.
     /// Clearing open_from_floor invalidates that origin even if the selected
     /// identity is later selected again.
@@ -252,6 +258,155 @@ pub(super) struct CatalogState {
 const WHEEL_PAGE_THRESHOLD: f32 = 24.0;
 const WHEEL_GESTURE_GAP: Duration = Duration::from_millis(250);
 const WHEEL_PAGE_COOLDOWN: Duration = Duration::from_millis(600);
+
+/// What a pick on another network asked for, replayed after the switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingIntent {
+    Select,
+    /// List or floor Open: unlock once the checked list confirms the Cube.
+    Open,
+}
+
+/// P-Launcher's network filter: every listed network, the live or test
+/// ones (Developer mode only), or one network from the Network menu.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum NetworkFilter {
+    #[default]
+    All,
+    Live,
+    Test,
+    Network(ChainId),
+}
+
+impl NetworkFilter {
+    pub(super) fn matches(self, chain: ChainId) -> bool {
+        let test = super::launcher_coin::is_test_network(chain);
+        match self {
+            NetworkFilter::All => true,
+            NetworkFilter::Live => !test,
+            NetworkFilter::Test => test,
+            NetworkFilter::Network(only) => chain == only,
+        }
+    }
+}
+
+/// The canvas's network order: the two mainnets, then the test networks.
+pub(super) fn network_rank(chain: ChainId) -> u8 {
+    match chain {
+        ChainId::Bitcoin => 0,
+        ChainId::BitcoinBlake2b => 1,
+        ChainId::Testnet4 => 2,
+        ChainId::Testnet => 3,
+        ChainId::Signet => 4,
+        ChainId::Regtest => 5,
+        ChainId::BitcoinBlake2bTestnet4 => 6,
+    }
+}
+
+impl Home {
+    /// The filter as it applies now. Without Developer mode there are no
+    /// test networks, so Live, Test and a test network fall back to All, as
+    /// do networks no longer listed.
+    pub(super) fn effective_filter(&self) -> NetworkFilter {
+        match self.catalog.filter {
+            NetworkFilter::Live | NetworkFilter::Test if !self.developer_mode => NetworkFilter::All,
+            NetworkFilter::Network(chain) if !self.displayed_networks.contains(&chain) => {
+                NetworkFilter::All
+            }
+            filter => filter,
+        }
+    }
+
+    /// The network a filter makes current, if it must change: the one
+    /// network it names, or for Live and Test the first listed network they
+    /// show when the current one is hidden. `None` keeps the current one.
+    pub(super) fn filter_target(&self, filter: NetworkFilter) -> Option<ChainId> {
+        let target = match filter {
+            NetworkFilter::All => return None,
+            NetworkFilter::Network(chain) => chain,
+            NetworkFilter::Live | NetworkFilter::Test if filter.matches(self.network) => {
+                return None
+            }
+            NetworkFilter::Live | NetworkFilter::Test => self
+                .ordered_networks()
+                .into_iter()
+                .find(|chain| filter.matches(*chain))?,
+        };
+        (target != self.network).then_some(target)
+    }
+
+    /// Listed networks in the canvas's order, plus the network of the
+    /// checked list when it is not listed (it is always shown).
+    pub(super) fn ordered_networks(&self) -> Vec<ChainId> {
+        let mut networks = self.displayed_networks.clone();
+        if let State::Cubes { source, .. } = &self.state {
+            if !networks.contains(source) {
+                networks.push(*source);
+            }
+        }
+        networks.sort_by_key(|chain| network_rank(*chain));
+        networks
+    }
+
+    pub(super) fn developer_mode(&self) -> bool {
+        self.developer_mode
+    }
+
+    /// A Cube shown from another network's read-only list cannot be acted on
+    /// in place: make its network current, and select it once that network's
+    /// list is checked (see `Message::Checked`).
+    pub(super) fn select_on_other_network(
+        &mut self,
+        key: &CubeCatalogKey,
+        intent: PendingIntent,
+    ) -> Option<Task<Message>> {
+        if key.chain == self.network {
+            // While the switch to this network is still being checked, the
+            // latest pick or Open wins over the one that started the switch.
+            let switching = self.catalog.pending_select.is_some()
+                && !matches!(&self.state, State::Cubes { source, .. } if *source == self.network);
+            if switching && !key.cube_id.is_empty() {
+                self.catalog.pending_select = Some((key.clone(), intent));
+                return Some(Task::none());
+            }
+            return None;
+        }
+        if key.cube_id.is_empty()
+            || !self
+                .network_catalog(key.chain)
+                .iter()
+                .any(|cube| cube.id == key.cube_id)
+        {
+            return None;
+        }
+        if self.claim_handoff_pending() {
+            self.set_error(CLAIM_HOLDS_NETWORK);
+            return Some(Task::none());
+        }
+        self.catalog.pending_select = Some((key.clone(), intent));
+        self.catalog.selected = None;
+        self.catalog.motion = None;
+        self.catalog.open_from_floor = false;
+        Some(Task::done(Message::View(
+            super::ViewMessage::SelectNetwork(key.chain),
+        )))
+    }
+}
+
+/// Switching networks would cancel a Bitcoin Blake2b Claim handoff, which
+/// is bound to the Bitcoin Cube it started from.
+const CLAIM_HOLDS_NETWORK: &str = "Finish or cancel the Bitcoin Blake2b Claim before showing \
+     another network's Cubes.";
+
+impl Home {
+    /// A Claim handoff waits on this network; switching would cancel it.
+    pub(super) fn claim_handoff_pending(&self) -> bool {
+        self.pending_fork_claim.is_some()
+            || self.imported_claim.is_some()
+            || self.claim_owner.is_some()
+            || self.pending_begin_claim
+    }
+}
 
 /// The floor is inside a vertical scrollable. It does not forward wheel events
 /// to children, and can mark even a sideways delta captured when it first
@@ -321,6 +476,8 @@ pub enum CatalogMessage {
     KeyClose,
     /// Opens or closes the top bar's network menu.
     NetworkMenu(bool),
+    /// All / Live / Test networks, or one network from the menu.
+    Filter(NetworkFilter),
     ClearSelection,
     Query(String),
     ClearQuery,
@@ -449,7 +606,7 @@ impl Home {
             selected_slot,
             backup: super::launcher_presenter::backup(cube).0,
             connect: selected.connect.1.clone(),
-            wallets: super::launcher_presenter::local_wallets(cube),
+            wallets: selected.wallets.clone(),
             peers,
             pages: projection.locals.len().div_ceil(FLOOR_PAGE_SIZE).max(1),
             chrome: super::launcher_chrome::snapshot(self, &projection),
@@ -470,6 +627,9 @@ impl Home {
     pub(super) fn update_catalog(&mut self, message: CatalogMessage) -> Task<Message> {
         match message {
             CatalogMessage::Select(key) => {
+                if let Some(task) = self.select_on_other_network(&key, PendingIntent::Select) {
+                    return task;
+                }
                 self.catalog.selected = self.catalog_selectable(&key).then_some(key.clone());
                 self.catalog.motion = None;
                 self.catalog.open_from_floor = false;
@@ -479,6 +639,9 @@ impl Home {
                 Task::none()
             }
             CatalogMessage::SelectFloor(key) => {
+                if let Some(task) = self.select_on_other_network(&key, PendingIntent::Select) {
+                    return task;
+                }
                 let previous = self.catalog.selected.clone();
                 self.catalog.selected = self.catalog_selectable(&key).then_some(key.clone());
                 self.catalog.motion = None;
@@ -513,6 +676,39 @@ impl Home {
             CatalogMessage::NetworkMenu(open) => {
                 self.catalog.network_menu = open;
                 Task::none()
+            }
+            CatalogMessage::Filter(filter) => {
+                let from_menu = std::mem::take(&mut self.catalog.network_menu);
+                // Create and Import act on the current network, so it must
+                // be one the filter shows: one network becomes current, and
+                // Live or Test move off a network they hide.
+                let target = self.filter_target(filter);
+                if target.is_some() && self.claim_handoff_pending() {
+                    self.set_error(CLAIM_HOLDS_NETWORK);
+                    return Task::none();
+                }
+                self.catalog.filter = filter;
+                self.catalog.page = 0;
+                // A selection the filter hides falls back to browsing.
+                if self
+                    .catalog
+                    .selected
+                    .as_ref()
+                    .is_some_and(|key| !self.effective_filter().matches(key.chain))
+                {
+                    self.catalog.selected = None;
+                    self.catalog.motion = None;
+                    self.catalog.open_from_floor = false;
+                }
+                let switch = target.map_or_else(Task::none, |chain| {
+                    Task::done(Message::View(super::ViewMessage::SelectNetwork(chain)))
+                });
+                // A menu choice closes the menu; keep keyboard focus on its chip.
+                if from_menu {
+                    Task::batch([switch, iced::widget::operation::focus(network_id())])
+                } else {
+                    switch
+                }
             }
             CatalogMessage::MotionTick(now) => {
                 if self
@@ -674,8 +870,15 @@ impl Home {
     /// exactly one listed Cube (removed, duplicated, reloaded from another
     /// chain). Never moves it to another Cube. Runs after every message.
     pub(super) fn reconcile_catalog(&mut self) {
-        // The Key card belongs to the Key button, which needs a local Cube.
-        if project(self).local_total == 0 {
+        // A pick or Open on another network belongs to the Launcher. Leaving
+        // it by any route (a nav click, a banner CTA, a handoff) drops it, so
+        // its replay cannot start an unlock from another section.
+        if !matches!(self.active_section, HomeSection::Cubes) {
+            self.catalog.pending_select = None;
+        }
+        // The Key card belongs to the Key button, which needs a Cube the
+        // filter shows.
+        if project(self).filtered_total == 0 {
             self.catalog.key = KeyCard::default();
         }
         let pages = project(self).locals.len().div_ceil(FLOOR_PAGE_SIZE).max(1);
@@ -691,7 +894,18 @@ impl Home {
                 self.catalog.open_from_floor = false;
             }
         }
-        if self.catalog.selected.is_none() || self.catalog.mode != LauncherMode::Cubes {
+        // Back leaves nothing selected while its Cube spins home, so a Return
+        // motion survives the empty selection until it finishes or its Cube
+        // goes away.
+        let returning = self
+            .catalog
+            .motion
+            .as_ref()
+            .and_then(|motion| motion.returning_key())
+            .is_some_and(|key| self.catalog_selectable(key));
+        if (self.catalog.selected.is_none() && !returning)
+            || self.catalog.mode != LauncherMode::Cubes
+        {
             self.catalog.motion = None;
             self.catalog.open_from_floor = false;
         }
@@ -868,11 +1082,24 @@ pub(super) fn theme_id() -> Id {
 pub(super) fn recover_vault_id() -> Id {
     control_id("recover-vault")
 }
+#[cfg(test)]
 pub(super) fn split_wallet_id() -> Id {
     control_id("split-wallet")
 }
 pub(super) fn clear_query_id() -> Id {
     control_id("clear-query")
+}
+/// An All / Live / Test networks chip.
+pub(super) fn filter_id(name: &str) -> Id {
+    control_id(&format!("filter-{name}"))
+}
+/// The top bar's "Clear filters" link.
+pub(super) fn clear_filters_id() -> Id {
+    control_id("clear-filters")
+}
+/// "Clear filters" in the empty state when every Cube is filtered out.
+pub(super) fn clear_filters_empty_id() -> Id {
+    control_id("clear-filters-empty")
 }
 pub(super) fn create_id() -> Id {
     control_id("create")
@@ -899,6 +1126,10 @@ pub(super) struct LocalRow<'a> {
     pub(super) connect: (Tone, String),
     /// A short, visible registration refusal; full guidance stays in details.
     pub(super) sync_warning: Option<String>,
+    /// This process holds the Cube's unlocked session.
+    pub(super) open: bool,
+    /// The wallets the Cube holds, as the details list them.
+    pub(super) wallets: String,
     /// The key is nonempty, the record's chain is the current network and the
     /// list's source, and `catalog_index` resolves to this very record.
     /// Otherwise the row is shown but its controls have no press target.
@@ -923,6 +1154,16 @@ pub(super) struct Projection<'a> {
     /// Whether the screen lists local Cubes (`State::Cubes`) or only the
     /// remote ones (`State::NoCube`); their limit copy differs.
     pub(super) has_local_list: bool,
+    /// Local Cubes the network filter hides (after any search).
+    pub(super) hidden: usize,
+    /// Local Cubes the network filter shows, before any search: what the
+    /// floor would hold, so the 20-Cube cap counts only these.
+    pub(super) filtered_total: usize,
+    /// Listed networks whose Cube list could not be read.
+    pub(super) unread: Vec<ChainId>,
+    /// Every listed network with its local Cube count, in the canvas order.
+    pub(super) network_counts: Vec<(ChainId, usize)>,
+    pub(super) filter: NetworkFilter,
 }
 
 impl Projection<'_> {
@@ -933,7 +1174,7 @@ impl Projection<'_> {
     pub(super) fn floor_eligible(&self, mode: LauncherMode) -> bool {
         mode == LauncherMode::Cubes
             && self.local_total > 0
-            && self.local_total <= FLOOR_MAX_CUBES
+            && self.filtered_total <= FLOOR_MAX_CUBES
             && self.query.is_empty()
     }
 
@@ -941,7 +1182,7 @@ impl Projection<'_> {
         self.total_count >= self.cube_limit
     }
     pub(super) fn no_matches(&self) -> bool {
-        !self.query.trim().is_empty()
+        (!self.query.trim().is_empty() || self.hidden > 0)
             && self.locals.is_empty()
             && self.remotes.is_empty()
             && self.local_total + self.remote_total > 0
@@ -957,42 +1198,76 @@ pub(super) fn project(home: &Home) -> Projection<'_> {
     let network = home.network;
     let signed_in = home.connect_account.authenticated_client().is_some();
     let query = home.catalog.query.clone();
-    let (cubes, has_local_list): (&[CubeSettings], bool) = match &home.state {
-        State::Cubes { cubes, .. } => (cubes.as_slice(), true),
-        _ => (&[], false),
+    let (checked, has_local_list): (Option<(&[CubeSettings], ChainId)>, bool) = match &home.state {
+        State::Cubes { cubes, source, .. } => (Some((cubes.as_slice(), *source)), true),
+        _ => (None, false),
     };
-    let locals: Vec<LocalRow<'_>> = cubes
-        .iter()
-        .enumerate()
-        .filter_map(|(index, cube)| {
+    let open_cube = crate::app::session::current_cube_id();
+    let filter = home.effective_filter();
+    // Every listed network, in the canvas's order. The current network's
+    // rows come from the checked list; the others from read-only copies,
+    // which act by first making their network current.
+    let mut network_counts = Vec::new();
+    let mut local_total = 0;
+    let mut filtered_total = 0;
+    let mut hidden = 0;
+    let mut locals: Vec<LocalRow<'_>> = Vec::new();
+    for chain in home.ordered_networks() {
+        let (cubes, current) = match checked {
+            Some((cubes, source)) if source == chain => (cubes, true),
+            _ => (home.network_catalog(chain), false),
+        };
+        network_counts.push((chain, cubes.len()));
+        local_total += cubes.len();
+        for (index, cube) in cubes.iter().enumerate() {
             let key = CubeCatalogKey {
                 chain: cube.network,
                 cube_id: cube.id.clone(),
             };
             let name = catalog_display_name(&cube.name);
-            matches_query(&name, &query).then(|| {
-                let connect = connect_caption(cube, signed_in, home.cube_sync_hint(cube));
-                let sync_warning = (signed_in && connect.0 == Tone::Warn)
-                    .then(|| connect.1.lines().next().unwrap_or_default().to_string());
-                LocalRow {
-                    // `catalog_index` also requires key chain == source == network.
-                    actionable: !key.cube_id.is_empty() && home.catalog_index(&key) == Some(index),
-                    index,
-                    connect,
-                    sync_warning,
-                    vault: vault_subtitle(cube),
-                    key,
+            if filter.matches(chain) {
+                filtered_total += 1;
+            }
+            if !matches_query(&name, &query) {
+                continue;
+            }
+            if !filter.matches(chain) {
+                hidden += 1;
+                continue;
+            }
+            let connect = connect_caption(cube, signed_in, home.cube_sync_hint(cube));
+            let sync_warning = (signed_in && connect.0 == Tone::Warn)
+                .then(|| connect.1.lines().next().unwrap_or_default().to_string());
+            locals.push(LocalRow {
+                // `catalog_index` also requires key chain == source == network.
+                // Another network's row is acted on by switching to it.
+                actionable: !key.cube_id.is_empty()
+                    && if current {
+                        home.catalog_index(&key) == Some(index)
+                    } else {
+                        key.chain == chain
+                    },
+                index: if current { index } else { usize::MAX },
+                connect,
+                sync_warning,
+                open: open_cube.as_deref() == Some(cube.id.as_str()),
+                // The Liquid probe reads the current network's data only.
+                wallets: super::launcher_presenter::local_wallets(
                     cube,
-                    name,
-                }
-            })
-        })
-        .collect();
+                    chain == network && home.liquid_on_disk,
+                ),
+                vault: vault_subtitle(cube),
+                key,
+                cube,
+                name,
+            });
+        }
+    }
     let network_str = settings::network_to_api_string(network);
     let all_remotes: Vec<&RemoteCube> = home
         .remote_cubes
         .iter()
-        .filter(|rc| !network.is_blake2b() && rc.network == network_str)
+        .filter(|rc| !network.is_blake2b() && rc.network == network_str && filter.matches(network))
         .collect();
     let remote_total = all_remotes.len();
     let remotes = all_remotes
@@ -1011,7 +1286,12 @@ pub(super) fn project(home: &Home) -> Projection<'_> {
             .position(|row| row.index == record && row.actionable)
     });
     Projection {
-        local_total: cubes.len(),
+        local_total,
+        filtered_total,
+        hidden,
+        network_counts,
+        unread: home.network_catalog_unread.clone(),
+        filter,
         remote_total,
         locals,
         remotes,
@@ -1107,57 +1387,24 @@ fn muted(theme: &theme::Theme) -> iced::widget::text::Style {
     }
 }
 
-/// `backed_up` records the local phrase backup. A Recovery Kit is a separate,
-/// cached Connect fact. An absent flag is not proof that either backup is missing.
+/// The Launcher presenter's Backup line, in the List's tones.
 fn backup_caption(cube: &CubeSettings) -> (Tone, &'static str) {
-    match (cube.backed_up, cube.has_recovery_kit()) {
-        (true, true) => (Tone::Good, "Phrase + Kit recorded"),
-        (true, false) => (Tone::Good, "Phrase recorded"),
-        (false, true) => (Tone::Good, "Kit recorded (cached)"),
-        (false, false) => (Tone::Muted, "Status unknown"),
-    }
-}
-
-/// Only the Vault or imported Bitcoin slot is known from pre-unlock settings.
-/// A pending import is an intent, not an installed wallet. Liquid and Spark
-/// availability are deliberately left unclaimed here.
-fn wallets_caption(cube: &CubeSettings) -> &'static str {
-    if let Some(import) = &cube.bitcoin_import {
-        return match &import.stage {
-            settings::BitcoinImportStage::PendingSource => {
-                "Bitcoin import pending · others unknown"
-            }
-            settings::BitcoinImportStage::Installing { .. } => {
-                "Bitcoin import installing · others unknown"
-            }
-            settings::BitcoinImportStage::Syncing { .. } => {
-                "Bitcoin import syncing · others unknown"
-            }
-            settings::BitcoinImportStage::Ready { .. } => "Bitcoin imported · others unknown",
-        };
-    }
-    if cube.vault_wallet_id.is_some() {
-        "Vault · others unknown"
-    } else {
-        "Status unknown"
-    }
-}
-
-fn wallets_cell<'a>(cube: &CubeSettings) -> Element<'a, ViewMessage> {
-    let known_icon = if cube.has_imported_bitcoin() {
-        Some(icon::wallet_icon().style(muted))
-    } else if cube.bitcoin_import.is_none() && cube.vault_wallet_id.is_some() {
-        Some(icon::vault_icon().style(muted))
-    } else {
-        None
+    let (text, tone) = super::launcher_presenter::backup(cube);
+    let tone = match tone {
+        coincube_ui::theme::tenshu::Tone::Good => Tone::Good,
+        coincube_ui::theme::tenshu::Tone::Warn => Tone::Warn,
+        _ => Tone::Muted,
     };
+    (tone, text)
+}
+
+fn wallets_cell<'a>(row: &LocalRow<'_>) -> Element<'a, ViewMessage> {
     Row::new()
         .spacing(6)
         .align_y(Alignment::Center)
         .width(Length::Fixed(WALLETS_WIDTH))
-        .push(known_icon)
         .push(
-            p2_regular(wallets_caption(cube))
+            p2_regular(row.wallets.clone())
                 .style(muted)
                 .wrapping(Wrapping::WordOrGlyph),
         )
@@ -1207,7 +1454,7 @@ fn local_row<'a>(row: &LocalRow<'_>, selected: bool, table: bool) -> Element<'a,
                 .wrapping(Wrapping::WordOrGlyph)
                 .width(Length::Fill),
         )
-        .push(p2_regular("Lock state unknown").style(muted))
+        .push(p2_regular(super::launcher_presenter::lock_state(row.open)).style(muted))
         .push(row.sync_warning.as_ref().map(|warning| {
             p2_regular(warning.clone())
                 .style(tone_style(Tone::Warn))
@@ -1224,7 +1471,7 @@ fn local_row<'a>(row: &LocalRow<'_>, selected: bool, table: bool) -> Element<'a,
                     .style(muted)
                     .width(Length::Fixed(NETWORK_WIDTH)),
             )
-            .push(wallets_cell(row.cube))
+            .push(wallets_cell(row))
             .push(
                 p2_regular(backup)
                     .style(tone_style(backup_tone))
@@ -1247,7 +1494,7 @@ fn local_row<'a>(row: &LocalRow<'_>, selected: bool, table: bool) -> Element<'a,
                 p2_regular(format!(
                     "Network: {}  ·  Wallets: {}  ·  Backup: {}",
                     row.key.chain.label(),
-                    wallets_caption(row.cube),
+                    row.wallets,
                     backup,
                 ))
                 .style(muted)
@@ -1368,7 +1615,9 @@ fn details_panel<'a>(row: &LocalRow<'_>) -> Element<'a, ViewMessage> {
             .push(detail_line("Stored", p2_regular("On this device").into()))
             .push(detail_line(
                 "Lock",
-                p2_regular("State unknown").style(muted).into(),
+                p2_regular(super::launcher_presenter::lock_state(row.open))
+                    .style(muted)
+                    .into(),
             ))
             .push(detail_line(
                 "Backup",
@@ -1389,7 +1638,7 @@ fn details_panel<'a>(row: &LocalRow<'_>) -> Element<'a, ViewMessage> {
             ))
             .push(detail_line(
                 "Wallets",
-                p2_regular(wallets_caption(row.cube))
+                p2_regular(row.wallets.clone())
                     .style(muted)
                     .wrapping(Wrapping::WordOrGlyph)
                     .into(),
@@ -1535,10 +1784,7 @@ pub(super) fn launcher_view(home: &Home) -> Element<'_, ViewMessage> {
             .height(Length::Fill)
             .push(screen)
             .push(super::launcher_chrome::key_layer(home))
-            .push(super::launcher_chrome::network_layer(
-                home,
-                projection.local_total + projection.remote_total,
-            )),
+            .push(super::launcher_chrome::network_layer(home, &projection)),
     )
     .width(Length::Fill)
     .height(Length::Fill)
@@ -2280,31 +2526,41 @@ mod tests {
     }
 
     #[test]
-    fn list_facts_use_only_recorded_backup_and_wallet_metadata() {
+    fn list_facts_report_lock_backup_and_wallets_from_recorded_metadata() {
+        use super::super::launcher_presenter::{local_wallets, lock_state};
+        let wallets = |cube: &CubeSettings| local_wallets(cube, false);
         let mut home = home_with(&[("a", "Alpha")]);
+        assert_eq!(lock_state(project(&home).locals[0].open), "Locked");
         let cube = &mut cubes_mut(&mut home)[0];
-        assert_eq!(backup_caption(cube), (Tone::Muted, "Status unknown"));
-        assert_eq!(wallets_caption(cube), "Status unknown");
-
-        cube.backed_up = true;
-        assert_eq!(backup_caption(cube), (Tone::Good, "Phrase recorded"));
-        cube.backed_up = false;
+        // Matches the open Cube's "Backup not confirmed" warning.
+        assert_eq!(backup_caption(cube), (Tone::Warn, "Not confirmed"));
+        // A Recovery Kit is shown on the Connect line, not here.
         cube.recovery_kit_password_backed_up = true;
-        assert_eq!(backup_caption(cube), (Tone::Good, "Kit recorded (cached)"));
+        assert_eq!(backup_caption(cube), (Tone::Warn, "Not confirmed"));
         cube.backed_up = true;
-        assert_eq!(backup_caption(cube), (Tone::Good, "Phrase + Kit recorded"));
+        assert_eq!(backup_caption(cube), (Tone::Good, "Confirmed"));
+
+        // Spark comes with every mainnet Cube; Liquid only behind its gate.
+        assert_eq!(wallets(cube), "Spark");
+        cube.liquid_granted = Some(true);
+        assert_eq!(wallets(cube), "Spark, Liquid");
+        cube.liquid_granted = None;
+        assert_eq!(local_wallets(cube, true), "Spark, Liquid");
         cube.vault_wallet_id = Some(crate::app::settings::WalletId::new(
             "test".to_string(),
             None,
         ));
-        assert_eq!(wallets_caption(cube), "Vault · others unknown");
+        assert_eq!(wallets(cube), "Spark, Vault");
+        let mut testnet = cube.clone();
+        testnet.network = ChainId::Testnet4;
+        testnet.liquid_granted = Some(true);
+        assert_eq!(local_wallets(&testnet, true), "Vault");
+        testnet.vault_wallet_id = None;
+        assert_eq!(local_wallets(&testnet, true), "No wallets yet");
 
         cube.vault_wallet_id = None;
         cube.bitcoin_import = Some(Box::new(settings::BitcoinImport::pending()));
-        assert_eq!(
-            wallets_caption(cube),
-            "Bitcoin import pending · others unknown"
-        );
+        assert_eq!(wallets(cube), "Spark, Bitcoin (importing)");
         assert!(!cube.has_imported_bitcoin());
 
         use coincube_core::{
@@ -2334,14 +2590,11 @@ mod tests {
         cube.bitcoin_import.as_mut().unwrap().stage = settings::BitcoinImportStage::Installing {
             wallet: wallet.clone(),
         };
-        assert_eq!(
-            wallets_caption(cube),
-            "Bitcoin import installing · others unknown"
-        );
+        assert_eq!(wallets(cube), "Spark, Bitcoin (importing)");
         assert!(!cube.has_imported_bitcoin());
         cube.bitcoin_import.as_mut().unwrap().stage =
             settings::BitcoinImportStage::Ready { wallet };
-        assert_eq!(wallets_caption(cube), "Bitcoin imported · others unknown");
+        assert_eq!(wallets(cube), "Spark, Bitcoin");
         assert!(cube.has_imported_bitcoin());
     }
 
@@ -2363,8 +2616,8 @@ mod tests {
             assert!(tree.has(&select_id(&key("a"))));
             assert!(tree.has(&open_id(&key("a"))));
             assert!(tree.has(&details_open_id(&key("a"))));
-            assert!(tree.contains("Lock state unknown"));
-            assert!(tree.contains("Status unknown"));
+            assert!(tree.contains("Locked"));
+            assert!(tree.contains("Not confirmed"));
             // The presenter draws these rows: the network is a coin mark and
             // label in both layouts, and the compact List folds Wallets and
             // Backup into one caption that the wide table splits into columns.
@@ -2421,7 +2674,7 @@ mod tests {
                 theme::Theme::light(),
             );
             assert_eq!(inspection.contains("Network: Bitcoin"), !table);
-            assert!(inspection.contains("Backup: Status unknown") || table);
+            assert!(inspection.contains("Backup: Not confirmed") || table);
             let bounds = focus_bounds(layout(&projection, body_width), body_width);
             let select = bounds_of(&bounds, &select_id(&key("a")));
             let long_name = inspection
@@ -3723,7 +3976,7 @@ mod tests {
 
     /// Bounds of the container carrying `id` in a window-sized layout.
     #[test]
-    fn the_network_chip_opens_the_prototype_menu_and_sends_select_network() {
+    fn the_network_chip_opens_the_prototype_menu_and_filters_by_network() {
         use super::super::launcher_chrome::network_option_id;
         let mut home = rows(2);
         home.displayed_networks = vec![ChainId::Bitcoin, ChainId::Testnet4];
@@ -3753,13 +4006,17 @@ mod tests {
             field,
             option
         );
+        home.catalog.filter = NetworkFilter::Network(ChainId::Bitcoin);
         for press in [Press::Pointer, Press::Enter] {
             assert!(matches!(
                 activate_chrome(&home, network_option_id(ChainId::Testnet4), press),
-                ViewMessage::SelectNetwork(ChainId::Testnet4)
+                ViewMessage::Catalog(CatalogMessage::Filter(NetworkFilter::Network(
+                    ChainId::Testnet4
+                )))
             ));
+            // The network already filtered to closes the menu.
             assert!(matches!(
-                activate_chrome(&home, network_option_id(home.network), press),
+                activate_chrome(&home, network_option_id(ChainId::Bitcoin), press),
                 ViewMessage::Catalog(CatalogMessage::NetworkMenu(false))
             ));
         }
@@ -3768,6 +4025,611 @@ mod tests {
             !home.catalog.network_menu,
             "choosing a network closes the menu"
         );
+    }
+
+    /// Bitcoin "a", "b" checked; Testnet4 "t1", "t2" and Signet "s1" read
+    /// from their directories. Developer mode lists them all.
+    fn all_networks() -> Home {
+        let mut home = home_with(&[("a", "Alpha"), ("b", "Beta")]);
+        home.catalog.mode = LauncherMode::Cubes;
+        home.developer_mode = true;
+        // What `refresh_displayed_networks` lists in Developer mode.
+        home.displayed_networks = ChainId::LAUNCHER.to_vec();
+        let cube = |id: &str, name: &str, chain| {
+            CubeSettings::new_with_raw_id(id.to_string(), name.to_string(), chain)
+        };
+        home.network_catalog_requested = ChainId::LAUNCHER
+            .iter()
+            .copied()
+            .filter(|chain| *chain != ChainId::Bitcoin)
+            .collect();
+        home.network_catalog = vec![
+            (
+                ChainId::Testnet4,
+                vec![
+                    cube("t1", "Lab", ChainId::Testnet4),
+                    cube("t2", "Bench", ChainId::Testnet4),
+                ],
+            ),
+            (ChainId::Signet, vec![cube("s1", "Sig", ChainId::Signet)]),
+        ];
+        home
+    }
+
+    fn names(home: &Home) -> Vec<String> {
+        project(home)
+            .locals
+            .iter()
+            .map(|row| row.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn the_floor_lists_every_network_and_each_filter_narrows_it() {
+        let mut home = all_networks();
+        assert_eq!(names(&home), ["Alpha", "Beta", "Lab", "Bench", "Sig"]);
+        let projection = project(&home);
+        assert_eq!((projection.local_total, projection.hidden), (5, 0));
+        assert_eq!(
+            projection.network_counts,
+            [
+                (ChainId::Bitcoin, 2),
+                (ChainId::Testnet4, 2),
+                (ChainId::Testnet, 0),
+                (ChainId::Signet, 1),
+                (ChainId::Regtest, 0)
+            ]
+        );
+
+        catalog(&mut home, CatalogMessage::Filter(NetworkFilter::Live));
+        assert_eq!(names(&home), ["Alpha", "Beta"]);
+        assert_eq!(project(&home).hidden, 3);
+
+        catalog(&mut home, CatalogMessage::Filter(NetworkFilter::Test));
+        assert_eq!(names(&home), ["Lab", "Bench", "Sig"]);
+
+        // One network also makes it current, for Create and Import.
+        let task = home.update_catalog(CatalogMessage::Filter(NetworkFilter::Network(
+            ChainId::Signet,
+        )));
+        assert!(task.units() > 0, "filtering to Signet selects that network");
+        assert_eq!(names(&home), ["Sig"]);
+
+        catalog(&mut home, CatalogMessage::Filter(NetworkFilter::All));
+        assert_eq!(names(&home).len(), 5);
+    }
+
+    #[test]
+    fn test_filters_fall_back_to_all_without_developer_mode() {
+        let mut home = all_networks();
+        home.catalog.filter = NetworkFilter::Test;
+        home.developer_mode = false;
+        home.refresh_displayed_networks();
+        assert_eq!(home.effective_filter(), NetworkFilter::All);
+        home.catalog.filter = NetworkFilter::Network(ChainId::Regtest);
+        assert_eq!(
+            home.effective_filter(),
+            NetworkFilter::All,
+            "a network that is not listed cannot be the filter"
+        );
+    }
+
+    #[test]
+    fn a_filter_that_hides_every_cube_shows_the_empty_state() {
+        let mut home = all_networks();
+        catalog(
+            &mut home,
+            CatalogMessage::Filter(NetworkFilter::Network(ChainId::Regtest)),
+        );
+        let projection = project(&home);
+        assert!(projection.locals.is_empty());
+        assert_eq!(projection.hidden, 5);
+        assert!(projection.no_matches());
+        let tree = home_tree("filtered-out", &home, WIDE, "dark", theme::Theme::dark());
+        assert!(tree.contains("No Cubes match these filters"));
+        assert!(tree.contains("5 Cubes hidden."));
+        assert!(tree.has(&clear_filters_empty_id()));
+        assert!(matches!(
+            activate_chrome(&home, clear_filters_id(), Press::Pointer),
+            ViewMessage::Catalog(CatalogMessage::Filter(NetworkFilter::All))
+        ));
+    }
+
+    #[test]
+    fn the_top_bar_shows_the_canvas_chips_count_and_clear_link() {
+        let mut home = all_networks();
+        let tree = home_tree("filters", &home, WIDE, "dark", theme::Theme::dark());
+        for label in [
+            "All networks",
+            "Live networks",
+            "Test networks",
+            "Network",
+            "5 Cubes",
+        ] {
+            assert!(tree.contains(label), "missing {:?}", label);
+        }
+        assert!(!tree.contains("Clear filters"));
+        catalog(&mut home, CatalogMessage::Filter(NetworkFilter::Live));
+        let tree = home_tree("filters-live", &home, WIDE, "dark", theme::Theme::dark());
+        assert!(tree.contains("2 of 5 Cubes · 3 hidden"));
+        assert!(tree.has(&clear_filters_id()));
+        assert!(matches!(
+            activate_chrome(&home, filter_id("test"), Press::Pointer),
+            ViewMessage::Catalog(CatalogMessage::Filter(NetworkFilter::Test))
+        ));
+        // Without Developer mode: one network, so no group chips at all.
+        let mut plain = home_with(&[("a", "Alpha")]);
+        plain.catalog.mode = LauncherMode::Cubes;
+        let tree = home_tree("filters-plain", &plain, WIDE, "dark", theme::Theme::dark());
+        assert!(!tree.contains("All networks"));
+        assert!(!tree.contains("Live networks"));
+        assert!(tree.contains("Network"));
+    }
+
+    #[test]
+    fn picking_a_cube_on_another_network_switches_then_selects_it() {
+        let mut home = all_networks();
+        let lab = CubeCatalogKey {
+            chain: ChainId::Testnet4,
+            cube_id: "t1".into(),
+        };
+        let bench = CubeCatalogKey {
+            chain: ChainId::Testnet4,
+            cube_id: "t2".into(),
+        };
+        let task = home.update_catalog(CatalogMessage::SelectFloor(lab.clone()));
+        assert!(
+            run_task(task).iter().any(|m| matches!(
+                m,
+                Message::View(ViewMessage::SelectNetwork(ChainId::Testnet4))
+            )),
+            "the switch to Testnet4 is requested"
+        );
+        assert_eq!(
+            home.catalog.pending_select,
+            Some((lab.clone(), PendingIntent::Select))
+        );
+        assert!(
+            home.catalog.selected.is_none(),
+            "nothing selected until checked"
+        );
+
+        // The real switch. Its probe is not run: Testnet4's list arrives below.
+        drop(home.update(Message::View(ViewMessage::SelectNetwork(ChainId::Testnet4))));
+        assert_eq!(home.network, ChainId::Testnet4);
+        // A later pick while the switch is checked wins.
+        drop(home.update_catalog(CatalogMessage::SelectFloor(bench.clone())));
+        assert_eq!(
+            home.catalog.pending_select,
+            Some((bench.clone(), PendingIntent::Select))
+        );
+
+        let checked = State::Cubes {
+            cubes: home.network_catalog(ChainId::Testnet4).to_vec(),
+            create_cube: false,
+            source: ChainId::Testnet4,
+        };
+        let replay = run_task(home.update(Message::Checked {
+            for_chain: ChainId::Testnet4,
+            res: Ok(checked),
+        }));
+        assert!(home.catalog.pending_select.is_none());
+        assert!(
+            replay.iter().any(|m| matches!(
+                m,
+                Message::View(ViewMessage::Catalog(CatalogMessage::SelectFloor(key))) if *key == bench
+            )),
+            "the pending selection is replayed: {:?}",
+            replay
+        );
+        // As the runtime would: feed the replay back.
+        for message in replay {
+            if matches!(message, Message::View(ViewMessage::Catalog(_))) {
+                drop(home.update(message));
+            }
+        }
+        assert_eq!(home.catalog.selected, Some(bench));
+        // The floor keeps every network, in the same order.
+        assert_eq!(names(&home), ["Alpha", "Beta", "Lab", "Bench", "Sig"]);
+    }
+
+    /// Runs a task's futures to completion and returns its messages.
+    fn run_task(task: Task<Message>) -> Vec<Message> {
+        use iced_runtime::futures::futures::StreamExt;
+        let Some(stream) = iced_runtime::task::into_stream(task) else {
+            return Vec::new();
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                stream
+                    .filter_map(|action| async move {
+                        match action {
+                            iced_runtime::Action::Output(message) => Some(message),
+                            _ => None,
+                        }
+                    })
+                    .collect()
+                    .await
+            })
+    }
+
+    #[test]
+    fn a_pending_claim_handoff_keeps_the_network() {
+        let mut home = all_networks();
+        home.pending_begin_claim = true;
+        let lab = CubeCatalogKey {
+            chain: ChainId::Testnet4,
+            cube_id: "t1".into(),
+        };
+        let messages = run_task(home.update_catalog(CatalogMessage::SelectFloor(lab)));
+        assert!(messages.is_empty(), "no switch: {:?}", messages);
+        assert!(home.catalog.pending_select.is_none());
+        assert_eq!(home.error.as_deref(), Some(CLAIM_HOLDS_NETWORK));
+        let messages = run_task(home.update_catalog(CatalogMessage::Filter(
+            NetworkFilter::Network(ChainId::Signet),
+        )));
+        assert!(messages.is_empty());
+        assert_eq!(home.catalog.filter, NetworkFilter::All);
+        assert!(home.pending_begin_claim, "the handoff survives");
+    }
+
+    #[test]
+    fn a_refused_switch_drops_the_pending_selection() {
+        let mut home = all_networks();
+        home.catalog.pending_select = Some((
+            CubeCatalogKey {
+                chain: ChainId::Testnet4,
+                cube_id: "t1".into(),
+            },
+            PendingIntent::Select,
+        ));
+        home.developer_mode = false;
+        drop(home.update(Message::View(ViewMessage::SelectNetwork(ChainId::Testnet4))));
+        assert_eq!(home.network, ChainId::Bitcoin);
+        assert!(home.catalog.pending_select.is_none());
+    }
+
+    #[test]
+    fn restore_rows_stay_on_screen_when_the_filter_hides_every_local_cube() {
+        let mut home = all_networks();
+        home.remote_cubes = vec![remote("r-1", "Cloud copy", true, true, false, false)];
+        home.remote_cubes[0].network = settings::network_to_api_string(ChainId::Bitcoin);
+        // Regtest is not current, so Bitcoin's restore rows are filtered too:
+        // every Cube is hidden and the canvas empty state shows.
+        home.catalog.filter = NetworkFilter::Network(ChainId::Regtest);
+        let tree = home_tree(
+            "filtered-remotes",
+            &home,
+            WIDE,
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(tree.contains("No Cubes match these filters"));
+        // Live hides only the test networks' Cubes, and Bitcoin has none
+        // local here: its restore row must stay reachable.
+        if let State::Cubes { cubes, .. } = &mut home.state {
+            cubes.clear();
+        }
+        home.catalog.filter = NetworkFilter::Live;
+        let projection = project(&home);
+        assert!(projection.locals.is_empty() && projection.hidden > 0);
+        assert!(!projection.no_matches());
+        let tree = home_tree("live-remotes", &home, WIDE, "dark", theme::Theme::dark());
+        assert!(tree.contains("Cloud copy"), "the restore row is gone");
+        assert!(!tree.contains("No Cubes match these filters"));
+    }
+
+    #[test]
+    fn open_on_another_network_opens_once_its_list_is_checked() {
+        let mut home = all_networks();
+        let lab = CubeCatalogKey {
+            chain: ChainId::Testnet4,
+            cube_id: "t1".into(),
+        };
+        let bench = CubeCatalogKey {
+            chain: ChainId::Testnet4,
+            cube_id: "t2".into(),
+        };
+        // List Open on a Testnet4 Cube while Bitcoin is current.
+        let switch = run_task(home.update(Message::View(ViewMessage::RunCatalog(lab.clone()))));
+        assert!(switch.iter().any(|m| matches!(
+            m,
+            Message::View(ViewMessage::SelectNetwork(ChainId::Testnet4))
+        )));
+        assert_eq!(
+            home.catalog.pending_select,
+            Some((lab.clone(), PendingIntent::Open))
+        );
+        drop(home.update(Message::View(ViewMessage::SelectNetwork(ChainId::Testnet4))));
+        // A second Open during the probe is kept, and wins.
+        drop(home.update(Message::View(ViewMessage::RunCatalog(bench.clone()))));
+        assert_eq!(
+            home.catalog.pending_select,
+            Some((bench.clone(), PendingIntent::Open))
+        );
+        let checked = State::Cubes {
+            cubes: home.network_catalog(ChainId::Testnet4).to_vec(),
+            create_cube: false,
+            source: ChainId::Testnet4,
+        };
+        let replay = run_task(home.update(Message::Checked {
+            for_chain: ChainId::Testnet4,
+            res: Ok(checked),
+        }));
+        assert!(
+            replay.iter().any(|m| matches!(
+                m,
+                Message::View(ViewMessage::RunCatalog(key)) if *key == bench
+            )),
+            "Open replays as Open: {:?}",
+            replay
+        );
+        // ...and that Open now resolves on the checked list.
+        assert_eq!(home.catalog_index(&bench), Some(1));
+    }
+
+    #[test]
+    fn live_and_test_keep_create_and_import_on_a_network_they_show() {
+        let mut home = all_networks();
+        // Bitcoin current: Test moves to the first test network.
+        let switch = run_task(home.update_catalog(CatalogMessage::Filter(NetworkFilter::Test)));
+        assert!(switch.iter().any(|m| matches!(
+            m,
+            Message::View(ViewMessage::SelectNetwork(ChainId::Testnet4))
+        )));
+        // Testnet4 current: Live moves back to Bitcoin; All keeps it.
+        home.network = ChainId::Testnet4;
+        assert_eq!(
+            home.filter_target(NetworkFilter::Live),
+            Some(ChainId::Bitcoin)
+        );
+        assert_eq!(home.filter_target(NetworkFilter::Test), None);
+        assert_eq!(home.filter_target(NetworkFilter::All), None);
+        home.network = ChainId::Bitcoin;
+        // The dock names the network Create and Import use.
+        let tree = home_tree("dock-target", &home, WIDE, "dark", theme::Theme::dark());
+        assert!(tree.contains("New Cubes: Bitcoin mainnet"));
+    }
+
+    #[test]
+    fn choosing_from_the_network_menu_returns_focus_to_its_chip() {
+        let mut home = all_networks();
+        home.catalog.network_menu = true;
+        // Bitcoin is current, so no switch: the task is the focus alone.
+        let task = home.update_catalog(CatalogMessage::Filter(NetworkFilter::Network(
+            ChainId::Bitcoin,
+        )));
+        assert!(task.units() > 0, "focus returns to the Network chip");
+        assert!(!home.catalog.network_menu);
+        home.catalog.network_menu = false;
+        let task = home.update_catalog(CatalogMessage::Filter(NetworkFilter::All));
+        assert_eq!(task.units(), 0, "a chip click keeps its own focus");
+    }
+
+    #[test]
+    fn a_failed_read_keeps_the_last_list_and_says_unavailable() {
+        let mut home = all_networks();
+        home.network_catalog_generation = 1;
+        drop(home.update(Message::NetworkCatalogLoaded {
+            generation: 1,
+            chain: ChainId::Testnet4,
+            cubes: Err("busy".into()),
+        }));
+        assert_eq!(home.network_catalog(ChainId::Testnet4).len(), 2);
+        assert_eq!(project(&home).unread, [ChainId::Testnet4]);
+        home.catalog.network_menu = true;
+        let tree = home_tree("unread", &home, WIDE, "dark", theme::Theme::dark());
+        assert!(tree.contains("Unavailable"));
+        drop(home.update(Message::NetworkCatalogLoaded {
+            generation: 1,
+            chain: ChainId::Testnet4,
+            cubes: Ok(Vec::new()),
+        }));
+        assert!(project(&home).unread.is_empty());
+    }
+
+    #[test]
+    fn the_floor_cap_counts_only_the_cubes_on_screen() {
+        let mut home = all_networks();
+        let many = |prefix: &str, n: usize, chain| -> Vec<CubeSettings> {
+            (0..n)
+                .map(|i| {
+                    CubeSettings::new_with_raw_id(
+                        format!("{prefix}{i}"),
+                        format!("{prefix} {i}"),
+                        chain,
+                    )
+                })
+                .collect()
+        };
+        home.state = State::Cubes {
+            cubes: many("b", 15, ChainId::Bitcoin),
+            create_cube: false,
+            source: ChainId::Bitcoin,
+        };
+        home.network_catalog = vec![(ChainId::Testnet4, many("t", 10, ChainId::Testnet4))];
+        assert!(
+            !project(&home).floor_eligible(home.catalog.mode),
+            "25 shown: List"
+        );
+        home.catalog.filter = NetworkFilter::Live;
+        let projection = project(&home);
+        assert_eq!(
+            (projection.filtered_total, projection.local_total),
+            (15, 25)
+        );
+        assert!(
+            projection.floor_eligible(home.catalog.mode),
+            "15 shown: floor"
+        );
+    }
+
+    #[test]
+    fn a_connect_change_to_the_listed_networks_reads_the_new_one() {
+        let mut home = all_networks();
+        home.network_catalog_generation = 1;
+        // Requested before Regtest was listed; a Connect result lists it.
+        home.network_catalog_requested
+            .retain(|chain| *chain != ChainId::Regtest);
+        let messages = run_task(home.update(Message::View(ViewMessage::ConnectAccount(
+            crate::app::view::ConnectAccountMessage::Init,
+        ))));
+        assert!(
+            messages.iter().any(|m| matches!(
+                m,
+                Message::NetworkCatalogLoaded {
+                    chain: ChainId::Regtest,
+                    ..
+                }
+            )),
+            "{:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn a_connect_change_reads_the_new_network_before_any_catalog_read() {
+        // A Bitcoin-only start reads no other network, so no generation is
+        // ever claimed; a Connect grant must still read what it lists.
+        let mut home = all_networks();
+        home.network_catalog_generation = 0;
+        home.network_catalog_requested
+            .retain(|chain| *chain != ChainId::Regtest);
+        let messages = run_task(home.update(Message::View(ViewMessage::ConnectAccount(
+            crate::app::view::ConnectAccountMessage::Init,
+        ))));
+        assert!(
+            messages.iter().any(|m| matches!(
+                m,
+                Message::NetworkCatalogLoaded {
+                    chain: ChainId::Regtest,
+                    ..
+                }
+            )),
+            "{:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn a_connect_change_off_the_list_is_read_before_the_list_returns() {
+        // A creation backup returns to the list without another check.
+        let mut home = all_networks();
+        home.state = State::RecoveryInput;
+        home.network_catalog_requested
+            .retain(|chain| *chain != ChainId::Regtest);
+        let messages = run_task(home.update(Message::View(ViewMessage::ConnectAccount(
+            crate::app::view::ConnectAccountMessage::Init,
+        ))));
+        assert!(
+            messages.iter().any(|m| matches!(
+                m,
+                Message::NetworkCatalogLoaded {
+                    chain: ChainId::Regtest,
+                    ..
+                }
+            )),
+            "{:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn a_filter_that_hides_every_local_cube_closes_the_key_card() {
+        let mut home = all_networks();
+        home.catalog.key.mode = KeyMode::Pinned;
+        catalog(
+            &mut home,
+            CatalogMessage::Filter(NetworkFilter::Network(ChainId::Regtest)),
+        );
+        assert_eq!(project(&home).filtered_total, 0);
+        assert!(!home.catalog.key_open(), "the card outlived its button");
+    }
+
+    #[test]
+    fn leaving_the_launcher_drops_a_pending_open() {
+        let mut home = all_networks();
+        let lab = CubeCatalogKey {
+            chain: ChainId::Testnet4,
+            cube_id: "t1".into(),
+        };
+        drop(home.update(Message::View(ViewMessage::RunCatalog(lab))));
+        assert!(home.catalog.pending_select.is_some());
+        drop(home.update(Message::View(ViewMessage::GoToSection(
+            HomeSection::RecoverVault,
+        ))));
+        assert_eq!(home.catalog.pending_select, None);
+        // A direct section change, such as a Connect banner CTA, too.
+        let lab = CubeCatalogKey {
+            chain: ChainId::Testnet4,
+            cube_id: "t1".into(),
+        };
+        home.active_section = HomeSection::Cubes;
+        drop(home.update(Message::View(ViewMessage::RunCatalog(lab))));
+        assert!(home.catalog.pending_select.is_some());
+        home.active_section = HomeSection::Connect(crate::app::menu::ConnectSubMenu::Overview);
+        drop(home.update(Message::View(ViewMessage::Catalog(
+            CatalogMessage::NetworkMenu(false),
+        ))));
+        assert_eq!(home.catalog.pending_select, None);
+    }
+
+    #[test]
+    fn an_imported_cube_opening_still_consumes_the_pending_pick() {
+        let mut home = all_networks();
+        let lab = CubeCatalogKey {
+            chain: ChainId::Testnet4,
+            cube_id: "t1".into(),
+        };
+        drop(home.update(Message::View(ViewMessage::RunCatalog(lab.clone()))));
+        drop(home.update(Message::View(ViewMessage::SelectNetwork(ChainId::Testnet4))));
+        assert!(home.catalog.pending_select.is_some());
+        // An import finished during the probe opens its own Cube first.
+        home.open_created_import_cube = Some("t2".into());
+        drop(home.update(Message::Checked {
+            for_chain: ChainId::Testnet4,
+            res: Ok(State::Cubes {
+                cubes: home.network_catalog(ChainId::Testnet4).to_vec(),
+                create_cube: false,
+                source: ChainId::Testnet4,
+            }),
+        }));
+        assert_eq!(
+            home.catalog.pending_select, None,
+            "a stale Open would replay on the next checked list"
+        );
+    }
+
+    #[test]
+    fn the_pin_screen_snapshot_keeps_the_new_cubes_caption() {
+        let home = all_networks();
+        let chrome = super::super::launcher_chrome::snapshot(&home, &project(&home));
+        assert_eq!(chrome.target.as_deref(), Some("New Cubes: Bitcoin mainnet"));
+        let mut one = home_with(&[("a", "Alpha")]);
+        one.catalog.mode = LauncherMode::Cubes;
+        let chrome = super::super::launcher_chrome::snapshot(&one, &project(&one));
+        assert_eq!(chrome.target, None, "one listed network needs no caption");
+    }
+
+    #[test]
+    fn a_superseded_catalog_read_is_dropped() {
+        let mut home = all_networks();
+        home.network_catalog_generation = 2;
+        drop(home.update(Message::NetworkCatalogLoaded {
+            generation: 1,
+            chain: ChainId::Signet,
+            cubes: Ok(Vec::new()),
+        }));
+        assert_eq!(home.network_catalog(ChainId::Signet).len(), 1);
+        drop(home.update(Message::NetworkCatalogLoaded {
+            generation: 2,
+            chain: ChainId::Signet,
+            cubes: Ok(Vec::new()),
+        }));
+        assert!(home.network_catalog(ChainId::Signet).is_empty());
     }
 
     #[test]
@@ -3861,18 +4723,14 @@ mod tests {
                     ViewMessage::GoToSection(HomeSection::RecoverVault)
                 ));
             }
-            let split = signed_in
+            // "Split a Bitcoin wallet" is not in the Launcher design.
+            assert!(signed_in
                 .connect_chain_availability(ChainId::BitcoinBlake2b)
-                .is_available();
-            assert_eq!(tree.has(&split_wallet_id()), split);
-            if split {
-                assert!(matches!(
-                    activate_chrome(&signed_in, split_wallet_id(), pointer),
-                    ViewMessage::GoToSection(HomeSection::SplitWallet)
-                ));
-            }
+                .is_available());
+            assert!(!tree.has(&split_wallet_id()));
+            assert!(!tree.contains("Split a Bitcoin wallet"));
         }
-        // Off Bitcoin the Split entry is not offered, exactly as in the sidebar.
+        // Nor anywhere else.
         let mut testnet = rows(2);
         crate::home::tests::enable_btcb2(&mut testnet);
         testnet.network = ChainId::Testnet4;
@@ -4384,5 +5242,61 @@ mod tests {
         );
         apply_widget_task(task, &mut resting);
         assert_eq!(resting.focused(), Some(details_open_id(&selected)));
+    }
+
+    #[test]
+    fn back_spins_the_cube_home_before_peers_settle() {
+        let mut home = home_with(&[("a", "Alpha"), ("b", "Beta")]);
+        home.catalog.mode = LauncherMode::Cubes;
+        catalog(&mut home, CatalogMessage::SelectFloor(key("a")));
+        let settled = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        catalog(&mut home, CatalogMessage::MotionTick(settled));
+        assert!(home.catalog.motion.is_none());
+
+        // A real pointer click on the face's Back link.
+        let back = bounds_of(
+            &focus_bounds_window(launcher_view(&home), 1440.0, 900.0),
+            &close_details_id(),
+        )
+        .center();
+        let cursor = iced::mouse::Cursor::Available(back);
+        let messages = {
+            let mut mounted = mount_window(launcher_view(&home), 1440.0, 900.0);
+            [
+                iced::mouse::Event::CursorMoved { position: back },
+                iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+                iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left),
+            ]
+            .iter()
+            .flat_map(|event| mounted.send(iced::Event::Mouse(*event), cursor))
+            .collect::<Vec<_>>()
+        };
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            ViewMessage::Catalog(CatalogMessage::ClearSelection)
+        )));
+        for message in messages {
+            let _ = home.update(Message::View(message));
+        }
+
+        assert_eq!(home.catalog.selected, None);
+        let motion = home
+            .catalog
+            .motion
+            .as_ref()
+            .expect("Back keeps the return spin running after the selection clears");
+        assert_eq!(motion.returning_key(), Some(&key("a")));
+        let midway = motion.pose(
+            &key("a"),
+            None,
+            std::time::Instant::now() + super::super::launcher_scene::TURN / 2,
+        );
+        assert!(midway.spin > 0.0 && midway.spin < 1.0, "{:?}", midway);
+
+        catalog(
+            &mut home,
+            CatalogMessage::MotionTick(settled + std::time::Duration::from_secs(5)),
+        );
+        assert!(home.catalog.motion.is_none());
     }
 }

@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use iced::advanced::widget::Id;
 use iced::{
     alignment::Horizontal,
-    widget::{checkbox, scrollable, tooltip, Space},
+    widget::{checkbox, scrollable, text::Wrapping, tooltip, Space},
     Alignment, Length,
 };
 
@@ -183,11 +183,33 @@ pub fn psbt_view<'a>(
     broadcast_ready: bool,
     recipient_identities: &'a [(usize, crate::services::branta::LookupResult)],
 ) -> Element<'a, Message> {
+    // A pending PSBT is an authorization screen: Sign and Broadcast must
+    // always show the exact amounts the user is approving. Once the proposal
+    // is terminal, its detail is passive and follows the global privacy eye.
+    let mask_amounts = mask_passive_psbt_detail(cache.balance_amounts_masked(), &tx.status);
+    let identity_summary = recipient_identity_summary(
+        tx,
+        network,
+        bitcoin_unit,
+        broadcast_ready,
+        recipient_identities,
+        cache.theme_mode,
+        mask_amounts,
+    );
+    let output_identities = if identity_summary.is_some() {
+        &[][..]
+    } else {
+        recipient_identities
+    };
     dashboard(
         &Menu::Vault(VaultSubMenu::PSBTs(None)),
         cache,
         Column::new()
             .spacing(20)
+            .push(
+                secondary_action(action_id(action_scope, "overview.back"), "‹ All PSBTs")
+                    .on_press(Message::Close),
+            )
             .push(
                 Row::new()
                     .align_y(Alignment::Center)
@@ -205,7 +227,13 @@ pub fn psbt_view<'a>(
                         _ => None,
                     }),
             )
-            .push(spend_header(tx, labels_editing, bitcoin_unit))
+            .push(spend_header_masked(
+                tx,
+                labels_editing,
+                bitcoin_unit,
+                mask_amounts,
+            ))
+            .push_maybe(identity_summary)
             .push(spend_overview_view(
                 action_scope,
                 tx,
@@ -220,14 +248,15 @@ pub fn psbt_view<'a>(
             .push(
                 Column::new()
                     .spacing(20)
-                    .push(inputs_view(
+                    .push(history_inputs_view(
                         &tx.coins,
                         &tx.psbt.unsigned_tx,
                         &tx.labels,
                         labels_editing,
                         bitcoin_unit,
+                        mask_amounts,
                     ))
-                    .push(outputs_view_with_identities(
+                    .push(outputs_view_with_identities_masked(
                         &tx.psbt.unsigned_tx,
                         network,
                         &tx.change_indexes,
@@ -236,8 +265,9 @@ pub fn psbt_view<'a>(
                         bitcoin_unit,
                         tx.is_single_payment().is_some(),
                         false,
-                        recipient_identities,
+                        output_identities,
                         cache.theme_mode,
+                        mask_amounts,
                     )),
             )
             .push(if saved {
@@ -267,6 +297,100 @@ pub fn psbt_view<'a>(
                     .width(Length::Fill)
             })
             .push(Space::new().height(10)),
+    )
+}
+
+fn mask_passive_psbt_detail(balance_amounts_masked: bool, status: &SpendStatus) -> bool {
+    balance_amounts_masked && *status != SpendStatus::Pending
+}
+
+/// The detail screen shows a current Branta association for a single external
+/// recipient beside the signing controls. Readiness comes from the spend state;
+/// Branta only identifies the recipient and never asserts that a PSBT is safe.
+fn recipient_identity_summary<'a>(
+    tx: &'a SpendTx,
+    network: Network,
+    bitcoin_unit: BitcoinDisplayUnit,
+    broadcast_ready: bool,
+    identities: &'a [(usize, crate::services::branta::LookupResult)],
+    theme_mode: coincube_ui::theme::palette::ThemeMode,
+    mask_amounts: bool,
+) -> Option<Element<'a, Message>> {
+    if !broadcast_ready || tx.status != SpendStatus::Pending || tx.is_send_to_self() {
+        return None;
+    }
+    // Keep the per-output cards for multi-recipient PSBTs, so the identities
+    // remain next to their respective outputs rather than one appearing to
+    // apply to the whole transaction.
+    if tx
+        .psbt
+        .unsigned_tx
+        .output
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !tx.change_indexes.contains(index))
+        .count()
+        != 1
+    {
+        return None;
+    }
+    let (vout, output) = tx
+        .psbt
+        .unsigned_tx
+        .output
+        .iter()
+        .enumerate()
+        .find(|(index, _)| !tx.change_indexes.contains(index))?;
+    let (_, crate::services::branta::LookupResult::Identified(matches)) =
+        identities.iter().find(|(index, _)| *index == vout)?
+    else {
+        return None;
+    };
+    let address = Address::from_script(&output.script_pubkey, network).ok()?;
+    let current: Vec<_> = matches
+        .iter()
+        .enumerate()
+        .filter(|(_, identity)| identity.is_current())
+        .collect();
+    if current.is_empty() {
+        return None;
+    }
+    let cards = current
+        .into_iter()
+        .fold(Column::new().spacing(10), |column, (index, identity)| {
+            column.push(crate::app::view::shared::recipient_identity::card(
+                identity,
+                Message::OpenVaultRecipientIdentity(vout, index),
+                theme_mode,
+            ))
+        });
+    Some(
+        Column::new()
+            .spacing(10)
+            .push(h4_bold("Recipient identity"))
+            .push(
+                Row::new()
+                    .spacing(10)
+                    .align_y(Alignment::Start)
+                    .push(
+                        p2_regular(address.to_string())
+                            .style(theme::text::secondary)
+                            .wrapping(Wrapping::WordOrGlyph)
+                            .width(Length::Fill),
+                    )
+                    .push({
+                        let amount: Element<'a, Message> = if mask_amounts {
+                            p2_regular("••••").into()
+                        } else {
+                            amount_with_unit(&output.value, bitcoin_unit)
+                                .width(Length::Shrink)
+                                .into()
+                        };
+                        amount
+                    }),
+            )
+            .push(cards)
+            .into(),
     )
 }
 
@@ -597,7 +721,23 @@ pub fn spend_header<'a>(
     labels_editing: &'a HashMap<String, form::Value<String>>,
     bitcoin_unit: BitcoinDisplayUnit,
 ) -> Element<'a, Message> {
+    spend_header_masked(tx, labels_editing, bitcoin_unit, false)
+}
+
+fn spend_header_masked<'a>(
+    tx: &'a SpendTx,
+    labels_editing: &'a HashMap<String, form::Value<String>>,
+    bitcoin_unit: BitcoinDisplayUnit,
+    mask_amounts: bool,
+) -> Element<'a, Message> {
     let txid = tx.psbt.unsigned_tx.compute_txid().to_string();
+    let amount_title: Element<'a, Message> = if tx.is_send_to_self() {
+        h1("Self-transfer").into()
+    } else if mask_amounts {
+        h1("••••").into()
+    } else {
+        amount_with_size_and_unit(&tx.spend_amount, H1_SIZE, bitcoin_unit).into()
+    };
     Column::new()
         .spacing(20)
         .push(if let Some(outpoint) = tx.is_single_payment() {
@@ -617,36 +757,29 @@ pub fn spend_header<'a>(
             label::label_editable(vec![txid.clone()], tx.labels.get(&txid), H3_SIZE)
         })
         .push(
-            Column::new()
-                .push(if tx.is_send_to_self() {
-                    Container::new(h1("Self-transfer"))
-                } else {
-                    Container::new(amount_with_size_and_unit(
-                        &tx.spend_amount,
-                        H1_SIZE,
-                        bitcoin_unit,
-                    ))
-                })
-                .push(
-                    Row::new()
-                        .align_y(Alignment::Center)
-                        .push(h3("Miner fee: ").style(theme::text::secondary))
-                        .push(if tx.fee_amount.is_none() {
-                            Some(text("Missing information about transaction inputs"))
+            Column::new().push(amount_title).push(
+                Row::new()
+                    .align_y(Alignment::Center)
+                    .push(h3("Miner fee: ").style(theme::text::secondary))
+                    .push(if tx.fee_amount.is_none() {
+                        Some(text("Missing information about transaction inputs"))
+                    } else {
+                        None
+                    })
+                    .push_maybe(tx.fee_amount.map(|fee| -> Element<'a, Message> {
+                        if mask_amounts {
+                            h3("••••").into()
                         } else {
-                            None
-                        })
-                        .push_maybe(
-                            tx.fee_amount
-                                .map(|fee| amount_with_size_and_unit(&fee, H3_SIZE, bitcoin_unit)),
-                        )
-                        .push(text(" ").size(H3_SIZE))
-                        .push(tx.min_feerate_vb().map(|rate| {
-                            text(format!("(~{} sats/vbyte)", rate))
-                                .size(H4_SIZE)
-                                .style(theme::text::secondary)
-                        })),
-                ),
+                            amount_with_size_and_unit(&fee, H3_SIZE, bitcoin_unit).into()
+                        }
+                    }))
+                    .push(text(" ").size(H3_SIZE))
+                    .push(tx.min_feerate_vb().map(|rate| {
+                        text(format!("(~{} sats/vbyte)", rate))
+                            .size(H4_SIZE)
+                            .style(theme::text::secondary)
+                    })),
+            ),
         )
         .into()
 }
@@ -2488,6 +2621,19 @@ mod tests {
     }
 
     #[test]
+    fn pending_psbt_review_keeps_authorization_amounts_visible() {
+        assert!(!mask_passive_psbt_detail(true, &SpendStatus::Pending));
+        for status in [
+            SpendStatus::Broadcast,
+            SpendStatus::Spent,
+            SpendStatus::Deprecated,
+        ] {
+            assert!(mask_passive_psbt_detail(true, &status));
+            assert!(!mask_passive_psbt_detail(false, &status));
+        }
+    }
+
+    #[test]
     fn signer_picker_mounted_keyboard_actions_and_replacement() {
         let fp = fingerprint("f714c228");
         let make_path = |state| SigningPath {
@@ -2641,6 +2787,100 @@ mod tests {
             ));
         }
         assert_ne!(action_id(92, "picker.close"), action_id(93, "picker.close"));
+    }
+
+    #[test]
+    fn recipient_identity_summary_is_visible_only_for_a_current_ready_proposal() {
+        let fixture = crate::app::state::vault::test_support::unified::fixture();
+        let mut input_coin = coin(1, 50_000, false);
+        input_coin.outpoint = fixture.psbt.unsigned_tx.input[0].previous_output;
+        let tx = SpendTx::new(
+            None,
+            fixture.psbt,
+            vec![input_coin],
+            &fixture.descriptor,
+            &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
+            Network::Signet,
+        );
+        let ticket = crate::services::branta::test_ticket(true);
+        let identity = crate::services::branta::test_identity(&ticket, "Synthetic Merchant");
+        let identities = [(
+            0,
+            crate::services::branta::LookupResult::Identified(vec![identity]),
+        )];
+
+        for (appearance, theme, mode) in [
+            (
+                "dark",
+                theme::Theme::dark(),
+                coincube_ui::theme::palette::ThemeMode::Dark,
+            ),
+            (
+                "light",
+                theme::Theme::light(),
+                coincube_ui::theme::palette::ThemeMode::Light,
+            ),
+        ] {
+            let summary = recipient_identity_summary(
+                &tx,
+                Network::Signet,
+                BitcoinDisplayUnit::Sats,
+                true,
+                &identities,
+                mode,
+                false,
+            )
+            .expect("current identity on a ready single-recipient proposal");
+            let mounted = capture::inspect(
+                "psbt-detail-recipient-identity",
+                summary,
+                (1024, 768),
+                appearance,
+                theme,
+            );
+            assert!(mounted.contains("Recipient identity"));
+            assert!(mounted.contains("Synthetic Merchant"));
+            assert!(mounted.contains("View with Branta"));
+            let hidden = capture::inspect(
+                "psbt-detail-recipient-identity-hidden",
+                recipient_identity_summary(
+                    &tx,
+                    Network::Signet,
+                    BitcoinDisplayUnit::Sats,
+                    true,
+                    &identities,
+                    mode,
+                    true,
+                )
+                .expect("masked current identity"),
+                (1024, 768),
+                appearance,
+                theme,
+            );
+            assert!(hidden.contains("••••"));
+            assert!(hidden.contains("Synthetic Merchant"));
+        }
+        assert!(recipient_identity_summary(
+            &tx,
+            Network::Signet,
+            BitcoinDisplayUnit::Sats,
+            false,
+            &identities,
+            coincube_ui::theme::palette::ThemeMode::Dark,
+            false,
+        )
+        .is_none());
+        ticket.set_test_enabled(false);
+        assert!(recipient_identity_summary(
+            &tx,
+            Network::Signet,
+            BitcoinDisplayUnit::Sats,
+            true,
+            &identities,
+            coincube_ui::theme::palette::ThemeMode::Dark,
+            false,
+        )
+        .is_none());
     }
 
     #[test]

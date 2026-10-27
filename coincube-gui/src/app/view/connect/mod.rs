@@ -184,7 +184,7 @@ pub const CONTENT_SCROLL_ID: &str = "tenshu.connect.content-scroll";
 pub const EMAIL_INPUT_ID: &str = "tenshu.connect.auth.email";
 pub const OTP_INPUT_ID: &str = "tenshu.connect.auth.otp";
 
-/// The five account-wide sections shown in the Connect sheet. Recovery
+/// Account-wide sections shown in the Connect sheet. Recovery
 /// services has its own section here without changing the older Home menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectSheetSection {
@@ -192,6 +192,7 @@ pub enum ConnectSheetSection {
     PlanBilling,
     Contacts,
     DevicesSecurity,
+    Duress,
     RecoveryServices,
 }
 
@@ -226,10 +227,18 @@ pub fn connect_sheet<'a>(
     );
     let show_auth =
         !signed_in && (matches!(page, ConnectSheetPage::Authentication) || auth_in_progress);
-    let active_section = match page {
+    let requested_section = match page {
         ConnectSheetPage::Sections(section) => section,
         ConnectSheetPage::Authentication => ConnectSheetSection::Account,
     };
+    // The sheet can outlive a feature refresh or account change. Never keep
+    // painting a hidden Duress route after its entitlement or launch gate drops.
+    let active_section =
+        if requested_section == ConnectSheetSection::Duress && !(signed_in && acct.show_duress()) {
+            ConnectSheetSection::Account
+        } else {
+            requested_section
+        };
     let title = if signed_in {
         "Connect account"
     } else {
@@ -288,6 +297,7 @@ pub fn connect_sheet<'a>(
             ConnectSheetSection::PlanBilling => plan_billing_ux(acct),
             ConnectSheetSection::Contacts => contacts::contacts_ux(acct),
             ConnectSheetSection::DevicesSecurity => security_ux(acct),
+            ConnectSheetSection::Duress => duress_ux(acct),
             ConnectSheetSection::RecoveryServices => recovery_services_ux(acct),
         };
         let mut column = Column::new().spacing(12);
@@ -302,7 +312,7 @@ pub fn connect_sheet<'a>(
         signed_out_section_ux(active_section)
     };
     let body: Element<ConnectSheetMessage> = if !show_auth {
-        let sections = [
+        let mut sections = vec![
             (
                 "tenshu.connect.section.account",
                 ConnectSheetSection::Account,
@@ -319,11 +329,14 @@ pub fn connect_sheet<'a>(
                 "tenshu.connect.section.security",
                 ConnectSheetSection::DevicesSecurity,
             ),
-            (
-                "tenshu.connect.section.recovery",
-                ConnectSheetSection::RecoveryServices,
-            ),
         ];
+        if signed_in && acct.show_duress() {
+            sections.push(("tenshu.connect.section.duress", ConnectSheetSection::Duress));
+        }
+        sections.push((
+            "tenshu.connect.section.recovery",
+            ConnectSheetSection::RecoveryServices,
+        ));
         let mut navigation = Column::new().spacing(6).height(Length::Fill);
         for (id, section) in sections {
             let selected = section == active_section;
@@ -332,6 +345,7 @@ pub fn connect_sheet<'a>(
                 ConnectSheetSection::PlanBilling => credit_card_icon(),
                 ConnectSheetSection::Contacts => people_icon(),
                 ConnectSheetSection::DevicesSecurity => laptop_icon(),
+                ConnectSheetSection::Duress => shield_check_icon(),
                 ConnectSheetSection::RecoveryServices => shield_check_icon(),
             };
             let label = tenshu_text::body(section_label(section));
@@ -447,6 +461,7 @@ fn section_label(section: ConnectSheetSection) -> &'static str {
         ConnectSheetSection::PlanBilling => "Plan & billing",
         ConnectSheetSection::Contacts => "Contacts",
         ConnectSheetSection::DevicesSecurity => "Devices & security",
+        ConnectSheetSection::Duress => "Duress mode",
         ConnectSheetSection::RecoveryServices => "Recovery services",
     }
 }
@@ -2915,6 +2930,15 @@ fn checking_duress_ux<'a>(status: DuressGateStatus) -> Element<'a, ConnectAccoun
 fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMessage> {
     use crate::services::duress::enroll::{DuressDelay, MIN_ALL_CLEAR_LEN};
 
+    // A submission abandoned on another sheet route may still succeed. Keep
+    // its payload for local arming without resurfacing the entered secrets.
+    if state.duress_enroll_abandoned {
+        return Column::new()
+            .push(text::h4_bold("Duress Mode").style(theme::text::primary))
+            .push(text::p1_regular("Finishing enrollment…"))
+            .into();
+    }
+
     // Wizard takes over the panel while enrollment is in progress.
     if let Some(enroll) = &state.duress_enroll {
         return duress_enroll::enroll_ux(enroll);
@@ -2974,30 +2998,29 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
         return Column::new().width(Length::Fill).into();
     }
 
-    // What duress activation does — stated plainly, no fine print. Shown in
-    // both the enrolled and not-yet-enrolled states.
+    // The approved Connect layout uses one continuous panel with ruled
+    // sections. Keep the security explanation ahead of every account state.
     col = col.push(
-        container(
-            Column::new()
-                .push(text::p1_bold("What duress mode does").style(theme::text::primary))
-                .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
-                .push(
-                    text::p2_regular(
-                        "Unlocking any one Cube with your duress PIN wipes every Cube on this \
+        Column::new()
+            .push(text::p1_bold("What duress mode does").style(theme::text::primary))
+            .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
+            .push(
+                text::p2_regular(
+                    "Unlocking any one Cube with your duress PIN wipes every Cube on this \
                      device and signals Connect to lock your entire account — this locks all \
                      of your Cubes, not just the one you opened. The device then shows a \
                      dead-end screen until you clear duress from another trusted device.",
-                    )
-                    .color(color::GREY_3),
                 )
-                .padding(20)
-                .spacing(2),
-        )
-        .style(card_style)
-        .width(Length::Fill),
+                .width(Length::Fill)
+                .style(theme::text::secondary),
+            )
+            .width(Length::Fill),
     );
 
-    col = col.push(iced::widget::Space::new().height(Length::Fixed(12.0)));
+    col = col
+        .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
+        .push(divider_line())
+        .push(iced::widget::Space::new().height(Length::Fixed(20.0)));
 
     // Once duress is enrolled (server-authoritative), show the enabled state
     // instead of the setup flow. `None` (state not yet loaded, or the account
@@ -3024,23 +3047,20 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
 
     if locally_armed {
         col = col.push(
-            container(
-                Column::new()
-                    .push(text::p1_bold("Duress mode is enabled").color(color::GREEN))
-                    .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
-                    .push(
-                        text::p2_regular(
-                            "Your duress PIN is armed on every Cube on this device. Entering it \
+            Column::new()
+                .push(text::p1_bold("Duress mode is enabled").style(theme::text::success))
+                .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
+                .push(
+                    text::p2_regular(
+                        "Your duress PIN is armed on every Cube on this device. Entering it \
                          at any Cube's unlock screen triggers a duress wipe and locks your \
                          account.",
-                        )
-                        .color(color::GREY_3),
                     )
-                    .padding(20)
-                    .spacing(2),
-            )
-            .style(card_style)
-            .width(Length::Fill),
+                    .width(Length::Fill)
+                    .style(theme::text::secondary),
+                )
+                .spacing(2)
+                .width(Length::Fill),
         );
 
         // Enrolled-state Recovery-Kit warning (master decision 6): if a Vault
@@ -3069,7 +3089,8 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
                 text::p2_regular(
                     "Turns off duress on all your devices. You can re-enable it anytime.",
                 )
-                .color(color::GREY_3),
+                .width(Length::Fill)
+                .style(theme::text::secondary),
             );
         }
     } else if server_enrolled {
@@ -3079,26 +3100,23 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
         // already-enrolled account is rejected server-side, and this device
         // can't arm without the duress PIN it never had.
         col = col.push(
-            container(
-                Column::new()
-                    .push(
-                        text::p1_bold("Duress mode is enabled on your account")
-                            .style(theme::text::primary),
-                    )
-                    .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
-                    .push(
-                        text::p2_regular(
-                            "It was set up on another device, so it is not armed on this one — \
+            Column::new()
+                .push(
+                    text::p1_bold("Duress mode is enabled on your account")
+                        .style(theme::text::primary),
+                )
+                .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
+                .push(
+                    text::p2_regular(
+                        "It was set up on another device, so it is not armed on this one — \
                          entering your duress PIN here will not trigger a wipe. Manage duress \
                          mode from the device where you enabled it.",
-                        )
-                        .color(color::GREY_3),
                     )
-                    .padding(20)
-                    .spacing(2),
-            )
-            .style(card_style)
-            .width(Length::Fill),
+                    .width(Length::Fill)
+                    .style(theme::text::secondary),
+                )
+                .spacing(2)
+                .width(Length::Fill),
         );
 
         // Duress can still be turned off account-wide from here (the server
@@ -3116,7 +3134,8 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
                 text::p2_regular(
                     "Turns off duress on all your devices. You can re-enable it anytime.",
                 )
-                .color(color::GREY_3),
+                .width(Length::Fill)
+                .style(theme::text::secondary),
             );
         }
     } else {
@@ -3128,42 +3147,43 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
 
         // Credentials the user will set during enrollment.
         col = col.push(
-            container(
-                Column::new()
-                    .push(text::p1_bold("You'll set").style(theme::text::primary))
-                    .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
-                    .push(
-                        text::p2_regular(
-                            "• A duress PIN — one you don't use to unlock any of your Cubes.",
-                        )
-                        .color(color::GREY_3),
+            Column::new()
+                .push(text::p1_bold("You'll set").style(theme::text::primary))
+                .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
+                .push(
+                    text::p2_regular(
+                        "• A duress PIN — one you don't use to unlock any of your Cubes.",
                     )
-                    .push(
-                        text::p2_regular(format!(
-                            "• An all-clear passphrase — at least {} characters, used to unlock \
+                    .width(Length::Fill)
+                    .style(theme::text::secondary),
+                )
+                .push(
+                    text::p2_regular(format!(
+                        "• An all-clear passphrase — at least {} characters, used to unlock \
                          your account from a trusted device.",
-                            MIN_ALL_CLEAR_LEN
-                        ))
-                        .color(color::GREY_3),
-                    )
-                    .push(
-                        text::p2_regular(
-                            "• A duress recovery-kit password — covers all your Cubes.",
-                        )
-                        .color(color::GREY_3),
-                    )
-                    .push(
-                        text::p2_regular(format!("• An unlock delay: {}.", delays))
-                            .color(color::GREY_3),
-                    )
-                    .padding(20)
-                    .spacing(4),
-            )
-            .style(card_style)
-            .width(Length::Fill),
+                        MIN_ALL_CLEAR_LEN
+                    ))
+                    .width(Length::Fill)
+                    .style(theme::text::secondary),
+                )
+                .push(
+                    text::p2_regular("• A duress recovery-kit password — covers all your Cubes.")
+                        .width(Length::Fill)
+                        .style(theme::text::secondary),
+                )
+                .push(
+                    text::p2_regular(format!("• An unlock delay: {}.", delays))
+                        .width(Length::Fill)
+                        .style(theme::text::secondary),
+                )
+                .spacing(6)
+                .width(Length::Fill),
         );
 
-        col = col.push(iced::widget::Space::new().height(Length::Fixed(12.0)));
+        col = col
+            .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
+            .push(divider_line())
+            .push(iced::widget::Space::new().height(Length::Fixed(20.0)));
 
         // Per-Cube recovery-kit checklist. A duress wipe is only reversible
         // from Connect for Cubes that have a Recovery Kit, so we list the
@@ -3185,7 +3205,8 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
                          Finish the Recovery Kit for each of your Vault Cubes before enabling \
                          duress mode.",
                     )
-                    .color(color::GREY_3),
+                    .width(Length::Fill)
+                    .style(theme::text::secondary),
                 );
             if let Some(list) = duress_recovery_kit_list(state) {
                 card_col = card_col
@@ -3212,12 +3233,11 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
                              Vault created on another device that hasn't synced yet may not \
                              appear here — open that device to confirm its Recovery Kit.",
                         )
-                        .color(color::GREY_3),
+                        .width(Length::Fill)
+                        .style(theme::text::secondary),
                     );
             }
-            container(card_col.padding(20).spacing(2))
-                .style(card_style)
-                .width(Length::Fill)
+            card_col.spacing(2).width(Length::Fill)
         });
 
         col = col.push(iced::widget::Space::new().height(Length::Fixed(16.0)));
@@ -3249,7 +3269,11 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
             } else {
                 "Checking your Cubes' Recovery Kits…"
             };
-            col = col.push(text::p2_regular(gate_copy).color(color::GREY_3));
+            col = col.push(
+                text::p2_regular(gate_copy)
+                    .width(Length::Fill)
+                    .style(theme::text::secondary),
+            );
         } else {
             col = col.push(
                 button::primary(None, "Set up Duress Mode")
@@ -3417,10 +3441,7 @@ fn duress_enrolled_kit_warning<'a>(
 fn divider_line<'a>() -> Element<'a, ConnectAccountMessage> {
     container(iced::widget::Space::new().height(Length::Fixed(1.0)))
         .width(Length::Fill)
-        .style(|_t| container::Style {
-            background: Some(iced::Background::Color(color::GREY_5)),
-            ..Default::default()
-        })
+        .style(theme::tenshu::control::divider)
         .into()
 }
 
@@ -3862,6 +3883,12 @@ mod renewal_banner_tests {
         .expect("software renderer for Connect sheet");
         let size = iced::Size::new(1000.0, 712.0);
         let mut account = ConnectAccountPanel::new();
+        let mut entitled = plan(PlanTier::Pro, PlanStatus::Active, None);
+        entitled.entitlements.duress = true;
+        account.plan = Some(entitled);
+        let mut features = features_purchasing(Some(true));
+        features.duress_enabled = Some(true);
+        account.features = Some(features);
 
         for (name, step, page) in [
             (
@@ -3907,6 +3934,11 @@ mod renewal_banner_tests {
                 ConnectSheetPage::Sections(ConnectSheetSection::DevicesSecurity),
             ),
             (
+                "duress",
+                ConnectFlowStep::Dashboard,
+                ConnectSheetPage::Sections(ConnectSheetSection::Duress),
+            ),
+            (
                 "recovery",
                 ConnectFlowStep::Dashboard,
                 ConnectSheetPage::Sections(ConnectSheetSection::RecoveryServices),
@@ -3940,6 +3972,65 @@ mod renewal_banner_tests {
                 assert!(labels.iter().any(|label| label == "Account"));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn connect_sheet_duress_entry_obeys_account_gate() {
+        use iced::advanced::renderer::Headless;
+
+        let renderer = <iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer");
+        let mut account = dashboard_panel();
+        account.plan.as_mut().unwrap().entitlements.duress = true;
+        account.features.as_mut().unwrap().duress_enabled = Some(true);
+        let labels = visible_labels(
+            connect_sheet(
+                &account,
+                ConnectSheetPage::Sections(ConnectSheetSection::Duress),
+            ),
+            &renderer,
+        );
+        assert!(labels.iter().any(|label| label == "Duress mode"));
+        assert!(labels.iter().any(|label| label == "What duress mode does"));
+
+        // A server kill switch or lost entitlement hides both navigation and
+        // stale route contents, including an in-flight enrollment screen.
+        for (entitled, enabled) in [(true, false), (false, true)] {
+            account.plan.as_mut().unwrap().entitlements.duress = entitled;
+            account.features.as_mut().unwrap().duress_enabled = Some(enabled);
+            let labels = visible_labels(
+                connect_sheet(
+                    &account,
+                    ConnectSheetPage::Sections(ConnectSheetSection::Duress),
+                ),
+                &renderer,
+            );
+            assert!(!labels.iter().any(|label| label == "Duress mode"));
+            assert!(!labels.iter().any(|label| label == "What duress mode does"));
+            assert!(labels
+                .iter()
+                .any(|label| label == "Signed in on this device"));
+        }
+
+        account.step = ConnectFlowStep::CheckingDuress {
+            status: DuressGateStatus::Checking,
+        };
+        let labels = visible_labels(
+            connect_sheet(
+                &account,
+                ConnectSheetPage::Sections(ConnectSheetSection::Duress),
+            ),
+            &renderer,
+        );
+        assert!(!labels.iter().any(|label| label == "Duress mode"));
+        assert!(!labels
+            .iter()
+            .any(|label| label == "Signed in on this device"));
     }
 
     fn plan(tier: PlanTier, status: PlanStatus, renewal_at: Option<&str>) -> ConnectPlan {
@@ -4780,6 +4871,71 @@ mod renewal_banner_tests {
             error: None,
         });
         let _ = duress_ux(&account);
+    }
+
+    #[test]
+    fn duress_status_fits_compact_connect_in_both_themes() {
+        use crate::app::view::shared::landing::capture;
+
+        let mut account = dashboard_panel();
+        account.active_sub = ConnectSubMenu::Duress;
+        account.plan.as_mut().unwrap().entitlements.duress = true;
+        account.plan.as_mut().unwrap().entitlements.duress_alerts = true;
+        account.features.as_mut().unwrap().duress_enabled = Some(true);
+        account.duress_cubes = Some(Vec::new());
+        account.duress_contacts.contacts =
+            Some(vec![crate::services::coincube::DuressAlertContact {
+                id: 1,
+                display_name: "Synthetic emergency contact".to_string(),
+                phone: None,
+                email: Some("synthetic-contact@example.test".to_string()),
+                channels: vec!["email".to_string()],
+                intro_sent_at: None,
+                opted_out_at: None,
+                created_at: None,
+                updated_at: None,
+            }]);
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            // Exercise the live sheet route with synthetic account/contact
+            // data at the 1024px minimum, in both supported appearances.
+            let sheet_padding = iced::Padding {
+                top: 28.0,
+                right: 40.0,
+                bottom: 40.0,
+                left: 40.0,
+            };
+            let inspection = capture::inspect_full_window(
+                "duress-status-sheet",
+                connect_sheet(
+                    &account,
+                    ConnectSheetPage::Sections(ConnectSheetSection::Duress),
+                ),
+                (1024, 768),
+                appearance,
+                theme,
+            );
+            assert!(inspection.contains("What duress mode does"));
+            assert!(inspection.contains("Set up a Cube Recovery Kit for each Cube"));
+            assert!(inspection.contains("Set up Duress Mode"));
+            assert!(inspection.contains("Synthetic emergency contact"));
+            assert!(inspection.contains("Remove"));
+
+            let contacts = capture::inspect_wide_content(
+                "duress-contacts-content-mount",
+                container(duress_contacts::section(&account))
+                    .padding(sheet_padding)
+                    .into(),
+                (1024, 768),
+                appearance,
+                theme,
+                711,
+            );
+            assert!(contacts.contains("Synthetic emergency contact"));
+            assert!(contacts.contains("Intro message queued"));
+        }
     }
 
     #[test]

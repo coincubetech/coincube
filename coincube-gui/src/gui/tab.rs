@@ -5897,7 +5897,7 @@ mod migration_warning_tests {
             selected_slot: 0,
             backup: "Status unknown",
             connect: String::new(),
-            wallets: "Not yet known",
+            wallets: "Not yet known".into(),
             peers: Vec::new(),
             pages: 1,
             chrome: Default::default(),

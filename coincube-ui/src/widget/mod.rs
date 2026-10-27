@@ -2,6 +2,7 @@ pub mod action;
 mod cursor;
 mod editor;
 pub mod equal_height;
+pub mod floating;
 mod menu;
 pub mod modal;
 pub mod text_input;

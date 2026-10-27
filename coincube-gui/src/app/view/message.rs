@@ -3,7 +3,9 @@ use crate::{
         menu::Menu,
         settings::unit::BitcoinDisplayUnit,
         view::{
-            global_home::{PickerSide, TransferError, TransferStage, WalletKind},
+            global_home::{
+                PickerSide, TransferDirection, TransferError, TransferStage, WalletKind,
+            },
             FiatAmountConverter,
         },
     },
@@ -924,7 +926,7 @@ pub enum SideshiftSendMessage {
     /// Breez payment failed.
     PaymentFailed(String),
     PollStatus,
-    StatusUpdated(Result<ShiftStatus, String>),
+    StatusUpdated(String, Result<ShiftStatus, String>),
     /// Go back one step, preserving entered data.
     Back,
     Reset,
@@ -2379,8 +2381,28 @@ pub enum HomeMessage {
     /// no longer matches the current state (keystroke-fast previews would
     /// otherwise flicker out-of-order).
     TransferPsbtPreviewReady {
+        generation: u64,
+        direction: TransferDirection,
         feerate_vb: u64,
         result: Result<Amount, String>,
+    },
+    /// Destination fetch result bound to the request and direction that started it.
+    TransferDestinationReady {
+        generation: u64,
+        direction: TransferDirection,
+        result: Result<
+            (
+                String,
+                coincube_core::miniscript::bitcoin::bip32::ChildNumber,
+            ),
+            TransferError,
+        >,
+    },
+    /// Failure from the same request; old failures must not disturb a newer transfer.
+    TransferDestinationFailed {
+        generation: u64,
+        direction: TransferDirection,
+        error: TransferError,
     },
     /// Result of the async step-1→2 prep for Spark-sourced transfers: we
     /// fetched a fresh Vault address (for SparkToVault) or a Breez peg-in
@@ -2388,6 +2410,8 @@ pub enum HomeMessage {
     /// on it. Handler stores the destination address + prepare handle so
     /// the confirm screen can render it and `ConfirmSparkSend` can broadcast.
     SparkPrepareSendReady {
+        generation: u64,
+        direction: TransferDirection,
         /// The destination address Spark will send to. For SparkToVault this
         /// is a fresh Vault BIP-32 address; for SparkToLiquid it's Breez's
         /// on-chain peg-in swap address.
@@ -2419,10 +2443,13 @@ pub enum HomeMessage {
         /// the badge stuck permanently because no Spark deposit ever arrives.
         swap_id: Option<String>,
     },
-    PrepareOnChainResponseReceived(PreparePayOnchainResponse),
+    PrepareOnChainResponseReceived {
+        generation: u64,
+        direction: TransferDirection,
+        response: PreparePayOnchainResponse,
+    },
     TransferSuccessful,
     BackToHome,
-    BreezOnchainAddress(String),
     RefreshLiquidBalance,
     RefreshSparkBalance,
     /// Bridge has emitted `Event::Synced`. The next (or already
@@ -2444,8 +2471,20 @@ pub enum HomeMessage {
     /// balance, if any, is left intact.
     SparkLoadFailed,
     SignVaultToLiquidTx,
-    TransferPsbtReady(TransferPsbtResult),
-    TransferSigningComplete,
+    TransferPsbtReady {
+        request_id: u64,
+        generation: u64,
+        direction: TransferDirection,
+        destination: String,
+        amount_sat: u64,
+        feerate_vb: u64,
+        result: TransferPsbtResult,
+    },
+    TransferSigningComplete {
+        request_id: u64,
+        generation: u64,
+        direction: TransferDirection,
+    },
     ConfirmTransfer,
     LiquidToVaultSubmitted {
         amount: Amount,
