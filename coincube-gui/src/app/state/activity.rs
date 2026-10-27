@@ -20,7 +20,7 @@ use crate::{
         wallets::{DomainPayment, DomainRefundableSwap, LiquidBackend, SparkBackend},
     },
     daemon::{
-        model::{HistoryTransaction, SpendStatus, SpendTx},
+        model::{HistoryTransaction, LabelItem, SpendStatus, SpendTx},
         Daemon,
     },
     utils::now,
@@ -65,6 +65,12 @@ pub struct Activity {
     pub liquid_has_more: bool,
     vault_limit: u64,
     generation: u64,
+    /// The selected row's unsaved label: its entry id and text.
+    label_draft: Option<(String, String)>,
+    pub label_saving: bool,
+    pub label_error: Option<String>,
+    /// The entry whose rail details are open; a new selection closes them.
+    details_open: Option<String>,
 }
 
 impl Activity {
@@ -98,7 +104,99 @@ impl Activity {
             liquid_has_more: false,
             vault_limit: HISTORY_LIMIT,
             generation: 0,
+            label_draft: None,
+            label_saving: false,
+            label_error: None,
+            details_open: None,
         }
+    }
+
+    pub fn label_draft_for(&self, entry_id: &str) -> Option<&str> {
+        self.label_draft
+            .as_ref()
+            .filter(|(id, _)| id == entry_id)
+            .map(|(_, draft)| draft.as_str())
+    }
+
+    pub fn details_open_for(&self, entry_id: &str) -> bool {
+        self.details_open.as_deref() == Some(entry_id)
+    }
+
+    /// The label stored under `key` in the loaded Vault history or proposals.
+    pub fn stored_label(&self, key: &LabelItem) -> &str {
+        let key = key.to_string();
+        self.vault
+            .iter()
+            .filter_map(|tx| tx.labels.get(&key))
+            .chain(self.psbts.iter().filter_map(|tx| tx.labels.get(&key)))
+            .map(String::as_str)
+            .next()
+            .unwrap_or("")
+    }
+
+    /// Keep a saved label in the loaded rows, so the title follows at once.
+    /// A txid key, or an outpoint key (`txid:vout`), belongs to that txid.
+    fn apply_label(&mut self, key: &str, label: Option<&str>) {
+        let owns = |txid: String| {
+            key == txid
+                || key
+                    .strip_prefix(&txid)
+                    .is_some_and(|rest| rest.starts_with(':'))
+        };
+        let rows = self
+            .vault
+            .iter_mut()
+            .map(|tx| (tx.txid.to_string(), &mut tx.labels))
+            .chain(self.psbts.iter_mut().map(|tx| {
+                (
+                    tx.psbt.unsigned_tx.compute_txid().to_string(),
+                    &mut tx.labels,
+                )
+            }));
+        for (txid, labels) in rows {
+            if !owns(txid) {
+                continue;
+            }
+            match label {
+                Some(label) => labels.insert(key.to_owned(), label.to_owned()),
+                None => labels.remove(key),
+            };
+        }
+    }
+
+    fn save_label(&mut self, daemon: Option<Arc<dyn Daemon + Sync + Send>>) -> Task<Message> {
+        let Some((entry_id, draft)) = self.label_draft.clone() else {
+            return Task::none();
+        };
+        let Some(entry) = self
+            .entries()
+            .into_iter()
+            .find(|entry| entry.id == entry_id)
+        else {
+            self.label_draft = None;
+            return Task::none();
+        };
+        let (Some(key), Some(daemon)) = (entry.label_key, daemon) else {
+            return Task::none();
+        };
+        if self.label_saving {
+            return Task::none();
+        }
+        let label = Some(draft.trim().to_owned()).filter(|label| !label.is_empty());
+        self.label_saving = true;
+        self.label_error = None;
+        let generation = self.generation;
+        Task::perform(
+            async move {
+                let stored = key.to_string();
+                daemon
+                    .update_labels(&HashMap::from([(key, label.clone())]))
+                    .await
+                    .map(|()| (entry_id, stored, label))
+                    .map_err(|e| e.to_string())
+            },
+            move |result| Message::ActivityLabelSaved(generation, result),
+        )
     }
 
     pub fn entries(&self) -> Vec<view::activity::Entry> {
@@ -348,6 +446,21 @@ impl State for Activity {
                     Err(error) => self.refundables_error = Some(error),
                 }
             }
+            Message::ActivityLabelSaved(generation, result) if generation == self.generation => {
+                self.label_saving = false;
+                match result {
+                    Ok((entry_id, key, label)) => {
+                        self.apply_label(&key, label.as_deref());
+                        if self.label_draft.as_ref().is_some_and(|(id, draft)| {
+                            id == &entry_id && draft.trim() == label.as_deref().unwrap_or("")
+                        }) {
+                            self.label_draft = None;
+                        }
+                        self.label_error = None;
+                    }
+                    Err(error) => self.label_error = Some(error),
+                }
+            }
             Message::View(view::Message::Activity(event)) => match event {
                 ActivityMessage::Wallet(value) => self.filters.wallet = value,
                 ActivityMessage::Direction(value) => self.filters.direction = value,
@@ -355,8 +468,28 @@ impl State for Activity {
                 ActivityMessage::DateRange(value) => self.filters.date_range = value,
                 ActivityMessage::Search(value) => self.filters.search = value,
                 ActivityMessage::Clear => self.filters = Default::default(),
-                ActivityMessage::Select(id) => self.selected_id = Some(id),
+                ActivityMessage::Select(id) => {
+                    if self.selected_id.as_deref() != Some(id.as_str()) {
+                        self.details_open = None;
+                        self.label_error = None;
+                        self.label_draft = None;
+                    }
+                    self.selected_id = Some(id);
+                }
+                ActivityMessage::ToggleDetails(open) => {
+                    self.details_open = open.then(|| self.selected_id.clone()).flatten();
+                }
+                ActivityMessage::LabelEdited(value) => {
+                    if let Some(id) = self.selected_id.clone() {
+                        self.label_draft = Some((id, value));
+                        self.label_error = None;
+                    }
+                }
+                ActivityMessage::SaveLabel => return self.save_label(_daemon),
                 ActivityMessage::CloseDetail => {
+                    self.details_open = None;
+                    self.label_draft = None;
+                    self.label_error = None;
                     let selected = self.selected_id.take();
                     return selected.map_or_else(Task::none, |id| {
                         iced::widget::operation::focus(view::activity::row_focus_id(&id))

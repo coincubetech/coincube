@@ -49,6 +49,8 @@ pub enum Message {
         Result<Vec<crate::app::wallets::DomainRefundableSwap>, String>,
     ),
     ActivityOpenDetail(super::state::activity::ActivityTarget),
+    /// A label saved from Activity: the entry id, the stored key and label.
+    ActivityLabelSaved(u64, Result<(String, String, Option<String>), String>),
     ImportedBitcoin(Box<super::state::imported_bitcoin::ImportEvent>),
     VaultSpendPrepared {
         generation: u64,
