@@ -5787,6 +5787,17 @@ fn derive_phone_recovery(owner_self: Option<&OwnerSelfRecoverySummary>) -> (bool
     }
 }
 
+/// Whether a Connect-only row offers phone recovery. A Bitcoin Blake2b Cube
+/// restores only as a whole Cube, so there a Vault-only phone backup is not
+/// offered: the fork Home refuses that restore, and the row (or the method
+/// picker) would launch a flow that can only end in an error.
+fn remote_phone_recoverable(cube: &RemoteCube) -> bool {
+    let fork = ChainId::from_api_str(&cube.network).is_some_and(|chain| chain.is_blake2b());
+    cube.phone_recoverable
+        && feature_flags::OWNER_KEYCHAIN_RECOVERY_ENABLED
+        && (cube.phone_full_cube || !fork)
+}
+
 fn remote_cube_list_item<'a>(cube: &'a RemoteCube) -> Element<'a, ViewMessage> {
     // A remote cube can be recovered from this screen two ways, and both
     // rebuild the *same* wallet — they differ only in which key unlocks the
@@ -5800,8 +5811,7 @@ fn remote_cube_list_item<'a>(cube: &'a RemoteCube) -> Element<'a, ViewMessage> {
     // launches that flow directly; when neither exists the row shows only its
     // honest status and a delete button.
     let password_recoverable = cube.has_recovery_kit && cube.has_encrypted_seed;
-    let phone_recoverable =
-        cube.phone_recoverable && feature_flags::OWNER_KEYCHAIN_RECOVERY_ENABLED;
+    let phone_recoverable = remote_phone_recoverable(cube);
 
     // Render the cube-name area as a plain card, NOT a Button. Using a
     // Button without `.on_press` makes Iced render it in
@@ -9453,6 +9463,30 @@ mod tests {
         assert_eq!(home.total_cube_count(), 1);
 
         std::fs::remove_dir_all(home.datadir_path.path()).ok();
+    }
+
+    /// A fork row offers phone recovery only for a full-Cube backup: the fork
+    /// Home refuses a Vault-only phone restore. Other chains keep offering
+    /// both, behind the same feature flag.
+    #[test]
+    fn fork_rows_offer_phone_recovery_only_for_a_full_cube_backup() {
+        let flag = feature_flags::OWNER_KEYCHAIN_RECOVERY_ENABLED;
+        let with_phone = |mut cube: RemoteCube, full_cube| {
+            cube.phone_recoverable = true;
+            cube.phone_full_cube = full_cube;
+            cube
+        };
+        let fork = || fork_remote_cube("remote-fork", "Remote Fork");
+        let bitcoin = || remote_cube("remote-main", "Remote Main", Network::Bitcoin);
+
+        assert!(!remote_phone_recoverable(&with_phone(fork(), false)));
+        assert_eq!(remote_phone_recoverable(&with_phone(fork(), true)), flag);
+        assert_eq!(
+            remote_phone_recoverable(&with_phone(bitcoin(), false)),
+            flag
+        );
+        assert_eq!(remote_phone_recoverable(&with_phone(bitcoin(), true)), flag);
+        assert!(!remote_phone_recoverable(&fork()));
     }
 
     /// Deleting a Cube Connect can't restore can't be undone, so the modal says
