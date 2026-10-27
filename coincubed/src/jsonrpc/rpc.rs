@@ -173,7 +173,9 @@ impl From<commands::CommandError> for Error {
             | commands::CommandError::RbfError(..)
             | commands::CommandError::EmptyFilterList
             | commands::CommandError::RecoveryNotAvailable
-            | commands::CommandError::OutpointNotRecoverable(..) => {
+            | commands::CommandError::OutpointNotRecoverable(..)
+            | commands::CommandError::ExternalChangeNotAllowed
+            | commands::CommandError::SignatureForDifferentTransaction => {
                 Error::new(ErrorCode::InvalidParams, e.to_string())
             }
             commands::CommandError::UnsafeLegacyAlternative { .. } => Error::new(

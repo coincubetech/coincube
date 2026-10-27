@@ -1,6 +1,8 @@
 //! AES-256-GCM + Argon2id envelope for the Cube Recovery Kit.
 //!
-//! Wire format (binary, then base64-encoded for transport):
+//! Wire format (binary, then base64-encoded for transport).
+//!
+//! Version 1, still decrypted:
 //!
 //! ```text
 //! version (1B=0x01) || kdf_id (1B=0x01) ||
@@ -8,12 +10,20 @@
 //! salt (16B) || nonce (12B) || ciphertext || tag (16B)
 //! ```
 //!
-//! AAD bound into the GCM auth tag = `version || kdf_id || kdf_params`
-//! (the first 6 bytes). Salt and nonce are already GCM inputs and don't
-//! need separate integrity, but downgrading the version/kdf bytes must
-//! be rejected on decrypt.
+//! AAD for version 1 is the 6-byte header.
+//!
+//! Version 2 is what `encrypt` writes. Memory cost is a u32 so it can match
+//! the seed file, and the cube id is appended to the header in the AAD:
+//!
+//! ```text
+//! version (1B=0x02) || kdf_id (1B=0x01) ||
+//! memory_kib (4B u32 BE) || t_cost u8 || p_cost u8 ||
+//! salt (16B) || nonce (12B) || ciphertext || tag (16B)
+//! ```
 //!
 //! Aligned with `PLAN-cube-recovery-kit-desktop.md` §2.1.
+
+use std::convert::TryFrom;
 
 use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
@@ -24,15 +34,21 @@ use zeroize::Zeroizing;
 
 use super::error::RecoveryError;
 
-/// Envelope version this client writes and is the only version it accepts.
+/// Envelope version 1. Still decrypted. New kits are version 2.
 pub const ENVELOPE_VERSION: u8 = 0x01;
+
+/// Envelope version this client writes. Memory cost is a u32 so it can match
+/// the seed-file Argon2id parameters, and the cube id is in the GCM data.
+pub const ENVELOPE_VERSION_V2: u8 = 0x02;
 
 /// KDF identifier for Argon2id-with-per-envelope-params. Adding a new KDF
 /// is a wire-format break and needs a new value here (and matching decrypt
 /// dispatch).
 pub const KDF_ID_ARGON2ID_V1: u8 = 0x01;
 
-const HEADER_LEN: usize = 6; // version + kdf_id + 4B params
+const V1_HEADER_LEN: usize = 6; // version + kdf_id + memory u16 + t + p
+const V2_HEADER_LEN: usize = 8; // version + kdf_id + memory u32 + t + p
+const HEADER_LEN: usize = V1_HEADER_LEN;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
 const TAG_LEN: usize = 16;
@@ -44,7 +60,7 @@ const MIN_ENVELOPE_LEN: usize = HEADER_LEN + SALT_LEN + NONCE_LEN + TAG_LEN;
 /// never re-derives the wire params on decrypt.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct KdfParams {
-    pub memory_kib: u16,
+    pub memory_kib: u32,
     pub t_cost: u8,
     pub p_cost: u8,
 }
@@ -59,22 +75,74 @@ impl KdfParams {
         t_cost: 2,
         p_cost: 1,
     };
+
+    /// Same Argon2id cost as the on-disk seed file (256 MiB, t=3, p=4).
+    /// New Recovery Kits use this. Decrypt still honours the params stored
+    /// in an older envelope.
+    pub const SEED: Self = Self {
+        memory_kib: 262_144,
+        t_cost: 3,
+        p_cost: 4,
+    };
 }
 
-fn header_bytes(version: u8, kdf_id: u8, params: KdfParams) -> [u8; HEADER_LEN] {
+fn v1_header(
+    version: u8,
+    kdf_id: u8,
+    params: KdfParams,
+) -> Result<[u8; V1_HEADER_LEN], RecoveryError> {
+    let memory = u16::try_from(params.memory_kib)
+        .map_err(|_| RecoveryError::InvalidParams(argon2::Error::MemoryTooLittle))?;
+    let m = memory.to_be_bytes();
+    Ok([version, kdf_id, m[0], m[1], params.t_cost, params.p_cost])
+}
+
+fn v2_header(version: u8, kdf_id: u8, params: KdfParams) -> [u8; V2_HEADER_LEN] {
     let m = params.memory_kib.to_be_bytes();
-    [version, kdf_id, m[0], m[1], params.t_cost, params.p_cost]
+    [
+        version,
+        kdf_id,
+        m[0],
+        m[1],
+        m[2],
+        m[3],
+        params.t_cost,
+        params.p_cost,
+    ]
 }
 
-fn parse_header(buf: &[u8]) -> Result<(u8, u8, KdfParams), RecoveryError> {
-    if buf.len() < HEADER_LEN {
+fn parse_header(buf: &[u8]) -> Result<(u8, u8, KdfParams, usize), RecoveryError> {
+    if buf.is_empty() {
         return Err(RecoveryError::Truncated);
     }
     let version = buf[0];
+    let header_len = match version {
+        ENVELOPE_VERSION => V1_HEADER_LEN,
+        ENVELOPE_VERSION_V2 => V2_HEADER_LEN,
+        _ => {
+            return Err(RecoveryError::Unsupported {
+                version,
+                kdf_id: buf.get(1).copied().unwrap_or(0),
+            })
+        }
+    };
+    if buf.len() < header_len {
+        return Err(RecoveryError::Truncated);
+    }
     let kdf_id = buf[1];
-    let memory_kib = u16::from_be_bytes([buf[2], buf[3]]);
-    let t_cost = buf[4];
-    let p_cost = buf[5];
+    let (memory_kib, t_cost, p_cost) = if version == ENVELOPE_VERSION {
+        (
+            u32::from(u16::from_be_bytes([buf[2], buf[3]])),
+            buf[4],
+            buf[5],
+        )
+    } else {
+        (
+            u32::from_be_bytes([buf[2], buf[3], buf[4], buf[5]]),
+            buf[6],
+            buf[7],
+        )
+    };
     Ok((
         version,
         kdf_id,
@@ -83,6 +151,7 @@ fn parse_header(buf: &[u8]) -> Result<(u8, u8, KdfParams), RecoveryError> {
             t_cost,
             p_cost,
         },
+        header_len,
     ))
 }
 
@@ -91,8 +160,13 @@ fn derive_key(
     salt: &[u8],
     params: KdfParams,
 ) -> Result<Zeroizing<[u8; KEY_LEN]>, RecoveryError> {
+    // A hostile envelope must not be able to ask for more RAM than a real
+    // kit uses. Version 2 stores the cost as a u32.
+    if params.memory_kib == 0 || params.memory_kib > KdfParams::SEED.memory_kib {
+        return Err(RecoveryError::InvalidParams(argon2::Error::MemoryTooMuch));
+    }
     let argon_params = Params::new(
-        u32::from(params.memory_kib),
+        params.memory_kib,
         u32::from(params.t_cost),
         u32::from(params.p_cost),
         Some(KEY_LEN),
@@ -106,12 +180,13 @@ fn derive_key(
     Ok(key)
 }
 
-/// Encrypts `plaintext` under `password` and returns a base64-encoded
-/// envelope. Generates a fresh 16-byte salt and 12-byte nonce per call.
+/// Encrypts `plaintext` under `password`, bound to `cube_id`, and returns a
+/// base64-encoded version-2 envelope. Generates a fresh salt and nonce.
 pub fn encrypt(
     plaintext: &[u8],
     password: &Zeroizing<String>,
     params: KdfParams,
+    cube_id: &str,
 ) -> Result<String, RecoveryError> {
     let mut salt = [0u8; SALT_LEN];
     let mut nonce = [0u8; NONCE_LEN];
@@ -125,14 +200,16 @@ pub fn encrypt(
         &salt,
         &nonce,
         params,
-        ENVELOPE_VERSION,
+        ENVELOPE_VERSION_V2,
         KDF_ID_ARGON2ID_V1,
+        Some(cube_id),
     )
 }
 
 /// Internal encrypt that takes explicit salt/nonce/version/kdf_id so tests
-/// can pin known-answer vectors. Callers outside the crate should use
-/// `encrypt`.
+/// can pin known-answer vectors. Version 2 requires `cube_id`. Callers
+/// outside the crate should use `encrypt`.
+#[allow(clippy::too_many_arguments)]
 fn encrypt_with(
     plaintext: &[u8],
     password: &[u8],
@@ -141,22 +218,38 @@ fn encrypt_with(
     params: KdfParams,
     version: u8,
     kdf_id: u8,
+    cube_id: Option<&str>,
 ) -> Result<String, RecoveryError> {
     let key = derive_key(password, salt, params)?;
     let cipher = Aes256Gcm::new_from_slice(key.as_ref()).map_err(RecoveryError::Cipher)?;
-    let header = header_bytes(version, kdf_id, params);
+    let (header, aad) = match version {
+        ENVELOPE_VERSION => {
+            let header = v1_header(version, kdf_id, params)?;
+            let aad = header.to_vec();
+            (header.to_vec(), aad)
+        }
+        ENVELOPE_VERSION_V2 => {
+            let header = v2_header(version, kdf_id, params);
+            let mut aad = header.to_vec();
+            aad.extend_from_slice(cube_id.unwrap_or("").as_bytes());
+            (header.to_vec(), aad)
+        }
+        _ => {
+            return Err(RecoveryError::Unsupported { version, kdf_id });
+        }
+    };
 
     let ct = cipher
         .encrypt(
             Nonce::from_slice(nonce),
             Payload {
                 msg: plaintext,
-                aad: &header,
+                aad: &aad,
             },
         )
         .map_err(|_| RecoveryError::Seal)?;
 
-    let mut out = Vec::with_capacity(HEADER_LEN + SALT_LEN + NONCE_LEN + ct.len());
+    let mut out = Vec::with_capacity(header.len() + SALT_LEN + NONCE_LEN + ct.len());
     out.extend_from_slice(&header);
     out.extend_from_slice(salt);
     out.extend_from_slice(nonce);
@@ -168,34 +261,44 @@ fn encrypt_with(
 /// `Zeroizing<Vec<u8>>` so it's wiped on drop. A tag mismatch is reported
 /// as `BadPasswordOrCorrupt` — the caller cannot distinguish a wrong
 /// password from a tampered envelope, by design.
+///
+/// Version 1 ignores `cube_id` (those kits were not bound to one). Version 2
+/// fails closed when `cube_id` does not match the value used at seal time.
 pub fn decrypt(
     envelope_b64: &str,
     password: &Zeroizing<String>,
+    cube_id: &str,
 ) -> Result<Zeroizing<Vec<u8>>, RecoveryError> {
     let raw = base64::engine::general_purpose::STANDARD.decode(envelope_b64)?;
     if raw.len() < MIN_ENVELOPE_LEN {
         return Err(RecoveryError::Truncated);
     }
 
-    let (version, kdf_id, params) = parse_header(&raw)?;
-    if version != ENVELOPE_VERSION || kdf_id != KDF_ID_ARGON2ID_V1 {
+    let (version, kdf_id, params, header_len) = parse_header(&raw)?;
+    if kdf_id != KDF_ID_ARGON2ID_V1 {
         return Err(RecoveryError::Unsupported { version, kdf_id });
     }
+    if raw.len() < header_len + SALT_LEN + NONCE_LEN + TAG_LEN {
+        return Err(RecoveryError::Truncated);
+    }
 
-    let salt = &raw[HEADER_LEN..HEADER_LEN + SALT_LEN];
-    let nonce = &raw[HEADER_LEN + SALT_LEN..HEADER_LEN + SALT_LEN + NONCE_LEN];
-    let ct_and_tag = &raw[HEADER_LEN + SALT_LEN + NONCE_LEN..];
+    let salt = &raw[header_len..header_len + SALT_LEN];
+    let nonce = &raw[header_len + SALT_LEN..header_len + SALT_LEN + NONCE_LEN];
+    let ct_and_tag = &raw[header_len + SALT_LEN + NONCE_LEN..];
 
     let key = derive_key(password.as_bytes(), salt, params)?;
     let cipher = Aes256Gcm::new_from_slice(key.as_ref()).map_err(RecoveryError::Cipher)?;
 
-    let header = header_bytes(version, kdf_id, params);
+    let mut aad = raw[..header_len].to_vec();
+    if version == ENVELOPE_VERSION_V2 {
+        aad.extend_from_slice(cube_id.as_bytes());
+    }
     let pt = cipher
         .decrypt(
             Nonce::from_slice(nonce),
             Payload {
                 msg: ct_and_tag,
-                aad: &header,
+                aad: &aad,
             },
         )
         .map_err(|_| RecoveryError::BadPasswordOrCorrupt)?;
@@ -211,7 +314,7 @@ mod tests {
         Zeroizing::new(s.to_string())
     }
 
-    // Deliberately reduced cost for fast tests. Production uses DEFAULT_V1.
+    // Deliberately reduced cost for fast tests. Production kits use KdfParams::SEED.
     const TEST_PARAMS: KdfParams = KdfParams {
         memory_kib: 512,
         t_cost: 1,
@@ -222,33 +325,34 @@ mod tests {
     fn roundtrip_basic() {
         let password = pw("correct horse battery staple");
         let plaintext = b"hello cube recovery";
-        let env = encrypt(plaintext, &password, TEST_PARAMS).unwrap();
-        let got = decrypt(&env, &password).unwrap();
+        let env = encrypt(plaintext, &password, TEST_PARAMS, "cube").unwrap();
+        let got = decrypt(&env, &password, "cube").unwrap();
         assert_eq!(got.as_slice(), plaintext);
     }
 
     #[test]
     fn wrong_password_maps_to_bad_or_corrupt() {
-        let env = encrypt(b"secret", &pw("right password"), TEST_PARAMS).unwrap();
-        let err = decrypt(&env, &pw("wrong password")).unwrap_err();
+        let env = encrypt(b"secret", &pw("right password"), TEST_PARAMS, "cube").unwrap();
+        let err = decrypt(&env, &pw("wrong password"), "cube").unwrap_err();
         assert!(matches!(err, RecoveryError::BadPasswordOrCorrupt));
     }
 
     #[test]
     fn flipped_header_byte_rejected_by_aad() {
-        // Flip the kdf_params memory_kib bytes. The KDF-id check won't
-        // fire (we kept version=1, kdf=1); the AAD bind will.
-        let env = encrypt(b"hello", &pw("pw"), TEST_PARAMS).unwrap();
+        // Flip the low byte of the v2 memory cost. The KDF id stays valid;
+        // the cost stays under the cap; the tag fails because the header
+        // is authenticated and the derived key changes.
+        let env = encrypt(b"hello", &pw("pw"), TEST_PARAMS, "cube").unwrap();
         let mut raw = base64::engine::general_purpose::STANDARD
             .decode(&env)
             .unwrap();
-        raw[2] ^= 0x01; // mutate memory_kib MSB
+        raw[5] ^= 0x01;
         let mutated = base64::engine::general_purpose::STANDARD.encode(raw);
 
         // Tampered header either (a) changes the derived key via the
         // params, or (b) breaks the AAD binding — either way, decrypt
         // must fail. Both paths surface as `BadPasswordOrCorrupt`.
-        let err = decrypt(&mutated, &pw("pw")).unwrap_err();
+        let err = decrypt(&mutated, &pw("pw"), "cube").unwrap_err();
         assert!(
             matches!(err, RecoveryError::BadPasswordOrCorrupt),
             "expected BadPasswordOrCorrupt, got {:?}",
@@ -258,40 +362,40 @@ mod tests {
 
     #[test]
     fn flipped_ciphertext_byte_rejected_by_tag() {
-        let env = encrypt(b"hello", &pw("pw"), TEST_PARAMS).unwrap();
+        let env = encrypt(b"hello", &pw("pw"), TEST_PARAMS, "cube").unwrap();
         let mut raw = base64::engine::general_purpose::STANDARD
             .decode(&env)
             .unwrap();
         // Flip a byte in the ciphertext region (past header + salt + nonce).
-        let ct_start = HEADER_LEN + SALT_LEN + NONCE_LEN;
+        let ct_start = V2_HEADER_LEN + SALT_LEN + NONCE_LEN;
         raw[ct_start] ^= 0x01;
         let mutated = base64::engine::general_purpose::STANDARD.encode(raw);
 
-        let err = decrypt(&mutated, &pw("pw")).unwrap_err();
+        let err = decrypt(&mutated, &pw("pw"), "cube").unwrap_err();
         assert!(matches!(err, RecoveryError::BadPasswordOrCorrupt));
     }
 
     #[test]
     fn truncated_envelope_rejected() {
-        let env = encrypt(b"hello", &pw("pw"), TEST_PARAMS).unwrap();
+        let env = encrypt(b"hello", &pw("pw"), TEST_PARAMS, "cube").unwrap();
         let mut raw = base64::engine::general_purpose::STANDARD
             .decode(&env)
             .unwrap();
         raw.truncate(MIN_ENVELOPE_LEN - 1);
         let truncated = base64::engine::general_purpose::STANDARD.encode(raw);
-        let err = decrypt(&truncated, &pw("pw")).unwrap_err();
+        let err = decrypt(&truncated, &pw("pw"), "cube").unwrap_err();
         assert!(matches!(err, RecoveryError::Truncated));
     }
 
     #[test]
     fn unsupported_version_rejected() {
-        let env = encrypt(b"hello", &pw("pw"), TEST_PARAMS).unwrap();
+        let env = encrypt(b"hello", &pw("pw"), TEST_PARAMS, "cube").unwrap();
         let mut raw = base64::engine::general_purpose::STANDARD
             .decode(&env)
             .unwrap();
         raw[0] = 0x99;
         let mutated = base64::engine::general_purpose::STANDARD.encode(raw);
-        let err = decrypt(&mutated, &pw("pw")).unwrap_err();
+        let err = decrypt(&mutated, &pw("pw"), "cube").unwrap_err();
         assert!(matches!(
             err,
             RecoveryError::Unsupported { version: 0x99, .. }
@@ -300,13 +404,13 @@ mod tests {
 
     #[test]
     fn unsupported_kdf_id_rejected() {
-        let env = encrypt(b"hello", &pw("pw"), TEST_PARAMS).unwrap();
+        let env = encrypt(b"hello", &pw("pw"), TEST_PARAMS, "cube").unwrap();
         let mut raw = base64::engine::general_purpose::STANDARD
             .decode(&env)
             .unwrap();
         raw[1] = 0xFE;
         let mutated = base64::engine::general_purpose::STANDARD.encode(raw);
-        let err = decrypt(&mutated, &pw("pw")).unwrap_err();
+        let err = decrypt(&mutated, &pw("pw"), "cube").unwrap_err();
         assert!(matches!(
             err,
             RecoveryError::Unsupported { kdf_id: 0xFE, .. }
@@ -319,8 +423,8 @@ mod tests {
         // boundaries that would only show up at scale.
         let password = pw("pw");
         let plaintext = vec![0xA5u8; 1_500_000];
-        let env = encrypt(&plaintext, &password, TEST_PARAMS).unwrap();
-        let got = decrypt(&env, &password).unwrap();
+        let env = encrypt(&plaintext, &password, TEST_PARAMS, "cube").unwrap();
+        let got = decrypt(&env, &password, "cube").unwrap();
         assert_eq!(got.as_slice(), plaintext.as_slice());
     }
 
@@ -342,6 +446,7 @@ mod tests {
             TEST_PARAMS,
             ENVELOPE_VERSION,
             KDF_ID_ARGON2ID_V1,
+            None,
         )
         .unwrap();
 
@@ -354,7 +459,7 @@ mod tests {
             .unwrap();
         assert_eq!(raw[0], ENVELOPE_VERSION, "version byte");
         assert_eq!(raw[1], KDF_ID_ARGON2ID_V1, "kdf_id byte");
-        let m = u16::from_be_bytes([raw[2], raw[3]]);
+        let m = u32::from(u16::from_be_bytes([raw[2], raw[3]]));
         assert_eq!(m, TEST_PARAMS.memory_kib);
         assert_eq!(raw[4], TEST_PARAMS.t_cost);
         assert_eq!(raw[5], TEST_PARAMS.p_cost);
@@ -375,8 +480,8 @@ mod tests {
         // produce different envelopes — otherwise the PRNG wiring is
         // broken or cached.
         let password = pw("pw");
-        let a = encrypt(b"same", &password, TEST_PARAMS).unwrap();
-        let b = encrypt(b"same", &password, TEST_PARAMS).unwrap();
+        let a = encrypt(b"same", &password, TEST_PARAMS, "cube").unwrap();
+        let b = encrypt(b"same", &password, TEST_PARAMS, "cube").unwrap();
         assert_ne!(a, b, "two sealings collided — RNG not feeding salt/nonce");
     }
 }

@@ -2391,7 +2391,7 @@ async fn encrypt_and_upload_wallet(
             serde_json::to_vec(&blob).map_err(|e| format!("serialize seed: {}", e))?,
         );
         Some(
-            recovery::encrypt(&bytes, &password, KdfParams::DEFAULT_V1)
+            recovery::encrypt(&bytes, &password, KdfParams::SEED, &cube_id_num.to_string())
                 .map_err(|e| format!("encrypt seed: {}", e))?,
         )
     } else {
@@ -2408,7 +2408,7 @@ async fn encrypt_and_upload_wallet(
     let (desc_ct, desc_fp) = if include_descriptor {
         let blob = descriptor_blob.as_ref().unwrap();
         let bytes = serialize_wallet_blob(blob)?;
-        let ct = recovery::encrypt(&bytes, &password, KdfParams::DEFAULT_V1)
+        let ct = recovery::encrypt(&bytes, &password, KdfParams::SEED, &cube_id_num.to_string())
             .map_err(|e| format!("encrypt descriptor: {}", e))?;
         let fp = wallet_blob_fingerprint(blob);
         (Some(ct), fp)

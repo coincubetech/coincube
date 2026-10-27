@@ -67,6 +67,9 @@ serde_json = { version = "1.0", features = ["raw_value"] }
 
 # Logging stuff
 log = "0.4"
+# Stable peer-credential check on the JSON-RPC socket. `UnixStream::peer_cred`
+# is still unstable.
+libc = "0.2"
 fern = "0.7"
 
 # In order to have a backtrace on panic, because the

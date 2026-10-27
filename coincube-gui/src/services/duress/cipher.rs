@@ -111,6 +111,56 @@ impl DeviceKey {
     }
 }
 
+/// Seals a JSON document for `duress-state.json` / `duress-queue.json`.
+///
+/// When a device key already exists the bytes are always ciphertext, so a
+/// later disarm does not flip the file back to grep-able JSON. `create_key`
+/// mints `duress.key` only for a payload that actually carries enrollment;
+/// an empty queue on a device that never enrolled stays plaintext and does
+/// not plant a key.
+pub fn seal_json(coincube_dir: &Path, json: &str, create_key: bool) -> io::Result<Vec<u8>> {
+    let key = if create_key {
+        Some(DeviceKey::load_or_create(coincube_dir)?)
+    } else {
+        DeviceKey::load(coincube_dir)?
+    };
+    match key {
+        Some(key) => {
+            let sealed = key
+                .encrypt(json)
+                .map_err(io::Error::other)?;
+            Ok(sealed.into_bytes())
+        }
+        None => Ok(json.as_bytes().to_vec()),
+    }
+}
+
+/// Opens a duress file. A leading `{` or `[` is legacy plaintext JSON. Anything
+/// else is a base64 envelope under `duress.key`, which is loaded and never
+/// created here.
+pub fn open_json(coincube_dir: &Path, bytes: &[u8]) -> io::Result<Vec<u8>> {
+    let start = bytes
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .map(|i| bytes[i])
+        .unwrap_or(0);
+    if start == b'{' || start == b'[' {
+        return Ok(bytes.to_vec());
+    }
+    let text =
+        std::str::from_utf8(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let key = DeviceKey::load(coincube_dir)?.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "encrypted duress file but duress.key is absent",
+        )
+    })?;
+    let plain = key
+        .decrypt(text.trim())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    Ok(plain.into_bytes())
+}
+
 fn write_key(path: &Path, key: &[u8; KEY_LEN]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;

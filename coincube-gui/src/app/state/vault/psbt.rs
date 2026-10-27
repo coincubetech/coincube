@@ -2976,6 +2976,12 @@ impl Modal for SignModal {
 }
 
 fn merge_signatures(psbt: &mut Psbt, signed_psbt: &Psbt) {
+    // Signatures are only meaningful for the transaction they were made for.
+    // Copying them by input index onto a different unsigned transaction would
+    // attach them to outputs the signer did not see.
+    if psbt.unsigned_tx != signed_psbt.unsigned_tx {
+        return;
+    }
     for i in 0..signed_psbt.inputs.len() {
         let psbtin = match psbt.inputs.get_mut(i) {
             Some(psbtin) => psbtin,

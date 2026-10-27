@@ -75,12 +75,12 @@ pub async fn get_service_config(
 /// Resolve only the Connect signing gRPC endpoint, without fetching the
 /// legacy lianalite desktop config used for auth and remote-backend fields.
 pub async fn resolve_connect_grpc_url() -> Option<String> {
-    if let Some(url) = runtime_grpc_url_override() {
+    if let Some(url) = reject_plaintext_in_release(runtime_grpc_url_override()) {
         return Some(url);
     }
     coincube_grpc_url()
         .await
-        .or_else(buildtime_grpc_url_default)
+        .or_else(|| reject_plaintext_in_release(buildtime_grpc_url_default()))
 }
 
 /// Fetch the Connect signing gRPC URL from coincube-api. Best-effort: any
@@ -91,9 +91,26 @@ pub async fn resolve_connect_grpc_url() -> Option<String> {
 async fn coincube_grpc_url() -> Option<String> {
     let base = crate::services::coincube_api_base_url();
     let url = format!("{base}/api/v1/connect/service-config");
-    let cfg: CoincubeServiceConfig = reqwest::get(url).await.ok()?.json().await.ok()?;
+    let https_only = !base.starts_with("http://");
+    let client = reqwest::Client::builder()
+        .https_only(https_only)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .ok()?;
+    let cfg: CoincubeServiceConfig = client.get(url).send().await.ok()?.json().await.ok()?;
     let raw = cfg.grpc_url?;
-    normalize_grpc_url(&raw, cfg.tls)
+    reject_plaintext_in_release(normalize_grpc_url(&raw, cfg.tls))
+}
+
+/// Release builds drop a cleartext gRPC URL instead of dialing it. Debug
+/// builds keep `http://` for a local signer.
+fn reject_plaintext_in_release(url: Option<String>) -> Option<String> {
+    #[cfg(not(debug_assertions))]
+    if url.as_deref().is_some_and(|u| u.starts_with("http://")) {
+        tracing::error!("refusing a plaintext Connect gRPC URL in a release build");
+        return None;
+    }
+    url
 }
 
 /// Compile-time baked gRPC URL (`COINCUBE_CONNECT_GRPC_URL` at build time),

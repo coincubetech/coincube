@@ -74,7 +74,14 @@ pub fn coincube_api_base_url() -> String {
     } else {
         default_base_url()
     };
-    raw.trim_end_matches('/').to_string()
+    let url = raw.trim_end_matches('/').to_string();
+    // A release binary must not follow COINCUBE_API_URL onto cleartext HTTP.
+    // Debug builds keep http:// for local API servers.
+    #[cfg(not(debug_assertions))]
+    if url.starts_with("http://") {
+        panic!("COINCUBE_API_URL must use https:// in release builds, got {url}");
+    }
+    url
 }
 
 fn default_base_url() -> String {

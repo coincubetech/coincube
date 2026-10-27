@@ -16,7 +16,7 @@ pub fn run(
 ) -> Result<(), io::Error> {
     let listener = unix::rpcserver_setup(socket_path)?;
     log::info!("JSONRPC server started.");
-    let res = unix::rpcserver_loop(listener, daemon_control, shutdown);
+    let res = unix::rpcserver_loop(listener, socket_path, daemon_control, shutdown);
     log::info!("JSONRPC server stopped.");
     res
 }

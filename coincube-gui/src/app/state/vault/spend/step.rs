@@ -504,6 +504,11 @@ impl DefineSpend {
         let destinations_is_empty = destinations.is_empty();
         // Clone for the result message; the original is moved into the future.
         let max_address_for_msg = max_address.clone();
+        // Mixed send-max (a remainder recipient plus other payments) must not
+        // put the remainder in the change slot: the daemon only accepts an
+        // external change address when the destination list is empty (a sweep).
+        let wallet_change = self.wallet.preview_change_address();
+        let fold_remainder = recipient_with_max.is_some() && !destinations.is_empty();
 
         // Run coin selection / PSBT construction off the UI thread. The result
         // is delivered as `Message::RedraftResult` and applied (if still
@@ -521,6 +526,16 @@ impl DefineSpend {
                             warnings: vec![],
                         })
                         .map_err(|e| e.into())
+                } else if fold_remainder {
+                    Self::fold_mixed_send_max(
+                        daemon,
+                        &outpoints,
+                        destinations,
+                        feerate_vb,
+                        max_address,
+                        wallet_change,
+                    )
+                    .await
                 } else {
                     daemon
                         .create_spend_tx(
@@ -541,6 +556,70 @@ impl DefineSpend {
                 result,
             },
         )
+    }
+
+    /// Turns a mixed send-max into explicit destination amounts.
+    ///
+    /// The first build uses the wallet's preview change address and reads the
+    /// leftover. That leftover is then a normal payment to the max recipient, and
+    /// the build is repeated so any fee change is added to the same recipient or
+    /// stepped down by `feerate * 64` when the extra output no longer fits.
+    async fn fold_mixed_send_max(
+        daemon: Arc<dyn Daemon + Sync + Send>,
+        outpoints: &[OutPoint],
+        mut destinations: HashMap<Address<address::NetworkUnchecked>, u64>,
+        feerate_vb: u64,
+        recipient: Address<address::NetworkUnchecked>,
+        wallet_change: Address<address::NetworkUnchecked>,
+    ) -> Result<CreateSpendResult, Error> {
+        let change_script = wallet_change.clone().assume_checked().script_pubkey();
+        let mut drafted: Option<CreateSpendResult> = None;
+        for _ in 0..4 {
+            let result = daemon
+                .create_spend_tx(
+                    outpoints,
+                    &destinations,
+                    feerate_vb,
+                    Some(wallet_change.clone()),
+                )
+                .await
+                .map_err(crate::app::error::Error::from)?;
+            match result {
+                CreateSpendResult::InsufficientFunds { missing } => {
+                    let current = destinations.get(&recipient).copied().unwrap_or(0);
+                    let reduced = current.saturating_sub(feerate_vb.saturating_mul(64));
+                    if current < DUST_OUTPUT_SATS
+                        || reduced < DUST_OUTPUT_SATS
+                        || reduced == current
+                    {
+                        if let Some(previous) = drafted {
+                            return Ok(previous);
+                        }
+                        return Ok(CreateSpendResult::InsufficientFunds { missing });
+                    }
+                    destinations.insert(recipient.clone(), reduced);
+                }
+                CreateSpendResult::Success { psbt, warnings } => {
+                    let change_sats = psbt
+                        .unsigned_tx
+                        .output
+                        .iter()
+                        .find(|output| output.script_pubkey == change_script)
+                        .map(|output| output.value.to_sat())
+                        .unwrap_or(0);
+                    if change_sats == 0 {
+                        return Ok(CreateSpendResult::Success { psbt, warnings });
+                    }
+                    let current = destinations.get(&recipient).copied().unwrap_or(0);
+                    destinations.insert(recipient.clone(), current.saturating_add(change_sats));
+                    drafted = Some(CreateSpendResult::Success { psbt, warnings });
+                }
+            }
+        }
+        daemon
+            .create_spend_tx(outpoints, &destinations, feerate_vb, Some(wallet_change))
+            .await
+            .map_err(crate::app::error::Error::from)
     }
 
     /// Apply the result of an async redraft to the form state. Mirrors the

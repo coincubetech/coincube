@@ -1202,10 +1202,11 @@ mod recovery_pair_tests {
                 t_cost: 1,
                 p_cost: 1,
             },
+            "42",
         )
         .unwrap();
         let RecoveredWalletBlob::Imported(restored) =
-            decrypt_wallet_descriptor_blob(&ciphertext, &password).unwrap()
+            decrypt_wallet_descriptor_blob(&ciphertext, &password, "42").unwrap()
         else {
             panic!("Expected an imported wallet Kit");
         };

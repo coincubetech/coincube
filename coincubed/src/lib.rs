@@ -1510,7 +1510,8 @@ impl DaemonHandle {
                 .spawn({
                     let shutdown = rpcserver_shutdown.clone();
                     move || {
-                        server::run(&data_dir.coincubed_rpc_socket_path(), control, shutdown)?;
+                        let socket_path = data_dir.publish_rpc_socket()?;
+                        server::run(&socket_path, control, shutdown)?;
                         Ok(())
                     }
                 })

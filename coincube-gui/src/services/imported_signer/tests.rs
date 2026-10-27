@@ -609,10 +609,11 @@ fn encrypted_imported_key_bundle_binds_cube_chain_wallet_and_passphrase() {
             t_cost: 1,
             p_cost: 1,
         },
+        "synthetic-cube-a",
     )
     .unwrap();
     assert!(!ciphertext.contains(&phrase));
-    let plaintext = decrypt(&ciphertext, &password).unwrap();
+    let plaintext = decrypt(&ciphertext, &password, "synthetic-cube-a").unwrap();
     let restored: Bundle = serde_json::from_slice(&plaintext).unwrap();
     restored.validate("synthetic-cube-a", &wallet).unwrap();
     assert_eq!(restored.local_keys[0].mnemonic, phrase);
