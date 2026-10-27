@@ -400,49 +400,77 @@ pub fn placeholder<'a, T: Into<Element<'a, Message>>>(
 /// from a transient reason string (see
 /// [`crate::app::features::route_availability`]).
 pub fn feature_unavailable_panel(reason: String) -> Element<'static, Message> {
-    let content = if is_liquid_account_unavailable(&reason) {
-        Column::new()
-            .push(text(reason).style(theme::text::secondary).bold())
+    if is_liquid_account_unavailable(&reason) {
+        let overview = Message::Menu(Menu::Cube(crate::app::menu::CubeSubMenu::Overview));
+        let gate = Column::new()
+            .push(iced::widget::rule::horizontal(1))
             .push(
-                text("Your other wallets are unaffected.")
-                    .size(P2_SIZE)
-                    .style(theme::text::secondary)
-                    .align_x(Alignment::Center),
+                Container::new(
+                    Column::new()
+                        .push(text(reason).bold())
+                        .push(
+                            text("Your other wallets are unaffected.")
+                                .size(P2_SIZE)
+                                .style(theme::text::secondary),
+                        )
+                        .push(
+                            button::secondary_action(
+                                liquid_account_overview_id(),
+                                None,
+                                "Back to Overview",
+                                Message::FocusAction,
+                            )
+                            .on_press(overview.clone()),
+                        )
+                        .spacing(14),
+                )
+                .padding([24, 0]),
             )
+            .push(iced::widget::rule::horizontal(1))
+            .width(Length::Fill);
+        let content = Column::new()
             .push(
                 button::secondary_action(
-                    liquid_account_overview_id(),
-                    None,
-                    "Back to Overview",
+                    liquid_account_back_id(),
+                    Some(coincube_ui::icon::arrow_back()),
+                    "Overview",
                     Message::FocusAction,
                 )
-                .on_press(Message::Menu(Menu::Cube(
-                    crate::app::menu::CubeSubMenu::Overview,
-                ))),
+                .style(theme::button::transparent)
+                .width(Length::Shrink)
+                .on_press(overview),
             )
-            .spacing(16)
-            .align_x(Alignment::Center)
-    } else {
-        Column::new()
-            .push(
-                coincube_ui::icon::plug_icon()
-                    .size(48)
-                    .style(theme::text::secondary),
-            )
-            .push(
-                text("Not available on this network")
-                    .style(theme::text::secondary)
-                    .bold(),
-            )
-            .push(
-                text(reason)
-                    .size(P2_SIZE)
-                    .style(theme::text::secondary)
-                    .align_x(Alignment::Center),
-            )
-            .spacing(16)
-            .align_x(Alignment::Center)
-    };
+            .push(Space::new().height(Length::Fixed(10.0)))
+            .push(text("Liquid").size(H3_SIZE).bold())
+            .push(Space::new().height(Length::Fixed(32.0)))
+            .push(gate)
+            .width(Length::Fill);
+
+        return Container::new(content)
+            .width(Length::Fill)
+            .padding([28, 48])
+            .into();
+    }
+
+    let content = Column::new()
+        .push(
+            coincube_ui::icon::plug_icon()
+                .size(48)
+                .style(theme::text::secondary),
+        )
+        .push(
+            text("Not available on this network")
+                .style(theme::text::secondary)
+                .bold(),
+        )
+        .push(
+            text(reason)
+                .size(P2_SIZE)
+                .style(theme::text::secondary)
+                .align_x(Alignment::Center),
+        )
+        .spacing(16)
+        .align_x(Alignment::Center);
 
     Container::new(content)
         .width(Length::Fill)
@@ -467,11 +495,15 @@ fn liquid_account_overview_id() -> Id {
     Id::from("tenshu.liquid.account-unavailable.overview")
 }
 
+fn liquid_account_back_id() -> Id {
+    Id::from("tenshu.liquid.account-unavailable.back")
+}
+
 #[cfg(test)]
 mod unavailable_panel_tests {
     use super::{
-        feature_unavailable_panel, is_liquid_account_unavailable, liquid_account_overview_id,
-        Message,
+        feature_unavailable_panel, is_liquid_account_unavailable, liquid_account_back_id,
+        liquid_account_overview_id, Message,
     };
     use crate::app::{
         features::{self, LiquidGate, MarketplaceServerFlags},
@@ -586,33 +618,39 @@ mod unavailable_panel_tests {
                         palette.clone(),
                     );
                     if account_gate {
+                        assert!(mounted.text.iter().any(|(value, _)| value == "Liquid"));
+                        assert!(mounted.text.iter().any(|(value, _)| value == "Overview"));
                         assert!(mounted.contains(features::LIQUID_ACCOUNT_UNAVAILABLE_REASON));
                         assert!(mounted.contains("Your other wallets are unaffected."));
                         assert!(mounted.contains("Back to Overview"));
                         assert!(!mounted.contains("Not available on this network"));
+                        assert!(mounted.has_focus(liquid_account_back_id()));
                         assert!(mounted.has_focus(liquid_account_overview_id()));
                     } else {
                         assert!(mounted.contains("Not available on this network"));
                         assert!(mounted.contains(&reason));
                         assert!(!mounted.contains("Your other wallets are unaffected."));
                         assert!(!mounted.contains("Back to Overview"));
+                        assert!(!mounted.has_focus(liquid_account_back_id()));
                         assert!(!mounted.has_focus(liquid_account_overview_id()));
                     }
                 }
             }
             if account_gate {
-                for key in [Named::Enter, Named::Space] {
-                    assert!(matches!(
-                        capture::activate_with_key(
-                            feature_unavailable_panel(reason.clone()),
-                            liquid_account_overview_id(),
-                            (1024, 768),
-                            false,
-                            key,
-                        )
-                        .as_slice(),
-                        [Message::Menu(Menu::Cube(CubeSubMenu::Overview))]
-                    ));
+                for target in [liquid_account_back_id(), liquid_account_overview_id()] {
+                    for key in [Named::Enter, Named::Space] {
+                        assert!(matches!(
+                            capture::activate_with_key(
+                                feature_unavailable_panel(reason.clone()),
+                                target.clone(),
+                                (1024, 768),
+                                false,
+                                key,
+                            )
+                            .as_slice(),
+                            [Message::Menu(Menu::Cube(CubeSubMenu::Overview))]
+                        ));
+                    }
                 }
             }
         }
