@@ -1224,6 +1224,10 @@ impl ConnectAccountPanel {
 
     pub fn install_admitted_client(&mut self, client: CoincubeClient) {
         self.session_generation = self.session_generation.wrapping_add(1);
+        // The prior session's async enrollment result is now stale. Scrub its
+        // retained credentials and release the abandoned-wizard gate before
+        // the replacement account can enter Duress.
+        self.clear_duress_enroll();
         self.client = client;
         self.admitted_client = true;
         self.shared_client = false;
@@ -7843,6 +7847,43 @@ mod plan_lifecycle_tests {
         };
         assert_eq!(payload.duress_pin.as_str(), "1234");
         assert_eq!(payload.duress_code.as_str(), "synthetic-code");
+    }
+
+    #[test]
+    fn admitted_client_replacement_scrubs_abandoned_enrollment_and_allows_new_wizard() {
+        let mut panel = ConnectAccountPanel::new();
+        panel.open_enroll_wizard();
+        let wizard = panel.duress_enroll.as_mut().unwrap();
+        wizard.duress_pin = "1234".into();
+        wizard.all_clear = "synthetic-all-clear".into();
+        wizard.pending_code = Some("synthetic-code".into());
+        wizard.submitting = true;
+        panel.scrub_duress_dialogs();
+        let old_generation = panel.session_generation();
+        assert!(panel.duress_enroll_abandoned);
+
+        let mut replacement = CoincubeClient::new();
+        replacement.set_token("replacement-bearer");
+        panel.install_shared_client(replacement);
+        assert_ne!(panel.session_generation(), old_generation);
+        assert!(panel.duress_enroll.is_none());
+        assert!(!panel.duress_enroll_abandoned);
+
+        let stale = panel.update_duress(DuressMessage::EnrollResult(Ok(()), old_generation));
+        assert!(iced_runtime::task::into_stream(stale).is_none());
+        panel.step = ConnectFlowStep::Dashboard;
+        panel.user = Some(crate::services::coincube::User {
+            id: 2,
+            email: "replacement@example.invalid".into(),
+            email_verified: Some(true),
+        });
+        panel.plan = Some(duress_entitled_plan());
+        panel.features = Some(features_with_duress(Some(true)));
+        panel.duress_cubes = Some(Vec::new());
+        let task = panel.update_duress(DuressMessage::StartEnrollment);
+        drop(task);
+        assert!(panel.duress_enroll.is_some());
+        assert!(!panel.duress_enroll_abandoned);
     }
 
     #[test]
