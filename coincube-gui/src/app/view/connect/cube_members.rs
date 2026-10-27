@@ -6,7 +6,7 @@
 
 use coincube_ui::{
     color,
-    component::{tenshu::action::ActionButton, text, tooltip},
+    component::{tenshu::action::ActionButton, text},
     icon::*,
     theme::{self, tenshu::button::ActionKind},
     widget::*,
@@ -64,14 +64,14 @@ fn row_action<'a>(
         ConnectCubeMessage::FocusAction,
     )
     .compact()
-    .width(Length::Fixed(90.0))
+    .width(Length::Fixed(82.0))
     .on_press(message)
     .into()
 }
 
 /// Top-level Members view. Composes the invite form, member list, and
-/// pending-invite list. Dialogs (error banner, stranded-vault conflict) are
-/// rendered at the bottom.
+/// pending-invite list. Errors sit before the form so they remain visible
+/// when a long list extends below the fold.
 pub fn cube_members_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCubeMessage> {
     let panel = &state.members;
     let ready = state.client.is_some() && state.server_cube_id.is_some();
@@ -86,11 +86,11 @@ pub fn cube_members_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCu
                         state.cube_name,
                         network_name(&state.cube_network)
                     ))
-                    .color(color::GREY_3),
+                    .style(theme::text::secondary),
                 )
                 .push(
                     text::p2_regular("People who can view this Cube and contribute signing keys.")
-                        .color(color::GREY_3),
+                        .style(theme::text::secondary),
                 )
                 .spacing(2),
         )
@@ -107,9 +107,22 @@ pub fn cube_members_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCu
 
     let mut col = Column::new()
         .push(header)
-        .push(iced::widget::Space::new().height(Length::Fixed(16.0)))
+        .push(iced::widget::Space::new().height(Length::Fixed(24.0)))
         .spacing(0)
         .width(Length::Fill);
+
+    // A fetch error describes the whole list, so it takes precedence over a
+    // previous action error. Once loading ends, last-good rows remain visible.
+    if let Some(err) = panel.load_error.as_deref().or(panel.error.as_deref()) {
+        col = col
+            .push(error_banner(err))
+            .push(iced::widget::Space::new().height(Length::Fixed(12.0)));
+    }
+    if let Some(conflict) = panel.remove_conflict.as_deref() {
+        col = col
+            .push(remove_conflict_banner(conflict))
+            .push(iced::widget::Space::new().height(Length::Fixed(12.0)));
+    }
 
     // The server Cube id is the boundary for every membership operation. A
     // registering Cube must not present an invite form that cannot submit.
@@ -147,19 +160,24 @@ pub fn cube_members_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCu
 
     col = col
         .push(text::p1_bold("Add Member").style(theme::text::primary))
-        .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
+        .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
         .push(invite_form(panel))
-        .push(iced::widget::Space::new().height(Length::Fixed(20.0)));
+        .push(iced::widget::Space::new().height(Length::Fixed(28.0)));
+
+    if panel.loading {
+        col = col
+            .push(text::p1_regular("Loading members and invites…").style(theme::text::secondary));
+    }
 
     // Pending invites section
-    if !panel.pending_invites.is_empty() {
+    if !panel.loading && !panel.pending_invites.is_empty() {
         col = col.push(text::p1_bold("Pending Invites").style(theme::text::primary));
         col = col.push(iced::widget::Space::new().height(Length::Fixed(8.0)));
         col = col.push(iced::widget::rule::horizontal(1));
         for invite in &panel.pending_invites {
             col = col.push(pending_invite_card(invite));
         }
-        col = col.push(iced::widget::Space::new().height(Length::Fixed(24.0)));
+        col = col.push(iced::widget::Space::new().height(Length::Fixed(28.0)));
     }
 
     // Members list. Skip the "No members yet" placeholder when there's
@@ -172,7 +190,7 @@ pub fn cube_members_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCu
         && panel.load_error.is_none()
     {
         col = col.push(empty_state());
-    } else if !panel.members.is_empty() {
+    } else if !panel.loading && !panel.members.is_empty() {
         col = col.push(text::p1_bold("Members").style(theme::text::primary));
         col = col.push(iced::widget::Space::new().height(Length::Fixed(8.0)));
         col = col.push(iced::widget::rule::horizontal(1));
@@ -180,25 +198,6 @@ pub fn cube_members_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCu
         for member in &panel.members {
             col = col.push(member_card(member, vault_created_at));
         }
-    } else if panel.loading {
-        col = col.push(text::p1_regular("Loading\u{2026}").color(color::GREY_3));
-    }
-
-    // Load errors take precedence — they describe a structural issue
-    // (can't render data) and are more severe than a transient action
-    // failure. An action error below is surfaced only when there's no
-    // load error to supersede it.
-    if let Some(err) = panel.load_error.as_deref() {
-        col = col.push(iced::widget::Space::new().height(Length::Fixed(12.0)));
-        col = col.push(error_banner(err));
-    } else if let Some(err) = panel.error.as_deref() {
-        col = col.push(iced::widget::Space::new().height(Length::Fixed(12.0)));
-        col = col.push(error_banner(err));
-    }
-
-    if let Some(conflict) = panel.remove_conflict.as_deref() {
-        col = col.push(iced::widget::Space::new().height(Length::Fixed(12.0)));
-        col = col.push(remove_conflict_banner(conflict));
     }
 
     col.into()
@@ -214,15 +213,9 @@ fn invite_form<'a>(
     let can_submit = !panel.invite_sending;
 
     let submit: Element<ConnectCubeMessage> = if panel.invite_sending {
-        iced::widget::button(
-            container(text::p1_regular("Sending\u{2026}").color(color::GREY_3))
-                .center_x(Length::Fill)
-                .center_y(Length::Fill),
-        )
-        .width(Length::Shrink)
-        .height(Length::Fixed(44.0))
-        .style(theme::button::primary)
-        .into()
+        text::p1_regular("Sending…")
+            .style(theme::text::secondary)
+            .into()
     } else {
         action(
             add_action_id(),
@@ -244,7 +237,7 @@ fn invite_form<'a>(
         .width(Length::Fill);
 
     let row = Row::new()
-        .push(input)
+        .push(container(input).max_width(360))
         .push(iced::widget::Space::new().width(Length::Fixed(8.0)))
         .push(submit)
         .align_y(Alignment::Center);
@@ -255,7 +248,7 @@ fn invite_form<'a>(
                 "Invite by email. Existing contacts are added immediately; new emails \
                  get an invite and join on accept.",
             )
-            .color(color::GREY_3),
+            .style(theme::text::secondary),
         )
         .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
         .push(row)
@@ -299,22 +292,22 @@ fn member_card<'a>(
             ..Default::default()
         });
 
-    // W16-desktop: show a subdued "Joined after Vault" badge on members
-    // who landed after the attached Vault's signing quorum was sealed.
-    // Their keys can attach to a future Vault rebuild but won't sign
-    // the current one. Tooltip spells out the implication on hover.
+    // W16-desktop: show a "Joined after Vault" cue on members who landed
+    // after the attached Vault's signing quorum was sealed. The implication
+    // stays visible for keyboard and touch users, too.
     let joined_after_vault =
         vault_created_at.is_some_and(|v| member_joined_after_vault(&member.joined_at, v));
     let badge_row: Option<Element<'_, ConnectCubeMessage>> = if joined_after_vault {
         Some(
-            Row::new()
-                .push(text::p2_regular("Joined after Vault").color(color::GREY_3))
-                .push(iced::widget::Space::new().width(Length::Fixed(4.0)))
-                .push(tooltip(
-                    "This member can attach keys but won't be in the current Vault's \
-                     signing quorum. Their keys will be available when the Vault is rebuilt.",
-                ))
-                .align_y(Alignment::Center)
+            Column::new()
+                .push(text::p2_regular("Joined after Vault").style(theme::text::secondary))
+                .push(
+                    text::p2_regular(
+                        "Can attach keys, but cannot sign for this Vault until it is rebuilt.",
+                    )
+                    .style(theme::text::secondary),
+                )
+                .spacing(2)
                 .into(),
         )
     } else {
@@ -327,7 +320,7 @@ fn member_card<'a>(
         info = info.push(badge);
     }
     let info = info
-        .push(text::p2_regular(format!("Joined {}", joined)).color(color::GREY_3))
+        .push(text::p2_regular(format!("Joined {}", joined)).style(theme::text::secondary))
         .spacing(2)
         .width(Length::Fill);
 
@@ -361,7 +354,10 @@ fn pending_invite_card<'a>(invite: &'a CubeInviteSummary) -> Element<'a, Connect
         .push(text::p1_regular(invite.email.as_str()).style(theme::text::primary))
         .push(
             Row::new()
-                .push(text::p2_regular(invite.status.as_str()).color(status_color(&invite.status)))
+                .push(
+                    text::p2_regular(invite_status(&invite.status))
+                        .style(invite_status_style(&invite.status)),
+                )
                 .push(iced::widget::Space::new().width(Length::Fixed(12.0)))
                 .push(expiry_elem)
                 .align_y(Alignment::Center),
@@ -401,7 +397,7 @@ fn empty_state<'a>() -> Element<'a, ConnectCubeMessage> {
                 text::p2_regular(
                     "Add a contact by email to let them contribute a signing key to this Cube.",
                 )
-                .color(color::GREY_3),
+                .style(theme::text::secondary),
             )
             .align_x(Alignment::Center)
             .padding(24)
@@ -415,7 +411,7 @@ fn empty_state<'a>() -> Element<'a, ConnectCubeMessage> {
 fn error_banner<'a>(err: &str) -> Element<'a, ConnectCubeMessage> {
     container(
         Row::new()
-            .push(text::p2_regular(err.to_string()).color(color::RED))
+            .push(text::p2_regular(err.to_string()).style(theme::text::error))
             .push(iced::widget::Space::new().width(Length::Fill))
             .push(action(
                 Id::new(ERROR_DISMISS_ID),
@@ -431,7 +427,7 @@ fn error_banner<'a>(err: &str) -> Element<'a, ConnectCubeMessage> {
     .style(|t| container::Style {
         background: Some(iced::Background::Color(t.colors.cards.simple.background)),
         border: iced::Border {
-            color: color::RED,
+            color: theme::text::adapt_color(color::RED, t),
             width: 0.5,
             radius: 8.0.into(),
         },
@@ -444,13 +440,13 @@ fn error_banner<'a>(err: &str) -> Element<'a, ConnectCubeMessage> {
 fn remove_conflict_banner<'a>(msg: &str) -> Element<'a, ConnectCubeMessage> {
     container(
         Column::new()
-            .push(text::p1_bold("Can't remove this member").color(color::RED))
+            .push(text::p1_bold("Can't remove this member").style(theme::text::error))
             .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
             .push(text::p2_regular(msg.to_string()).style(theme::text::primary))
             .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
             .push(
                 text::p2_regular("Wind down the Vault(s) first, then try again.")
-                    .color(color::GREY_3),
+                    .style(theme::text::secondary),
             )
             .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
             .push(
@@ -471,7 +467,7 @@ fn remove_conflict_banner<'a>(msg: &str) -> Element<'a, ConnectCubeMessage> {
     .style(|t| container::Style {
         background: Some(iced::Background::Color(t.colors.cards.simple.background)),
         border: iced::Border {
-            color: color::RED,
+            color: theme::text::adapt_color(color::RED, t),
             width: 1.0,
             radius: 12.0.into(),
         },
@@ -485,12 +481,22 @@ fn remove_conflict_banner<'a>(msg: &str) -> Element<'a, ConnectCubeMessage> {
 // Helpers
 // =============================================================================
 
-fn status_color(status: &str) -> iced::Color {
+fn invite_status_style(status: &str) -> fn(&theme::Theme) -> iced::widget::text::Style {
     match status {
-        "pending" => color::ORANGE,
-        "accepted" => color::GREEN,
-        "revoked" | "expired" => color::GREY_3,
-        _ => color::GREY_3,
+        "pending" => theme::text::warning,
+        "accepted" => theme::text::success,
+        "revoked" | "expired" => theme::text::secondary,
+        _ => theme::text::secondary,
+    }
+}
+
+fn invite_status(status: &str) -> &str {
+    match status {
+        "pending" => "Pending invitation",
+        "accepted" => "Accepted invitation",
+        "revoked" => "Revoked invitation",
+        "expired" => "Expired invitation",
+        other => other,
     }
 }
 
@@ -518,18 +524,18 @@ fn expiry_element<'a>(expires_at: &str) -> Element<'a, ConnectCubeMessage> {
     // though it's already past.
     let expiry_utc = expiry.with_timezone(&chrono::Utc);
     if expiry_utc <= now {
-        return text::p2_regular("Expired").color(color::RED).into();
+        return text::p2_regular("Expired").style(theme::text::error).into();
     }
     let days = (expiry_utc.date_naive() - now.date_naive()).num_days();
     match days {
         0 => text::p2_regular("Expires today")
-            .color(color::ORANGE)
+            .style(theme::text::warning)
             .into(),
         1 => text::p2_regular("Expires in 1 day")
-            .color(color::GREY_3)
+            .style(theme::text::secondary)
             .into(),
         d => text::p2_regular(format!("Expires in {} days", d))
-            .color(color::GREY_3)
+            .style(theme::text::secondary)
             .into(),
     }
 }
@@ -556,7 +562,7 @@ mod tests {
             ))
             .push(invite_form(panel))
             .push(pending_invite_card(invite))
-            .push(member_card(member, None))
+            .push(member_card(member, Some("2026-10-01T00:00:00Z")))
             .push(error_banner("Network unavailable"))
             .push(remove_conflict_banner("Keys are signing an active Vault"))
             .spacing(12)
@@ -598,6 +604,9 @@ mod tests {
                     theme,
                 );
                 assert!(mounted.contains("Please enter a valid email address"));
+                assert!(mounted.contains("Pending invitation"));
+                assert!(mounted.contains("Joined after Vault"));
+                assert!(mounted.contains("cannot sign for this Vault until it is rebuilt"));
                 for id in [
                     refresh_action_id(),
                     add_action_id(),
