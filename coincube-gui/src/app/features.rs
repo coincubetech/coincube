@@ -176,9 +176,12 @@ pub fn liquid_wallet_usable<C: Into<ChainId>>(chain: C, gate: LiquidGate) -> boo
 /// Reason shown for a Liquid route reached while the wallet is gated off —
 /// a restored or deep-linked route, since the nav hides Liquid entirely in
 /// this state. Not a per-network message: Liquid is sunset for new wallets.
+pub const LIQUID_ACCOUNT_UNAVAILABLE_REASON: &str =
+    "The Liquid wallet isn't available on this account.";
+
 fn liquid_sunset() -> Availability {
     Availability::Unavailable {
-        reason: "The Liquid wallet isn't available on this account.".to_string(),
+        reason: LIQUID_ACCOUNT_UNAVAILABLE_REASON.to_string(),
     }
 }
 
@@ -859,7 +862,7 @@ mod tests {
                 LiquidGate::HIDDEN,
             )
             .reason(),
-            Some("The Liquid wallet isn't available on this account.")
+            Some(LIQUID_ACCOUNT_UNAVAILABLE_REASON)
         );
     }
 

@@ -393,31 +393,49 @@ pub fn placeholder<'a, T: Into<Element<'a, Message>>>(
         .into()
 }
 
-/// Full-panel placeholder for a route whose feature isn't available on the
-/// current network — e.g. a restored or deep-linked route onto a rail item
-/// that renders greyed out. Mirrors [`placeholder`] but owns its subtitle so
-/// it can be built from a transient reason string (see
+/// Full-panel placeholder for a route whose feature isn't available — e.g. a
+/// restored Liquid route after its account gate closes, or a network-disabled
+/// rail item. Mirrors [`placeholder`] but owns its copy so it can be built
+/// from a transient reason string (see
 /// [`crate::app::features::route_availability`]).
 pub fn feature_unavailable_panel(reason: String) -> Element<'static, Message> {
-    let content = Column::new()
-        .push(
-            coincube_ui::icon::plug_icon()
-                .size(48)
-                .style(theme::text::secondary),
-        )
-        .push(
-            text("Not available on this network")
-                .style(theme::text::secondary)
-                .bold(),
-        )
-        .push(
-            text(reason)
-                .size(P2_SIZE)
-                .style(theme::text::secondary)
-                .align_x(Alignment::Center),
-        )
-        .spacing(16)
-        .align_x(Alignment::Center);
+    let content = if is_liquid_account_unavailable(&reason) {
+        Column::new()
+            .push(text(reason).style(theme::text::secondary).bold())
+            .push(
+                text("Your other wallets are unaffected.")
+                    .size(P2_SIZE)
+                    .style(theme::text::secondary)
+                    .align_x(Alignment::Center),
+            )
+            .push(
+                button::secondary(None, "Back to Overview").on_press(Message::Menu(Menu::Cube(
+                    crate::app::menu::CubeSubMenu::Overview,
+                ))),
+            )
+            .spacing(16)
+            .align_x(Alignment::Center)
+    } else {
+        Column::new()
+            .push(
+                coincube_ui::icon::plug_icon()
+                    .size(48)
+                    .style(theme::text::secondary),
+            )
+            .push(
+                text("Not available on this network")
+                    .style(theme::text::secondary)
+                    .bold(),
+            )
+            .push(
+                text(reason)
+                    .size(P2_SIZE)
+                    .style(theme::text::secondary)
+                    .align_x(Alignment::Center),
+            )
+            .spacing(16)
+            .align_x(Alignment::Center)
+    };
 
     Container::new(content)
         .width(Length::Fill)
@@ -432,6 +450,70 @@ pub fn feature_unavailable_panel(reason: String) -> Element<'static, Message> {
             ..Default::default()
         })
         .into()
+}
+
+fn is_liquid_account_unavailable(reason: &str) -> bool {
+    reason == crate::app::features::LIQUID_ACCOUNT_UNAVAILABLE_REASON
+}
+
+#[cfg(test)]
+mod unavailable_panel_tests {
+    use super::is_liquid_account_unavailable;
+    use crate::app::{
+        features::{self, LiquidGate, MarketplaceServerFlags},
+        menu::{LiquidSubMenu, Menu, SparkSubMenu},
+    };
+    use coincube_core::miniscript::bitcoin::Network;
+
+    #[test]
+    fn account_disabled_liquid_gets_the_account_panel() {
+        let reason = features::route_availability(
+            &Menu::Liquid(LiquidSubMenu::Overview),
+            Network::Bitcoin,
+            false,
+            MarketplaceServerFlags::OFF,
+            LiquidGate::HIDDEN,
+        )
+        .reason()
+        .unwrap()
+        .to_owned();
+
+        assert!(is_liquid_account_unavailable(&reason));
+        assert_eq!(reason, features::LIQUID_ACCOUNT_UNAVAILABLE_REASON);
+    }
+
+    #[test]
+    fn unsupported_networks_keep_the_network_panel() {
+        let granted = LiquidGate {
+            server_enabled: true,
+            local_state_exists: false,
+        };
+        for (menu, network, expected_reason) in [
+            (
+                Menu::Liquid(LiquidSubMenu::Overview),
+                Network::Regtest,
+                "Liquid isn't available on Regtest.",
+            ),
+            (
+                Menu::Spark(SparkSubMenu::Overview),
+                Network::Signet,
+                "Spark isn't available on Signet.",
+            ),
+        ] {
+            let reason = features::route_availability(
+                &menu,
+                network,
+                false,
+                MarketplaceServerFlags::OFF,
+                granted,
+            )
+            .reason()
+            .unwrap()
+            .to_owned();
+            assert!(!is_liquid_account_unavailable(&reason));
+            assert_eq!(reason, expected_reason);
+        }
+    }
 }
 
 /// Loading-state card mirroring [`placeholder`]'s layout, but with the
