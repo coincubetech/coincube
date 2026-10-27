@@ -29,6 +29,8 @@ use crate::{
 use super::State;
 
 const HISTORY_LIMIT: u64 = 100;
+/// The label editors' and the RPC daemon's limit (`vault/label.rs`).
+const LABEL_MAX_LEN: usize = 100;
 
 #[derive(Debug, Clone)]
 pub enum ActivityTarget {
@@ -65,6 +67,18 @@ pub struct Activity {
     pub liquid_has_more: bool,
     vault_limit: u64,
     generation: u64,
+    /// The selected row's unsaved label: its entry id and text.
+    label_draft: Option<(String, String)>,
+    /// Label saves in flight: request number, entry id and the text sent.
+    /// Their own numbers, not the list generation, so a reload cannot
+    /// strand one; rows save independently.
+    label_saves: Vec<(u64, String, String)>,
+    label_requests: u64,
+    /// Why an entry's last save failed, shown under that entry until it is
+    /// edited or saved.
+    label_errors: HashMap<String, String>,
+    /// The entry whose rail details are open; a new selection closes them.
+    details_open: Option<String>,
 }
 
 impl Activity {
@@ -98,7 +112,156 @@ impl Activity {
             liquid_has_more: false,
             vault_limit: HISTORY_LIMIT,
             generation: 0,
+            label_draft: None,
+            label_saves: Vec::new(),
+            label_requests: 0,
+            label_errors: HashMap::new(),
+            details_open: None,
         }
+    }
+
+    /// The Vault screen offers Bump fee and Cancel only on a wallet with
+    /// an inheritance path (`state/vault/transactions.rs`).
+    pub fn vault_supports_replacement(&self) -> bool {
+        self.wallet
+            .as_ref()
+            .is_some_and(|wallet| wallet.supports_inheritance())
+    }
+
+    #[cfg(test)]
+    pub fn generation_for_tests(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn label_saving_for(&self, entry_id: &str) -> bool {
+        self.label_saves.iter().any(|(_, id, _)| id == entry_id)
+    }
+
+    pub fn label_error_for(&self, entry_id: &str) -> Option<&str> {
+        self.label_errors.get(entry_id).map(String::as_str)
+    }
+
+    pub fn label_draft_for(&self, entry_id: &str) -> Option<&str> {
+        self.label_draft
+            .as_ref()
+            .filter(|(id, _)| id == entry_id)
+            .map(|(_, draft)| draft.as_str())
+    }
+
+    pub fn details_open_for(&self, entry_id: &str) -> bool {
+        self.details_open.as_deref() == Some(entry_id)
+    }
+
+    /// The label `entry` edits, read from the entry's own row: other rows
+    /// can carry the same key (a spend loads its inputs' outpoint labels).
+    pub fn stored_label(&self, entry: &view::activity::Entry) -> &str {
+        let Some(key) = entry.label_key.as_ref().map(ToString::to_string) else {
+            return "";
+        };
+        let labels = match &entry.target {
+            ActivityTarget::Vault(tx) => self
+                .vault
+                .iter()
+                .find(|row| row.txid == tx.txid)
+                .map(|row| &row.labels),
+            ActivityTarget::Psbt(tx) => {
+                let txid = tx.psbt.unsigned_tx.compute_txid();
+                self.psbts
+                    .iter()
+                    .find(|row| row.psbt.unsigned_tx.compute_txid() == txid)
+                    .map(|row| &row.labels)
+            }
+            _ => None,
+        };
+        labels
+            .and_then(|labels| labels.get(&key))
+            .map_or("", String::as_str)
+    }
+
+    /// Keep a saved label in the loaded rows, so titles follow at once: every
+    /// row already holding the key (a spend carries its inputs' labels), and
+    /// the row that owns it. A txid key, or an outpoint key (`txid:vout`),
+    /// belongs to that txid.
+    fn apply_label(&mut self, key: &str, label: Option<&str>) {
+        let owns = |txid: String| {
+            key == txid
+                || key
+                    .strip_prefix(&txid)
+                    .is_some_and(|rest| rest.starts_with(':'))
+        };
+        let rows = self
+            .vault
+            .iter_mut()
+            .map(|tx| (tx.txid.to_string(), &mut tx.labels))
+            .chain(self.psbts.iter_mut().map(|tx| {
+                (
+                    tx.psbt.unsigned_tx.compute_txid().to_string(),
+                    &mut tx.labels,
+                )
+            }));
+        for (txid, labels) in rows {
+            if !owns(txid) && !labels.contains_key(key) {
+                continue;
+            }
+            match label {
+                Some(label) => labels.insert(key.to_owned(), label.to_owned()),
+                None => labels.remove(key),
+            };
+        }
+    }
+
+    fn save_label(&mut self, daemon: Option<Arc<dyn Daemon + Sync + Send>>) -> Task<Message> {
+        let Some((entry_id, draft)) = self.label_draft.clone() else {
+            return Task::none();
+        };
+        if self.label_saving_for(&entry_id) {
+            return Task::none();
+        }
+        let Some(entry) = self
+            .entries()
+            .into_iter()
+            .find(|entry| entry.id == entry_id)
+        else {
+            self.label_draft = None;
+            return Task::none();
+        };
+        let Some(key) = entry.label_key else {
+            return Task::none();
+        };
+        let label = Some(draft.trim().to_owned()).filter(|label| !label.is_empty());
+        // The daemon's own limit; the embedded one does not check it.
+        if label
+            .as_ref()
+            .is_some_and(|label| label.len() > LABEL_MAX_LEN)
+        {
+            self.label_errors.insert(
+                entry_id,
+                format!("Labels are limited to {LABEL_MAX_LEN} characters."),
+            );
+            return Task::none();
+        }
+        let Some(daemon) = daemon else {
+            self.label_errors.insert(
+                entry_id,
+                "The Vault isn't running, so the label can't be saved yet.".to_owned(),
+            );
+            return Task::none();
+        };
+        self.label_requests = self.label_requests.wrapping_add(1);
+        let request = self.label_requests;
+        self.label_saves.push((request, entry_id.clone(), draft));
+        self.label_errors.remove(&entry_id);
+        Task::perform(
+            async move {
+                let stored = key.to_string();
+                daemon
+                    .update_labels(&HashMap::from([(key, label.clone())]))
+                    .await
+                    .map(|()| (entry_id, stored, label))
+                    .map_err(|e| e.to_string())
+            },
+            move |result| Message::ActivityLabelSaved(request, result),
+        )
     }
 
     pub fn entries(&self) -> Vec<view::activity::Entry> {
@@ -348,6 +511,43 @@ impl State for Activity {
                     Err(error) => self.refundables_error = Some(error),
                 }
             }
+            Message::ActivityLabelSaved(request, result) => {
+                // Only this request's own answer ends its "Saving…"; an
+                // answer from before a reload still updates the rows.
+                let current = self
+                    .label_saves
+                    .iter()
+                    .position(|(pending, _, _)| *pending == request)
+                    .map(|index| self.label_saves.remove(index));
+                match result {
+                    Ok((entry_id, key, label)) => {
+                        self.apply_label(&key, label.as_deref());
+                        self.label_errors.remove(&entry_id);
+                        if self.label_draft.as_ref().is_some_and(|(id, draft)| {
+                            id == &entry_id && draft.trim() == label.as_deref().unwrap_or("")
+                        }) {
+                            self.label_draft = None;
+                        }
+                    }
+                    Err(_) => {
+                        if let Some((_, entry_id, text)) = current {
+                            // Give the text back, unless another row's edit
+                            // holds the draft now.
+                            if self
+                                .label_draft
+                                .as_ref()
+                                .is_none_or(|(id, _)| id == &entry_id)
+                            {
+                                self.label_draft = Some((entry_id.clone(), text));
+                            }
+                            self.label_errors.insert(
+                                entry_id,
+                                "The label couldn't be saved. Press Enter to retry.".to_owned(),
+                            );
+                        }
+                    }
+                }
+            }
             Message::View(view::Message::Activity(event)) => match event {
                 ActivityMessage::Wallet(value) => self.filters.wallet = value,
                 ActivityMessage::Direction(value) => self.filters.direction = value,
@@ -355,8 +555,34 @@ impl State for Activity {
                 ActivityMessage::DateRange(value) => self.filters.date_range = value,
                 ActivityMessage::Search(value) => self.filters.search = value,
                 ActivityMessage::Clear => self.filters = Default::default(),
-                ActivityMessage::Select(id) => self.selected_id = Some(id),
+                ActivityMessage::Select(id) => {
+                    if self.selected_id.as_deref() != Some(id.as_str()) {
+                        self.details_open = None;
+                    }
+                    // One draft at a time, kept for its own row (a failed
+                    // save gives its text back); a row's save error stays.
+                    if self
+                        .label_draft
+                        .as_ref()
+                        .is_some_and(|(draft_id, _)| draft_id != &id)
+                    {
+                        self.label_draft = None;
+                    }
+                    self.selected_id = Some(id);
+                }
+                ActivityMessage::ToggleDetails(open) => {
+                    self.details_open = open.then(|| self.selected_id.clone()).flatten();
+                }
+                ActivityMessage::LabelEdited(value) => {
+                    if let Some(id) = self.selected_id.clone() {
+                        self.label_errors.remove(&id);
+                        self.label_draft = Some((id, value));
+                    }
+                }
+                ActivityMessage::SaveLabel => return self.save_label(_daemon),
                 ActivityMessage::CloseDetail => {
+                    self.details_open = None;
+                    self.label_draft = None;
                     let selected = self.selected_id.take();
                     return selected.map_or_else(Task::none, |id| {
                         iced::widget::operation::focus(view::activity::row_focus_id(&id))
@@ -382,6 +608,9 @@ impl State for Activity {
             self.wallet = wallet.clone();
         }
         self.generation = self.generation.wrapping_add(1);
+        // A save's answer may have gone to another panel while this one was
+        // away; never leave a field waiting on it. Unsaved text stays.
+        self.label_saves.clear();
         self.vault_limit = HISTORY_LIMIT;
         self.vault_has_more = false;
         self.spark_has_more = false;
@@ -510,6 +739,7 @@ mod tests {
             direction: "receive".into(),
             method: "lightning".into(),
             description: None,
+            details: Default::default(),
         }
     }
 

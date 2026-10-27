@@ -150,19 +150,34 @@ pub fn dashboard<'a, T: Into<Element<'a, Message>>>(
 
 /// Activity needs the shell's full content area for its transaction list and
 /// 420px detail pane at the standard 1440px viewport.
+/// Activity fills the content area edge to edge (`.main`): its header and
+/// filters stay put while the list and the detail pane scroll on their own.
 pub fn dashboard_activity<'a, T: Into<Element<'a, Message>>>(
     menu: &'a Menu,
     cache: &'a Cache,
     content: T,
 ) -> Element<'a, Message> {
-    dashboard_with_info_layout(
+    let content_column: Element<'_, Message> = Column::new()
+        .push(warn(None))
+        .push_maybe(cache.spark_notice.as_ref().map(spark_notice_banner))
+        .push(
+            Container::new(content)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(|theme: &theme::Theme| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(theme.colors.shell.background)),
+                    ..Default::default()
+                }),
+        )
+        .width(Length::Fill)
+        .into();
+    dashboard_shell_with_info(
         menu,
         cache,
-        content,
+        content_column,
         &cache.cube_name,
         cache.avatar_handle.as_ref(),
         cache.lightning_address.as_deref(),
-        true,
     )
 }
 
