@@ -1,4 +1,7 @@
-use iced::{widget::rule, Alignment, Length};
+use iced::{
+    widget::{rule, text::Wrapping},
+    Alignment, Length,
+};
 
 use coincube_core::descriptors::PathSpendInfo;
 use coincube_ui::component::amount::BitcoinDisplayUnit;
@@ -19,10 +22,11 @@ use crate::{
 
 use super::super::message::*;
 
-const AMOUNT_WIDTH: f32 = 150.0;
-const RECIPIENTS_WIDTH: f32 = 100.0;
-const SIGNATURES_WIDTH: f32 = 135.0;
-const STATUS_WIDTH: f32 = 130.0;
+const PROPOSAL_SHARE: u16 = 4;
+const AMOUNT_SHARE: u16 = 3;
+const RECIPIENTS_SHARE: u16 = 2;
+const SIGNATURES_SHARE: u16 = 2;
+const STATUS_SHARE: u16 = 3;
 
 pub fn import_psbt_success_view<'a>() -> Element<'a, Message> {
     Column::new()
@@ -89,11 +93,17 @@ fn table_header<'a>() -> Container<'a, Message> {
         Row::new()
             .align_y(Alignment::Center)
             .spacing(12)
-            .push(header_cell("Proposal", Length::Fill))
-            .push(header_cell("Amount", Length::Fixed(AMOUNT_WIDTH)))
-            .push(header_cell("Recipients", Length::Fixed(RECIPIENTS_WIDTH)))
-            .push(header_cell("Signatures", Length::Fixed(SIGNATURES_WIDTH)))
-            .push(header_cell("Status", Length::Fixed(STATUS_WIDTH))),
+            .push(header_cell("Proposal", Length::FillPortion(PROPOSAL_SHARE)))
+            .push(header_cell("Amount", Length::FillPortion(AMOUNT_SHARE)))
+            .push(header_cell(
+                "Recipients",
+                Length::FillPortion(RECIPIENTS_SHARE),
+            ))
+            .push(header_cell(
+                "Signatures",
+                Length::FillPortion(SIGNATURES_SHARE),
+            ))
+            .push(header_cell("Status", Length::FillPortion(STATUS_SHARE))),
     )
     .padding(14)
     .width(Length::Fill)
@@ -187,26 +197,34 @@ fn spend_tx_list_view(
                             .align_y(Alignment::Center)
                             .spacing(8)
                             .push(icon::receipt_icon().size(P2_SIZE))
-                            .push(p2_regular(proposal).bold()),
+                            .push(
+                                p2_regular(proposal)
+                                    .bold()
+                                    .wrapping(Wrapping::WordOrGlyph)
+                                    .width(Length::Fill),
+                            ),
                     )
-                    .width(Length::Fill),
+                    .width(Length::FillPortion(PROPOSAL_SHARE)),
                 )
                 .push(
                     Container::new(Column::new().spacing(4).push(amount).push_maybe(fee))
-                        .width(Length::Fixed(AMOUNT_WIDTH)),
+                        .width(Length::FillPortion(AMOUNT_SHARE)),
                 )
                 .push(
                     Container::new(p2_regular(recipients.to_string()))
-                        .width(Length::Fixed(RECIPIENTS_WIDTH)),
+                        .width(Length::FillPortion(RECIPIENTS_SHARE)),
                 )
-                .push(Container::new(p2_regular(signatures)).width(Length::Fixed(SIGNATURES_WIDTH)))
+                .push(
+                    Container::new(p2_regular(signatures))
+                        .width(Length::FillPortion(SIGNATURES_SHARE)),
+                )
                 .push(
                     Container::new(
                         Container::new(p2_regular(status))
                             .padding([7, 10])
                             .style(status_style),
                     )
-                    .width(Length::Fixed(STATUS_WIDTH)),
+                    .width(Length::FillPortion(STATUS_SHARE)),
                 ),
         )
         .padding(14)
