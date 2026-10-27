@@ -30,6 +30,7 @@ pub use vault::fiat::FiatAmountConverter;
 pub use vault::warning::warn;
 
 use iced::{
+    advanced::widget::Id,
     widget::{container, row, scrollable, Space},
     Alignment, Length,
 };
@@ -409,7 +410,13 @@ pub fn feature_unavailable_panel(reason: String) -> Element<'static, Message> {
                     .align_x(Alignment::Center),
             )
             .push(
-                button::secondary(None, "Back to Overview").on_press(Message::Menu(Menu::Cube(
+                button::secondary_action(
+                    liquid_account_overview_id(),
+                    None,
+                    "Back to Overview",
+                    Message::FocusAction,
+                )
+                .on_press(Message::Menu(Menu::Cube(
                     crate::app::menu::CubeSubMenu::Overview,
                 ))),
             )
@@ -456,14 +463,24 @@ fn is_liquid_account_unavailable(reason: &str) -> bool {
     reason == crate::app::features::LIQUID_ACCOUNT_UNAVAILABLE_REASON
 }
 
+fn liquid_account_overview_id() -> Id {
+    Id::from("tenshu.liquid.account-unavailable.overview")
+}
+
 #[cfg(test)]
 mod unavailable_panel_tests {
-    use super::is_liquid_account_unavailable;
+    use super::{
+        feature_unavailable_panel, is_liquid_account_unavailable, liquid_account_overview_id,
+        Message,
+    };
     use crate::app::{
         features::{self, LiquidGate, MarketplaceServerFlags},
-        menu::{LiquidSubMenu, Menu, SparkSubMenu},
+        menu::{CubeSubMenu, LiquidSubMenu, Menu, SparkSubMenu},
+        view::shared::landing::capture,
     };
     use coincube_core::miniscript::bitcoin::Network;
+    use coincube_ui::theme;
+    use iced::keyboard::key::Named;
 
     #[test]
     fn account_disabled_liquid_gets_the_account_panel() {
@@ -512,6 +529,92 @@ mod unavailable_panel_tests {
             .to_owned();
             assert!(!is_liquid_account_unavailable(&reason));
             assert_eq!(reason, expected_reason);
+        }
+    }
+
+    #[test]
+    fn unavailable_routes_mount_in_both_themes_and_overview_activates_from_keyboard() {
+        let granted = LiquidGate {
+            server_enabled: true,
+            local_state_exists: false,
+        };
+        let cases = [
+            (
+                "liquid-account-unavailable",
+                Menu::Liquid(LiquidSubMenu::Overview),
+                Network::Bitcoin,
+                LiquidGate::HIDDEN,
+                true,
+            ),
+            (
+                "liquid-network-unavailable",
+                Menu::Liquid(LiquidSubMenu::Overview),
+                Network::Regtest,
+                granted,
+                false,
+            ),
+            (
+                "spark-network-unavailable",
+                Menu::Spark(SparkSubMenu::Overview),
+                Network::Signet,
+                granted,
+                false,
+            ),
+        ];
+
+        for (scenario, menu, network, liquid_gate, account_gate) in cases {
+            let reason = features::route_availability(
+                &menu,
+                network,
+                false,
+                MarketplaceServerFlags::OFF,
+                liquid_gate,
+            )
+            .reason()
+            .expect("route is unavailable")
+            .to_owned();
+            for (appearance, palette) in [
+                ("dark", theme::Theme::dark()),
+                ("light", theme::Theme::light()),
+            ] {
+                for outer in [(1024, 768), (1440, 900)] {
+                    let mounted = capture::inspect(
+                        scenario,
+                        feature_unavailable_panel(reason.clone()),
+                        outer,
+                        appearance,
+                        palette.clone(),
+                    );
+                    if account_gate {
+                        assert!(mounted.contains(features::LIQUID_ACCOUNT_UNAVAILABLE_REASON));
+                        assert!(mounted.contains("Your other wallets are unaffected."));
+                        assert!(mounted.contains("Back to Overview"));
+                        assert!(!mounted.contains("Not available on this network"));
+                        assert!(mounted.has_focus(liquid_account_overview_id()));
+                    } else {
+                        assert!(mounted.contains("Not available on this network"));
+                        assert!(mounted.contains(&reason));
+                        assert!(!mounted.contains("Your other wallets are unaffected."));
+                        assert!(!mounted.contains("Back to Overview"));
+                        assert!(!mounted.has_focus(liquid_account_overview_id()));
+                    }
+                }
+            }
+            if account_gate {
+                for key in [Named::Enter, Named::Space] {
+                    assert!(matches!(
+                        capture::activate_with_key(
+                            feature_unavailable_panel(reason.clone()),
+                            liquid_account_overview_id(),
+                            (1024, 768),
+                            false,
+                            key,
+                        )
+                        .as_slice(),
+                        [Message::Menu(Menu::Cube(CubeSubMenu::Overview))]
+                    ));
+                }
+            }
         }
     }
 }
