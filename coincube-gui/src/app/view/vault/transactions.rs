@@ -255,6 +255,7 @@ pub fn create_rbf_modal<'a>(
     descendant_txids: &HashSet<Txid>,
     feerate: &form::Value<String>,
     replacement_txid: Option<Txid>,
+    processing: bool,
 ) -> Element<'a, Message> {
     let created = replacement_txid.is_some();
     let mut confirm_button = button::primary_action(
@@ -263,7 +264,7 @@ pub fn create_rbf_modal<'a>(
         "Confirm",
         Message::FocusAction,
     );
-    if !created && (feerate.valid || is_cancel) {
+    if !created && !processing && (feerate.valid || is_cancel) {
         confirm_button = confirm_button.on_press(Message::CreateRbf(CreateRbfMessage::Confirm));
     }
     let help_text = if is_cancel {
@@ -385,14 +386,21 @@ pub fn create_rbf_modal<'a>(
                 .spacing(5)
                 .push(p1_bold("Feerate (sats/vbyte)"))
                 .push(
-                    form::Form::new_trimmed("", feerate, |msg| {
-                        Message::CreateRbf(CreateRbfMessage::FeerateEdited(msg))
-                    })
+                    if processing {
+                        form::Form::new_disabled("", feerate)
+                    } else {
+                        form::Form::new_trimmed("", feerate, |msg| {
+                            Message::CreateRbf(CreateRbfMessage::FeerateEdited(msg))
+                        })
+                    }
                     .warning("Feerate must be greater than the previous value and at most 1000 sats/vbyte")
                     .size(P1_SIZE)
                     .padding(10),
                 )
         });
+        if processing {
+            body = body.push(text("Creating replacement PSBT…").style(theme::text::secondary));
+        }
         body = body.push(
             Row::new()
                 .spacing(10)
@@ -404,7 +412,9 @@ pub fn create_rbf_modal<'a>(
                         "Back",
                         Message::FocusAction,
                     )
-                    .on_press(Message::CreateRbf(CreateRbfMessage::Cancel)),
+                    .on_press_maybe(
+                        (!processing).then_some(Message::CreateRbf(CreateRbfMessage::Cancel)),
+                    ),
                 )
                 .push(confirm_button),
         );
@@ -616,27 +626,52 @@ mod rbf_view_tests {
             ("light", theme::Theme::light()),
         ] {
             for outer in [(1024, 768), (1440, 900)] {
-                let inspect =
-                    |scenario, cancel, ids: &HashSet<Txid>, rate: &form::Value<String>, created| {
-                        capture::inspect_full_window(
-                            scenario,
-                            create_rbf_modal(cancel, ids, rate, created),
-                            outer,
-                            appearance,
-                            theme.clone(),
-                        )
-                    };
-                let bump = inspect("vault-rbf-bump", false, &none, &rate("12", true), None);
+                let inspect = |scenario,
+                               cancel,
+                               ids: &HashSet<Txid>,
+                               rate: &form::Value<String>,
+                               created,
+                               processing| {
+                    capture::inspect_full_window(
+                        scenario,
+                        create_rbf_modal(cancel, ids, rate, created, processing),
+                        outer,
+                        appearance,
+                        theme.clone(),
+                    )
+                };
+                let bump = inspect(
+                    "vault-rbf-bump",
+                    false,
+                    &none,
+                    &rate("12", true),
+                    None,
+                    false,
+                );
                 assert!(bump.contains("Bump fee"));
                 assert!(bump.contains("Feerate (sats/vbyte)"));
                 assert!(bump.has_focus(Id::new("vault-rbf-confirm")));
 
-                let invalid = inspect("vault-rbf-invalid", false, &none, &rate("3", false), None);
+                let invalid = inspect(
+                    "vault-rbf-invalid",
+                    false,
+                    &none,
+                    &rate("3", false),
+                    None,
+                    false,
+                );
                 assert!(invalid.contains("Feerate must be greater"));
                 assert!(!invalid.has_focus(Id::new("vault-rbf-confirm")));
                 assert!(invalid.has_focus(Id::new("vault-rbf-back")));
 
-                let cancel = inspect("vault-rbf-cancel", true, &none, &rate("5", true), None);
+                let cancel = inspect(
+                    "vault-rbf-cancel",
+                    true,
+                    &none,
+                    &rate("5", true),
+                    None,
+                    false,
+                );
                 assert!(cancel.contains("Cancel transaction"));
                 assert!(cancel.contains("Set automatically"));
                 assert!(!cancel.contains("Feerate (sats/vbyte)"));
@@ -648,6 +683,7 @@ mod rbf_view_tests {
                     &descendants,
                     &rate("12", true),
                     None,
+                    false,
                 );
                 assert!(warning.contains("invalidate 2 later payments"));
                 assert!(warning.contains(&txid('a').to_string()));
@@ -660,10 +696,25 @@ mod rbf_view_tests {
                     &none,
                     &rate("12", true),
                     Some(txid('c')),
+                    false,
                 );
                 assert!(created.contains("Replacement PSBT created successfully"));
                 assert!(created.has_focus(Id::new("vault-rbf-go-to-replacement")));
                 assert!(!created.has_focus(Id::new("vault-rbf-confirm")));
+
+                for is_cancel in [false, true] {
+                    let pending = inspect(
+                        "vault-rbf-pending",
+                        is_cancel,
+                        &none,
+                        &rate("12", true),
+                        None,
+                        true,
+                    );
+                    assert!(pending.contains("Creating replacement PSBT"));
+                    assert!(!pending.has_focus(Id::new("vault-rbf-back")));
+                    assert!(!pending.has_focus(Id::new("vault-rbf-confirm")));
+                }
             }
         }
     }
@@ -674,7 +725,7 @@ mod rbf_view_tests {
         let valid = rate("12", true);
         let activate = |cancel, rate: &form::Value<String>, created, target: &str| {
             capture::activate(
-                create_rbf_modal(cancel, &none, rate, created),
+                create_rbf_modal(cancel, &none, rate, created, false),
                 Id::new(target),
                 (1440, 900),
                 false,
@@ -691,7 +742,7 @@ mod rbf_view_tests {
             .any(|m| matches!(m, Message::CreateRbf(CreateRbfMessage::Cancel))));
         let descendants = HashSet::from([txid('a')]);
         assert!(capture::activate(
-            create_rbf_modal(false, &descendants, &valid, None),
+            create_rbf_modal(false, &descendants, &valid, None, false),
             Id::new(format!("vault-rbf-copy-{}", txid('a'))),
             (1440, 900),
             false,

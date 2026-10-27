@@ -764,6 +764,7 @@ impl CreateRbfModal {
                 &self.descendant_txids,
                 &self.feerate_val,
                 self.replacement_txid,
+                self.processing,
             ),
         );
         if self.processing {
