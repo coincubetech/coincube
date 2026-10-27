@@ -183,11 +183,25 @@ pub fn psbt_view<'a>(
     broadcast_ready: bool,
     recipient_identities: &'a [(usize, crate::services::branta::LookupResult)],
 ) -> Element<'a, Message> {
+    let identity_summary = recipient_identity_summary(
+        tx,
+        network,
+        bitcoin_unit,
+        broadcast_ready,
+        recipient_identities,
+        cache.theme_mode,
+    );
+    let output_identities = if identity_summary.is_some() {
+        &[][..]
+    } else {
+        recipient_identities
+    };
     dashboard(
         &Menu::Vault(VaultSubMenu::PSBTs(None)),
         cache,
         Column::new()
             .spacing(20)
+            .push(button::transparent(None, "‹ All PSBTs").on_press(Message::Close))
             .push(
                 Row::new()
                     .align_y(Alignment::Center)
@@ -206,6 +220,7 @@ pub fn psbt_view<'a>(
                     }),
             )
             .push(spend_header(tx, labels_editing, bitcoin_unit))
+            .push_maybe(identity_summary)
             .push(spend_overview_view(
                 action_scope,
                 tx,
@@ -235,7 +250,7 @@ pub fn psbt_view<'a>(
                         bitcoin_unit,
                         tx.is_single_payment().is_some(),
                         false,
-                        recipient_identities,
+                        output_identities,
                         cache.theme_mode,
                     )),
             )
@@ -266,6 +281,80 @@ pub fn psbt_view<'a>(
                     .width(Length::Fill)
             })
             .push(Space::new().height(10)),
+    )
+}
+
+/// The detail screen shows a current Branta association for a single external
+/// recipient beside the signing controls. Readiness comes from the spend state;
+/// Branta only identifies the recipient and never asserts that a PSBT is safe.
+fn recipient_identity_summary<'a>(
+    tx: &'a SpendTx,
+    network: Network,
+    bitcoin_unit: BitcoinDisplayUnit,
+    broadcast_ready: bool,
+    identities: &'a [(usize, crate::services::branta::LookupResult)],
+    theme_mode: coincube_ui::theme::palette::ThemeMode,
+) -> Option<Element<'a, Message>> {
+    if !broadcast_ready || tx.status != SpendStatus::Pending || tx.is_send_to_self() {
+        return None;
+    }
+    // Keep the per-output cards for multi-recipient PSBTs, so the identities
+    // remain next to their respective outputs rather than one appearing to
+    // apply to the whole transaction.
+    if tx
+        .psbt
+        .unsigned_tx
+        .output
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !tx.change_indexes.contains(index))
+        .count()
+        != 1
+    {
+        return None;
+    }
+    let (vout, output) = tx
+        .psbt
+        .unsigned_tx
+        .output
+        .iter()
+        .enumerate()
+        .find(|(index, _)| !tx.change_indexes.contains(index))?;
+    let (_, crate::services::branta::LookupResult::Identified(matches)) =
+        identities.iter().find(|(index, _)| *index == vout)?
+    else {
+        return None;
+    };
+    let address = Address::from_script(&output.script_pubkey, network).ok()?;
+    let current: Vec<_> = matches
+        .iter()
+        .enumerate()
+        .filter(|(_, identity)| identity.is_current())
+        .collect();
+    if current.is_empty() {
+        return None;
+    }
+    let cards = current
+        .into_iter()
+        .fold(Column::new().spacing(10), |column, (index, identity)| {
+            column.push(crate::app::view::shared::recipient_identity::card(
+                identity,
+                Message::OpenVaultRecipientIdentity(vout, index),
+                theme_mode,
+            ))
+        });
+    Some(
+        Column::new()
+            .spacing(10)
+            .push(h4_bold("Recipient identity"))
+            .push(
+                Row::new()
+                    .spacing(10)
+                    .push(p2_regular(address.to_string()).style(theme::text::secondary))
+                    .push(amount_with_unit(&output.value, bitcoin_unit)),
+            )
+            .push(cards)
+            .into(),
     )
 }
 
