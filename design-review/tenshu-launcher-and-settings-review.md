@@ -804,3 +804,20 @@ While exporting, two regressions of mine surfaced. (1) Removing the cross-tab li
 
 **For Codex:** in `coincube-ui`, `radius::PILL` and `radius::CHIP` are now 8. A new `radius::TOGGLE` (16) keeps the labelled pill toggle's shape. The remaining hand-rolled round buttons in the GUI are squared too.
 
+## One page layout for every Cube screen (2026-10-27, canvas v123)
+
+**Robert:** some screens have left and right margins that grow and shrink with the window, for example Overview and the Spark and Vault pages. Activity and Settings start closer to the side menu and run wider. This needs to be uniform.
+
+**Cause:** each board sized its own column. There were eight different maximum widths, from 820 to 1112 px. Overview, Advanced, P2P, Split and Transfer centered the column; Send, Receive and Buy/Sell centered their grid; Settings, Members, Liquid and others were left-aligned; Activity used its own 24 px padding at full width. Changing pages moved the title and content sideways.
+
+**Decision (Robert agreed):** anchor every page to the left with one gutter, and allow two widths. Centering every page was rejected: Activity's table and detail panel need the full width, and centering leaves an empty band next to the side menu on wide windows.
+
+**Applied:** all 20 Cube-shell boards now use a shared page-shell block:
+- gutter `clamp(24px, 3vw, 48px)`;
+- 28 px top padding;
+- reading width up to 1120 px;
+- Activity at full width, with its title, filters and table on the same gutter.
+
+Inner grids (Send, Receive, Buy/Sell) start at the left edge. The rule is written up in HANDOFF §4, "Page layout". Launcher, Opening, sign-in, Create, Restore and full-screen overlays (Connect, App preferences, Duress, Delete, Border Wallet) are not Cube pages and are unchanged.
+
+**For Codex:** add one page container in `coincube-ui` that implements the rule, with a reading variant and a wide variant. Replace each Cube screen's own padding and `max_width`/centering with it.

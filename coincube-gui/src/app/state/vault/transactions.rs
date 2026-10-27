@@ -14,7 +14,7 @@ use coincube_ui::{
     widget::{modal::Modal, Element},
 };
 use coincubed::commands::CoinStatus;
-use iced::Task;
+use iced::{advanced::widget::Id, Task};
 
 /// Bump to a larger value (e.g. 50) once Prev/Next pagination is verified
 /// end-to-end on real wallets. Kept low during rollout so QA can exercise
@@ -398,7 +398,22 @@ impl State for VaultTransactionsPanel {
                 }
             }
             Message::View(view::Message::CreateRbf(view::CreateRbfMessage::Cancel)) => {
-                self.modal = VaultTransactionsModal::None;
+                // A Back event queued before the pending view was rebuilt must not
+                // hide the result of an in-flight replacement PSBT.
+                if !matches!(&self.modal, VaultTransactionsModal::CreateRbf(modal) if modal.processing)
+                {
+                    let trigger = match &self.modal {
+                        VaultTransactionsModal::CreateRbf(modal) if modal.is_cancel => {
+                            view::vault::transactions::RBF_CANCEL_TRIGGER_ID
+                        }
+                        VaultTransactionsModal::CreateRbf(_) => {
+                            view::vault::transactions::RBF_BUMP_TRIGGER_ID
+                        }
+                        _ => return Task::none(),
+                    };
+                    self.modal = VaultTransactionsModal::None;
+                    return iced::widget::operation::focus(Id::new(trigger));
+                }
             }
             Message::View(view::Message::CreateRbf(view::CreateRbfMessage::New(is_cancel))) => {
                 if !self.wallet.supports_inheritance() {
@@ -745,6 +760,11 @@ impl CreateRbfModal {
                 }
             }
             Message::View(view::Message::CreateRbf(view::CreateRbfMessage::Confirm)) => {
+                // Confirm can already be queued when the first request switches
+                // the modal to its disabled, processing view.
+                if self.processing || self.replacement_txid.is_some() {
+                    return Task::none();
+                }
                 self.warning = None;
                 self.processing = true;
                 return Task::perform(
@@ -764,6 +784,7 @@ impl CreateRbfModal {
                 &self.descendant_txids,
                 &self.feerate_val,
                 self.replacement_txid,
+                self.processing,
             ),
         );
         if self.processing {
@@ -832,4 +853,90 @@ async fn rbf(
 
     daemon.update_spend_tx(&psbt).await?;
     Ok(psbt.unsigned_tx.compute_txid())
+}
+
+#[cfg(test)]
+mod rbf_state_tests {
+    use super::*;
+    use coincube_core::miniscript::bitcoin::Network;
+
+    fn test_daemon() -> Arc<dyn Daemon + Sync + Send> {
+        Arc::new(crate::daemon::client::Coincubed::new(
+            crate::utils::mock::Daemon::new(vec![]).run(),
+        ))
+    }
+
+    fn test_tx() -> HistoryTransaction {
+        HistoryTransaction::new(
+            crate::app::state::vault::test_support::empty_psbt().unsigned_tx,
+            None,
+            None,
+            vec![],
+            vec![],
+            Network::Signet,
+        )
+    }
+
+    #[test]
+    fn queued_cancel_and_confirm_cannot_discard_or_duplicate_an_in_flight_rbf() {
+        let cache = Cache::default();
+        let daemon = test_daemon();
+        let tx = test_tx();
+        let wallet = Arc::new(Wallet::new(
+            crate::app::state::vault::test_support::unified::fixture()
+                .descriptor
+                .clone(),
+        ));
+
+        for is_cancel in [false, true] {
+            let mut modal = CreateRbfModal::new(tx.clone(), is_cancel, HashSet::new());
+            modal.processing = true;
+            let duplicate = modal.update(
+                daemon.clone(),
+                &cache,
+                Message::View(view::Message::CreateRbf(view::CreateRbfMessage::Confirm)),
+            );
+            assert_eq!(
+                duplicate.units(),
+                0,
+                "stale Confirm must not schedule another rbf"
+            );
+            assert!(modal.processing);
+            assert!(modal.replacement_txid.is_none());
+
+            let mut panel = VaultTransactionsPanel::new(wallet.clone());
+            panel.preselect(tx.clone());
+            panel.modal = VaultTransactionsModal::CreateRbf(modal);
+            let dismissed = panel.update(
+                Some(daemon.clone()),
+                &cache,
+                Message::View(view::Message::CreateRbf(view::CreateRbfMessage::Cancel)),
+            );
+            assert_eq!(dismissed.units(), 0);
+            assert!(matches!(&panel.modal, VaultTransactionsModal::CreateRbf(_)));
+
+            if let VaultTransactionsModal::CreateRbf(modal) = &mut panel.modal {
+                modal.processing = false;
+            }
+            let _ = panel.update(
+                Some(daemon.clone()),
+                &cache,
+                Message::View(view::Message::CreateRbf(view::CreateRbfMessage::Cancel)),
+            );
+            assert!(matches!(&panel.modal, VaultTransactionsModal::None));
+        }
+
+        let mut completed = CreateRbfModal::new(tx.clone(), false, HashSet::new());
+        completed.replacement_txid = Some(tx.txid);
+        let duplicate = completed.update(
+            daemon,
+            &cache,
+            Message::View(view::Message::CreateRbf(view::CreateRbfMessage::Confirm)),
+        );
+        assert_eq!(
+            duplicate.units(),
+            0,
+            "created PSBT must not be replaced twice"
+        );
+    }
 }
