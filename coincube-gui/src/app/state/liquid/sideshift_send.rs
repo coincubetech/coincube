@@ -555,7 +555,11 @@ impl SideshiftSendFlow {
             SideshiftSendMessage::PollStatus => self.poll_shift_status(),
 
             SideshiftSendMessage::StatusUpdated(shift_id, result) => {
-                if self.shift.as_ref().is_none_or(|shift| shift.id != shift_id) {
+                if self
+                    .shift
+                    .as_ref()
+                    .is_none_or(|shift| &shift.id != shift_id)
+                {
                     return Task::none();
                 }
                 if let Ok(status) = result {

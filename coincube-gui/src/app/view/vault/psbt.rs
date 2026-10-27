@@ -377,12 +377,15 @@ fn recipient_identity_summary<'a>(
                             .wrapping(Wrapping::WordOrGlyph)
                             .width(Length::Fill),
                     )
-                    .push(if mask_amounts {
-                        p2_regular("••••").into()
-                    } else {
-                        amount_with_unit(&output.value, bitcoin_unit)
-                            .width(Length::Shrink)
-                            .into()
+                    .push({
+                        let amount: Element<'a, Message> = if mask_amounts {
+                            p2_regular("••••").into()
+                        } else {
+                            amount_with_unit(&output.value, bitcoin_unit)
+                                .width(Length::Shrink)
+                                .into()
+                        };
+                        amount
                     }),
             )
             .push(cards)
@@ -727,6 +730,13 @@ fn spend_header_masked<'a>(
     mask_amounts: bool,
 ) -> Element<'a, Message> {
     let txid = tx.psbt.unsigned_tx.compute_txid().to_string();
+    let amount_title: Element<'a, Message> = if tx.is_send_to_self() {
+        h1("Self-transfer").into()
+    } else if mask_amounts {
+        h1("••••").into()
+    } else {
+        amount_with_size_and_unit(&tx.spend_amount, H1_SIZE, bitcoin_unit).into()
+    };
     Column::new()
         .spacing(20)
         .push(if let Some(outpoint) = tx.is_single_payment() {
@@ -746,37 +756,29 @@ fn spend_header_masked<'a>(
             label::label_editable(vec![txid.clone()], tx.labels.get(&txid), H3_SIZE)
         })
         .push(
-            Column::new()
-                .push(if tx.is_send_to_self() {
-                    h1("Self-transfer").into()
-                } else if mask_amounts {
-                    h1("••••").into()
-                } else {
-                    amount_with_size_and_unit(&tx.spend_amount, H1_SIZE, bitcoin_unit).into()
-                })
-                .push(
-                    Row::new()
-                        .align_y(Alignment::Center)
-                        .push(h3("Miner fee: ").style(theme::text::secondary))
-                        .push(if tx.fee_amount.is_none() {
-                            Some(text("Missing information about transaction inputs"))
+            Column::new().push(amount_title).push(
+                Row::new()
+                    .align_y(Alignment::Center)
+                    .push(h3("Miner fee: ").style(theme::text::secondary))
+                    .push(if tx.fee_amount.is_none() {
+                        Some(text("Missing information about transaction inputs"))
+                    } else {
+                        None
+                    })
+                    .push_maybe(tx.fee_amount.map(|fee| -> Element<'a, Message> {
+                        if mask_amounts {
+                            h3("••••").into()
                         } else {
-                            None
-                        })
-                        .push_maybe(tx.fee_amount.map(|fee| {
-                            if mask_amounts {
-                                h3("••••").into()
-                            } else {
-                                amount_with_size_and_unit(&fee, H3_SIZE, bitcoin_unit).into()
-                            }
-                        }))
-                        .push(text(" ").size(H3_SIZE))
-                        .push(tx.min_feerate_vb().map(|rate| {
-                            text(format!("(~{} sats/vbyte)", rate))
-                                .size(H4_SIZE)
-                                .style(theme::text::secondary)
-                        })),
-                ),
+                            amount_with_size_and_unit(&fee, H3_SIZE, bitcoin_unit).into()
+                        }
+                    }))
+                    .push(text(" ").size(H3_SIZE))
+                    .push(tx.min_feerate_vb().map(|rate| {
+                        text(format!("(~{} sats/vbyte)", rate))
+                            .size(H4_SIZE)
+                            .style(theme::text::secondary)
+                    })),
+            ),
         )
         .into()
 }
