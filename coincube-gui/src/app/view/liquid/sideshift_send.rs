@@ -34,6 +34,7 @@ pub fn sideshift_send_view<'a>(
     recent_transactions: &'a [RecentTransaction],
     shift: Option<&'a ShiftResponse>,
     shift_status: Option<&'a ShiftStatusKind>,
+    confirmed_settle_amount: Option<&'a str>,
     loading: bool,
     error: Option<&'a str>,
     usdt_asset_id: &str,
@@ -69,8 +70,16 @@ pub fn sideshift_send_view<'a>(
         | SendPhase::FetchingQuote
         | SendPhase::CreatingShift
         | SendPhase::Sending => loading_view(phase),
-        SendPhase::Review => review_view(selected_network, shift, amount_input, error),
-        SendPhase::Sent => sent_view(selected_network, shift, shift_status),
+        SendPhase::Review => {
+            review_view(selected_network, shift, amount_input, error, mask_amounts)
+        }
+        SendPhase::Sent => sent_view(
+            selected_network,
+            shift,
+            shift_status,
+            confirmed_settle_amount,
+            mask_amounts,
+        ),
         SendPhase::Failed => error_view(error),
     }
 }
@@ -581,6 +590,7 @@ fn review_view<'a>(
     shift: Option<&'a ShiftResponse>,
     amount_input: &'a str,
     error: Option<&'a str>,
+    mask_amounts: bool,
 ) -> Element<'a, SideshiftSendMessage> {
     let Some(shift) = shift else {
         return error_view(Some("Swap data missing."));
@@ -593,13 +603,13 @@ fn review_view<'a>(
     let title = Column::new().spacing(4).push(h3("Review Swap")).push(
         text(format!(
             "You will send Liquid USDt. SideShift delivers {} USDt to the recipient.",
-            network.standard_label()
+            network.network_name()
         ))
         .size(P1_SIZE)
         .style(theme::text::secondary),
     );
 
-    let info = info_card(shift, amount_input);
+    let info = info_card(shift, amount_input, mask_amounts);
 
     let warning = Container::new(
         text(format!(
@@ -651,29 +661,37 @@ fn review_view<'a>(
 // Sent / polling view
 // ---------------------------------------------------------------------------
 
+const SENT_LABEL_WIDTH: f32 = 120.0;
+
 fn sent_view<'a>(
     selected_network: Option<&SideshiftNetwork>,
     shift: Option<&'a ShiftResponse>,
     shift_status: Option<&'a ShiftStatusKind>,
+    confirmed_settle_amount: Option<&'a str>,
+    mask_amounts: bool,
 ) -> Element<'a, SideshiftSendMessage> {
     let network = selected_network
         .copied()
         .unwrap_or(SideshiftNetwork::Ethereum);
 
-    let status_label = shift_status.map(|s| s.display()).unwrap_or("Processing…");
+    let status_label = sent_status_label(shift_status);
 
-    let (status_color, status_icon) = match shift_status {
-        Some(ShiftStatusKind::Settled) => (color::GREEN, "✓"),
-        Some(ShiftStatusKind::Expired | ShiftStatusKind::Error | ShiftStatusKind::Refunded) => {
-            (color::RED, "✗")
-        }
-        _ => (color::ORANGE, "⟳"),
-    };
+    let (status_style, status_icon): (fn(&theme::Theme) -> iced::widget::text::Style, &str) =
+        match shift_status {
+            Some(ShiftStatusKind::Settled) => (theme::text::success, "✓"),
+            Some(ShiftStatusKind::Expired | ShiftStatusKind::Error | ShiftStatusKind::Refunded) => {
+                (theme::text::error, "✗")
+            }
+            Some(ShiftStatusKind::Review | ShiftStatusKind::Refunding) => {
+                (theme::text::warning, "!")
+            }
+            _ => (theme::text::warning, "⟳"),
+        };
 
     let title = Column::new().spacing(4).push(h3("Swap Submitted")).push(
         text(format!(
-            "Your Liquid USDt is being swapped to {} USDt.",
-            network.standard_label()
+            "SideShift swap from Liquid USDt to {}.",
+            network.display_name()
         ))
         .size(P1_SIZE)
         .style(theme::text::secondary),
@@ -683,13 +701,35 @@ fn sent_view<'a>(
         Row::new()
             .spacing(6)
             .align_y(Alignment::Center)
-            .push(text(status_icon).size(P1_SIZE).color(status_color))
-            .push(text(status_label).size(P1_SIZE).color(status_color)),
+            .push(text(status_icon).size(P1_SIZE).style(status_style))
+            .push(text(status_label).size(P1_SIZE).style(status_style)),
     )
     .padding([8, 16])
     .style(theme::card::simple);
 
-    let mut col = Column::new().spacing(20).push(title).push(status_badge);
+    let mut col = Column::new()
+        .spacing(20)
+        .push(title)
+        .push(status_badge)
+        .push(swap_timeline(shift_status));
+
+    let outcome_note = match shift_status {
+        Some(ShiftStatusKind::Review) => Some("SideShift has put this swap on hold for review. Contact SideShift with the swap ID for help."),
+        Some(ShiftStatusKind::Refunding) => Some("A refund is in progress. Check the swap status again later."),
+        Some(ShiftStatusKind::Refunded) => Some("This swap was refunded. The recipient was not paid."),
+        Some(ShiftStatusKind::Expired) => Some("This swap expired. Check the swap details before trying again."),
+        Some(ShiftStatusKind::Error) => Some("SideShift reported an error. Check the swap details before trying again."),
+        Some(ShiftStatusKind::Unknown(_)) => Some("SideShift returned an unrecognized status. Check the swap details before taking further action."),
+        _ => None,
+    };
+    if let Some(note) = outcome_note {
+        col = col.push(
+            Container::new(text(note).size(P2_SIZE).style(theme::text::secondary))
+                .padding([10, 14])
+                .width(Length::Fill)
+                .style(theme::card::simple),
+        );
+    }
 
     if let Some(shift) = shift {
         col = col.push(
@@ -703,7 +743,7 @@ fn sent_view<'a>(
                             text("Swap ID")
                                 .size(P2_SIZE)
                                 .style(theme::text::secondary)
-                                .width(Length::Fixed(80.0)),
+                                .width(Length::Fixed(SENT_LABEL_WIDTH)),
                         )
                         .push(text(&shift.id).size(P2_SIZE).font(iced::Font::MONOSPACE))
                         .push(
@@ -720,10 +760,36 @@ fn sent_view<'a>(
                             text("Recipient")
                                 .size(P2_SIZE)
                                 .style(theme::text::secondary)
-                                .width(Length::Fixed(80.0)),
+                                .width(Length::Fixed(SENT_LABEL_WIDTH)),
                         )
                         .push(text(addr).size(P2_SIZE).font(iced::Font::MONOSPACE))
-                })),
+                }))
+                .push_maybe(
+                    recipient_amount_to_show(
+                        shift_status,
+                        confirmed_settle_amount,
+                        shift.settle_amount.as_deref(),
+                    )
+                    .map(|(label, amount)| {
+                        Row::new()
+                            .spacing(8)
+                            .align_y(Alignment::Center)
+                            .push(
+                                text(label)
+                                    .size(P2_SIZE)
+                                    .style(theme::text::secondary)
+                                    .width(Length::Fixed(SENT_LABEL_WIDTH)),
+                            )
+                            .push(
+                                text(if mask_amounts {
+                                    "••••••".to_string()
+                                } else {
+                                    format!("{} {}", amount, network.display_name())
+                                })
+                                .size(P2_SIZE),
+                            )
+                    }),
+                ),
         );
     }
 
@@ -736,35 +802,155 @@ fn sent_view<'a>(
         .into()
 }
 
+fn sent_status_label(status: Option<&ShiftStatusKind>) -> &str {
+    status
+        .map(ShiftStatusKind::display)
+        .unwrap_or("Payment sent · checking swap")
+}
+
+fn recipient_amount_to_show<'a>(
+    status: Option<&ShiftStatusKind>,
+    confirmed: Option<&'a str>,
+    quote: Option<&'a str>,
+) -> Option<(&'static str, &'a str)> {
+    if status == Some(&ShiftStatusKind::Settled) {
+        confirmed.map(|amount| ("Recipient receives", amount))
+    } else {
+        quote.map(|amount| ("Quoted amount", amount))
+    }
+}
+
+fn swap_timeline_stage(status: Option<&ShiftStatusKind>) -> Option<usize> {
+    match status {
+        Some(ShiftStatusKind::Waiting) | None => Some(0),
+        Some(ShiftStatusKind::Pending) => Some(1),
+        Some(ShiftStatusKind::Processing) => Some(2),
+        Some(ShiftStatusKind::Settling) => Some(3),
+        Some(ShiftStatusKind::Settled) => Some(4),
+        // Holds, refunds, failures and unknown statuses are not forward progress.
+        _ => None,
+    }
+}
+
+fn swap_timeline(status: Option<&ShiftStatusKind>) -> Element<'static, SideshiftSendMessage> {
+    const STAGES: [&str; 5] = [
+        "Waiting for deposit",
+        "Deposit detected",
+        "Processing",
+        "Settling",
+        "Settled",
+    ];
+
+    let current = swap_timeline_stage(status);
+
+    let mut stages = Column::new().spacing(10).push(h4_bold("Swap status"));
+    for (index, label) in STAGES.iter().enumerate() {
+        let complete =
+            current.is_some_and(|step| index < step) || (index == 4 && current == Some(4));
+        let active = current == Some(index) && !complete;
+        let (marker, tone): (&str, fn(&theme::Theme) -> iced::widget::text::Style) = if complete {
+            ("✓", theme::text::success)
+        } else if active {
+            ("●", theme::text::warning)
+        } else {
+            ("○", theme::text::secondary)
+        };
+        stages = stages.push(
+            Row::new()
+                .spacing(10)
+                .align_y(Alignment::Center)
+                .push(text(marker).size(P1_SIZE).style(tone))
+                .push(text(*label).size(P1_SIZE).style(tone)),
+        );
+    }
+
+    Container::new(stages)
+        .padding([12, 16])
+        .width(Length::Fill)
+        .style(theme::card::simple)
+        .into()
+}
+
+#[cfg(test)]
+mod status_presentation_tests {
+    use super::{
+        recipient_amount_to_show, sent_status_label, swap_timeline_stage, ShiftStatusKind,
+    };
+
+    #[test]
+    fn local_payment_and_server_deposit_have_distinct_statuses() {
+        assert_eq!(sent_status_label(None), "Payment sent · checking swap");
+        assert_eq!(swap_timeline_stage(None), Some(0));
+
+        let detected = ShiftStatusKind::Pending;
+        assert_eq!(sent_status_label(Some(&detected)), "Deposit detected");
+        assert_eq!(swap_timeline_stage(Some(&detected)), Some(1));
+
+        let waiting = ShiftStatusKind::Waiting;
+        assert_eq!(swap_timeline_stage(Some(&waiting)), Some(0));
+    }
+
+    #[test]
+    fn interrupted_swap_does_not_advance_the_timeline() {
+        assert_eq!(swap_timeline_stage(Some(&ShiftStatusKind::Review)), None);
+        assert_eq!(swap_timeline_stage(Some(&ShiftStatusKind::Refunding)), None);
+        assert_eq!(swap_timeline_stage(Some(&ShiftStatusKind::Expired)), None);
+    }
+
+    #[test]
+    fn settled_amount_comes_from_status_response_and_never_falls_back_to_quote() {
+        let settled = ShiftStatusKind::Settled;
+        assert_eq!(
+            recipient_amount_to_show(Some(&settled), Some("4.91"), Some("4.93")),
+            Some(("Recipient receives", "4.91"))
+        );
+        assert_eq!(
+            recipient_amount_to_show(Some(&settled), None, Some("4.93")),
+            None
+        );
+        assert_eq!(
+            recipient_amount_to_show(Some(&ShiftStatusKind::Processing), None, Some("4.93")),
+            Some(("Quoted amount", "4.93"))
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn info_card(shift: &ShiftResponse, amount_input: &str) -> Element<'static, SideshiftSendMessage> {
+fn info_card(
+    shift: &ShiftResponse,
+    amount_input: &str,
+    mask_amounts: bool,
+) -> Element<'static, SideshiftSendMessage> {
     let mut rows = Column::new().spacing(8);
 
     if let Some(dep) = &shift.deposit_amount {
-        rows = rows.push(info_row("You send", &format!("{} Liquid USDt", dep)));
+        rows = rows.push(masked_info_row(
+            "You send",
+            &format!("{} Liquid USDt", dep),
+            mask_amounts,
+        ));
     } else if !amount_input.is_empty() {
-        rows = rows.push(info_row(
+        rows = rows.push(masked_info_row(
             "You send",
             &format!("{} Liquid USDt", amount_input),
+            mask_amounts,
         ));
     }
     if let Some(settle) = &shift.settle_amount {
-        rows = rows.push(info_row("Recipient receives", settle));
+        rows = rows.push(masked_info_row("Recipient receives", settle, mask_amounts));
     }
     if let Some(rate) = &shift.rate {
         rows = rows.push(info_row("Rate", rate));
     }
-    if let Some(min) = &shift.deposit_min {
-        rows = rows.push(info_row("Min", min));
-    }
-    if let Some(max) = &shift.deposit_max {
-        rows = rows.push(info_row("Max", max));
-    }
     if let Some(fee) = &shift.network_fee_usd {
-        rows = rows.push(info_row("Network fee", &format!("${}", fee)));
+        rows = rows.push(masked_info_row(
+            "Network fee",
+            &format!("${}", fee),
+            mask_amounts,
+        ));
     }
     if let Some(aff) = &shift.affiliate_fee_percent {
         rows = rows.push(info_row("Service fee", &format!("{}%", aff)));
@@ -779,6 +965,21 @@ fn info_card(shift: &ShiftResponse, amount_input: &str) -> Element<'static, Side
         .width(Length::Fill)
         .style(theme::card::simple)
         .into()
+}
+
+fn masked_info_row(
+    label: &str,
+    value: &str,
+    mask_amounts: bool,
+) -> Element<'static, SideshiftSendMessage> {
+    info_row(
+        label,
+        if mask_amounts {
+            "••••••"
+        } else {
+            value
+        },
+    )
 }
 
 fn info_row(label: &str, value: &str) -> Element<'static, SideshiftSendMessage> {
@@ -869,6 +1070,7 @@ mod privacy_tests {
                 &recent,
                 None,
                 None,
+                None,
                 false,
                 None,
                 "usdt",
@@ -911,6 +1113,7 @@ mod privacy_tests {
                 &recent,
                 None,
                 None,
+                None,
                 false,
                 None,
                 "usdt",
@@ -922,5 +1125,169 @@ mod privacy_tests {
         );
         assert!(amount_hidden.contains("••••••"));
         assert!(!amount_hidden.contains("1.35 USDt"));
+    }
+
+    #[test]
+    fn sideshift_review_masks_quote_values_but_keeps_destination_visible() {
+        let shift = ShiftResponse {
+            id: "synthetic-review-swap".into(),
+            deposit_address: "synthetic-deposit".into(),
+            deposit_coin: None,
+            deposit_network: None,
+            settle_address: Some("synthetic-recipient".into()),
+            settle_coin: None,
+            settle_network: None,
+            deposit_min: Some("20.11".into()),
+            deposit_max: Some("120.22".into()),
+            deposit_amount: Some("91.27".into()),
+            settle_amount: Some("90.13".into()),
+            rate: Some("0.98765".into()),
+            expires_at: None,
+            created_at: None,
+            status: None,
+            affiliate_fee_percent: Some("0.55".into()),
+            network_fee_usd: Some("0.77".into()),
+        };
+        let render = |mask_amounts| {
+            sideshift_send_view(
+                &SendPhase::Review,
+                Some(&SideshiftNetwork::Ethereum),
+                &[],
+                &SideshiftShiftType::Fixed,
+                "",
+                "88.44",
+                0,
+                &[],
+                Some(&shift),
+                None,
+                None,
+                false,
+                None,
+                "usdt",
+                mask_amounts,
+            )
+        };
+        let hidden = capture::inspect(
+            "sideshift-review-hidden",
+            render(true),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(hidden.contains("••••••"));
+        for value in ["91.27", "90.13", "0.77"] {
+            assert!(!hidden.contains(value), "review leaked {}", value);
+        }
+        assert!(hidden.contains("0.98765"));
+        assert!(hidden.contains("0.55%"));
+        assert!(!hidden.contains("20.11"));
+        assert!(!hidden.contains("120.22"));
+        assert!(hidden.contains("synthetic-recipient"));
+        assert!(hidden.contains("synthetic-review-swap"));
+
+        let mut variable_shift = shift.clone();
+        variable_shift.deposit_amount = None;
+        let fallback_hidden = capture::inspect(
+            "sideshift-review-fallback-hidden",
+            review_view(
+                Some(&SideshiftNetwork::Ethereum),
+                Some(&variable_shift),
+                "88.44",
+                None,
+                true,
+            ),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(!fallback_hidden.contains("88.44"));
+
+        let shown = capture::inspect(
+            "sideshift-review-shown",
+            render(false),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(shown.contains("91.27"));
+        assert!(shown.contains("90.13"));
+        assert!(shown.contains("0.98765"));
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            let compact = capture::inspect(
+                "sideshift-review-compact-hidden",
+                render(true),
+                (1024, 768),
+                appearance,
+                theme,
+            );
+            assert!(compact.contains("••••••"));
+            assert!(compact.contains("synthetic-recipient"));
+        }
+    }
+
+    #[test]
+    fn sideshift_sent_status_mounts_in_dark_and_light_themes() {
+        let shift = ShiftResponse {
+            id: "synthetic-sent-swap".into(),
+            deposit_address: "synthetic-deposit".into(),
+            deposit_coin: None,
+            deposit_network: None,
+            settle_address: Some(format!("0x{}", "a".repeat(40))),
+            settle_coin: None,
+            settle_network: None,
+            deposit_min: None,
+            deposit_max: None,
+            deposit_amount: Some("91.27".into()),
+            settle_amount: Some("90.13".into()),
+            rate: None,
+            expires_at: None,
+            created_at: None,
+            status: None,
+            affiliate_fee_percent: None,
+            network_fee_usd: None,
+        };
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            for (phase, status) in [
+                ("waiting", None),
+                ("processing", Some(ShiftStatusKind::Processing)),
+                ("settled", Some(ShiftStatusKind::Settled)),
+                ("refunded", Some(ShiftStatusKind::Refunded)),
+            ] {
+                let mounted = capture::inspect(
+                    &format!("sideshift-sent-status-{phase}"),
+                    sent_view(
+                        Some(&SideshiftNetwork::Ethereum),
+                        Some(&shift),
+                        status.as_ref(),
+                        Some("90.13"),
+                        false,
+                    ),
+                    (1024, 768),
+                    appearance,
+                    theme,
+                );
+                assert!(mounted.contains("Swap status"));
+                assert!(mounted.contains("Waiting for deposit"));
+                assert!(mounted.contains("Settled"));
+                let amount_label = if phase == "settled" {
+                    "Recipient receives"
+                } else {
+                    "Quoted amount"
+                };
+                let label_height = mounted
+                    .text
+                    .iter()
+                    .find(|(value, _)| value == amount_label)
+                    .map(|(_, bounds)| bounds.height)
+                    .expect("captured SideShift amount label");
+                assert!(label_height <= 24.0, "SideShift amount label wrapped");
+            }
+        }
     }
 }

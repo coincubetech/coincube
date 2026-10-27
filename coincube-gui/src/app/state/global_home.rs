@@ -43,6 +43,24 @@ fn default_transfer_feerate() -> form::Value<String> {
     }
 }
 
+fn transfer_signing_completion_message(
+    persisted: bool,
+    threshold_met: bool,
+    request: Option<(u64, u64, TransferDirection)>,
+) -> Option<HomeMessage> {
+    if persisted && threshold_met {
+        request.map(
+            |(request_id, generation, direction)| HomeMessage::TransferSigningComplete {
+                request_id,
+                generation,
+                direction,
+            },
+        )
+    } else {
+        None
+    }
+}
+
 /// Extract the Breez peg-out swap id from a successful `pay_onchain` response.
 /// Mirrors `swap_id_for_bitcoin_send` in `app/mod.rs` for the SdkEvent path —
 /// here we consume the `Payment` by value since the caller owns the response.
@@ -325,6 +343,11 @@ pub struct GlobalHome {
     current_view: HomeView,
     entered_amount: form::Value<String>,
     receive_address_info: Option<ReceiveAddressInfo>,
+    transfer_request_generation: u64,
+    destination_ready: Option<(u64, TransferDirection)>,
+    transfer_psbt_ready_for: Option<(u64, u64, TransferDirection)>,
+    next_psbt_request_id: u64,
+    active_psbt_request: Option<u64>,
     labels_edited: LabelsEdited,
     address_expanded: bool,
     modal: Modal,
@@ -447,6 +470,11 @@ impl GlobalHome {
             current_view: HomeView::default(),
             entered_amount: form::Value::default(),
             receive_address_info: None,
+            transfer_request_generation: 0,
+            destination_ready: None,
+            transfer_psbt_ready_for: None,
+            next_psbt_request_id: 0,
+            active_psbt_request: None,
             labels_edited: LabelsEdited::default(),
             address_expanded: false,
             modal: Modal::default(),
@@ -520,6 +548,11 @@ impl GlobalHome {
             current_view: HomeView::default(),
             entered_amount: form::Value::default(),
             receive_address_info: None,
+            transfer_request_generation: 0,
+            destination_ready: None,
+            transfer_psbt_ready_for: None,
+            next_psbt_request_id: 0,
+            active_psbt_request: None,
             labels_edited: LabelsEdited::default(),
             address_expanded: false,
             modal: Modal::default(),
@@ -659,6 +692,15 @@ impl State for GlobalHome {
                 wallet_picker: self.wallet_picker,
                 entered_amount: &self.entered_amount,
                 receive_address: self.receive_address_info.as_ref().map(|info| &info.address),
+                destination_ready: self.destination_is_ready(),
+                transfer_action_ready: self.destination_is_ready()
+                    && self.transfer_direction.is_some_and(|direction| {
+                        match direction.from_kind() {
+                            WalletKind::Vault => true,
+                            WalletKind::Liquid => self.prepare_onchain_send_response.is_some(),
+                            WalletKind::Spark => self.spark_send_handle.is_some(),
+                        }
+                    }),
                 receive_index: self.receive_address_info.as_ref().map(|info| &info.index),
                 labels: self
                     .receive_address_info
@@ -854,6 +896,7 @@ impl State for GlobalHome {
                             self.transfer_to = Some(default_to);
                             self.transfer_direction =
                                 TransferDirection::try_from_pair(default_from, default_to);
+                            self.invalidate_transfer_destination();
                             self.wallet_picker = None;
                             self.entered_amount = form::Value::default();
                             // Fresh flow: reset the Vault-sourced feerate
@@ -904,6 +947,10 @@ impl State for GlobalHome {
                             {
                                 return Task::none();
                             }
+                            let Some(direction) = self.transfer_direction else {
+                                return Task::none();
+                            };
+                            let generation = self.invalidate_transfer_destination();
                             let mut tasks = Vec::new();
                             if matches!(
                                 self.transfer_direction,
@@ -920,11 +967,24 @@ impl State for GlobalHome {
                                 tasks.push(Task::perform(
                                     async move {
                                         match daemon.get_new_address().await {
-                                            Ok(res) => Ok((res.address, res.derivation_index)),
-                                            Err(e) => Err(e.into()),
+                                            Ok(res) => {
+                                                Ok((res.address.to_string(), res.derivation_index))
+                                            }
+                                            Err(e) => Err(TransferError::NoDepositAddress {
+                                                to: WalletKind::Vault,
+                                                detail: e.to_string(),
+                                            }),
                                         }
                                     },
-                                    Message::ReceiveAddress,
+                                    move |result| {
+                                        Message::View(view::Message::Home(
+                                            HomeMessage::TransferDestinationReady {
+                                                generation,
+                                                direction,
+                                                result,
+                                            },
+                                        ))
+                                    },
                                 ));
                                 if let Ok(amount) = Amount::from_str_in(
                                     &self.entered_amount.value,
@@ -947,11 +1007,19 @@ impl State for GlobalHome {
                                                 .await
                                         },
                                         move |result| match result {
-                                            Ok(response) => Message::View(view::Message::Home(HomeMessage::PrepareOnChainResponseReceived(response))),
+                                            Ok(response) => Message::View(view::Message::Home(HomeMessage::PrepareOnChainResponseReceived {
+                                                generation,
+                                                direction,
+                                                response,
+                                            })),
                                             Err(error) => Message::View(view::Message::Home(
-                                                HomeMessage::Error(TransferError::FeeEstimateFailed {
-                                                    detail: error.to_string(),
-                                                }),
+                                                HomeMessage::TransferDestinationFailed {
+                                                    generation,
+                                                    direction,
+                                                    error: TransferError::FeeEstimateFailed {
+                                                        detail: error.to_string(),
+                                                    },
+                                                },
                                             )),
                                         },
                                     ))
@@ -969,16 +1037,26 @@ impl State for GlobalHome {
                                         let result = breez_client.receive_onchain(None).await;
                                         result
                                     },
-                                    |result| match result {
-                                        Ok(response) => Message::View(view::Message::Home(
-                                            HomeMessage::BreezOnchainAddress(response.destination),
-                                        )),
-                                        Err(error) => Message::View(view::Message::Home(
-                                            HomeMessage::Error(TransferError::NoDepositAddress {
-                                                to: WalletKind::Liquid,
-                                                detail: error.to_string(),
-                                            }),
-                                        )),
+                                    move |result| {
+                                        Message::View(view::Message::Home(
+                                            HomeMessage::TransferDestinationReady {
+                                                generation,
+                                                direction,
+                                                result: result
+                                                    .map(|response| {
+                                                        (
+                                                            response.destination,
+                                                            ChildNumber::Normal { index: 1 },
+                                                        )
+                                                    })
+                                                    .map_err(|error| {
+                                                        TransferError::NoDepositAddress {
+                                                            to: WalletKind::Liquid,
+                                                            detail: error.to_string(),
+                                                        }
+                                                    }),
+                                            },
+                                        ))
                                     },
                                 ));
                             } else if matches!(
@@ -994,23 +1072,30 @@ impl State for GlobalHome {
                                     self.current_view.next();
                                     tasks.push(Task::perform(
                                         async move { spark.receive_onchain(None).await },
-                                        |result| match result {
+                                        move |result| match result {
                                             // `payment_request` is a plain Bitcoin address for
                                             // on-chain receives (possibly wrapped in a BIP21
-                                            // URI — the existing `BreezOnchainAddress` handler
+                                            // URI — the `TransferDestinationReady` handler
                                             // already strips "bitcoin:" prefixes).
                                             Ok(response) => Message::View(view::Message::Home(
-                                                HomeMessage::BreezOnchainAddress(
-                                                    response.payment_request,
-                                                ),
+                                                HomeMessage::TransferDestinationReady {
+                                                    generation,
+                                                    direction,
+                                                    result: Ok((
+                                                        response.payment_request,
+                                                        ChildNumber::Normal { index: 1 },
+                                                    )),
+                                                },
                                             )),
                                             Err(error) => Message::View(view::Message::Home(
-                                                HomeMessage::Error(
-                                                    TransferError::NoDepositAddress {
+                                                HomeMessage::TransferDestinationReady {
+                                                    generation,
+                                                    direction,
+                                                    result: Err(TransferError::NoDepositAddress {
                                                         to: WalletKind::Spark,
                                                         detail: error.to_string(),
-                                                    },
-                                                ),
+                                                    }),
+                                                },
                                             )),
                                         },
                                     ));
@@ -1038,18 +1123,26 @@ impl State for GlobalHome {
                                 self.current_view.next();
                                 tasks.push(Task::perform(
                                     async move { spark.receive_onchain(None).await },
-                                    |result| match result {
-                                        Ok(response) => Message::View(view::Message::Home(
-                                            HomeMessage::BreezOnchainAddress(
-                                                response.payment_request,
-                                            ),
-                                        )),
-                                        Err(error) => Message::View(view::Message::Home(
-                                            HomeMessage::Error(TransferError::NoDepositAddress {
-                                                to: WalletKind::Spark,
-                                                detail: error.to_string(),
-                                            }),
-                                        )),
+                                    move |result| {
+                                        Message::View(view::Message::Home(
+                                            HomeMessage::TransferDestinationReady {
+                                                generation,
+                                                direction,
+                                                result: result
+                                                    .map(|response| {
+                                                        (
+                                                            response.payment_request,
+                                                            ChildNumber::Normal { index: 1 },
+                                                        )
+                                                    })
+                                                    .map_err(|error| {
+                                                        TransferError::NoDepositAddress {
+                                                            to: WalletKind::Spark,
+                                                            detail: error.to_string(),
+                                                        }
+                                                    }),
+                                            },
+                                        ))
                                     },
                                 ));
                                 if let Ok(amount) = Amount::from_str_in(
@@ -1073,11 +1166,19 @@ impl State for GlobalHome {
                                                 .await
                                         },
                                         move |result| match result {
-                                            Ok(response) => Message::View(view::Message::Home(HomeMessage::PrepareOnChainResponseReceived(response))),
+                                            Ok(response) => Message::View(view::Message::Home(HomeMessage::PrepareOnChainResponseReceived {
+                                                generation,
+                                                direction,
+                                                response,
+                                            })),
                                             Err(error) => Message::View(view::Message::Home(
-                                                HomeMessage::Error(TransferError::FeeEstimateFailed {
-                                                    detail: error.to_string(),
-                                                }),
+                                                HomeMessage::TransferDestinationFailed {
+                                                    generation,
+                                                    direction,
+                                                    error: TransferError::FeeEstimateFailed {
+                                                        detail: error.to_string(),
+                                                    },
+                                                },
                                             )),
                                         },
                                     ));
@@ -1133,10 +1234,12 @@ impl State for GlobalHome {
                                             prep.fee_sat,
                                         ))
                                     },
-                                    |result| match result {
+                                    move |result| match result {
                                         Ok((destination, prepare_handle, fee_sat)) => {
                                             Message::View(view::Message::Home(
                                                 HomeMessage::SparkPrepareSendReady {
+                                                    generation,
+                                                    direction,
                                                     destination,
                                                     prepare_handle,
                                                     fee_sat,
@@ -1144,7 +1247,11 @@ impl State for GlobalHome {
                                             ))
                                         }
                                         Err(error) => Message::View(view::Message::Home(
-                                            HomeMessage::Error(error),
+                                            HomeMessage::TransferDestinationFailed {
+                                                generation,
+                                                direction,
+                                                error,
+                                            },
                                         )),
                                     },
                                 ));
@@ -1204,10 +1311,12 @@ impl State for GlobalHome {
                                             prep.fee_sat,
                                         ))
                                     },
-                                    |result| match result {
+                                    move |result| match result {
                                         Ok((destination, prepare_handle, fee_sat)) => {
                                             Message::View(view::Message::Home(
                                                 HomeMessage::SparkPrepareSendReady {
+                                                    generation,
+                                                    direction,
                                                     destination,
                                                     prepare_handle,
                                                     fee_sat,
@@ -1215,7 +1324,11 @@ impl State for GlobalHome {
                                             ))
                                         }
                                         Err(error) => Message::View(view::Message::Home(
-                                            HomeMessage::Error(error),
+                                            HomeMessage::TransferDestinationFailed {
+                                                generation,
+                                                direction,
+                                                error,
+                                            },
                                         )),
                                     },
                                 ));
@@ -1233,11 +1346,7 @@ impl State for GlobalHome {
                         // returning user would land on the confirm screen with
                         // a stale "Confirm & Broadcast" button and broadcast
                         // the previous PSBT against a changed amount.
-                        self.transfer_spend_tx = None;
-                        self.transfer_signed = false;
-                        self.spend_tx_fees = None;
-                        self.spark_send_handle = None;
-                        self.spark_send_fee_sat = None;
+                        self.invalidate_transfer_destination();
                         // Mirror `BackToHome`'s reset: if we left the confirm
                         // screen with a stuck `is_sending` (e.g. an error path
                         // that didn't clear it), leaving it set would disable
@@ -1250,14 +1359,19 @@ impl State for GlobalHome {
                         Task::none()
                     }
                     HomeMessage::SparkPrepareSendReady {
+                        generation,
+                        direction,
                         destination,
                         prepare_handle,
                         fee_sat,
                     } => {
+                        if !self.destination_response_is_current(generation, direction) {
+                            return Task::none();
+                        }
                         // Parse the destination as a checked Bitcoin address — if
                         // the string is a BIP21 URI (rare here but cheap to
                         // handle) strip the prefix first. Mirrors the logic in
-                        // `BreezOnchainAddress`. Destination is sourced from our
+                        // `TransferDestinationReady`. Destination is sourced from our
                         // own trusted components (Breez peg-in / Vault daemon)
                         // and Spark has already prepared against it, so failure
                         // here indicates an upstream bug — refuse to proceed
@@ -1290,11 +1404,15 @@ impl State for GlobalHome {
                             index: ChildNumber::Normal { index: 0 },
                             labels: HashMap::new(),
                         });
+                        self.destination_ready = Some((generation, direction));
                         self.spark_send_handle = Some(prepare_handle);
                         self.spark_send_fee_sat = Some(fee_sat);
                         Task::none()
                     }
                     HomeMessage::ConfirmSparkSend => {
+                        if !self.destination_is_ready() {
+                            return Task::none();
+                        }
                         if self.transfer_direction == Some(TransferDirection::SparkToVault)
                             && !self.legacy_vault_available(cache)
                         {
@@ -1436,6 +1554,9 @@ impl State for GlobalHome {
                         Task::none()
                     }
                     HomeMessage::FetchTransferFeeratePreset(preset) => {
+                        if self.is_sending {
+                            return Task::none();
+                        }
                         // Fire a mempool estimate for the requested target.
                         // The corresponding button is gated non-pressable while
                         // `transfer_feerate_loading == Some(preset)`.
@@ -1462,6 +1583,10 @@ impl State for GlobalHome {
                         )
                     }
                     HomeMessage::TransferFeerateEstimated { preset, result } => {
+                        if self.is_sending {
+                            self.transfer_feerate_loading = None;
+                            return Task::none();
+                        }
                         // If a different preset is now pending, ignore this stale
                         // response so a late Fast result doesn't clobber a more
                         // recent Slow click.
@@ -1497,6 +1622,9 @@ impl State for GlobalHome {
                         }
                     }
                     HomeMessage::SetTransferFeerate(value) => {
+                        if self.is_sending {
+                            return Task::none();
+                        }
                         let parsed = value.trim().parse::<u64>();
                         let (valid, warning) = match parsed {
                             Ok(v) if v > 0 && v <= 1000 => (true, None),
@@ -1557,6 +1685,7 @@ impl State for GlobalHome {
                             if side == PickerSide::To && self.transfer_from == Some(kind) {
                                 return Task::none();
                             }
+                            let old_pair = (self.transfer_from, self.transfer_to);
                             match side {
                                 PickerSide::From => {
                                     if self.transfer_to == Some(kind) {
@@ -1569,6 +1698,9 @@ impl State for GlobalHome {
                             if let (Some(from), Some(to)) = (self.transfer_from, self.transfer_to) {
                                 self.transfer_direction =
                                     TransferDirection::try_from_pair(from, to);
+                            }
+                            if old_pair != (self.transfer_from, self.transfer_to) {
+                                self.invalidate_transfer_destination();
                             }
                             self.wallet_picker = None;
                             // Re-validate the entered amount against the new
@@ -1589,6 +1721,10 @@ impl State for GlobalHome {
                         if !self.legacy_vault_available(cache) {
                             return Task::none();
                         }
+                        if !self.destination_is_ready() {
+                            return Task::none();
+                        }
+                        let generation = self.transfer_request_generation;
                         if let Some(transfer_direction) = self.transfer_direction {
                             // Shared signer path for both Vault-sourced directions —
                             // `receive_address_info` is the only thing that differs
@@ -1613,6 +1749,7 @@ impl State for GlobalHome {
                                             denomination,
                                         ) {
                                             let amount_sat = amount.to_sat();
+                                            let destination = address_info.address.to_string();
                                             let mut destinations = std::collections::HashMap::new();
                                             destinations.insert(
                                                 address_info.address.as_unchecked().clone(),
@@ -1644,6 +1781,14 @@ impl State for GlobalHome {
                                                 }
                                             };
                                             self.is_sending = true;
+                                            self.transfer_feerate_loading = None;
+                                            self.next_psbt_request_id =
+                                                self.next_psbt_request_id.wrapping_add(1);
+                                            let request_id = self.next_psbt_request_id;
+                                            self.active_psbt_request = Some(request_id);
+                                            self.transfer_spend_tx = None;
+                                            self.transfer_psbt_ready_for = None;
+                                            self.transfer_signed = false;
                                             return Task::perform(
                                                 async move {
                                                     let psbt = match daemon_clone
@@ -1683,9 +1828,17 @@ impl State for GlobalHome {
 
                                                     Ok((psbt, wallet, cache_clone))
                                                 },
-                                                |result| {
+                                                move |result| {
                                                     Message::View(view::Message::Home(
-                                                        HomeMessage::TransferPsbtReady(result),
+                                                        HomeMessage::TransferPsbtReady {
+                                                            request_id,
+                                                            generation,
+                                                            direction: transfer_direction,
+                                                            destination,
+                                                            amount_sat,
+                                                            feerate_vb,
+                                                            result,
+                                                        },
                                                     ))
                                                 },
                                             );
@@ -1697,6 +1850,9 @@ impl State for GlobalHome {
                         Task::none()
                     }
                     HomeMessage::ConfirmTransfer => {
+                        if !self.destination_is_ready() {
+                            return Task::none();
+                        }
                         if self
                             .transfer_direction
                             .is_some_and(Self::direction_uses_vault)
@@ -1810,6 +1966,15 @@ impl State for GlobalHome {
                                 // directions. The PSBT was built earlier in the same
                                 // shared `SignVaultToLiquidTx` handler against the
                                 // destination address stored in `receive_address_info`.
+                                if self.transfer_psbt_ready_for
+                                    != Some((
+                                        self.next_psbt_request_id,
+                                        self.transfer_request_generation,
+                                        transfer_direction,
+                                    ))
+                                {
+                                    return Task::none();
+                                }
                                 if self.transfer_signed {
                                     if let Some(spend_tx) = &self.transfer_spend_tx {
                                         if let Some(daemon) = daemon {
@@ -2228,7 +2393,14 @@ impl State for GlobalHome {
                         self.validate_entered_amount(cache);
                         Task::none()
                     }
-                    HomeMessage::PrepareOnChainResponseReceived(response) => {
+                    HomeMessage::PrepareOnChainResponseReceived {
+                        generation,
+                        direction,
+                        response,
+                    } => {
+                        if !self.destination_response_is_current(generation, direction) {
+                            return Task::none();
+                        }
                         self.prepare_onchain_send_response = Some(response);
                         Task::none()
                     }
@@ -2337,7 +2509,7 @@ impl State for GlobalHome {
                         self.transfer_to = None;
                         self.wallet_picker = None;
                         self.entered_amount = form::Value::default();
-                        self.receive_address_info = None;
+                        self.invalidate_transfer_destination();
                         self.onchain_send_limit = None;
                         self.onchain_receive_limit = None;
                         self.prepare_onchain_send_response = None;
@@ -2370,7 +2542,22 @@ impl State for GlobalHome {
                         }
                         Task::none()
                     }
-                    HomeMessage::BreezOnchainAddress(address) => {
+                    HomeMessage::TransferDestinationReady {
+                        generation,
+                        direction,
+                        result,
+                    } => {
+                        if !self.destination_response_is_current(generation, direction) {
+                            return Task::none();
+                        }
+                        let (address, index) = match result {
+                            Ok(address) => address,
+                            Err(error) => {
+                                return Task::done(Message::View(view::Message::Home(
+                                    HomeMessage::Error(error),
+                                )));
+                            }
+                        };
                         // Parse BIP-21 URI format: bitcoin:address?params or plain address
                         let addr_str = address
                             .strip_prefix("bitcoin:")
@@ -2385,9 +2572,10 @@ impl State for GlobalHome {
                                 Ok(checked_address) => {
                                     self.receive_address_info = Some(ReceiveAddressInfo {
                                         address: checked_address,
-                                        index: ChildNumber::Normal { index: 1 },
+                                        index,
                                         labels: HashMap::new(),
                                     });
+                                    self.destination_ready = Some((generation, direction));
                                     // For Vault-sourced directions the Fees/Total
                                     // rows can't be populated until we can call
                                     // `create_spend_tx` — which needs this address.
@@ -2407,6 +2595,18 @@ impl State for GlobalHome {
                             log::error!("Failed to parse Breez on-chain address: {}", addr_str);
                         }
                         Task::none()
+                    }
+                    HomeMessage::TransferDestinationFailed {
+                        generation,
+                        direction,
+                        error,
+                    } => {
+                        if !self.destination_response_is_current(generation, direction) {
+                            return Task::none();
+                        }
+                        Task::done(Message::View(view::Message::Home(HomeMessage::Error(
+                            error,
+                        ))))
                     }
                     HomeMessage::RefreshLiquidBalance => self.load_liquid_balance(),
                     HomeMessage::RefreshSparkBalance => {
@@ -2492,12 +2692,46 @@ impl State for GlobalHome {
                         }
                         Task::none()
                     }
-                    HomeMessage::TransferPsbtReady(result) => {
-                        if !self.legacy_vault_available(cache) {
-                            self.is_sending = false;
+                    HomeMessage::TransferPsbtReady {
+                        request_id,
+                        generation,
+                        direction,
+                        destination,
+                        amount_sat,
+                        feerate_vb,
+                        result,
+                    } => {
+                        if self.active_psbt_request != Some(request_id) {
                             return Task::none();
                         }
+                        // This result owns the busy state. Release it even if
+                        // the fee or amount changed while the PSBT was built;
+                        // otherwise a rejected result strands Back and Sign.
+                        self.active_psbt_request = None;
                         self.is_sending = false;
+                        let denomination = if matches!(cache.bitcoin_unit, BitcoinDisplayUnit::BTC)
+                        {
+                            coincube_core::miniscript::bitcoin::Denomination::Bitcoin
+                        } else {
+                            coincube_core::miniscript::bitcoin::Denomination::Satoshi
+                        };
+                        if !self.legacy_vault_available(cache)
+                            || !self.destination_response_is_current(generation, direction)
+                            || !self.destination_is_ready()
+                            || self
+                                .receive_address_info
+                                .as_ref()
+                                .map(|info| info.address.to_string())
+                                != Some(destination)
+                            || Amount::from_str_in(&self.entered_amount.value, denomination)
+                                .ok()
+                                .map(|amount| amount.to_sat())
+                                != Some(amount_sat)
+                            || self.transfer_feerate.value.trim().parse::<u64>().ok()
+                                != Some(feerate_vb)
+                        {
+                            return Task::none();
+                        }
                         match result {
                             Ok((psbt, wallet, (datadir_path, network))) => {
                                 if let Some(wallet) = wallet {
@@ -2559,6 +2793,8 @@ impl State for GlobalHome {
                                     };
 
                                     self.transfer_spend_tx = Some(spend_tx);
+                                    self.transfer_psbt_ready_for =
+                                        Some((request_id, generation, direction));
 
                                     // Create the SignModal. This send-to-self
                                     // transfer signs locally only — no nested
@@ -2596,14 +2832,37 @@ impl State for GlobalHome {
                         }
                         Task::none()
                     }
-                    HomeMessage::TransferSigningComplete => {
+                    HomeMessage::TransferSigningComplete {
+                        request_id,
+                        generation,
+                        direction,
+                    } => {
+                        if !self.destination_response_is_current(generation, direction)
+                            || !self.destination_is_ready()
+                            || self.transfer_psbt_ready_for
+                                != Some((request_id, generation, direction))
+                            || self.transfer_spend_tx.is_none()
+                            || !matches!(self.modal, Modal::Sign(_))
+                        {
+                            return Task::none();
+                        }
                         self.transfer_signed = true;
                         self.modal = Modal::None;
                         self.is_sending = false;
                         Task::none()
                     }
-                    HomeMessage::TransferPsbtPreviewReady { feerate_vb, result } => {
+                    HomeMessage::TransferPsbtPreviewReady {
+                        generation,
+                        direction,
+                        feerate_vb,
+                        result,
+                    } => {
                         if !self.legacy_vault_available(cache) {
+                            return Task::none();
+                        }
+                        if !self.destination_response_is_current(generation, direction)
+                            || !self.destination_is_ready()
+                        {
                             return Task::none();
                         }
                         // Drop late results: if the user has since edited the
@@ -2635,21 +2894,10 @@ impl State for GlobalHome {
                     }
                 }
             }
-            Message::ReceiveAddress(res) => match res {
-                Ok((address, index)) => {
-                    self.receive_address_info = Some(ReceiveAddressInfo {
-                        address,
-                        index,
-                        labels: HashMap::new(),
-                    });
-                    Task::none()
-                }
-                Err(e) => {
-                    let err_msg = crate::user_error::report(&e);
-                    self.receive_address_info = None;
-                    Task::done(Message::View(view::Message::ShowError(err_msg)))
-                }
-            },
+            // Transfer destination fetches use TransferDestinationReady with a
+            // request generation. An untagged result from another panel must
+            // never become the destination of this transfer.
+            Message::ReceiveAddress(_) => Task::none(),
             Message::View(view::Message::SelectAddress(_addr)) => {
                 self.address_expanded = !self.address_expanded;
                 Task::none()
@@ -2684,22 +2932,49 @@ impl State for GlobalHome {
             Message::View(view::Message::Close) => {
                 self.modal = Modal::None;
                 self.transfer_spend_tx = None;
+                self.transfer_psbt_ready_for = None;
+                self.transfer_signed = false;
                 Task::none()
             }
-            Message::Updated(_) => {
+            Message::Updated(result) => {
+                let persisted = result.is_ok();
+                let signing_request = self.transfer_psbt_ready_for;
+                let wallet = self.wallet.clone();
                 if let (Modal::Sign(ref mut sign_modal), Some(daemon)) = (&mut self.modal, daemon) {
                     if let Some(ref mut spend_tx) = self.transfer_spend_tx {
                         use crate::app::state::vault::psbt::Modal as PsbtModalTrait;
-                        let task = sign_modal.update(daemon, message, spend_tx);
-
-                        return Task::batch(vec![
-                            task,
-                            Task::perform(async {}, |_| {
-                                Message::View(view::Message::Home(
-                                    HomeMessage::TransferSigningComplete,
-                                ))
-                            }),
-                        ]);
+                        let task = sign_modal.update(daemon, Message::Updated(result), spend_tx);
+                        let threshold_met = wallet
+                            .as_ref()
+                            .and_then(|wallet| {
+                                wallet.inheritance_descriptor().and_then(|descriptor| {
+                                    crate::app::state::vault::replay::spend_info_for_chain(
+                                        wallet.chain,
+                                        descriptor,
+                                        &spend_tx.psbt,
+                                    )
+                                    .ok()
+                                })
+                            })
+                            .is_some_and(|info| {
+                                let primary = info.primary_path();
+                                primary.sigs_count >= primary.threshold
+                                    || info
+                                        .recovery_paths()
+                                        .values()
+                                        .any(|path| path.sigs_count >= path.threshold)
+                            });
+                        if let Some(completion) = transfer_signing_completion_message(
+                            persisted,
+                            threshold_met,
+                            signing_request,
+                        ) {
+                            return Task::batch(vec![
+                                task,
+                                Task::done(Message::View(view::Message::Home(completion))),
+                            ]);
+                        }
+                        return task;
                     }
                 }
                 Task::none()
@@ -2782,6 +3057,44 @@ impl State for GlobalHome {
 }
 
 impl GlobalHome {
+    fn invalidate_transfer_destination(&mut self) -> u64 {
+        self.transfer_request_generation = self.transfer_request_generation.wrapping_add(1);
+        self.destination_ready = None;
+        self.receive_address_info = None;
+        self.prepare_onchain_send_response = None;
+        self.transfer_spend_tx = None;
+        self.transfer_psbt_ready_for = None;
+        self.active_psbt_request = None;
+        self.transfer_signed = false;
+        self.spend_tx_fees = None;
+        self.spark_send_handle = None;
+        self.spark_send_fee_sat = None;
+        self.transfer_feerate_loading = None;
+        if matches!(self.modal, Modal::Sign(_)) {
+            self.modal = Modal::None;
+        }
+        self.transfer_request_generation
+    }
+
+    fn destination_response_is_current(
+        &self,
+        generation: u64,
+        direction: TransferDirection,
+    ) -> bool {
+        self.transfer_request_generation == generation
+            && self.transfer_direction == Some(direction)
+            && self.current_view.step == 2
+    }
+
+    fn destination_is_ready(&self) -> bool {
+        self.current_view.step == 2
+            && self.receive_address_info.is_some()
+            && self.destination_ready
+                == self
+                    .transfer_direction
+                    .map(|direction| (self.transfer_request_generation, direction))
+    }
+
     fn legacy_vault_available(&self, cache: &Cache) -> bool {
         cache.has_vault
             && self
@@ -2950,6 +3263,10 @@ impl GlobalHome {
         ) {
             return Task::none();
         }
+        if !self.destination_is_ready() {
+            return Task::none();
+        }
+        let generation = self.transfer_request_generation;
         let Some(address_info) = self.receive_address_info.clone() else {
             return Task::none();
         };
@@ -3004,6 +3321,8 @@ impl GlobalHome {
             },
             move |result| {
                 Message::View(view::Message::Home(HomeMessage::TransferPsbtPreviewReady {
+                    generation,
+                    direction,
                     feerate_vb,
                     result,
                 }))
@@ -3461,6 +3780,22 @@ mod tests {
     use std::str::FromStr;
 
     const MAINNET_ADDR: &str = "bc1qvrl2849aggm6qry9ea7xqp2kk39j8vaa8r3cwg";
+
+    #[test]
+    fn transfer_signing_completion_requires_persisted_threshold() {
+        let request = Some((3, 7, TransferDirection::VaultToSpark));
+        assert!(transfer_signing_completion_message(false, true, request).is_none());
+        assert!(transfer_signing_completion_message(true, false, request).is_none());
+        assert!(transfer_signing_completion_message(true, true, None).is_none());
+        assert!(matches!(
+            transfer_signing_completion_message(true, true, request),
+            Some(HomeMessage::TransferSigningComplete {
+                request_id: 3,
+                generation: 7,
+                direction: TransferDirection::VaultToSpark,
+            })
+        ));
+    }
 
     /// A `GlobalHome` with no wallet and a disconnected Liquid backend — enough
     /// to drive the balance-message handlers, which touch nothing else.
@@ -4221,11 +4556,15 @@ mod tests {
                 false,
             );
             home.transfer_direction = Some(TransferDirection::VaultToLiquid);
+            home.transfer_from = Some(WalletKind::Vault);
+            home.transfer_to = Some(WalletKind::Liquid);
+            home.current_view.step = 2;
             home.receive_address_info = Some(ReceiveAddressInfo {
                 address: Address::from_str(MAINNET_ADDR).unwrap().assume_checked(),
                 index: ChildNumber::from(0),
                 labels: HashMap::new(),
             });
+            home.destination_ready = Some((0, TransferDirection::VaultToLiquid));
             home.entered_amount = form::Value {
                 value: "100000".to_string(),
                 warning: None,
@@ -4282,7 +4621,14 @@ mod tests {
             // A common Bitcoin Wallet may be loaded without a Cube Vault.
             // Even forged/stale legacy transfer messages must stop before a
             // daemon create_spend_tx call or an in-memory picker mutation.
-            let cache = Cache::default();
+            // The shared fixture has a Vault source, and Cache::default()
+            // reports a Vault. Clear both to model the absent-Vault premise.
+            let cache = Cache {
+                has_vault: false,
+                ..Cache::default()
+            };
+            home.transfer_from = None;
+            home.transfer_direction = None;
             home.wallet_picker = Some(PickerSide::From);
             drain(home.update(
                 Some(as_daemon.clone()),
@@ -4322,10 +4668,286 @@ mod tests {
         }
 
         #[test]
+        fn back_and_destination_switch_reject_old_address_until_new_request_completes() {
+            let (mut home, wallet) = home_on_transfer_screen();
+            let daemon = Arc::new(RecordingDaemon::default());
+            let as_daemon: Arc<dyn Daemon + Sync + Send> = daemon.clone();
+            let cache = Cache {
+                has_vault: true,
+                ..Cache::default()
+            };
+            let old_generation = home.transfer_request_generation;
+            drain(home.update(
+                Some(as_daemon.clone()),
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::PreviousStep)),
+            ));
+            assert!(home.receive_address_info.is_none());
+            assert!(!home.destination_is_ready());
+
+            // This callback test has no Spark backend. Model the new pair and
+            // pending request directly; the selection guard stays enforced.
+            home.transfer_to = Some(WalletKind::Spark);
+            home.transfer_direction = Some(TransferDirection::VaultToSpark);
+            assert_eq!(
+                home.transfer_direction,
+                Some(TransferDirection::VaultToSpark)
+            );
+            assert!(home.receive_address_info.is_none());
+
+            // A real Vault→Spark Next starts the asynchronous Spark address fetch.
+            // Model that pending step without starting the Spark bridge in this test.
+            let generation = home.invalidate_transfer_destination();
+            home.current_view.step = 2;
+            for (callback_generation, callback_direction) in [
+                (old_generation, TransferDirection::VaultToLiquid),
+                (generation, TransferDirection::VaultToLiquid),
+            ] {
+                drain(home.update(
+                    Some(as_daemon.clone()),
+                    &cache,
+                    Message::View(view::Message::Home(HomeMessage::TransferDestinationReady {
+                        generation: callback_generation,
+                        direction: callback_direction,
+                        result: Ok((MAINNET_ADDR.to_string(), ChildNumber::from(1))),
+                    })),
+                ));
+                assert!(home.receive_address_info.is_none());
+                assert!(!home.destination_is_ready());
+            }
+            drain(home.update(
+                Some(as_daemon.clone()),
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::TransferPsbtPreviewReady {
+                    generation: old_generation,
+                    direction: TransferDirection::VaultToLiquid,
+                    feerate_vb: 2,
+                    result: Ok(Amount::from_sat(500)),
+                })),
+            ));
+            assert!(home.spend_tx_fees.is_none());
+            drain(home.update(
+                Some(as_daemon.clone()),
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::SignVaultToLiquidTx)),
+            ));
+            assert!(daemon.calls.lock().unwrap().is_empty());
+
+            // A prior Vault→Liquid PSBT may finish after the new Vault→Spark
+            // attempt has started. It must not clear B's pending state or
+            // reopen a signer for A's old destination.
+            let stale_psbt =
+                Psbt::from_unsigned_tx(coincube_core::miniscript::bitcoin::Transaction {
+                    version: coincube_core::miniscript::bitcoin::transaction::Version::TWO,
+                    lock_time: coincube_core::miniscript::bitcoin::absolute::LockTime::ZERO,
+                    input: vec![],
+                    output: vec![],
+                })
+                .unwrap();
+            home.is_sending = true;
+            drain(home.update(
+                Some(as_daemon.clone()),
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::TransferPsbtReady {
+                    request_id: 1,
+                    generation: old_generation,
+                    direction: TransferDirection::VaultToLiquid,
+                    destination: MAINNET_ADDR.to_string(),
+                    amount_sat: 100_000,
+                    feerate_vb: 2,
+                    result: Ok((
+                        stale_psbt,
+                        Some(wallet),
+                        (cache.datadir_path.clone(), cache.network),
+                    )),
+                })),
+            ));
+            assert!(home.is_sending);
+            assert!(home.transfer_spend_tx.is_none());
+            assert!(matches!(home.modal, Modal::None));
+            drain(home.update(
+                Some(as_daemon.clone()),
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::TransferSigningComplete {
+                    request_id: 1,
+                    generation: old_generation,
+                    direction: TransferDirection::VaultToLiquid,
+                })),
+            ));
+            assert!(!home.transfer_signed);
+            assert!(home.is_sending);
+
+            drain(home.update(
+                None,
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::TransferDestinationReady {
+                    generation,
+                    direction: TransferDirection::VaultToSpark,
+                    result: Ok((
+                        "1BoatSLRHtKNngkdXEeobR76b53LETtpyT".to_string(),
+                        ChildNumber::from(1),
+                    )),
+                })),
+            ));
+            assert!(home.destination_is_ready());
+            assert_eq!(
+                home.receive_address_info
+                    .as_ref()
+                    .unwrap()
+                    .address
+                    .to_string(),
+                "1BoatSLRHtKNngkdXEeobR76b53LETtpyT"
+            );
+            drain(home.update(
+                None,
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::TransferDestinationReady {
+                    generation: old_generation,
+                    direction: TransferDirection::VaultToLiquid,
+                    result: Ok((MAINNET_ADDR.to_string(), ChildNumber::from(1))),
+                })),
+            ));
+            assert_eq!(
+                home.receive_address_info.unwrap().address.to_string(),
+                "1BoatSLRHtKNngkdXEeobR76b53LETtpyT"
+            );
+        }
+
+        #[test]
+        fn current_psbt_result_releases_busy_state_after_fee_mismatch() {
+            let (mut home, _) = home_on_transfer_screen();
+            let cache = Cache {
+                has_vault: true,
+                ..Cache::default()
+            };
+            home.is_sending = true;
+            home.active_psbt_request = Some(9);
+            drain(home.update(
+                None,
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::SetTransferFeerate(
+                    "5".to_string(),
+                ))),
+            ));
+            assert_eq!(home.transfer_feerate.value, "2");
+
+            // A stale preset or external setting can still change a value
+            // while work is in flight. Reject that PSBT, but release its own
+            // busy state so the user can retry or go back.
+            home.transfer_feerate.value = "5".to_string();
+            let generation = home.transfer_request_generation;
+            drain(home.update(
+                None,
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::TransferPsbtReady {
+                    request_id: 9,
+                    generation,
+                    direction: TransferDirection::VaultToLiquid,
+                    destination: MAINNET_ADDR.to_string(),
+                    amount_sat: 100_000,
+                    feerate_vb: 2,
+                    result: Err("late result".to_string()),
+                })),
+            ));
+            assert!(!home.is_sending);
+            assert!(home.active_psbt_request.is_none());
+            assert!(home.transfer_spend_tx.is_none());
+
+            home.active_psbt_request = Some(11);
+            home.is_sending = true;
+            drain(home.update(
+                None,
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::TransferPsbtReady {
+                    request_id: 10,
+                    generation,
+                    direction: TransferDirection::VaultToLiquid,
+                    destination: MAINNET_ADDR.to_string(),
+                    amount_sat: 100_000,
+                    feerate_vb: 5,
+                    result: Err("older result".to_string()),
+                })),
+            ));
+            assert!(home.is_sending);
+            assert_eq!(home.active_psbt_request, Some(11));
+        }
+
+        #[test]
+        fn late_preparation_results_cannot_populate_a_new_transfer_attempt() {
+            let (mut home, _) = home_on_transfer_screen();
+            let cache = Cache::default();
+            let old_generation = home.transfer_request_generation;
+            home.transfer_direction = Some(TransferDirection::LiquidToSpark);
+            let generation = home.invalidate_transfer_destination();
+            let response = PreparePayOnchainResponse {
+                receiver_amount_sat: 100_000,
+                claim_fees_sat: 100,
+                total_fees_sat: 1_000,
+            };
+            drain(home.update(
+                None,
+                &cache,
+                Message::View(view::Message::Home(
+                    HomeMessage::PrepareOnChainResponseReceived {
+                        generation: old_generation,
+                        direction: TransferDirection::LiquidToSpark,
+                        response: response.clone(),
+                    },
+                )),
+            ));
+            assert!(home.prepare_onchain_send_response.is_none());
+            drain(home.update(
+                None,
+                &cache,
+                Message::View(view::Message::Home(
+                    HomeMessage::PrepareOnChainResponseReceived {
+                        generation,
+                        direction: TransferDirection::LiquidToSpark,
+                        response,
+                    },
+                )),
+            ));
+            assert!(home.prepare_onchain_send_response.is_some());
+
+            home.transfer_direction = Some(TransferDirection::SparkToLiquid);
+            let spark_generation = home.invalidate_transfer_destination();
+            for callback_generation in [generation, old_generation] {
+                drain(home.update(
+                    None,
+                    &cache,
+                    Message::View(view::Message::Home(HomeMessage::SparkPrepareSendReady {
+                        generation: callback_generation,
+                        direction: TransferDirection::SparkToLiquid,
+                        destination: MAINNET_ADDR.to_string(),
+                        prepare_handle: "stale".to_string(),
+                        fee_sat: 123,
+                    })),
+                ));
+                assert!(home.spark_send_handle.is_none());
+                assert!(home.receive_address_info.is_none());
+            }
+            drain(home.update(
+                None,
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::SparkPrepareSendReady {
+                    generation: spark_generation,
+                    direction: TransferDirection::SparkToLiquid,
+                    destination: MAINNET_ADDR.to_string(),
+                    prepare_handle: "current".to_string(),
+                    fee_sat: 123,
+                })),
+            ));
+            assert_eq!(home.spark_send_handle.as_deref(), Some("current"));
+            assert!(home.destination_is_ready());
+        }
+
+        #[test]
         fn inline_from_selection_swaps_the_existing_destination() {
             let (mut home, _) = home_on_transfer_screen();
             home.transfer_from = Some(WalletKind::Vault);
             home.transfer_to = Some(WalletKind::Liquid);
+            let old_generation = home.transfer_request_generation;
+            assert!(home.destination_is_ready());
             let cache = Cache {
                 has_vault: true,
                 liquid_gate: crate::app::features::LiquidGate {
@@ -4344,6 +4966,9 @@ mod tests {
             ));
             assert_eq!(home.transfer_from, Some(WalletKind::Liquid));
             assert_eq!(home.transfer_to, Some(WalletKind::Vault));
+            assert!(home.transfer_request_generation > old_generation);
+            assert!(home.receive_address_info.is_none());
+            assert!(!home.destination_is_ready());
             assert_eq!(
                 home.transfer_direction,
                 Some(TransferDirection::LiquidToVault)
@@ -4354,6 +4979,18 @@ mod tests {
                 home.entered_amount.warning,
                 Some("Amount exceeds Liquid balance")
             );
+            let unchanged_generation = home.transfer_request_generation;
+            drain(home.update(
+                None,
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::SelectTransferWallet(
+                    PickerSide::From,
+                    WalletKind::Liquid,
+                ))),
+            ));
+            assert_eq!(home.transfer_request_generation, unchanged_generation);
+            assert_eq!(home.transfer_from, Some(WalletKind::Liquid));
+            assert_eq!(home.transfer_to, Some(WalletKind::Vault));
             drain(home.update(
                 None,
                 &cache,
@@ -4363,6 +5000,7 @@ mod tests {
                 ))),
             ));
             assert_eq!(home.transfer_to, Some(WalletKind::Vault));
+            assert_eq!(home.transfer_request_generation, unchanged_generation);
         }
 
         #[test]

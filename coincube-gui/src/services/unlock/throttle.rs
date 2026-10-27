@@ -434,17 +434,19 @@ pub struct ThrottleState {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 struct CubeThrottle {
     consecutive_failures: u32,
-    /// Unix seconds of the last failure. Absolute rather than an `Instant` so
-    /// the penalty survives a restart — otherwise "quit and relaunch" is the
-    /// bypass.
+    /// Absolute Unix time keeps the penalty across a restart. Retain the
+    /// seconds field so existing counter files remain readable.
     last_failure_unix: u64,
+    /// New counter files retain the fraction of a second as well. Without it,
+    /// a one-second penalty can expire immediately at a Unix-second boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_failure_subsec_nanos: Option<u32>,
 }
 
-fn now_unix() -> u64 {
+fn now_unix() -> Duration {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .unwrap_or(Duration::ZERO)
 }
 
 fn path(root: &Path) -> PathBuf {
@@ -488,7 +490,7 @@ impl ThrottleState {
         self.remaining_lockout_at(cube_id, now_unix())
     }
 
-    fn remaining_lockout_at(&self, cube_id: &str, now_unix: u64) -> Duration {
+    fn remaining_lockout_at(&self, cube_id: &str, now_unix: Duration) -> Duration {
         let Some(entry) = self.failures.get(cube_id) else {
             return Duration::ZERO;
         };
@@ -496,15 +498,27 @@ impl ThrottleState {
         if penalty.is_zero() {
             return Duration::ZERO;
         }
-        let elapsed = now_unix.saturating_sub(entry.last_failure_unix);
-        penalty.saturating_sub(Duration::from_secs(elapsed))
+        let last_failure = match entry.last_failure_subsec_nanos {
+            Some(nanos) if nanos < 1_000_000_000 => Duration::new(entry.last_failure_unix, nanos),
+            // Legacy counter files only know the whole second. Use its end
+            // so upgrading cannot shorten an already-recorded penalty.
+            _ => {
+                Duration::from_secs(entry.last_failure_unix).saturating_add(Duration::from_secs(1))
+            }
+        };
+        penalty.saturating_sub(now_unix.saturating_sub(last_failure))
     }
 
     /// Record a wrong PIN and return the new lockout.
     pub fn record_failure(&mut self, root: &Path, cube_id: &str) -> Duration {
+        self.record_failure_at(root, cube_id, now_unix())
+    }
+
+    fn record_failure_at(&mut self, root: &Path, cube_id: &str, now: Duration) -> Duration {
         let entry = self.failures.entry(cube_id.to_string()).or_default();
         entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
-        entry.last_failure_unix = now_unix();
+        entry.last_failure_unix = now.as_secs();
+        entry.last_failure_subsec_nanos = Some(now.subsec_nanos());
         let penalty = penalty_for(entry.consecutive_failures);
         self.save(root);
         penalty
@@ -564,7 +578,10 @@ fn penalty_for(consecutive_failures: u32) -> Duration {
 
 /// User-facing text for a remaining lockout.
 pub fn lockout_message(remaining: Duration) -> String {
-    let secs = remaining.as_secs().max(1);
+    let secs = remaining
+        .as_secs()
+        .saturating_add(u64::from(remaining.subsec_nanos() > 0))
+        .max(1);
     if secs < 60 {
         format!("Too many incorrect PINs. Try again in {secs}s.")
     } else {
@@ -754,12 +771,17 @@ mod tests {
     }
 
     fn remaining_at_last_failure(state: &ThrottleState, cube_id: &str) -> Duration {
-        let last_failure_unix = state
+        let entry = state
             .failures
             .get(cube_id)
-            .expect("the test must record a failure first")
-            .last_failure_unix;
-        state.remaining_lockout_at(cube_id, last_failure_unix)
+            .expect("the test must record a failure first");
+        state.remaining_lockout_at(
+            cube_id,
+            Duration::new(
+                entry.last_failure_unix,
+                entry.last_failure_subsec_nanos.unwrap_or(0),
+            ),
+        )
     }
 
     fn tmp(tag: &str) -> PathBuf {
@@ -1012,10 +1034,13 @@ mod tests {
         for _ in 0..3 {
             st.record_failure(&root, "cube-a");
         }
-        st.failures
+        let old = now_unix().saturating_sub(Duration::from_secs(2));
+        let entry = st
+            .failures
             .get_mut("cube-a")
-            .expect("the test must record a failure first")
-            .last_failure_unix = now_unix().saturating_sub(2);
+            .expect("the test must record a failure first");
+        entry.last_failure_unix = old.as_secs();
+        entry.last_failure_subsec_nanos = Some(old.subsec_nanos());
 
         assert_eq!(st.remaining_lockout("cube-a"), Duration::ZERO);
         std::fs::remove_dir_all(root).unwrap();
@@ -1033,6 +1058,42 @@ mod tests {
         let reloaded = ThrottleState::load(&root);
         assert!(remaining_at_last_failure(&reloaded, "cube-a") > Duration::ZERO);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn one_second_penalty_survives_a_second_boundary_and_restart() {
+        let root = tmp("second-boundary");
+        let mut state = ThrottleState::default();
+        let failure_time = Duration::new(100, 999_999_999);
+        for _ in 0..3 {
+            state.record_failure_at(&root, "cube-a", failure_time);
+        }
+
+        let reloaded = ThrottleState::load(&root);
+        assert_eq!(
+            reloaded.remaining_lockout_at("cube-a", Duration::from_secs(101)),
+            Duration::from_nanos(999_999_999)
+        );
+        assert_eq!(
+            reloaded.remaining_lockout_at("cube-a", failure_time + Duration::from_secs(1)),
+            Duration::ZERO
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_whole_second_counter_remains_readable_and_conservative() {
+        let legacy =
+            br#"{"failures":{"cube-a":{"consecutive_failures":3,"last_failure_unix":100}}}"#;
+        let state: ThrottleState = serde_json::from_slice(legacy).unwrap();
+        assert_eq!(
+            state.remaining_lockout_at("cube-a", Duration::from_secs(101)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            state.remaining_lockout_at("cube-a", Duration::from_secs(102)),
+            Duration::ZERO
+        );
     }
 
     /// Guesses must accumulate across *every* surface that checks the PIN, not
@@ -1100,5 +1161,9 @@ mod tests {
         assert!(lockout_message(Duration::from_secs(120)).contains("2 minute"));
         // Sub-second remainders still say something, never "0s".
         assert!(lockout_message(Duration::from_millis(200)).contains("1s"));
+        // Fractional remainders must not promise an earlier retry than the
+        // lockout actually allows.
+        assert!(lockout_message(Duration::from_millis(1_999)).contains("2s"));
+        assert!(lockout_message(Duration::from_millis(60_001)).contains("2 minute"));
     }
 }

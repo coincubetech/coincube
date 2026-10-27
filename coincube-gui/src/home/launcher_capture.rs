@@ -206,6 +206,50 @@ fn launcher_capture() {
         home.catalog.network_menu = true;
         shot(&home, "01-floor-menu", &mut renderer);
         home.catalog.network_menu = false;
+        // Every network at once (Developer mode), as on the canvas: All /
+        // Live / Test chips, the Network menu with counts, a filtered count
+        // with Clear filters, and the empty state when nothing matches.
+        {
+            use super::launcher_catalog::NetworkFilter;
+            let mut all = self::home(light);
+            all.developer_mode = true;
+            all.displayed_networks = vec![
+                ChainId::Bitcoin,
+                ChainId::Testnet4,
+                ChainId::Signet,
+                ChainId::Regtest,
+            ];
+            let test_cube = |id: &str, name: &str, chain| {
+                CubeSettings::new_with_raw_id(id.into(), name.into(), chain)
+            };
+            all.network_catalog_requested =
+                vec![ChainId::Testnet4, ChainId::Signet, ChainId::Regtest];
+            all.network_catalog = vec![
+                (
+                    ChainId::Testnet4,
+                    vec![test_cube("t-1", "Lab bench", ChainId::Testnet4)],
+                ),
+                (
+                    ChainId::Signet,
+                    vec![test_cube("s-1", "Signet demo", ChainId::Signet)],
+                ),
+                (
+                    ChainId::Regtest,
+                    vec![test_cube("r-1", "Regtest", ChainId::Regtest)],
+                ),
+            ];
+            shot(&all, "12-filters-all", &mut renderer);
+            all.catalog.network_menu = true;
+            shot(&all, "12-filters-menu", &mut renderer);
+            all.catalog.network_menu = false;
+            all.catalog.filter = NetworkFilter::Live;
+            shot(&all, "12-filters-live", &mut renderer);
+            all.catalog.filter = NetworkFilter::Test;
+            shot(&all, "12-filters-test", &mut renderer);
+            all.displayed_networks.push(ChainId::BitcoinBlake2bTestnet4);
+            all.catalog.filter = NetworkFilter::Network(ChainId::BitcoinBlake2bTestnet4);
+            shot(&all, "12-filters-none", &mut renderer);
+        }
         // Browse -> details on the second Cube: every 82ms of the 820ms turn.
         home.catalog.selected = Some(key(pick));
         for step in 0..=10u64 {

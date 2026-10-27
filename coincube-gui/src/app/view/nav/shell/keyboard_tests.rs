@@ -273,18 +273,7 @@ fn send(
     cursor: mouse::Cursor,
     size: Size,
 ) -> Vec<Message> {
-    let mut messages = Vec::new();
-    element.as_widget_mut().update(
-        tree,
-        &event,
-        Layout::new(node),
-        cursor,
-        renderer,
-        &mut iced::advanced::clipboard::Null,
-        &mut iced::advanced::Shell::new(&mut messages),
-        &Rectangle::with_size(size),
-    );
-    messages
+    test_send(element, tree, node, renderer, &event, cursor, size)
 }
 
 fn key(named: keyboard::key::Named, repeat: bool, pressed: bool) -> Event {
@@ -938,17 +927,7 @@ async fn focused_shell_capture_uses_production_compact_and_full_split() {
                     size
                 )
                 .is_empty());
-                element.as_widget().draw(
-                    &tree,
-                    &mut renderer,
-                    &theme,
-                    &iced::advanced::renderer::Style {
-                        text_color: theme.colors.shell.ink,
-                    },
-                    Layout::new(&node),
-                    mouse::Cursor::Unavailable,
-                    &Rectangle::with_size(size),
-                );
+                test_draw(&mut element, &mut tree, &node, &mut renderer, &theme, size);
                 let pixels = renderer.screenshot(
                     Size::new(width, height),
                     1.0,
@@ -1063,17 +1042,7 @@ async fn selected_successor_does_not_paint_over_focused_nav_ring() {
                     size
                 )
                 .is_empty());
-                element.as_widget().draw(
-                    &tree,
-                    &mut renderer,
-                    &theme,
-                    &iced::advanced::renderer::Style {
-                        text_color: theme.colors.shell.ink,
-                    },
-                    Layout::new(&node),
-                    mouse::Cursor::Unavailable,
-                    &Rectangle::with_size(size),
-                );
+                test_draw(&mut element, &mut tree, &node, &mut renderer, &theme, size);
                 let pixels = renderer.screenshot(
                     Size::new(width, height),
                     1.0,
@@ -1206,4 +1175,86 @@ fn wallets_have_no_sidebar_sub_menus() {
             menu
         );
     }
+}
+
+#[test]
+fn switcher_menu_covers_the_nav_without_moving_it_and_keeps_tab_order() {
+    load_fonts();
+    let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+        coincube_ui::font::REGULAR,
+        14.into(),
+        Some("tiny-skia"),
+    ))
+    .unwrap();
+    let ctx = fixture_context();
+    let size = Size::new(1024.0, 768.0);
+    let mount = |state: ShellState| {
+        let mut element = shell_tree(&ctx, state);
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        (element, tree, node)
+    };
+    let (mut closed, mut closed_tree, closed_node) = mount(ShellState::default());
+    let shut = focus_snapshot(&mut closed, &mut closed_tree, &closed_node, &renderer);
+    let (mut open, mut open_tree, open_node) = mount(ShellState {
+        switcher_open: true,
+        ..ShellState::default()
+    });
+    let shown = focus_snapshot(&mut open, &mut open_tree, &open_node, &renderer);
+
+    for (id, bounds) in &shut.bounds {
+        let moved = shown
+            .bounds
+            .iter()
+            .find(|(other, _)| other == id)
+            .map(|(_, b)| *b);
+        assert_eq!(moved, Some(*bounds), "{:?} moved when the menu opened", id);
+    }
+    let switcher = bounds_of(&shown.bounds, CUBE_SWITCHER_ID);
+    let all_cubes = bounds_of(&shown.bounds, "tenshu.launcher.all-cubes");
+    let overview = bounds_of(&shown.bounds, "tenshu.shell.nav.Overview");
+    assert!(all_cubes.y >= switcher.y + switcher.height);
+    assert!(
+        all_cubes.intersects(&overview),
+        "the menu lies over the first rows: {:?} {:?}",
+        all_cubes,
+        overview
+    );
+
+    // Tab still goes from the switcher into the menu.
+    operate(
+        &mut open,
+        &mut open_tree,
+        &open_node,
+        &renderer,
+        focusable::focus::<()>(Id::new(CUBE_SWITCHER_ID)),
+    );
+    operate(
+        &mut open,
+        &mut open_tree,
+        &open_node,
+        &renderer,
+        focusable::focus_next::<()>(),
+    );
+    assert_eq!(
+        operate(
+            &mut open,
+            &mut open_tree,
+            &open_node,
+            &renderer,
+            focusable::find_focused(),
+        ),
+        Some(Id::new("tenshu.launcher.all-cubes"))
+    );
+}
+
+fn bounds_of(bounds: &[(Id, Rectangle)], id: &'static str) -> Rectangle {
+    bounds
+        .iter()
+        .find_map(|(other, b)| (*other == Id::new(id)).then_some(*b))
+        .unwrap_or_else(|| panic!("{} has no focus target", id))
 }

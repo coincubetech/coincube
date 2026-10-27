@@ -44,6 +44,356 @@ fn sign_in_home(gui: &mut GUI, pane_id: pane_grid::Pane) {
     home.connect_account.step = crate::app::state::connect::ConnectFlowStep::Dashboard;
 }
 
+fn set_duress_gate(gui: &mut GUI, pane_id: pane_grid::Pane, entitled: bool, enabled: bool) {
+    use crate::services::coincube::{
+        BillingCycle, ConnectPlan, FeaturesResponse, PlanEntitlements, PlanStatus, PlanTier,
+    };
+    let tab::State::Home(home) = &mut gui.panes.get_mut(pane_id).unwrap().tabs[0].state else {
+        unreachable!()
+    };
+    home.connect_account.plan = Some(ConnectPlan {
+        plan: if entitled {
+            PlanTier::Pro
+        } else {
+            PlanTier::Free
+        },
+        status: PlanStatus::Active,
+        renewal_at: None,
+        entitlements: PlanEntitlements {
+            duress: entitled,
+            ..PlanEntitlements::default()
+        },
+        billing_cycle: Some(BillingCycle::Monthly),
+        plan_provenance: None,
+    });
+    home.connect_account.features = Some(FeaturesResponse {
+        plans: Vec::new(),
+        pricing_schema_version: None,
+        purchasing_enabled: None,
+        marketplace_enabled: None,
+        liquid_enabled: None,
+        buy_sell_enabled: None,
+        p2p_enabled: None,
+        duress_enabled: Some(enabled),
+        bitcoin_blake2b_enabled: None,
+    });
+}
+
+fn set_synthetic_duress_dialogs(gui: &mut GUI, pane_id: pane_grid::Pane, submitting: bool) {
+    let tab::State::Home(home) = &mut gui.panes.get_mut(pane_id).unwrap().tabs[0].state else {
+        unreachable!()
+    };
+    home.connect_account.duress_enroll = Some(app::state::connect::DuressEnrollState {
+        step: app::state::connect::DuressEnrollStep::SetDuressPin,
+        duress_pin: "test-pin".into(),
+        duress_pin_confirm: "test-pin".into(),
+        all_clear: "test-all-clear".into(),
+        crk_password: "test-crk-password".into(),
+        delay: crate::services::duress::enroll::DuressDelay::default(),
+        memorized: false,
+        submitting,
+        error: None,
+        pending_code: Some("test-code".into()),
+    });
+    home.connect_account.duress_disable = Some(app::state::connect::DuressDisableState {
+        pin: "test-regular-pin".into(),
+        ..Default::default()
+    });
+}
+
+fn assert_duress_dialogs_scrubbed(gui: &GUI, pane_id: pane_grid::Pane) {
+    let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[0].state else {
+        unreachable!()
+    };
+    assert!(home.connect_account.duress_enroll.is_none());
+    assert!(!home.connect_account.duress_enroll_abandoned);
+    assert!(home.connect_account.duress_disable.is_none());
+}
+
+fn deliver_enroll_failure(gui: &mut GUI, pane_id: pane_grid::Pane, tab_id: usize) {
+    let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[0].state else {
+        unreachable!()
+    };
+    let generation = home.connect_account.session_generation();
+    drop(gui.update(Message::Pane(
+        pane_id,
+        pane::Message::tab(
+            tab_id,
+            tab::Message::Launch(home::Message::View(home::ViewMessage::ConnectAccount(
+                view::ConnectAccountMessage::Duress(view::DuressMessage::EnrollResult(
+                    Err("synthetic server rejection".into()),
+                    generation,
+                )),
+            ))),
+        ),
+    )));
+}
+
+fn deliver_preflight_failure(gui: &mut GUI, pane_id: pane_grid::Pane, tab_id: usize) {
+    let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[0].state else {
+        unreachable!()
+    };
+    let generation = home.connect_account.session_generation();
+    drop(gui.update(Message::Pane(
+        pane_id,
+        pane::Message::tab(
+            tab_id,
+            tab::Message::Launch(home::Message::View(home::ViewMessage::ConnectAccount(
+                view::ConnectAccountMessage::Duress(view::DuressMessage::EnrollPreflightDone(
+                    Err("synthetic PIN collision".into()),
+                    generation,
+                )),
+            ))),
+        ),
+    )));
+}
+
+#[test]
+fn abandoned_preflight_failure_scrubs_after_section_switch_or_close() {
+    with_runtime("connect-duress-preflight-exit", |path, _runtime| {
+        for close in [false, true] {
+            let root = CoincubeDirectory::new(path.to_path_buf());
+            let mut gui = launcher_gui(&root);
+            let pane_id = gui.focus.unwrap();
+            let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
+            sign_in_home(&mut gui, pane_id);
+            set_duress_gate(&mut gui, pane_id, true, true);
+            launcher_connect_entry(&mut gui, pane_id, tab_id);
+            drop(
+                gui.update(Message::ConnectSheet(ConnectSheetMessage::SelectSection(
+                    ConnectSheetSection::Duress,
+                ))),
+            );
+            set_synthetic_duress_dialogs(&mut gui, pane_id, true);
+
+            drop(gui.update(Message::ConnectSheet(if close {
+                ConnectSheetMessage::Close
+            } else {
+                ConnectSheetMessage::SelectSection(ConnectSheetSection::Account)
+            })));
+            let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[0].state else {
+                unreachable!()
+            };
+            assert!(home.connect_account.duress_enroll_abandoned);
+            deliver_preflight_failure(&mut gui, pane_id, tab_id);
+            assert_duress_dialogs_scrubbed(&gui, pane_id);
+            assert_eq!(gui.connect_sheet.is_none(), close);
+        }
+    });
+}
+
+#[test]
+fn legacy_duress_route_and_sheet_selection_respect_gate() {
+    with_runtime("connect-duress-route", |path, _runtime| {
+        let root = CoincubeDirectory::new(path.to_path_buf());
+        let mut gui = launcher_gui(&root);
+        let pane_id = gui.focus.unwrap();
+        let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
+        sign_in_home(&mut gui, pane_id);
+        set_duress_gate(&mut gui, pane_id, true, true);
+
+        drop(gui.update(Message::Pane(
+            pane_id,
+            pane::Message::tab(
+                tab_id,
+                tab::Message::Launch(home::Message::View(home::ViewMessage::GoToSection(
+                    home::HomeSection::Connect(crate::app::menu::ConnectSubMenu::Duress),
+                ))),
+            ),
+        )));
+        assert_eq!(
+            gui.connect_sheet.as_ref().unwrap().page,
+            ConnectSheetPage::Sections(ConnectSheetSection::Duress)
+        );
+        assert_focus_target_mounted(
+            &gui,
+            iced::advanced::widget::Id::new("tenshu.connect.section.duress"),
+        );
+        let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[0].state else {
+            unreachable!()
+        };
+        assert_eq!(
+            home.connect_account.active_sub,
+            crate::app::menu::ConnectSubMenu::Duress
+        );
+
+        let (generation, revoked) = {
+            let tab::State::Home(home) = &mut gui.panes.get_mut(pane_id).unwrap().tabs[0].state
+            else {
+                unreachable!()
+            };
+            let mut revoked = home.connect_account.features.clone().unwrap();
+            revoked.duress_enabled = Some(false);
+            (home.connect_account.session_generation(), revoked)
+        };
+        set_synthetic_duress_dialogs(&mut gui, pane_id, false);
+        drop(
+            gui.update(Message::ConnectSheet(ConnectSheetMessage::Account(
+                view::ConnectAccountMessage::FeaturesLoaded(Some(revoked), generation),
+            ))),
+        );
+        assert_eq!(
+            gui.connect_sheet.as_ref().unwrap().page,
+            ConnectSheetPage::Sections(ConnectSheetSection::Account)
+        );
+        let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[0].state else {
+            unreachable!()
+        };
+        assert_eq!(
+            home.connect_account.active_sub,
+            crate::app::menu::ConnectSubMenu::Overview
+        );
+        assert_duress_dialogs_scrubbed(&gui, pane_id);
+
+        drop(
+            gui.update(Message::ConnectSheet(ConnectSheetMessage::SelectSection(
+                ConnectSheetSection::Duress,
+            ))),
+        );
+        assert_eq!(
+            gui.connect_sheet.as_ref().unwrap().page,
+            ConnectSheetPage::Sections(ConnectSheetSection::Account)
+        );
+        set_duress_gate(&mut gui, pane_id, false, true);
+        drop(
+            gui.update(Message::ConnectSheet(ConnectSheetMessage::SelectSection(
+                ConnectSheetSection::Duress,
+            ))),
+        );
+        assert_eq!(
+            gui.connect_sheet.as_ref().unwrap().page,
+            ConnectSheetPage::Sections(ConnectSheetSection::Account)
+        );
+        drop(gui.update(Message::ConnectSheet(ConnectSheetMessage::Close)));
+        assert!(gui.connect_sheet.is_none());
+
+        // A stale legacy route cannot expose Duress during login, even with
+        // an old in-memory entitlement and feature payload.
+        let tab::State::Home(home) = &mut gui.panes.get_mut(pane_id).unwrap().tabs[0].state else {
+            unreachable!()
+        };
+        home.connect_account.step = app::state::connect::ConnectFlowStep::Login {
+            email: String::new(),
+            loading: false,
+        };
+        set_duress_gate(&mut gui, pane_id, true, true);
+        drop(gui.update(Message::Pane(
+            pane_id,
+            pane::Message::tab(
+                tab_id,
+                tab::Message::Launch(home::Message::View(home::ViewMessage::GoToSection(
+                    home::HomeSection::Connect(crate::app::menu::ConnectSubMenu::Duress),
+                ))),
+            ),
+        )));
+        assert_eq!(
+            gui.connect_sheet.as_ref().unwrap().page,
+            ConnectSheetPage::Sections(ConnectSheetSection::Account)
+        );
+    });
+}
+
+#[test]
+fn leaving_duress_section_scrubs_pending_dialogs() {
+    with_runtime("connect-duress-section-exit", |path, _runtime| {
+        let root = CoincubeDirectory::new(path.to_path_buf());
+        let mut gui = launcher_gui(&root);
+        let pane_id = gui.focus.unwrap();
+        let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
+        sign_in_home(&mut gui, pane_id);
+        set_duress_gate(&mut gui, pane_id, true, true);
+        launcher_connect_entry(&mut gui, pane_id, tab_id);
+        drop(
+            gui.update(Message::ConnectSheet(ConnectSheetMessage::SelectSection(
+                ConnectSheetSection::Duress,
+            ))),
+        );
+        set_synthetic_duress_dialogs(&mut gui, pane_id, false);
+
+        drop(
+            gui.update(Message::ConnectSheet(ConnectSheetMessage::SelectSection(
+                ConnectSheetSection::Contacts,
+            ))),
+        );
+        assert_eq!(
+            gui.connect_sheet.as_ref().unwrap().page,
+            ConnectSheetPage::Sections(ConnectSheetSection::Contacts)
+        );
+        assert_duress_dialogs_scrubbed(&gui, pane_id);
+
+        // An enroll request already submitted to Connect retains the wizard
+        // until its result arrives; the independent disable dialog still clears.
+        drop(
+            gui.update(Message::ConnectSheet(ConnectSheetMessage::SelectSection(
+                ConnectSheetSection::Duress,
+            ))),
+        );
+        set_synthetic_duress_dialogs(&mut gui, pane_id, true);
+        drop(
+            gui.update(Message::ConnectSheet(ConnectSheetMessage::SelectSection(
+                ConnectSheetSection::Account,
+            ))),
+        );
+        let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[0].state else {
+            unreachable!()
+        };
+        assert!(
+            home.connect_account
+                .duress_enroll
+                .as_ref()
+                .unwrap()
+                .submitting
+        );
+        assert!(home.connect_account.duress_disable.is_none());
+        assert!(home.connect_account.duress_enroll_abandoned);
+        deliver_enroll_failure(&mut gui, pane_id, tab_id);
+        assert_duress_dialogs_scrubbed(&gui, pane_id);
+        assert_eq!(
+            gui.connect_sheet.as_ref().unwrap().page,
+            ConnectSheetPage::Sections(ConnectSheetSection::Account)
+        );
+    });
+}
+
+#[test]
+fn closing_duress_sheet_scrubs_pending_dialogs() {
+    with_runtime("connect-duress-close", |path, _runtime| {
+        let root = CoincubeDirectory::new(path.to_path_buf());
+        let mut gui = launcher_gui(&root);
+        let pane_id = gui.focus.unwrap();
+        let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
+        sign_in_home(&mut gui, pane_id);
+        set_duress_gate(&mut gui, pane_id, true, true);
+        launcher_connect_entry(&mut gui, pane_id, tab_id);
+        drop(
+            gui.update(Message::ConnectSheet(ConnectSheetMessage::SelectSection(
+                ConnectSheetSection::Duress,
+            ))),
+        );
+        set_synthetic_duress_dialogs(&mut gui, pane_id, false);
+
+        drop(gui.update(Message::ConnectSheet(ConnectSheetMessage::Close)));
+        assert!(gui.connect_sheet.is_none());
+        assert_duress_dialogs_scrubbed(&gui, pane_id);
+
+        launcher_connect_entry(&mut gui, pane_id, tab_id);
+        drop(
+            gui.update(Message::ConnectSheet(ConnectSheetMessage::SelectSection(
+                ConnectSheetSection::Duress,
+            ))),
+        );
+        set_synthetic_duress_dialogs(&mut gui, pane_id, true);
+        drop(gui.update(Message::ConnectSheet(ConnectSheetMessage::Close)));
+        let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[0].state else {
+            unreachable!()
+        };
+        assert!(home.connect_account.duress_enroll_abandoned);
+        deliver_enroll_failure(&mut gui, pane_id, tab_id);
+        assert!(gui.connect_sheet.is_none());
+        assert_duress_dialogs_scrubbed(&gui, pane_id);
+    });
+}
+
 fn launcher_connect_entry(gui: &mut GUI, pane_id: pane_grid::Pane, tab_id: usize) {
     drop(gui.update(Message::Pane(
         pane_id,

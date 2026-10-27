@@ -23,6 +23,40 @@ const FOCUS_RING_GAP: f32 = 2.0;
 const FOCUS_RING_WIDTH: f32 = 2.0;
 const FOCUS_RING_OUTSET: f32 = FOCUS_RING_GAP + FOCUS_RING_WIDTH;
 
+thread_local! {
+    /// Whether the last input was the keyboard, as a browser's
+    /// `:focus-visible` decides. A click still focuses the action, so Enter
+    /// and Tab continue from it, but only keyboard use paints the ring. One
+    /// flag per UI thread: every window shares the user's current modality.
+    static KEYBOARD_MODALITY: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+fn note_modality(event: &Event) {
+    let keyboard = match event {
+        // Modifiers alone (the Cmd of a Cmd-click) keep the current modality.
+        Event::Keyboard(keyboard::Event::KeyPressed {
+            key:
+                keyboard::Key::Named(
+                    key::Named::Shift
+                    | key::Named::Control
+                    | key::Named::Alt
+                    | key::Named::Super
+                    | key::Named::Meta,
+                ),
+            ..
+        }) => return,
+        Event::Keyboard(keyboard::Event::KeyPressed { .. }) => true,
+        Event::Mouse(mouse::Event::ButtonPressed(_))
+        | Event::Touch(iced::touch::Event::FingerPressed { .. }) => false,
+        _ => return,
+    };
+    KEYBOARD_MODALITY.with(|modality| modality.set(keyboard));
+}
+
+fn focus_visible() -> bool {
+    KEYBOARD_MODALITY.with(std::cell::Cell::get)
+}
+
 fn focus_outer_bounds(bounds: Rectangle) -> Rectangle {
     Rectangle {
         x: bounds.x - FOCUS_RING_OUTSET,
@@ -46,8 +80,11 @@ pub fn focus_previous_visible<Message: Send + 'static>(
     iced::widget::operation::focus_previous().chain(reveal_focused(scroll_id.into()))
 }
 
-fn reveal_focused<Message: Send + 'static>(scroll_id: Id) -> iced::Task<Message> {
-    iced_runtime::task::widget(FocusedScrollDelta::new(scroll_id)).then(|delta| {
+/// Reveal the currently focused action inside a named scrollable, if present.
+/// Chaining this after another focus/reveal operation is safe when the named
+/// scrollable is absent or the focused widget is outside it.
+pub fn reveal_focused<Message: Send + 'static>(scroll_id: impl Into<Id>) -> iced::Task<Message> {
+    iced_runtime::task::widget(FocusedScrollDelta::new(scroll_id.into())).then(|delta| {
         iced::widget::operation::scroll_by(
             delta.id,
             iced::widget::operation::AbsoluteOffset { x: 0.0, y: delta.y },
@@ -350,6 +387,7 @@ impl<Message: Clone + 'static> Widget<Message, Theme, Renderer> for Action<'_, M
             Event::Window(iced::window::Event::Unfocused)
                 | Event::Touch(iced::touch::Event::FingerLost { .. })
         );
+        note_modality(event);
         if pointer_press {
             let state = tree.state.downcast_mut::<State>();
             if self.on_press.is_some() && cursor.is_over(layout.bounds()) {
@@ -454,7 +492,8 @@ impl<Message: Clone + 'static> Widget<Message, Theme, Renderer> for Action<'_, M
             cursor,
             viewport,
         );
-        if self.on_press.is_some() && tree.state.downcast_ref::<State>().focused {
+        if self.on_press.is_some() && tree.state.downcast_ref::<State>().focused && focus_visible()
+        {
             use iced::advanced::Renderer as _;
             renderer.fill_quad(
                 renderer::Quad {
@@ -827,6 +866,127 @@ mod tests {
                 "stroke must end 4px outside control"
             );
         }
+    }
+
+    #[test]
+    fn a_click_focuses_without_a_ring_until_the_keyboard_is_used() {
+        load_fonts();
+        let theme = Theme::dark();
+        let renderer = iced::futures::executor::block_on(<Renderer as Headless>::new(
+            font::REGULAR,
+            14.into(),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let mut element: Element<'_, Message> = container(
+            Action::new("ring", text("Focus"), Message::Focus)
+                .width(Length::Fixed(100.0))
+                .height(Length::Fixed(32.0))
+                .on_press(Message::First),
+        )
+        .padding(12)
+        .into();
+        let mut tree = Tree::new(element.as_widget());
+        let size = Size::new(160.0, 56.0);
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        let control = node.children()[0].bounds();
+        let focus = theme.colors.shell.focus;
+        let expected = [focus.r, focus.g, focus.b].map(|component| (component * 255.0) as u8);
+        // A fresh renderer per frame: the headless one keeps earlier layers.
+        let ring_painted = |element: &Element<'_, Message>, tree: &Tree| {
+            let mut renderer = iced::futures::executor::block_on(<Renderer as Headless>::new(
+                font::REGULAR,
+                14.into(),
+                Some("tiny-skia"),
+            ))
+            .unwrap();
+            element.as_widget().draw(
+                tree,
+                &mut renderer,
+                &theme,
+                &renderer::Style {
+                    text_color: theme.colors.shell.ink,
+                },
+                Layout::new(&node),
+                mouse::Cursor::Unavailable,
+                &Rectangle::with_size(size),
+            );
+            let pixels =
+                renderer.screenshot(Size::new(160, 56), 1.0, theme.colors.shell.background);
+            let i = (((control.y as u32 - 3) * 160 + (control.x + control.width / 2.0) as u32) * 4)
+                as usize;
+            [pixels[i], pixels[i + 1], pixels[i + 2]]
+                .iter()
+                .zip(expected)
+                .all(|(actual, expected)| actual.abs_diff(expected) <= 2)
+        };
+
+        let cursor = mouse::Cursor::Available(control.center());
+        let dispatch = |renderer: &Renderer,
+                        element: &mut Element<'_, Message>,
+                        tree: &mut Tree,
+                        event: Event| {
+            let mut messages = Vec::new();
+            element.as_widget_mut().update(
+                tree,
+                &event,
+                Layout::new(&node),
+                cursor,
+                renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut Shell::new(&mut messages),
+                &Rectangle::with_size(size),
+            );
+            messages
+        };
+        assert_eq!(
+            dispatch(
+                &renderer,
+                &mut element,
+                &mut tree,
+                Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            ),
+            vec![Message::Focus(Id::new("ring"))]
+        );
+        dispatch(
+            &renderer,
+            &mut element,
+            &mut tree,
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+        );
+        assert!(!ring_painted(&element, &tree), "a click paints no ring");
+
+        // A modifier alone (Cmd-click) does not reveal it either.
+        dispatch(
+            &renderer,
+            &mut element,
+            &mut tree,
+            key_event(key::Named::Super, false, true),
+        );
+        assert!(!ring_painted(&element, &tree));
+
+        dispatch(
+            &renderer,
+            &mut element,
+            &mut tree,
+            key_event(key::Named::Tab, false, true),
+        );
+        assert!(ring_painted(&element, &tree), "keyboard use shows the ring");
+
+        dispatch(
+            &renderer,
+            &mut element,
+            &mut tree,
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+        );
+        assert!(
+            !ring_painted(&element, &tree),
+            "the next click hides it again"
+        );
     }
 
     #[test]

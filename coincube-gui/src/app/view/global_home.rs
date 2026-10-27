@@ -851,6 +851,8 @@ fn confirm_transfer_view<'a>(
     direction: TransferDirection,
     amount: &'a form::Value<String>,
     receive_address: Option<&'a coincube_core::miniscript::bitcoin::Address>,
+    destination_ready: bool,
+    transfer_action_ready: bool,
     labels: &'a std::collections::HashMap<String, String>,
     labels_editing: &'a std::collections::HashMap<String, form::Value<String>>,
     address_expanded: bool,
@@ -1112,7 +1114,7 @@ fn confirm_transfer_view<'a>(
                         crate::app::view::shared::feerate_picker::feerate_presets_row::<Message>(
                             transfer_feerate_loading,
                             |preset| Message::Home(HomeMessage::FetchTransferFeeratePreset(preset)),
-                            is_tx_signed,
+                            is_tx_signed || is_sending,
                         ),
                     )
                     .push(crate::app::view::shared::feerate_picker::feerate_input::<
@@ -1121,7 +1123,7 @@ fn confirm_transfer_view<'a>(
                     >(
                         transfer_feerate,
                         |s| Message::Home(HomeMessage::SetTransferFeerate(s)),
-                        is_tx_signed,
+                        is_tx_signed || is_sending,
                     )),
             )
             .width(Length::Fill)
@@ -1203,15 +1205,15 @@ fn confirm_transfer_view<'a>(
                         None,
                         "Confirm & Broadcast",
                         is_sending,
-                        Some(Message::Home(HomeMessage::ConfirmTransfer)),
+                        transfer_action_ready
+                            .then_some(Message::Home(HomeMessage::ConfirmTransfer)),
                     )
                 } else {
                     button::primary_loading(
                         None,
                         "Sign Transaction",
                         is_sending,
-                        transfer_feerate
-                            .valid
+                        (transfer_feerate.valid && destination_ready)
                             .then_some(Message::Home(HomeMessage::SignVaultToLiquidTx)),
                     )
                 }
@@ -1221,7 +1223,7 @@ fn confirm_transfer_view<'a>(
                     None,
                     "Confirm Transfer",
                     is_sending,
-                    Some(Message::Home(HomeMessage::ConfirmTransfer)),
+                    transfer_action_ready.then_some(Message::Home(HomeMessage::ConfirmTransfer)),
                 )
             }
             // Spark-sourced: the prepare handle was fetched at step 1→2. Confirm
@@ -1232,7 +1234,7 @@ fn confirm_transfer_view<'a>(
                     None,
                     "Confirm Transfer",
                     is_sending,
-                    Some(Message::Home(HomeMessage::ConfirmSparkSend)),
+                    transfer_action_ready.then_some(Message::Home(HomeMessage::ConfirmSparkSend)),
                 )
             }
         });
@@ -1582,6 +1584,10 @@ pub struct GlobalViewConfig<'a> {
     pub wallet_picker: Option<PickerSide>,
     pub entered_amount: &'a form::Value<String>,
     pub receive_address: Option<&'a coincube_core::miniscript::bitcoin::Address>,
+    /// True only when the destination was returned for the current transfer request.
+    pub destination_ready: bool,
+    /// Current destination plus the direction-specific prepared response/handle.
+    pub transfer_action_ready: bool,
     pub receive_index: Option<&'a coincube_core::miniscript::bitcoin::bip32::ChildNumber>,
     pub labels: &'a std::collections::HashMap<String, String>,
     pub labels_editing: &'a std::collections::HashMap<String, form::Value<String>>,
@@ -1671,6 +1677,8 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
         wallet_picker: _,
         entered_amount,
         receive_address,
+        destination_ready,
+        transfer_action_ready,
         receive_index: _receive_index,
         labels,
         labels_editing,
@@ -1722,6 +1730,8 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
                     direction,
                     entered_amount,
                     receive_address,
+                    destination_ready,
+                    transfer_action_ready,
                     labels,
                     labels_editing,
                     address_expanded,
@@ -2598,6 +2608,8 @@ mod tests {
                 wallet_picker,
                 entered_amount: &self.entered_amount,
                 receive_address: Some(&self.receive_address),
+                destination_ready: true,
+                transfer_action_ready: true,
                 receive_index: Some(&self.receive_index),
                 labels: &self.labels,
                 labels_editing: &self.labels_editing,

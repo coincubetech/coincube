@@ -119,3 +119,92 @@ impl DuressActiveScreen {
             .into()
     }
 }
+
+#[cfg(test)]
+mod presentation_tests {
+    use super::*;
+    use crate::app::view::shared::landing::capture;
+    use coincube_ui::theme;
+    use iced::advanced::{layout, renderer::Headless, widget::Tree, Layout};
+    use iced::{mouse, Rectangle, Size};
+
+    #[test]
+    fn active_screen_fits_minimum_window_and_keeps_one_action() {
+        let screen = DuressActiveScreen::new();
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            let inspection = capture::inspect_full_window(
+                "duress-active",
+                screen.view(),
+                (1024, 768),
+                appearance,
+                theme,
+            );
+            assert!(inspection.contains("Duress Mode Activated"));
+            assert!(inspection.contains("Sign in to Connect"));
+            assert!(!inspection.contains("Recovery Kit"));
+            assert!(!inspection.contains("All-clear"));
+
+            // The shared content capture wraps views in a scrollable. Draw
+            // this full-screen state directly too, so Fill height and its
+            // vertical centering are checked at the real minimum viewport.
+            let mut renderer =
+                iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+                    coincube_ui::font::REGULAR,
+                    iced::Pixels(16.0),
+                    Some("tiny-skia"),
+                ))
+                .expect("software renderer for synthetic duress screen");
+            let size = Size::new(1024.0, 768.0);
+            let mut element = screen.view();
+            let mut tree = Tree::new(element.as_widget());
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, size),
+            );
+            assert_eq!(node.size().height, size.height);
+            let viewport = Rectangle::with_size(size);
+            element.as_widget_mut().update(
+                &mut tree,
+                &iced::Event::Window(iced::window::Event::RedrawRequested(
+                    std::time::Instant::now(),
+                )),
+                Layout::new(&node),
+                mouse::Cursor::Unavailable,
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut iced::advanced::Shell::new(&mut Vec::new()),
+                &viewport,
+            );
+            element.as_widget().draw(
+                &tree,
+                &mut renderer,
+                &theme,
+                &iced::advanced::renderer::Style {
+                    text_color: theme.colors.text.primary,
+                },
+                Layout::new(&node),
+                mouse::Cursor::Unavailable,
+                &viewport,
+            );
+            if let Ok(directory) = std::env::var("R06A_CAPTURE_DIR") {
+                std::fs::create_dir_all(&directory).expect("create synthetic capture directory");
+                let pixels =
+                    renderer.screenshot(Size::new(1024, 768), 1.0, theme.colors.shell.background);
+                image::save_buffer(
+                    std::path::Path::new(&directory).join(format!(
+                        "duress-active-native-{appearance}-1024x768-synthetic.png"
+                    )),
+                    &pixels,
+                    1024,
+                    768,
+                    image::ColorType::Rgba8,
+                )
+                .expect("save synthetic active screen");
+            }
+        }
+    }
+}
