@@ -22,11 +22,11 @@ use crate::{
 
 use super::super::message::*;
 
-const PROPOSAL_SHARE: u16 = 4;
+const PROPOSAL_SHARE: u16 = 3;
 const AMOUNT_SHARE: u16 = 4;
 const RECIPIENTS_SHARE: u16 = 2;
 const SIGNATURES_SHARE: u16 = 3;
-const STATUS_SHARE: u16 = 3;
+const STATUS_SHARE: u16 = 4;
 
 pub fn import_psbt_success_view<'a>() -> Element<'a, Message> {
     Column::new()
@@ -136,6 +136,32 @@ fn spend_tx_list_view(
     bitcoin_unit: BitcoinDisplayUnit,
     mask_amounts: bool,
 ) -> Element<'_, Message> {
+    let status: (
+        &'static str,
+        fn(&theme::Theme) -> iced::widget::container::Style,
+    ) = match tx.status {
+        SpendStatus::Pending if tx.path_ready().is_some() => ("Fully signed", theme::pill::success),
+        SpendStatus::Pending if !tx.signers().is_empty() => {
+            ("Partially signed", theme::pill::warning)
+        }
+        SpendStatus::Pending => ("Not signed", theme::pill::simple),
+        SpendStatus::Broadcast => ("Unconfirmed", theme::pill::warning),
+        SpendStatus::Spent => ("Spent", theme::pill::success),
+        SpendStatus::Deprecated => ("Deprecated", theme::pill::simple),
+    };
+    spend_tx_list_view_with_status(i, tx, bitcoin_unit, mask_amounts, status)
+}
+
+pub(crate) fn spend_tx_list_view_with_status<'a>(
+    i: usize,
+    tx: &'a SpendTx,
+    bitcoin_unit: BitcoinDisplayUnit,
+    mask_amounts: bool,
+    (status, status_style): (
+        &'static str,
+        fn(&theme::Theme) -> iced::widget::container::Style,
+    ),
+) -> Element<'a, Message> {
     let txid = tx.psbt.unsigned_tx.compute_txid().to_string();
     let proposal = tx
         .is_single_payment()
@@ -183,20 +209,6 @@ fn spend_tx_list_view(
         path.sigs_count.min(path.threshold),
         path.threshold
     );
-    let (status, status_style): (&str, fn(&theme::Theme) -> iced::widget::container::Style) =
-        match tx.status {
-            SpendStatus::Pending if tx.path_ready().is_some() => {
-                ("Fully signed", theme::pill::success)
-            }
-            SpendStatus::Pending if !tx.signers().is_empty() => {
-                ("Partially signed", theme::pill::warning)
-            }
-            SpendStatus::Pending => ("Not signed", theme::pill::simple),
-            SpendStatus::Broadcast => ("Unconfirmed", theme::pill::warning),
-            SpendStatus::Spent => ("Spent", theme::pill::success),
-            SpendStatus::Deprecated => ("Deprecated", theme::pill::simple),
-        };
-
     Container::new(
         Button::new(
             Row::new()

@@ -661,6 +661,8 @@ fn review_view<'a>(
 // Sent / polling view
 // ---------------------------------------------------------------------------
 
+const SENT_LABEL_WIDTH: f32 = 120.0;
+
 fn sent_view<'a>(
     selected_network: Option<&SideshiftNetwork>,
     shift: Option<&'a ShiftResponse>,
@@ -741,7 +743,7 @@ fn sent_view<'a>(
                             text("Swap ID")
                                 .size(P2_SIZE)
                                 .style(theme::text::secondary)
-                                .width(Length::Fixed(80.0)),
+                                .width(Length::Fixed(SENT_LABEL_WIDTH)),
                         )
                         .push(text(&shift.id).size(P2_SIZE).font(iced::Font::MONOSPACE))
                         .push(
@@ -758,7 +760,7 @@ fn sent_view<'a>(
                             text("Recipient")
                                 .size(P2_SIZE)
                                 .style(theme::text::secondary)
-                                .width(Length::Fixed(80.0)),
+                                .width(Length::Fixed(SENT_LABEL_WIDTH)),
                         )
                         .push(text(addr).size(P2_SIZE).font(iced::Font::MONOSPACE))
                 }))
@@ -776,7 +778,7 @@ fn sent_view<'a>(
                                 text(label)
                                     .size(P2_SIZE)
                                     .style(theme::text::secondary)
-                                    .width(Length::Fixed(80.0)),
+                                    .width(Length::Fixed(SENT_LABEL_WIDTH)),
                             )
                             .push(
                                 text(if mask_amounts {
@@ -814,7 +816,7 @@ fn recipient_amount_to_show<'a>(
     if status == Some(&ShiftStatusKind::Settled) {
         confirmed.map(|amount| ("Recipient receives", amount))
     } else {
-        quote.map(|amount| ("Quoted recipient amount", amount))
+        quote.map(|amount| ("Quoted amount", amount))
     }
 }
 
@@ -908,7 +910,7 @@ mod status_presentation_tests {
         );
         assert_eq!(
             recipient_amount_to_show(Some(&ShiftStatusKind::Processing), None, Some("4.93")),
-            Some(("Quoted recipient amount", "4.93"))
+            Some(("Quoted amount", "4.93"))
         );
     }
 }
@@ -1228,6 +1230,25 @@ mod privacy_tests {
 
     #[test]
     fn sideshift_sent_status_mounts_in_dark_and_light_themes() {
+        let shift = ShiftResponse {
+            id: "synthetic-sent-swap".into(),
+            deposit_address: "synthetic-deposit".into(),
+            deposit_coin: None,
+            deposit_network: None,
+            settle_address: Some(format!("0x{}", "a".repeat(40))),
+            settle_coin: None,
+            settle_network: None,
+            deposit_min: None,
+            deposit_max: None,
+            deposit_amount: Some("91.27".into()),
+            settle_amount: Some("90.13".into()),
+            rate: None,
+            expires_at: None,
+            created_at: None,
+            status: None,
+            affiliate_fee_percent: None,
+            network_fee_usd: None,
+        };
         for (appearance, theme) in [
             ("dark", theme::Theme::dark()),
             ("light", theme::Theme::light()),
@@ -1242,9 +1263,9 @@ mod privacy_tests {
                     &format!("sideshift-sent-status-{phase}"),
                     sent_view(
                         Some(&SideshiftNetwork::Ethereum),
-                        None,
+                        Some(&shift),
                         status.as_ref(),
-                        None,
+                        Some("90.13"),
                         false,
                     ),
                     (1024, 768),
@@ -1254,6 +1275,18 @@ mod privacy_tests {
                 assert!(mounted.contains("Swap status"));
                 assert!(mounted.contains("Waiting for deposit"));
                 assert!(mounted.contains("Settled"));
+                let amount_label = if phase == "settled" {
+                    "Recipient receives"
+                } else {
+                    "Quoted amount"
+                };
+                let label_height = mounted
+                    .text
+                    .iter()
+                    .find(|(value, _)| value == amount_label)
+                    .map(|(_, bounds)| bounds.height)
+                    .expect("captured SideShift amount label");
+                assert!(label_height <= 24.0, "SideShift amount label wrapped");
             }
         }
     }

@@ -277,6 +277,33 @@ mod tests {
                         assert_eq!(mounted.contains(fee), !masked);
                     }
                     assert_eq!(mounted.contains("••••••"), masked);
+                    if size == (1024, 768) && !masked {
+                        let partial = capture::inspect(
+                            "vault-psbts-partially-signed",
+                            coincube_ui::widget::Container::new(
+                                view::vault::psbts::spend_tx_list_view_with_status(
+                                    0,
+                                    &rows[0],
+                                    BitcoinDisplayUnit::Sats,
+                                    false,
+                                    ("Partially signed", theme::pill::warning),
+                                ),
+                            )
+                            .width(iced::Length::Fixed(652.0))
+                            .into(),
+                            size,
+                            appearance,
+                            theme,
+                        );
+                        assert!(partial.contains("Partially signed"));
+                        let status_height = partial
+                            .text
+                            .iter()
+                            .find(|(value, _)| value == "Partially signed")
+                            .map(|(_, bounds)| bounds.height)
+                            .expect("captured status label");
+                        assert!(status_height <= 24.0, "status pill text wrapped");
+                    }
                 }
             }
         }
