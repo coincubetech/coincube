@@ -768,9 +768,14 @@ fn shown_title(entry: &Entry, masked: bool) -> String {
     }
 }
 
-/// A detail value while balances may be hidden: amounts and invoices go.
+/// A detail value while balances may be hidden: amounts go, and so does
+/// any invoice (a Spark invoice can carry an amount too) or payment URI
+/// naming one.
 fn private_fact(key: &str, value: &str, masked: bool) -> String {
-    if masked && (key == "Refund amount" || shows_invoice(value)) {
+    let names_amount = matches!(key, "Refund amount" | "Invoice")
+        || shows_invoice(value)
+        || value.to_ascii_lowercase().contains("amount=");
+    if masked && names_amount {
         MASK.to_owned()
     } else {
         value.to_owned()
@@ -1408,18 +1413,18 @@ fn identifier_row<'a>(index: usize, name: &'static str, value: &str) -> Element<
 /// which keeps its signing, refund and replacement safeguards. Settled rows
 /// ask nothing; a PSBT still collecting signatures shows "Continue signing"
 /// with its signers instead.
-fn next_step(entry: &Entry) -> Option<&'static str> {
+fn next_step(entry: &Entry, replaceable: bool) -> Option<&'static str> {
     match &entry.target {
         ActivityTarget::Refundable(_) => Some("Refund"),
         ActivityTarget::Psbt(tx) => {
             let path = tx.sigs.primary_path();
             (path.sigs_count >= path.threshold).then_some("Review and broadcast")
         }
-        // The Vault screen offers a replacement only while unconfirmed, and
-        // only with a known fee (otherwise coins may be missing).
-        ActivityTarget::Vault(tx) => {
-            (tx.time.is_none() && tx.fee_amount.is_some()).then_some("Bump fee or cancel")
-        }
+        // The Vault screen offers a replacement only on a wallet that
+        // supports it, while unconfirmed, and with a known fee (otherwise
+        // coins may be missing).
+        ActivityTarget::Vault(tx) => (replaceable && tx.time.is_none() && tx.fee_amount.is_some())
+            .then_some("Bump fee or cancel"),
         ActivityTarget::Spark(_) | ActivityTarget::Liquid(_) => None,
     }
 }
@@ -1678,7 +1683,7 @@ fn detail_pane<'a>(activity: &'a Activity, entry: &Entry, cache: &'a Cache) -> C
         }
     }
 
-    if let Some(label) = next_step(entry) {
+    if let Some(label) = next_step(entry, activity.vault_supports_replacement()) {
         detail = detail.push(Space::new().height(Length::Fixed(16.0))).push(
             Action::new(
                 DETAIL_NEXT_STEP_ID,
@@ -2946,7 +2951,8 @@ mod tests {
         assert!(activity.label_saving_for(&id));
         drop(activity.reload(None, None));
         assert!(!activity.label_saving_for(&id));
-        assert_eq!(activity.label_draft_for(&id), None);
+        // Retry keeps unsaved text.
+        assert_eq!(activity.label_draft_for(&id), Some("Rent"));
         load(&mut activity, tx);
         drop(activity.update(
             None,
@@ -2954,6 +2960,46 @@ mod tests {
             AppMessage::ActivityLabelSaved(1, Err("late".into())),
         ));
         assert_eq!(activity.label_error_for(&id), None);
+    }
+
+    #[test]
+    fn a_failed_save_survives_moving_to_another_row() {
+        let cache = Cache::default();
+        let mut activity = Activity::new(None, None);
+        let tx = outgoing_vault_payment();
+        let id = Entry::vault(tx.clone()).id;
+        drop(activity.update(
+            None,
+            &cache,
+            AppMessage::ActivityVaultLoaded(0, Ok((vec![tx.clone()], false))),
+        ));
+        for message in edit(&id, "Rent") {
+            drop(activity.update(None, &cache, message));
+        }
+        let key = format!("{}:1", tx.txid);
+        drop(activity.update(
+            Some(label_daemon(&key, "Rent")),
+            &cache,
+            AppMessage::View(Message::Activity(ActivityMessage::SaveLabel)),
+        ));
+        drop(activity.update(
+            None,
+            &cache,
+            AppMessage::View(Message::Activity(ActivityMessage::Select("other".into()))),
+        ));
+        drop(activity.update(
+            None,
+            &cache,
+            AppMessage::ActivityLabelSaved(1, Err("offline".into())),
+        ));
+        drop(activity.update(
+            None,
+            &cache,
+            AppMessage::View(Message::Activity(ActivityMessage::Select(id.clone()))),
+        ));
+        assert!(activity.label_error_for(&id).is_some());
+        assert_eq!(activity.label_draft_for(&id), Some("Rent"));
+        assert!(!activity.label_saving_for(&id));
     }
 
     fn activity_generation(activity: &Activity) -> u64 {
@@ -2984,6 +3030,11 @@ mod tests {
             private_fact("Refund amount", "1,000 SATS", false),
             "1,000 SATS"
         );
+        assert_eq!(private_fact("Invoice", "spark1synthetic", true), MASK);
+        assert_eq!(
+            private_fact("Destination", "bitcoin:bc1qsynthetic?amount=0.001", true),
+            MASK
+        );
     }
 
     #[test]
@@ -2993,15 +3044,18 @@ mod tests {
             timestamp: 1_760_000_000,
             amount_sat: 20_000,
         });
-        assert_eq!(next_step(&refund), Some("Refund"));
+        assert_eq!(next_step(&refund, false), Some("Refund"));
         let mut unconfirmed = outgoing_vault_payment();
         unconfirmed.time = None;
+        let unconfirmed = Entry::vault(unconfirmed);
+        assert_eq!(next_step(&unconfirmed, true), Some("Bump fee or cancel"));
+        // The Vault screen would offer neither action.
+        assert_eq!(next_step(&unconfirmed, false), None);
         assert_eq!(
-            next_step(&Entry::vault(unconfirmed)),
-            Some("Bump fee or cancel")
+            next_step(&Entry::vault(outgoing_vault_payment()), true),
+            None
         );
-        assert_eq!(next_step(&Entry::vault(outgoing_vault_payment())), None);
-        assert_eq!(next_step(&Entry::spark(spark_payment())), None);
+        assert_eq!(next_step(&Entry::spark(spark_payment()), true), None);
 
         let cache = Cache::default();
         let mut activity = Activity::new(None, None);
