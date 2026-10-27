@@ -144,7 +144,8 @@ arguments for paths, credentials, shell commands or daemon RPC methods.
 
 ## Tools
 
-All outputs are structured JSON with advertised schemas. Amounts are satoshis.
+All outputs are structured JSON with advertised schemas. Balance and unsigned
+preparation amounts are satoshis; history rows omit exact amounts.
 Tool discovery and `tenshu_get_capabilities` are public static build metadata.
 They do not inspect installed wallets or grant authority. Every wallet-data call is authenticated
 and scoped inside Tenshu, regardless of what the adapter or host claims.
@@ -154,13 +155,17 @@ and scoped inside Tenshu, regardless of what the adapter or host claims.
 | `tenshu_get_capabilities` | `{}` | Public static build metadata only; no installed-wallet inventory or live consent. Proposal availability depends on the experimental native build flag; direct MCP wallet creation is prohibited by design. |
 | `tenshu_list_wallets` | `{}` | Only the authorized active Vault; opaque session ID and generic display name. |
 | `tenshu_get_wallet_summary` | `{"wallet_id":"…"}` | Confirmed, unconfirmed and available sats, network and sync state. |
-| `tenshu_get_transactions` | `{"wallet_id":"…","limit":20}` | Up to 50 most recent confirmed transactions, newest first. Each row has a session activity id, not a chain transaction id. No pending history or pagination cursor. |
+| `tenshu_get_transactions` | `{"wallet_id":"…","limit":20}` | Up to 50 most recent confirmed activities, newest first. Rows contain a session activity id, coarse kind (`incoming`, `outgoing`, `self_transfer`) and `confirmed` status. No exact amount, time, block height, chain id, pending history or pagination cursor. |
 | `tenshu_get_wallet_policy_summary` | `{"wallet_id":"…"}` | Deterministic script type, thresholds, key counts, relative recovery delays in blocks. |
 | `tenshu_prepare_wallet_proposal` | Explicit 3-of-5 primary, recovery quorum/delay, bounded retry ID | Requires separate proposal consent in the opt-in Regtest native build. Produces an in-memory topology draft; keys, actual descriptor validation and creation approval are native-only. |
 | `tenshu_get_wallet_proposal` | `{"proposal_id":"…"}` | Only the current proposal grant's draft. Existing read grants cannot access proposals, and proposal grants cannot access wallet reads. |
 | `tenshu_prepare_wallet_creation` | Public account keys and explicit topology | Separate setup pairing, actual descriptor validation and native builder; creation approval remains native. |
 | `tenshu_prepare_transaction` | Opaque wallet/request IDs, recipients in sats, fee rate and fee ceiling | Separate transaction pairing; unsigned Regtest PSBT stays in Tenshu, only a summary is returned. |
 | `tenshu_get_prepared_transaction` | Opaque wallet and draft IDs | Current transaction pairing/session summary only; no PSBT or input/change-address export. |
+
+The history output schema removes the former `incoming_sats`, `outgoing_sats`,
+`timestamp` and `height` fields. They are absent, not optional or null. Clients
+that used those fields must use the coarse `kind` and `status` instead.
 
 Ordinary builds report `wallet_proposals:false`. The opt-in native demo reports
 its Regtest bounds in `proposal_support`; this static metadata is not permission.
@@ -181,18 +186,20 @@ UTXOs. Unconfirmed includes unspent change; the UI groups self-change differentl
 Available follows the existing owned-coin predicate and excludes immature/spending
 coins. This is coin availability, not proof that signatures or recovery conditions
 are satisfied. Snapshots can change between calls and during sync; do not interpret
-an unsynced zero as authoritative history. Transaction incoming/outgoing values
-reuse the existing UI's representation, not a newly computed net accounting balance.
-Incoming values include wallet-owned outputs, including change or self-transfers.
-Outgoing values are zero for incoming payments: another sender's change is never
-reported as Vault spending.
+an unsynced zero as authoritative history. History kind is wallet-relative:
+`incoming` means the wallet did not spend an input, `outgoing` means it spent
+to a non-wallet output, and `self_transfer` means it spent only to itself.
+The rows retain order and coarse type/status, so a client could still correlate
+activity with information it already has. The reduced metadata does not guarantee
+transaction anonymity.
 Key counts count policy keys, not independently verified people/devices. Recovery
 conditions do not mean recovery can be performed now.
 
 No seeds, private keys, passwords, credentials, descriptors, wallet xpubs, raw
 scripts, labels, PSBTs or chain transaction ids are exported. Read tools omit
 addresses. History rows use a session activity id that is not a block-explorer
-lookup key; a new unlock mints new ids. A separately
+lookup key; a new unlock mints new ids. Exact history amounts, confirmation times
+and block heights are omitted. A separately
 authorized transaction tool echoes only its caller-supplied recipient addresses
 and amounts; the AI provider may receive those results. Topology/wallet drafts
 change bounded session memory. A successful transaction preparation reserves an

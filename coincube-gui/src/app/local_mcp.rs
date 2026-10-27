@@ -1100,25 +1100,26 @@ impl VaultReader {
                 }))
             }
             wire::Request::History(input) => {
-                let transactions = self
+                let mut transactions = self
                     .daemon
                     .list_history_txs(0, u32::MAX, u64::from(input.limit))
                     .await
                     .map_err(|_| wire::Error::Unavailable)?;
-                let mut transactions: Vec<_> = transactions
+                // The confirmed-history query applies DISTINCT after ORDER BY,
+                // which does not preserve newest-first. Sort before projecting
+                // so exact time, height and chain ID never cross the MCP boundary.
+                transactions.sort_by(|left, right| {
+                    right
+                        .time
+                        .cmp(&left.time)
+                        .then(right.height.cmp(&left.height))
+                        .then(left.txid.cmp(&right.txid))
+                });
+                let transactions: Vec<_> = transactions
                     .into_iter()
                     .take(usize::from(input.limit))
                     .map(|tx| project_transaction(&tx, &self.activity_key))
                     .collect();
-                // The confirmed-history query applies DISTINCT after ORDER BY,
-                // which does not preserve newest-first. Sort here.
-                transactions.sort_by(|left, right| {
-                    right
-                        .timestamp
-                        .cmp(&left.timestamp)
-                        .then(right.height.cmp(&left.height))
-                        .then(left.activity_id.cmp(&right.activity_id))
-                });
                 Ok(wire::Response::History(wire::History {
                     wallet_id: self.wallet_id.clone(),
                     confirmed_only: true,
@@ -1166,16 +1167,14 @@ fn project_transaction(
 ) -> wire::Transaction {
     wire::Transaction {
         activity_id: activity_id(activity_key, &tx.txid),
-        incoming_sats: tx.incoming_amount.to_sat(),
-        // The model totals every non-wallet output even for a deposit. In that
-        // case those outputs belong to the sender, not this Vault's spending.
-        outgoing_sats: if tx.is_external() {
-            0
+        kind: if tx.is_external() {
+            wire::TransactionKind::Incoming
+        } else if tx.is_send_to_self() {
+            wire::TransactionKind::SelfTransfer
         } else {
-            tx.outgoing_amount.to_sat()
+            wire::TransactionKind::Outgoing
         },
-        timestamp: tx.time,
-        height: tx.height,
+        status: wire::TransactionStatus::Confirmed,
     }
 }
 
@@ -1551,13 +1550,12 @@ mod tests {
         );
         let activity_key = [7u8; 32];
         let projected_batch = project_transaction(&batch_history, &activity_key);
-        assert_eq!(projected_batch.incoming_sats, 1_100_000);
-        assert_eq!(projected_batch.outgoing_sats, 0);
-        for (wallet_inputs, wallet_outputs, expected_incoming, expected_outgoing) in [
-            (vec![], vec![0], 1_000_000, 0),
-            (vec![], vec![0, 1], 4_999_999_844, 0),
-            (vec![coin.clone()], vec![0], 1_000_000, 4_998_999_844),
-            (vec![coin], vec![0, 1], 4_999_999_844, 0),
+        assert_eq!(projected_batch.kind, wire::TransactionKind::Incoming);
+        for (wallet_inputs, wallet_outputs, expected_kind) in [
+            (vec![], vec![0], wire::TransactionKind::Incoming),
+            (vec![], vec![0, 1], wire::TransactionKind::Incoming),
+            (vec![coin.clone()], vec![0], wire::TransactionKind::Outgoing),
+            (vec![coin], vec![0, 1], wire::TransactionKind::SelfTransfer),
         ] {
             let history = HistoryTransaction::new(
                 transaction.clone(),
@@ -1580,12 +1578,21 @@ mod tests {
                 project_transaction(&history, &[9u8; 32]).activity_id,
                 projected.activity_id
             );
-            assert_eq!(projected.incoming_sats, expected_incoming);
-            assert_eq!(projected.outgoing_sats, expected_outgoing);
-            assert_eq!(
-                (projected.height, projected.timestamp),
-                (Some(103), Some(1234))
-            );
+            assert_eq!(projected.kind, expected_kind);
+            assert_eq!(projected.status, wire::TransactionStatus::Confirmed);
+            let json = serde_json::to_value(&projected).unwrap();
+            let row = json.as_object().unwrap();
+            assert_eq!(row.len(), 3);
+            for key in [
+                "incoming_sats",
+                "outgoing_sats",
+                "timestamp",
+                "height",
+                "txid",
+            ] {
+                assert!(!row.contains_key(key));
+            }
+            assert!(!json.to_string().contains(&chain_id));
         }
     }
 
@@ -2533,8 +2540,13 @@ mod tests {
             let summary = response(&mut stdin, &mut stdout, call(4, "tenshu_get_wallet_summary", json!({"wallet_id":id}))).await;
             assert_eq!(summary["structuredContent"]["confirmed_sats"], 55_000);
             let history = response(&mut stdin, &mut stdout, call(5, "tenshu_get_transactions", json!({"wallet_id":id,"limit":10}))).await;
-            assert_eq!(history["structuredContent"]["transactions"][0]["incoming_sats"], 55_000);
-            assert_eq!(history["structuredContent"]["transactions"][0]["outgoing_sats"], 0);
+            let row = history["structuredContent"]["transactions"][0].as_object().unwrap();
+            assert_eq!(row["kind"], "incoming");
+            assert_eq!(row["status"], "confirmed");
+            assert_eq!(row.len(), 3);
+            for key in ["incoming_sats", "outgoing_sats", "timestamp", "height", "txid"] {
+                assert!(!row.contains_key(key));
+            }
             let policy = response(&mut stdin, &mut stdout, call(6, "tenshu_get_wallet_policy_summary", json!({"wallet_id":id}))).await;
             assert_eq!(policy["structuredContent"]["recovery"][0]["relative_delay_blocks"], 144);
             let denied = response(&mut stdin, &mut stdout, call(7, "tenshu_get_wallet_summary", json!({"wallet_id":"another-wallet"}))).await;
@@ -2585,6 +2597,9 @@ mod tests {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             super::super::session::open_without_pin("mcp-fixture");
             let (root, wallet, daemon) = fixture();
+            let chain_txid = daemon.list_history_txs(0, u32::MAX, 1).await.unwrap()[0]
+                .txid
+                .to_string();
             let mut settings = Settings::default();
             assert!(!settings.enabled && settings.server.is_none());
             settings.update(
@@ -2652,8 +2667,27 @@ mod tests {
                 panic!("expected history")
             };
             assert_eq!(history.transactions.len(), 1);
-            assert_eq!(history.transactions[0].incoming_sats, 55_000);
-            assert_eq!(history.transactions[0].outgoing_sats, 0);
+            assert_eq!(
+                history.transactions[0].kind,
+                wire::TransactionKind::Incoming
+            );
+            assert_eq!(
+                history.transactions[0].status,
+                wire::TransactionStatus::Confirmed
+            );
+            let history_json = serde_json::to_value(&history).unwrap();
+            let row = history_json["transactions"][0].as_object().unwrap();
+            assert_eq!(row.len(), 3);
+            for key in [
+                "incoming_sats",
+                "outgoing_sats",
+                "timestamp",
+                "height",
+                "txid",
+            ] {
+                assert!(!row.contains_key(key));
+            }
+            assert!(!history_json.to_string().contains(&chain_txid));
             let policy = wire::ipc::call(&socket, &credential, wire::Request::Policy(input(id)))
                 .await
                 .unwrap();

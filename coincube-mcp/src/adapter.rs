@@ -51,7 +51,7 @@ pub fn tools() -> Vec<Tool> {
         ),
         tool::<HistoryInput, History>(
             "tenshu_get_transactions",
-            "Read at most 50 recent confirmed transactions, newest first. Each row has a session activity id, not a chain transaction id. Excludes labels, addresses and scripts.",
+            "Read at most 50 recent confirmed activities, newest first. Each row has a session activity id, coarse kind and confirmed status. Exact amounts, times, heights, chain ids, labels, addresses and scripts are omitted.",
         ),
         tool::<WalletInput, Policy>(
             "tenshu_get_wallet_policy_summary",
