@@ -934,6 +934,9 @@ pub struct ConnectAccountPanel {
     pub show_campaign_redeem: bool,
     /// Active duress enrollment wizard (Phases 2 & 8); `None` when closed.
     pub duress_enroll: Option<DuressEnrollState>,
+    /// A submitting wizard was hidden by leaving Duress. Retain its secrets
+    /// only until the server result can arm this device or reject enrollment.
+    pub duress_enroll_abandoned: bool,
     /// Active "Disable Duress Mode" step-up dialog (Issue 2); `None` when closed.
     pub duress_disable: Option<DuressDisableState>,
     /// Duress "Emergency contacts" section (Estate Notifications — PR 1).
@@ -1011,6 +1014,7 @@ impl ConnectAccountPanel {
             show_plan_comparison: false,
             show_campaign_redeem: false,
             duress_enroll: None,
+            duress_enroll_abandoned: false,
             duress_disable: None,
             duress_contacts: DuressContactsState::default(),
             duress_cubes: None,
@@ -1220,6 +1224,10 @@ impl ConnectAccountPanel {
 
     pub fn install_admitted_client(&mut self, client: CoincubeClient) {
         self.session_generation = self.session_generation.wrapping_add(1);
+        // The prior session's async enrollment result is now stale. Scrub its
+        // retained credentials and release the abandoned-wizard gate before
+        // the replacement account can enter Duress.
+        self.clear_duress_enroll();
         self.client = client;
         self.admitted_client = true;
         self.shared_client = false;
@@ -1777,6 +1785,7 @@ impl ConnectAccountPanel {
                         self.selected_billing_cycle = cycle;
                     }
                     self.plan = plan;
+                    self.leave_hidden_duress_route();
                 }
             }
 
@@ -2211,6 +2220,7 @@ impl ConnectAccountPanel {
             ConnectAccountMessage::FeaturesLoaded(features, gen) => {
                 if gen == self.session_generation {
                     self.features = features;
+                    self.leave_hidden_duress_route();
                 }
             }
 
@@ -2977,8 +2987,20 @@ impl ConnectAccountPanel {
     /// Completion paths clone the few values they forward into a `Zeroizing`
     /// payload first, then call this to scrub the originals.
     fn clear_duress_enroll(&mut self) {
+        self.duress_enroll_abandoned = false;
         if let Some(mut wizard) = self.duress_enroll.take() {
             wizard.zeroize_secrets();
+        }
+    }
+
+    /// A failed preflight or server request may arrive after the user left the
+    /// sheet. Retain retry state only while its wizard is still visible.
+    fn fail_duress_enrollment(&mut self, message: String) {
+        if self.duress_enroll_abandoned {
+            self.clear_duress_enroll();
+        } else if let Some(wizard) = &mut self.duress_enroll {
+            wizard.submitting = false;
+            wizard.error = Some(message);
         }
     }
 
@@ -2994,11 +3016,23 @@ impl ConnectAccountPanel {
     /// - the step-up disable dialog is always taken and zeroized, matching
     ///   `DisableCancel`.
     pub fn scrub_duress_dialogs(&mut self) {
-        if self.duress_enroll.as_ref().is_none_or(|e| !e.submitting) {
+        if self.duress_enroll.as_ref().is_some_and(|e| e.submitting) {
+            self.duress_enroll_abandoned = true;
+        } else {
             self.clear_duress_enroll();
         }
         if let Some(mut d) = self.duress_disable.take() {
+            crate::services::passkey::reauth::cancel();
             d.zeroize_secrets();
+        }
+    }
+
+    /// A Connect sheet can remain open while an account plan or launch flag
+    /// changes. Its Duress route uses the same hidden-surface rule as Home.
+    fn leave_hidden_duress_route(&mut self) {
+        if matches!(self.active_sub, ConnectSubMenu::Duress) && !self.show_duress() {
+            self.scrub_duress_dialogs();
+            self.active_sub = ConnectSubMenu::Overview;
         }
     }
 
@@ -3372,6 +3406,11 @@ impl ConnectAccountPanel {
 
             // ── Enrollment wizard (Phases 2 & 8) ──
             DuressMessage::StartEnrollment => {
+                // An abandoned submission still owns the server response and
+                // its local arming payload; do not replace it with a new wizard.
+                if self.duress_enroll_abandoned {
+                    return iced::Task::none();
+                }
                 // Duress is a paid (Pro/Estate) feature behind a launch
                 // kill-switch. The nav hides the surface and the CTA for anyone
                 // who fails the show-rule (entitlement AND the launch gate);
@@ -3573,14 +3612,14 @@ impl ConnectAccountPanel {
                 if gen != self.session_generation {
                     return iced::Task::none();
                 }
-                let Some(e) = &mut self.duress_enroll else {
-                    return iced::Task::none();
-                };
-                if let Err(msg) = res {
-                    e.submitting = false;
-                    e.error = Some(msg);
+                if self.duress_enroll.is_none() {
                     return iced::Task::none();
                 }
+                if let Err(msg) = res {
+                    self.fail_duress_enrollment(msg);
+                    return iced::Task::none();
+                }
+                let e = self.duress_enroll.as_mut().unwrap();
                 let gen = self.session_generation;
 
                 // Generate this device's duress code ONCE: its hash goes to the
@@ -3608,16 +3647,14 @@ impl ConnectAccountPanel {
                 let (all_clear_hash, code_hash) = match (all_clear_hash, code_hash) {
                     (Ok(a), Ok(c)) => (a, c),
                     _ => {
-                        e.error = Some("Failed to hash credentials.".to_string());
-                        e.submitting = false;
+                        self.fail_duress_enrollment("Failed to hash credentials.".to_string());
                         return iced::Task::none();
                     }
                 };
                 let crk_hash = match crk_hash {
                     Ok(h) => Some(h),
                     Err(_) => {
-                        e.error = Some("Failed to hash credentials.".to_string());
-                        e.submitting = false;
+                        self.fail_duress_enrollment("Failed to hash credentials.".to_string());
                         return iced::Task::none();
                     }
                 };
@@ -3627,8 +3664,7 @@ impl ConnectAccountPanel {
                 let fingerprint = match device_fingerprint() {
                     Ok(fp) => fp,
                     Err(msg) => {
-                        e.error = Some(msg);
-                        e.submitting = false;
+                        self.fail_duress_enrollment(msg);
                         return iced::Task::none();
                     }
                 };
@@ -3703,12 +3739,9 @@ impl ConnectAccountPanel {
                         );
                     }
                     Err(msg) => {
-                        // No local state was written — just surface the error
-                        // and keep the wizard open for a retry.
-                        if let Some(e) = &mut self.duress_enroll {
-                            e.submitting = false;
-                            e.error = Some(msg);
-                        }
+                        // A hidden wizard has no retry surface. Scrub its
+                        // secrets as soon as the server has rejected it.
+                        self.fail_duress_enrollment(msg);
                     }
                 }
             }
@@ -7785,6 +7818,75 @@ mod plan_lifecycle_tests {
         panel.scrub_duress_dialogs();
 
         assert!(panel.duress_enroll.is_some());
+        assert!(panel.duress_enroll_abandoned);
+    }
+
+    #[test]
+    fn abandoned_enrollment_success_still_forwards_local_arming_payload() {
+        use iced::futures::StreamExt;
+
+        let mut panel = ConnectAccountPanel::new();
+        panel.open_enroll_wizard();
+        let wizard = panel.duress_enroll.as_mut().unwrap();
+        wizard.duress_pin = "1234".into();
+        wizard.pending_code = Some("synthetic-code".into());
+        wizard.submitting = true;
+        panel.scrub_duress_dialogs();
+
+        let task = panel.update_duress(DuressMessage::EnrollResult(
+            Ok(()),
+            panel.session_generation(),
+        ));
+        assert!(panel.duress_enroll.is_none());
+        assert!(!panel.duress_enroll_abandoned);
+        let mut stream = iced_runtime::task::into_stream(task).expect("local arming task");
+        let result = iced::futures::executor::block_on(stream.next());
+        let Some(iced_runtime::Action::Output(Message::CompleteDuressEnrollment(payload))) = result
+        else {
+            panic!("successful enrollment must arm this device");
+        };
+        assert_eq!(payload.duress_pin.as_str(), "1234");
+        assert_eq!(payload.duress_code.as_str(), "synthetic-code");
+    }
+
+    #[test]
+    fn admitted_client_replacement_scrubs_abandoned_enrollment_and_allows_new_wizard() {
+        let mut panel = ConnectAccountPanel::new();
+        panel.open_enroll_wizard();
+        let wizard = panel.duress_enroll.as_mut().unwrap();
+        wizard.duress_pin = "1234".into();
+        wizard.all_clear = "synthetic-all-clear".into();
+        wizard.pending_code = Some("synthetic-code".into());
+        wizard.submitting = true;
+        panel.scrub_duress_dialogs();
+        let old_generation = panel.session_generation();
+        assert!(panel.duress_enroll_abandoned);
+
+        let mut replacement = CoincubeClient::new();
+        replacement.set_token("replacement-bearer");
+        panel.install_shared_client(replacement);
+        assert_ne!(panel.session_generation(), old_generation);
+        assert!(panel.duress_enroll.is_none());
+        assert!(!panel.duress_enroll_abandoned);
+
+        let stale = panel.update_duress(DuressMessage::EnrollResult(Ok(()), old_generation));
+        assert!(iced_runtime::task::into_stream(stale).is_none());
+        panel.step = ConnectFlowStep::Dashboard;
+        panel.user = Some(crate::services::coincube::User {
+            id: 2,
+            email: "replacement@example.invalid".into(),
+            email_verified: Some(true),
+        });
+        panel.plan = Some(duress_entitled_plan());
+        panel.features = Some(features_with_duress(Some(true)));
+        panel.duress_cubes = Some(Vec::new());
+        // StartEnrollment reads the active Cube inventory. The test-only
+        // datadir is intentionally absent until a fixture creates it.
+        std::fs::create_dir_all(crate::dir::CoincubeDirectory::active().unwrap().path()).unwrap();
+        let task = panel.update_duress(DuressMessage::StartEnrollment);
+        drop(task);
+        assert!(panel.duress_enroll.is_some());
+        assert!(!panel.duress_enroll_abandoned);
     }
 
     #[test]
