@@ -1232,14 +1232,14 @@ mod privacy_tests {
             ("dark", theme::Theme::dark()),
             ("light", theme::Theme::light()),
         ] {
-            for status in [
-                None,
-                Some(ShiftStatusKind::Processing),
-                Some(ShiftStatusKind::Settled),
-                Some(ShiftStatusKind::Refunded),
+            for (phase, status) in [
+                ("waiting", None),
+                ("processing", Some(ShiftStatusKind::Processing)),
+                ("settled", Some(ShiftStatusKind::Settled)),
+                ("refunded", Some(ShiftStatusKind::Refunded)),
             ] {
                 let mounted = capture::inspect(
-                    "sideshift-sent-status",
+                    &format!("sideshift-sent-status-{phase}"),
                     sent_view(
                         Some(&SideshiftNetwork::Ethereum),
                         None,
