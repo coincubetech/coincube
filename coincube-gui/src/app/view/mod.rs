@@ -499,164 +499,6 @@ fn liquid_account_back_id() -> Id {
     Id::from("tenshu.liquid.account-unavailable.back")
 }
 
-#[cfg(test)]
-mod unavailable_panel_tests {
-    use super::{
-        feature_unavailable_panel, is_liquid_account_unavailable, liquid_account_back_id,
-        liquid_account_overview_id, Message,
-    };
-    use crate::app::{
-        features::{self, LiquidGate, MarketplaceServerFlags},
-        menu::{CubeSubMenu, LiquidSubMenu, Menu, SparkSubMenu},
-        view::shared::landing::capture,
-    };
-    use coincube_core::miniscript::bitcoin::Network;
-    use coincube_ui::theme;
-    use iced::keyboard::key::Named;
-
-    #[test]
-    fn account_disabled_liquid_gets_the_account_panel() {
-        let reason = features::route_availability(
-            &Menu::Liquid(LiquidSubMenu::Overview),
-            Network::Bitcoin,
-            false,
-            MarketplaceServerFlags::OFF,
-            LiquidGate::HIDDEN,
-        )
-        .reason()
-        .unwrap()
-        .to_owned();
-
-        assert!(is_liquid_account_unavailable(&reason));
-        assert_eq!(reason, features::LIQUID_ACCOUNT_UNAVAILABLE_REASON);
-    }
-
-    #[test]
-    fn unsupported_networks_keep_the_network_panel() {
-        let granted = LiquidGate {
-            server_enabled: true,
-            local_state_exists: false,
-        };
-        for (menu, network, expected_reason) in [
-            (
-                Menu::Liquid(LiquidSubMenu::Overview),
-                Network::Regtest,
-                "Liquid isn't available on Regtest.",
-            ),
-            (
-                Menu::Spark(SparkSubMenu::Overview),
-                Network::Signet,
-                "Spark isn't available on Signet.",
-            ),
-        ] {
-            let reason = features::route_availability(
-                &menu,
-                network,
-                false,
-                MarketplaceServerFlags::OFF,
-                granted,
-            )
-            .reason()
-            .unwrap()
-            .to_owned();
-            assert!(!is_liquid_account_unavailable(&reason));
-            assert_eq!(reason, expected_reason);
-        }
-    }
-
-    #[test]
-    fn unavailable_routes_mount_in_both_themes_and_overview_activates_from_keyboard() {
-        let granted = LiquidGate {
-            server_enabled: true,
-            local_state_exists: false,
-        };
-        let cases = [
-            (
-                "liquid-account-unavailable",
-                Menu::Liquid(LiquidSubMenu::Overview),
-                Network::Bitcoin,
-                LiquidGate::HIDDEN,
-                true,
-            ),
-            (
-                "liquid-network-unavailable",
-                Menu::Liquid(LiquidSubMenu::Overview),
-                Network::Regtest,
-                granted,
-                false,
-            ),
-            (
-                "spark-network-unavailable",
-                Menu::Spark(SparkSubMenu::Overview),
-                Network::Signet,
-                granted,
-                false,
-            ),
-        ];
-
-        for (scenario, menu, network, liquid_gate, account_gate) in cases {
-            let reason = features::route_availability(
-                &menu,
-                network,
-                false,
-                MarketplaceServerFlags::OFF,
-                liquid_gate,
-            )
-            .reason()
-            .expect("route is unavailable")
-            .to_owned();
-            for (appearance, palette) in [
-                ("dark", theme::Theme::dark()),
-                ("light", theme::Theme::light()),
-            ] {
-                for outer in [(1024, 768), (1440, 900)] {
-                    let mounted = capture::inspect(
-                        scenario,
-                        feature_unavailable_panel(reason.clone()),
-                        outer,
-                        appearance,
-                        palette.clone(),
-                    );
-                    if account_gate {
-                        assert!(mounted.text.iter().any(|(value, _)| value == "Liquid"));
-                        assert!(mounted.text.iter().any(|(value, _)| value == "Overview"));
-                        assert!(mounted.contains(features::LIQUID_ACCOUNT_UNAVAILABLE_REASON));
-                        assert!(mounted.contains("Your other wallets are unaffected."));
-                        assert!(mounted.contains("Back to Overview"));
-                        assert!(!mounted.contains("Not available on this network"));
-                        assert!(mounted.has_focus(liquid_account_back_id()));
-                        assert!(mounted.has_focus(liquid_account_overview_id()));
-                    } else {
-                        assert!(mounted.contains("Not available on this network"));
-                        assert!(mounted.contains(&reason));
-                        assert!(!mounted.contains("Your other wallets are unaffected."));
-                        assert!(!mounted.contains("Back to Overview"));
-                        assert!(!mounted.has_focus(liquid_account_back_id()));
-                        assert!(!mounted.has_focus(liquid_account_overview_id()));
-                    }
-                }
-            }
-            if account_gate {
-                for target in [liquid_account_back_id(), liquid_account_overview_id()] {
-                    for key in [Named::Enter, Named::Space] {
-                        assert!(matches!(
-                            capture::activate_with_key(
-                                feature_unavailable_panel(reason.clone()),
-                                target.clone(),
-                                (1024, 768),
-                                false,
-                                key,
-                            )
-                            .as_slice(),
-                            [Message::Menu(Menu::Cube(CubeSubMenu::Overview))]
-                        ));
-                    }
-                }
-            }
-        }
-    }
-}
-
 /// Loading-state card mirroring [`placeholder`]'s layout, but with the
 /// app's pulsing-dots `loading_indicator` (the same one shown while a Cube
 /// loads) below the title instead of a subtitle. Shown while an initial
@@ -777,4 +619,162 @@ pub fn toast_overlay<'a, I: Iterator<Item = (usize, log::Level, String)>>(
         .align_x(Alignment::Center)
         .align_y(Alignment::Center)
         .into()
+}
+
+#[cfg(test)]
+mod unavailable_panel_tests {
+    use super::{
+        feature_unavailable_panel, is_liquid_account_unavailable, liquid_account_back_id,
+        liquid_account_overview_id, Message,
+    };
+    use crate::app::{
+        features::{self, LiquidGate, MarketplaceServerFlags},
+        menu::{CubeSubMenu, LiquidSubMenu, Menu, SparkSubMenu},
+        view::shared::landing::capture,
+    };
+    use coincube_core::miniscript::bitcoin::Network;
+    use coincube_ui::theme;
+    use iced::keyboard::key::Named;
+
+    #[test]
+    fn account_disabled_liquid_gets_the_account_panel() {
+        let reason = features::route_availability(
+            &Menu::Liquid(LiquidSubMenu::Overview),
+            Network::Bitcoin,
+            false,
+            MarketplaceServerFlags::OFF,
+            LiquidGate::HIDDEN,
+        )
+        .reason()
+        .unwrap()
+        .to_owned();
+
+        assert!(is_liquid_account_unavailable(&reason));
+        assert_eq!(reason, features::LIQUID_ACCOUNT_UNAVAILABLE_REASON);
+    }
+
+    #[test]
+    fn unsupported_networks_keep_the_network_panel() {
+        let granted = LiquidGate {
+            server_enabled: true,
+            local_state_exists: false,
+        };
+        for (menu, network, expected_reason) in [
+            (
+                Menu::Liquid(LiquidSubMenu::Overview),
+                Network::Regtest,
+                "Liquid isn't available on Regtest.",
+            ),
+            (
+                Menu::Spark(SparkSubMenu::Overview),
+                Network::Signet,
+                "Spark isn't available on Signet.",
+            ),
+        ] {
+            let reason = features::route_availability(
+                &menu,
+                network,
+                false,
+                MarketplaceServerFlags::OFF,
+                granted,
+            )
+            .reason()
+            .unwrap()
+            .to_owned();
+            assert!(!is_liquid_account_unavailable(&reason));
+            assert_eq!(reason, expected_reason);
+        }
+    }
+
+    #[test]
+    fn unavailable_routes_mount_in_both_themes_and_overview_activates_from_keyboard() {
+        let granted = LiquidGate {
+            server_enabled: true,
+            local_state_exists: false,
+        };
+        let cases = [
+            (
+                "liquid-account-unavailable",
+                Menu::Liquid(LiquidSubMenu::Overview),
+                Network::Bitcoin,
+                LiquidGate::HIDDEN,
+                true,
+            ),
+            (
+                "liquid-network-unavailable",
+                Menu::Liquid(LiquidSubMenu::Overview),
+                Network::Regtest,
+                granted,
+                false,
+            ),
+            (
+                "spark-network-unavailable",
+                Menu::Spark(SparkSubMenu::Overview),
+                Network::Signet,
+                granted,
+                false,
+            ),
+        ];
+
+        for (scenario, menu, network, liquid_gate, account_gate) in cases {
+            let reason = features::route_availability(
+                &menu,
+                network,
+                false,
+                MarketplaceServerFlags::OFF,
+                liquid_gate,
+            )
+            .reason()
+            .expect("route is unavailable")
+            .to_owned();
+            for (appearance, palette) in [
+                ("dark", theme::Theme::dark()),
+                ("light", theme::Theme::light()),
+            ] {
+                for outer in [(1024, 768), (1440, 900)] {
+                    let mounted = capture::inspect(
+                        scenario,
+                        feature_unavailable_panel(reason.clone()),
+                        outer,
+                        appearance,
+                        palette,
+                    );
+                    if account_gate {
+                        assert!(mounted.text.iter().any(|(value, _)| value == "Liquid"));
+                        assert!(mounted.text.iter().any(|(value, _)| value == "Overview"));
+                        assert!(mounted.contains(features::LIQUID_ACCOUNT_UNAVAILABLE_REASON));
+                        assert!(mounted.contains("Your other wallets are unaffected."));
+                        assert!(mounted.contains("Back to Overview"));
+                        assert!(!mounted.contains("Not available on this network"));
+                        assert!(mounted.has_focus(liquid_account_back_id()));
+                        assert!(mounted.has_focus(liquid_account_overview_id()));
+                    } else {
+                        assert!(mounted.contains("Not available on this network"));
+                        assert!(mounted.contains(&reason));
+                        assert!(!mounted.contains("Your other wallets are unaffected."));
+                        assert!(!mounted.contains("Back to Overview"));
+                        assert!(!mounted.has_focus(liquid_account_back_id()));
+                        assert!(!mounted.has_focus(liquid_account_overview_id()));
+                    }
+                }
+            }
+            if account_gate {
+                for target in [liquid_account_back_id(), liquid_account_overview_id()] {
+                    for key in [Named::Enter, Named::Space] {
+                        assert!(matches!(
+                            capture::activate_with_key(
+                                feature_unavailable_panel(reason.clone()),
+                                target.clone(),
+                                (1024, 768),
+                                false,
+                                key,
+                            )
+                            .as_slice(),
+                            [Message::Menu(Menu::Cube(CubeSubMenu::Overview))]
+                        ));
+                    }
+                }
+            }
+        }
+    }
 }
