@@ -10,16 +10,14 @@ use crate::{
         features,
         menu::{CubeSettingsOption, CubeSubMenu, LiquidSubMenu, Menu, SparkSubMenu, VaultSubMenu},
         state::preferences::{BalancePrivacy, BalancePrivacyChrome},
-        view::Message,
+        view::{shared::glyph, Message},
         ConnectionStatus,
     },
     chain::{ChainId, ChainIdExt},
 };
 use coincube_ui::{
-    icon::{
-        arrow_down, chevron_right, cube_icon, eye_icon, eye_slash_icon, home_icon,
-        lightning_outline_icon, receipt_icon, recovery_icon, settings_icon, shop_icon, vault_icon,
-    },
+    font,
+    icon::{cube_icon, eye_icon, eye_slash_icon, settings_icon, shop_icon},
     theme,
     widget::{action::Action, floating::Floating, Column, ColumnExt, Element, Row, Text},
 };
@@ -260,9 +258,16 @@ pub fn top_bar_with_privacy<'a>(
     .into()
 }
 
+/// A rail icon: the canvas's stroke glyph, or a font icon where the canvas
+/// draws none (Marketplace).
+enum NavIcon {
+    Glyph(&'static str),
+    Font(Text<'static>),
+}
+
 fn nav_row<'a>(
     label: impl Into<String>,
-    icon: Option<Text<'static>>,
+    icon: Option<NavIcon>,
     active: bool,
     message: Option<Message>,
     nested: bool,
@@ -273,19 +278,29 @@ fn nav_row<'a>(
     if nested {
         body = body.push(Space::new().width(Length::Fixed(18.0)));
     }
-    if let Some(icon) = icon {
-        body = body.push(
-            icon.size(17)
-                .style(move |t: &theme::Theme| iced::widget::text::Style {
-                    color: Some(if active {
-                        t.colors.shell.accent_ink
-                    } else {
-                        t.colors.shell.muted
-                    }),
-                }),
-        );
+    // `.ni .ic` is muted; `.ni.on .ic` takes the accent ink.
+    let tint = if active { glyph::accent } else { glyph::muted };
+    match icon {
+        Some(NavIcon::Glyph(source)) => body = body.push(glyph::glyph(source, 18.0, tint)),
+        Some(NavIcon::Font(icon)) => {
+            body = body.push(icon.size(17).width(Length::Fixed(18.0)).style(
+                move |t: &theme::Theme| iced::widget::text::Style {
+                    color: Some(tint(t)),
+                },
+            ))
+        }
+        None => {}
     }
-    body = body.push(text(label.clone()).size(if nested { 13 } else { 14 }));
+    // `.ni.on { font-weight: 600 }`.
+    body = body.push(
+        text(label.clone())
+            .size(if nested { 13 } else { 14 })
+            .font(if active {
+                font::SEMIBOLD
+            } else {
+                font::REGULAR
+            }),
+    );
     let id = if nested {
         format!("tenshu.shell.sub.{label}.{message:?}")
     } else {
@@ -325,7 +340,7 @@ fn nav_row<'a>(
 
 fn route<'a>(
     label: impl Into<String>,
-    icon: Option<Text<'static>>,
+    icon: Option<NavIcon>,
     menu: &Menu,
     to: Menu,
     nested: bool,
@@ -349,18 +364,19 @@ fn subitem<'a>(menu: &Menu, item: SubItem, label: Option<&str>) -> Element<'a, M
     )
 }
 
+/// `.gh`: a 13px semibold muted group heading.
 fn section(label: &'static str) -> Element<'static, Message> {
-    container(muted(label, 12))
+    container(muted(label, 13).font(font::SEMIBOLD))
         .padding(iced::Padding {
-            top: 17.0,
+            top: 22.0,
             right: 10.0,
-            bottom: 5.0,
+            bottom: 6.0,
             left: 10.0,
         })
         .into()
 }
 
-fn identity<'a>(ctx: &NavContext<'a>, state: ShellState) -> Element<'a, Message> {
+fn identity<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
     let avatar: Element<'a, Message> = if let Some(handle) = ctx.avatar {
         iced::widget::image(handle.clone())
             .width(Length::Fixed(36.0))
@@ -399,11 +415,8 @@ fn identity<'a>(ctx: &NavContext<'a>, state: ShellState) -> Element<'a, Message>
             ]
             .spacing(1)
             .width(Length::Fill),
-            if state.switcher_open {
-                arrow_down()
-            } else {
-                chevron_right()
-            },
+            // `.side .cv`: one muted 16px chevron; the open menu shows the state.
+            glyph::glyph(glyph::CHEVRON_DOWN, 16.0, glyph::muted),
         ]
         .spacing(9)
         .align_y(Alignment::Center),
@@ -429,7 +442,7 @@ fn identity<'a>(ctx: &NavContext<'a>, state: ShellState) -> Element<'a, Message>
 fn switcher_menu<'a>(ctx: &NavContext<'a>, state: ShellState) -> Element<'a, Message> {
     let mut items: Column<Message> = column![nav_row(
         "All Cubes",
-        Some(cube_icon()),
+        Some(NavIcon::Glyph(glyph::GRID)),
         false,
         Some(Message::OpenLauncher),
         false,
@@ -486,7 +499,7 @@ fn switcher_menu<'a>(ctx: &NavContext<'a>, state: ShellState) -> Element<'a, Mes
     } else {
         items = items.push(nav_row(
             "Lock Cube",
-            None,
+            Some(NavIcon::Glyph(glyph::LOCK)),
             false,
             Some(Message::AskCubeLock),
             false,
@@ -513,6 +526,67 @@ fn marketplace_children<'a>(menu: &Menu, ctx: &NavContext<'a>) -> Vec<Element<'a
         .collect()
 }
 
+pub const BACKUP_ATTENTION_ID: &str = "tenshu.shell.backup-attention";
+
+/// `.attn`: a bordered panel card above the foot, a warning mark and
+/// "Backup not confirmed" in the warning ink, with "Review" in the accent.
+fn backup_attention<'a>() -> Element<'a, Message> {
+    let body = row![
+        glyph::glyph(glyph::WARNING, 16.0, glyph::warn),
+        text("Backup not confirmed")
+            .size(12.5)
+            .font(font::MEDIUM)
+            .style(|t: &theme::Theme| iced::widget::text::Style {
+                color: Some(t.colors.shell.warn),
+            }),
+        Space::new().width(Length::Fill),
+        text("Review")
+            .size(12.5)
+            .font(font::SEMIBOLD)
+            .style(|t: &theme::Theme| iced::widget::text::Style {
+                color: Some(t.colors.shell.accent_ink),
+            }),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+    container(
+        Action::new(BACKUP_ATTENTION_ID, body, Message::FocusAction)
+            .width(Length::Fill)
+            .padding([9, 8])
+            .style(|t: &theme::Theme, status| {
+                let shell = t.colors.shell;
+                let hovered = matches!(
+                    status,
+                    iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed
+                );
+                iced::widget::button::Style {
+                    background: Some(iced::Background::Color(if hovered {
+                        shell.selected
+                    } else {
+                        shell.panel
+                    })),
+                    text_color: shell.ink,
+                    border: iced::Border {
+                        color: shell.line,
+                        width: 1.0,
+                        radius: 8.0.into(),
+                    },
+                    ..Default::default()
+                }
+            })
+            .on_press(Message::Menu(Menu::Cube(CubeSubMenu::Settings(
+                CubeSettingsOption::Recovery,
+            )))),
+    )
+    .padding(iced::Padding {
+        top: 0.0,
+        right: 16.0,
+        bottom: 8.0,
+        left: 16.0,
+    })
+    .into()
+}
+
 /// One anchored sidebar, with only its middle group scrolling.
 pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Element<'a, Message> {
     let overview = Menu::Cube(CubeSubMenu::Overview);
@@ -523,10 +597,16 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
     // have opaque fills, so they need this clearance to keep the ring visible.
     let mut top: Column<Message> = Column::new().spacing(4).padding([0, 10]);
     top = top
-        .push(route("Overview", Some(home_icon()), menu, overview, false))
+        .push(route(
+            "Overview",
+            Some(NavIcon::Glyph(glyph::GRID)),
+            menu,
+            overview,
+            false,
+        ))
         .push(nav_row(
             "Activity",
-            Some(receipt_icon()),
+            Some(NavIcon::Glyph(glyph::CLOCK)),
             matches!(menu, Menu::Cube(CubeSubMenu::Activity)),
             activity.map(Message::Menu),
             false,
@@ -534,7 +614,7 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
         ))
         .push(route(
             "Backup & protection",
-            Some(recovery_icon()),
+            Some(NavIcon::Glyph(glyph::SHIELD_CHECK)),
             menu,
             backup,
             false,
@@ -543,12 +623,12 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
     // The scroll viewport clips drawing outside its content. Reserve more
     // than the focus ring's 4px outer extent at its first and last actions.
     let mut middle: Column<Message> = Column::new().spacing(4).padding([6, 10]);
-    middle = middle.push(section("WALLETS"));
+    middle = middle.push(section("Wallets"));
     if !ctx.network.is_blake2b() {
         let spark_reason = features::spark(ctx.network).reason().map(str::to_owned);
         middle = middle.push(nav_row(
             "Spark",
-            Some(lightning_outline_icon()),
+            Some(NavIcon::Glyph(glyph::BOLT)),
             matches!(menu, Menu::Spark(_)),
             spark_reason
                 .is_none()
@@ -560,7 +640,7 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
     if ctx.has_vault || ctx.has_imported_bitcoin {
         middle = middle.push(nav_row(
             "Vault",
-            Some(vault_icon()),
+            Some(NavIcon::Glyph(glyph::SHIELD)),
             matches!(menu, Menu::Vault(_)),
             Some(Message::Menu(Menu::Vault(VaultSubMenu::Overview))),
             false,
@@ -569,7 +649,7 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
     } else {
         middle = middle.push(nav_row(
             "Set up Vault",
-            Some(vault_icon()),
+            Some(NavIcon::Glyph(glyph::SHIELD)),
             false,
             Some(Message::SetupVault),
             false,
@@ -580,7 +660,7 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
         let liquid_reason = features::liquid(ctx.network).reason().map(str::to_owned);
         middle = middle.push(nav_row(
             "Liquid",
-            None,
+            Some(NavIcon::Glyph(glyph::DROPLET)),
             matches!(menu, Menu::Liquid(_)),
             liquid_reason
                 .is_none()
@@ -594,7 +674,7 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
     if show_marketplace {
         middle = middle.push(nav_row(
             "Marketplace",
-            Some(shop_icon()),
+            Some(NavIcon::Font(shop_icon())),
             matches!(menu, Menu::Marketplace(_)),
             Some(Message::Menu(super::primary::marketplace_landing_menu(ctx))),
             false,
@@ -622,7 +702,7 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
         rule::horizontal(1),
         container(nav_row(
             "Settings",
-            Some(settings_icon()),
+            Some(NavIcon::Glyph(glyph::GEAR)),
             settings_active,
             Some(Message::Menu(Menu::Cube(CubeSubMenu::Settings(
                 CubeSettingsOption::General
@@ -636,7 +716,7 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
     .padding([8, 10]);
 
     let mut sidebar: Column<Message> = Column::new()
-        .push(identity(ctx, state))
+        .push(identity(ctx))
         .width(Length::Fill)
         .height(Length::Fill);
     // The menu covers the rows below it rather than pushing them down.
@@ -648,18 +728,7 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
     sidebar = sidebar
         .push(top)
         .push(scrollable(middle).id(MIDDLE_SCROLL_ID).height(Length::Fill))
-        .push_maybe(state.backup_attention.then(|| {
-            nav_row(
-                "Backup not confirmed · Review",
-                None,
-                false,
-                Some(Message::Menu(Menu::Cube(CubeSubMenu::Settings(
-                    CubeSettingsOption::Recovery,
-                )))),
-                false,
-                None,
-            )
-        }))
+        .push_maybe(state.backup_attention.then(backup_attention))
         .push(foot);
     container(sidebar)
         .width(Length::Fill)
