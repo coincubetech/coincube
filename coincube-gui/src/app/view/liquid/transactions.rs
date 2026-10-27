@@ -939,7 +939,7 @@ pub fn refundable_detail_view<'a>(
 
     Column::new()
         .spacing(20)
-        .push(detail_back_button())
+        .push(refund_back_button())
         .push(
             Row::new()
                 .spacing(12)
@@ -1138,12 +1138,19 @@ pub fn refundable_detail_view<'a>(
         .into()
 }
 
-fn detail_back_button() -> Element<'static, Message> {
+fn refund_back_button() -> Element<'static, Message> {
     Action::new(REFUND_BACK_ACTION_ID, text("‹ Back"), Message::FocusAction)
         .width(Length::Shrink)
         .padding(5)
         .on_press(Message::Close)
         .style(theme::button::link)
+        .into()
+}
+
+fn detail_back_button() -> Element<'static, Message> {
+    button::secondary(None, "< Back")
+        .width(Length::Fixed(150.0))
+        .on_press(Message::Close)
         .into()
 }
 
