@@ -112,12 +112,16 @@ impl<M> Widget<M, Theme, Renderer> for Page<'_, M> {
     ) -> layout::Node {
         let pane_width = limits.max().width;
         let (x, width) = content_frame(pane_width, self.width, (self.gutter)(pane_width));
-        let child_limits = layout::Limits::new(
+        // Keep the incoming height compression: inside a vertical scrollable
+        // the max height is infinite and compression is what makes a `Fill`
+        // child shrink to its content instead of resolving to infinity.
+        let child_limits = layout::Limits::with_compression(
             Size::new(width, 0.0),
             Size::new(
                 width,
                 (limits.max().height - self.top - self.bottom).max(0.0),
             ),
+            Size::new(false, limits.compression().height),
         );
         let child = self
             .content
@@ -267,6 +271,39 @@ mod tests {
         let (reading_x, _) = content_frame(2312.0, PageWidth::Reading, 48.0);
         let (wide_x, _) = content_frame(2312.0, PageWidth::Wide, 48.0);
         assert_eq!(reading_x, wide_x, "titles line up across page widths");
+    }
+
+    fn renderer() -> Renderer {
+        use iced::advanced::renderer::Headless;
+        iced::futures::executor::block_on(<Renderer as Headless>::new(
+            crate::font::REGULAR,
+            14.into(),
+            Some("tiny-skia"),
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_fill_height_child_stays_finite_inside_a_vertical_scrollable() {
+        // What iced 0.14's vertical scrollable hands its child: an infinite
+        // max height with height compression on.
+        let limits = layout::Limits::with_compression(
+            Size::ZERO,
+            Size::new(1192.0, f32::INFINITY),
+            Size::new(false, true),
+        );
+        let mut page = page(
+            iced::widget::Space::new()
+                .width(Length::Fill)
+                .height(Length::Fill),
+            PageWidth::Reading,
+            gutter_for_window,
+        );
+        let mut tree = Tree::new(&page as &dyn Widget<(), Theme, Renderer>);
+        let node =
+            Widget::<(), Theme, Renderer>::layout(&mut page, &mut tree, &renderer(), &limits);
+        assert!(node.size().height.is_finite(), "{:?}", node.size());
+        assert_eq!(node.size().height, PAGE_TOP + PAGE_BOTTOM);
     }
 
     #[test]
