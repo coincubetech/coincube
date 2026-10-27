@@ -34,6 +34,7 @@ pub fn sideshift_send_view<'a>(
     recent_transactions: &'a [RecentTransaction],
     shift: Option<&'a ShiftResponse>,
     shift_status: Option<&'a ShiftStatusKind>,
+    confirmed_settle_amount: Option<&'a str>,
     loading: bool,
     error: Option<&'a str>,
     usdt_asset_id: &str,
@@ -70,7 +71,13 @@ pub fn sideshift_send_view<'a>(
         | SendPhase::CreatingShift
         | SendPhase::Sending => loading_view(phase),
         SendPhase::Review => review_view(selected_network, shift, amount_input, error),
-        SendPhase::Sent => sent_view(selected_network, shift, shift_status, mask_amounts),
+        SendPhase::Sent => sent_view(
+            selected_network,
+            shift,
+            shift_status,
+            confirmed_settle_amount,
+            mask_amounts,
+        ),
         SendPhase::Failed => error_view(error),
     }
 }
@@ -655,19 +662,14 @@ fn sent_view<'a>(
     selected_network: Option<&SideshiftNetwork>,
     shift: Option<&'a ShiftResponse>,
     shift_status: Option<&'a ShiftStatusKind>,
+    confirmed_settle_amount: Option<&'a str>,
     mask_amounts: bool,
 ) -> Element<'a, SideshiftSendMessage> {
     let network = selected_network
         .copied()
         .unwrap_or(SideshiftNetwork::Ethereum);
 
-    // Pending is also set locally as soon as the Liquid payment is sent. It is
-    // not evidence that SideShift has detected the deposit yet.
-    let status_label = match shift_status {
-        Some(ShiftStatusKind::Pending) => "Payment sent · checking swap",
-        Some(status) => status.display(),
-        None => "Checking swap…",
-    };
+    let status_label = sent_status_label(shift_status);
 
     let (status_color, status_icon) = match shift_status {
         Some(ShiftStatusKind::Settled) => (color::GREEN, "✓"),
@@ -754,25 +756,32 @@ fn sent_view<'a>(
                         )
                         .push(text(addr).size(P2_SIZE).font(iced::Font::MONOSPACE))
                 }))
-                .push_maybe(shift.settle_amount.as_ref().map(|amount| {
-                    Row::new()
-                        .spacing(8)
-                        .align_y(Alignment::Center)
-                        .push(
-                            text("Quoted recipient amount")
-                                .size(P2_SIZE)
-                                .style(theme::text::secondary)
-                                .width(Length::Fixed(170.0)),
-                        )
-                        .push(
-                            text(if mask_amounts {
-                                "••••••".to_string()
-                            } else {
-                                format!("{} {}", amount, network.display_name())
-                            })
-                            .size(P2_SIZE),
-                        )
-                })),
+                .push_maybe(
+                    recipient_amount_to_show(
+                        shift_status,
+                        confirmed_settle_amount,
+                        shift.settle_amount.as_deref(),
+                    )
+                    .map(|(label, amount)| {
+                        Row::new()
+                            .spacing(8)
+                            .align_y(Alignment::Center)
+                            .push(
+                                text(label)
+                                    .size(P2_SIZE)
+                                    .style(theme::text::secondary)
+                                    .width(Length::Fixed(170.0)),
+                            )
+                            .push(
+                                text(if mask_amounts {
+                                    "••••••".to_string()
+                                } else {
+                                    format!("{} {}", amount, network.display_name())
+                                })
+                                .size(P2_SIZE),
+                            )
+                    }),
+                ),
         );
     }
 
@@ -785,6 +794,36 @@ fn sent_view<'a>(
         .into()
 }
 
+fn sent_status_label(status: Option<&ShiftStatusKind>) -> &str {
+    status
+        .map(ShiftStatusKind::display)
+        .unwrap_or("Payment sent · checking swap")
+}
+
+fn recipient_amount_to_show<'a>(
+    status: Option<&ShiftStatusKind>,
+    confirmed: Option<&'a str>,
+    quote: Option<&'a str>,
+) -> Option<(&'static str, &'a str)> {
+    if status == Some(&ShiftStatusKind::Settled) {
+        confirmed.map(|amount| ("Recipient receives", amount))
+    } else {
+        quote.map(|amount| ("Quoted recipient amount", amount))
+    }
+}
+
+fn swap_timeline_stage(status: Option<&ShiftStatusKind>) -> Option<usize> {
+    match status {
+        Some(ShiftStatusKind::Waiting) | None => Some(0),
+        Some(ShiftStatusKind::Pending) => Some(1),
+        Some(ShiftStatusKind::Processing) => Some(2),
+        Some(ShiftStatusKind::Settling) => Some(3),
+        Some(ShiftStatusKind::Settled) => Some(4),
+        // Holds, refunds, failures and unknown statuses are not forward progress.
+        _ => None,
+    }
+}
+
 fn swap_timeline(status: Option<&ShiftStatusKind>) -> Element<'static, SideshiftSendMessage> {
     const STAGES: [&str; 5] = [
         "Waiting for deposit",
@@ -794,14 +833,7 @@ fn swap_timeline(status: Option<&ShiftStatusKind>) -> Element<'static, Sideshift
         "Settled",
     ];
 
-    let current = match status {
-        Some(ShiftStatusKind::Waiting | ShiftStatusKind::Pending) | None => Some(0),
-        Some(ShiftStatusKind::Processing) => Some(2),
-        Some(ShiftStatusKind::Settling) => Some(3),
-        Some(ShiftStatusKind::Settled) => Some(4),
-        // Holds, refunds, failures and unknown statuses are not forward progress.
-        _ => None,
-    };
+    let current = swap_timeline_stage(status);
 
     let mut stages = Column::new().spacing(10).push(h4_bold("Swap status"));
     for (index, label) in STAGES.iter().enumerate() {
@@ -829,6 +861,50 @@ fn swap_timeline(status: Option<&ShiftStatusKind>) -> Element<'static, Sideshift
         .width(Length::Fill)
         .style(theme::card::simple)
         .into()
+}
+
+#[cfg(test)]
+mod status_presentation_tests {
+    use super::{
+        recipient_amount_to_show, sent_status_label, swap_timeline_stage, ShiftStatusKind,
+    };
+
+    #[test]
+    fn local_payment_and_server_deposit_have_distinct_statuses() {
+        assert_eq!(sent_status_label(None), "Payment sent · checking swap");
+        assert_eq!(swap_timeline_stage(None), Some(0));
+
+        let detected = ShiftStatusKind::Pending;
+        assert_eq!(sent_status_label(Some(&detected)), "Deposit detected");
+        assert_eq!(swap_timeline_stage(Some(&detected)), Some(1));
+
+        let waiting = ShiftStatusKind::Waiting;
+        assert_eq!(swap_timeline_stage(Some(&waiting)), Some(0));
+    }
+
+    #[test]
+    fn interrupted_swap_does_not_advance_the_timeline() {
+        assert_eq!(swap_timeline_stage(Some(&ShiftStatusKind::Review)), None);
+        assert_eq!(swap_timeline_stage(Some(&ShiftStatusKind::Refunding)), None);
+        assert_eq!(swap_timeline_stage(Some(&ShiftStatusKind::Expired)), None);
+    }
+
+    #[test]
+    fn settled_amount_comes_from_status_response_and_never_falls_back_to_quote() {
+        let settled = ShiftStatusKind::Settled;
+        assert_eq!(
+            recipient_amount_to_show(Some(&settled), Some("4.91"), Some("4.93")),
+            Some(("Recipient receives", "4.91"))
+        );
+        assert_eq!(
+            recipient_amount_to_show(Some(&settled), None, Some("4.93")),
+            None
+        );
+        assert_eq!(
+            recipient_amount_to_show(Some(&ShiftStatusKind::Processing), None, Some("4.93")),
+            Some(("Quoted recipient amount", "4.93"))
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

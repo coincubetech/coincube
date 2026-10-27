@@ -62,6 +62,8 @@ pub struct SideshiftSendFlow {
     quote: Option<ShiftQuote>,
     shift: Option<ShiftResponse>,
     shift_status: Option<ShiftStatusKind>,
+    /// Final amount reported by SideShift when the shift settles.
+    confirmed_settle_amount: Option<String>,
 
     loading: bool,
     error: Option<String>,
@@ -89,6 +91,7 @@ impl SideshiftSendFlow {
             quote: None,
             shift: None,
             shift_status: None,
+            confirmed_settle_amount: None,
             loading: false,
             error: None,
             coincube_client: CoincubeClient::new(),
@@ -152,6 +155,7 @@ impl SideshiftSendFlow {
         self.quote = None;
         self.shift = None;
         self.shift_status = None;
+        self.confirmed_settle_amount = None;
         self.loading = false;
         self.error = None;
     }
@@ -279,6 +283,7 @@ impl SideshiftSendFlow {
             recent_transactions,
             self.shift.as_ref(),
             self.shift_status.as_ref(),
+            self.confirmed_settle_amount.as_deref(),
             self.loading,
             self.error.as_deref(),
             usdt_asset_id_str,
@@ -532,7 +537,9 @@ impl SideshiftSendFlow {
 
             SideshiftSendMessage::PaymentSent => {
                 self.phase = SendPhase::Sent;
-                self.shift_status = Some(ShiftStatusKind::Pending);
+                // The Liquid payment succeeded locally; only a SideShift poll
+                // can confirm that its deposit has been detected.
+                self.shift_status = None;
                 Task::none()
             }
 
@@ -547,6 +554,11 @@ impl SideshiftSendFlow {
             SideshiftSendMessage::StatusUpdated(result) => {
                 if let Ok(status) = result {
                     let kind = ShiftStatusKind::from(status.status.as_str());
+                    self.confirmed_settle_amount = if kind == ShiftStatusKind::Settled {
+                        status.settle_amount
+                    } else {
+                        None
+                    };
                     self.shift_status = Some(kind);
                 }
                 Task::none()
