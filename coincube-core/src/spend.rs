@@ -54,7 +54,8 @@ fn mcp_fee_cap_key() -> bitcoin::psbt::raw::ProprietaryKey {
 /// Remember the caller's fee ceiling and requested sat/vB on the PSBT.
 ///
 /// The value stored for the rate is the request, not an estimate. Broadcast
-/// reads it back and applies it to the finalized transaction.
+/// reads it back and checks the fee against the maximum signed size used at
+/// preparation, along with the total fee ceiling.
 pub fn stamp_mcp_fee_cap(psbt: &mut Psbt, max_fee_sats: u64, max_fee_rate_sat_vb: u64) {
     let mut value = Vec::with_capacity(16);
     value.extend_from_slice(&max_fee_sats.to_le_bytes());

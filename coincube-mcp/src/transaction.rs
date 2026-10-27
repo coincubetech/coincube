@@ -106,8 +106,8 @@ pub struct Prepared {
     pub fee_sats: u64,
     /// Estimated sat/vB at the descriptor's maximum signed size, rounded up.
     /// A shorter real witness makes the signed transaction smaller, so its
-    /// rate can be higher. Tenshu applies the requested rate again to the
-    /// finalized transaction before broadcast.
+    /// rate can be higher. Before broadcast, Tenshu rechecks the fee ceiling
+    /// and requested rate against the maximum signed size used at preparation.
     pub fee_rate_sat_vb: u64,
     /// Total change amount, without revealing its address.
     pub change_sats: u64,
