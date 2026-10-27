@@ -220,6 +220,17 @@ pub(crate) fn check_output_value(value: bitcoin::Amount) -> Result<(), SpendCrea
     }
 }
 
+fn check_network_output_value(
+    value: bitcoin::Amount,
+    script: &bitcoin::Script,
+) -> Result<(), SpendCreationError> {
+    if value > bitcoin::Amount::MAX_MONEY || value < script.minimal_non_dust() {
+        Err(SpendCreationError::InvalidOutputValue(value))
+    } else {
+        Ok(())
+    }
+}
+
 /// Authenticate the output spent by `outpoint` using a complete previous
 /// transaction, and return that output.
 ///
@@ -482,6 +493,8 @@ pub(crate) fn select_coins_for_spend(
     max_sat_weight: u64,
     is_segwit: bool,
     must_have_change: bool,
+    min_change_sats: u64,
+    use_economic_change_policy: bool,
 ) -> Result<CoinSelectionRes, InsufficientFunds> {
     let out_value_nochange = base_tx.output.iter().map(|o| o.value.to_sat()).sum();
     let out_weight_nochange = {
@@ -549,9 +562,11 @@ pub(crate) fn select_coins_for_spend(
         }
     }
 
-    // Now set the change policy. We use a policy which ensures no change output is created with a
-    // lower value than our custom dust limit. NOTE: the change output weight must not account for
-    // a potential difference in the size of the outputs count varint.
+    // Now set the change policy. Ordinary spends omit uneconomical change. MCP
+    // drafts keep change at the network minimum so a valid output is not
+    // silently converted to fee and rejected by the caller's fee cap.
+    // NOTE: the change output weight must not account for a potential
+    // difference in the size of the outputs count varint.
     let feerate = FeeRate::from_sat_per_vb(feerate_vb);
     let long_term_feerate = FeeRate::from_sat_per_vb(LONG_TERM_FEERATE_VB);
     let change_output_weight = change_txo.weight().to_wu();
@@ -561,13 +576,17 @@ pub(crate) fn select_coins_for_spend(
         n_outputs: 1, // we only want a single change output
     };
     // As of bdk_coin_select v0.3.0, the min change value is exclusive so we must subtract 1.
-    let change_min_value = DUST_OUTPUT_SATS.saturating_sub(1);
-    let change_policy = ChangePolicy::min_value_and_waste(
-        drain_weights,
-        change_min_value,
-        feerate,
-        long_term_feerate,
-    );
+    let change_min_value = min_change_sats.saturating_sub(1);
+    let change_policy = if use_economic_change_policy {
+        ChangePolicy::min_value_and_waste(
+            drain_weights,
+            change_min_value,
+            feerate,
+            long_term_feerate,
+        )
+    } else {
+        ChangePolicy::min_value(drain_weights, change_min_value)
+    };
 
     // Finally, run the coin selection algorithm. We use an opportunistic BnB and if it couldn't
     // find any solution we fall back to selecting coins by descending value.
@@ -630,7 +649,7 @@ pub(crate) fn select_coins_for_spend(
                 let drain = if must_have_change {
                     bdk_coin_select::Drain {
                         weights: drain_weights,
-                        value: DUST_OUTPUT_SATS,
+                        value: min_change_sats,
                     }
                 } else {
                     drain
@@ -762,6 +781,7 @@ pub enum SpendTxFees {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CreateSpendWarning {
     ChangeAddedToFee(u64),
+    NetworkDustChangeAddedToFee { amount: u64, minimum: u64 },
     AdditionalFeeForAncestors(u64),
 }
 
@@ -776,6 +796,11 @@ impl fmt::Display for CreateSpendWarning {
                 DUST_OUTPUT_SATS,
                 amt,
                 if *amt > 1 { "s" } else { "" },
+            ),
+            CreateSpendWarning::NetworkDustChangeAddedToFee { amount, minimum } => write!(
+                f,
+                "A change output of {} sats was added to the fee because it did not meet the {}-sat network dust limit.",
+                amount, minimum,
             ),
             CreateSpendWarning::AdditionalFeeForAncestors(amt) => write!(
                 f,
@@ -847,6 +872,33 @@ pub fn create_spend(
     )
 }
 
+/// Create a capped MCP Vault spend using each output script's network dust
+/// minimum. Ordinary spends retain the wallet's 500-sat output floor.
+#[allow(clippy::too_many_arguments)]
+pub fn create_spend_with_network_dust(
+    main_descriptor: &descriptors::CoincubeDescriptor,
+    secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    tx_getter: &mut impl TxGetter,
+    destinations: &[(SpendOutputAddress, bitcoin::Amount)],
+    candidate_coins: &[CandidateCoin],
+    fees: SpendTxFees,
+    change_addr: SpendOutputAddress,
+    locktime: LockTime,
+) -> Result<CreateSpendRes, SpendCreationError> {
+    create_spend_with_output_floor(
+        main_descriptor,
+        secp,
+        tx_getter,
+        destinations,
+        candidate_coins,
+        fees,
+        change_addr,
+        locktime,
+        None,
+        true,
+    )
+}
+
 // Only the bounded Claim builder supplies a poison script. Ordinary spend
 // construction keeps the exact historical path by passing None.
 #[allow(clippy::too_many_arguments)]
@@ -860,6 +912,33 @@ pub(crate) fn create_spend_with_poison(
     change_addr: SpendOutputAddress,
     locktime: LockTime,
     poison: Option<bitcoin::ScriptBuf>,
+) -> Result<CreateSpendRes, SpendCreationError> {
+    create_spend_with_output_floor(
+        main_descriptor,
+        secp,
+        tx_getter,
+        destinations,
+        candidate_coins,
+        fees,
+        change_addr,
+        locktime,
+        poison,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_spend_with_output_floor(
+    main_descriptor: &descriptors::CoincubeDescriptor,
+    secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    tx_getter: &mut impl TxGetter,
+    destinations: &[(SpendOutputAddress, bitcoin::Amount)],
+    candidate_coins: &[CandidateCoin],
+    fees: SpendTxFees,
+    change_addr: SpendOutputAddress,
+    locktime: LockTime,
+    poison: Option<bitcoin::ScriptBuf>,
+    network_dust_only: bool,
 ) -> Result<CreateSpendRes, SpendCreationError> {
     // This method does quite a few things. In addition, we support different modes (coin control
     // vs automated coin selection, self-spend, sweep, etc..) which make the logic a bit more
@@ -896,7 +975,11 @@ pub(crate) fn create_spend_with_poison(
     // sanity check each output's value.
     let mut psbt_outs = Vec::with_capacity(destinations.len());
     for (address, amount) in destinations {
-        check_output_value(*amount)?;
+        if network_dust_only {
+            check_network_output_value(*amount, &address.addr.script_pubkey())?;
+        } else {
+            check_output_value(*amount)?;
+        }
 
         tx.output.push(bitcoin::TxOut {
             value: *amount,
@@ -934,6 +1017,11 @@ pub(crate) fn create_spend_with_poison(
     let mut change_txo = bitcoin::TxOut {
         value: bitcoin::Amount::MAX,
         script_pubkey: change_addr.addr.script_pubkey(),
+    };
+    let min_change_sats = if network_dust_only {
+        change_txo.script_pubkey.minimal_non_dust().to_sat()
+    } else {
+        DUST_OUTPUT_SATS
     };
     // If no candidates have relative locktime, then we should use the primary spending path.
     // Note we set this value before actually selecting the coins, but we expect either all
@@ -975,6 +1063,8 @@ pub(crate) fn create_spend_with_poison(
             max_sat_wu,
             true,
             is_self_send,
+            min_change_sats,
+            !network_dust_only,
         )
         .map_err(SpendCreationError::CoinSelection)?
     };
@@ -983,7 +1073,11 @@ pub(crate) fn create_spend_with_poison(
     // return an error. In any case, the PSBT sanity check will catch a transaction with no outputs.
     let has_change = change_amount.to_sat() > 0;
     if has_change {
-        check_output_value(change_amount)?;
+        if network_dust_only {
+            check_network_output_value(change_amount, &change_txo.script_pubkey)?;
+        } else {
+            check_output_value(change_amount)?;
+        }
 
         // If the change address is ours, tell the signers by setting the BIP32 derivations in the
         // PSBT output.
@@ -1003,9 +1097,16 @@ pub(crate) fn create_spend_with_poison(
         tx.output.push(change_txo);
         psbt_outs.push(psbt_out);
     } else if max_change_amount.to_sat() > 0 {
-        warnings.push(CreateSpendWarning::ChangeAddedToFee(
-            max_change_amount.to_sat(),
-        ));
+        if network_dust_only {
+            warnings.push(CreateSpendWarning::NetworkDustChangeAddedToFee {
+                amount: max_change_amount.to_sat(),
+                minimum: min_change_sats,
+            });
+        } else {
+            warnings.push(CreateSpendWarning::ChangeAddedToFee(
+                max_change_amount.to_sat(),
+            ));
+        }
     }
 
     if fee_for_ancestors.to_sat() > 0 {

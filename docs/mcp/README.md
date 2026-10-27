@@ -433,10 +433,10 @@ fee is above the ceiling, before committing a change index. It stores the
 requested rate on the PSBT. Before broadcast, it rechecks the total fee against
 the ceiling and checks the fee rate against the same maximum signed size used
 to prepare the draft. A shorter real signature does not cause a refusal.
-Recipient amounts must be at least the greater of Tenshu's 500-sat
-output floor and the script's network dust limit. The exact floor is accepted;
-a P2WPKH output at its 294-sat network dust is below the wallet floor and is
-rejected, by this check and by the spend engine. Tenshu verifies the actual inputs, recipient amounts, wallet-owned change,
+For MCP drafts, recipient and change amounts must be at least their output
+script's network dust limit. The exact minimum is accepted, including a
+P2WPKH output at 294 sats. Ordinary spends keep Tenshu's 500-sat wallet floor.
+Tenshu verifies the actual inputs, recipient amounts, wallet-owned change,
 unsigned state and total fee before returning a minimized summary. The review
 screen stays view-only until the user chooses Sign in Tenshu. The raw PSBT,
 input identities and change address stay inside Tenshu. Request IDs are immutable

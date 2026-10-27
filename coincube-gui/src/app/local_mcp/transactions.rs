@@ -10,7 +10,6 @@ use crate::{
 use coincube_core::{
     descriptors::CoincubeDescriptor,
     miniscript::bitcoin::{secp256k1, Address, Network, Psbt},
-    spend::DUST_OUTPUT_SATS,
 };
 use coincube_mcp::{
     self as wire,
@@ -313,14 +312,12 @@ impl wire::Reader for Service {
     }
 }
 
-/// Tenshu's output floor is 500 sats, including when a script's network dust
-/// is lower. The binding minimum is the greater of that floor and the script
-/// dust limit, and an amount equal to the binding minimum is accepted.
+/// MCP drafts use the network dust minimum for each output script.
 fn output_below_floor(
     amount_sats: u64,
     script: coincube_core::miniscript::bitcoin::ScriptBuf,
 ) -> bool {
-    amount_sats < DUST_OUTPUT_SATS || amount_sats < script.minimal_non_dust().to_sat()
+    amount_sats < script.minimal_non_dust().to_sat()
 }
 
 /// Independently verify the engine's public construction before exposing a summary.
@@ -1046,18 +1043,17 @@ mod tests {
     }
 
     #[test]
-    fn output_floor_accepts_the_binding_minimum() {
+    fn output_floor_accepts_the_network_minimum() {
         use coincube_core::miniscript::bitcoin::{hashes::Hash, PubkeyHash, WPubkeyHash};
         let p2wpkh = ScriptBuf::new_p2wpkh(&WPubkeyHash::all_zeros());
         let network_dust = p2wpkh.minimal_non_dust().to_sat();
-        assert!(network_dust < DUST_OUTPUT_SATS);
-        assert!(output_below_floor(network_dust, p2wpkh.clone()));
-        assert!(output_below_floor(DUST_OUTPUT_SATS - 1, p2wpkh.clone()));
-        assert!(!output_below_floor(DUST_OUTPUT_SATS, p2wpkh));
+        assert_eq!(network_dust, 294);
+        assert!(output_below_floor(network_dust - 1, p2wpkh.clone()));
+        assert!(!output_below_floor(network_dust, p2wpkh));
 
         let p2pkh = ScriptBuf::new_p2pkh(&PubkeyHash::all_zeros());
         let legacy_dust = p2pkh.minimal_non_dust().to_sat();
-        assert!(legacy_dust > DUST_OUTPUT_SATS);
+        assert_eq!(legacy_dust, 546);
         assert!(output_below_floor(legacy_dust - 1, p2pkh.clone()));
         assert!(!output_below_floor(legacy_dust, p2pkh));
     }

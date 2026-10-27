@@ -1573,6 +1573,18 @@ impl DaemonControl {
                 has_change,
                 warnings,
             } = match match &self.config.main_descriptor {
+                WalletDescriptor::Vault(vault) if max_fee_sats.is_some() => {
+                    spend::create_spend_with_network_dust(
+                        vault,
+                        &self.secp,
+                        &mut tx_getter,
+                        &destinations_checked,
+                        &candidate_coins,
+                        SpendTxFees::Regular(feerate_vb),
+                        change_address,
+                        locktime,
+                    )
+                }
                 WalletDescriptor::Vault(vault) => create_spend(
                     vault,
                     &self.secp,
@@ -3580,6 +3592,73 @@ mod tests {
             Ok(CreateSpendResult::Success { .. })
         ));
         assert_eq!(db_conn.change_index(), before.increment().unwrap());
+    }
+
+    #[test]
+    fn capped_vault_spend_accepts_network_dust_recipient() {
+        let ms = DummyCoincube::new(DummyBitcoind::new(), DummyDatabase::new());
+        let control = &ms.control();
+        let mut db_conn = control.db().lock().unwrap().connection();
+        let funding = funding_tx(control, &[(0, 100_000, 13, false)]);
+        let outpoint = bitcoin::OutPoint::new(funding.compute_txid(), 0);
+        db_conn.new_txs(std::slice::from_ref(&funding));
+        db_conn.new_unspent_coins(&[Coin {
+            outpoint,
+            is_immature: false,
+            block_info: None,
+            amount: bitcoin::Amount::from_sat(100_000),
+            derivation_index: bip32::ChildNumber::from(13),
+            is_change: false,
+            spend_txid: None,
+            spend_block: None,
+            is_from_self: false,
+        }]);
+        let destination =
+            bitcoin::Address::from_str("bc1qnsexk3gnuyayu92fc3tczvc7k62u22a22ua2kv").unwrap();
+        let network_dust = destination
+            .assume_checked_ref()
+            .script_pubkey()
+            .minimal_non_dust()
+            .to_sat();
+        assert_eq!(network_dust, 294);
+        let mut destinations = HashMap::from([(destination, network_dust - 1)]);
+        let before = db_conn.change_index();
+        assert!(matches!(
+            control.create_spend_within_limits(&destinations, &[outpoint], 1, None, Some(10_000)),
+            Err(CommandError::SpendCreation(
+                SpendCreationError::InvalidOutputValue(_)
+            ))
+        ));
+        assert_eq!(db_conn.change_index(), before);
+        *destinations.values_mut().next().unwrap() = network_dust;
+        assert!(matches!(
+            control.create_spend(&destinations, &[outpoint], 1, None),
+            Err(CommandError::SpendCreation(
+                SpendCreationError::InvalidOutputValue(_)
+            ))
+        ));
+        let created = control
+            .create_spend_within_limits(&destinations, &[outpoint], 1, None, Some(10_000))
+            .unwrap();
+        let CreateSpendResult::Success { psbt, .. } = created else {
+            panic!("expected successful capped spend");
+        };
+        assert_eq!(psbt.unsigned_tx.output[0].value.to_sat(), network_dust);
+
+        // At 1 sat/vB this spend pays 161 sats and leaves exactly one
+        // network-minimum P2WSH change output. The ordinary economic change
+        // rule would add the 330 sats to fees and fail the capped draft.
+        *destinations.values_mut().next().unwrap() = 99_509;
+        let created = control
+            .create_spend_within_limits(&destinations, &[outpoint], 1, None, Some(10_000))
+            .unwrap();
+        let CreateSpendResult::Success { psbt, .. } = created else {
+            panic!("expected successful capped spend with minimum change");
+        };
+        assert_eq!(psbt.unsigned_tx.output.len(), 2);
+        let change = &psbt.unsigned_tx.output[1];
+        assert_eq!(change.value.to_sat(), 330);
+        assert_eq!(change.value, change.script_pubkey.minimal_non_dust());
     }
 
     #[test]
