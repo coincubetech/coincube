@@ -3417,10 +3417,7 @@ fn duress_enrolled_kit_warning<'a>(
 fn divider_line<'a>() -> Element<'a, ConnectAccountMessage> {
     container(iced::widget::Space::new().height(Length::Fixed(1.0)))
         .width(Length::Fill)
-        .style(|_t| container::Style {
-            background: Some(iced::Background::Color(color::GREY_5)),
-            ..Default::default()
-        })
+        .style(theme::tenshu::control::divider)
         .into()
 }
 
