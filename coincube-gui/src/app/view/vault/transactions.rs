@@ -637,7 +637,7 @@ mod rbf_view_tests {
                         create_rbf_modal(cancel, ids, rate, created, processing),
                         outer,
                         appearance,
-                        theme.clone(),
+                        theme,
                     )
                 };
                 let bump = inspect(
