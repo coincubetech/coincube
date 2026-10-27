@@ -1410,6 +1410,34 @@ impl DaemonControl {
         Ok((fee, vsize))
     }
 
+    fn verify_capped_broadcast_fee(
+        &self,
+        prepared_psbt: &Psbt,
+        final_tx: &bitcoin::Transaction,
+        (max_fee, max_rate): (u64, u64),
+    ) -> Result<(), CommandError> {
+        let total_in = Self::witness_input_value(prepared_psbt)?;
+        let prepared_vsize = self.fee_and_vsize(prepared_psbt)?.1;
+        let total_out = final_tx
+            .output
+            .iter()
+            .try_fold(0u64, |total, output| {
+                total.checked_add(output.value.to_sat())
+            })
+            .ok_or(CommandError::FeeMeasurement)?;
+        let fee = total_in
+            .checked_sub(total_out)
+            .filter(|fee| *fee > 0)
+            .ok_or(CommandError::FeeMeasurement)?;
+        if fee > max_fee {
+            return Err(CommandError::FeeCeilingExceeded);
+        }
+        if spend::signed_fee_exceeds_cap(fee, prepared_vsize, max_fee, max_rate) {
+            return Err(CommandError::FeeRateExceeded);
+        }
+        Ok(())
+    }
+
     pub fn create_spend(
         &self,
         destinations: &HashMap<bitcoin::Address<bitcoin::address::NetworkUnchecked>, u64>,
@@ -1791,14 +1819,7 @@ impl DaemonControl {
         // when the fee was selected. Dividing the unchanged fee by final vsize
         // would reject an ordinary signed spend at the broadcast boundary.
         let fee_cap = spend::mcp_fee_cap(&spend_psbt);
-        let capped_measurement = if fee_cap.is_some() {
-            Some((
-                Self::witness_input_value(&spend_psbt)?,
-                self.fee_and_vsize(&spend_psbt)?.1,
-            ))
-        } else {
-            None
-        };
+        let capped_prepared_psbt = fee_cap.map(|_| spend_psbt.clone());
         let final_tx = match &self.config.main_descriptor {
             WalletDescriptor::Vault(vault) => {
                 spend::reverify_spend_before_broadcast(vault, &spend_psbt)?;
@@ -1817,26 +1838,8 @@ impl DaemonControl {
                 .clone()
             }
         };
-        if let (Some((max_fee, max_rate)), Some((total_in, prepared_vsize))) =
-            (fee_cap, capped_measurement)
-        {
-            let total_out = final_tx
-                .output
-                .iter()
-                .try_fold(0u64, |total, output| {
-                    total.checked_add(output.value.to_sat())
-                })
-                .ok_or(CommandError::FeeMeasurement)?;
-            let fee = total_in
-                .checked_sub(total_out)
-                .filter(|fee| *fee > 0)
-                .ok_or(CommandError::FeeMeasurement)?;
-            if fee > max_fee {
-                return Err(CommandError::FeeCeilingExceeded);
-            }
-            if spend::signed_fee_exceeds_cap(fee, prepared_vsize, max_fee, max_rate) {
-                return Err(CommandError::FeeRateExceeded);
-            }
+        if let (Some(cap), Some(prepared_psbt)) = (fee_cap, capped_prepared_psbt.as_ref()) {
+            self.verify_capped_broadcast_fee(prepared_psbt, &final_tx, cap)?;
         }
         if self.config.main_descriptor.as_imported().is_some() {
             if let Some(recorded) = db_conn
@@ -2758,11 +2761,17 @@ mod tests {
             1_000,
             2
         ));
-        assert!(!spend::signed_fee_exceeds_cap(
-            fee,
-            prepared_vsize,
-            1_000,
-            2
+        assert!(control
+            .verify_capped_broadcast_fee(&psbt, &finalized, (1_000, 2))
+            .is_ok());
+        assert!(matches!(
+            control.verify_capped_broadcast_fee(&psbt, &finalized, (fee - 1, 2)),
+            Err(CommandError::FeeCeilingExceeded)
+        ));
+        finalized.output[0].value = Amount::from_sat(finalized.output[0].value.to_sat() - 1);
+        assert!(matches!(
+            control.verify_capped_broadcast_fee(&psbt, &finalized, (1_000, 2)),
+            Err(CommandError::FeeRateExceeded)
         ));
         daemon.shutdown();
     }
