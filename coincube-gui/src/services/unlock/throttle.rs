@@ -578,7 +578,10 @@ fn penalty_for(consecutive_failures: u32) -> Duration {
 
 /// User-facing text for a remaining lockout.
 pub fn lockout_message(remaining: Duration) -> String {
-    let secs = remaining.as_secs().max(1);
+    let secs = remaining
+        .as_secs()
+        .saturating_add(u64::from(remaining.subsec_nanos() > 0))
+        .max(1);
     if secs < 60 {
         format!("Too many incorrect PINs. Try again in {secs}s.")
     } else {
@@ -1158,5 +1161,9 @@ mod tests {
         assert!(lockout_message(Duration::from_secs(120)).contains("2 minute"));
         // Sub-second remainders still say something, never "0s".
         assert!(lockout_message(Duration::from_millis(200)).contains("1s"));
+        // Fractional remainders must not promise an earlier retry than the
+        // lockout actually allows.
+        assert!(lockout_message(Duration::from_millis(1_999)).contains("2s"));
+        assert!(lockout_message(Duration::from_millis(60_001)).contains("2 minute"));
     }
 }
