@@ -353,7 +353,7 @@ pub fn create_rbf_modal<'a>(
                             )
                             .push(
                                 Action::new(
-                                    Id::new(format!("vault-rbf-copy-{id}")),
+                                    Id::from(format!("vault-rbf-copy-{id}")),
                                     icon::clipboard_icon().style(theme::text::secondary),
                                     Message::FocusAction,
                                 )
@@ -688,7 +688,7 @@ mod rbf_view_tests {
                 assert!(warning.contains("invalidate 2 later payments"));
                 assert!(warning.contains(&txid('a').to_string()));
                 assert!(warning.contains(&txid('b').to_string()));
-                assert!(warning.has_focus(Id::new(format!("vault-rbf-copy-{}", txid('a')))));
+                assert!(warning.has_focus(Id::from(format!("vault-rbf-copy-{}", txid('a')))));
 
                 let created = inspect(
                     "vault-rbf-created",
@@ -743,7 +743,7 @@ mod rbf_view_tests {
         let descendants = HashSet::from([txid('a')]);
         assert!(capture::activate(
             create_rbf_modal(false, &descendants, &valid, None, false),
-            Id::new(format!("vault-rbf-copy-{}", txid('a'))),
+            Id::from(format!("vault-rbf-copy-{}", txid('a'))),
             (1440, 900),
             false,
         )
