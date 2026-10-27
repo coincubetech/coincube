@@ -615,16 +615,8 @@ pub(super) fn dock<'a>(
             .width(Length::Fill)
     });
     let key = (projection.filtered_total > 0).then(|| key_button(home.catalog.key_open()));
-    // Create and Import act on the current network: name it once more than
-    // one network is listed, since the filter alone may not show which.
-    let target = (projection.network_counts.len() > 1).then(|| {
-        words(
-            format!("New Cubes: {}", network_name(home.network)),
-            12.0,
-            font::REGULAR,
-            Ink::Muted,
-        )
-    });
+    let target = dock_target(home, projection)
+        .map(|caption| words(caption, 12.0, font::REGULAR, Ink::Muted));
     Container::new(
         Row::new()
             .spacing(8)
@@ -984,6 +976,8 @@ pub(crate) struct ChromeSnapshot {
     eye: Option<bool>,
     connect: Vec<(String, Ink, f32, bool)>,
     links: Vec<&'static str>,
+    /// The dock's "New Cubes: <network>" caption, when it shows.
+    pub(super) target: Option<String>,
     limit: Option<String>,
     key: bool,
 }
@@ -1041,9 +1035,17 @@ pub(super) fn snapshot(home: &Home, projection: &Projection<'_>) -> ChromeSnapsh
             .map(|chrome| chrome.privacy.masks_amounts()),
         connect,
         links,
+        target: dock_target(home, projection),
         limit: at_limit.then(|| limit_text(projection)),
         key: projection.filtered_total > 0,
     }
+}
+
+/// Create and Import act on the current network: name it once more than one
+/// network is listed, since the filter alone may not show which.
+fn dock_target(home: &Home, projection: &Projection<'_>) -> Option<String> {
+    (projection.network_counts.len() > 1)
+        .then(|| format!("New Cubes: {}", network_name(home.network)))
 }
 
 fn count_text(shown: usize, total: usize) -> String {
@@ -1197,6 +1199,9 @@ pub(crate) fn quiet_dock<'a, M: 'a>(chrome: &ChromeSnapshot) -> Element<'a, M> {
         .height(Length::Fill)
         .push(action(PLUS, "Create Cube"))
         .push(action(IMPORT, "Import Bitcoin wallet"));
+    if let Some(target) = &chrome.target {
+        row = row.push(words(target.clone(), 12.0, font::REGULAR, Ink::Muted));
+    }
     for link in &chrome.links {
         row = row.push(
             Container::new(words(*link, 13.0, font::MEDIUM, Ink::Accent)).padding([4.0, 6.0]),

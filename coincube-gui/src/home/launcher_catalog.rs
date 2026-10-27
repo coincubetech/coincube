@@ -259,12 +259,6 @@ const WHEEL_PAGE_THRESHOLD: f32 = 24.0;
 const WHEEL_GESTURE_GAP: Duration = Duration::from_millis(250);
 const WHEEL_PAGE_COOLDOWN: Duration = Duration::from_millis(600);
 
-/// The floor is inside a vertical scrollable. It does not forward wheel events
-/// to children, and can mark even a sideways delta captured when it first
-/// announces its viewport. Keys must remain unhandled by focused widgets;
-/// horizontal wheel input is filtered by the reducer instead of that status.
-/// `listen_with` has no hit target, so native QA must check sideways scroll
-/// over Launcher chrome and Connect rows before treating this as floor-only.
 /// What a pick on another network asked for, replayed after the switch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PendingIntent {
@@ -414,6 +408,12 @@ impl Home {
     }
 }
 
+/// The floor is inside a vertical scrollable. It does not forward wheel events
+/// to children, and can mark even a sideways delta captured when it first
+/// announces its viewport. Keys must remain unhandled by focused widgets;
+/// horizontal wheel input is filtered by the reducer instead of that status.
+/// `listen_with` has no hit target, so native QA must check sideways scroll
+/// over Launcher chrome and Connect rows before treating this as floor-only.
 pub(super) fn floor_event(
     event: iced::Event,
     status: event::Status,
@@ -870,8 +870,15 @@ impl Home {
     /// exactly one listed Cube (removed, duplicated, reloaded from another
     /// chain). Never moves it to another Cube. Runs after every message.
     pub(super) fn reconcile_catalog(&mut self) {
-        // The Key card belongs to the Key button, which needs a local Cube.
-        if project(self).local_total == 0 {
+        // A pick or Open on another network belongs to the Launcher. Leaving
+        // it by any route (a nav click, a banner CTA, a handoff) drops it, so
+        // its replay cannot start an unlock from another section.
+        if !matches!(self.active_section, HomeSection::Cubes) {
+            self.catalog.pending_select = None;
+        }
+        // The Key card belongs to the Key button, which needs a Cube the
+        // filter shows.
+        if project(self).filtered_total == 0 {
             self.catalog.key = KeyCard::default();
         }
         let pages = project(self).locals.len().div_ceil(FLOOR_PAGE_SIZE).max(1);
@@ -4481,6 +4488,130 @@ mod tests {
             "{:?}",
             messages
         );
+    }
+
+    #[test]
+    fn a_connect_change_reads_the_new_network_before_any_catalog_read() {
+        // A Bitcoin-only start reads no other network, so no generation is
+        // ever claimed; a Connect grant must still read what it lists.
+        let mut home = all_networks();
+        home.network_catalog_generation = 0;
+        home.network_catalog_requested
+            .retain(|chain| *chain != ChainId::Regtest);
+        let messages = run_task(home.update(Message::View(ViewMessage::ConnectAccount(
+            crate::app::view::ConnectAccountMessage::Init,
+        ))));
+        assert!(
+            messages.iter().any(|m| matches!(
+                m,
+                Message::NetworkCatalogLoaded {
+                    chain: ChainId::Regtest,
+                    ..
+                }
+            )),
+            "{:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn a_connect_change_off_the_list_is_read_before_the_list_returns() {
+        // A creation backup returns to the list without another check.
+        let mut home = all_networks();
+        home.state = State::RecoveryInput;
+        home.network_catalog_requested
+            .retain(|chain| *chain != ChainId::Regtest);
+        let messages = run_task(home.update(Message::View(ViewMessage::ConnectAccount(
+            crate::app::view::ConnectAccountMessage::Init,
+        ))));
+        assert!(
+            messages.iter().any(|m| matches!(
+                m,
+                Message::NetworkCatalogLoaded {
+                    chain: ChainId::Regtest,
+                    ..
+                }
+            )),
+            "{:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn a_filter_that_hides_every_local_cube_closes_the_key_card() {
+        let mut home = all_networks();
+        home.catalog.key.mode = KeyMode::Pinned;
+        catalog(
+            &mut home,
+            CatalogMessage::Filter(NetworkFilter::Network(ChainId::Regtest)),
+        );
+        assert_eq!(project(&home).filtered_total, 0);
+        assert!(!home.catalog.key_open(), "the card outlived its button");
+    }
+
+    #[test]
+    fn leaving_the_launcher_drops_a_pending_open() {
+        let mut home = all_networks();
+        let lab = CubeCatalogKey {
+            chain: ChainId::Testnet4,
+            cube_id: "t1".into(),
+        };
+        drop(home.update(Message::View(ViewMessage::RunCatalog(lab))));
+        assert!(home.catalog.pending_select.is_some());
+        drop(home.update(Message::View(ViewMessage::GoToSection(
+            HomeSection::RecoverVault,
+        ))));
+        assert_eq!(home.catalog.pending_select, None);
+        // A direct section change, such as a Connect banner CTA, too.
+        let lab = CubeCatalogKey {
+            chain: ChainId::Testnet4,
+            cube_id: "t1".into(),
+        };
+        home.active_section = HomeSection::Cubes;
+        drop(home.update(Message::View(ViewMessage::RunCatalog(lab))));
+        assert!(home.catalog.pending_select.is_some());
+        home.active_section = HomeSection::Connect(crate::app::menu::ConnectSubMenu::Overview);
+        drop(home.update(Message::View(ViewMessage::Catalog(
+            CatalogMessage::NetworkMenu(false),
+        ))));
+        assert_eq!(home.catalog.pending_select, None);
+    }
+
+    #[test]
+    fn an_imported_cube_opening_still_consumes_the_pending_pick() {
+        let mut home = all_networks();
+        let lab = CubeCatalogKey {
+            chain: ChainId::Testnet4,
+            cube_id: "t1".into(),
+        };
+        drop(home.update(Message::View(ViewMessage::RunCatalog(lab.clone()))));
+        drop(home.update(Message::View(ViewMessage::SelectNetwork(ChainId::Testnet4))));
+        assert!(home.catalog.pending_select.is_some());
+        // An import finished during the probe opens its own Cube first.
+        home.open_created_import_cube = Some("t2".into());
+        drop(home.update(Message::Checked {
+            for_chain: ChainId::Testnet4,
+            res: Ok(State::Cubes {
+                cubes: home.network_catalog(ChainId::Testnet4).to_vec(),
+                create_cube: false,
+                source: ChainId::Testnet4,
+            }),
+        }));
+        assert_eq!(
+            home.catalog.pending_select, None,
+            "a stale Open would replay on the next checked list"
+        );
+    }
+
+    #[test]
+    fn the_pin_screen_snapshot_keeps_the_new_cubes_caption() {
+        let home = all_networks();
+        let chrome = super::super::launcher_chrome::snapshot(&home, &project(&home));
+        assert_eq!(chrome.target.as_deref(), Some("New Cubes: Bitcoin mainnet"));
+        let mut one = home_with(&[("a", "Alpha")]);
+        one.catalog.mode = LauncherMode::Cubes;
+        let chrome = super::super::launcher_chrome::snapshot(&one, &project(&one));
+        assert_eq!(chrome.target, None, "one listed network needs no caption");
     }
 
     #[test]

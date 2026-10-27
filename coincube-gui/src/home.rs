@@ -1688,8 +1688,12 @@ impl Home {
             message => self.update_lifecycle(message),
         };
         self.reconcile_catalog();
-        // Once the catalog is in use, read the networks such a change lists.
-        if connect && self.network_catalog_generation > 0 {
+        // Once the first probe has finished, read the networks such a change
+        // lists, whatever screen Home is on: a creation backup or recovery
+        // returns to the list without another check. A Bitcoin-only start
+        // never claims a generation, so the generation cannot stand for
+        // "in use".
+        if connect && !matches!(self.state, State::Unchecked) {
             if let Some(load) = self.refresh_network_catalog(false) {
                 return Task::batch([task, load]);
             }
@@ -3174,6 +3178,9 @@ impl Home {
                             self.datadir_path.path(),
                             self.network.bitcoin_network(),
                         );
+                    // Taken before the import's own Open returns early, so
+                    // a pending pick never outlives this checked list.
+                    let pending = self.catalog.pending_select.take();
                     if let (Some(id), State::Cubes { cubes, .. }) =
                         (&self.open_created_import_cube, &self.state)
                     {
@@ -3186,7 +3193,7 @@ impl Home {
                     // current; now that its list is checked, select it.
                     // Open replays as `RunCatalog`, which resolves the Cube
                     // through `catalog_index` on this checked list again.
-                    let select = match self.catalog.pending_select.take() {
+                    let select = match pending {
                         Some((key, intent)) if key.chain == self.network => {
                             Task::done(Message::View(match intent {
                                 launcher_catalog::PendingIntent::Select => ViewMessage::Catalog(
