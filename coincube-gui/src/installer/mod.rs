@@ -10,6 +10,8 @@ pub(crate) mod migration;
 mod prompt;
 #[cfg(feature = "mcp-proposals")]
 pub(crate) mod proposal;
+#[cfg(feature = "mcp-proposals")]
+mod proposal_handoff;
 pub(crate) mod step;
 mod view;
 
@@ -939,6 +941,7 @@ impl Installer {
         self.context.remote_backend = RemoteBackend::None;
         self.context.use_coincube_connect = false;
         self.steps = vec![
+            Box::new(proposal_handoff::ProposalHandoff::new(proposal.clone())),
             DefineDescriptor::new(self.network, self.signer.clone()).into(),
             BackupMnemonic::new(self.signer.clone()).into(),
             BackupDescriptor::default().into(),
