@@ -6,7 +6,7 @@ Read this file first, then the review doc, then the inventory.
 
 | What | Where |
 | --- | --- |
-| Live prototype (clickable, needs a signed-in claude.ai browser) | https://claude.ai/artifact/4DkSWQshpyXVu2kVrbneRz (canvas v122) |
+| Live prototype (clickable, needs a signed-in claude.ai browser) | https://claude.ai/artifact/4DkSWQshpyXVu2kVrbneRz (canvas v123) |
 | Exported screenshots of every screen, dark and light (open without a browser session) | `screens/dark/`, `screens/light/`, index in `screens/README.md` |
 | Artboard sources (35 linked screens plus their light twins, plain HTML + CSS + a small script each) | `canvas/*.dc.html`, index in `canvas/canvas.json` |
 | Earlier exploration boards the prototype was distilled from (superseded) | `archive/explorations/` |
@@ -119,6 +119,28 @@ switcher, 10px cards and menus, 16px chips. Side menu 248px; top bar 56px.
 Reduced motion: every transition and the 3D floor spin are off under
 `prefers-reduced-motion` and under the app preference.
 
+### Page layout (Cube screens)
+
+Every screen inside the Cube shell uses one page container. The left edge is
+fixed; only the right edge varies by page width.
+
+| Rule | Value |
+| --- | --- |
+| Anchor | Left. The content starts one gutter from the side menu. Never center the page column (`margin: 0 auto`, `justify-content: center`). |
+| Gutter | `clamp(24px, 3vw, 48px)` on both sides (43px at 1440 wide, 24px at the 1024 minimum window). In the app: `(0.03 × window width).clamp(24, 48)`. |
+| Top padding | 28px above the page title on every page; 48px bottom padding. |
+| Reading width | Content is at most 1120px wide, so the container is at most 1120px plus two gutters. Applies to Overview, wallet pages, Send, Receive, Transfer, Tools, Split, Claim, Signing, Settings, Members, Marketplace, AI access and the gap screens. |
+| Wide width | Activity only: no maximum. The filter row, the table and the detail panel use the full width. The title, filters and first table column still start at the gutter. |
+| Page header | The same on every page: title, then the Cube and network line. A right-side item (Overview's network line, Activity's result count) sits at the container's right edge. |
+
+Inner layouts sit inside this container and start at its left edge. For example,
+Send and Receive keep their 680px form and 240px step column, with no centering.
+In the artboards the rule is the "page shell" block at the end of each
+`<helmet><style>`: `--gutter` and `--page-max` on `.tenshu`, applied to `.main .pg`
+(Activity: `.phd`, `.filters`, `.lst`). In the app, build one shared page
+container in `coincube-ui` and make every Cube screen use it. Do not give a
+screen its own padding or `max_width`.
+
 ## 5. Sequencing · one draft PR per step
 
 Each step is independently reviewable and ships behind nothing; the app keeps
@@ -170,6 +192,8 @@ review doc section in parentheses.
 - Keep both themes and reduced motion working on every screen you touch.
 - Window minimum 1024×768 (the compact-layout boards are in
   `archive/explorations/`).
+- Every Cube screen uses the shared page container (§4, "Page layout"): left-anchored,
+  one gutter, reading or wide width. No screen centers its own column.
 - Bitcoin Blake2b is a per-device toggle (App preferences › Developer). With it
   off, no Blake2b network, Cube, tab, card, copy or badge appears anywhere: not in
   the Launcher's network menu or Cube list, not in Create's network step, not in
