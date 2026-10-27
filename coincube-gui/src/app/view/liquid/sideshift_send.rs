@@ -70,7 +70,9 @@ pub fn sideshift_send_view<'a>(
         | SendPhase::FetchingQuote
         | SendPhase::CreatingShift
         | SendPhase::Sending => loading_view(phase),
-        SendPhase::Review => review_view(selected_network, shift, amount_input, error),
+        SendPhase::Review => {
+            review_view(selected_network, shift, amount_input, error, mask_amounts)
+        }
         SendPhase::Sent => sent_view(
             selected_network,
             shift,
@@ -588,6 +590,7 @@ fn review_view<'a>(
     shift: Option<&'a ShiftResponse>,
     amount_input: &'a str,
     error: Option<&'a str>,
+    mask_amounts: bool,
 ) -> Element<'a, SideshiftSendMessage> {
     let Some(shift) = shift else {
         return error_view(Some("Swap data missing."));
@@ -606,7 +609,7 @@ fn review_view<'a>(
         .style(theme::text::secondary),
     );
 
-    let info = info_card(shift, amount_input);
+    let info = info_card(shift, amount_input, mask_amounts);
 
     let warning = Container::new(
         text(format!(
@@ -911,34 +914,51 @@ mod status_presentation_tests {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn info_card(shift: &ShiftResponse, amount_input: &str) -> Element<'static, SideshiftSendMessage> {
+fn info_card(
+    shift: &ShiftResponse,
+    amount_input: &str,
+    mask_amounts: bool,
+) -> Element<'static, SideshiftSendMessage> {
     let mut rows = Column::new().spacing(8);
 
     if let Some(dep) = &shift.deposit_amount {
-        rows = rows.push(info_row("You send", &format!("{} Liquid USDt", dep)));
+        rows = rows.push(masked_info_row(
+            "You send",
+            &format!("{} Liquid USDt", dep),
+            mask_amounts,
+        ));
     } else if !amount_input.is_empty() {
-        rows = rows.push(info_row(
+        rows = rows.push(masked_info_row(
             "You send",
             &format!("{} Liquid USDt", amount_input),
+            mask_amounts,
         ));
     }
     if let Some(settle) = &shift.settle_amount {
-        rows = rows.push(info_row("Recipient receives", settle));
+        rows = rows.push(masked_info_row("Recipient receives", settle, mask_amounts));
     }
     if let Some(rate) = &shift.rate {
-        rows = rows.push(info_row("Rate", rate));
+        rows = rows.push(masked_info_row("Rate", rate, mask_amounts));
     }
     if let Some(min) = &shift.deposit_min {
-        rows = rows.push(info_row("Min", min));
+        rows = rows.push(masked_info_row("Min", min, mask_amounts));
     }
     if let Some(max) = &shift.deposit_max {
-        rows = rows.push(info_row("Max", max));
+        rows = rows.push(masked_info_row("Max", max, mask_amounts));
     }
     if let Some(fee) = &shift.network_fee_usd {
-        rows = rows.push(info_row("Network fee", &format!("${}", fee)));
+        rows = rows.push(masked_info_row(
+            "Network fee",
+            &format!("${}", fee),
+            mask_amounts,
+        ));
     }
     if let Some(aff) = &shift.affiliate_fee_percent {
-        rows = rows.push(info_row("Service fee", &format!("{}%", aff)));
+        rows = rows.push(masked_info_row(
+            "Service fee",
+            &format!("{}%", aff),
+            mask_amounts,
+        ));
     }
     if let Some(addr) = &shift.settle_address {
         rows = rows.push(info_row("To", addr));
@@ -950,6 +970,21 @@ fn info_card(shift: &ShiftResponse, amount_input: &str) -> Element<'static, Side
         .width(Length::Fill)
         .style(theme::card::simple)
         .into()
+}
+
+fn masked_info_row(
+    label: &str,
+    value: &str,
+    mask_amounts: bool,
+) -> Element<'static, SideshiftSendMessage> {
+    info_row(
+        label,
+        if mask_amounts {
+            "••••••"
+        } else {
+            value
+        },
+    )
 }
 
 fn info_row(label: &str, value: &str) -> Element<'static, SideshiftSendMessage> {
@@ -1095,5 +1130,90 @@ mod privacy_tests {
         );
         assert!(amount_hidden.contains("••••••"));
         assert!(!amount_hidden.contains("1.35 USDt"));
+    }
+
+    #[test]
+    fn sideshift_review_masks_quote_values_but_keeps_destination_visible() {
+        let shift = ShiftResponse {
+            id: "synthetic-review-swap".into(),
+            deposit_address: "synthetic-deposit".into(),
+            deposit_coin: None,
+            deposit_network: None,
+            settle_address: Some("synthetic-recipient".into()),
+            settle_coin: None,
+            settle_network: None,
+            deposit_min: Some("20.11".into()),
+            deposit_max: Some("120.22".into()),
+            deposit_amount: Some("91.27".into()),
+            settle_amount: Some("90.13".into()),
+            rate: Some("0.98765".into()),
+            expires_at: None,
+            created_at: None,
+            status: None,
+            affiliate_fee_percent: Some("0.55".into()),
+            network_fee_usd: Some("0.77".into()),
+        };
+        let render = |mask_amounts| {
+            sideshift_send_view(
+                &SendPhase::Review,
+                Some(&SideshiftNetwork::Ethereum),
+                &[],
+                &SideshiftShiftType::Fixed,
+                "",
+                "88.44",
+                0,
+                &[],
+                Some(&shift),
+                None,
+                None,
+                false,
+                None,
+                "usdt",
+                mask_amounts,
+            )
+        };
+        let hidden = capture::inspect(
+            "sideshift-review-hidden",
+            render(true),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(hidden.contains("••••••"));
+        for value in [
+            "91.27", "90.13", "0.98765", "20.11", "120.22", "0.77", "0.55",
+        ] {
+            assert!(!hidden.contains(value), "review leaked {value}");
+        }
+        assert!(hidden.contains("synthetic-recipient"));
+        assert!(hidden.contains("synthetic-review-swap"));
+
+        let mut variable_shift = shift.clone();
+        variable_shift.deposit_amount = None;
+        let fallback_hidden = capture::inspect(
+            "sideshift-review-fallback-hidden",
+            review_view(
+                Some(&SideshiftNetwork::Ethereum),
+                Some(&variable_shift),
+                "88.44",
+                None,
+                true,
+            ),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(!fallback_hidden.contains("88.44"));
+
+        let shown = capture::inspect(
+            "sideshift-review-shown",
+            render(false),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(shown.contains("91.27"));
+        assert!(shown.contains("90.13"));
+        assert!(shown.contains("0.98765"));
     }
 }
