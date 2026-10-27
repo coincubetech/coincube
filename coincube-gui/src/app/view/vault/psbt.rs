@@ -183,6 +183,7 @@ pub fn psbt_view<'a>(
     broadcast_ready: bool,
     recipient_identities: &'a [(usize, crate::services::branta::LookupResult)],
 ) -> Element<'a, Message> {
+    let mask_amounts = cache.balance_amounts_masked();
     let identity_summary = recipient_identity_summary(
         tx,
         network,
@@ -190,6 +191,7 @@ pub fn psbt_view<'a>(
         broadcast_ready,
         recipient_identities,
         cache.theme_mode,
+        mask_amounts,
     );
     let output_identities = if identity_summary.is_some() {
         &[][..]
@@ -201,7 +203,10 @@ pub fn psbt_view<'a>(
         cache,
         Column::new()
             .spacing(20)
-            .push(button::transparent(None, "‹ All PSBTs").on_press(Message::Close))
+            .push(
+                secondary_action(action_id(action_scope, "overview.back"), "‹ All PSBTs")
+                    .on_press(Message::Close),
+            )
             .push(
                 Row::new()
                     .align_y(Alignment::Center)
@@ -219,7 +224,12 @@ pub fn psbt_view<'a>(
                         _ => None,
                     }),
             )
-            .push(spend_header(tx, labels_editing, bitcoin_unit))
+            .push(spend_header_masked(
+                tx,
+                labels_editing,
+                bitcoin_unit,
+                mask_amounts,
+            ))
             .push_maybe(identity_summary)
             .push(spend_overview_view(
                 action_scope,
@@ -234,14 +244,15 @@ pub fn psbt_view<'a>(
             .push(
                 Column::new()
                     .spacing(20)
-                    .push(inputs_view(
+                    .push(history_inputs_view(
                         &tx.coins,
                         &tx.psbt.unsigned_tx,
                         &tx.labels,
                         labels_editing,
                         bitcoin_unit,
+                        mask_amounts,
                     ))
-                    .push(outputs_view_with_identities(
+                    .push(outputs_view_with_identities_masked(
                         &tx.psbt.unsigned_tx,
                         network,
                         &tx.change_indexes,
@@ -252,6 +263,7 @@ pub fn psbt_view<'a>(
                         false,
                         output_identities,
                         cache.theme_mode,
+                        mask_amounts,
                     )),
             )
             .push(if saved {
@@ -294,6 +306,7 @@ fn recipient_identity_summary<'a>(
     broadcast_ready: bool,
     identities: &'a [(usize, crate::services::branta::LookupResult)],
     theme_mode: coincube_ui::theme::palette::ThemeMode,
+    mask_amounts: bool,
 ) -> Option<Element<'a, Message>> {
     if !broadcast_ready || tx.status != SpendStatus::Pending || tx.is_send_to_self() {
         return None;
@@ -357,7 +370,13 @@ fn recipient_identity_summary<'a>(
                             .wrapping(Wrapping::WordOrGlyph)
                             .width(Length::Fill),
                     )
-                    .push(amount_with_unit(&output.value, bitcoin_unit).width(Length::Shrink)),
+                    .push(if mask_amounts {
+                        p2_regular("••••").into()
+                    } else {
+                        amount_with_unit(&output.value, bitcoin_unit)
+                            .width(Length::Shrink)
+                            .into()
+                    }),
             )
             .push(cards)
             .into(),
@@ -691,6 +710,15 @@ pub fn spend_header<'a>(
     labels_editing: &'a HashMap<String, form::Value<String>>,
     bitcoin_unit: BitcoinDisplayUnit,
 ) -> Element<'a, Message> {
+    spend_header_masked(tx, labels_editing, bitcoin_unit, false)
+}
+
+fn spend_header_masked<'a>(
+    tx: &'a SpendTx,
+    labels_editing: &'a HashMap<String, form::Value<String>>,
+    bitcoin_unit: BitcoinDisplayUnit,
+    mask_amounts: bool,
+) -> Element<'a, Message> {
     let txid = tx.psbt.unsigned_tx.compute_txid().to_string();
     Column::new()
         .spacing(20)
@@ -713,13 +741,11 @@ pub fn spend_header<'a>(
         .push(
             Column::new()
                 .push(if tx.is_send_to_self() {
-                    Container::new(h1("Self-transfer"))
+                    h1("Self-transfer").into()
+                } else if mask_amounts {
+                    h1("••••").into()
                 } else {
-                    Container::new(amount_with_size_and_unit(
-                        &tx.spend_amount,
-                        H1_SIZE,
-                        bitcoin_unit,
-                    ))
+                    amount_with_size_and_unit(&tx.spend_amount, H1_SIZE, bitcoin_unit).into()
                 })
                 .push(
                     Row::new()
@@ -730,10 +756,13 @@ pub fn spend_header<'a>(
                         } else {
                             None
                         })
-                        .push_maybe(
-                            tx.fee_amount
-                                .map(|fee| amount_with_size_and_unit(&fee, H3_SIZE, bitcoin_unit)),
-                        )
+                        .push_maybe(tx.fee_amount.map(|fee| {
+                            if mask_amounts {
+                                h3("••••").into()
+                            } else {
+                                amount_with_size_and_unit(&fee, H3_SIZE, bitcoin_unit).into()
+                            }
+                        }))
                         .push(text(" ").size(H3_SIZE))
                         .push(tx.min_feerate_vb().map(|rate| {
                             text(format!("(~{} sats/vbyte)", rate))
@@ -2771,6 +2800,7 @@ mod tests {
                 true,
                 &identities,
                 mode,
+                false,
             )
             .expect("current identity on a ready single-recipient proposal");
             let mounted = capture::inspect(
@@ -2778,11 +2808,29 @@ mod tests {
                 summary,
                 (1024, 768),
                 appearance,
-                theme,
+                theme.clone(),
             );
             assert!(mounted.contains("Recipient identity"));
             assert!(mounted.contains("Synthetic Merchant"));
             assert!(mounted.contains("View with Branta"));
+            let hidden = capture::inspect(
+                "psbt-detail-recipient-identity-hidden",
+                recipient_identity_summary(
+                    &tx,
+                    Network::Signet,
+                    BitcoinDisplayUnit::Sats,
+                    true,
+                    &identities,
+                    mode,
+                    true,
+                )
+                .expect("masked current identity"),
+                (1024, 768),
+                appearance,
+                theme,
+            );
+            assert!(hidden.contains("••••"));
+            assert!(hidden.contains("Synthetic Merchant"));
         }
         assert!(recipient_identity_summary(
             &tx,
@@ -2791,6 +2839,7 @@ mod tests {
             false,
             &identities,
             coincube_ui::theme::palette::ThemeMode::Dark,
+            false,
         )
         .is_none());
         ticket.set_test_enabled(false);
@@ -2801,6 +2850,7 @@ mod tests {
             true,
             &identities,
             coincube_ui::theme::palette::ThemeMode::Dark,
+            false,
         )
         .is_none());
     }

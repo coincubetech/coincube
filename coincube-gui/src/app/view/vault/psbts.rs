@@ -23,9 +23,9 @@ use crate::{
 use super::super::message::*;
 
 const PROPOSAL_SHARE: u16 = 4;
-const AMOUNT_SHARE: u16 = 3;
+const AMOUNT_SHARE: u16 = 4;
 const RECIPIENTS_SHARE: u16 = 2;
-const SIGNATURES_SHARE: u16 = 2;
+const SIGNATURES_SHARE: u16 = 3;
 const STATUS_SHARE: u16 = 3;
 
 pub fn import_psbt_success_view<'a>() -> Element<'a, Message> {
@@ -118,7 +118,11 @@ fn most_signed_path<'a>(
     recovery: impl Iterator<Item = &'a PathSpendInfo>,
 ) -> &'a PathSpendInfo {
     recovery.fold(primary, |best, path| {
-        if path.sigs_count > best.sigs_count {
+        // A recovery path can be further along with the same raw count when
+        // its threshold is lower. Keep primary only when progress really ties.
+        if path.sigs_count.saturating_mul(best.threshold)
+            > best.sigs_count.saturating_mul(path.threshold)
+        {
             path
         } else {
             best
@@ -134,8 +138,10 @@ fn spend_tx_list_view(
 ) -> Element<'_, Message> {
     let txid = tx.psbt.unsigned_tx.compute_txid().to_string();
     let proposal = tx
-        .labels
-        .get(&txid)
+        .is_single_payment()
+        .and_then(|outpoint| tx.labels.get(&outpoint.to_string()))
+        .filter(|label| !label.is_empty())
+        .or_else(|| tx.labels.get(&txid))
         .filter(|label| !label.is_empty())
         .cloned()
         .unwrap_or_else(|| format!("PSBT {}…", &txid[..8]));
@@ -168,7 +174,12 @@ fn spend_tx_list_view(
         most_signed_path(tx.sigs.primary_path(), tx.sigs.recovery_paths().values())
     });
     let signatures = format!(
-        "{} of {}",
+        "{} · {} of {}",
+        if std::ptr::eq(path, tx.sigs.primary_path()) {
+            "Primary"
+        } else {
+            "Recovery"
+        },
         path.sigs_count.min(path.threshold),
         path.threshold
     );
@@ -256,5 +267,13 @@ mod tests {
         let recovery = path(1, 2);
         let displayed = most_signed_path(&primary, std::iter::once(&recovery));
         assert_eq!((displayed.sigs_count, displayed.threshold), (1, 2));
+    }
+
+    #[test]
+    fn path_with_more_progress_wins_equal_signature_counts() {
+        let primary = path(1, 3);
+        let recovery = path(1, 2);
+        let displayed = most_signed_path(&primary, std::iter::once(&recovery));
+        assert!(std::ptr::eq(displayed, &recovery));
     }
 }

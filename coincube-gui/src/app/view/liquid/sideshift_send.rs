@@ -603,7 +603,7 @@ fn review_view<'a>(
     let title = Column::new().spacing(4).push(h3("Review Swap")).push(
         text(format!(
             "You will send Liquid USDt. SideShift delivers {} USDt to the recipient.",
-            network.standard_label()
+            network.network_name()
         ))
         .size(P1_SIZE)
         .style(theme::text::secondary),
@@ -674,19 +674,22 @@ fn sent_view<'a>(
 
     let status_label = sent_status_label(shift_status);
 
-    let (status_color, status_icon) = match shift_status {
-        Some(ShiftStatusKind::Settled) => (color::GREEN, "✓"),
-        Some(ShiftStatusKind::Expired | ShiftStatusKind::Error | ShiftStatusKind::Refunded) => {
-            (color::RED, "✗")
-        }
-        Some(ShiftStatusKind::Review | ShiftStatusKind::Refunding) => (color::ORANGE, "!"),
-        _ => (color::ORANGE, "⟳"),
-    };
+    let (status_style, status_icon): (fn(&theme::Theme) -> iced::widget::text::Style, &str) =
+        match shift_status {
+            Some(ShiftStatusKind::Settled) => (theme::text::success, "✓"),
+            Some(ShiftStatusKind::Expired | ShiftStatusKind::Error | ShiftStatusKind::Refunded) => {
+                (theme::text::error, "✗")
+            }
+            Some(ShiftStatusKind::Review | ShiftStatusKind::Refunding) => {
+                (theme::text::warning, "!")
+            }
+            _ => (theme::text::warning, "⟳"),
+        };
 
     let title = Column::new().spacing(4).push(h3("Swap Submitted")).push(
         text(format!(
-            "SideShift swap from Liquid USDt to {} USDt.",
-            network.standard_label()
+            "SideShift swap from Liquid USDt to {}.",
+            network.display_name()
         ))
         .size(P1_SIZE)
         .style(theme::text::secondary),
@@ -696,8 +699,8 @@ fn sent_view<'a>(
         Row::new()
             .spacing(6)
             .align_y(Alignment::Center)
-            .push(text(status_icon).size(P1_SIZE).color(status_color))
-            .push(text(status_label).size(P1_SIZE).color(status_color)),
+            .push(text(status_icon).size(P1_SIZE).style(status_style))
+            .push(text(status_label).size(P1_SIZE).style(status_style)),
     )
     .padding([8, 16])
     .style(theme::card::simple);
@@ -773,7 +776,7 @@ fn sent_view<'a>(
                                 text(label)
                                     .size(P2_SIZE)
                                     .style(theme::text::secondary)
-                                    .width(Length::Fixed(170.0)),
+                                    .width(Length::Fixed(80.0)),
                             )
                             .push(
                                 text(if mask_amounts {
@@ -843,19 +846,19 @@ fn swap_timeline(status: Option<&ShiftStatusKind>) -> Element<'static, Sideshift
         let complete =
             current.is_some_and(|step| index < step) || (index == 4 && current == Some(4));
         let active = current == Some(index) && !complete;
-        let (marker, tone) = if complete {
-            ("✓", color::GREEN)
+        let (marker, tone): (&str, fn(&theme::Theme) -> iced::widget::text::Style) = if complete {
+            ("✓", theme::text::success)
         } else if active {
-            ("●", color::ORANGE)
+            ("●", theme::text::warning)
         } else {
-            ("○", color::GREY_3)
+            ("○", theme::text::secondary)
         };
         stages = stages.push(
             Row::new()
                 .spacing(10)
                 .align_y(Alignment::Center)
-                .push(text(marker).size(P1_SIZE).color(tone))
-                .push(text(*label).size(P1_SIZE).color(tone)),
+                .push(text(marker).size(P1_SIZE).style(tone))
+                .push(text(*label).size(P1_SIZE).style(tone)),
         );
     }
 
@@ -938,13 +941,7 @@ fn info_card(
         rows = rows.push(masked_info_row("Recipient receives", settle, mask_amounts));
     }
     if let Some(rate) = &shift.rate {
-        rows = rows.push(masked_info_row("Rate", rate, mask_amounts));
-    }
-    if let Some(min) = &shift.deposit_min {
-        rows = rows.push(masked_info_row("Min", min, mask_amounts));
-    }
-    if let Some(max) = &shift.deposit_max {
-        rows = rows.push(masked_info_row("Max", max, mask_amounts));
+        rows = rows.push(info_row("Rate", rate));
     }
     if let Some(fee) = &shift.network_fee_usd {
         rows = rows.push(masked_info_row(
@@ -954,11 +951,7 @@ fn info_card(
         ));
     }
     if let Some(aff) = &shift.affiliate_fee_percent {
-        rows = rows.push(masked_info_row(
-            "Service fee",
-            &format!("{}%", aff),
-            mask_amounts,
-        ));
+        rows = rows.push(info_row("Service fee", &format!("{}%", aff)));
     }
     if let Some(addr) = &shift.settle_address {
         rows = rows.push(info_row("To", addr));
@@ -1180,11 +1173,13 @@ mod privacy_tests {
             theme::Theme::dark(),
         );
         assert!(hidden.contains("••••••"));
-        for value in [
-            "91.27", "90.13", "0.98765", "20.11", "120.22", "0.77", "0.55",
-        ] {
+        for value in ["91.27", "90.13", "0.77"] {
             assert!(!hidden.contains(value), "review leaked {}", value);
         }
+        assert!(hidden.contains("0.98765"));
+        assert!(hidden.contains("0.55%"));
+        assert!(!hidden.contains("20.11"));
+        assert!(!hidden.contains("120.22"));
         assert!(hidden.contains("synthetic-recipient"));
         assert!(hidden.contains("synthetic-review-swap"));
 
@@ -1228,6 +1223,38 @@ mod privacy_tests {
             );
             assert!(compact.contains("••••••"));
             assert!(compact.contains("synthetic-recipient"));
+        }
+    }
+
+    #[test]
+    fn sideshift_sent_status_mounts_in_dark_and_light_themes() {
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            for status in [
+                None,
+                Some(ShiftStatusKind::Processing),
+                Some(ShiftStatusKind::Settled),
+                Some(ShiftStatusKind::Refunded),
+            ] {
+                let mounted = capture::inspect(
+                    "sideshift-sent-status",
+                    sent_view(
+                        Some(&SideshiftNetwork::Ethereum),
+                        None,
+                        status.as_ref(),
+                        None,
+                        false,
+                    ),
+                    (1024, 768),
+                    appearance,
+                    theme.clone(),
+                );
+                assert!(mounted.contains("Swap status"));
+                assert!(mounted.contains("Waiting for deposit"));
+                assert!(mounted.contains("Settled"));
+            }
         }
     }
 }

@@ -55,7 +55,7 @@ fn action<'a>(
 fn row_action<'a>(
     id: Id,
     label: &'a str,
-    message: ConnectCubeMessage,
+    message: Option<ConnectCubeMessage>,
 ) -> Element<'a, ConnectCubeMessage> {
     ActionButton::new(
         id,
@@ -65,7 +65,7 @@ fn row_action<'a>(
     )
     .compact()
     .width(Length::Fixed(82.0))
-    .on_press(message)
+    .on_press_maybe(message)
     .into()
 }
 
@@ -170,12 +170,12 @@ pub fn cube_members_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCu
     }
 
     // Pending invites section
-    if !panel.loading && !panel.pending_invites.is_empty() {
+    if !panel.pending_invites.is_empty() {
         col = col.push(text::p1_bold("Pending Invites").style(theme::text::primary));
         col = col.push(iced::widget::Space::new().height(Length::Fixed(8.0)));
         col = col.push(iced::widget::rule::horizontal(1));
         for invite in &panel.pending_invites {
-            col = col.push(pending_invite_card(invite));
+            col = col.push(pending_invite_card(invite, panel.loading));
         }
         col = col.push(iced::widget::Space::new().height(Length::Fixed(28.0)));
     }
@@ -190,13 +190,13 @@ pub fn cube_members_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCu
         && panel.load_error.is_none()
     {
         col = col.push(empty_state());
-    } else if !panel.loading && !panel.members.is_empty() {
+    } else if !panel.members.is_empty() {
         col = col.push(text::p1_bold("Members").style(theme::text::primary));
         col = col.push(iced::widget::Space::new().height(Length::Fixed(8.0)));
         col = col.push(iced::widget::rule::horizontal(1));
         let vault_created_at = panel.vault_created_at.as_deref();
         for member in &panel.members {
-            col = col.push(member_card(member, vault_created_at));
+            col = col.push(member_card(member, vault_created_at, panel.loading));
         }
     }
 
@@ -269,6 +269,7 @@ fn invite_form<'a>(
 fn member_card<'a>(
     member: &'a CubeMember,
     vault_created_at: Option<&str>,
+    loading: bool,
 ) -> Element<'a, ConnectCubeMessage> {
     let email = &member.user.email;
     let initial = email
@@ -328,7 +329,9 @@ fn member_card<'a>(
     let remove_btn = row_action(
         remove_action_id(member_id),
         "Remove",
-        ConnectCubeMessage::Members(ConnectCubeMembersMessage::RemoveMember(member_id)),
+        (!loading).then_some(ConnectCubeMessage::Members(
+            ConnectCubeMembersMessage::RemoveMember(member_id),
+        )),
     );
 
     Column::new()
@@ -347,7 +350,10 @@ fn member_card<'a>(
         .into()
 }
 
-fn pending_invite_card<'a>(invite: &'a CubeInviteSummary) -> Element<'a, ConnectCubeMessage> {
+fn pending_invite_card<'a>(
+    invite: &'a CubeInviteSummary,
+    loading: bool,
+) -> Element<'a, ConnectCubeMessage> {
     let expiry_elem = expiry_element(&invite.expires_at);
 
     let info = Column::new()
@@ -371,7 +377,9 @@ fn pending_invite_card<'a>(invite: &'a CubeInviteSummary) -> Element<'a, Connect
         row = row.push(row_action(
             revoke_action_id(invite_id),
             "Revoke",
-            ConnectCubeMessage::Members(ConnectCubeMembersMessage::RevokeInvite(invite_id)),
+            (!loading).then_some(ConnectCubeMessage::Members(
+                ConnectCubeMembersMessage::RevokeInvite(invite_id),
+            )),
         ));
     }
 
@@ -561,8 +569,8 @@ mod tests {
                 )),
             ))
             .push(invite_form(panel))
-            .push(pending_invite_card(invite))
-            .push(member_card(member, Some("2026-10-01T00:00:00Z")))
+            .push(pending_invite_card(invite, false))
+            .push(member_card(member, Some("2026-10-01T00:00:00Z"), false))
             .push(error_banner("Network unavailable"))
             .push(remove_conflict_banner("Keys are signing an active Vault"))
             .spacing(12)

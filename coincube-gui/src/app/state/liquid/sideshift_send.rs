@@ -248,10 +248,13 @@ impl SideshiftSendFlow {
             let client = self.sideshift_client.clone();
             let shift_id = shift.id.clone();
             Task::perform(
-                async move { client.get_shift_status(&shift_id).await },
-                |result| {
+                async move {
+                    let result = client.get_shift_status(&shift_id).await;
+                    (shift_id, result)
+                },
+                |(shift_id, result)| {
                     Message::View(view::Message::SideshiftSend(
-                        SideshiftSendMessage::StatusUpdated(result),
+                        SideshiftSendMessage::StatusUpdated(shift_id, result),
                     ))
                 },
             )
@@ -551,7 +554,10 @@ impl SideshiftSendFlow {
 
             SideshiftSendMessage::PollStatus => self.poll_shift_status(),
 
-            SideshiftSendMessage::StatusUpdated(result) => {
+            SideshiftSendMessage::StatusUpdated(shift_id, result) => {
+                if self.shift.as_ref().is_none_or(|shift| shift.id != shift_id) {
+                    return Task::none();
+                }
                 if let Ok(status) = result {
                     let kind = ShiftStatusKind::from(status.status.as_str());
                     self.confirmed_settle_amount = if kind == ShiftStatusKind::Settled {

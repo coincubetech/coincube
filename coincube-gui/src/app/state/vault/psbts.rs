@@ -243,7 +243,8 @@ mod tests {
         // The shared PSBT is a self-transfer; make this rendering fixture an
         // outbound row with nonzero values so both amount fields are visible.
         tx.kind = TransactionKind::OutgoingPaymentBatch(vec![]);
-        tx.spend_amount = Amount::from_sat(123_456);
+        // Ten BTC in the default Sats unit exercises the narrow Amount cell.
+        tx.spend_amount = Amount::from_sat(1_000_000_000);
         tx.fee_amount = Some(Amount::from_sat(12_345));
         assert!(tx.spend_amount.to_sat() > 0);
         let raw_spend = tx
