@@ -254,7 +254,7 @@ mod tests {
     fn partial_recovery_signatures_are_visible_when_primary_has_none() {
         let primary = path(0, 2);
         let recovery = path(1, 2);
-        let displayed = most_signed_path(&primary, [&recovery].into_iter());
+        let displayed = most_signed_path(&primary, std::iter::once(&recovery));
         assert_eq!((displayed.sigs_count, displayed.threshold), (1, 2));
     }
 }

@@ -2733,6 +2733,79 @@ mod tests {
     }
 
     #[test]
+    fn recipient_identity_summary_is_visible_only_for_a_current_ready_proposal() {
+        let fixture = crate::app::state::vault::test_support::unified::fixture();
+        let mut input_coin = coin(1, 50_000, false);
+        input_coin.outpoint = fixture.psbt.unsigned_tx.input[0].previous_output;
+        let tx = SpendTx::new(
+            None,
+            fixture.psbt,
+            vec![input_coin],
+            &fixture.descriptor,
+            &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
+            Network::Signet,
+        );
+        let ticket = crate::services::branta::test_ticket(true);
+        let identity = crate::services::branta::test_identity(&ticket, "Synthetic Merchant");
+        let identities = [(
+            0,
+            crate::services::branta::LookupResult::Identified(vec![identity]),
+        )];
+
+        for (appearance, theme, mode) in [
+            (
+                "dark",
+                theme::Theme::dark(),
+                coincube_ui::theme::palette::ThemeMode::Dark,
+            ),
+            (
+                "light",
+                theme::Theme::light(),
+                coincube_ui::theme::palette::ThemeMode::Light,
+            ),
+        ] {
+            let summary = recipient_identity_summary(
+                &tx,
+                Network::Signet,
+                BitcoinDisplayUnit::Sats,
+                true,
+                &identities,
+                mode,
+            )
+            .expect("current identity on a ready single-recipient proposal");
+            let mounted = capture::inspect(
+                "psbt-detail-recipient-identity",
+                summary,
+                (1024, 768),
+                appearance,
+                theme,
+            );
+            assert!(mounted.contains("Recipient identity"));
+            assert!(mounted.contains("Synthetic Merchant"));
+            assert!(mounted.contains("View with Branta"));
+        }
+        assert!(recipient_identity_summary(
+            &tx,
+            Network::Signet,
+            BitcoinDisplayUnit::Sats,
+            false,
+            &identities,
+            coincube_ui::theme::palette::ThemeMode::Dark,
+        )
+        .is_none());
+        ticket.set_test_enabled(false);
+        assert!(recipient_identity_summary(
+            &tx,
+            Network::Signet,
+            BitcoinDisplayUnit::Sats,
+            true,
+            &identities,
+            coincube_ui::theme::palette::ThemeMode::Dark,
+        )
+        .is_none());
+    }
+
+    #[test]
     fn overview_preserves_disabled_gates_and_modal_hides_base_from_tab_order() {
         let fixture = crate::app::state::vault::test_support::unified::fixture();
         let policy = fixture.descriptor.policy();

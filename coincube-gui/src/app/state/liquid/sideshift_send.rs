@@ -555,7 +555,7 @@ impl SideshiftSendFlow {
                 if let Ok(status) = result {
                     let kind = ShiftStatusKind::from(status.status.as_str());
                     self.confirmed_settle_amount = if kind == ShiftStatusKind::Settled {
-                        status.settle_amount
+                        status.settle_amount.clone()
                     } else {
                         None
                     };

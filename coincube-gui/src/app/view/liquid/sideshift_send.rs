@@ -1183,7 +1183,7 @@ mod privacy_tests {
         for value in [
             "91.27", "90.13", "0.98765", "20.11", "120.22", "0.77", "0.55",
         ] {
-            assert!(!hidden.contains(value), "review leaked {value}");
+            assert!(!hidden.contains(value), "review leaked {}", value);
         }
         assert!(hidden.contains("synthetic-recipient"));
         assert!(hidden.contains("synthetic-review-swap"));
@@ -1215,5 +1215,19 @@ mod privacy_tests {
         assert!(shown.contains("91.27"));
         assert!(shown.contains("90.13"));
         assert!(shown.contains("0.98765"));
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            let compact = capture::inspect(
+                "sideshift-review-compact-hidden",
+                render(true),
+                (1024, 768),
+                appearance,
+                theme,
+            );
+            assert!(compact.contains("••••••"));
+            assert!(compact.contains("synthetic-recipient"));
+        }
     }
 }

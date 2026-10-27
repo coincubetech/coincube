@@ -253,20 +253,31 @@ mod tests {
             .fee_amount
             .map(|amount| amount.to_formatted_string_with_unit(BitcoinDisplayUnit::Sats));
         let rows = [tx];
-        for masked in [true, false] {
-            let mounted = capture::inspect(
-                "vault-psbts-privacy",
-                view::vault::psbts::psbts_view(&rows, BitcoinDisplayUnit::Sats, masked),
-                (1024, 768),
-                "dark",
-                theme::Theme::dark(),
-            );
-            assert!(mounted.contains("PSBT proposals"));
-            assert_eq!(mounted.contains(&raw_spend), !masked);
-            if let Some(fee) = &fee {
-                assert_eq!(mounted.contains(fee), !masked);
+        for size in [(1024, 768), (1440, 900)] {
+            for (appearance, theme) in [
+                ("dark", theme::Theme::dark()),
+                ("light", theme::Theme::light()),
+            ] {
+                for masked in [true, false] {
+                    let mounted = capture::inspect(
+                        if masked {
+                            "vault-psbts-private"
+                        } else {
+                            "vault-psbts-shown"
+                        },
+                        view::vault::psbts::psbts_view(&rows, BitcoinDisplayUnit::Sats, masked),
+                        size,
+                        appearance,
+                        theme.clone(),
+                    );
+                    assert!(mounted.contains("PSBT proposals"));
+                    assert_eq!(mounted.contains(&raw_spend), !masked);
+                    if let Some(fee) = &fee {
+                        assert_eq!(mounted.contains(fee), !masked);
+                    }
+                    assert_eq!(mounted.contains("••••••"), masked);
+                }
             }
-            assert_eq!(mounted.contains("••••••"), masked);
         }
     }
 
