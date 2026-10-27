@@ -183,7 +183,10 @@ pub fn psbt_view<'a>(
     broadcast_ready: bool,
     recipient_identities: &'a [(usize, crate::services::branta::LookupResult)],
 ) -> Element<'a, Message> {
-    let mask_amounts = cache.balance_amounts_masked();
+    // A pending PSBT is an authorization screen: Sign and Broadcast must
+    // always show the exact amounts the user is approving. Once the proposal
+    // is terminal, its detail is passive and follows the global privacy eye.
+    let mask_amounts = mask_passive_psbt_detail(cache.balance_amounts_masked(), &tx.status);
     let identity_summary = recipient_identity_summary(
         tx,
         network,
@@ -294,6 +297,10 @@ pub fn psbt_view<'a>(
             })
             .push(Space::new().height(10)),
     )
+}
+
+fn mask_passive_psbt_detail(balance_amounts_masked: bool, status: &SpendStatus) -> bool {
+    balance_amounts_masked && *status != SpendStatus::Pending
 }
 
 /// The detail screen shows a current Branta association for a single external
@@ -2602,6 +2609,19 @@ mod tests {
             label: label.to_string(),
             kind,
             state,
+        }
+    }
+
+    #[test]
+    fn pending_psbt_review_keeps_authorization_amounts_visible() {
+        assert!(!mask_passive_psbt_detail(true, &SpendStatus::Pending));
+        for status in [
+            SpendStatus::Broadcast,
+            SpendStatus::Spent,
+            SpendStatus::Deprecated,
+        ] {
+            assert!(mask_passive_psbt_detail(true, &status));
+            assert!(!mask_passive_psbt_detail(false, &status));
         }
     }
 
