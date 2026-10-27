@@ -5,7 +5,9 @@ an independent identifier, a PIN, and its own master seed even when its Vault is
 watch-only. The seed is displayed for offline backup and advancing requires an
 explicit written-backup confirmation. Encrypted persistence follows successful
 backend admission; Cube settings retain the exact ChainId and master fingerprint.
-The post-create continuation reopens the Cube through PIN verification.
+The post-create continuation reopens the Cube through PIN verification. A Cube
+restored from its Connect backup (see BTCB2_HOME_ENTRY.md) is written in the
+same shape, under the PIN chosen during the restore, and reopens the same way.
 
 Successful fork PIN verification keeps the decrypted signer in a private,
 one-use slot owned by that unlock screen. It does not put the seed in cloned UI

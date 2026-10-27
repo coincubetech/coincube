@@ -377,7 +377,8 @@ impl Installer {
         {
             return Err(Error::Unexpected(reason.to_string()));
         }
-        if matches!(&user_flow, UserFlow::ClaimBlake2b { .. })
+        if (matches!(&user_flow, UserFlow::ClaimBlake2b { .. })
+            || (chain.is_blake2b() && is_fork_restore_flow(&user_flow)))
             && coincube_client.as_ref().and_then(|c| c.token()).is_none()
         {
             return Err(Error::Unexpected(
@@ -418,13 +419,16 @@ impl Installer {
         }
         if chain.is_blake2b()
             && (remote_backend.is_some()
-                || !matches!(
+                // A restore mints its own Cube; it never lands in an open one.
+                || (cube_settings.is_some() && is_fork_restore_flow(&user_flow))
+                || !(matches!(
                     user_flow,
                     UserFlow::CreateWallet | UserFlow::ClaimBlake2b { .. }
-                ))
+                ) || is_fork_restore_flow(&user_flow)))
         {
             return Err(Error::Unexpected(
-                "Bitcoin Blake2b supports only a Connect-backed Vault creation or claim flow"
+                "Bitcoin Blake2b supports only a Connect-backed Vault creation, claim or \
+                 full Cube restore flow"
                     .to_string(),
             ));
         }
@@ -590,6 +594,7 @@ impl Installer {
             context.fresh_fork_cube = true;
             context.cube_id = Some(uuid::Uuid::new_v4().to_string());
         }
+        context.fork_restore = chain.is_blake2b() && is_fork_restore_flow(&user_flow);
         // A claim target is a Cube of its own — its own id, its own Connect
         // Cube, its own datadir (I7) — built from the source Cube's descriptor
         // and seed. Both are settled here rather than collected by a step:
@@ -757,6 +762,38 @@ impl Installer {
                         WalletAlias::default().into(),
                         Final::new().into(),
                     ],
+                    // A Bitcoin Blake2b Cube is always a PIN-protected seed
+                    // plus a Vault, so only the full restore exists for it.
+                    // Same tail as the fork's own creation flow: no
+                    // `DefineNode`, and the kit step's Connect session makes
+                    // `SelectBitcoindTypeStep` pick Connect's BTCB2 proxy.
+                    UserFlow::RestoreFromRecoveryKit { cube_uuid } if chain.is_blake2b() => {
+                        vec![
+                            RecoveryKitRestoreStep::new(
+                                RestoreScope::Full,
+                                network_str.clone(),
+                                cube_uuid,
+                            )
+                            .into(),
+                            RestorePinSetupStep::new().into(),
+                            CoincubeConnectStep::new().into(),
+                            SelectBitcoindTypeStep::new().into(),
+                            InternalBitcoindStep::new(&context.coincube_directory).into(),
+                            WalletAlias::default().into(),
+                            Final::new().into(),
+                        ]
+                    }
+                    UserFlow::RecoverOwnCubeWithPhone { cube_id, .. } if chain.is_blake2b() => {
+                        vec![
+                            OwnerKeychainRestoreStep::new(RestoreScope::Full, cube_id).into(),
+                            RestorePinSetupStep::new().into(),
+                            CoincubeConnectStep::new().into(),
+                            SelectBitcoindTypeStep::new().into(),
+                            InternalBitcoindStep::new(&context.coincube_directory).into(),
+                            WalletAlias::default().into(),
+                            Final::new().into(),
+                        ]
+                    }
                     // W13 — full restore: the kit carries both the seed
                     // and the descriptor, so the flow skips the editor +
                     // register-descriptor + backup-mnemonic steps that
@@ -1311,7 +1348,8 @@ fn seed_device_secret(
 ) -> Result<Option<coincube_core::seed_crypt::DeviceSecret>, Error> {
     // Fresh fork Cubes use PIN encryption plus the mandatory mnemonic backup.
     // Device sealing/migration is not enabled by this Connect-only capability.
-    if ctx.fresh_fork_cube {
+    // A restored fork Cube is written in exactly the shape a fresh one is.
+    if ctx.fresh_fork_cube || ctx.fork_restore {
         return Ok(None);
     }
     let cube_id = ctx.seed_cube_id();
@@ -1403,8 +1441,44 @@ fn validate_fork_creation_material(ctx: &Context) -> Result<(), Error> {
     Ok(())
 }
 
+/// The Bitcoin Blake2b restore flows: a full Cube, seed and Vault, from a
+/// password Recovery Kit or the owner's phone. Descriptor-only restores have
+/// no fork form — a BTCB2 Cube is never a Vault without its PIN-bound seed.
+fn is_fork_restore_flow(flow: &UserFlow) -> bool {
+    matches!(
+        flow,
+        UserFlow::RestoreFromRecoveryKit { .. }
+            | UserFlow::RecoverOwnCubeWithPhone {
+                full_cube: true,
+                ..
+            }
+    )
+}
+
+/// A fork restore rebuilds the Cube from what its restore steps decrypted:
+/// the seed, the PIN chosen for it, the Vault descriptor and the original
+/// Cube identity. Missing any of them would mint a Cube nothing can open, or
+/// a second Connect Cube instead of reactivating the deleted one.
+fn validate_fork_restore_material(ctx: &Context) -> Result<(), Error> {
+    if ctx.fork_restore
+        && (!ctx.bitcoin_config.chain.is_blake2b()
+            || ctx.recovered_signer.is_none()
+            || ctx.restore_pin.as_ref().is_none_or(|p| p.is_empty())
+            || ctx.descriptor.is_none()
+            || ctx.cube_id.as_deref().is_none_or(str::is_empty))
+    {
+        return Err(Error::Unexpected(
+            "This Bitcoin Blake2b restore is missing its seed, PIN, Vault or Cube identity. \
+             Start the restore again."
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn require_installable_chain(ctx: &Context) -> Result<(), Error> {
     validate_fork_creation_material(ctx)?;
+    validate_fork_restore_material(ctx)?;
     if let crate::chain::RuntimeSupport::Dormant { reason } =
         crate::chain::authenticated_connect_support(ctx.bitcoin_config.chain)
     {
@@ -1539,6 +1613,21 @@ pub async fn install_local_wallet(
     } else if ctx.fresh_fork_cube {
         persist_cube_master_seed(
             &signer.lock().unwrap(),
+            &ctx.coincube_directory,
+            ctx.bitcoin_config.chain,
+            seed_password(&ctx)?.as_str(),
+            ctx.seed_cube_id(),
+            seed_device_secret(&ctx)?.as_ref(),
+        )?;
+    } else if ctx.fork_restore {
+        // The same Cube master seed a fresh fork Cube gets — here the seed the
+        // restore decrypted, under the PIN chosen for it. `require_installable_chain`
+        // above has already refused a restore without one.
+        let recovered = ctx.recovered_signer.as_ref().ok_or_else(|| {
+            Error::Unexpected("This Bitcoin Blake2b restore is missing its seed".into())
+        })?;
+        persist_restored_fork_master_seed(
+            recovered,
             &ctx.coincube_directory,
             ctx.bitcoin_config.chain,
             seed_password(&ctx)?.as_str(),
@@ -1976,6 +2065,89 @@ pub(crate) fn persist_cube_master_seed(
     }
 }
 
+/// Persist a restored fork Cube's master seed, replacing the copy a local-only
+/// delete left behind.
+///
+/// Deleting a Cube keeps its seed-only master seed file, as on every chain. A
+/// restore reuses the deleted Cube's id, so that file is bound to the same id
+/// but possibly a different PIN — and [`crate::services::unlock::unlock_connect_fork`]
+/// opens the oldest file for a fingerprint, which a seed-only file always is.
+/// Left in place, it would make the new PIN read as wrong on every unlock.
+///
+/// It is replaced only when no Cube on this chain records the fingerprint;
+/// otherwise it is a live Cube's seed and the restore refuses. Removing it
+/// before the rewrite loses nothing: its fingerprint is the restored seed's,
+/// which the restore holds in memory and writes straight back.
+pub(crate) fn persist_restored_fork_master_seed(
+    signer: &Signer,
+    coincube_directory: &CoincubeDirectory,
+    chain: crate::chain::ChainId,
+    password: &str,
+    cube_id: &str,
+    device_secret: Option<&coincube_core::seed_crypt::DeviceSecret>,
+) -> Result<(), Error> {
+    let conflict = match persist_cube_master_seed(
+        signer,
+        coincube_directory,
+        chain,
+        password,
+        cube_id,
+        device_secret,
+    ) {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    let fingerprint = signer.fingerprint();
+    let path = coincube_core::signer::MasterSigner::mnemonics_folder_for_chain(
+        coincube_directory.path(),
+        chain,
+    )
+    .join(
+        coincube_core::signer::MnemonicFileName {
+            fingerprint,
+            descriptor_info: None,
+        }
+        .to_string(),
+    );
+    if !path.exists() {
+        return Err(conflict);
+    }
+    let cubes = match crate::app::settings::Settings::from_file(
+        &coincube_directory.network_directory(chain),
+    ) {
+        Ok(settings) => settings.cubes,
+        Err(SettingsError::NotFound) => Vec::new(),
+        Err(e) => {
+            return Err(Error::Unexpected(format!(
+                "Couldn't check whether this Cube's old seed file is still in use: {e}"
+            )))
+        }
+    };
+    if cubes
+        .iter()
+        .any(|cube| cube.master_signer_fingerprint == Some(fingerprint))
+    {
+        return Err(Error::Unexpected(
+            "A Cube on this device already uses this seed. Delete it before restoring this one."
+                .into(),
+        ));
+    }
+    info!("Replacing the seed file left by a deleted Cube before restoring it");
+    std::fs::remove_file(&path).map_err(|e| {
+        Error::Unexpected(format!(
+            "Couldn't replace the deleted Cube's seed file: {e}"
+        ))
+    })?;
+    persist_cube_master_seed(
+        signer,
+        coincube_directory,
+        chain,
+        password,
+        cube_id,
+        device_secret,
+    )
+}
+
 /// Persist a seed-only (Vault-less) restore and ensure its GUI config exists.
 /// Retries use the same exact-file credential and mnemonic check as fresh Cubes.
 fn persist_seed_only_install(
@@ -2408,6 +2580,204 @@ mod pending_rescan_tests {
         assert!(validate_fork_creation_material(&ctx).is_err());
         ctx.fresh_fork_seed_backed_up = true;
         assert!(validate_fork_creation_material(&ctx).is_ok());
+    }
+
+    fn fork_restore_installer(
+        flow: UserFlow,
+        token: Option<&str>,
+    ) -> Result<(Installer, Task<Message>), Error> {
+        let root = std::env::temp_dir().join(format!("fork-restore-{}", uuid::Uuid::new_v4()));
+        let client = token.map(|token| {
+            let mut client = crate::services::coincube::CoincubeClient::new();
+            client.set_token(token);
+            client
+        });
+        let result = Installer::try_new_for_chain(
+            CoincubeDirectory::new(root.clone()),
+            crate::chain::ChainId::BitcoinBlake2b,
+            None,
+            flow,
+            false,
+            None,
+            None,
+            None,
+            false,
+            client,
+        );
+        assert!(!root.exists(), "construction must not touch a datadir");
+        result
+    }
+
+    /// A fork Cube restores only as a whole Cube — seed and Vault — and only
+    /// with a Connect session, since both the backup and the chain data come
+    /// from Connect. Its steps are the fork creation tail: no `DefineNode`.
+    #[test]
+    fn fork_restore_is_admitted_only_as_an_authenticated_full_cube_restore() {
+        for flow in [
+            UserFlow::RestoreFromRecoveryKit {
+                cube_uuid: Some("restored".into()),
+            },
+            UserFlow::RecoverOwnCubeWithPhone {
+                cube_id: 7,
+                full_cube: true,
+            },
+        ] {
+            let (installer, task) = fork_restore_installer(flow.clone(), Some("synthetic-token"))
+                .unwrap_or_else(|e| panic!("{:?}: {}", flow, e));
+            drop(task);
+            assert!(installer.context.fork_restore);
+            assert!(!installer.context.fresh_fork_cube);
+            assert!(installer.context.claim_source.is_none());
+            assert!(installer.context.remote_backend.is_none());
+            assert!(installer.breez_client.is_none() && installer.spark_backend.is_none());
+            assert_eq!(installer.steps.len(), 7, "{:?}", flow);
+            assert!(!installer.steps[0].skip(&installer.context));
+
+            let error = fork_restore_installer(flow.clone(), None).err().unwrap();
+            assert!(
+                error
+                    .to_string()
+                    .contains("Connect authentication is required"),
+                "{:?}: {}",
+                flow,
+                error
+            );
+        }
+        for flow in [
+            UserFlow::RestoreVaultFromRecoveryKit,
+            UserFlow::RecoverOwnCubeWithPhone {
+                cube_id: 7,
+                full_cube: false,
+            },
+            UserFlow::RecoverInheritedVault {
+                cube_id: 7,
+                full_cube: true,
+            },
+            UserFlow::AddWallet,
+        ] {
+            let error = fork_restore_installer(flow.clone(), Some("synthetic-token"))
+                .err()
+                .unwrap_or_else(|| panic!("{:?} must be refused", flow));
+            assert!(
+                error.to_string().contains("full Cube restore"),
+                "{:?}: {}",
+                flow,
+                error
+            );
+        }
+
+        // Bitcoin keeps its own restore steps, `DefineNode` included.
+        let (bitcoin, _) = Installer::try_new_for_chain(
+            CoincubeDirectory::new(std::env::temp_dir().join("bitcoin-restore-steps-only")),
+            crate::chain::ChainId::Bitcoin,
+            None,
+            UserFlow::RestoreFromRecoveryKit { cube_uuid: None },
+            false,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        assert!(!bitcoin.context.fork_restore);
+        assert_eq!(bitcoin.steps.len(), 8);
+    }
+
+    #[test]
+    fn fork_restore_refuses_missing_seed_pin_vault_or_identity() {
+        let mut ctx = Context::new_for_chain(
+            crate::chain::ChainId::BitcoinBlake2b,
+            CoincubeDirectory::new(Default::default()),
+            RemoteBackend::None,
+            None,
+            None,
+        );
+        assert!(
+            validate_fork_restore_material(&ctx).is_ok(),
+            "not a restore"
+        );
+        ctx.fork_restore = true;
+        assert!(validate_fork_restore_material(&ctx).is_err());
+        ctx.recovered_signer = Some(Arc::new(Signer::generate(Network::Bitcoin).unwrap()));
+        ctx.restore_pin = Some(zeroize::Zeroizing::new("1234".into()));
+        ctx.cube_id = Some("restored".into());
+        assert!(validate_fork_restore_material(&ctx).is_err(), "no Vault");
+        // The mainnet Vault fixture `claim.rs` and `loader.rs` use.
+        ctx.descriptor = Some(
+            "tr([abcdef01]xpub6Eze7yAT3Y1wGrnzedCNVYDXUqa9NmHVWck5emBaTbXtURbe1NWZbK9bsz1TiVE7Cz341PMTfYgFw1KdLWdzcM1UMFTcdQfCYhhXZ2HJvTW/<0;1>/*,and_v(v:pk([abcdef01]xpub688Hn4wScQAAiYJLPg9yH27hUpfZAUnmJejRQBCiwfP5PEDzjWMNW1wChcninxr5gyavFqbbDjdV1aK5USJz8NDVjUy7FRQaaqqXHh5SbXe/<0;1>/*),older(52560)))#0mt7e93c"
+                .parse::<coincube_core::descriptors::CoincubeDescriptor>()
+                .unwrap(),
+        );
+        assert!(validate_fork_restore_material(&ctx).is_ok());
+        ctx.restore_pin = Some(zeroize::Zeroizing::new(String::new()));
+        assert!(validate_fork_restore_material(&ctx).is_err(), "empty PIN");
+    }
+
+    /// Local delete keeps a Cube's seed-only master seed file, and a restore
+    /// reuses the Cube's id. With a new PIN that leftover would shadow the
+    /// restored seed (the fork unlock opens the oldest file first), so the
+    /// restore replaces it — but never a seed a live Cube still records.
+    #[tokio::test]
+    async fn fork_restore_replaces_only_an_orphaned_seed_file() {
+        use crate::services::unlock::{unlock_connect_fork, CubeLocation, PinOutcome};
+        let chain = crate::chain::ChainId::BitcoinBlake2b;
+        let root_path =
+            std::env::temp_dir().join(format!("fork-restore-seed-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(root_path.clone());
+        let signer = Signer::generate(Network::Bitcoin).unwrap();
+        let cube = crate::app::settings::CubeSettings::new_with_raw_id(
+            "restored".into(),
+            "Restored".into(),
+            chain,
+        )
+        .with_master_signer(signer.fingerprint());
+        let opens_with = |pin: &str| {
+            matches!(
+                unlock_connect_fork(&CubeLocation::new(&root_path, &cube), pin),
+                Ok(PinOutcome::Unlock(_))
+            )
+        };
+
+        // Fresh: nothing on disk yet.
+        persist_restored_fork_master_seed(&signer, &root, chain, "1111", &cube.id, None).unwrap();
+        assert!(opens_with("1111"));
+        // A retry with the same credentials is accepted as-is.
+        persist_restored_fork_master_seed(&signer, &root, chain, "1111", &cube.id, None).unwrap();
+        assert!(opens_with("1111"));
+
+        // A live Cube on this chain records the fingerprint: refuse, untouched.
+        let live = cube.clone();
+        crate::app::settings::update_settings_file(&root.network_directory(chain), move |mut s| {
+            s.cubes.push(live);
+            Some(s)
+        })
+        .await
+        .unwrap();
+        let error =
+            persist_restored_fork_master_seed(&signer, &root, chain, "2222", &cube.id, None)
+                .err()
+                .unwrap();
+        assert!(
+            error.to_string().contains("already uses this seed"),
+            "{}",
+            error
+        );
+        assert!(opens_with("1111"));
+
+        // The Cube was deleted locally: its leftover file is replaced under
+        // the new PIN, and the old PIN no longer opens it.
+        crate::app::settings::update_settings_file(&root.network_directory(chain), |mut s| {
+            s.cubes.clear();
+            Some(s)
+        })
+        .await
+        .unwrap();
+        persist_restored_fork_master_seed(&signer, &root, chain, "2222", &cube.id, None).unwrap();
+        assert!(opens_with("2222"));
+        assert!(!opens_with("1111"));
+
+        std::fs::remove_dir_all(root_path).unwrap();
     }
 
     #[test]

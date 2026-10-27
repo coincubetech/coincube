@@ -317,6 +317,160 @@ async fn actual_fork_install_pin_unlock_and_authenticated_reopen_are_chain_bound
     std::fs::remove_dir_all(root_path).unwrap();
 }
 
+/// A Cube deleted on this device but kept on Connect comes back from its
+/// Recovery Kit under a new PIN. The seed file its local delete left behind
+/// (same Cube id, old PIN) must not shadow the restored seed: the Cube is
+/// minted with its original id and the fork PIN screen opens it with the new
+/// PIN only.
+#[tokio::test]
+async fn fork_restore_install_reopens_the_original_cube_under_its_new_pin() {
+    let server = ActivationServer::start(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    })
+    .await;
+    let chain = ChainId::BitcoinBlake2b;
+    let prefix = "/api/v1/esplora/bitcoin-blake2b/mainnet";
+    let root_path =
+        std::env::temp_dir().join(format!("btcb2-restore-reopen-{}", uuid::Uuid::new_v4()));
+    let root = CoincubeDirectory::new(root_path.clone());
+    enable_beta(&root);
+    let mut client = CoincubeClient::new();
+    client.base_url = server.base_url.clone();
+    client.set_token("synthetic-activation-token");
+    let (mut installer, _) = Installer::try_new_for_chain(
+        root.clone(),
+        chain,
+        None,
+        UserFlow::RestoreFromRecoveryKit {
+            cube_uuid: Some("restored-cube".into()),
+        },
+        false,
+        None,
+        None,
+        None,
+        false,
+        Some(client.clone()),
+    )
+    .unwrap();
+    assert!(installer.context.fork_restore);
+
+    // What the local delete left: the Cube's master seed under its old PIN.
+    let recovered = Arc::new(Signer::generate(bitcoin::Network::Bitcoin).unwrap());
+    let fingerprint = recovered.fingerprint();
+    persist_cube_master_seed(&recovered, &root, chain, "1357", "restored-cube", None).unwrap();
+
+    // What the Recovery Kit and PIN steps leave in the context.
+    installer.context.recovered_signer = Some(recovered);
+    installer.context.restore_pin = Some(zeroize::Zeroizing::new("2468".to_string()));
+    installer.context.cube_id = Some("restored-cube".into());
+    installer.context.cube_name = Some("Restored".into());
+    installer.context.restore_source = Some(RestoreSource::PasswordKit);
+    installer.context.descriptor = Some(DESCRIPTOR.parse().unwrap());
+    installer.context.bitcoin_backend =
+        Some(BitcoinBackend::Esplora(coincubed::config::EsploraConfig {
+            addr: format!("{}{prefix}", server.base_url),
+            token: None,
+            fallback_addr: None,
+            fallback_token: None,
+            secondary_fallback_addr: None,
+            secondary_fallback_token: None,
+        }));
+    let wallet_id = WalletId::generate(installer.context.descriptor.as_ref().unwrap());
+    let settings = install_local_wallet(
+        installer.context.clone(),
+        wallet_id,
+        installer.signer.clone(),
+    )
+    .await
+    .unwrap();
+    assert!(!root_path.join("bitcoin").exists());
+
+    // The tab-level exit seam mints the Cube back under its original id.
+    let identity = crate::gui::tab::installer_exit_identity(&installer).unwrap();
+    assert_eq!(identity.uuid, "restored-cube");
+    let seed = crate::gui::tab::installer_exit_seed(&installer).unwrap();
+    assert_eq!(seed.master_signer_fingerprint, fingerprint);
+    let vault = crate::app::settings::VaultIdentity {
+        wallet_id: settings.wallet_id(),
+        fingerprint: None,
+    };
+    let cube = crate::gui::tab::find_or_create_cube(
+        &root.network_directory(chain),
+        Some(&vault),
+        &Some("Restored".to_string()),
+        chain,
+        None,
+        Some(identity),
+        Some(&seed),
+    )
+    .await
+    .unwrap();
+    assert_eq!(cube.id, "restored-cube");
+    assert_eq!(cube.master_signer_fingerprint, Some(fingerprint));
+    assert!(
+        crate::app::settings::Settings::from_file(&root.network_directory(chain))
+            .unwrap()
+            .cubes
+            .iter()
+            .any(|c| c.id == "restored-cube" && c.network == chain)
+    );
+
+    let location = crate::services::unlock::CubeLocation::new(&root_path, &cube);
+    assert!(matches!(
+        crate::services::unlock::unlock_connect_fork(&location, "1357"),
+        Ok(crate::services::unlock::PinOutcome::Wrong)
+    ));
+    let mut entry = crate::pin_entry::PinEntry::new(
+        cube,
+        root_path.clone(),
+        crate::pin_entry::PinEntrySuccess::LoadApp {
+            datadir: root.clone(),
+            config: crate::app::Config::new(false),
+            network: bitcoin::Network::Bitcoin,
+            internal_bitcoind: None,
+            backup: None,
+            wallet_settings: Some(settings.clone()),
+            connect_client: Some(client.clone()),
+        },
+        None,
+    );
+    for (i, digit) in "2468".chars().enumerate() {
+        let _ = entry.update(crate::pin_entry::Message::PinInput(
+            crate::pin_input::Message::DigitChanged(i, digit.to_string()),
+        ));
+    }
+    let messages = output(entry.update(crate::pin_entry::Message::Submit)).await;
+    assert!(matches!(
+        messages.as_slice(),
+        [crate::pin_entry::Message::ForkClassified(
+            _,
+            Ok(crate::pin_entry::Verdict::Unlock)
+        )]
+    ));
+    for message in messages {
+        assert!(matches!(
+            output(entry.update(message)).await.as_slice(),
+            [crate::pin_entry::Message::PinVerified]
+        ));
+    }
+    let unlocked = entry.take_fork_signer().unwrap();
+    assert_eq!(
+        unlocked.fingerprint(&bitcoin::secp256k1::Secp256k1::signing_only()),
+        fingerprint
+    );
+    let (daemon, node, _) =
+        crate::loader::start_connect_daemon(root.clone(), chain, settings, client)
+            .await
+            .unwrap();
+    assert!(node.is_none());
+    daemon.stop().await.unwrap();
+    assert_eq!(server.bitcoin.load(std::sync::atomic::Ordering::Relaxed), 0);
+    std::fs::remove_dir_all(root_path).unwrap();
+}
+
 #[tokio::test]
 async fn feature_refusals_precede_anchor_requests_and_all_fork_filesystem_writes() {
     for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {

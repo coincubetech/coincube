@@ -131,6 +131,10 @@ pub struct Context {
     /// A new fork Cube needs its own PIN-bound master seed, even for a watch-only Vault.
     pub fresh_fork_cube: bool,
     pub fresh_fork_seed_backed_up: bool,
+    /// A fork Cube being rebuilt, seed and Vault, from its Connect backup (a
+    /// password Recovery Kit or the owner's phone). Set at construction from
+    /// the flow, so the install boundary knows what material it must carry.
+    pub fork_restore: bool,
     /// How the descriptor being installed was restored, if it was.
     ///
     /// Not derivable from the other fields. A `Full` restore leaves
@@ -411,6 +415,7 @@ impl Context {
             recovered_signer: None,
             fresh_fork_cube: false,
             fresh_fork_seed_backed_up: false,
+            fork_restore: false,
             restore_source: None,
             restored_wallet_birthday: None,
             bitcoind_is_external: true,

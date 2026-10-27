@@ -336,9 +336,11 @@ async fn an_unauthenticated_claim_is_refused_before_anything_is_built() {
 }
 
 /// Every other flow stays refused on the fork chain — the gate was widened to
-/// exactly one more flow, not opened.
+/// the claim and the full-Cube Connect restores
+/// (`fork_restore_is_admitted_only_as_an_authenticated_full_cube_restore`), not
+/// opened.
 #[tokio::test]
-async fn the_fork_chain_still_refuses_every_flow_but_creation_and_claim() {
+async fn the_fork_chain_still_refuses_every_flow_but_creation_claim_and_full_restore() {
     // One process-global session slot: serialise with every other test that
     // opens one, or a sibling's `open` replaces this source's PIN.
     let _guard = crate::app::session::test_guard();
@@ -346,7 +348,6 @@ async fn the_fork_chain_still_refuses_every_flow_but_creation_and_claim() {
     for flow in [
         UserFlow::AddWallet,
         UserFlow::RestoreVaultFromRecoveryKit,
-        UserFlow::RestoreFromRecoveryKit { cube_uuid: None },
         UserFlow::RecoverInheritedVault {
             cube_id: 1,
             full_cube: true,

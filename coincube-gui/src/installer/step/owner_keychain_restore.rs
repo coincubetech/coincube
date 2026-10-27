@@ -237,6 +237,25 @@ impl Step for OwnerKeychainRestoreStep {
                 return false;
             }
         }
+        // A phone backup names the chain it was sealed for. A Bitcoin Blake2b
+        // backup restored into another chain, or another chain's into Bitcoin
+        // Blake2b, would bind the seed to the wrong directory and Connect
+        // network. The password-kit step refuses the same mismatch through
+        // `validate_against_selection`.
+        let chain = ctx.bitcoin_config.chain;
+        let crosses_fork = |network: &str| {
+            network != chain.api_str()
+                && (chain.is_blake2b()
+                    || crate::chain::ChainId::from_api_str(network).is_some_and(|c| c.is_blake2b()))
+        };
+        if seed.as_ref().is_some_and(|s| crosses_fork(&s.cube.network))
+            || vault_blob.is_some_and(|d| crosses_fork(&d.cube.network))
+        {
+            self.phase = Phase::Error {
+                message: "This phone backup belongs to a different Cube or chain.".into(),
+            };
+            return false;
+        }
         let staged = match stage_restore(
             ctx.bitcoin_config.network,
             self.scope,
@@ -479,5 +498,50 @@ mod tests {
                 .receive_index,
             45
         );
+    }
+
+    /// A phone backup sealed for one side of the fork never restores into the
+    /// other: the seed would be bound to the wrong chain's directory.
+    #[test]
+    fn owner_phone_refuses_a_backup_from_across_the_fork() {
+        let fork_context = || {
+            Context::new_for_chain(
+                ChainId::BitcoinBlake2b,
+                CoincubeDirectory::new(
+                    std::env::temp_dir().join("owner-fork-restore-context-only"),
+                ),
+                RemoteBackend::None,
+                None,
+                None,
+            )
+        };
+        let ready = |network: &str| {
+            let mut seed = seed_blob();
+            seed.cube.network = network.into();
+            let mut step = OwnerKeychainRestoreStep::new(RestoreScope::Full, 7);
+            step.phase = Phase::Ready {
+                seed: Some(seed),
+                descriptor: None,
+            };
+            step
+        };
+
+        let mut mainnet_into_fork = ready("mainnet");
+        let mut ctx = fork_context();
+        assert!(!mainnet_into_fork.apply(&mut ctx));
+        assert!(matches!(mainnet_into_fork.phase, Phase::Error { .. }));
+        assert!(ctx.recovered_signer.is_none());
+        assert!(ctx.cube_id.is_none());
+
+        let mut fork_into_mainnet = ready(ChainId::BitcoinBlake2b.api_str());
+        let mut ctx = context();
+        assert!(!fork_into_mainnet.apply(&mut ctx));
+        assert!(ctx.recovered_signer.is_none());
+
+        let mut fork_into_fork = ready(ChainId::BitcoinBlake2b.api_str());
+        let mut ctx = fork_context();
+        assert!(fork_into_fork.apply(&mut ctx));
+        assert!(ctx.recovered_signer.is_some());
+        assert_eq!(ctx.cube_id.as_deref(), Some("restored-cube"));
     }
 }

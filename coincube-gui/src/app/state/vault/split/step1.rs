@@ -165,6 +165,14 @@ pub fn journal_directory(root: &Path, digest: sha256::Hash) -> PathBuf {
     root.join(digest.to_string())
 }
 
+/// Whether this Vault has any Split journal on disk, open or closed. Read-only:
+/// the Home delete modal uses it to warn that deleting the Cube removes them.
+pub fn has_journal(datadir: &CoincubeDirectory, wallet: &WalletId) -> bool {
+    std::fs::read_dir(journal_root(datadir, wallet))
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false)
+}
+
 /// #625 F2 (A1 = A): the tombstone a split closed in its step-2 dead end
 /// leaves in its journal directory (`step2::close`). The journal stays, with
 /// the recorded signed step 2, so a new split of the same source is still
