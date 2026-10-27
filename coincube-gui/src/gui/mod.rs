@@ -1584,6 +1584,12 @@ impl GUI {
         let Some(sheet) = self.connect_sheet.take() else {
             return Task::none();
         };
+        if matches!(
+            sheet.page,
+            ConnectSheetPage::Sections(ConnectSheetSection::Duress)
+        ) {
+            self.scrub_connect_sheet_duress(&sheet.origin);
+        }
         if self.overlay_origin_is_current(&sheet.origin) {
             if let Some(focus) = self.connect_return_focus(&sheet.origin) {
                 return iced_runtime::task::widget(
@@ -1701,7 +1707,14 @@ impl GUI {
             return Task::none();
         };
         if !self.overlay_origin_is_current(&sheet.origin) {
-            self.connect_sheet = None;
+            if let Some(sheet) = self.connect_sheet.take() {
+                if matches!(
+                    sheet.page,
+                    ConnectSheetPage::Sections(ConnectSheetSection::Duress)
+                ) {
+                    self.scrub_connect_sheet_duress(&sheet.origin);
+                }
+            }
             return Task::none();
         }
         match message {
@@ -1711,6 +1724,10 @@ impl GUI {
             ConnectSheetMessage::Close => self.close_connect_sheet(),
             ConnectSheetMessage::SelectSection(section) => {
                 let origin = sheet.origin.clone();
+                let was_duress = matches!(
+                    sheet.page,
+                    ConnectSheetPage::Sections(ConnectSheetSection::Duress)
+                );
                 let section = if section == ConnectSheetSection::Duress
                     && !self
                         .connect_panel(&origin)
@@ -1720,12 +1737,22 @@ impl GUI {
                 } else {
                     section
                 };
+                if was_duress && section != ConnectSheetSection::Duress {
+                    self.scrub_connect_sheet_duress(&origin);
+                }
                 if let Some(sheet) = &mut self.connect_sheet {
                     sheet.page = ConnectSheetPage::Sections(section);
                 }
                 self.load_connect_section(&origin, section)
             }
             ConnectSheetMessage::OpenAuthentication { create_account } => {
+                if matches!(
+                    sheet.page,
+                    ConnectSheetPage::Sections(ConnectSheetSection::Duress)
+                ) {
+                    let origin = sheet.origin.clone();
+                    self.scrub_connect_sheet_duress(&origin);
+                }
                 if let Some(sheet) = &mut self.connect_sheet {
                     sheet.page = ConnectSheetPage::Authentication;
                 }
@@ -1754,6 +1781,14 @@ impl GUI {
                         | crate::app::view::ConnectAccountMessage::ComparePlans(_)
                         | crate::app::view::ConnectAccountMessage::RenewCurrentPlan
                 );
+                if plan_navigation
+                    && matches!(
+                        sheet.page,
+                        ConnectSheetPage::Sections(ConnectSheetSection::Duress)
+                    )
+                {
+                    self.scrub_connect_sheet_duress(&origin);
+                }
                 let inner = match origin.source {
                     tab::PreferencesSource::Home => {
                         tab::Message::Launch(home::Message::View(if plan_navigation {
@@ -1777,6 +1812,21 @@ impl GUI {
                 }
                 task
             }
+        }
+    }
+
+    fn scrub_connect_sheet_duress(&mut self, origin: &OverlayOrigin) {
+        let Some(tab) = self
+            .panes
+            .get_mut(origin.pane)
+            .and_then(|pane| pane.tabs.iter_mut().find(|tab| tab.id == origin.tab_id))
+        else {
+            return;
+        };
+        match &mut tab.state {
+            tab::State::Home(home) => home.connect_account.scrub_duress_dialogs(),
+            tab::State::App(app) => app.connect_sheet_account_mut().scrub_duress_dialogs(),
+            _ => {}
         }
     }
 
@@ -1804,6 +1854,7 @@ impl GUI {
         if let Some(sheet) = &mut self.connect_sheet {
             sheet.page = ConnectSheetPage::Sections(ConnectSheetSection::Account);
         }
+        self.scrub_connect_sheet_duress(&origin);
         if let Some(tab) = self
             .panes
             .get_mut(origin.pane)
@@ -1814,7 +1865,6 @@ impl GUI {
                 tab::State::App(app) => app.connect_sheet_account_mut(),
                 _ => return,
             };
-            account.scrub_duress_dialogs();
             account.active_sub = crate::app::menu::ConnectSubMenu::Overview;
         }
     }
@@ -2014,7 +2064,14 @@ impl GUI {
             .as_ref()
             .is_some_and(|sheet| !self.overlay_origin_is_current(&sheet.origin))
         {
-            self.connect_sheet = None;
+            if let Some(sheet) = self.connect_sheet.take() {
+                if matches!(
+                    sheet.page,
+                    ConnectSheetPage::Sections(ConnectSheetSection::Duress)
+                ) {
+                    self.scrub_connect_sheet_duress(&sheet.origin);
+                }
+            }
         }
         // A completed classifier is an emergency even if Back closed its
         // PinEntry or a different Cube reopened at the same tab id. The proof
