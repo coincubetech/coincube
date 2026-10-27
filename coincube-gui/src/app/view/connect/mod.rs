@@ -4872,6 +4872,7 @@ mod renewal_banner_tests {
         account.active_sub = ConnectSubMenu::Duress;
         account.plan.as_mut().unwrap().entitlements.duress = true;
         account.plan.as_mut().unwrap().entitlements.duress_alerts = true;
+        account.features.as_mut().unwrap().duress_enabled = Some(true);
         account.duress_cubes = Some(Vec::new());
         account.duress_contacts.contacts =
             Some(vec![crate::services::coincube::DuressAlertContact {
@@ -4889,23 +4890,23 @@ mod renewal_banner_tests {
             ("dark", theme::Theme::dark()),
             ("light", theme::Theme::light()),
         ] {
-            // The Duress route is still outside the new Connect sheet until
-            // #870. Mount its production presenter inside the sheet's 40px
-            // horizontal content padding at the 1024px minimum instead of
-            // claiming this is a live sheet screenshot.
+            // Exercise the live sheet route with synthetic account/contact
+            // data at the 1024px minimum, in both supported appearances.
             let sheet_padding = iced::Padding {
                 top: 28.0,
                 right: 40.0,
                 bottom: 40.0,
                 left: 40.0,
             };
-            let inspection = capture::inspect_wide_content(
-                "duress-status-content-mount",
-                container(duress_ux(&account)).padding(sheet_padding).into(),
+            let inspection = capture::inspect_full_window(
+                "duress-status-sheet",
+                connect_sheet(
+                    &account,
+                    ConnectSheetPage::Sections(ConnectSheetSection::Duress),
+                ),
                 (1024, 768),
                 appearance,
                 theme,
-                711,
             );
             assert!(inspection.contains("What duress mode does"));
             assert!(inspection.contains("Set up a Cube Recovery Kit for each Cube"));
