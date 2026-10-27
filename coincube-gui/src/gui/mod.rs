@@ -1630,9 +1630,16 @@ impl GUI {
         let Some(origin) = self.overlay_origin(focus) else {
             return Task::none();
         };
-        if self.connect_panel(&origin).is_none() {
+        let Some(account) = self.connect_panel(&origin) else {
             return Task::none();
-        }
+        };
+        let section = if section == ConnectSheetSection::Duress
+            && !(account.is_authenticated() && account.show_duress())
+        {
+            ConnectSheetSection::Account
+        } else {
+            section
+        };
         let initialize = self.connect_panel(&origin).is_some_and(|account| {
             matches!(
                 &account.step,
@@ -1704,6 +1711,15 @@ impl GUI {
             ConnectSheetMessage::Close => self.close_connect_sheet(),
             ConnectSheetMessage::SelectSection(section) => {
                 let origin = sheet.origin.clone();
+                let section = if section == ConnectSheetSection::Duress
+                    && !self
+                        .connect_panel(&origin)
+                        .is_some_and(|account| account.is_authenticated() && account.show_duress())
+                {
+                    ConnectSheetSection::Account
+                } else {
+                    section
+                };
                 if let Some(sheet) = &mut self.connect_sheet {
                     sheet.page = ConnectSheetPage::Sections(section);
                 }
@@ -1764,6 +1780,45 @@ impl GUI {
         }
     }
 
+    /// Feature, plan, and auth completions arrive through ordinary Pane
+    /// messages as well as sheet actions. Reconcile the retained sheet route
+    /// after every dispatch so a revoked Duress surface cannot reappear if a
+    /// later response turns its gate back on.
+    fn reconcile_connect_sheet_duress(&mut self) {
+        let Some(sheet) = self.connect_sheet.as_ref() else {
+            return;
+        };
+        if !matches!(
+            sheet.page,
+            ConnectSheetPage::Sections(ConnectSheetSection::Duress)
+        ) {
+            return;
+        }
+        let origin = sheet.origin.clone();
+        if self
+            .connect_panel(&origin)
+            .is_some_and(|account| account.is_authenticated() && account.show_duress())
+        {
+            return;
+        }
+        if let Some(sheet) = &mut self.connect_sheet {
+            sheet.page = ConnectSheetPage::Sections(ConnectSheetSection::Account);
+        }
+        if let Some(tab) = self
+            .panes
+            .get_mut(origin.pane)
+            .and_then(|pane| pane.tabs.iter_mut().find(|tab| tab.id == origin.tab_id))
+        {
+            let account = match &mut tab.state {
+                tab::State::Home(home) => &mut home.connect_account,
+                tab::State::App(app) => app.connect_sheet_account_mut(),
+                _ => return,
+            };
+            account.scrub_duress_dialogs();
+            account.active_sub = crate::app::menu::ConnectSubMenu::Overview;
+        }
+    }
+
     fn load_connect_section(
         &mut self,
         origin: &OverlayOrigin,
@@ -1783,6 +1838,13 @@ impl GUI {
                 tab::State::App(app) => (app.connect_sheet_account_mut(), true),
                 _ => return Task::none(),
             };
+            let section = if section == ConnectSheetSection::Duress
+                && !(account.is_authenticated() && account.show_duress())
+            {
+                ConnectSheetSection::Account
+            } else {
+                section
+            };
             account.active_sub = match section {
                 ConnectSheetSection::Account | ConnectSheetSection::RecoveryServices => {
                     ConnectSubMenu::Overview
@@ -1790,6 +1852,7 @@ impl GUI {
                 ConnectSheetSection::PlanBilling => ConnectSubMenu::PlanBilling,
                 ConnectSheetSection::Contacts => ConnectSubMenu::Contacts,
                 ConnectSheetSection::DevicesSecurity => ConnectSubMenu::Security,
+                ConnectSheetSection::Duress => ConnectSubMenu::Duress,
             };
             if !account.is_authenticated() {
                 return Task::none();
@@ -1803,6 +1866,11 @@ impl GUI {
                 ConnectSheetSection::DevicesSecurity => {
                     load_security_data(&account.client, account.session_generation())
                 }
+                ConnectSheetSection::Duress => Task::batch([
+                    account.reload_duress_contacts(),
+                    account.reload_duress_cubes(),
+                    account.reload_duress_state(),
+                ]),
             };
             (task, app)
         };
@@ -2380,6 +2448,7 @@ impl GUI {
         // Dispatch may return early (notably for in-App account messages).
         // Keep those returns inside the helper so invalidation tasks always run.
         let routed = self.update_message(message);
+        self.reconcile_connect_sheet_duress();
         if let Some((pane_id, tab_id)) = unlock_duress_target {
             self.seal_verified_seed_export_duress_surface(pane_id, tab_id);
         }
@@ -2964,6 +3033,7 @@ impl GUI {
                             crate::app::menu::ConnectSubMenu::Overview
                                 | crate::app::menu::ConnectSubMenu::PlanBilling
                                 | crate::app::menu::ConnectSubMenu::Security
+                                | crate::app::menu::ConnectSubMenu::Duress
                                 | crate::app::menu::ConnectSubMenu::Contacts
                         )
                     )))
@@ -2995,7 +3065,7 @@ impl GUI {
                         ConnectSheetSection::DevicesSecurity
                     }
                     crate::app::menu::ConnectSubMenu::Contacts => ConnectSheetSection::Contacts,
-                    crate::app::menu::ConnectSubMenu::Duress => unreachable!(),
+                    crate::app::menu::ConnectSubMenu::Duress => ConnectSheetSection::Duress,
                 };
                 let signed_out_launcher = section == ConnectSheetSection::Account
                     && self.overlay_origin(None).is_some_and(|origin| {

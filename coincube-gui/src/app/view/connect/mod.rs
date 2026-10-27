@@ -184,7 +184,7 @@ pub const CONTENT_SCROLL_ID: &str = "tenshu.connect.content-scroll";
 pub const EMAIL_INPUT_ID: &str = "tenshu.connect.auth.email";
 pub const OTP_INPUT_ID: &str = "tenshu.connect.auth.otp";
 
-/// The five account-wide sections shown in the Connect sheet. Recovery
+/// Account-wide sections shown in the Connect sheet. Recovery
 /// services has its own section here without changing the older Home menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectSheetSection {
@@ -192,6 +192,7 @@ pub enum ConnectSheetSection {
     PlanBilling,
     Contacts,
     DevicesSecurity,
+    Duress,
     RecoveryServices,
 }
 
@@ -226,10 +227,18 @@ pub fn connect_sheet<'a>(
     );
     let show_auth =
         !signed_in && (matches!(page, ConnectSheetPage::Authentication) || auth_in_progress);
-    let active_section = match page {
+    let requested_section = match page {
         ConnectSheetPage::Sections(section) => section,
         ConnectSheetPage::Authentication => ConnectSheetSection::Account,
     };
+    // The sheet can outlive a feature refresh or account change. Never keep
+    // painting a hidden Duress route after its entitlement or launch gate drops.
+    let active_section =
+        if requested_section == ConnectSheetSection::Duress && !(signed_in && acct.show_duress()) {
+            ConnectSheetSection::Account
+        } else {
+            requested_section
+        };
     let title = if signed_in {
         "Connect account"
     } else {
@@ -288,6 +297,7 @@ pub fn connect_sheet<'a>(
             ConnectSheetSection::PlanBilling => plan_billing_ux(acct),
             ConnectSheetSection::Contacts => contacts::contacts_ux(acct),
             ConnectSheetSection::DevicesSecurity => security_ux(acct),
+            ConnectSheetSection::Duress => duress_ux(acct),
             ConnectSheetSection::RecoveryServices => recovery_services_ux(acct),
         };
         let mut column = Column::new().spacing(12);
@@ -302,7 +312,7 @@ pub fn connect_sheet<'a>(
         signed_out_section_ux(active_section)
     };
     let body: Element<ConnectSheetMessage> = if !show_auth {
-        let sections = [
+        let mut sections = vec![
             (
                 "tenshu.connect.section.account",
                 ConnectSheetSection::Account,
@@ -319,11 +329,14 @@ pub fn connect_sheet<'a>(
                 "tenshu.connect.section.security",
                 ConnectSheetSection::DevicesSecurity,
             ),
-            (
-                "tenshu.connect.section.recovery",
-                ConnectSheetSection::RecoveryServices,
-            ),
         ];
+        if signed_in && acct.show_duress() {
+            sections.push(("tenshu.connect.section.duress", ConnectSheetSection::Duress));
+        }
+        sections.push((
+            "tenshu.connect.section.recovery",
+            ConnectSheetSection::RecoveryServices,
+        ));
         let mut navigation = Column::new().spacing(6).height(Length::Fill);
         for (id, section) in sections {
             let selected = section == active_section;
@@ -332,6 +345,7 @@ pub fn connect_sheet<'a>(
                 ConnectSheetSection::PlanBilling => credit_card_icon(),
                 ConnectSheetSection::Contacts => people_icon(),
                 ConnectSheetSection::DevicesSecurity => laptop_icon(),
+                ConnectSheetSection::Duress => shield_check_icon(),
                 ConnectSheetSection::RecoveryServices => shield_check_icon(),
             };
             let label = tenshu_text::body(section_label(section));
@@ -447,6 +461,7 @@ fn section_label(section: ConnectSheetSection) -> &'static str {
         ConnectSheetSection::PlanBilling => "Plan & billing",
         ConnectSheetSection::Contacts => "Contacts",
         ConnectSheetSection::DevicesSecurity => "Devices & security",
+        ConnectSheetSection::Duress => "Duress mode",
         ConnectSheetSection::RecoveryServices => "Recovery services",
     }
 }
@@ -3859,6 +3874,12 @@ mod renewal_banner_tests {
         .expect("software renderer for Connect sheet");
         let size = iced::Size::new(1000.0, 712.0);
         let mut account = ConnectAccountPanel::new();
+        let mut entitled = plan(PlanTier::Pro, PlanStatus::Active, None);
+        entitled.entitlements.duress = true;
+        account.plan = Some(entitled);
+        let mut features = features_purchasing(Some(true));
+        features.duress_enabled = Some(true);
+        account.features = Some(features);
 
         for (name, step, page) in [
             (
@@ -3904,6 +3925,11 @@ mod renewal_banner_tests {
                 ConnectSheetPage::Sections(ConnectSheetSection::DevicesSecurity),
             ),
             (
+                "duress",
+                ConnectFlowStep::Dashboard,
+                ConnectSheetPage::Sections(ConnectSheetSection::Duress),
+            ),
+            (
                 "recovery",
                 ConnectFlowStep::Dashboard,
                 ConnectSheetPage::Sections(ConnectSheetSection::RecoveryServices),
@@ -3937,6 +3963,65 @@ mod renewal_banner_tests {
                 assert!(labels.iter().any(|label| label == "Account"));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn connect_sheet_duress_entry_obeys_account_gate() {
+        use iced::advanced::renderer::Headless;
+
+        let renderer = <iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer");
+        let mut account = dashboard_panel();
+        account.plan.as_mut().unwrap().entitlements.duress = true;
+        account.features.as_mut().unwrap().duress_enabled = Some(true);
+        let labels = visible_labels(
+            connect_sheet(
+                &account,
+                ConnectSheetPage::Sections(ConnectSheetSection::Duress),
+            ),
+            &renderer,
+        );
+        assert!(labels.iter().any(|label| label == "Duress mode"));
+        assert!(labels.iter().any(|label| label == "What duress mode does"));
+
+        // A server kill switch or lost entitlement hides both navigation and
+        // stale route contents, including an in-flight enrollment screen.
+        for (entitled, enabled) in [(true, false), (false, true)] {
+            account.plan.as_mut().unwrap().entitlements.duress = entitled;
+            account.features.as_mut().unwrap().duress_enabled = Some(enabled);
+            let labels = visible_labels(
+                connect_sheet(
+                    &account,
+                    ConnectSheetPage::Sections(ConnectSheetSection::Duress),
+                ),
+                &renderer,
+            );
+            assert!(!labels.iter().any(|label| label == "Duress mode"));
+            assert!(!labels.iter().any(|label| label == "What duress mode does"));
+            assert!(labels
+                .iter()
+                .any(|label| label == "Signed in on this device"));
+        }
+
+        account.step = ConnectFlowStep::CheckingDuress {
+            status: DuressGateStatus::Checking,
+        };
+        let labels = visible_labels(
+            connect_sheet(
+                &account,
+                ConnectSheetPage::Sections(ConnectSheetSection::Duress),
+            ),
+            &renderer,
+        );
+        assert!(!labels.iter().any(|label| label == "Duress mode"));
+        assert!(!labels
+            .iter()
+            .any(|label| label == "Signed in on this device"));
     }
 
     fn plan(tier: PlanTier, status: PlanStatus, renewal_at: Option<&str>) -> ConnectPlan {

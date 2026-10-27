@@ -44,6 +44,168 @@ fn sign_in_home(gui: &mut GUI, pane_id: pane_grid::Pane) {
     home.connect_account.step = crate::app::state::connect::ConnectFlowStep::Dashboard;
 }
 
+fn set_duress_gate(gui: &mut GUI, pane_id: pane_grid::Pane, entitled: bool, enabled: bool) {
+    use crate::services::coincube::{
+        BillingCycle, ConnectPlan, FeaturesResponse, PlanEntitlements, PlanStatus, PlanTier,
+    };
+    let tab::State::Home(home) = &mut gui.panes.get_mut(pane_id).unwrap().tabs[0].state else {
+        unreachable!()
+    };
+    home.connect_account.plan = Some(ConnectPlan {
+        plan: if entitled {
+            PlanTier::Pro
+        } else {
+            PlanTier::Free
+        },
+        status: PlanStatus::Active,
+        renewal_at: None,
+        entitlements: PlanEntitlements {
+            duress: entitled,
+            ..PlanEntitlements::default()
+        },
+        billing_cycle: Some(BillingCycle::Monthly),
+        plan_provenance: None,
+    });
+    home.connect_account.features = Some(FeaturesResponse {
+        plans: Vec::new(),
+        pricing_schema_version: None,
+        purchasing_enabled: None,
+        marketplace_enabled: None,
+        liquid_enabled: None,
+        buy_sell_enabled: None,
+        p2p_enabled: None,
+        duress_enabled: Some(enabled),
+        bitcoin_blake2b_enabled: None,
+    });
+}
+
+#[test]
+fn legacy_duress_route_and_sheet_selection_respect_gate() {
+    with_runtime("connect-duress-route", |path, _runtime| {
+        let root = CoincubeDirectory::new(path.to_path_buf());
+        let mut gui = launcher_gui(&root);
+        let pane_id = gui.focus.unwrap();
+        let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
+        sign_in_home(&mut gui, pane_id);
+        set_duress_gate(&mut gui, pane_id, true, true);
+
+        drop(gui.update(Message::Pane(
+            pane_id,
+            pane::Message::tab(
+                tab_id,
+                tab::Message::Launch(home::Message::View(home::ViewMessage::GoToSection(
+                    home::HomeSection::Connect(crate::app::menu::ConnectSubMenu::Duress),
+                ))),
+            ),
+        )));
+        assert_eq!(
+            gui.connect_sheet.as_ref().unwrap().page,
+            ConnectSheetPage::Sections(ConnectSheetSection::Duress)
+        );
+        assert_focus_target_mounted(
+            &gui,
+            iced::advanced::widget::Id::new("tenshu.connect.section.duress"),
+        );
+        let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[0].state else {
+            unreachable!()
+        };
+        assert_eq!(
+            home.connect_account.active_sub,
+            crate::app::menu::ConnectSubMenu::Duress
+        );
+
+        let (generation, revoked) = {
+            let tab::State::Home(home) = &mut gui.panes.get_mut(pane_id).unwrap().tabs[0].state
+            else {
+                unreachable!()
+            };
+            home.connect_account.duress_enroll = Some(app::state::connect::DuressEnrollState {
+                step: app::state::connect::DuressEnrollStep::SetDuressPin,
+                duress_pin: "test-pin".into(),
+                duress_pin_confirm: "test-pin".into(),
+                all_clear: "test-all-clear".into(),
+                crk_password: "test-crk-password".into(),
+                delay: crate::services::duress::enroll::DuressDelay::default(),
+                memorized: false,
+                submitting: false,
+                error: None,
+                pending_code: Some("test-code".into()),
+            });
+            home.connect_account.duress_disable = Some(app::state::connect::DuressDisableState {
+                pin: "test-regular-pin".into(),
+                ..Default::default()
+            });
+            let mut revoked = home.connect_account.features.clone().unwrap();
+            revoked.duress_enabled = Some(false);
+            (home.connect_account.session_generation(), revoked)
+        };
+        drop(
+            gui.update(Message::ConnectSheet(ConnectSheetMessage::Account(
+                view::ConnectAccountMessage::FeaturesLoaded(Some(revoked), generation),
+            ))),
+        );
+        assert_eq!(
+            gui.connect_sheet.as_ref().unwrap().page,
+            ConnectSheetPage::Sections(ConnectSheetSection::Account)
+        );
+        let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[0].state else {
+            unreachable!()
+        };
+        assert_eq!(
+            home.connect_account.active_sub,
+            crate::app::menu::ConnectSubMenu::Overview
+        );
+        assert!(home.connect_account.duress_enroll.is_none());
+        assert!(home.connect_account.duress_disable.is_none());
+
+        drop(
+            gui.update(Message::ConnectSheet(ConnectSheetMessage::SelectSection(
+                ConnectSheetSection::Duress,
+            ))),
+        );
+        assert_eq!(
+            gui.connect_sheet.as_ref().unwrap().page,
+            ConnectSheetPage::Sections(ConnectSheetSection::Account)
+        );
+        set_duress_gate(&mut gui, pane_id, false, true);
+        drop(
+            gui.update(Message::ConnectSheet(ConnectSheetMessage::SelectSection(
+                ConnectSheetSection::Duress,
+            ))),
+        );
+        assert_eq!(
+            gui.connect_sheet.as_ref().unwrap().page,
+            ConnectSheetPage::Sections(ConnectSheetSection::Account)
+        );
+        drop(gui.update(Message::ConnectSheet(ConnectSheetMessage::Close)));
+        assert!(gui.connect_sheet.is_none());
+
+        // A stale legacy route cannot expose Duress during login, even with
+        // an old in-memory entitlement and feature payload.
+        let tab::State::Home(home) = &mut gui.panes.get_mut(pane_id).unwrap().tabs[0].state else {
+            unreachable!()
+        };
+        home.connect_account.step = app::state::connect::ConnectFlowStep::Login {
+            email: String::new(),
+            loading: false,
+        };
+        set_duress_gate(&mut gui, pane_id, true, true);
+        drop(gui.update(Message::Pane(
+            pane_id,
+            pane::Message::tab(
+                tab_id,
+                tab::Message::Launch(home::Message::View(home::ViewMessage::GoToSection(
+                    home::HomeSection::Connect(crate::app::menu::ConnectSubMenu::Duress),
+                ))),
+            ),
+        )));
+        assert_eq!(
+            gui.connect_sheet.as_ref().unwrap().page,
+            ConnectSheetPage::Sections(ConnectSheetSection::Account)
+        );
+    });
+}
+
 fn launcher_connect_entry(gui: &mut GUI, pane_id: pane_grid::Pane, tab_id: usize) {
     drop(gui.update(Message::Pane(
         pane_id,

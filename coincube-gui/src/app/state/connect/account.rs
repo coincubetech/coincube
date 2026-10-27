@@ -1777,6 +1777,7 @@ impl ConnectAccountPanel {
                         self.selected_billing_cycle = cycle;
                     }
                     self.plan = plan;
+                    self.leave_hidden_duress_route();
                 }
             }
 
@@ -2211,6 +2212,7 @@ impl ConnectAccountPanel {
             ConnectAccountMessage::FeaturesLoaded(features, gen) => {
                 if gen == self.session_generation {
                     self.features = features;
+                    self.leave_hidden_duress_route();
                 }
             }
 
@@ -2999,6 +3001,15 @@ impl ConnectAccountPanel {
         }
         if let Some(mut d) = self.duress_disable.take() {
             d.zeroize_secrets();
+        }
+    }
+
+    /// A Connect sheet can remain open while an account plan or launch flag
+    /// changes. Its Duress route uses the same hidden-surface rule as Home.
+    fn leave_hidden_duress_route(&mut self) {
+        if matches!(self.active_sub, ConnectSubMenu::Duress) && !self.show_duress() {
+            self.scrub_duress_dialogs();
+            self.active_sub = ConnectSubMenu::Overview;
         }
     }
 
