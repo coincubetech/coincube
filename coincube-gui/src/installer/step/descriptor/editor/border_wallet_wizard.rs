@@ -1132,9 +1132,7 @@ mod presentation_tests {
     }
 
     fn capture(
-        directory: &str,
-        state: &str,
-        name: &str,
+        path: &std::path::Path,
         element: &Element<'_, Message>,
         tree: &Tree,
         node: &layout::Node,
@@ -1142,7 +1140,7 @@ mod presentation_tests {
         theme: &theme::Theme,
         size: Size,
     ) {
-        std::fs::create_dir_all(directory).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         iced::advanced::Renderer::reset(renderer, Rectangle::with_size(size));
         let style = iced::advanced::renderer::Style {
             text_color: theme.colors.shell.ink,
@@ -1157,16 +1155,7 @@ mod presentation_tests {
             &Rectangle::with_size(size),
         );
         let pixels = renderer.screenshot(Size::new(1024, 768), 1.0, theme.colors.shell.background);
-        image::save_buffer(
-            std::path::Path::new(directory).join(format!(
-                "border-wallet-synthetic-{state}-{name}-1024x768.png"
-            )),
-            &pixels,
-            1024,
-            768,
-            image::ColorType::Rgba8,
-        )
-        .unwrap();
+        image::save_buffer(path, &pixels, 1024, 768, image::ColorType::Rgba8).unwrap();
     }
 
     #[tokio::test]
@@ -1272,9 +1261,9 @@ mod presentation_tests {
             assert!(first_bounds.y >= top_viewport.y + 4.0);
             if let Ok(directory) = std::env::var("BORDER_WALLET_CAPTURE_DIR") {
                 capture(
-                    &directory,
-                    "top-left",
-                    name,
+                    &std::path::Path::new(&directory).join(format!(
+                        "border-wallet-synthetic-top-left-{name}-1024x768.png"
+                    )),
                     &element,
                     &tree,
                     &node,
@@ -1459,9 +1448,9 @@ mod presentation_tests {
 
             if let Ok(directory) = std::env::var("BORDER_WALLET_CAPTURE_DIR") {
                 capture(
-                    &directory,
-                    "bottom-right",
-                    name,
+                    &std::path::Path::new(&directory).join(format!(
+                        "border-wallet-synthetic-bottom-right-{name}-1024x768.png"
+                    )),
                     &element,
                     &tree,
                     &node,
@@ -1490,9 +1479,9 @@ mod presentation_tests {
             assert!(error_modal.y >= 0.0 && error_modal.y + error_modal.height <= size.height);
             if let Ok(directory) = std::env::var("BORDER_WALLET_CAPTURE_DIR") {
                 capture(
-                    &directory,
-                    "error-line",
-                    name,
+                    &std::path::Path::new(&directory).join(format!(
+                        "border-wallet-synthetic-error-line-{name}-1024x768.png"
+                    )),
                     &error_element,
                     &error_tree,
                     &error_node,
