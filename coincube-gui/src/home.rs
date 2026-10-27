@@ -4808,20 +4808,18 @@ impl Home {
                                     let total_count = self.total_cube_count();
                                     let at_limit = total_count >= self.cube_limit();
 
-                                    // Center the children: the create form is a
-                                    // `center_x(Fill)` container, so without this
-                                    // the form spans/centers full width while the
-                                    // shrink-width remote-cube rows default to the
-                                    // left edge — leaving the list and form
-                                    // misaligned.
-                                    let mut col =
-                                        Column::new().spacing(20).align_x(Alignment::Center);
-
                                     // The form owns the whole screen when it is
                                     // shown — never stacked under the remote-Cube
                                     // list, which is what made this screen read as
                                     // two pages crammed into one.
                                     if self.showing_create_form() {
+                                        // Center the form's children: the create
+                                        // form is a `center_x(Fill)` container, and
+                                        // the limit notice under it should sit in
+                                        // the same column.
+                                        let mut col = Column::new()
+                                            .spacing(20)
+                                            .align_x(Alignment::Center);
                                         if at_limit && !remote_for_net.is_empty() {
                                             col = col.push(
                                                 Container::new(
@@ -4841,6 +4839,14 @@ impl Home {
                                         }
                                         col.into()
                                     } else {
+                                        // Laid out exactly like the local-Cube list:
+                                        // not centred child by child, so the 500px
+                                        // cards and buttons share a left edge and the
+                                        // action buttons hang off the right, while the
+                                        // outer column centres the block. Centring each
+                                        // child put the wider rows off from the
+                                        // buttons whenever only Connect Cubes remain.
+                                        let mut col = Column::new().spacing(20);
                                         for rc in &remote_for_net {
                                             col = col.push(remote_cube_list_item(rc));
                                         }
