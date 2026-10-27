@@ -18,6 +18,7 @@ use coincube_core::{
     },
 };
 use iced::{
+    advanced::widget::Id,
     alignment::{Horizontal, Vertical},
     widget::{scrollable, Space},
     Length, Task,
@@ -32,7 +33,7 @@ use coincube_ui::{
         text::{p1_bold, p1_regular, text},
     },
     icon, theme,
-    widget::{Button, Column, Container, Element, Row, TextInput},
+    widget::{action::Action, Column, Container, Element, Row, TextInput},
 };
 
 use std::sync::{Arc, Mutex};
@@ -46,6 +47,9 @@ use crate::{
     },
     signer::Signer,
 };
+
+/// The global Tab handler reveals focus here after the outer app scroll area.
+pub(crate) const BORDER_WALLET_GRID_SCROLL_ID: &str = "tenshu.border-wallet.grid-scroll";
 
 /// Wizard step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,11 +86,8 @@ impl std::fmt::Debug for BorderWalletWizardMessage {
             Self::Next => write!(f, "Next"),
             Self::Previous => write!(f, "Previous"),
             Self::GeneratePhrase => write!(f, "GeneratePhrase"),
-            Self::ToggleCellSelection(r, c) => f
-                .debug_tuple("ToggleCellSelection")
-                .field(r)
-                .field(c)
-                .finish(),
+            // The ordered pattern is the key. Coordinates must not enter logs.
+            Self::ToggleCellSelection(_, _) => write!(f, "ToggleCellSelection(<redacted>)"),
             Self::UndoLastCell => write!(f, "UndoLastCell"),
             Self::ClearPattern => write!(f, "ClearPattern"),
             Self::ConfirmEnrollment => write!(f, "ConfirmEnrollment"),
@@ -106,6 +107,9 @@ pub struct BorderWalletWizard {
     // Grid + pattern
     grid: Option<WordGrid>,
     pattern: OrderedPattern,
+    // Opaque, stable focus IDs: coordinate-bearing IDs would reveal the
+    // pattern if a future generic message logger recorded FocusAction events.
+    grid_focus_ids: Vec<Id>,
 
     // Derived data — only the checksum word is retained, never the full mnemonic.
     checksum_word: Option<String>,
@@ -143,6 +147,9 @@ impl BorderWalletWizard {
             phrase_valid: false,
             grid: None,
             pattern: OrderedPattern::new(),
+            grid_focus_ids: (0..WordGrid::ROWS * WordGrid::COLS)
+                .map(|_| Id::unique())
+                .collect(),
             checksum_word: None,
             enrollment: None,
             allow_random_grid_phrase,
@@ -369,6 +376,149 @@ impl BorderWalletWizard {
         Message::BorderWalletWizard(msg)
     }
 
+    fn primary_control<'a>(
+        id: &'static str,
+        label: &'static str,
+        message: Option<BorderWalletWizardMessage>,
+    ) -> Action<'a, Message> {
+        button::primary_action(id, None, label, Message::FocusAction)
+            .on_press_maybe(message.map(Message::BorderWalletWizard))
+    }
+
+    fn secondary_control<'a>(
+        id: &'static str,
+        label: &'static str,
+        message: Option<BorderWalletWizardMessage>,
+    ) -> Action<'a, Message> {
+        button::secondary_action(id, None, label, Message::FocusAction)
+            .on_press_maybe(message.map(Message::BorderWalletWizard))
+    }
+
+    fn back_control<'a>(id: &'static str, message: Message) -> Action<'a, Message> {
+        Action::new(
+            id,
+            Row::new()
+                .spacing(8)
+                .align_y(Vertical::Center)
+                .push(icon::previous_icon())
+                .push(text("Back")),
+            Message::FocusAction,
+        )
+        .padding(8)
+        .style(|theme, status| {
+            let mut style = theme::button::transparent(theme, status);
+            style.text_color = theme.colors.shell.ink;
+            style
+        })
+        .on_press(message)
+    }
+
+    fn modal_style(theme: &theme::Theme) -> iced::widget::container::Style {
+        iced::widget::container::Style {
+            background: Some(iced::Background::Color(theme.colors.shell.panel)),
+            border: iced::Border {
+                color: theme.colors.shell.line,
+                width: 1.0,
+                radius: 12.0.into(),
+            },
+            text_color: Some(theme.colors.shell.ink),
+            ..Default::default()
+        }
+    }
+
+    fn grid_cell_style(
+        theme: &theme::Theme,
+        status: iced::widget::button::Status,
+        selected: bool,
+    ) -> iced::widget::button::Style {
+        let shell = theme.colors.shell;
+        iced::widget::button::Style {
+            background: Some(iced::Background::Color(if selected {
+                shell.accent
+            } else {
+                shell.panel
+            })),
+            text_color: if selected {
+                iced::color!(0x201407)
+            } else {
+                shell.ink
+            },
+            border: iced::Border {
+                color: if selected {
+                    shell.accent
+                } else if matches!(status, iced::widget::button::Status::Hovered) {
+                    shell.muted
+                } else {
+                    shell.line
+                },
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            ..Default::default()
+        }
+    }
+
+    /// The intro explains the flow; the four numbered stages start with Phrase.
+    fn progress(&self) -> Element<Message> {
+        let current = match self.step {
+            WizardStep::Intro | WizardStep::RecoveryPhrase => 0,
+            WizardStep::Grid => 1,
+            WizardStep::Checksum => 2,
+            WizardStep::Confirm => 3,
+        };
+        let labels = ["Phrase", "Pattern", "Checksum", "Confirm"];
+        let mut steps = Column::new().spacing(4).width(Length::Fill);
+        for (index, label) in labels.iter().enumerate() {
+            let number = Container::new(text(format!("{}", index + 1)).size(11))
+                .center_x(Length::Fixed(20.0))
+                .center_y(Length::Fixed(20.0))
+                .style(move |theme: &theme::Theme| iced::widget::container::Style {
+                    background: (index == current)
+                        .then_some(iced::Background::Color(theme.colors.shell.selected)),
+                    border: iced::Border {
+                        color: if index < current {
+                            theme.colors.shell.good
+                        } else if index == current {
+                            theme.colors.shell.accent
+                        } else {
+                            theme.colors.shell.line
+                        },
+                        width: 1.0,
+                        radius: 10.0.into(),
+                    },
+                    text_color: Some(if index < current {
+                        theme.colors.shell.good
+                    } else if index == current {
+                        theme.colors.shell.accent_ink
+                    } else {
+                        theme.colors.shell.muted
+                    }),
+                    ..Default::default()
+                });
+            let name = text(if index == current {
+                format!("{} · Step {} of 4", label, index + 1)
+            } else {
+                label.to_string()
+            })
+            .size(12)
+            .style(move |theme: &theme::Theme| iced::widget::text::Style {
+                color: Some(if index == current {
+                    theme.colors.shell.ink
+                } else {
+                    theme.colors.shell.muted
+                }),
+            });
+            steps = steps.push(
+                Row::new()
+                    .spacing(6)
+                    .align_y(Vertical::Center)
+                    .push(number)
+                    .push(name),
+            );
+        }
+        steps.into()
+    }
+
     fn view_intro(&self) -> Element<Message> {
         let header = modal::header(Some("Border Wallet".to_string()), Some(|| Message::Close));
 
@@ -397,21 +547,24 @@ impl BorderWalletWizard {
                  Write them down and store them securely.",
             ));
 
-        let next_btn = button::primary(None, "Get Started")
-            .on_press(self.wizard_msg(BorderWalletWizardMessage::Next));
+        let next_btn = Self::primary_control(
+            "border-wallet.intro.start",
+            "Get Started",
+            Some(BorderWalletWizardMessage::Next),
+        );
 
         // Footer: [Back] [spacer] [Get Started]. Intro is the first step
         // of the wizard, so "Back" returns the user to the
         // Select-key-source picker for this slot (via
         // `DefineDescriptor::ReopenKeyModal`) rather than dropping
         // them all the way back to the descriptor editor.
-        let coordinates = self.coordinates.clone();
         let footer = Row::new()
-            .push(modal::back_button(move || {
+            .push(Self::back_control(
+                "border-wallet.intro.back",
                 Message::DefineDescriptor(message::DefineDescriptor::ReopenKeyModal(
-                    coordinates.clone(),
-                ))
-            }))
+                    self.coordinates.clone(),
+                )),
+            ))
             .push(Space::new().width(Length::Fill))
             .push(next_btn)
             .align_y(Vertical::Center);
@@ -425,24 +578,29 @@ impl BorderWalletWizard {
 
         Container::new(col)
             .padding(20)
-            .style(theme::card::modal)
+            .style(Self::modal_style)
             .into()
     }
 
     fn view_recovery_phrase(&self) -> Element<Message> {
         let header = modal::header(Some("Recovery Phrase".to_string()), Some(|| Message::Close));
 
-        let back_btn = button::transparent(Some(icon::previous_icon()), "Back")
-            .on_press(self.wizard_msg(BorderWalletWizardMessage::Previous));
+        let back_btn = Self::back_control(
+            "border-wallet.phrase.back",
+            self.wizard_msg(BorderWalletWizardMessage::Previous),
+        );
 
-        let generate_label = if self.allow_random_grid_phrase {
+        let generate_label: &'static str = if self.allow_random_grid_phrase {
             "Generate Random Phrase"
         } else {
             "Derive from Master Key"
         };
-        let generate_btn = button::secondary(None, generate_label)
-            .on_press(self.wizard_msg(BorderWalletWizardMessage::GeneratePhrase))
-            .width(Length::Fill);
+        let generate_btn = Self::secondary_control(
+            "border-wallet.phrase.generate",
+            generate_label,
+            Some(BorderWalletWizardMessage::GeneratePhrase),
+        )
+        .width(Length::Fill);
 
         let mut word_rows = Column::new().spacing(6);
         for chunk_start in (0..12).step_by(3) {
@@ -455,6 +613,14 @@ impl BorderWalletWizard {
                         Message::BorderWalletWizard(BorderWalletWizardMessage::PhraseWordEdited(
                             idx, s,
                         ))
+                    })
+                    .style(|theme: &theme::Theme, status| {
+                        let mut style = theme::text_input::primary(theme, status);
+                        if matches!(status, iced::widget::text_input::Status::Focused { .. }) {
+                            style.border.color = theme.colors.shell.focus;
+                            style.border.width = 2.0;
+                        }
+                        style
                     })
                     .width(Length::Fill);
                 row_widget = row_widget.push(
@@ -473,17 +639,17 @@ impl BorderWalletWizard {
             .as_ref()
             .map(|e| p1_regular(e.as_str()).color(color::RED).into());
 
-        let next_btn = if self.phrase_valid {
-            button::primary(None, "Next")
-                .on_press(self.wizard_msg(BorderWalletWizardMessage::Next))
-                .width(Length::Fill)
-        } else {
-            button::primary(None, "Next").width(Length::Fill)
-        };
+        let next_btn = Self::primary_control(
+            "border-wallet.phrase.next",
+            "Next",
+            self.phrase_valid.then_some(BorderWalletWizardMessage::Next),
+        )
+        .width(Length::Fill);
 
         let mut col = Column::new()
             .spacing(12)
             .push(header)
+            .push(self.progress())
             .push(p1_regular(
                 "Enter or generate the 12-word recovery phrase that will seed the word grid.",
             ))
@@ -498,15 +664,17 @@ impl BorderWalletWizard {
 
         Container::new(col.width(550))
             .padding(20)
-            .style(theme::card::modal)
+            .style(Self::modal_style)
             .into()
     }
 
     fn view_grid(&self) -> Element<Message> {
         let header = modal::header(Some("Select Pattern".to_string()), Some(|| Message::Close));
 
-        let back_btn = button::transparent(Some(icon::previous_icon()), "Back")
-            .on_press(self.wizard_msg(BorderWalletWizardMessage::Previous));
+        let back_btn = Self::back_control(
+            "border-wallet.pattern.back",
+            self.wizard_msg(BorderWalletWizardMessage::Previous),
+        );
 
         let status = p1_bold(format!(
             "Selected: {} / {} cells",
@@ -514,25 +682,39 @@ impl BorderWalletWizard {
             PATTERN_LENGTH
         ));
 
-        let undo_btn = if !self.pattern.is_empty() {
-            button::secondary(None, "Undo")
-                .on_press(self.wizard_msg(BorderWalletWizardMessage::UndoLastCell))
-        } else {
-            button::secondary(None, "Undo")
-        };
+        let undo_btn = Self::secondary_control(
+            "border-wallet.pattern.undo",
+            "Undo",
+            (!self.pattern.is_empty()).then_some(BorderWalletWizardMessage::UndoLastCell),
+        )
+        .width(Length::Shrink);
 
-        let clear_btn = if !self.pattern.is_empty() {
-            button::secondary(None, "Clear")
-                .on_press(self.wizard_msg(BorderWalletWizardMessage::ClearPattern))
-        } else {
-            button::secondary(None, "Clear")
-        };
+        let clear_btn = Self::secondary_control(
+            "border-wallet.pattern.clear",
+            "Clear",
+            (!self.pattern.is_empty()).then_some(BorderWalletWizardMessage::ClearPattern),
+        )
+        .width(Length::Shrink);
 
         let grid_content: Element<Message> = if let Some(grid) = &self.grid {
-            let mut grid_col = Column::new().spacing(1);
+            let mut grid_col = Column::new().spacing(4);
 
+            let mut column_numbers = Row::new().spacing(4).push(Space::new().width(24));
+            for col_idx in 0..WordGrid::COLS {
+                column_numbers = column_numbers.push(
+                    text(format!("{}", col_idx + 1))
+                        .size(10)
+                        .width(46)
+                        .align_x(Horizontal::Center),
+                );
+            }
             for row_idx in 0..WordGrid::ROWS {
-                let mut row_widget = Row::new().spacing(1);
+                let mut row_widget = Row::new().spacing(4).push(
+                    text(format!("{}", row_idx + 1))
+                        .size(10)
+                        .width(24)
+                        .align_x(Horizontal::Right),
+                );
                 for col_idx in 0..WordGrid::COLS {
                     let word = grid.word_at(row_idx, col_idx).unwrap_or("???");
                     let prefix = &word[..std::cmp::min(4, word.len())];
@@ -552,27 +734,32 @@ impl BorderWalletWizard {
                         prefix.to_string()
                     };
 
-                    let cell_style = if is_selected {
-                        theme::button::primary
-                    } else {
-                        theme::button::secondary
-                    };
-
                     let r = row_idx as u16;
                     let c = col_idx as u8;
-                    let cell_btn = Button::new(text(label).size(11).align_x(Horizontal::Center))
-                        .style(cell_style)
-                        .on_press(
-                            self.wizard_msg(BorderWalletWizardMessage::ToggleCellSelection(r, c)),
-                        )
-                        .width(50)
-                        .height(28);
+                    let cell_btn = Action::new(
+                        self.grid_focus_ids[row_idx * WordGrid::COLS + col_idx].clone(),
+                        text(label).size(11).align_x(Horizontal::Center),
+                        Message::FocusAction,
+                    )
+                    .style(move |theme, status| Self::grid_cell_style(theme, status, is_selected))
+                    .focus_radius(4.0)
+                    .on_press(self.wizard_msg(BorderWalletWizardMessage::ToggleCellSelection(r, c)))
+                    .width(46)
+                    .height(28);
 
                     row_widget = row_widget.push(cell_btn);
                 }
                 grid_col = grid_col.push(row_widget);
             }
-            scrollable(grid_col).height(400).into()
+            Column::new()
+                .spacing(4)
+                .push(column_numbers)
+                .push(
+                    scrollable(grid_col)
+                        .id(BORDER_WALLET_GRID_SCROLL_ID)
+                        .height(320),
+                )
+                .into()
         } else {
             p1_regular("No grid available").into()
         };
@@ -582,17 +769,19 @@ impl BorderWalletWizard {
             .as_ref()
             .map(|e| p1_regular(e.as_str()).color(color::RED).into());
 
-        let next_btn = if self.pattern.is_complete() {
-            button::primary(None, "Next")
-                .on_press(self.wizard_msg(BorderWalletWizardMessage::Next))
-                .width(Length::Fill)
-        } else {
-            button::primary(None, "Next").width(Length::Fill)
-        };
+        let next_btn = Self::primary_control(
+            "border-wallet.pattern.next",
+            "Next",
+            self.pattern
+                .is_complete()
+                .then_some(BorderWalletWizardMessage::Next),
+        )
+        .width(Length::Fill);
 
         let mut col = Column::new()
             .spacing(10)
             .push(header)
+            .push(self.progress())
             .push(p1_regular(
                 "Select 11 cells from the grid in order. This pattern is your key \u{2014} remember it exactly.",
             ))
@@ -603,6 +792,11 @@ impl BorderWalletWizard {
                     .push(undo_btn)
                     .push(clear_btn),
             )
+            .push(p1_regular(format!(
+                "{} rows × {} columns · first four letters shown · selected numbers show order",
+                WordGrid::ROWS,
+                WordGrid::COLS
+            )))
             .push(grid_content);
 
         if let Some(err) = error_text {
@@ -613,15 +807,17 @@ impl BorderWalletWizard {
 
         Container::new(col.width(850))
             .padding(20)
-            .style(theme::card::modal)
+            .style(Self::modal_style)
             .into()
     }
 
     fn view_checksum(&self) -> Element<Message> {
         let header = modal::header(Some("Checksum & Key".to_string()), Some(|| Message::Close));
 
-        let back_btn = button::transparent(Some(icon::previous_icon()), "Back")
-            .on_press(self.wizard_msg(BorderWalletWizardMessage::Previous));
+        let back_btn = Self::back_control(
+            "border-wallet.checksum.back",
+            self.wizard_msg(BorderWalletWizardMessage::Previous),
+        );
 
         let checksum_word = self.checksum_word.as_deref().unwrap_or("???");
 
@@ -642,13 +838,17 @@ impl BorderWalletWizard {
             Column::new().push(p1_regular("No enrollment data"))
         };
 
-        let next_btn = button::primary(None, "Next")
-            .on_press(self.wizard_msg(BorderWalletWizardMessage::Next))
-            .width(Length::Fill);
+        let next_btn = Self::primary_control(
+            "border-wallet.checksum.next",
+            "Next",
+            Some(BorderWalletWizardMessage::Next),
+        )
+        .width(Length::Fill);
 
         let col = Column::new()
             .spacing(12)
             .push(header)
+            .push(self.progress())
             .push(p1_bold(format!("Checksum word: \"{}\"", checksum_word)))
             .push(p1_regular(
                 "This is the only word you need to memorize. The checksum word is \
@@ -662,15 +862,17 @@ impl BorderWalletWizard {
 
         Container::new(col)
             .padding(20)
-            .style(theme::card::modal)
+            .style(Self::modal_style)
             .into()
     }
 
     fn view_confirm(&self) -> Element<Message> {
         let header = modal::header(Some("Confirm".to_string()), Some(|| Message::Close));
 
-        let back_btn = button::transparent(Some(icon::previous_icon()), "Back")
-            .on_press(self.wizard_msg(BorderWalletWizardMessage::Previous));
+        let back_btn = Self::back_control(
+            "border-wallet.confirm.back",
+            self.wizard_msg(BorderWalletWizardMessage::Previous),
+        );
 
         let fingerprint = self
             .enrollment
@@ -705,20 +907,24 @@ impl BorderWalletWizard {
             ))
             .push(p1_bold(format!("Key fingerprint: {}", fingerprint)));
 
-        let confirm_btn = button::primary(None, "Confirm & Enroll Key")
-            .on_press(self.wizard_msg(BorderWalletWizardMessage::ConfirmEnrollment))
-            .width(Length::Fill);
+        let confirm_btn = Self::primary_control(
+            "border-wallet.confirm.enroll",
+            "Confirm & Enroll Key",
+            Some(BorderWalletWizardMessage::ConfirmEnrollment),
+        )
+        .width(Length::Fill);
 
         let col = Column::new()
             .spacing(15)
             .push(header)
+            .push(self.progress())
             .push(warning)
             .push(Row::new().spacing(10).push(back_btn).push(confirm_btn))
             .width(500);
 
         Container::new(col)
             .padding(20)
-            .style(theme::card::modal)
+            .style(Self::modal_style)
             .into()
     }
 }
@@ -773,6 +979,333 @@ impl super::DescriptorEditModal for BorderWalletWizard {
             WizardStep::Grid => self.view_grid(),
             WizardStep::Checksum => self.view_checksum(),
             WizardStep::Confirm => self.view_confirm(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod presentation_tests {
+    use super::*;
+    use coincube_ui::widget::action;
+    use iced::advanced::{
+        clipboard::Null,
+        layout,
+        renderer::Headless,
+        widget::{
+            operation, operation::focusable, operation::Focusable, operation::Outcome, Operation,
+            Tree,
+        },
+        Layout, Shell,
+    };
+    use iced::futures::StreamExt;
+    use iced::{keyboard, mouse, Event, Rectangle, Size, Vector};
+
+    #[derive(Default)]
+    struct FocusTargets(Vec<Id>);
+
+    impl Operation for FocusTargets {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+
+        fn focusable(&mut self, id: Option<&Id>, _bounds: Rectangle, _state: &mut dyn Focusable) {
+            if let Some(id) = id {
+                self.0.push(id.clone());
+            }
+        }
+    }
+
+    struct GridViewport {
+        focused_id: Id,
+        viewport: Option<Rectangle>,
+        offset: f32,
+        focused: Option<Rectangle>,
+    }
+
+    impl GridViewport {
+        fn new(focused_id: Id) -> Self {
+            Self {
+                focused_id,
+                viewport: None,
+                offset: 0.0,
+                focused: None,
+            }
+        }
+
+        fn screen_bounds(&self) -> Rectangle {
+            let mut bounds = self.focused.expect("focused grid cell must be found");
+            bounds.y -= self.offset;
+            bounds
+        }
+    }
+
+    impl Operation for GridViewport {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+
+        fn scrollable(
+            &mut self,
+            id: Option<&Id>,
+            bounds: Rectangle,
+            _content_bounds: Rectangle,
+            translation: Vector,
+            _state: &mut dyn operation::Scrollable,
+        ) {
+            if id == Some(&Id::new(BORDER_WALLET_GRID_SCROLL_ID)) {
+                self.viewport = Some(bounds);
+                self.offset = translation.y;
+            }
+        }
+
+        fn focusable(&mut self, id: Option<&Id>, bounds: Rectangle, state: &mut dyn Focusable) {
+            if id == Some(&self.focused_id) && state.is_focused() {
+                self.focused = Some(bounds);
+            }
+        }
+    }
+
+    fn operate<T: 'static>(
+        element: &mut Element<'_, Message>,
+        tree: &mut Tree,
+        node: &layout::Node,
+        renderer: &iced::Renderer,
+        operation: impl Operation<T> + 'static,
+    ) -> Option<T> {
+        let mut operation: Box<dyn Operation<T>> = Box::new(operation);
+        loop {
+            element.as_widget_mut().operate(
+                tree,
+                Layout::new(node),
+                renderer,
+                &mut operation::black_box(operation.as_mut()),
+            );
+            match operation.finish() {
+                Outcome::None => return None,
+                Outcome::Some(result) => return Some(result),
+                Outcome::Chain(next) => operation = next,
+            }
+        }
+    }
+
+    async fn apply_focus_task(
+        task: Task<Message>,
+        element: &mut Element<'_, Message>,
+        tree: &mut Tree,
+        node: &mut layout::Node,
+        renderer: &iced::Renderer,
+        size: Size,
+    ) {
+        let mut stream = iced_runtime::task::into_stream(task).expect("focus task has operations");
+        while let Some(action) = stream.next().await {
+            let iced_runtime::Action::Widget(mut operation) = action else {
+                panic!("focus task must only operate on widgets");
+            };
+            loop {
+                element.as_widget_mut().operate(
+                    tree,
+                    Layout::new(node),
+                    renderer,
+                    operation.as_mut(),
+                );
+                match operation.finish() {
+                    Outcome::None | Outcome::Some(()) => break,
+                    Outcome::Chain(next) => operation = next,
+                }
+            }
+            *node = element.as_widget_mut().layout(
+                tree,
+                renderer,
+                &layout::Limits::new(Size::ZERO, size),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tab_reveals_below_viewport_grid_cell_at_1024_in_both_themes() {
+        for (name, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            for bytes in coincube_ui::font::load() {
+                iced::advanced::graphics::text::font_system()
+                    .write()
+                    .unwrap()
+                    .load_font(bytes);
+            }
+            // A public BIP39 test vector is a synthetic grid fixture, never a
+            // user's recovery phrase. Neither phrase nor pattern is logged.
+            let grid = GridRecoveryPhrase::from_phrase(
+                "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+            )
+            .unwrap()
+            .generate_grid();
+            let wizard = BorderWalletWizard {
+                network: Network::Regtest,
+                coordinates: Vec::new(),
+                step: WizardStep::Grid,
+                phrase_words: vec![form::Value::default(); 12],
+                phrase_valid: false,
+                grid: Some(grid),
+                pattern: OrderedPattern::new(),
+                grid_focus_ids: (0..WordGrid::TOTAL_CELLS).map(|_| Id::unique()).collect(),
+                checksum_word: None,
+                enrollment: None,
+                allow_random_grid_phrase: true,
+                signer: None,
+                phrase_source: GridSeedSource::Independent,
+                error: None,
+            };
+            let previous = wizard.grid_focus_ids[11 * WordGrid::COLS + 15].clone();
+            let target = wizard.grid_focus_ids[12 * WordGrid::COLS].clone();
+            let mut element: Element<'_, Message> = Container::new(wizard.view_grid())
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .into();
+            let mut renderer = <iced::Renderer as Headless>::new(
+                coincube_ui::font::REGULAR,
+                iced::Pixels(14.0),
+                Some("tiny-skia"),
+            )
+            .await
+            .unwrap();
+            let size = Size::new(1024.0, 768.0);
+            let mut tree = Tree::new(element.as_widget());
+            let mut node = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, size),
+            );
+            let modal = node.children()[0].bounds();
+            assert!(modal.x >= 0.0 && modal.x + modal.width <= size.width);
+            assert!(modal.y >= 0.0 && modal.y + modal.height <= size.height);
+            let mut targets = FocusTargets::default();
+            element
+                .as_widget_mut()
+                .operate(&mut tree, Layout::new(&node), &renderer, &mut targets);
+            assert!(targets.0.contains(&Id::new("border-wallet.pattern.back")));
+            for disabled in [
+                "border-wallet.pattern.undo",
+                "border-wallet.pattern.clear",
+                "border-wallet.pattern.next",
+            ] {
+                assert!(!targets.0.contains(&Id::new(disabled)));
+            }
+            operate(
+                &mut element,
+                &mut tree,
+                &node,
+                &renderer,
+                focusable::focus::<()>(previous.clone()),
+            );
+            apply_focus_task(
+                action::reveal_focused(BORDER_WALLET_GRID_SCROLL_ID),
+                &mut element,
+                &mut tree,
+                &mut node,
+                &renderer,
+                size,
+            )
+            .await;
+            let mut before = GridViewport::new(previous);
+            element
+                .as_widget_mut()
+                .operate(&mut tree, Layout::new(&node), &renderer, &mut before);
+            let before_offset = before.offset;
+            let before_bounds = before.screen_bounds();
+            let viewport = before.viewport.unwrap();
+            assert!(before_bounds.y >= viewport.y + 4.0);
+            assert!(before_bounds.y + before_bounds.height <= viewport.y + viewport.height - 4.0);
+
+            // This is the global Tab path: keep the outer shell reveal and
+            // then reveal the focused cell in the nested Border Wallet grid.
+            apply_focus_task(
+                action::focus_next_visible(crate::app::view::nav::shell::MIDDLE_SCROLL_ID)
+                    .chain(action::reveal_focused(BORDER_WALLET_GRID_SCROLL_ID)),
+                &mut element,
+                &mut tree,
+                &mut node,
+                &renderer,
+                size,
+            )
+            .await;
+            let mut after = GridViewport::new(target);
+            element
+                .as_widget_mut()
+                .operate(&mut tree, Layout::new(&node), &renderer, &mut after);
+            assert!(
+                after.offset > before_offset,
+                "Tab must scroll to the next row"
+            );
+            let focused = after.screen_bounds();
+            let viewport = after.viewport.unwrap();
+            assert!(focused.y >= viewport.y + 4.0);
+            assert!(focused.y + focused.height <= viewport.y + viewport.height - 4.0);
+
+            let key = keyboard::Key::Named(keyboard::key::Named::Enter);
+            let press = Event::Keyboard(keyboard::Event::KeyPressed {
+                key: key.clone(),
+                modified_key: key,
+                physical_key: keyboard::key::Physical::Unidentified(
+                    keyboard::key::NativeCode::Unidentified,
+                ),
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::empty(),
+                text: None,
+                repeat: false,
+            });
+            let mut messages = Vec::new();
+            element.as_widget_mut().update(
+                &mut tree,
+                &press,
+                Layout::new(&node),
+                mouse::Cursor::Unavailable,
+                &renderer,
+                &mut Null,
+                &mut Shell::new(&mut messages),
+                &Rectangle::with_size(size),
+            );
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(|message| matches!(
+                        message,
+                        Message::BorderWalletWizard(
+                            BorderWalletWizardMessage::ToggleCellSelection(12, 0)
+                        )
+                    ))
+                    .count(),
+                1,
+                "Enter must activate the visible focused cell once"
+            );
+
+            if let Ok(directory) = std::env::var("BORDER_WALLET_CAPTURE_DIR") {
+                std::fs::create_dir_all(&directory).unwrap();
+                let style = iced::advanced::renderer::Style {
+                    text_color: theme.colors.shell.ink,
+                };
+                element.as_widget().draw(
+                    &tree,
+                    &mut renderer,
+                    &theme,
+                    &style,
+                    Layout::new(&node),
+                    iced::mouse::Cursor::Unavailable,
+                    &Rectangle::with_size(size),
+                );
+                let pixels =
+                    renderer.screenshot(Size::new(1024, 768), 1.0, theme.colors.shell.background);
+                image::save_buffer(
+                    std::path::Path::new(&directory).join(format!(
+                        "border-wallet-synthetic-focus-row13-{name}-1024x768.png"
+                    )),
+                    &pixels,
+                    1024,
+                    768,
+                    image::ColorType::Rgba8,
+                )
+                .unwrap();
+            }
         }
     }
 }

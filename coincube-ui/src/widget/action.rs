@@ -80,8 +80,11 @@ pub fn focus_previous_visible<Message: Send + 'static>(
     iced::widget::operation::focus_previous().chain(reveal_focused(scroll_id.into()))
 }
 
-fn reveal_focused<Message: Send + 'static>(scroll_id: Id) -> iced::Task<Message> {
-    iced_runtime::task::widget(FocusedScrollDelta::new(scroll_id)).then(|delta| {
+/// Reveal the currently focused action inside a named scrollable, if present.
+/// Chaining this after another focus/reveal operation is safe when the named
+/// scrollable is absent or the focused widget is outside it.
+pub fn reveal_focused<Message: Send + 'static>(scroll_id: impl Into<Id>) -> iced::Task<Message> {
+    iced_runtime::task::widget(FocusedScrollDelta::new(scroll_id.into())).then(|delta| {
         iced::widget::operation::scroll_by(
             delta.id,
             iced::widget::operation::AbsoluteOffset { x: 0.0, y: delta.y },
