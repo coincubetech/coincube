@@ -1656,7 +1656,17 @@ impl State for GlobalHome {
                         self.wallet_picker = None;
                         Task::none()
                     }
-                    HomeMessage::SelectWalletInPicker(kind) => {
+                    selection @ (HomeMessage::SelectWalletInPicker(kind)
+                    | HomeMessage::SelectTransferWallet(_, kind)) => {
+                        if (kind == WalletKind::Spark && self.spark_backend.is_none())
+                            || (kind == WalletKind::Liquid
+                                && !crate::app::features::liquid_wallet_usable(
+                                    cache.network,
+                                    cache.liquid_gate,
+                                ))
+                        {
+                            return Task::none();
+                        }
                         if !self.legacy_vault_available(cache)
                             && (kind == WalletKind::Vault
                                 || self.transfer_from == Some(WalletKind::Vault)
@@ -1664,14 +1674,17 @@ impl State for GlobalHome {
                         {
                             return Task::none();
                         }
-                        // Apply the selection to the side being edited. The TO
-                        // popup already filters out the current FROM, but the
-                        // FROM popup shows all three — so picking a FROM that
-                        // collides with the current TO is possible. Treat that
-                        // as a swap: move the previous FROM into the TO slot.
-                        // The TO popup's filter means the symmetric case
-                        // doesn't occur there.
-                        if let Some(side) = self.wallet_picker {
+                        // Apply either the legacy popup or inline-row choice.
+                        // The To list excludes the current source. A From
+                        // choice matching To swaps the existing pair.
+                        let side = match selection {
+                            HomeMessage::SelectTransferWallet(side, _) => Some(side),
+                            _ => self.wallet_picker,
+                        };
+                        if let Some(side) = side {
+                            if side == PickerSide::To && self.transfer_from == Some(kind) {
+                                return Task::none();
+                            }
                             let old_pair = (self.transfer_from, self.transfer_to);
                             match side {
                                 PickerSide::From => {
@@ -4627,6 +4640,18 @@ mod tests {
             assert_eq!(home.wallet_picker, Some(PickerSide::From));
             assert_eq!(home.transfer_from, None);
 
+            // Inline rows use the same guard as the old picker; a stale
+            // direct selection cannot make an unavailable Vault the source.
+            drain(home.update(
+                Some(as_daemon.clone()),
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::SelectTransferWallet(
+                    PickerSide::From,
+                    WalletKind::Vault,
+                ))),
+            ));
+            assert_eq!(home.transfer_from, None);
+
             for message in [
                 HomeMessage::SetTransferFeerate("25".to_string()),
                 HomeMessage::SignVaultToLiquidTx,
@@ -4660,14 +4685,10 @@ mod tests {
             assert!(home.receive_address_info.is_none());
             assert!(!home.destination_is_ready());
 
-            home.wallet_picker = Some(PickerSide::To);
-            drain(home.update(
-                Some(as_daemon.clone()),
-                &cache,
-                Message::View(view::Message::Home(HomeMessage::SelectWalletInPicker(
-                    WalletKind::Spark,
-                ))),
-            ));
+            // This callback test has no Spark backend. Model the new pair and
+            // pending request directly; the selection guard stays enforced.
+            home.transfer_to = Some(WalletKind::Spark);
+            home.transfer_direction = Some(TransferDirection::VaultToSpark);
             assert_eq!(
                 home.transfer_direction,
                 Some(TransferDirection::VaultToSpark)
@@ -4918,6 +4939,68 @@ mod tests {
             ));
             assert_eq!(home.spark_send_handle.as_deref(), Some("current"));
             assert!(home.destination_is_ready());
+        }
+
+        #[test]
+        fn inline_from_selection_swaps_the_existing_destination() {
+            let (mut home, _) = home_on_transfer_screen();
+            home.transfer_from = Some(WalletKind::Vault);
+            home.transfer_to = Some(WalletKind::Liquid);
+            let old_generation = home.transfer_request_generation;
+            assert!(home.destination_is_ready());
+            let cache = Cache {
+                has_vault: true,
+                liquid_gate: crate::app::features::LiquidGate {
+                    server_enabled: false,
+                    local_state_exists: true,
+                },
+                ..Cache::default()
+            };
+            drain(home.update(
+                None,
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::SelectTransferWallet(
+                    PickerSide::From,
+                    WalletKind::Liquid,
+                ))),
+            ));
+            assert_eq!(home.transfer_from, Some(WalletKind::Liquid));
+            assert_eq!(home.transfer_to, Some(WalletKind::Vault));
+            assert!(home.transfer_request_generation > old_generation);
+            assert!(home.receive_address_info.is_none());
+            assert!(!home.destination_is_ready());
+            assert_eq!(
+                home.transfer_direction,
+                Some(TransferDirection::LiquidToVault)
+            );
+            assert_eq!(home.entered_amount.value, "100000");
+            assert!(!home.entered_amount.valid);
+            assert_eq!(
+                home.entered_amount.warning,
+                Some("Amount exceeds Liquid balance")
+            );
+            let unchanged_generation = home.transfer_request_generation;
+            drain(home.update(
+                None,
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::SelectTransferWallet(
+                    PickerSide::From,
+                    WalletKind::Liquid,
+                ))),
+            ));
+            assert_eq!(home.transfer_request_generation, unchanged_generation);
+            assert_eq!(home.transfer_from, Some(WalletKind::Liquid));
+            assert_eq!(home.transfer_to, Some(WalletKind::Vault));
+            drain(home.update(
+                None,
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::SelectTransferWallet(
+                    PickerSide::To,
+                    WalletKind::Liquid,
+                ))),
+            ));
+            assert_eq!(home.transfer_to, Some(WalletKind::Vault));
+            assert_eq!(home.transfer_request_generation, unchanged_generation);
         }
 
         #[test]
