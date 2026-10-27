@@ -268,7 +268,7 @@ mod tests {
                         view::vault::psbts::psbts_view(&rows, BitcoinDisplayUnit::Sats, masked),
                         size,
                         appearance,
-                        theme.clone(),
+                        theme,
                     );
                     assert!(mounted.contains("PSBT proposals"));
                     assert_eq!(mounted.contains(&raw_spend), !masked);
