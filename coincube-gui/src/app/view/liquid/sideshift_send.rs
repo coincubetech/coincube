@@ -1249,7 +1249,7 @@ mod privacy_tests {
                     ),
                     (1024, 768),
                     appearance,
-                    theme.clone(),
+                    theme,
                 );
                 assert!(mounted.contains("Swap status"));
                 assert!(mounted.contains("Waiting for deposit"));

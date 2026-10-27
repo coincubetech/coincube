@@ -2830,7 +2830,7 @@ mod tests {
                 summary,
                 (1024, 768),
                 appearance,
-                theme.clone(),
+                theme,
             );
             assert!(mounted.contains("Recipient identity"));
             assert!(mounted.contains("Synthetic Merchant"));
