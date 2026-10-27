@@ -256,8 +256,8 @@ impl Service {
             .coins;
         let (fee_sats, change_sats, fee_rate_sat_vb) =
             validate(input, &psbt, &coins, &self.descriptor)?;
-        // The returned rate is the maximum-size estimate. Broadcast applies
-        // this requested rate to the finalized, shorter-or-equal transaction.
+        // The returned rate is the maximum-size estimate. Broadcast checks
+        // the requested rate against that same prepared maximum signed size.
         coincube_core::spend::stamp_mcp_fee_cap(
             &mut psbt,
             input.max_fee_sats,
