@@ -2989,6 +2989,17 @@ impl ConnectAccountPanel {
         }
     }
 
+    /// A failed preflight or server request may arrive after the user left the
+    /// sheet. Retain retry state only while its wizard is still visible.
+    fn fail_duress_enrollment(&mut self, message: String) {
+        if self.duress_enroll_abandoned {
+            self.clear_duress_enroll();
+        } else if let Some(wizard) = &mut self.duress_enroll {
+            wizard.submitting = false;
+            wizard.error = Some(message);
+        }
+    }
+
     /// Cancel-equivalent teardown for the in-flight duress dialogs, for when the
     /// surface is hidden out from under the user — the launch kill-switch
     /// (`show_duress`) flipped off mid-session and the route is redirecting
@@ -3007,6 +3018,7 @@ impl ConnectAccountPanel {
             self.clear_duress_enroll();
         }
         if let Some(mut d) = self.duress_disable.take() {
+            crate::services::passkey::reauth::cancel();
             d.zeroize_secrets();
         }
     }
@@ -3596,14 +3608,14 @@ impl ConnectAccountPanel {
                 if gen != self.session_generation {
                     return iced::Task::none();
                 }
-                let Some(e) = &mut self.duress_enroll else {
-                    return iced::Task::none();
-                };
-                if let Err(msg) = res {
-                    e.submitting = false;
-                    e.error = Some(msg);
+                if self.duress_enroll.is_none() {
                     return iced::Task::none();
                 }
+                if let Err(msg) = res {
+                    self.fail_duress_enrollment(msg);
+                    return iced::Task::none();
+                }
+                let e = self.duress_enroll.as_mut().unwrap();
                 let gen = self.session_generation;
 
                 // Generate this device's duress code ONCE: its hash goes to the
@@ -3631,16 +3643,14 @@ impl ConnectAccountPanel {
                 let (all_clear_hash, code_hash) = match (all_clear_hash, code_hash) {
                     (Ok(a), Ok(c)) => (a, c),
                     _ => {
-                        e.error = Some("Failed to hash credentials.".to_string());
-                        e.submitting = false;
+                        self.fail_duress_enrollment("Failed to hash credentials.".to_string());
                         return iced::Task::none();
                     }
                 };
                 let crk_hash = match crk_hash {
                     Ok(h) => Some(h),
                     Err(_) => {
-                        e.error = Some("Failed to hash credentials.".to_string());
-                        e.submitting = false;
+                        self.fail_duress_enrollment("Failed to hash credentials.".to_string());
                         return iced::Task::none();
                     }
                 };
@@ -3650,8 +3660,7 @@ impl ConnectAccountPanel {
                 let fingerprint = match device_fingerprint() {
                     Ok(fp) => fp,
                     Err(msg) => {
-                        e.error = Some(msg);
-                        e.submitting = false;
+                        self.fail_duress_enrollment(msg);
                         return iced::Task::none();
                     }
                 };
@@ -3728,12 +3737,7 @@ impl ConnectAccountPanel {
                     Err(msg) => {
                         // A hidden wizard has no retry surface. Scrub its
                         // secrets as soon as the server has rejected it.
-                        if self.duress_enroll_abandoned {
-                            self.clear_duress_enroll();
-                        } else if let Some(e) = &mut self.duress_enroll {
-                            e.submitting = false;
-                            e.error = Some(msg);
-                        }
+                        self.fail_duress_enrollment(msg);
                     }
                 }
             }

@@ -129,6 +129,59 @@ fn deliver_enroll_failure(gui: &mut GUI, pane_id: pane_grid::Pane, tab_id: usize
     )));
 }
 
+fn deliver_preflight_failure(gui: &mut GUI, pane_id: pane_grid::Pane, tab_id: usize) {
+    let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[0].state else {
+        unreachable!()
+    };
+    let generation = home.connect_account.session_generation();
+    drop(gui.update(Message::Pane(
+        pane_id,
+        pane::Message::tab(
+            tab_id,
+            tab::Message::Launch(home::Message::View(home::ViewMessage::ConnectAccount(
+                view::ConnectAccountMessage::Duress(view::DuressMessage::EnrollPreflightDone(
+                    Err("synthetic PIN collision".into()),
+                    generation,
+                )),
+            ))),
+        ),
+    )));
+}
+
+#[test]
+fn abandoned_preflight_failure_scrubs_after_section_switch_or_close() {
+    with_runtime("connect-duress-preflight-exit", |path, _runtime| {
+        for close in [false, true] {
+            let root = CoincubeDirectory::new(path.to_path_buf());
+            let mut gui = launcher_gui(&root);
+            let pane_id = gui.focus.unwrap();
+            let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
+            sign_in_home(&mut gui, pane_id);
+            set_duress_gate(&mut gui, pane_id, true, true);
+            launcher_connect_entry(&mut gui, pane_id, tab_id);
+            drop(
+                gui.update(Message::ConnectSheet(ConnectSheetMessage::SelectSection(
+                    ConnectSheetSection::Duress,
+                ))),
+            );
+            set_synthetic_duress_dialogs(&mut gui, pane_id, true);
+
+            drop(gui.update(Message::ConnectSheet(if close {
+                ConnectSheetMessage::Close
+            } else {
+                ConnectSheetMessage::SelectSection(ConnectSheetSection::Account)
+            })));
+            let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[0].state else {
+                unreachable!()
+            };
+            assert!(home.connect_account.duress_enroll_abandoned);
+            deliver_preflight_failure(&mut gui, pane_id, tab_id);
+            assert_duress_dialogs_scrubbed(&gui, pane_id);
+            assert_eq!(gui.connect_sheet.is_none(), close);
+        }
+    });
+}
+
 #[test]
 fn legacy_duress_route_and_sheet_selection_respect_gate() {
     with_runtime("connect-duress-route", |path, _runtime| {
