@@ -269,6 +269,7 @@ fn valid_retire(files: &[String]) -> bool {
                 && bytes[36] == b'-'
                 && Uuid::parse_str(&name[..36]).is_ok_and(|id| !id.is_nil())
                 && Uuid::parse_str(&name[37..73]).is_ok_and(|id| !id.is_nil())
+                && &name[73..] == ".key"
                 && name == name.to_ascii_lowercase()
         })
 }
@@ -553,6 +554,33 @@ pub(crate) mod tests {
         let mut unknown = bytes.clone();
         unknown[TAG.len()] = 2;
         assert!(Anchor::decode(&unknown).is_err());
+    }
+
+    #[test]
+    fn retire_filename_codec_requires_key_suffix() {
+        let filename = format!("{}-{}.key", Uuid::new_v4(), Uuid::new_v4());
+        let anchor = Anchor {
+            scope: scope(),
+            state: State::Pending {
+                old_generation: 0,
+                old_digest: [1; 32],
+                next_digest: [2; 32],
+                txn_id: Uuid::new_v4(),
+                retire_files: vec![filename],
+            },
+        };
+        let encoded = anchor.encode().unwrap();
+        assert_eq!(Anchor::decode(&encoded).unwrap(), anchor);
+
+        let mut wrong_suffix = anchor.clone();
+        if let State::Pending { retire_files, .. } = &mut wrong_suffix.state {
+            retire_files[0].replace_range(73.., ".bak");
+        }
+        assert!(wrong_suffix.encode().is_err());
+
+        let mut forged = encoded;
+        forged[forged.len() - 4..].copy_from_slice(b".bak");
+        assert!(Anchor::decode(&forged).is_err());
     }
 
     #[test]
