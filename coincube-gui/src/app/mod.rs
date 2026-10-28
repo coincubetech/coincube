@@ -6682,17 +6682,14 @@ impl App {
         }
         self.panels.current = menu.clone();
 
-        // The Vault page re-reads its rows on entry. Spark's follow from
-        // the overview reload below (`SparkOverviewMessage::DataLoaded`).
-        let recent = if wallet_page(&menu) == Some(view::activity::WalletFilter::Vault) {
-            self.panels.activity.refresh_wallet(
-                view::activity::WalletFilter::Vault,
-                self.daemon.clone(),
-                self.wallet.clone(),
-            )
-        } else {
-            Task::none()
-        };
+        // A wallet page re-reads its rows on entry: a failed read then shows
+        // with its Retry even if the page's own reload fails. Spark's rows
+        // also follow each later page reload (`SparkOverviewMessage::DataLoaded`).
+        let recent = wallet_page(&menu).map_or_else(Task::none, |wallet| {
+            self.panels
+                .activity
+                .refresh_wallet(wallet, self.daemon.clone(), self.wallet.clone())
+        });
 
         // Call reload with optional daemon/wallet
         // Liquid panels don't need them (use BreezClient), Vault panels do
@@ -9863,6 +9860,10 @@ impl App {
                 return Task::batch([forwarded, refresh]);
             }
             Message::ActivityOpenDetail(target) => {
+                // The hand-off leaves the wallet page: its selection ends.
+                if wallet_page(&self.panels.current).is_some() {
+                    self.panels.activity.clear_selection();
+                }
                 // Hand off the source record to its owning wallet panel. Those
                 // panels retain signing, refund and replacement safeguards.
                 match target {
@@ -19641,7 +19642,17 @@ mod wallet_recent_activity_tests {
             Some(old.as_str())
         );
 
-        // The Spark page's reload still reaches its panel.
+        // The Spark page's reload reaches its panel and re-reads Activity's
+        // Spark rows; off that page it does neither for Activity.
+        app.panels.current = Menu::Cube(menu::CubeSubMenu::Overview);
+        drop(app.update(Message::View(view::Message::SparkOverview(
+            view::SparkOverviewMessage::DataLoaded {
+                balance: coincube_core::miniscript::bitcoin::Amount::from_sat(42),
+                stable_balance: None,
+                recent_payments: Vec::new(),
+            },
+        ))));
+        let before = app.panels.activity.spark_refresh_requests;
         app.panels.current = Menu::Spark(menu::SparkSubMenu::Overview);
         drop(app.update(Message::View(view::Message::SparkOverview(
             view::SparkOverviewMessage::DataLoaded {
@@ -19651,6 +19662,7 @@ mod wallet_recent_activity_tests {
             },
         ))));
         assert!(app.panels.spark_overview.has_snapshot_for_tests());
+        assert_eq!(app.panels.activity.spark_refresh_requests, before + 1);
         let _ = std::fs::remove_dir_all(&root);
     }
 

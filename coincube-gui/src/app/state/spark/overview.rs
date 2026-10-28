@@ -166,7 +166,6 @@ impl SparkOverview {
         let page = view::dashboard_with_detail(
             menu,
             cache,
-            "tenshu.spark.page.scroll",
             move || self.page_body(cache, Some(address()), Some(recent_activity())),
             detail,
         );

@@ -72,6 +72,9 @@ pub struct Activity {
     /// still reaches "Recent activity".
     vault_stale: bool,
     spark_stale: bool,
+    /// Spark refreshes asked for (Spark's bridge has no test double).
+    #[cfg(test)]
+    pub spark_refresh_requests: u64,
     pub liquid_has_more: bool,
     vault_limit: u64,
     generation: u64,
@@ -120,6 +123,8 @@ impl Activity {
             liquid_has_more: false,
             vault_stale: false,
             spark_stale: false,
+            #[cfg(test)]
+            spark_refresh_requests: 0,
             vault_limit: HISTORY_LIMIT,
             generation: 0,
             label_draft: None,
@@ -216,6 +221,10 @@ impl Activity {
                 }
             }
             WalletFilter::Spark => {
+                #[cfg(test)]
+                {
+                    self.spark_refresh_requests += 1;
+                }
                 if self.spark_loading {
                     self.spark_stale = true;
                 } else if let Some(spark) = self.spark_backend.clone() {

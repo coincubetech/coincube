@@ -272,13 +272,14 @@ fn dashboard_with_info_layout<'a, T: Into<Element<'a, Message>>>(
     )
 }
 
+const WALLET_PAGE_SCROLL_ID: &str = "tenshu.wallet.page.scroll";
+
 /// A reading page with Activity's detail pane (`.det`) for a selected row:
 /// beside the page at the content's right edge when both fit, else over the
 /// page from that edge. `content` and `detail` are rebuilt per layout width.
 pub fn dashboard_with_detail<'a>(
     menu: &'a Menu,
     cache: &'a Cache,
-    scroll_id: &'static str,
     content: impl Fn() -> Element<'a, Message> + 'a,
     detail: impl Fn() -> Option<Element<'a, Message>> + 'a,
 ) -> Element<'a, Message> {
@@ -291,7 +292,7 @@ pub fn dashboard_with_detail<'a>(
                     .width(Length::Fill),
                 PageWidth::Reading,
             ))
-            .id(iced::advanced::widget::Id::from(scroll_id))
+            .id(iced::advanced::widget::Id::from(WALLET_PAGE_SCROLL_ID))
             .on_scroll(|w| Message::Scroll(w.absolute_offset().y)),
         )
         .width(Length::Fill)
