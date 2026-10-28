@@ -2766,12 +2766,16 @@ impl GUI {
                 };
                 // The Border Wallet grid has its own clipped viewport. Revealing
                 // focus there is a no-op for every other screen.
-                focus.chain(action::reveal_focused(
+                let focus = focus.chain(action::reveal_focused(
                     crate::installer::step::descriptor::editor::border_wallet_wizard::BORDER_WALLET_GRID_SCROLL_ID,
-                ))
+                ));
+                #[cfg(feature = "mcp-proposals")]
+                let focus = focus.chain(action::reveal_focused(
+                    crate::installer::proposal_handoff::SCROLL_ID,
+                ));
                 // The RBF warning has its own clipped descendant list. Tab can
                 // reach every copy action, including those below its viewport.
-                .chain(action::reveal_focused(
+                focus.chain(action::reveal_focused(
                     crate::app::view::vault::transactions::RBF_DESCENDANTS_SCROLL_ID,
                 ))
             }
