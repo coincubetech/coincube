@@ -246,6 +246,7 @@ fn dashboard_with_info_layout<'a, T: Into<Element<'a, Message>>>(
     let body = page(
         Column::new()
             .push_maybe(settings::frame::in_content_navigation(menu, cache))
+            .push_maybe(vault::tools::in_content_navigation(menu, cache))
             .push(content.into())
             .width(Length::Fill),
         width,

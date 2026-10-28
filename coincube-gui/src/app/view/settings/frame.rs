@@ -203,23 +203,9 @@ fn scope_icon(scope: &str) -> coincube_ui::widget::Text<'static> {
     }
 }
 
-/// The Settings heading, its scope line, the scope chips and the section tabs
-/// (`.ph`, `.idl`, `.scopes`, `.tabs`). The tabs keep one row at the 1024px
-/// minimum window, so there is no narrow-window substitute.
-pub fn in_content_navigation(menu: &Menu, cache: &Cache) -> Option<Element<'static, Message>> {
-    let scope = route_scope(menu)?;
-    let scopes = route_choices(menu, cache);
-    let sections = section_routes(menu, cache);
+/// The network coin and "<name> · <network>" under a page title (`.idl`).
+pub(crate) fn scope_line(cache: &Cache, name: &str) -> Element<'static, Message> {
     let network = crate::app::view::nav::shell::network_label(cache.chain());
-    let scope_name = scopes
-        .iter()
-        .find(|choice| choice.selected)
-        .map(|choice| choice.label.clone())
-        .unwrap_or_else(|| match scope {
-            RouteScope::Cube => "Cube".to_owned(),
-            RouteScope::Vault => "Vault".to_owned(),
-            RouteScope::Spark => "Spark".to_owned(),
-        });
     let light = matches!(
         cache.theme_mode,
         coincube_ui::theme::palette::ThemeMode::Light
@@ -229,7 +215,7 @@ pub fn in_content_navigation(menu: &Menu, cache: &Cache) -> Option<Element<'stat
     ))
     .width(Length::Fixed(16.0))
     .height(Length::Fixed(16.0));
-    let scope_line = Row::new()
+    Row::new()
         .spacing(6)
         .align_y(iced::Alignment::Center)
         .push(
@@ -239,7 +225,27 @@ pub fn in_content_navigation(menu: &Menu, cache: &Cache) -> Option<Element<'stat
                 .center_x(Length::Fixed(18.0))
                 .center_y(Length::Fixed(18.0)),
         )
-        .push(tenshu::caption(format!("{} · {}", scope_name, network)).size(13));
+        .push(tenshu::caption(format!("{} · {}", name, network)).size(13))
+        .into()
+}
+
+/// The Settings heading, its scope line, the scope chips and the section tabs
+/// (`.ph`, `.idl`, `.scopes`, `.tabs`). The tabs keep one row at the 1024px
+/// minimum window, so there is no narrow-window substitute.
+pub fn in_content_navigation(menu: &Menu, cache: &Cache) -> Option<Element<'static, Message>> {
+    let scope = route_scope(menu)?;
+    let scopes = route_choices(menu, cache);
+    let sections = section_routes(menu, cache);
+    let scope_name = scopes
+        .iter()
+        .find(|choice| choice.selected)
+        .map(|choice| choice.label.clone())
+        .unwrap_or_else(|| match scope {
+            RouteScope::Cube => "Cube".to_owned(),
+            RouteScope::Vault => "Vault".to_owned(),
+            RouteScope::Spark => "Spark".to_owned(),
+        });
+    let scope_line = scope_line(cache, &scope_name);
 
     let scope_intents: Vec<Message> = scopes.iter().map(|c| c.intent.clone()).collect();
     let chips = choice_chips(

@@ -12,7 +12,7 @@ use coincube_ui::{
     component::{amount::*, button, card, form, spinner, text::*},
     icon::{self, cross_icon},
     theme,
-    widget::{Button, Column, ColumnExt, Element},
+    widget::{action::Action, Button, Column, ColumnExt, Element},
 };
 
 use crate::{
@@ -184,36 +184,54 @@ fn failure_detail(message: &str) -> String {
     format!("{}…", truncated.trim_end())
 }
 
-/// The Vault's tools (coin control, PSBT proposals, recovery path, split
-/// coins), reached from the Vault page as on the canvas, not the sidebar.
+/// The one Tools row on the Vault page (P-Overview): it names the tools the
+/// Vault offers and opens the Tools page on the first of them, where a tab
+/// bar switches between them.
 pub(crate) fn vault_tools<'a>(
     cube_id: &str,
     tools: &[(&'static str, Menu)],
 ) -> Element<'a, Message> {
-    tools
+    let Some((_, first)) = tools.first() else {
+        return Space::new().into();
+    };
+    let summary = tools
         .iter()
-        .fold(
-            Column::new().spacing(10).push(h4_bold("Tools")),
-            |column, (label, route)| {
-                column.push(
-                    Container::new(
-                        landing_button(
-                            landing_control_id(cube_id, "Vault", label),
-                            label,
-                            None,
-                            Message::FocusAction,
-                            Some(Message::Menu(route.clone())),
-                            theme::button::transparent_border,
-                        )
+        .enumerate()
+        .map(|(index, (label, _))| {
+            // "Coin control, PSBT proposals, recovery path, split coins".
+            if index == 0 || label.starts_with("PSBT") {
+                label.to_string()
+            } else {
+                label.to_lowercase()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Container::new(
+        Action::new(
+            landing_control_id(cube_id, "Vault", "tools"),
+            Row::new()
+                .spacing(15)
+                .align_y(Alignment::Center)
+                .push(icon::wrench_icon().style(theme::text::secondary))
+                .push(
+                    Column::new()
+                        .spacing(2)
                         .width(Length::Fill)
-                        .padding(15),
-                    )
-                    .width(Length::Fill)
-                    .style(theme::card::simple),
+                        .push(text("Tools").size(P1_SIZE).bold())
+                        .push(text(summary).size(P2_SIZE).style(theme::text::secondary)),
                 )
-            },
+                .push(icon::chevron_right().style(theme::text::secondary)),
+            Message::FocusAction,
         )
-        .into()
+        .style(theme::button::transparent_border)
+        .width(Length::Fill)
+        .padding(15)
+        .on_press(Message::Menu(first.clone())),
+    )
+    .width(Length::Fill)
+    .style(theme::card::simple)
+    .into()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -737,7 +755,7 @@ mod capture_tests {
     }
 
     #[test]
-    fn vault_page_links_each_tool_it_is_given() {
+    fn vault_page_has_one_tools_row_naming_each_tool() {
         let balance = bitcoin::Amount::from_sat(250_000);
         let zero = bitcoin::Amount::ZERO;
         let tools = [
@@ -774,13 +792,20 @@ mod capture_tests {
             )
         };
         let with = view(&tools);
+        // One Tools row naming every tool, not one button per tool.
         assert!(with.contains("Tools"));
+        assert!(with.contains("Coin control, PSBT proposals, recovery path, split coins"));
+        assert!(with.has_focus(landing_control_id("synthetic-cube", "Vault", "tools")));
         for (label, _) in &tools {
-            assert!(with.contains(label), "missing {:?}", label);
-            assert!(with.has_focus(landing_control_id("synthetic-cube", "Vault", label)));
+            assert!(
+                !with.has_focus(landing_control_id("synthetic-cube", "Vault", label)),
+                "{:?} has its own button",
+                label
+            );
         }
         let without = view(&[]);
         assert!(!without.contains("Coin control"));
+        assert!(!without.has_focus(landing_control_id("synthetic-cube", "Vault", "tools")));
     }
 
     #[test]
