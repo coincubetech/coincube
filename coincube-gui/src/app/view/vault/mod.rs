@@ -14,5 +14,6 @@ pub mod recovery;
 pub mod settings;
 pub mod spend;
 pub mod split;
+pub mod tools;
 pub mod transactions;
 pub mod warning;
