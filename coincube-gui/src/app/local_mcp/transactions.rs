@@ -10,7 +10,6 @@ use crate::{
 use coincube_core::{
     descriptors::CoincubeDescriptor,
     miniscript::bitcoin::{secp256k1, Address, Network, Psbt},
-    spend::DUST_OUTPUT_SATS,
 };
 use coincube_mcp::{
     self as wire,
@@ -180,8 +179,7 @@ impl Service {
                 .map_err(|_| Error::InvalidInput)?
                 .require_network(Network::Regtest)
                 .map_err(|_| Error::InvalidInput)?;
-            if recipient.amount_sats < DUST_OUTPUT_SATS
-                || recipient.amount_sats <= address.script_pubkey().minimal_non_dust().to_sat()
+            if output_below_floor(recipient.amount_sats, address.script_pubkey())
                 || destinations
                     .insert(address.into_unchecked(), recipient.amount_sats)
                     .is_some()
@@ -219,12 +217,27 @@ impl Service {
         >,
     ) -> Result<(Prepared, NativeDraft), wire::Error> {
         use wire::Error;
-        let result = self
+        let result = match self
             .daemon
-            .create_spend_tx(&[], destinations, input.fee_rate_sat_vb, None)
+            .create_spend_tx_capped(
+                &[],
+                destinations,
+                input.fee_rate_sat_vb,
+                None,
+                input.max_fee_sats,
+            )
             .await
-            .map_err(|_| Error::Unavailable)?;
-        let (psbt, warnings) = match result {
+        {
+            Ok(result) => result,
+            Err(crate::daemon::DaemonError::FeeCeilingExceeded) => {
+                return Err(Error::FeeLimitExceeded);
+            }
+            Err(crate::daemon::DaemonError::FeeRateExceeded) => {
+                return Err(Error::FeeRateExceeded);
+            }
+            Err(_) => return Err(Error::Unavailable),
+        };
+        let (mut psbt, warnings) = match result {
             CreateSpendResult::Success { psbt, warnings } => (psbt, warnings),
             CreateSpendResult::InsufficientFunds { .. } => return Err(Error::InsufficientFunds),
         };
@@ -240,7 +253,15 @@ impl Service {
             .await
             .map_err(|_| Error::Unavailable)?
             .coins;
-        let (fee_sats, change_sats) = validate(input, &psbt, &coins, &self.descriptor)?;
+        let (fee_sats, change_sats, fee_rate_sat_vb) =
+            validate(input, &psbt, &coins, &self.descriptor)?;
+        // The returned rate is the maximum-size estimate. Broadcast checks
+        // the requested rate against that same prepared maximum signed size.
+        coincube_core::spend::stamp_mcp_fee_cap(
+            &mut psbt,
+            input.max_fee_sats,
+            input.fee_rate_sat_vb,
+        );
         if self.revoked.load(Ordering::SeqCst) {
             return Err(Error::AccessDenied);
         }
@@ -252,7 +273,7 @@ impl Service {
             recipients: input.recipients.clone(),
             amount_sats: input.recipients.iter().map(|r| r.amount_sats).sum(),
             fee_sats,
-            fee_rate_sat_vb: input.fee_rate_sat_vb,
+            fee_rate_sat_vb,
             change_sats,
             input_count: outpoints.len(),
             signing_required: true,
@@ -291,13 +312,21 @@ impl wire::Reader for Service {
     }
 }
 
+/// MCP drafts use the network dust minimum for each output script.
+fn output_below_floor(
+    amount_sats: u64,
+    script: coincube_core::miniscript::bitcoin::ScriptBuf,
+) -> bool {
+    amount_sats < script.minimal_non_dust().to_sat()
+}
+
 /// Independently verify the engine's public construction before exposing a summary.
 fn validate(
     input: &PrepareInput,
     psbt: &Psbt,
     coins: &[Coin],
     descriptor: &CoincubeDescriptor,
-) -> Result<(u64, u64), wire::Error> {
+) -> Result<(u64, u64, u64), wire::Error> {
     use wire::Error;
     if psbt.serialize().len() > 65_536
         || psbt.inputs.is_empty()
@@ -363,9 +392,7 @@ fn validate(
     let mut change = 0u64;
     let mut changes = 0;
     for (n, output) in psbt.unsigned_tx.output.iter().enumerate() {
-        if output.value.to_sat() < DUST_OUTPUT_SATS
-            || output.value <= output.script_pubkey.minimal_non_dust()
-        {
+        if output_below_floor(output.value.to_sat(), output.script_pubkey.clone()) {
             return Err(Error::Unavailable);
         }
         let is_own = change_indexes.iter().any(|c| c.index() == n);
@@ -399,7 +426,16 @@ fn validate(
     if fee > input.max_fee_sats {
         return Err(Error::FeeLimitExceeded);
     }
-    Ok((fee, change))
+    // Match the spend engine's maximum signed size, including SegWit framing.
+    let vsize = descriptor.unsigned_tx_max_vbytes(&psbt.unsigned_tx, true);
+    if vsize == 0 {
+        return Err(Error::Unavailable);
+    }
+    let measured_rate = fee.div_ceil(vsize);
+    if measured_rate > input.fee_rate_sat_vb {
+        return Err(Error::FeeRateExceeded);
+    }
+    Ok((fee, change, measured_rate))
 }
 
 #[cfg(test)]
@@ -549,7 +585,39 @@ mod tests {
             let native = service.native(&summary.draft_id).unwrap();
             assert_eq!(
                 validate(&input(), &native.psbt, &native.coins, &service.descriptor).unwrap(),
-                (summary.fee_sats, summary.change_sats)
+                (
+                    summary.fee_sats,
+                    summary.change_sats,
+                    summary.fee_rate_sat_vb
+                )
+            );
+            let mut one_sat_per_vbyte = native.psbt.clone();
+            let max_vsize = service
+                .descriptor
+                .unsigned_tx_max_vbytes(&one_sat_per_vbyte.unsigned_tx, true);
+            let total_in: u64 = native.coins.iter().map(|coin| coin.amount.to_sat()).sum();
+            let recipient_script = Address::from_str(&input().recipients[0].address)
+                .unwrap()
+                .assume_checked()
+                .script_pubkey();
+            let change = one_sat_per_vbyte
+                .unsigned_tx
+                .output
+                .iter_mut()
+                .find(|output| output.script_pubkey != recipient_script)
+                .unwrap();
+            let change_sats = total_in - input().recipients[0].amount_sats - max_vsize;
+            change.value = Amount::from_sat(change_sats);
+            let mut one_sat_request = input();
+            one_sat_request.fee_rate_sat_vb = 1;
+            assert_eq!(
+                validate(
+                    &one_sat_request,
+                    &one_sat_per_vbyte,
+                    &native.coins,
+                    &service.descriptor
+                ),
+                Ok((max_vsize, change_sats, 1))
             );
             let mut cases = Vec::new();
             let mut signed = native.psbt.clone();
@@ -714,15 +782,22 @@ mod tests {
             let mut request = input();
             request.max_fee_sats = 1;
             let call = |v| wire::Request::PrepareTransaction(v);
+            let before = service.daemon.get_info().await.unwrap().change_index;
+            assert_eq!(
+                service.read(call(request.clone())).await.unwrap_err(),
+                wire::Error::FeeLimitExceeded
+            );
+            assert_eq!(
+                service.daemon.get_info().await.unwrap().change_index,
+                before,
+                "fee rejection reserved a change address"
+            );
             assert_eq!(
                 service.read(call(request.clone())).await.unwrap_err(),
                 wire::Error::FeeLimitExceeded
             );
             let index = service.daemon.get_info().await.unwrap().change_index;
-            assert_eq!(
-                service.read(call(request.clone())).await.unwrap_err(),
-                wire::Error::FeeLimitExceeded
-            );
+            assert_eq!(index, before, "fee rejection reserved a change address");
             assert_eq!(
                 service.daemon.get_info().await.unwrap().change_index,
                 index,
@@ -751,6 +826,7 @@ mod tests {
                 service.daemon.get_info().await.unwrap().change_index,
                 bounded
             );
+            assert_eq!(bounded, before, "rejected drafts reserved change");
             assert!(service.summaries().is_empty());
             assert!(service
                 .daemon
@@ -964,5 +1040,21 @@ mod tests {
             session::close();
             cleanup(root, service).await;
         });
+    }
+
+    #[test]
+    fn output_floor_accepts_the_network_minimum() {
+        use coincube_core::miniscript::bitcoin::{hashes::Hash, PubkeyHash, WPubkeyHash};
+        let p2wpkh = ScriptBuf::new_p2wpkh(&WPubkeyHash::all_zeros());
+        let network_dust = p2wpkh.minimal_non_dust().to_sat();
+        assert_eq!(network_dust, 294);
+        assert!(output_below_floor(network_dust - 1, p2wpkh.clone()));
+        assert!(!output_below_floor(network_dust, p2wpkh));
+
+        let p2pkh = ScriptBuf::new_p2pkh(&PubkeyHash::all_zeros());
+        let legacy_dust = p2pkh.minimal_non_dust().to_sat();
+        assert_eq!(legacy_dust, 546);
+        assert!(output_below_floor(legacy_dust - 1, p2pkh.clone()));
+        assert!(!output_below_floor(legacy_dust, p2pkh));
     }
 }

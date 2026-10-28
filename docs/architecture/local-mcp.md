@@ -125,7 +125,9 @@ or reset when it may have leaked.
 - `tenshu_get_wallet_summary`: current daemon balances in satoshis and sync state;
   no promise that a policy is presently satisfiable or that data is fully synced.
 - `tenshu_get_transactions`: bounded confirmed history, newest-first; no labels,
-  scripts or addresses. Limits avoid inventing unsupported cursor semantics.
+  scripts, addresses or chain transaction ids. Each row carries a session activity
+  id that changes on the next unlock and differs per client. Limits avoid inventing
+  unsupported cursor semantics.
 - `tenshu_get_wallet_policy_summary`: script type, deterministic signing thresholds
   and key counts, recovery delays in blocks. No prediction of recovery eligibility.
 

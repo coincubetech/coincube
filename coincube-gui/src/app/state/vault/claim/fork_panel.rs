@@ -639,6 +639,7 @@ impl ForkClaimPanel {
                     psbt.saved,
                     psbt.replay_presentation(operation_cache),
                     false,
+                    true,
                 ));
             } else {
                 body = body.push(card::warning(

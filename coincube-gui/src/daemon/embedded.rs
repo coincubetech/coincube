@@ -85,6 +85,8 @@ fn map_spend_command_error(error: CommandError) -> DaemonError {
             coincubed::commands::TX_BROADCAST_ERROR as i32,
             error.to_string(),
         ),
+        CommandError::FeeCeilingExceeded => DaemonError::FeeCeilingExceeded,
+        CommandError::FeeRateExceeded => DaemonError::FeeRateExceeded,
         other => DaemonError::Unexpected(other.to_string()),
     }
 }
@@ -455,6 +457,36 @@ impl Daemon for EmbeddedDaemon {
             daemon
                 .create_spend(destinations, coins_outpoints, feerate_vb, change_address)
                 .map_err(|e| DaemonError::Unexpected(e.to_string()))
+        })
+        .await
+    }
+
+    async fn create_spend_tx_capped(
+        &self,
+        coins_outpoints: &[OutPoint],
+        destinations: &HashMap<Address<address::NetworkUnchecked>, u64>,
+        feerate_vb: u64,
+        change_address: Option<Address<address::NetworkUnchecked>>,
+        max_fee_sats: u64,
+    ) -> Result<CreateSpendResult, DaemonError> {
+        self.command(|daemon| {
+            daemon
+                .create_spend_within_limits(
+                    destinations,
+                    coins_outpoints,
+                    feerate_vb,
+                    change_address,
+                    Some(max_fee_sats),
+                )
+                .map_err(|error| match error {
+                    coincubed::commands::CommandError::FeeCeilingExceeded => {
+                        DaemonError::FeeCeilingExceeded
+                    }
+                    coincubed::commands::CommandError::FeeRateExceeded => {
+                        DaemonError::FeeRateExceeded
+                    }
+                    other => DaemonError::Unexpected(other.to_string()),
+                })
         })
         .await
     }

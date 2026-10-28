@@ -336,6 +336,25 @@ impl Review {
         }
     }
 }
+fn account_identity(
+    key: &coincube_core::miniscript::descriptor::DescriptorPublicKey,
+) -> (
+    Option<coincube_core::miniscript::bitcoin::bip32::Fingerprint>,
+    Option<coincube_core::miniscript::bitcoin::bip32::Fingerprint>,
+) {
+    match key {
+        coincube_core::miniscript::descriptor::DescriptorPublicKey::XPub(key) => (
+            key.origin.as_ref().map(|(fingerprint, _)| *fingerprint),
+            Some(key.xkey.fingerprint()),
+        ),
+        coincube_core::miniscript::descriptor::DescriptorPublicKey::MultiXPub(key) => (
+            key.origin.as_ref().map(|(fingerprint, _)| *fingerprint),
+            Some(key.xkey.fingerprint()),
+        ),
+        _ => (None, None),
+    }
+}
+
 impl Step for Review {
     fn load_context(&mut self, ctx: &Context) {
         self.session.invalidate();
@@ -345,6 +364,20 @@ impl Step for Review {
             .map(ToString::to_string)
             .unwrap_or_default();
         self.signers.clear();
+        let assistant_origins = self
+            .session
+            .creation_keys()
+            .ok()
+            .flatten()
+            .map(|validated| {
+                validated
+                    .primary
+                    .iter()
+                    .chain(validated.recovery.iter())
+                    .map(|key| key.fingerprint)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         if let Some(descriptor) = &ctx.descriptor {
             let policy = descriptor.policy();
             let paths = std::iter::once(("Primary".to_owned(), policy.primary_path())).chain(
@@ -354,27 +387,56 @@ impl Step for Review {
                     .map(|(delay, path)| (format!("Recovery after {delay} blocks"), path)),
             );
             for (path_name, path) in paths {
-                let (_, origins) = path.thresh_origins();
-                let mut fingerprints = origins.keys().copied().collect::<Vec<_>>();
-                fingerprints.sort();
-                for fp in fingerprints {
+                let mut descriptor_keys = match path {
+                    coincube_core::descriptors::PathInfo::Single(key) => vec![key.clone()],
+                    coincube_core::descriptors::PathInfo::Multi(_, keys) => keys.clone(),
+                };
+                descriptor_keys.sort_by_key(|key| account_identity(key).0);
+                for desc_key in descriptor_keys {
+                    let (origin, account) = account_identity(&desc_key);
+                    let Some(fp) = origin else {
+                        continue;
+                    };
                     let key = ctx.keys.get(&fp);
                     let alias = key
                         .map(|k| k.name.as_str())
                         .filter(|s| !s.is_empty())
                         .unwrap_or("Unnamed signer");
-                    let source = if key.is_some_and(|k| k.keychain_key_id.is_some()) {
-                        "Keychain metadata recorded; verify on the phone"
+                    let assistant_supplied = assistant_origins.contains(&fp);
+                    let (identity, source) = if assistant_supplied {
+                        (
+                            account
+                                .map(|fingerprint| {
+                                    format!("account xpub fingerprint {fingerprint}")
+                                })
+                                .unwrap_or_else(|| {
+                                    "account xpub fingerprint unavailable".to_string()
+                                }),
+                            "origin fingerprint was supplied by the assistant and was not checked",
+                        )
+                    } else if key.is_some_and(|k| k.keychain_key_id.is_some()) {
+                        (
+                            format!("fingerprint {fp}"),
+                            "Keychain metadata recorded; verify on the phone",
+                        )
                     } else if ctx.hws.iter().any(|(_, fingerprint, _)| *fingerprint == fp) {
-                        "hardware registration recorded; verify on the device"
+                        (
+                            format!("fingerprint {fp}"),
+                            "hardware registration recorded; verify on the device",
+                        )
                     } else if key.is_some_and(|k| k.is_border_wallet) {
-                        "Border Wallet provenance recorded; verify its source"
+                        (
+                            format!("fingerprint {fp}"),
+                            "Border Wallet provenance recorded; verify its source",
+                        )
                     } else {
-                        "verify the original key source locally"
+                        (
+                            format!("fingerprint {fp}"),
+                            "verify the original key source locally",
+                        )
                     };
-                    self.signers.push(format!(
-                        "{path_name}: {alias} · fingerprint {fp} · {source}"
-                    ));
+                    self.signers
+                        .push(format!("{path_name}: {alias} · {identity} · {source}"));
                 }
             }
         }
@@ -407,7 +469,7 @@ impl Step for Review {
         let topology = self.session.topology();
         let mut content = column![h3("Review and authorize this Regtest Vault"),
             text(format!("Primary: 3 of 5. Recovery: {} of {} after {} relative blocks for each coin. Block time varies; this is not a calendar deadline.", topology.recovery.quorum.threshold, topology.recovery.quorum.key_count, topology.recovery.relative_delay_blocks)),
-            text("Tenshu validated this actual descriptor. Verify every signer fingerprint and key on its source device, signer distribution and recovery assumptions before creating. Distinct fingerprints do not prove independent custody."),
+            text("Tenshu validated this actual descriptor. For assistant-supplied keys, the account xpub fingerprint below is computed from the key itself; the origin fingerprint was supplied by the assistant and was not checked. Verify every key on its source device, signer distribution and recovery assumptions before creating. Distinct fingerprints do not prove independent custody."),
             text(&self.descriptor),
             text("Creation ends MCP access. A separate approval is required to read the resulting Vault. Backup possession and recovery testing are not verified by descriptor validation."),
             text(self.warning.as_deref().unwrap_or("Confirm that this is the exact policy and set of public keys you intend."))].spacing(16).padding(24);

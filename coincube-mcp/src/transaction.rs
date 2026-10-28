@@ -104,7 +104,10 @@ pub struct Prepared {
     pub amount_sats: u64,
     /// Actual total fee of this unsigned construction.
     pub fee_sats: u64,
-    /// Requested fee rate, not a claim about future confirmation time.
+    /// Estimated sat/vB at the descriptor's maximum signed size, rounded up.
+    /// A shorter real witness makes the signed transaction smaller, so its
+    /// rate can be higher. Before broadcast, Tenshu rechecks the fee ceiling
+    /// and requested rate against the maximum signed size used at preparation.
     pub fee_rate_sat_vb: u64,
     /// Total change amount, without revealing its address.
     pub change_sats: u64,

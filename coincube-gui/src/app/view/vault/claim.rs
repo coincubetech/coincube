@@ -1354,6 +1354,7 @@ fn sign_view<'a>(
                     None,
                     state.broadcast_ready(cache),
                     (!finalizing).then_some(Message::Claim(ClaimMessage::Cancel)),
+                    true,
                 )
             })),
     );
@@ -1419,6 +1420,7 @@ fn paired_sign_view<'a>(
                 None,
                 false,
                 Some(Message::Claim(ClaimMessage::Cancel)),
+                true,
             )))),
     );
     let rendered = match &state.modal {

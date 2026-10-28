@@ -436,6 +436,20 @@ impl From<&Error> for UserError {
                     CC_DMN_UNSUPPORTED,
                     false,
                 ),
+
+                DaemonError::FeeCeilingExceeded => UserError::new(
+                    "Fee is above the limit",
+                    "The transaction fee is above the ceiling supplied for this payment. Lower the fee or raise the limit, then try again.",
+                    CC_DMN_COINSELECT,
+                    false,
+                ),
+
+                DaemonError::FeeRateExceeded => UserError::new(
+                    "Fee rate is above the request",
+                    "The constructed transaction's fee rate is above the rate supplied for this payment. Choose a higher rate or a smaller payment, then try again.",
+                    CC_DMN_COINSELECT,
+                    false,
+                ),
             },
 
             Error::Unexpected(_) => UserError::new(
