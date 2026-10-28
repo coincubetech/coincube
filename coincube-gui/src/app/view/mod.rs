@@ -272,6 +272,62 @@ fn dashboard_with_info_layout<'a, T: Into<Element<'a, Message>>>(
     )
 }
 
+/// A reading page with Activity's detail pane (`.det`) for a selected row:
+/// beside the page at the content's right edge when both fit, else over the
+/// page from that edge. `content` and `detail` are rebuilt per layout width.
+pub fn dashboard_with_detail<'a>(
+    menu: &'a Menu,
+    cache: &'a Cache,
+    content: impl Fn() -> Element<'a, Message> + 'a,
+    detail: impl Fn() -> Option<Element<'a, Message>> + 'a,
+) -> Element<'a, Message> {
+    let body = iced::widget::responsive(move |size: iced::Size| {
+        let page_body: Element<'a, Message> = Container::new(
+            scrollable(page(
+                Column::new()
+                    .push_maybe(settings::frame::in_content_navigation(menu, cache))
+                    .push(content())
+                    .width(Length::Fill),
+                PageWidth::Reading,
+            ))
+            .on_scroll(|w| Message::Scroll(w.absolute_offset().y)),
+        )
+        .width(Length::Fill)
+        .style(theme::container::background)
+        .height(Length::Fill)
+        .into();
+        let Some(detail) = detail() else {
+            return page_body;
+        };
+        let pane = activity::detail_column(detail);
+        if activity::wallet_detail_beside(size.width) {
+            row![page_body, iced::widget::rule::vertical(1), pane].into()
+        } else {
+            iced::widget::Stack::new()
+                .push(page_body)
+                .push(row![
+                    Space::new().width(Length::Fill),
+                    iced::widget::opaque(row![iced::widget::rule::vertical(1), pane])
+                ])
+                .into()
+        }
+    });
+    let content_column: Element<'_, Message> = Column::new()
+        .push(warn(None))
+        .push_maybe(cache.spark_notice.as_ref().map(spark_notice_banner))
+        .push(body)
+        .width(Length::Fill)
+        .into();
+    dashboard_shell_with_info(
+        menu,
+        cache,
+        content_column,
+        &cache.cube_name,
+        cache.avatar_handle.as_ref(),
+        cache.lightning_address.as_deref(),
+    )
+}
+
 /// Use the same shell for panels with their own scroll handling, such as P2P
 /// chat. `body` owns its content and warnings; the shell owns all navigation.
 pub fn dashboard_shell<'a, T: Into<Element<'a, Message>>>(

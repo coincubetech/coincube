@@ -15,7 +15,6 @@ use coincube_ui::component::text::Text;
 use coincube_ui::{
     color,
     component::{amount::*, button, text::*},
-    icon::receipt_icon,
     theme,
     widget::*,
 };
@@ -27,12 +26,9 @@ use iced::{
 use crate::app::settings::display::DisplayMode;
 use crate::app::state::connect::ConnectCubePanel;
 use crate::app::state::spark::overview::SparkBalanceSnapshot;
-use crate::app::view::shared::activity_row::{
-    activity_row, ActivityDirection, ActivityIdentity, ActivityRow,
-};
 use crate::app::view::shared::landing::{
-    amount_cell, landing_balance_section, landing_button, landing_control_id,
-    landing_subtle_button_style, AmountCell, AmountTier,
+    amount_cell, landing_balance_section, landing_button, landing_control_id, AmountCell,
+    AmountTier,
 };
 use crate::app::view::spark::settings::lightning_address::{
     lightning_address_body, LN_ADDRESS_DOMAIN,
@@ -496,112 +492,9 @@ fn connected_view<'a>(
         );
     }
 
-    // ── Recent transactions ───────────────────────────────────────────
-    content = content.push(Column::new().spacing(10).push(h4_bold("Last transactions")));
-
-    if !recent.is_empty() {
-        for tx in recent {
-            let open = (!tx.id.trim().is_empty()
-                && recent.iter().filter(|other| other.id == tx.id).count() == 1)
-                .then(|| SparkOverviewMessage::SelectTransaction(tx.id.clone()));
-            let amount = (!mask_amounts).then(|| {
-                tx.token_display.clone().unwrap_or_else(|| {
-                    format!(
-                        "{} {}",
-                        row_display_amount(tx).to_formatted_string_with_unit(bitcoin_unit),
-                        bitcoin_unit.label()
-                    )
-                })
-            });
-            let amount = amount.map(|amount| {
-                if tx.is_incoming {
-                    format!("+{amount}")
-                } else {
-                    format!("−{amount}")
-                }
-            });
-            let secondary = (!mask_amounts)
-                .then_some(
-                    tx.fiat_amount
-                        .as_ref()
-                        .filter(|_| tx.method != SparkPaymentMethod::StableBalance)
-                        .map(|fiat| {
-                            format!(
-                                "{} {} · current rate",
-                                fiat.to_formatted_string(),
-                                fiat.currency()
-                            )
-                        }),
-                )
-                .flatten();
-            let rail = match tx.method {
-                SparkPaymentMethod::Lightning => "Lightning",
-                SparkPaymentMethod::OnChainBitcoin => "Bitcoin on-chain",
-                SparkPaymentMethod::Spark => "Spark",
-                SparkPaymentMethod::StableBalance => "Stable Balance",
-            };
-            content = content.push(activity_row(
-                ActivityRow {
-                    identity: ActivityIdentity {
-                        cube: cube_id.to_owned(),
-                        wallet: "Spark".into(),
-                        payment: open.as_ref().map(|_| tx.id.clone()),
-                    },
-                    rail: Some(rail.into()),
-                    date: (tx.timestamp > 0)
-                        .then(|| {
-                            chrono::DateTime::<chrono::Utc>::from_timestamp(tx.timestamp as i64, 0)
-                        })
-                        .flatten()
-                        .map(|date| {
-                            date.with_timezone(&chrono::Local)
-                                .format("%b %-d, %H:%M")
-                                .to_string()
-                        })
-                        .unwrap_or_else(|| "Time unknown".into()),
-                    timezone_tooltip: (tx.timestamp > 0).then(|| "Local time".into()),
-                    direction: if tx.is_incoming {
-                        ActivityDirection::Incoming
-                    } else {
-                        ActivityDirection::Outgoing
-                    },
-                    label: tx.description.clone(),
-                    wallet_caption: None,
-                    amount: amount.map_or_else(AmountCell::masked, |amount| {
-                        AmountCell::shown(amount, secondary)
-                    }),
-                    status: tx.status.into(),
-                },
-                false,
-                open,
-                SparkOverviewMessage::FocusAction,
-            ));
-        }
-    } else {
-        content = content.push(placeholder(
-            receipt_icon().size(80),
-            "No transactions yet",
-            "Your transaction history will appear here once you send or receive coins.",
-        ));
-    }
-
-    let view_transactions_button = landing_button(
-        landing_control_id(cube_id, "Spark", "history"),
-        "View All Transactions",
-        None,
-        SparkOverviewMessage::FocusAction,
-        Some(SparkOverviewMessage::History),
-        landing_subtle_button_style,
-    );
-
-    content = content
-        .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
-        .push(
-            Container::new(view_transactions_button)
-                .width(Length::Fill)
-                .center_x(Length::Fill),
-        )
-        .push(iced::widget::Space::new().height(Length::Fixed(40.0)));
+    // "Recent activity" follows the balance; App mounts it from Activity
+    // (`view::activity::wallet_recent_activity`).
+    content = content.push(iced::widget::Space::new().height(Length::Fixed(20.0)));
 
     Container::new(content).padding([0, 16]).into()
 }
@@ -656,38 +549,6 @@ fn stable_badge<'a>() -> Element<'a, SparkOverviewMessage> {
         ..Default::default()
     })
     .into()
-}
-
-fn placeholder<'a, T: Into<Element<'a, SparkOverviewMessage>>>(
-    icon: T,
-    title: &'a str,
-    subtitle: &'a str,
-) -> Element<'a, SparkOverviewMessage> {
-    let content = Column::new()
-        .push(icon)
-        .push(text(title).style(theme::text::secondary).bold())
-        .push(
-            text(subtitle)
-                .size(P2_SIZE)
-                .style(theme::text::secondary)
-                .align_x(Alignment::Center),
-        )
-        .spacing(16)
-        .align_x(Alignment::Center);
-
-    Container::new(content)
-        .width(Length::Fill)
-        .padding(60)
-        .center_x(Length::Fill)
-        .style(|t| container::Style {
-            background: Some(iced::Background::Color(t.colors.cards.simple.background)),
-            border: iced::Border {
-                radius: 20.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        })
-        .into()
 }
 
 #[cfg(test)]
@@ -1263,31 +1124,6 @@ mod tests {
                 None,
             ),
         ];
-        let adverse = [
-            DomainPaymentStatus::Created,
-            DomainPaymentStatus::Pending,
-            DomainPaymentStatus::Complete,
-            DomainPaymentStatus::Failed,
-            DomainPaymentStatus::TimedOut,
-            DomainPaymentStatus::Refundable,
-            DomainPaymentStatus::RefundPending,
-            DomainPaymentStatus::WaitingFeeAcceptance,
-        ]
-        .iter()
-        .enumerate()
-        .map(|(index, status)| {
-            let mut payment = tx(
-                &format!("payment-{index}"),
-                index % 2 == 0,
-                *status,
-                99_999_999_999,
-                1,
-                None,
-            );
-            payment.description = "A long Spark payment description with a beneficiary name and contextual details that should wrap safely in compact mode".into();
-            payment
-        })
-        .collect::<Vec<_>>();
         for (appearance, theme) in [
             ("dark", theme::Theme::dark()),
             ("light", theme::Theme::light()),
@@ -1306,9 +1142,10 @@ mod tests {
                     appearance,
                     theme,
                 );
-                assert!(normal.contains("Last transactions"));
+                // "Recent activity" is Activity's, mounted by App.
+                assert!(!normal.contains("Last transactions"));
                 assert!(normal.contains("2.50 USDB"));
-                for control in ["flip-balance", "send-btc", "receive-btc", "history"] {
+                for control in ["flip-balance", "send-btc", "receive-btc"] {
                     assert!(normal.has_focus(landing_control_id(
                         "synthetic-cube",
                         "Spark",
@@ -1347,8 +1184,6 @@ mod tests {
                     theme,
                 );
                 assert!(unknown_setting.contains("setting is still unknown"));
-                assert!(unknown_setting.contains("No transactions yet"));
-                assert!(unknown_setting.contains("View All Transactions"));
                 let unavailable = capture::inspect(
                     "spark-bridge-unavailable",
                     synthetic_overview(SparkStatus::Unavailable, &[], None, None, None),
@@ -1357,21 +1192,6 @@ mod tests {
                     theme,
                 );
                 assert!(unavailable.contains("not configured"));
-                let statuses = capture::inspect(
-                    "spark-all-statuses-long-labels",
-                    synthetic_overview(
-                        SparkStatus::Connected(snapshot.clone()),
-                        &adverse,
-                        Some(true),
-                        Some(50_000.0),
-                        None,
-                    ),
-                    outer,
-                    appearance,
-                    theme,
-                );
-                assert!(statuses.contains("Refund available"));
-                assert!(statuses.contains("Review fee"));
             }
         }
     }

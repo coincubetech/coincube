@@ -108,8 +108,33 @@ impl VaultOverview {
     }
 }
 
-impl State for VaultOverview {
-    fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
+impl VaultOverview {
+    /// The Vault page with its "Recent activity" and the selected row's
+    /// detail pane, both read from Activity by App (`view::activity`).
+    pub fn view_with_recent_activity<'a>(
+        &'a self,
+        menu: &'a Menu,
+        cache: &'a Cache,
+        recent_activity: impl Fn() -> Element<'a, view::Message> + 'a,
+        detail: impl Fn() -> Option<Element<'a, view::Message>> + 'a,
+    ) -> Element<'a, view::Message> {
+        if let Some(page) = self.full_page_view(menu, cache) {
+            return page;
+        }
+        view::dashboard_with_detail(
+            menu,
+            cache,
+            move || self.page_body(cache, Some(recent_activity())),
+            detail,
+        )
+    }
+
+    /// The received celebration or a payment's own screen replace the page.
+    fn full_page_view<'a>(
+        &'a self,
+        menu: &'a Menu,
+        cache: &'a Cache,
+    ) -> Option<Element<'a, view::Message>> {
         if self.show_received_celebration {
             let celebration = view::vault::overview::received_celebration_page(
                 "bitcoin-receive",
@@ -117,12 +142,9 @@ impl State for VaultOverview {
                 &self.received_quote,
                 &self.received_image_handle,
             );
-            return view::dashboard(menu, cache, celebration);
+            return Some(view::dashboard(menu, cache, celebration));
         }
-
-        let converter: Option<view::FiatAmountConverter> =
-            cache.fiat_price.as_ref().and_then(|p| p.try_into().ok());
-        if let Some((tx, output_index)) = &self.selected_event {
+        self.selected_event.as_ref().map(|(tx, output_index)| {
             view::vault::overview::payment_view(
                 menu,
                 cache,
@@ -130,42 +152,44 @@ impl State for VaultOverview {
                 *output_index,
                 self.labels_edited.cache(),
             )
-        } else {
-            view::dashboard(
-                menu,
-                cache,
-                view::vault::overview::vault_overview_view(
-                    &self.balance,
-                    &self.unconfirmed_balance,
-                    &self.remaining_sequence,
-                    converter,
-                    &self.expiring_coins,
-                    &self.payments.list,
-                    &cache.cube_id,
-                    self.payments.is_last_page,
-                    self.processing,
-                    // "Loading transactions" while the very first page fetch
-                    // is still in flight: no page loaded yet, nothing to
-                    // show, and no error reported. A background Tick reload
-                    // keeps `list` populated, so it won't flash to loading.
-                    self.payments.list.is_empty()
-                        && !self.payments.history_loaded
-                        && self.payments.last_error.is_none(),
-                    self.payments.history_loaded,
-                    self.payments.last_error.as_deref(),
-                    &self.sync_status,
-                    self.show_rescan_prompt,
-                    self.awaiting_rescan_date,
-                    cache.bitcoin_unit,
-                    cache.node_bitcoind_sync_progress,
-                    cache.node_bitcoind_ibd,
-                    cache.show_direction_badges,
-                    cache.display_mode,
-                    cache.balance_amounts_masked(),
-                    &view::nav::vault::tools(&view::nav::NavContext::from_cache(cache)),
-                ),
-            )
-        }
+        })
+    }
+
+    fn page_body<'a>(
+        &'a self,
+        cache: &'a Cache,
+        recent_activity: Option<Element<'a, view::Message>>,
+    ) -> Element<'a, view::Message> {
+        let converter: Option<view::FiatAmountConverter> =
+            cache.fiat_price.as_ref().and_then(|p| p.try_into().ok());
+        view::vault::overview::vault_overview_view(
+            &self.balance,
+            &self.unconfirmed_balance,
+            &self.remaining_sequence,
+            converter,
+            &self.expiring_coins,
+            recent_activity,
+            &cache.cube_id,
+            &self.sync_status,
+            self.show_rescan_prompt,
+            self.awaiting_rescan_date,
+            cache.bitcoin_unit,
+            cache.node_bitcoind_sync_progress,
+            cache.node_bitcoind_ibd,
+            cache.show_direction_badges,
+            cache.display_mode,
+            cache.balance_amounts_masked(),
+            &view::nav::vault::tools(&view::nav::NavContext::from_cache(cache)),
+        )
+    }
+}
+
+impl State for VaultOverview {
+    /// App renders this page through [`Self::view_with_recent_activity`];
+    /// on its own it has no Activity rows to show.
+    fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
+        self.full_page_view(menu, cache)
+            .unwrap_or_else(|| view::dashboard(menu, cache, self.page_body(cache, None)))
     }
 
     fn update(
