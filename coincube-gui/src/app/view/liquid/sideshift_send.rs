@@ -413,7 +413,7 @@ fn disambiguation_view<'a>(
     }
 
     Container::new(col.push(next_btn).max_width(520).width(Length::Fill))
-        .center_x(Length::Fill)
+        .width(Length::Fill)
         .into()
 }
 
@@ -551,7 +551,7 @@ fn amount_input_view<'a>(
     }
 
     Container::new(col.push(review_btn).max_width(520).width(Length::Fill))
-        .center_x(Length::Fill)
+        .width(Length::Fill)
         .into()
 }
 
@@ -577,7 +577,7 @@ fn loading_view(phase: &SendPhase) -> Element<'static, SideshiftSendMessage> {
             .max_width(520)
             .width(Length::Fill),
     )
-    .center_x(Length::Fill)
+    .width(Length::Fill)
     .into()
 }
 
@@ -653,7 +653,7 @@ fn review_view<'a>(
     }
 
     Container::new(col.push(action_row).max_width(520).width(Length::Fill))
-        .center_x(Length::Fill)
+        .width(Length::Fill)
         .into()
 }
 
@@ -798,7 +798,7 @@ fn sent_view<'a>(
         .width(Length::Fill);
 
     Container::new(col.push(done_btn).max_width(520).width(Length::Fill))
-        .center_x(Length::Fill)
+        .width(Length::Fill)
         .into()
 }
 
@@ -1021,7 +1021,7 @@ fn error_view(error: Option<&str>) -> Element<SideshiftSendMessage> {
             .max_width(520)
             .width(Length::Fill),
     )
-    .center_x(Length::Fill)
+    .width(Length::Fill)
     .into()
 }
 

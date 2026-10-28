@@ -1,14 +1,13 @@
-use iced::widget::{mouse_area, Column, Container, Row, Space, Toggler};
+use iced::widget::{mouse_area, Column, Container, Row, Space};
 use iced::{Alignment, Length};
 
 use coincube_ui::color;
 use coincube_ui::component::tenshu::{
-    section, segment, segmented, select, setting_row, toggle, SegmentSize, Tone,
+    segment, segmented, select, setting_row, toggle, SegmentSize, Tone,
 };
 use coincube_ui::component::text::*;
-use coincube_ui::component::{button, card};
 use coincube_ui::theme;
-use coincube_ui::widget::{action::Action as FocusableAction, Element};
+use coincube_ui::widget::Element;
 
 use crate::app::cache;
 use crate::app::menu::{CubeSettingsOption, CubeSubMenu, Menu, SettingsOption, VaultSubMenu};
@@ -20,6 +19,7 @@ use crate::app::state::settings::recovery_alerts::RecoveryAlerts;
 use crate::app::state::settings::recovery_kit::RecoveryKit;
 use crate::app::view::dashboard;
 use crate::app::view::message::*;
+use crate::app::view::settings::page;
 use crate::services::coincube::{RecoveryKitStatus, VaultMemberRole};
 use crate::services::fiat::{Currency, ALL_PRICE_SOURCES};
 use crate::services::inheritance::EscrowTier;
@@ -44,6 +44,8 @@ pub fn settings_content_section<'a>(
     backup_mnemonic: Option<&'a [String]>,
     recovery_kit: Option<&'a RecoveryKit>,
     recovery_alerts: Option<&'a RecoveryAlerts>,
+    name_input: Option<&'a str>,
+    confirm_checks_off: bool,
 ) -> Element<'a, Message> {
     match section {
         SettingsSection::General => general_section(
@@ -54,8 +56,11 @@ pub fn settings_content_section<'a>(
             currencies_list,
             show_direction_badges,
             saved,
+            name_input,
         ),
-        SettingsSection::PaymentChecks => payment_checks_section(menu, cache, saved),
+        SettingsSection::PaymentChecks => {
+            payment_checks_section(menu, cache, saved, confirm_checks_off)
+        }
         SettingsSection::DataExports => data_exports_section(menu, cache),
         SettingsSection::Recovery => recovery_section(
             menu,
@@ -71,6 +76,7 @@ pub fn settings_content_section<'a>(
 
 /// Cube display preferences. Each control keeps its existing persistence path:
 /// Cube amount settings save per Cube, while direction badges save per device.
+#[allow(clippy::too_many_arguments)]
 fn general_section<'a>(
     menu: &'a Menu,
     cache: &'a cache::Cache,
@@ -79,15 +85,43 @@ fn general_section<'a>(
     currencies_list: &'a [Currency],
     show_direction_badges: bool,
     saved: bool,
+    name_input: Option<&'a str>,
 ) -> Element<'a, Message> {
-    let mut col = Column::new()
-        .spacing(20)
-        .push(super::header(
-            "Display & appearance",
-            SettingsMessage::GeneralSection,
-        ))
-        .push(network_row(cache.chain()))
-        .push(section("Amounts & currency"))
+    dashboard(
+        menu,
+        cache,
+        display_content(
+            cache,
+            new_price_setting,
+            new_unit_setting,
+            currencies_list,
+            show_direction_badges,
+            saved,
+            name_input,
+            None,
+        ),
+    )
+}
+
+pub const CUBE_NAME_ID: &str = "tenshu.settings.cube-name";
+pub const AVATAR_ACTION_ID: &str = "tenshu.settings.avatar";
+
+/// The Display & appearance groups (`#h-amt`, `#h-id`). `avatar_flow` is the
+/// avatar set-up or regeneration flow, shown inline under the Avatar row
+/// while it is open.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn display_content<'a>(
+    cache: &'a cache::Cache,
+    new_price_setting: &'a PriceSetting,
+    new_unit_setting: &'a UnitSetting,
+    currencies_list: &'a [Currency],
+    show_direction_badges: bool,
+    saved: bool,
+    name_input: Option<&'a str>,
+    avatar_flow: Option<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let amounts = Column::new()
+        .push(page::rule())
         .push(amounts_and_currency(
             new_unit_setting,
             cache.display_mode,
@@ -97,57 +131,196 @@ fn general_section<'a>(
             cache.fiat_chain.is_blake2b(),
             show_direction_badges,
         ))
-        .push(text("Cube identity").size(20).bold())
-        .push(
-            card::simple(
-                Row::new()
-                    .spacing(20)
-                    .align_y(Alignment::Center)
-                    .push(text("Cube name").bold())
-                    .push(Space::new().width(Length::Fill))
-                    .push(text(if cache.cube_name.is_empty() {
-                        "Name unavailable"
-                    } else {
-                        cache.cube_name.as_str()
-                    })),
+        .push(page::saved_line(saved));
+
+    let name = name_input.unwrap_or(cache.cube_name.as_str());
+    let name_row = page::row("Cube name")
+        .description("Saved when you press Return or leave the field.")
+        .control(
+            Container::new(
+                coincube_ui::component::tenshu::text_field(
+                    CUBE_NAME_ID,
+                    "Cube name",
+                    name,
+                    Message::FocusAction,
+                )
+                .hide_label()
+                .size(coincube_ui::component::tenshu::FieldSize::Compact)
+                .width(Length::Fixed(280.0))
+                .on_input(|value| SettingsMessage::CubeNameEdited(value).into())
+                .on_submit(SettingsMessage::CubeNameSubmitted(name.to_owned()).into()),
             )
-            .width(Length::Fill),
-        )
-        .push(button::secondary(None, "Rename Cube in Launcher").on_press(Message::OpenLauncher))
-        .push(
-            button::secondary(None, "Manage Cube avatar").on_press(Message::Menu(Menu::Cube(
-                CubeSubMenu::Settings(CubeSettingsOption::Avatar),
-            ))),
-        )
-        .push(text("Preview and confirm avatar changes in the Cube identity flow.").size(14));
-    if saved {
-        col = col.push(text("Saved").size(14));
+            .width(Length::Fixed(280.0)),
+        );
+
+    let flow_open = avatar_flow.is_some();
+    let mut identity = Column::new()
+        .width(Length::Fill)
+        .push(page::rows([name_row.into(), avatar_row(cache, flow_open)]));
+    if let Some(flow) = avatar_flow {
+        identity = identity.push(
+            Container::new(flow)
+                .padding(iced::Padding::default().top(16.0))
+                .width(Length::Fill),
+        );
     }
 
-    dashboard(menu, cache, col)
+    Column::new()
+        .width(Length::Fill)
+        .push(page::group("Amounts & currency", None, amounts))
+        .push(page::group("Cube identity", None, identity))
+        .into()
+}
+
+/// The Avatar row: the 48px tile, how many regenerations remain and the
+/// action that opens the avatar flow inline.
+fn avatar_row<'a>(cache: &'a cache::Cache, flow_open: bool) -> Element<'a, Message> {
+    let tile: Element<'a, Message> = match cache.avatar_handle.as_ref() {
+        Some(handle) => Container::new(
+            iced::widget::image(handle.clone())
+                .width(Length::Fixed(48.0))
+                .height(Length::Fixed(48.0))
+                .border_radius(12.0),
+        )
+        .into(),
+        None => Container::new(text("No avatar").size(11).style(theme::text::secondary))
+            .width(Length::Fixed(48.0))
+            .height(Length::Fixed(48.0))
+            .center_x(Length::Fixed(48.0))
+            .center_y(Length::Fixed(48.0))
+            .style(|t: &theme::Theme| iced::widget::container::Style {
+                border: iced::Border {
+                    color: t.colors.shell.muted,
+                    width: 1.0,
+                    radius: 12.0.into(),
+                },
+                ..Default::default()
+            })
+            .into(),
+    };
+    let signed_in = cache.connect_authenticated;
+    let detail = if !signed_in {
+        "Needs Connect sign-in.".to_owned()
+    } else if cache.avatar_handle.is_none() {
+        "Not set up yet.".to_owned()
+    } else {
+        match cache.avatar_regenerations_remaining {
+            Some(n) if n >= 0 => format!("Regenerations left: {}", n),
+            _ => "Generated from your Lightning Address.".to_owned(),
+        }
+    };
+    let (label, target) = if flow_open {
+        (
+            "Close",
+            Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::General)),
+        )
+    } else if cache.avatar_handle.is_some() {
+        (
+            "Regenerate…",
+            Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Avatar)),
+        )
+    } else {
+        (
+            "Set up…",
+            Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Avatar)),
+        )
+    };
+    page::row("Avatar")
+        .leading(tile)
+        .description(detail)
+        .control(page::button(
+            AVATAR_ACTION_ID,
+            label,
+            signed_in.then_some(Message::Menu(target)),
+        ))
+        .into()
 }
 
 fn payment_checks_section<'a>(
     menu: &'a Menu,
     cache: &'a cache::Cache,
     saved: bool,
+    confirming_off: bool,
 ) -> Element<'a, Message> {
-    let mut content = Column::new()
-        .spacing(20)
-        .push(super::header(
-            "Payment checks",
-            SettingsMessage::PaymentChecksSection,
-        ))
-        .push(p2_regular(
-            "Payment checks currently apply to all Cubes on this device.",
-        ))
-        .push(recipient_identity_checks_toggle())
-        .push(text("A check never guarantees who the recipient is. Unverifiable recipients appear as not verified.").size(14));
-    if saved {
-        content = content.push(text("Saved").size(14));
+    let enabled = crate::services::branta::enabled();
+    let mut rows: Vec<Element<'a, Message>> = vec![page::row("Check payment requests")
+        .control(
+            toggle(CHECKS_TOGGLE_ID, enabled, Message::FocusAction).on_toggle(move |on| {
+                if on {
+                    SettingsMessage::ToggleRecipientIdentityChecks(true).into()
+                } else {
+                    SettingsMessage::AskRecipientChecksOff.into()
+                }
+            }),
+        )
+        .into()];
+    if confirming_off && enabled {
+        rows.push(
+            Column::new()
+                .push(page::note(
+                    Tone::Warn,
+                    Row::new()
+                        .spacing(4)
+                        .push(
+                            text("Turn off recipient checks?")
+                                .size(13)
+                                .font(coincube_ui::font::SEMIBOLD),
+                        )
+                        .push(text("Sends will skip the identity check.").size(13))
+                        .wrap(),
+                    Some(
+                        Row::new()
+                            .spacing(8)
+                            .push(page::primary(
+                                CHECKS_OFF_CONFIRM_ID,
+                                "Turn off",
+                                Some(SettingsMessage::ToggleRecipientIdentityChecks(false).into()),
+                            ))
+                            .push(page::button(
+                                CHECKS_OFF_CANCEL_ID,
+                                "Cancel",
+                                Some(SettingsMessage::CancelRecipientChecksOff.into()),
+                            ))
+                            .into(),
+                    ),
+                ))
+                .push(Space::new().height(Length::Fixed(12.0)))
+                .into(),
+        );
     }
+    rows.push(
+        page::row("Strict mode")
+            .description(
+                "Strict mode does not share the plaintext destination or payment amount. \
+                 Branta can still observe lookup timing and your network connection.",
+            )
+            .line(page::link(
+                BRANTA_PRIVACY_ID,
+                "Branta privacy information",
+                Message::OpenUrl("https://branta.pro/your-data".into()),
+            ))
+            .control(page::status(page::Status::Ok, "Always on"))
+            .top()
+            .into(),
+    );
+    let content = Column::new()
+        .width(Length::Fill)
+        .push(page::group(
+            "Recipient checks",
+            Some("Before you send, Tenshu asks Branta whether the recipient is verified. This applies to every Cube on this device.".into()),
+            page::rows(rows),
+        ))
+        .push(page::caption(
+            "A check never guarantees who the recipient is. Unverifiable recipients show as \u{201c}Not verified\u{201d}.",
+        ))
+        .push(page::saved_line(saved));
     dashboard(menu, cache, content)
 }
+
+pub const CHECKS_TOGGLE_ID: &str = "tenshu.settings.checks.toggle";
+pub const CHECKS_OFF_CONFIRM_ID: &str = "tenshu.settings.checks.off";
+pub const CHECKS_OFF_CANCEL_ID: &str = "tenshu.settings.checks.off-cancel";
+pub const BRANTA_PRIVACY_ID: &str = "tenshu.settings.checks.branta-privacy";
 
 fn recovery_kit_route() -> Menu {
     Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Recovery))
@@ -171,58 +344,29 @@ fn data_exports_section<'a>(menu: &'a Menu, cache: &'a cache::Cache) -> Element<
         "No Vault in this Cube."
     };
 
-    let recovery_row = card::simple(
-        Row::new()
-            .spacing(20)
-            .align_y(Alignment::Center)
-            .push(
-                Column::new()
-                    .spacing(4)
-                    .width(Length::Fill)
-                    .push(text("Recovery Kit").bold())
-                    .push(text("Managed in Backup & protection.").size(14)),
-            )
-            .push(
-                button::secondary(None, "Open Backup & protection")
-                    .on_press(Message::Menu(recovery_kit_route())),
-            ),
-    )
-    .width(Length::Fill);
-
-    let vault_row = card::simple(
-        Row::new()
-            .spacing(20)
-            .align_y(Alignment::Center)
-            .push(
-                Column::new()
-                    .spacing(4)
-                    .width(Length::Fill)
-                    .push(text("Vault files and records").bold())
-                    .push(text(vault_detail).size(14)),
-            )
-            .push(
-                button::secondary(None, "Open Vault data")
-                    .on_press_maybe(vault_data_route(cache).map(Message::Menu)),
-            ),
-    )
-    .width(Length::Fill);
-
-    dashboard(
-        menu,
-        cache,
-        Column::new()
-            .spacing(20)
-            .push(super::header(
-                "Data & exports",
-                SettingsMessage::DataExportsSection,
+    let rows = page::rows([
+        page::row("Recovery Kit")
+            .description("Managed in Backup & protection.")
+            .control(page::button(
+                DATA_BACKUP_ID,
+                "Open Backup & protection",
+                Some(Message::Menu(recovery_kit_route())),
             ))
-            .push(recovery_row)
-            .push(vault_row)
-            .push(
-                text("Exported records do not replace your seed phrase or Recovery Kit.").size(14),
-            ),
-    )
+            .into(),
+        page::row("Vault files and records")
+            .description(vault_detail)
+            .control(page::button(
+                DATA_VAULT_ID,
+                "Open Vault data",
+                vault_data_route(cache).map(Message::Menu),
+            ))
+            .into(),
+    ]);
+    dashboard(menu, cache, page::group("Data & exports", None, rows))
 }
+
+pub const DATA_BACKUP_ID: &str = "tenshu.settings.data.backup";
+pub const DATA_VAULT_ID: &str = "tenshu.settings.data.vault";
 
 /// Recovery tab: local paper backup + Connect Recovery Kit + Vault Recovery
 /// Alerts. Hosts the local-backup wizard page takeover (unchanged from when it
@@ -247,98 +391,183 @@ fn recovery_section<'a>(
         }
     }
 
-    let mut col = Column::new()
-        .spacing(20)
-        .push(super::header(
-            "Backup & protection",
-            SettingsMessage::RecoverySection,
-        ))
-        .push(cache.unswept_recovery_notice().map(text))
-        .push(text("Backup readiness").size(20).bold())
-        .push(backup_master_seed_card(cache.current_cube_backed_up));
+    let backed_up = cache.current_cube_backed_up;
+    let seed_start: Message = SettingsMessage::BackupMasterSeed(BackupWalletMessage::Start).into();
+    let lead = if backed_up {
+        page::lead(
+            page::Status::Ok,
+            "Seed phrase confirmed",
+            "Your seed phrase is confirmed",
+            "The three-word check was saved for this Cube.",
+            page::button(
+                SEED_LEAD_ID,
+                "Reveal seed phrase…",
+                Some(seed_start.clone()),
+            ),
+        )
+    } else {
+        page::lead(
+            page::Status::Warn,
+            "Backup not confirmed",
+            "Confirm your seed phrase",
+            "Losing this computer could mean losing the Cube.",
+            page::primary(
+                SEED_LEAD_ID,
+                "Confirm seed phrase",
+                Some(seed_start.clone()),
+            ),
+        )
+    };
 
-    col = col.push(text("Backup methods").size(20).bold());
-
-    // Connect-hosted Recovery Kit card. Render only when the outer
-    // SettingsState had a `RecoveryKit` on hand — i.e. when the downcasting
-    // wrapper invoked `view_with_recovery_kit`. Falling back to no-card when
-    // `None` keeps the trait-based `view` callers harmless.
-    if let Some(rk) = recovery_kit {
-        if !cache.connect_authenticated && !cache.restorable_connect_session {
-            // The Recovery Kit lives in the Connect account, so it needs sign-in
-            // first. Reuse the shared Connect sign-in prompt (same card + "Sign
-            // In" → `OpenConnectSignIn` button used by Avatar / Members) rather
-            // than a "Create Recovery Kit" CTA that would only dead-end.
-            col = col.push(crate::app::view::connect::sign_in_prompt::sign_in_prompt(
-                "back up your Cube Recovery Kit",
-            ));
-        } else if let Some((action_label, action)) = unregistered_cube_action(cache) {
-            col = col.push(
-                card::simple(
-                    Column::new()
-                        .spacing(10)
-                        .push(text("Recovery Kit unavailable").bold())
-                        .push(text(if cache.connect_authenticated {
-                            "This Cube is not registered with Connect yet. Retry its connection before setting up or changing a Recovery Kit."
-                        } else {
-                            "Restore this account's Connect session on the Cube to finish registration before setting up a Recovery Kit."
-                        }).size(14))
-                        .push(button::primary(None, action_label).on_press(action)),
-                )
-                .width(Length::Fill),
-            );
+    let seed_row = page::row("Seed phrase")
+        .accessory(if backed_up {
+            page::status(page::Status::Ok, "Confirmed")
         } else {
-            // W12 drift, per method (PR 3): compare the live descriptor
-            // fingerprint (refreshed every App tick) against each method's
-            // last-backed-up fingerprint (persisted per-method on `CubeSettings`).
-            // A method's descriptor presence comes from the server status via
-            // `backup_overview`; the positive-evidence-only rule keeps a missing
-            // slot from firing that method's banner.
-            let overview = backup_overview(rk.status.as_ref());
-            let drift = descriptor_drift(
-                cache.current_descriptor_fingerprint.as_deref(),
-                overview.password.map(|m| m.descriptor).unwrap_or(false),
-                cache
-                    .recovery_kit_last_backed_up_descriptor_fingerprint
-                    .as_deref(),
-                overview.keychain.map(|m| m.descriptor).unwrap_or(false),
-                cache
-                    .recovery_kit_last_backed_up_keychain_descriptor_fingerprint
-                    .as_deref(),
-            );
-            col = col.push(recovery_kit_card(
-                cache.has_vault || cache.has_imported_bitcoin,
-                rk.status.as_ref(),
-                rk.status_loading,
-                rk.status_stale,
-                drift,
-                cache.has_imported_bitcoin && cache.current_descriptor_fingerprint.is_none(),
-            ));
+            page::status(page::Status::Warn, "Not confirmed")
+        })
+        .description("12 words, written down offline.")
+        .control(page::button(
+            SEED_REVEAL_ID,
+            "Reveal seed phrase…",
+            Some(seed_start),
+        ));
+
+    let mut methods = vec![seed_row.into()];
+    if let Some(rk) = recovery_kit {
+        methods.push(recovery_kit_row(cache, rk));
+    }
+
+    let mut col = Column::new().width(Length::Fill).push(lead);
+    if let Some(notice) = cache.unswept_recovery_notice() {
+        col = col.push(page::note(Tone::Muted, page::muted(notice), None));
+    }
+    col = col.push(page::group("Backup methods", None, page::rows(methods)));
+
+    let path_row = if cache.has_vault {
+        page::row("Recovery path")
+            .description("Review the Vault's recovery spending path and timelocks in its tools.")
+            .control(page::button(
+                RECOVERY_TOOLS_ID,
+                "Open recovery tools",
+                Some(Message::Menu(Menu::Vault(VaultSubMenu::Recovery))),
+            ))
+    } else {
+        page::row("Recovery path")
+            .description("No Vault in this Cube.")
+            .control(page::status(page::Status::Off, "Not applicable"))
+    };
+    let mut path_rows = vec![path_row.into()];
+    let mut alerts_controls = None;
+    if let Some(ra) = recovery_alerts {
+        path_rows.push(recovery_alerts_row(ra, cache.has_vault));
+        if ra.managing && cache.has_vault && ra.entitled && !ra.no_vault && ra.status.is_some() {
+            alerts_controls = Some(recovery_alerts_card(ra));
         }
     }
-
-    col = col
-        .push(text("Vault recovery path").size(20).bold())
-        .push(text("Recovery path spending is separate from backup. A backup never unlocks the recovery path.").size(14))
-        .push(text(if cache.has_vault {
-            "Review the Vault's recovery spending path and timelocks in its tools."
-        } else {
-            "Not applicable — this Cube has no Vault."
-        }).size(14));
-    if cache.has_vault {
-        col = col.push(
-            button::secondary(None, "Open recovery path")
-                .on_press(Message::Menu(Menu::Vault(VaultSubMenu::Recovery))),
-        );
+    let mut path = Column::new()
+        .width(Length::Fill)
+        .push(page::rows(path_rows));
+    if let Some(controls) = alerts_controls {
+        path = path.push(page::disclosure_body([controls]));
     }
-
-    // Vault Recovery Alerts card (Estate Notifications — PR 2). Same threading
-    // discipline as the Recovery Kit card above.
-    if let Some(ra) = recovery_alerts {
-        col = col.push(recovery_alerts_card(ra));
-    }
+    col = col.push(page::group(
+        "Vault recovery path",
+        Some("Spending, not backup. A backup never unlocks it.".into()),
+        path,
+    ));
 
     dashboard(menu, cache, col)
+}
+
+pub const SEED_LEAD_ID: &str = "tenshu.settings.backup.lead";
+pub const SEED_REVEAL_ID: &str = "tenshu.settings.backup.seed";
+pub const KIT_PRIMARY_ID: &str = "tenshu.settings.backup.kit";
+pub const KIT_REMOVE_ID: &str = "tenshu.settings.backup.kit-remove";
+pub const RECOVERY_TOOLS_ID: &str = "tenshu.settings.backup.recovery-tools";
+pub const ALERTS_MANAGE_ID: &str = "tenshu.settings.backup.alerts";
+
+/// The Recovery Kit row (`#recovery-kit`): its status beside the label, what
+/// protects it and what it holds below, and the action for its state.
+fn recovery_kit_row<'a>(cache: &'a cache::Cache, rk: &'a RecoveryKit) -> Element<'a, Message> {
+    let row =
+        page::row("Recovery Kit").description("Encrypted copy kept with your Connect account.");
+    if !cache.connect_authenticated && !cache.restorable_connect_session {
+        return row
+            .accessory(page::status(page::Status::Unknown, "Sign in required"))
+            .control(page::button(
+                KIT_PRIMARY_ID,
+                "Sign in",
+                Some(Message::OpenConnectSignIn),
+            ))
+            .into();
+    }
+    if let Some((label, action)) = unregistered_cube_action(cache) {
+        return row
+            .accessory(page::status(page::Status::Unknown, "Reconnect required"))
+            .control(page::button(KIT_PRIMARY_ID, label, Some(action)))
+            .into();
+    }
+    let overview = backup_overview(rk.status.as_ref());
+    let drift = descriptor_drift(
+        cache.current_descriptor_fingerprint.as_deref(),
+        overview.password.map(|m| m.descriptor).unwrap_or(false),
+        cache
+            .recovery_kit_last_backed_up_descriptor_fingerprint
+            .as_deref(),
+        overview.keychain.map(|m| m.descriptor).unwrap_or(false),
+        cache
+            .recovery_kit_last_backed_up_keychain_descriptor_fingerprint
+            .as_deref(),
+    );
+    recovery_kit_card(
+        cache.has_vault || cache.has_imported_bitcoin,
+        rk.status.as_ref(),
+        rk.status_loading,
+        rk.status_stale,
+        drift,
+        cache.has_imported_bitcoin && cache.current_descriptor_fingerprint.is_none(),
+        row,
+    )
+}
+
+/// The Recovery alerts row: eligibility and state beside the label, with
+/// "Manage alerts" opening the alerts controls beneath the rows.
+fn recovery_alerts_row<'a>(ra: &'a RecoveryAlerts, has_vault: bool) -> Element<'a, Message> {
+    let manage = |label: &'static str| {
+        page::button(
+            ALERTS_MANAGE_ID,
+            if ra.managing { "Close" } else { label },
+            Some(SettingsMessage::RecoveryAlerts(RecoveryAlertsMessage::ToggleManage).into()),
+        )
+    };
+    let row = page::row("Recovery alerts");
+    let row = if !has_vault || ra.no_vault {
+        row.accessory(page::status(page::Status::Off, "Not applicable"))
+            .description("Needs a Vault with a recovery path, registered with Connect.")
+    } else if !ra.entitled {
+        row.accessory(page::status(page::Status::Off, "Not included"))
+            .description("Not in your plan. Verified by Connect.")
+            .control(page::button(
+                RECOVERY_ALERTS_VIEW_PLANS_ID,
+                "Compare plans",
+                Some(Message::OpenPlanBillingFrom(RECOVERY_ALERTS_VIEW_PLANS_ID)),
+            ))
+    } else if ra.loading && ra.status.is_none() {
+        row.accessory(page::status(page::Status::Busy, "Checking…"))
+            .description("Still checking. No plan change implied.")
+    } else if ra.status.is_none() {
+        row.accessory(page::status(page::Status::Unknown, "Eligibility unknown"))
+            .description("Sign in to Connect to check eligibility.")
+    } else if ra.alerts_on() {
+        row.accessory(page::status(page::Status::Ok, "On"))
+            .description("Alerts your recovery contacts when the path opens.")
+            .control(manage("Manage alerts"))
+    } else {
+        row.accessory(page::status(page::Status::Off, "Off"))
+            .description("Your keyholders are not alerted when the path opens.")
+            .control(manage("Manage alerts"))
+    };
+    row.into()
 }
 
 /// Refresh this Cube tab's Connect panel directly. The shell's sign-in intent
@@ -367,105 +596,51 @@ fn unregistered_cube_action(cache: &cache::Cache) -> Option<(&'static str, Messa
 /// keyholder list lives under the alerts toggle (it's who alerts notify). See
 /// `PLAN-recovery-alerts-cleanup.md` PR 2.
 fn recovery_alerts_card<'a>(ra: &'a RecoveryAlerts) -> Element<'a, Message> {
-    let mut body = Column::new()
-        .spacing(10)
-        .push(text("Vault Recovery Alerts").bold())
-        .push(
-            text(
+    let alerts_on = ra.alerts_on();
+    let busy = ra.submitting;
+    let mut body = Column::new().spacing(0).width(Length::Fill);
+
+    // ── Control 1: the Recovery alerts toggle (monitoring on/off) ──────────
+    body = body.push(
+        page::row("Recovery alerts")
+            .description(
                 "Let COINCUBE watch the chain and alert your keyholders when a recovery path \
                  for this Vault opens.",
             )
-            .size(13),
-        );
-
-    // Locked affordance when the account can't use recovery alerts at all.
-    if !ra.entitled {
-        body = body
-            .push(
-                text(
-                    "Recovery alerts aren't available on your current plan. Upgrade your Connect \
-                     plan to alert your keyholders when this Vault's recovery window opens.",
-                )
-                .size(13),
-            )
-            .push(Space::new().height(Length::Fixed(12.0)))
-            .push(
-                FocusableAction::new(
-                    RECOVERY_ALERTS_VIEW_PLANS_ID,
-                    iced::widget::container(text("View plans").bold())
-                        .center_x(Length::Fill)
-                        .padding(5),
-                    Message::FocusAction,
-                )
-                .width(Length::Fixed(160.0))
-                .style(theme::button::primary)
-                .on_press(Message::OpenPlanBillingFrom(RECOVERY_ALERTS_VIEW_PLANS_ID)),
-            );
-        return card::simple(body).width(Length::Fill).into();
-    }
-
-    // No Connect vault to monitor yet.
-    if ra.no_vault {
-        body = body.push(
-            text("Create a Vault and register it with Connect to enable recovery alerts.").size(13),
-        );
-        return card::simple(body).width(Length::Fill).into();
-    }
-
-    if ra.loading && ra.status.is_none() {
-        body = body.push(text("Loading\u{2026}").size(13));
-        return card::simple(body).width(Length::Fill).into();
-    }
-
-    let alerts_on = ra.alerts_on();
-    let busy = ra.submitting;
-
-    // ── Control 1: the Recovery alerts toggle (monitoring on/off) ──────────
-    body = body.push(Space::new().height(Length::Fixed(4.0)));
-    body = body.push(
-        Row::new()
-            .spacing(20)
-            .align_y(Alignment::Center)
-            .push(text("Recovery alerts").bold())
-            .push(Space::new().width(Length::Fill))
-            .push(
-                Toggler::new(alerts_on)
-                    .on_toggle(|on| {
+            .control(
+                toggle(ALERTS_TOGGLE_ID, alerts_on, Message::FocusAction).on_toggle_maybe(
+                    (!busy).then_some(|on| {
                         SettingsMessage::RecoveryAlerts(RecoveryAlertsMessage::ToggleAlerts(on))
                             .into()
-                    })
-                    .width(50)
-                    .style(theme::toggler::orange),
+                    }),
+                ),
             ),
     );
     // The C4 disclosure — stated plainly, no euphemisms.
-    body = body.push(
-        text(
-            "When on, COINCUBE learns only the block height at which this Vault's recovery window \
-             opens and that this desktop checked in — never your addresses or balances.",
-        )
-        .size(13),
-    );
+    if alerts_on {
+        body = body.push(page::caption(
+            "When on, COINCUBE learns only the block height at which this Vault's recovery \
+             window opens and that this desktop checked in — never your addresses or balances.",
+        ));
+    }
 
     // Residual nudge (PR 3): with keyholders present but alerts off, they'd
-    // never be told when the recovery window opens. Not a re-prompt — the
-    // one-time consent card is durable — just a standing warning on the card.
+    // never be told when the recovery window opens.
     if !alerts_on && !ra.recipients.notified.is_empty() {
-        body = body.push(
-            text(
+        body = body.push(page::note(
+            Tone::Warn,
+            page::muted(
                 "Your keyholders will NOT be alerted when this Vault's recovery window opens. \
                  Turn on Recovery alerts to fix this.",
-            )
-            .size(13)
-            .style(theme::text::error),
-        );
+            ),
+            None,
+        ));
     }
 
     // Inline confirm for turning alerts off. Never silent: when a recovery kit
     // is escrowed, the confirm discloses that it will be deleted too (escrow
     // can't outlive alerts).
     if ra.confirming_alerts_off {
-        body = body.push(Space::new().height(Length::Fixed(6.0)));
         let warning = if ra.has_escrow() {
             "Turn off recovery alerts? COINCUBE will stop watching for this Vault's recovery \
              window. This also deletes the encrypted recovery kit currently stored for your \
@@ -474,49 +649,47 @@ fn recovery_alerts_card<'a>(ra: &'a RecoveryAlerts) -> Element<'a, Message> {
             "Turn off recovery alerts? COINCUBE will stop watching for this Vault's recovery \
              window, so your keyholders won't be alerted when it opens."
         };
-        body = body.push(text(warning).size(13));
-        body = body.push(
-            Row::new()
-                .spacing(8)
-                .push(
-                    button::primary(None, "Turn off")
-                        .padding([8, 14])
-                        .on_press_maybe(
-                            (!busy).then_some(
-                                SettingsMessage::RecoveryAlerts(
-                                    RecoveryAlertsMessage::ConfirmAlertsOff,
-                                )
-                                .into(),
-                            ),
+        body = body.push(page::note(
+            Tone::Bad,
+            text(warning).size(13),
+            Some(
+                Row::new()
+                    .spacing(8)
+                    .push(page::primary(
+                        ALERTS_OFF_CONFIRM_ID,
+                        "Turn off",
+                        (!busy).then_some(
+                            SettingsMessage::RecoveryAlerts(
+                                RecoveryAlertsMessage::ConfirmAlertsOff,
+                            )
+                            .into(),
                         ),
-                )
-                .push(button::secondary(None, "Cancel").padding([8, 14]).on_press(
-                    SettingsMessage::RecoveryAlerts(RecoveryAlertsMessage::CancelAlertsOff).into(),
-                )),
-        );
+                    ))
+                    .push(page::button(
+                        ALERTS_OFF_CANCEL_ID,
+                        "Cancel",
+                        Some(
+                            SettingsMessage::RecoveryAlerts(RecoveryAlertsMessage::CancelAlertsOff)
+                                .into(),
+                        ),
+                    ))
+                    .into(),
+            ),
+        ));
     }
 
-    // The keyholder list belongs to alerts (who'd be notified), so it shows
-    // whenever alerts are on.
+    // The keyholder list belongs to alerts (who'd be notified).
     if alerts_on {
-        body = body.push(Space::new().height(Length::Fixed(4.0)));
-        body = body.push(text("Keyholders who'd be notified").bold().size(14));
+        let mut who = Column::new().spacing(2).width(Length::Fill);
         if ra.recipients.notified.is_empty() {
             // Deliberately does *not* say "add keyholders": a Vault's
-            // keyholders are its signers, fixed when the descriptor is sealed
-            // at build time, and the backend rejects adding one to an active
-            // Vault. Pointing at an action with no button — and no backend
-            // path — is what this copy used to do.
-            body = body.push(
-                text(
-                    "No one would be alerted for this Vault. Alert recipients are this Vault's \
-                     keyholders and beneficiaries; its keyholders are fixed when the Vault is \
-                     built, so they can't be added to an existing Vault.",
-                )
-                .size(13),
-            );
+            // keyholders are its signers, fixed when the descriptor is sealed.
+            who = who.push(page::muted(
+                "No one would be alerted for this Vault. Alert recipients are this Vault's \
+                 keyholders and beneficiaries; its keyholders are fixed when the Vault is \
+                 built, so they can't be added to an existing Vault.",
+            ));
         } else {
-            let mut who = Column::new().spacing(2);
             for r in &ra.recipients.notified {
                 // Tag beneficiaries so a mixed list stays honest under a
                 // heading that says "keyholders". Keyholders read plain.
@@ -526,12 +699,8 @@ fn recovery_alerts_card<'a>(ra: &'a RecoveryAlerts) -> Element<'a, Message> {
                 };
                 who = who.push(text(line).size(13));
             }
-            body = body.push(who);
         }
-        // Members who hold a notifiable role but have no address on file. The
-        // server skips these silently (they're keyholders added by key alone,
-        // with no contact row), so without this line a Vault can look covered
-        // while nobody is actually reachable.
+        // Members who hold a notifiable role but have no address on file.
         if ra.recipients.unreachable > 0 {
             let n = ra.recipients.unreachable;
             let (noun, verb) = if n == 1 {
@@ -539,28 +708,34 @@ fn recovery_alerts_card<'a>(ra: &'a RecoveryAlerts) -> Element<'a, Message> {
             } else {
                 ("members", "have")
             };
-            body = body.push(
-                text(format!(
-                    "{} {} of this Vault {} no email on file, so COINCUBE can't alert them.",
-                    n, noun, verb,
-                ))
-                .size(13)
-                .style(theme::text::secondary),
-            );
+            who = who.push(page::muted(format!(
+                "{} {} of this Vault {} no email on file, so COINCUBE can't alert them.",
+                n, noun, verb,
+            )));
         }
+        body = body.push(page::row("Keyholders who'd be notified").line(who).top());
     }
 
     // ── Control 2: the escrow selector (what keyholders can recover) ───────
-    body = body.push(Space::new().height(Length::Fixed(10.0)));
-    body = body.push(text("What keyholders can recover").bold().size(14));
-    body = body.push(escrow_selector(ra, alerts_on, busy));
+    body = body.push(
+        page::row("What keyholders can recover")
+            .line(escrow_selector(ra, alerts_on, busy))
+            .top(),
+    );
 
     if let Some(err) = ra.error.as_deref() {
-        body = body.push(text(err).size(13).style(theme::text::error));
+        body = body.push(page::caption(err));
     }
 
-    card::simple(body).width(Length::Fill).into()
+    body.into()
 }
+
+pub const ALERTS_TOGGLE_ID: &str = "tenshu.settings.alerts.toggle";
+pub const ALERTS_OFF_CONFIRM_ID: &str = "tenshu.settings.alerts.off";
+pub const ALERTS_OFF_CANCEL_ID: &str = "tenshu.settings.alerts.off-cancel";
+pub const ESCROW_PIN_ID: &str = "tenshu.settings.escrow.pin";
+pub const ESCROW_CONFIRM_ID: &str = "tenshu.settings.escrow.confirm";
+pub const ESCROW_CANCEL_ID: &str = "tenshu.settings.escrow.cancel";
 
 /// The "What keyholders can recover" escrow selector — Estate-gated (locked
 /// affordance when the account lacks the `inheritanceEscrow` entitlement). The
@@ -572,28 +747,25 @@ fn escrow_selector<'a>(
 ) -> Element<'a, Message> {
     // Locked affordance when the account can't escrow a recovery kit.
     if !ra.escrow_entitled {
-        return Column::new()
-            .spacing(10)
-            .push(
-                text(
-                    "An encrypted recovery kit for your keyholders is part of the Estate plan. \
-                     Recovery alerts above still work on your current plan.",
+        return page::note(
+            Tone::Muted,
+            Column::new()
+                .spacing(2)
+                .push(
+                    text(
+                        "An encrypted recovery kit for your keyholders is part of the Estate plan.",
+                    )
+                    .size(13),
                 )
-                .size(13),
-            )
-            .push(
-                FocusableAction::new(
-                    ESCROW_VIEW_PLANS_ID,
-                    iced::widget::container(text("View plans").bold())
-                        .center_x(Length::Fill)
-                        .padding(5),
-                    Message::FocusAction,
-                )
-                .width(Length::Fixed(160.0))
-                .style(theme::button::primary)
-                .on_press(Message::OpenPlanBillingFrom(ESCROW_VIEW_PLANS_ID)),
-            )
-            .into();
+                .push(page::muted(
+                    "Recovery alerts above still work on your current plan.",
+                )),
+            Some(page::button(
+                ESCROW_VIEW_PLANS_ID,
+                "View plans",
+                Some(Message::OpenPlanBillingFrom(ESCROW_VIEW_PLANS_ID)),
+            )),
+        );
     }
 
     // `None` = escrow is on but this device can't tell which tier (older API
@@ -606,52 +778,65 @@ fn escrow_selector<'a>(
         escrow_tier
     };
 
-    let selector = Row::new()
-        .spacing(8)
-        .push(escrow_button(
-            "Nothing",
-            EscrowTier::Off,
-            display_tier,
-            busy,
-        ))
-        .push(escrow_button(
-            "Vault only",
-            EscrowTier::VaultOnly,
-            display_tier,
-            busy,
-        ))
-        .push(escrow_button(
-            "Full Cube",
-            EscrowTier::FullCube,
-            display_tier,
-            busy,
-        ));
+    // Every tier stays pressable unless a change is in flight; re-selecting
+    // the known current tier is a no-op in `SelectEscrow`.
+    let selector = segmented(
+        [
+            segment("tenshu.settings.escrow.off", EscrowTier::Off, "Nothing"),
+            segment(
+                "tenshu.settings.escrow.vault",
+                EscrowTier::VaultOnly,
+                "Vault only",
+            ),
+            segment(
+                "tenshu.settings.escrow.full",
+                EscrowTier::FullCube,
+                "Full Cube",
+            ),
+        ],
+        display_tier,
+        Message::FocusAction,
+    )
+    .size(SegmentSize::Compact)
+    .plain()
+    .on_select_maybe((!busy).then_some(|tier| {
+        SettingsMessage::RecoveryAlerts(RecoveryAlertsMessage::SelectEscrow(tier)).into()
+    }));
 
     let mut col = Column::new()
-        .spacing(10)
+        .spacing(6)
+        .push(Space::new().height(Length::Fixed(4.0)))
         .push(selector)
-        .push(text(escrow_copy(display_tier)).size(13));
+        .push(Container::new(text(escrow_copy(display_tier)).size(13)).max_width(560));
 
     // Auto-enable disclosure: picking a kit while alerts are off turns them on.
     if !alerts_on {
-        col = col.push(
-            text("Choosing Vault only or Full Cube also turns Recovery alerts on.")
-                .size(13)
-                .style(theme::text::secondary),
-        );
+        col = col.push(page::muted(
+            "Choosing Vault only or Full Cube also turns Recovery alerts on.",
+        ));
     }
 
     // Full-Cube re-confirms the PIN before exporting the seed into escrow.
     if ra.awaiting_pin {
-        col = col.push(Space::new().height(Length::Fixed(6.0)));
-        col = col.push(
-            text("Enter your PIN to include this Cube's seed in the encrypted recovery kit.")
-                .size(13),
-        );
-        col = col.push(
-            iced::widget::text_input("PIN", ra.pin.as_str())
+        col = col
+            .push(Space::new().height(Length::Fixed(8.0)))
+            .push(
+                text("Enter your PIN to include this Cube's seed in the encrypted recovery kit.")
+                    .size(13)
+                    .font(coincube_ui::font::SEMIBOLD),
+            )
+            .push(
+                coincube_ui::component::tenshu::text_field(
+                    ESCROW_PIN_ID,
+                    "PIN",
+                    ra.pin.as_str(),
+                    Message::FocusAction,
+                )
+                .hide_label()
+                .placeholder("PIN")
                 .secure(true)
-                .padding(8)
+                .size(coincube_ui::component::tenshu::FieldSize::Compact)
+                .width(Length::Fixed(200.0))
                 .on_input(|s| {
                     SettingsMessage::RecoveryAlerts(RecoveryAlertsMessage::EscrowPinChanged(
                         s.into(),
@@ -661,62 +846,30 @@ fn escrow_selector<'a>(
                 .on_submit(
                     SettingsMessage::RecoveryAlerts(RecoveryAlertsMessage::ConfirmFullCube).into(),
                 ),
-        );
-        col = col.push(
-            Row::new()
-                .spacing(8)
-                .push(
-                    button::primary(None, "Confirm")
-                        .padding([8, 14])
-                        .on_press_maybe(
-                            (!busy).then_some(
-                                SettingsMessage::RecoveryAlerts(
-                                    RecoveryAlertsMessage::ConfirmFullCube,
-                                )
+            )
+            .push(
+                Row::new()
+                    .spacing(8)
+                    .push(page::primary(
+                        ESCROW_CONFIRM_ID,
+                        "Confirm",
+                        (!busy).then_some(
+                            SettingsMessage::RecoveryAlerts(RecoveryAlertsMessage::ConfirmFullCube)
                                 .into(),
-                            ),
                         ),
-                )
-                .push(button::secondary(None, "Cancel").padding([8, 14]).on_press(
-                    SettingsMessage::RecoveryAlerts(RecoveryAlertsMessage::CancelFullCube).into(),
-                )),
-        );
+                    ))
+                    .push(page::button(
+                        ESCROW_CANCEL_ID,
+                        "Cancel",
+                        Some(
+                            SettingsMessage::RecoveryAlerts(RecoveryAlertsMessage::CancelFullCube)
+                                .into(),
+                        ),
+                    )),
+            );
     }
 
     col.into()
-}
-
-/// An escrow-tier option button. Highlighted (primary) when it's the active
-/// tier (or while collecting the PIN for a Full-Cube enrolment); disabled while
-/// a change is in flight.
-fn escrow_button<'a>(
-    label: &'static str,
-    this: EscrowTier,
-    active: Option<EscrowTier>,
-    busy: bool,
-) -> Element<'a, Message> {
-    // `active == None` (tier on but unknown on this device) highlights nothing,
-    // leaving every tier pressable so the owner can confirm/change it.
-    let is_active = active == Some(this);
-    // Every tier keeps a press handler unless a change is in flight. The active
-    // one is a no-op — `SelectEscrow` returns early on a re-select of the known
-    // current tier — and that matters for appearance: iced paints a button with
-    // no `on_press` using `Status::Disabled`, so withholding it here made the
-    // *selected* tier read as greyed-out and unavailable rather than chosen.
-    let on_press = (!busy).then_some(
-        SettingsMessage::RecoveryAlerts(RecoveryAlertsMessage::SelectEscrow(this)).into(),
-    );
-    if is_active {
-        button::primary(None, label)
-            .padding([8, 14])
-            .on_press_maybe(on_press)
-            .into()
-    } else {
-        button::secondary(None, label)
-            .padding([8, 14])
-            .on_press_maybe(on_press)
-            .into()
-    }
 }
 
 /// Plain-language trade-off for each escrow tier (no euphemisms — the
@@ -750,45 +903,6 @@ fn escrow_copy(tier: Option<EscrowTier>) -> &'static str {
              seed."
         }
     }
-}
-
-/// The "Backup Master Seed Phrase" card shown on the normal General
-/// Settings page. Shows a different label depending on whether the
-/// current cube has already been backed up.
-fn backup_master_seed_card<'a>(backed_up: bool) -> Element<'a, Message> {
-    let (title, subtitle, button_label) = if backed_up {
-        (
-            "Seed phrase confirmed",
-            "The three-word check was saved for this Cube. This does not confirm a Connect Recovery Kit or a Vault recovery path.",
-            "Reveal seed phrase…",
-        )
-    } else {
-        (
-            "Backup not confirmed",
-            "Write down the 12-word phrase offline, then complete the three-word check. This opens the authenticated reveal flow.",
-            "Confirm seed phrase backup",
-        )
-    };
-    card::simple(
-        Row::new()
-            .spacing(20)
-            .align_y(Alignment::Center)
-            .push(
-                Column::new()
-                    .spacing(4)
-                    .width(Length::Fill)
-                    .push(text(title).bold())
-                    .push(text(subtitle).size(14)),
-            )
-            .push(
-                button::secondary(None, button_label)
-                    .padding([8, 16])
-                    .width(Length::Shrink)
-                    .on_press(SettingsMessage::BackupMasterSeed(BackupWalletMessage::Start).into()),
-            ),
-    )
-    .width(Length::Fill)
-    .into()
 }
 
 /// Small rounded "pill" badge naming a Recovery-Kit backup method in use
@@ -876,19 +990,6 @@ pub(crate) fn backup_overview(status: Option<&RecoveryKitStatus>) -> BackupOverv
         keychain,
         last_updated,
     }
-}
-
-/// A pill row prefixed by a muted caption. The caption is what makes two pill
-/// rows legible side by side — "Password" under "Protected by:" and "Master
-/// Seed Phrase" under "Includes:" are answering different questions, and
-/// unlabelled they read as one undifferentiated set of tags.
-fn pill_row<'a>(
-    caption: impl iced::widget::text::IntoFragment<'a>,
-) -> Row<'a, Message, theme::Theme> {
-    Row::new()
-        .spacing(6)
-        .align_y(Alignment::Center)
-        .push(text(caption).size(12).style(theme::text::secondary))
 }
 
 /// User-facing names of the halves a method holds, in a fixed order (seed
@@ -1206,9 +1307,10 @@ fn recovery_kit_card<'a>(
     stale: bool,
     drift: DescriptorDrift,
     imported_state_unknown: bool,
+    row: page::PageRow<'a, Message>,
 ) -> Element<'a, Message> {
     // One source of truth for what's backed up, by which method (master
-    // §definitions). Drives the card state, the pills, and Remove visibility.
+    // §definitions). Drives the row state, the method lines and Remove.
     let overview = backup_overview(status);
     let CardState {
         title,
@@ -1216,150 +1318,125 @@ fn recovery_kit_card<'a>(
         primary_label,
         primary_mode,
     } = recovery_kit_card_state(&overview, has_vault, loading, status.is_some());
+    let has_kit = overview.any_enabled();
 
-    // Drift overrides the "complete" state: primary CTA becomes "Update now"
-    // and the subtitle swaps to a drift warning naming the stale method(s)
-    // (per-method drift, PR 3). Each method is judged independently, so a
-    // keychain-only kit can now drift (unlike PR 1, which kept drift
-    // password-scoped); re-sealing one method clears only its warning.
-    let (subtitle, primary_label, primary_mode) = if loading {
-        (
-            "Checking the current Recovery Kit status…".to_string(),
-            primary_label,
-            primary_mode,
-        )
+    // The row's status word, from the same state the card copy used.
+    let (kind, word) = if loading {
+        (page::Status::Busy, "Checking…")
+    } else if status.is_none() {
+        (page::Status::Unknown, "Status unavailable")
+    } else if stale {
+        (page::Status::Unknown, "Last known state")
+    } else if drift.any() {
+        (page::Status::Warn, "Out of date")
+    } else if !has_kit {
+        (page::Status::Off, "Not set up")
+    } else if title == "Recovery Kit backed up" {
+        (page::Status::Ok, "Backed up")
+    } else {
+        (page::Status::Warn, "Incomplete")
+    };
+
+    // Drift overrides the "complete" state: the action becomes "Update now"
+    // and the detail names the stale method(s) (per-method drift, PR 3).
+    let (detail, primary_label, primary_mode) = if loading {
+        (None, primary_label, primary_mode)
     } else if stale && status.is_some() {
         (
-            "Showing the last known Recovery Kit state. Reconnect and refresh before changing it."
-                .to_string(),
+            Some("Showing the last known Recovery Kit state. Reconnect and refresh before changing it.".to_string()),
             primary_label,
             primary_mode,
         )
     } else if imported_state_unknown {
         (
-            "Connect and refresh this Bitcoin wallet before checking or updating its Recovery Kit."
-                .to_string(),
+            Some("Connect and refresh this Bitcoin wallet before checking or updating its Recovery Kit.".to_string()),
             primary_label,
             primary_mode,
         )
     } else if drift.any() {
         (
-            drift_subtitle(&drift).to_string(),
+            Some(drift_subtitle(&drift).to_string()),
             "Update now",
             RecoveryKitMode::Rotate,
         )
+    } else if status.is_none() || !has_kit {
+        (None, primary_label, primary_mode)
     } else {
-        (subtitle, primary_label, primary_mode)
+        (Some(subtitle), primary_label, primary_mode)
     };
 
-    // Render with Remove button when any method is enabled.
-    let has_kit = overview.any_enabled();
-    let mut actions = Row::new().spacing(10).align_y(Alignment::Center);
-    if status.is_none() || stale {
-        actions = actions.push(
-            button::secondary(None, "Refresh status")
-                .on_press_maybe((!loading).then_some(
-                    SettingsMessage::RecoveryKit(RecoveryKitMessage::LoadStatus).into(),
-                )),
-        );
-    } else {
-        actions = actions.push(
-            button::primary(None, primary_label)
-                .padding([8, 16])
-                .width(Length::Fixed(220.0))
-                .on_press_maybe((!imported_state_unknown && !loading).then_some(
-                    SettingsMessage::RecoveryKit(RecoveryKitMessage::Start(primary_mode)).into(),
-                )),
-        );
+    let mut row = row.accessory(page::status(kind, word));
+    if let Some(detail) = detail {
+        row = row.line(page::muted(detail));
     }
-    if has_kit && !stale && !loading {
-        actions = actions.push(
-            button::secondary(None, "Remove")
-                .padding([8, 16])
-                .width(Length::Fixed(120.0))
-                .on_press(SettingsMessage::RecoveryKit(RecoveryKitMessage::Remove).into()),
-        );
-    }
-
-    // Which backup methods are actually in place (presence, not completeness) —
-    // drives the method pills. A partial method still shows its pill.
     let (password_present, keychain_present) =
         (overview.password.is_some(), overview.keychain.is_some());
-
-    let mut body = Column::new()
-        .spacing(4)
-        .width(Length::Fill)
-        .push(text(title).bold())
-        .push(text(subtitle).size(14))
-        .push(text("Encrypted on this device before upload to Connect. A Recovery Kit is separate from the offline seed phrase and may also include the Vault descriptor.").size(14));
     if password_present || keychain_present {
-        let mut pills = pill_row("Protected by:");
+        let mut methods: Vec<&str> = Vec::new();
         if password_present {
-            pills = pills.push(backup_pill("Password"));
+            methods.push("Password");
         }
         if keychain_present {
-            pills = pills.push(backup_pill("Keychain"));
+            methods.push("Keychain");
         }
-        body = body
-            .push(Space::new().height(Length::Fixed(2.0)))
-            .push(pills);
+        row = row.line(page::muted(format!(
+            "Protected by: {}",
+            methods.join(" · ")
+        )));
     }
-    // What's actually *in* the backup. Without this the card answered "how is it
-    // protected" and left "what would I get back" to guesswork — a kit labelled
-    // "Password" looks identical whether it holds the Master Seed Phrase, the
-    // Wallet Descriptor, or both.
+    // What's actually *in* the backup, not only how it is protected.
     match backup_contents(&overview) {
         BackupContents::Nothing => {}
         BackupContents::Shared(halves) => {
-            body = body.push(
-                halves
-                    .into_iter()
-                    .fold(pill_row("Includes:"), |row, h| row.push(backup_pill(h))),
-            );
+            row = row.line(page::muted(format!("Includes: {}", halves.join(" · "))));
         }
         BackupContents::PerMethod(per_method) => {
             for (method, halves) in per_method {
-                body = body.push(
-                    halves
-                        .into_iter()
-                        .fold(pill_row(format!("{} holds:", method)), |row, h| {
-                            row.push(backup_pill(h))
-                        }),
-                );
+                row = row.line(page::muted(format!(
+                    "{} holds: {}",
+                    method,
+                    halves.join(" · ")
+                )));
             }
         }
     }
     if drift.any() {
-        body = body.push(
+        row = row.line(
             text(drift_warning_line(&drift))
                 .size(12)
                 .style(coincube_ui::theme::text::warning),
         );
     }
 
-    card::simple(
-        Row::new()
-            .spacing(20)
-            .align_y(Alignment::Center)
-            .push(body)
-            .push(actions),
-    )
-    .width(Length::Fill)
-    .into()
-}
-
-fn network_row<'a>(network: crate::chain::ChainId) -> Element<'a, Message> {
-    let label = crate::app::features::net_label(network);
-    card::simple(
-        Row::new()
-            .spacing(20)
-            .align_y(Alignment::Center)
-            .push(text("Network:").bold())
-            .push(Space::new().width(Length::Fill))
-            .push(text(label)),
-    )
-    .width(Length::Fill)
-    .into()
+    if status.is_none() || stale {
+        row = row.control(page::button(
+            KIT_PRIMARY_ID,
+            "Refresh status",
+            (!loading)
+                .then_some(SettingsMessage::RecoveryKit(RecoveryKitMessage::LoadStatus).into()),
+        ));
+    } else {
+        let label = match primary_mode {
+            RecoveryKitMode::Create => "Set up Recovery Kit…",
+            _ => primary_label,
+        };
+        let press = (!imported_state_unknown && !loading).then_some(
+            SettingsMessage::RecoveryKit(RecoveryKitMessage::Start(primary_mode)).into(),
+        );
+        row = row.control(if drift.any() || word == "Incomplete" {
+            page::primary(KIT_PRIMARY_ID, label, press)
+        } else {
+            page::button(KIT_PRIMARY_ID, label, press)
+        });
+    }
+    if has_kit && !stale && !loading {
+        row = row.control(page::button(
+            KIT_REMOVE_ID,
+            "Remove…",
+            Some(SettingsMessage::RecoveryKit(RecoveryKitMessage::Remove).into()),
+        ));
+    }
+    row.top().into()
 }
 
 fn amounts_and_currency<'a>(
@@ -1389,7 +1466,6 @@ fn direction_badges_toggle<'a>(show: bool) -> Element<'a, Message> {
     )
     .tag("This device")
     .description("In and Out badges in Activity.")
-    .without_divider()
     .into()
 }
 
@@ -1434,21 +1510,6 @@ fn labeled_select_row<'a>(
         .into()
 }
 
-fn recipient_identity_checks_toggle<'a>() -> Element<'a, Message> {
-    card::simple(
-        Column::new().spacing(10)
-            .push(Row::new().spacing(20).align_y(Alignment::Center)
-                .push(text("Recipient identity checks").bold())
-                .push(Space::new().width(Length::Fill))
-                .push(Toggler::new(crate::services::branta::enabled())
-                    .on_toggle(|enabled| SettingsMessage::ToggleRecipientIdentityChecks(enabled).into())
-                    .width(50).style(theme::toggler::orange)))
-            .push(p2_regular("Check supported payment requests with Branta before sending. Strict mode does not share the plaintext destination or payment amount, but Branta can still observe lookup timing and your network connection."))
-            .push(button::transparent(None, "Branta privacy information")
-                .on_press(Message::OpenUrl("https://branta.pro/your-data".into()))),
-    ).width(Length::Fill).into()
-}
-
 fn display_mode_choice<'a>(current: DisplayMode, allowed: bool) -> Element<'a, Message> {
     setting_row(
         "Primary amount",
@@ -1465,6 +1526,7 @@ fn display_mode_choice<'a>(current: DisplayMode, allowed: bool) -> Element<'a, M
             Message::FocusAction,
         )
         .size(SegmentSize::Compact)
+        .plain()
         .on_select_maybe(allowed.then_some({
             move |selected| {
                 if selected == current {
@@ -1495,6 +1557,7 @@ pub fn bitcoin_display_unit<'a>(new_unit_setting: &'a UnitSetting) -> Element<'a
             Message::FocusAction,
         )
         .size(SegmentSize::Compact)
+        .plain()
         .on_select(move |selected| {
             if selected == current {
                 Message::FocusAction(iced::advanced::widget::Id::new(match selected {
@@ -1805,7 +1868,9 @@ mod tests {
                     };
                     let content: Element<'_, Message> = Column::new()
                         .spacing(20)
-                        .push(section("Amounts & currency"))
+                        .push(coincube_ui::component::tenshu::section(
+                            "Amounts & currency",
+                        ))
                         .push(amounts_and_currency(
                             &unit,
                             DisplayMode::BitcoinNative,

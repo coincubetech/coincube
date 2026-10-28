@@ -90,14 +90,43 @@ impl SettingsState {
     }
 }
 
-impl State for SettingsState {
-    fn update(
+impl SettingsState {
+    /// The Display & appearance (or another general) section, when open.
+    pub fn general(&self) -> Option<&GeneralSettingsState> {
+        self.setting
+            .as_ref()
+            .and_then(|s| s.as_any())
+            .and_then(|a| a.downcast_ref::<GeneralSettingsState>())
+    }
+
+    /// Leaving Display & appearance for another section saves a Cube name
+    /// that was typed but not yet submitted, as leaving the field does.
+    fn save_pending_name(&self, cache: &Cache) -> Task<Message> {
+        match self
+            .general()
+            .and_then(|g| g.pending_cube_name(&cache.cube_name))
+        {
+            Some(name) => Task::done(Message::View(view::Message::Settings(
+                view::SettingsMessage::CubeNameSubmitted(name),
+            ))),
+            None => Task::none(),
+        }
+    }
+
+    fn switch_section(
         &mut self,
         daemon: Option<Arc<dyn Daemon + Sync + Send>>,
         cache: &Cache,
         message: Message,
     ) -> Task<Message> {
         match &message {
+            Message::View(view::Message::Settings(view::SettingsMessage::GeneralSection))
+                if self
+                    .general()
+                    .is_some_and(|g| g.section() == SettingsSection::General) =>
+            {
+                Task::none()
+            }
             Message::View(view::Message::Settings(view::SettingsMessage::GeneralSection)) => {
                 self.setting = Some(
                     GeneralSettingsState::new(
@@ -215,6 +244,29 @@ impl State for SettingsState {
                 .map(|s| s.update(daemon, cache, message))
                 .unwrap_or_else(Task::none),
         }
+    }
+}
+
+impl State for SettingsState {
+    fn update(
+        &mut self,
+        daemon: Option<Arc<dyn Daemon + Sync + Send>>,
+        cache: &Cache,
+        message: Message,
+    ) -> Task<Message> {
+        if let Message::View(view::Message::Settings(
+            view::SettingsMessage::PaymentChecksSection
+            | view::SettingsMessage::DataExportsSection
+            | view::SettingsMessage::RecoverySection
+            | view::SettingsMessage::AboutSection
+            | view::SettingsMessage::InstallStatsSection,
+        )) = &message
+        {
+            let save = self.save_pending_name(cache);
+            let switch = self.switch_section(daemon, cache, message);
+            return Task::batch([save, switch]);
+        }
+        self.switch_section(daemon, cache, message)
     }
 
     fn subscription(&self) -> iced::Subscription<Message> {

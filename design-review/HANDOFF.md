@@ -127,7 +127,7 @@ fixed; only the right edge varies by page width.
 | Rule | Value |
 | --- | --- |
 | Anchor | Left. The content starts one gutter from the side menu. Never center the page column (`margin: 0 auto`, `justify-content: center`). |
-| Gutter | `clamp(24px, 3vw, 48px)` on both sides (43px at 1440 wide, 24px at the 1024 minimum window). In the app: `(0.03 × window width).clamp(24, 48)`. |
+| Gutter | `clamp(24px, 3vw, 48px)` on both sides (30.7px at the 1024 minimum window, 43.2px at 1440, 48px from 1600). In the app: `(0.03 × window width).clamp(24, 48)`. |
 | Top padding | 28px above the page title on every page; 48px bottom padding. |
 | Reading width | Content is at most 1120px wide, so the container is at most 1120px plus two gutters. Applies to Overview, wallet pages, Send, Receive, Transfer, Tools, Split, Claim, Signing, Settings, Members, Marketplace, AI access and the gap screens. |
 | Wide width | Activity only: no maximum. The filter row, the table and the detail panel use the full width. The title, filters and first table column still start at the gutter. |
@@ -137,9 +137,10 @@ Inner layouts sit inside this container and start at its left edge. For example,
 Send and Receive keep their 680px form and 240px step column, with no centering.
 In the artboards the rule is the "page shell" block at the end of each
 `<helmet><style>`: `--gutter` and `--page-max` on `.tenshu`, applied to `.main .pg`
-(Activity: `.phd`, `.filters`, `.lst`). In the app, build one shared page
-container in `coincube-ui` and make every Cube screen use it. Do not give a
-screen its own padding or `max_width`.
+(Activity: `.phd`, `.filters`, `.lst`). In the app this is `coincube_ui::component::tenshu::page`, wrapped by the
+Cube shell (`coincube-gui/src/app/view/mod.rs`: `dashboard` reads,
+`dashboard_activity` is wide). Do not give a screen its own side padding, page
+`max_width` or centering.
 
 ## 5. Sequencing · one draft PR per step
 

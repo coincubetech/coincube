@@ -336,7 +336,7 @@ impl<'a> SparkReceiveView<'a> {
         ));
 
         Container::new(Container::new(content).width(Length::Fill).max_width(960.0))
-            .center_x(Length::Fill)
+            .width(Length::Fill)
             .into()
     }
 }
