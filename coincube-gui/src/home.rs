@@ -7,7 +7,7 @@ use iced::{
 
 use coincube_core::{bip39, miniscript::bitcoin::Network};
 use coincube_ui::{
-    component::{button, card, network_banner, notification, spinner, text::*},
+    component::{button, card, notification, spinner, text::*},
     icon, image, theme,
     widget::{
         action::Action as FocusableAction, modal::Modal, CheckBox, Column, Container, Element, Row,
@@ -5430,15 +5430,8 @@ impl Home {
             self.legacy_frame(mask_amounts)
         };
 
-        let layout = if self.network != ChainId::Bitcoin && !self.network.is_blake2b() {
-            Column::with_children(vec![
-                network_banner(self.network.bitcoin_network()).into(),
-                layout,
-            ])
-            .into()
-        } else {
-            layout
-        };
+        // No test-network banner here: the Launcher lists Cubes from every
+        // network, and each Cube's own screens show the banner for its network.
         // If passkey ceremony webview is active, overlay it on top
         let layout = if let Some(ceremony) = &self.passkey_ceremony {
             if let Some(active) = &ceremony.active_webview {
