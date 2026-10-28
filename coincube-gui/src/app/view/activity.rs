@@ -1403,22 +1403,42 @@ fn recent_when(timestamp: u64, today: NaiveDate) -> String {
     }
 }
 
-fn wallet_history_state(activity: &Activity, wallet: WalletFilter) -> (bool, Option<&str>) {
+/// Whether `wallet`'s history is loading, and a failed read with what it
+/// read. A Vault's history is its transactions: its pending proposals load
+/// beside it and report their own failure.
+fn wallet_history_state(
+    activity: &Activity,
+    wallet: WalletFilter,
+) -> (bool, Option<(&'static str, &str)>) {
     match wallet {
         WalletFilter::Vault => (
-            activity.vault_loading || activity.psbt_loading,
+            activity.vault_loading,
             activity
                 .vault_error
                 .as_deref()
-                .or(activity.psbt_error.as_deref()),
+                .map(|error| ("Vault history", error))
+                .or(activity
+                    .psbt_error
+                    .as_deref()
+                    .map(|error| ("Vault proposals", error))),
         ),
-        WalletFilter::Spark => (activity.spark_loading, activity.spark_error.as_deref()),
+        WalletFilter::Spark => (
+            activity.spark_loading,
+            activity
+                .spark_error
+                .as_deref()
+                .map(|error| ("Spark history", error)),
+        ),
         WalletFilter::Liquid => (
-            activity.liquid_loading || activity.refundables_loading,
+            activity.liquid_loading,
             activity
                 .liquid_error
                 .as_deref()
-                .or(activity.refundables_error.as_deref()),
+                .map(|error| ("Liquid history", error))
+                .or(activity
+                    .refundables_error
+                    .as_deref()
+                    .map(|error| ("Liquid refunds", error))),
         ),
         WalletFilter::All => (false, None),
     }
@@ -1457,15 +1477,15 @@ pub fn wallet_recent_activity<'a>(
     let mut content = Column::new()
         .spacing(10)
         .push(coincube_ui::component::text::h4_bold("Recent activity"));
-    if let Some(error) = error {
+    if let Some((source, error)) = error {
         content = content.push(
             row![
                 glyph::glyph(glyph::WARNING, 16.0, glyph::warn),
                 words(
                     if entries.is_empty() {
-                        format!("{wallet} history couldn't load")
+                        format!("{source} couldn't load")
                     } else {
-                        format!("Last known activity · {error}")
+                        format!("Last known activity · {source} couldn't load: {error}")
                     },
                     13.0,
                     font::REGULAR,
@@ -1544,8 +1564,15 @@ pub fn wallet_activity_detail<'a>(
 /// Whether a wallet page at `width` keeps the detail pane beside it; below
 /// this it slides over the page from the right edge instead.
 pub fn wallet_detail_beside(width: f32) -> bool {
-    width >= RECENT_ROWS_MIN_WIDTH + 2.0 * super::page_gutter(width) + SELECTED_DETAIL_WIDTH
+    width
+        >= RECENT_ROWS_MIN_WIDTH
+            + 2.0 * (super::page_gutter(width) + WALLET_PAGE_INSET)
+            + 1.0
+            + SELECTED_DETAIL_WIDTH
 }
+
+/// The Vault and Spark overviews' own side padding inside the page.
+const WALLET_PAGE_INSET: f32 = 16.0;
 
 // `.tr` on a wallet page: Time 104, Details (at least 160 here), Amount 128 and
 // Status 132, 12px apart, inside the row's 12px insets.
@@ -3338,6 +3365,33 @@ mod tests {
     }
 
     #[test]
+    fn vault_proposals_neither_hold_nor_fail_the_vault_history() {
+        let cache = Cache::default();
+        let mut activity = Activity::new(None, None);
+        // History answered empty; proposals still loading.
+        activity.psbt_loading = true;
+        let mounted = |activity: &Activity, scenario: &str| {
+            mount(
+                scenario,
+                wallet_recent_activity(activity, &cache, WalletFilter::Vault, None),
+                (1440, 900),
+                "dark",
+                coincube_ui::theme::Theme::dark(),
+                680,
+            )
+        };
+        let waiting = mounted(&activity, "wallet-recent-activity-proposals-loading");
+        assert!(waiting.contains("No transactions yet"));
+        assert!(!waiting.contains("Loading payment history"));
+        // Proposals failed after the history loaded: said as proposals.
+        activity.psbt_loading = false;
+        activity.psbt_error = Some("daemon busy".into());
+        let failed = mounted(&activity, "wallet-recent-activity-proposals-failed");
+        assert!(failed.contains("Vault proposals couldn't load"));
+        assert!(!failed.contains("Vault history couldn't load"));
+    }
+
+    #[test]
     fn the_pane_closes_when_its_row_leaves_the_page() {
         let cache = Cache::default();
         let mut activity = spark_activity(&cache, 6);
@@ -3420,6 +3474,15 @@ mod tests {
         assert!(!wallet_detail_beside(816.0));
         // 1440 window: page rows and the 420px pane side by side.
         assert!(wallet_detail_beside(1192.0));
+        // The overview's 16px insets and the rule count: at the edge the
+        // details column keeps its 160px.
+        let edge = 1100.0;
+        let details = edge
+            - SELECTED_DETAIL_WIDTH
+            - 1.0
+            - 2.0 * (super::super::page_gutter(edge) + WALLET_PAGE_INSET)
+            - (RECENT_TIME_WIDTH + 128.0 + 132.0 + 3.0 * 12.0 + 2.0 * ROW_INSET);
+        assert_eq!(wallet_detail_beside(edge), details >= 160.0);
     }
 
     #[test]

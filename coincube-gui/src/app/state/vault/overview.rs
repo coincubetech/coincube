@@ -129,6 +129,7 @@ impl VaultOverview {
         view::dashboard_with_detail(
             menu,
             cache,
+            "tenshu.vault.page.scroll",
             move || self.page_body(cache, Some(recent_activity(unknown_history))),
             detail,
         )

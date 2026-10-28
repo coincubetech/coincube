@@ -6354,6 +6354,28 @@ impl App {
         )
     }
 
+    /// On a wallet page the pane belongs to a row it shows: once a load moves
+    /// the selected row out of the five, nothing is selected, so it cannot
+    /// reopen by itself when a later load brings the row back.
+    fn settle_wallet_selection(&mut self) {
+        let Some(wallet) = wallet_page(&self.panels.current) else {
+            return;
+        };
+        let Some(selected) = self.panels.activity.selected_id.clone() else {
+            return;
+        };
+        let shown = self
+            .panels
+            .activity
+            .wallet_entries(wallet)
+            .into_iter()
+            .take(view::activity::RECENT_ACTIVITY_ROWS)
+            .any(|entry| entry.id == selected);
+        if !shown {
+            self.panels.activity.clear_selection();
+        }
+    }
+
     fn set_current_panel(&mut self, menu: Menu) -> Task<Message> {
         // A bare Vault Settings route has no distinct landing page. Resolve it
         // before imported-wallet dispatch and panel reload so the content and
@@ -6653,21 +6675,24 @@ impl App {
             }
         }
 
+        // A row chosen on a wallet page is that page's: neither another page
+        // nor the next visit opens with it selected.
+        if wallet_page(&self.panels.current).is_some() || wallet_page(&menu).is_some() {
+            self.panels.activity.clear_selection();
+        }
         self.panels.current = menu.clone();
 
-        // The Vault and Spark pages open with no row selected and their
-        // "Recent activity" re-read from the wallet.
-        let recent = match &menu {
-            Menu::Vault(menu::VaultSubMenu::Overview) => Some(view::activity::WalletFilter::Vault),
-            Menu::Spark(menu::SparkSubMenu::Overview) => Some(view::activity::WalletFilter::Spark),
-            _ => None,
-        }
-        .map_or_else(Task::none, |wallet| {
-            self.panels.activity.clear_selection();
-            self.panels
-                .activity
-                .refresh_wallet(wallet, self.daemon.clone(), self.wallet.clone())
-        });
+        // The Vault page re-reads its rows on entry. Spark's follow from
+        // the overview reload below (`SparkOverviewMessage::DataLoaded`).
+        let recent = if wallet_page(&menu) == Some(view::activity::WalletFilter::Vault) {
+            self.panels.activity.refresh_wallet(
+                view::activity::WalletFilter::Vault,
+                self.daemon.clone(),
+                self.wallet.clone(),
+            )
+        } else {
+            Task::none()
+        };
 
         // Call reload with optional daemon/wallet
         // Liquid panels don't need them (use BreezClient), Vault panels do
@@ -9771,10 +9796,12 @@ impl App {
             | Message::ActivityLiquidLoaded(..)
             | Message::ActivityRefundablesLoaded(..)
             | Message::ActivityLabelSaved(..)) => {
-                return self
+                let task = self
                     .panels
                     .activity
                     .update(self.daemon.clone(), &self.cache, msg);
+                self.settle_wallet_selection();
+                return task;
             }
             Message::View(view::Message::Activity(view::activity::ActivityMessage::ViewAll(
                 wallet,
@@ -9796,6 +9823,24 @@ impl App {
                     .panels
                     .activity
                     .update(self.daemon.clone(), &self.cache, msg);
+            }
+            msg @ Message::View(view::Message::SparkOverview(
+                view::SparkOverviewMessage::DataLoaded { .. },
+            )) if matches!(
+                self.panels.current,
+                Menu::Spark(menu::SparkSubMenu::Overview)
+            ) =>
+            {
+                // Every Spark page reload (a payment event, a `Synced` tick,
+                // opening the page) re-reads payments for its balance; its
+                // "Recent activity" follows from Activity's copy.
+                let refresh = self.panels.activity.refresh_wallet(
+                    view::activity::WalletFilter::Spark,
+                    None,
+                    None,
+                );
+                let forwarded = self.panels.spark_overview.update(None, &self.cache, msg);
+                return Task::batch([forwarded, refresh]);
             }
             msg @ Message::Payments(Ok(_))
                 if matches!(
@@ -10510,16 +10555,6 @@ impl App {
                         | SparkEvent::PaymentFailed { .. }
                 ) {
                     tasks.push(self.panels.spark_transactions.reload(None, None));
-                    if matches!(
-                        self.panels.current,
-                        Menu::Spark(menu::SparkSubMenu::Overview)
-                    ) {
-                        tasks.push(self.panels.activity.refresh_wallet(
-                            view::activity::WalletFilter::Spark,
-                            None,
-                            None,
-                        ));
-                    }
                 }
 
                 match event {
@@ -12255,6 +12290,15 @@ fn restart_daemon_blocking_guarded(
         return DaemonRestart::StartedNotPersisted(daemon);
     }
     DaemonRestart::Started(daemon)
+}
+
+/// The wallet whose "Recent activity" a route shows, if any.
+fn wallet_page(menu: &Menu) -> Option<view::activity::WalletFilter> {
+    match menu {
+        Menu::Vault(menu::VaultSubMenu::Overview) => Some(view::activity::WalletFilter::Vault),
+        Menu::Spark(menu::SparkSubMenu::Overview) => Some(view::activity::WalletFilter::Spark),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -19525,6 +19569,88 @@ mod wallet_recent_activity_tests {
                 .len(),
             1
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A row picked on a wallet page stays selected only while that page
+    /// shows it and only on that page; the Spark page's own reloads still
+    /// reach it.
+    #[test]
+    fn a_wallet_page_selection_ends_with_its_row_or_the_page() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("recent-select-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+        app.panels.current = Menu::Spark(menu::SparkSubMenu::Overview);
+        let generation = app.panels.activity.generation_for_tests();
+        let at = |n: u64, id: &str| coincube_spark_protocol::PaymentSummary {
+            timestamp: 1_760_000_000 + n,
+            ..receipt(id)
+        };
+        drop(app.update(Message::ActivitySparkLoaded(
+            generation,
+            Ok((vec![at(0, "old")], false)),
+        )));
+        let old = app
+            .panels
+            .activity
+            .wallet_entries(view::activity::WalletFilter::Spark)[0]
+            .id
+            .clone();
+        let select = |app: &mut App, id: &str| {
+            drop(app.update(Message::View(view::Message::Activity(
+                view::activity::ActivityMessage::Select(id.to_owned()),
+            ))))
+        };
+        select(&mut app, &old);
+
+        // Still one of the five: kept.
+        drop(app.update(Message::ActivitySparkRefreshed(
+            generation,
+            Ok((vec![at(5, "n5"), at(0, "old")], false)),
+        )));
+        assert_eq!(
+            app.panels.activity.selected_id.as_deref(),
+            Some(old.as_str())
+        );
+        // Five newer rows push it off the page: nothing stays selected, so
+        // it cannot reopen when a later read brings it back.
+        let newer: Vec<_> = (1..=5)
+            .map(|n| at(n, &format!("n{n}")))
+            .chain([at(0, "old")])
+            .collect();
+        drop(app.update(Message::ActivitySparkRefreshed(
+            generation,
+            Ok((newer, false)),
+        )));
+        assert!(app.panels.activity.selected_id.is_none());
+        drop(app.update(Message::ActivitySparkRefreshed(
+            generation,
+            Ok((vec![at(0, "old")], false)),
+        )));
+        assert!(app.panels.activity.selected_id.is_none());
+
+        // Leaving the page by the sidebar drops its selection too.
+        select(&mut app, &old);
+        drop(app.set_current_panel(Menu::Cube(menu::CubeSubMenu::Activity)));
+        assert!(app.panels.activity.selected_id.is_none());
+        // The Activity page's own selection survives the Activity page.
+        select(&mut app, &old);
+        drop(app.set_current_panel(Menu::Cube(menu::CubeSubMenu::Activity)));
+        assert_eq!(
+            app.panels.activity.selected_id.as_deref(),
+            Some(old.as_str())
+        );
+
+        // The Spark page's reload still reaches its panel.
+        app.panels.current = Menu::Spark(menu::SparkSubMenu::Overview);
+        drop(app.update(Message::View(view::Message::SparkOverview(
+            view::SparkOverviewMessage::DataLoaded {
+                balance: coincube_core::miniscript::bitcoin::Amount::from_sat(42),
+                stable_balance: None,
+                recent_payments: Vec::new(),
+            },
+        ))));
+        assert!(app.panels.spark_overview.has_snapshot_for_tests());
         let _ = std::fs::remove_dir_all(&root);
     }
 

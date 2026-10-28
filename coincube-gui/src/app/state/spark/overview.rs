@@ -166,6 +166,7 @@ impl SparkOverview {
         let page = view::dashboard_with_detail(
             menu,
             cache,
+            "tenshu.spark.page.scroll",
             move || self.page_body(cache, Some(address()), Some(recent_activity())),
             detail,
         );
@@ -178,6 +179,11 @@ impl SparkOverview {
         } else {
             page
         }
+    }
+
+    #[cfg(test)]
+    pub fn has_snapshot_for_tests(&self) -> bool {
+        self.snapshot.is_some()
     }
 
     /// A save result is routed through App even if the user left this panel.
