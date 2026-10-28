@@ -7324,8 +7324,8 @@ impl App {
         // result to render its banner, so it keeps its normal route.
         let health = match &message {
             Message::View(view::Message::Settings(
-                view::SettingsMessage::ConnectDeviceReregistered(Ok(device_id)),
-            )) => self.adopt_reregistered_device(device_id),
+                view::SettingsMessage::ConnectDeviceReregistered(Ok((email, device_id))),
+            )) => self.adopt_reregistered_device(email, device_id),
             _ => None,
         };
         let task = self.route(message);
@@ -7339,10 +7339,19 @@ impl App {
     /// id. Swap it into the stream config: the subscription is keyed on
     /// `device_id`, so a stream stopped by `DeviceRejected` (or one still
     /// using the stale id) is replaced by one that says hello with the new id.
-    /// A result landing after sign-out (which clears the stream config) is
-    /// ignored, so it can't bring the device card back for a signed-out user.
-    fn adopt_reregistered_device(&mut self, device_id: &str) -> Option<Task<Message>> {
+    /// A result landing after sign-out (which clears the stream config) or
+    /// for another account than the signed-in one is ignored, so it can't
+    /// bring the device card back or hand this account's stream a foreign id.
+    /// An unchanged id leaves the status alone: the subscription key doesn't
+    /// change, so nothing restarts and "Connecting" would never settle.
+    fn adopt_reregistered_device(&mut self, email: &str, device_id: &str) -> Option<Task<Message>> {
+        if self.connect_email.as_deref() != Some(email) {
+            return None;
+        }
         let cfg = self.connect_stream_config.as_mut()?;
+        if cfg.device_id == device_id {
+            return None;
+        }
         cfg.device_id = device_id.to_owned();
         self.cache.connect_device_id = Some(device_id.to_owned());
         self.cache.connect_stream_status = ConnectionStatus::Connecting;
@@ -14440,6 +14449,7 @@ pub(crate) mod tests {
             .as_ref()
             .map(|cfg| cfg.tokens.clone());
         app.cache.connect_email = Some("rejected@example.invalid".into());
+        app.connect_email = Some("rejected@example.invalid".into());
         drop(app.update(Message::View(view::Message::Menu(
             view::nav::shell::DEVICE_REJECTED_ROUTE,
         ))));
@@ -14463,8 +14473,36 @@ pub(crate) mod tests {
         );
         assert_eq!(app.connect_stream_config.as_ref().unwrap().device_id, "1");
 
+        // A result for another account (switched mid-flight) is ignored.
         drop(app.update(Message::View(view::Message::Settings(
-            view::SettingsMessage::ConnectDeviceReregistered(Ok("42".into())),
+            view::SettingsMessage::ConnectDeviceReregistered(Ok((
+                "other@example.invalid".into(),
+                "41".into(),
+            ))),
+        ))));
+        assert_eq!(app.connect_stream_config.as_ref().unwrap().device_id, "1");
+        assert_eq!(
+            app.cache.connect_stream_status,
+            ConnectionStatus::DeviceRejected
+        );
+
+        // The same id again restarts nothing, so the rejection stays visible.
+        drop(app.update(Message::View(view::Message::Settings(
+            view::SettingsMessage::ConnectDeviceReregistered(Ok((
+                "rejected@example.invalid".into(),
+                "1".into(),
+            ))),
+        ))));
+        assert_eq!(
+            app.cache.connect_stream_status,
+            ConnectionStatus::DeviceRejected
+        );
+
+        drop(app.update(Message::View(view::Message::Settings(
+            view::SettingsMessage::ConnectDeviceReregistered(Ok((
+                "rejected@example.invalid".into(),
+                "42".into(),
+            ))),
         ))));
         assert_eq!(app.connect_stream_config.as_ref().unwrap().device_id, "42");
         assert_eq!(app.cache.connect_device_id.as_deref(), Some("42"));
@@ -14477,7 +14515,10 @@ pub(crate) mod tests {
         app.connect_stream_config = None;
         app.cache.connect_device_id = None;
         drop(app.update(Message::View(view::Message::Settings(
-            view::SettingsMessage::ConnectDeviceReregistered(Ok("43".into())),
+            view::SettingsMessage::ConnectDeviceReregistered(Ok((
+                "rejected@example.invalid".into(),
+                "43".into(),
+            ))),
         ))));
         assert_eq!(app.cache.connect_device_id, None);
         let _ = std::fs::remove_dir_all(&root);

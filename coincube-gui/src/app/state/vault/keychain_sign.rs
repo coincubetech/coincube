@@ -499,6 +499,13 @@ impl KeychainSignModal {
         }
     }
 
+    /// Start from the stream's current health. Events only report changes,
+    /// so a modal opened after a rejection would otherwise read `Connected`.
+    pub fn with_stream_health(mut self, status: crate::app::ConnectionStatus) -> Self {
+        self.stream_health = status;
+        self
+    }
+
     pub fn pending(&self) -> &[PendingSession] {
         &self.pending
     }
