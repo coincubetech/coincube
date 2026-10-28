@@ -21,14 +21,11 @@ use crate::{
         menu::{self, Menu, VaultSubMenu},
         settings::display::DisplayMode,
         view::{
-            dashboard, loading_placeholder,
+            dashboard,
             message::Message,
-            shared::activity_row::{
-                activity_row, ActivityDirection, ActivityIdentity, ActivityRow, ActivityStatus,
-            },
             shared::landing::{
                 amount_cell, landing_balance_section, landing_button, landing_control_id,
-                landing_subtle_button_style, AmountCell, AmountTier,
+                AmountCell, AmountTier,
             },
             vault::coins,
             vault::label,
@@ -37,7 +34,7 @@ use crate::{
         },
         wallet::SyncStatus,
     },
-    daemon::model::{HistoryTransaction, Payment, PaymentKind, TransactionKind},
+    daemon::model::{HistoryTransaction, TransactionKind},
 };
 
 const RESCAN_DATE_PROMPT: &str = "This Vault was restored from a Recovery Kit that doesn't record when the wallet was created, so its past transactions can't be found without a start date. Pick one to scan the blockchain from.";
@@ -226,13 +223,8 @@ pub fn vault_overview_view<'a>(
     remaining_sequence: &Option<u32>,
     fiat_converter: Option<FiatAmountConverter>,
     expiring_coins: &[bitcoin::OutPoint],
-    events: &'a [Payment],
+    recent_activity: Option<Element<'a, Message>>,
     cube_id: &str,
-    is_last_page: bool,
-    processing: bool,
-    loading: bool,
-    history_loaded: bool,
-    history_error: Option<&str>,
     sync_status: &SyncStatus,
     show_rescan_prompt: bool,
     awaiting_rescan_date: bool,
@@ -418,181 +410,15 @@ pub fn vault_overview_view<'a>(
                     .style(theme::card::invalid),
                 )
             })
-            .push(
-                Column::new()
-                    .spacing(10)
-                    .push(h4_bold("Recent activity"))
-                    .push_maybe(history_error.map(|error| {
-                        text(if history_loaded {
-                            format!("Last known activity · {error}")
-                        } else {
-                            error.to_owned()
-                        })
-                        .size(P2_SIZE)
-                        .style(theme::text::warning)
-                    }))
-                    .push_maybe(loading.then(|| {
-                        loading_placeholder(
-                            icon::receipt_icon().size(48),
-                            if history_unknown {
-                                // Nothing is loading yet: the list is read once the
-                                // history is in, and saying "Loading" until then is
-                                // what made an unfinished scan look like a slow page.
-                                "Transactions appear once the Vault's history has loaded"
-                            } else {
-                                "Loading transactions"
-                            },
-                        )
-                    }))
-                    .push(events.iter().fold(Column::new().spacing(10), |col, event| {
-                        // Change outputs are skipped — their transaction is already
-                        // listed as the outgoing payment. A self-transfer has no
-                        // such counterpart row, so it stays.
-                        if event.kind != PaymentKind::SendToSelf {
-                            col.push(event_list_view(
-                                event,
-                                cube_id,
-                                bitcoin_unit,
-                                fiat_converter,
-                                mask_amounts,
-                            ))
-                        } else {
-                            col
-                        }
-                    }))
-                    .push(if !is_last_page && !events.is_empty() {
-                        Some(
-                            Container::new(
-                                landing_button(
-                                    landing_control_id(cube_id, "Vault", "see-more"),
-                                    if processing {
-                                        "Fetching ..."
-                                    } else {
-                                        "See more"
-                                    },
-                                    None,
-                                    Message::FocusAction,
-                                    (!processing).then_some(Message::Next),
-                                    theme::button::transparent_border,
-                                )
-                                .width(Length::Fill)
-                                .padding(15),
-                            )
-                            .width(Length::Fill)
-                            .style(theme::card::simple),
-                        )
-                    } else {
-                        None
-                    }),
-            )
-            .push_maybe(if history_loaded {
-                Some(
-                    Container::new(landing_button(
-                        landing_control_id(cube_id, "Vault", "history"),
-                        "View All Transactions",
-                        None,
-                        Message::FocusAction,
-                        Some(Message::Menu(Menu::Vault(VaultSubMenu::Transactions(None)))),
-                        landing_subtle_button_style,
-                    ))
-                    .width(Length::Fill)
-                    .center_x(Length::Fill),
-                )
-            } else {
-                None
-            })
+            // "Recent activity": App mounts Activity's rows for the Vault
+            // (`view::activity::wallet_recent_activity`).
+            .push_maybe(recent_activity)
             .push_maybe((!tools.is_empty()).then(|| vault_tools(cube_id, tools)))
             .push(Space::new().height(Length::Fixed(40.0)))
             .spacing(20),
     )
     .padding([0, 16])
     .into()
-}
-
-fn event_list_view(
-    event: &Payment,
-    cube_id: &str,
-    bitcoin_unit: BitcoinDisplayUnit,
-    fiat_converter: Option<FiatAmountConverter>,
-    mask_amounts: bool,
-) -> Element<'static, Message> {
-    let direction = match event.kind {
-        PaymentKind::Incoming => ActivityDirection::Incoming,
-        PaymentKind::SelfTransfer | PaymentKind::SendToSelf => ActivityDirection::SelfTransfer,
-        PaymentKind::Outgoing => ActivityDirection::Outgoing,
-    };
-
-    let label = event
-        .label
-        .clone()
-        .or_else(|| {
-            event
-                .address_label
-                .as_ref()
-                .map(|label| format!("address label: {label}"))
-        })
-        .unwrap_or_else(|| match direction {
-            ActivityDirection::Incoming => "Received".into(),
-            ActivityDirection::Outgoing => "Sent".into(),
-            ActivityDirection::SelfTransfer => "Self-transfer".into(),
-        });
-    let amount = (!mask_amounts).then(|| {
-        format!(
-            "{} {}",
-            event.amount.to_formatted_string_with_unit(bitcoin_unit),
-            bitcoin_unit.label()
-        )
-    });
-    let amount = amount.map(|amount| match direction {
-        ActivityDirection::Outgoing => format!("−{amount}"),
-        ActivityDirection::Incoming => format!("+{amount}"),
-        ActivityDirection::SelfTransfer => amount,
-    });
-    let fiat_amount = (!mask_amounts)
-        .then_some(fiat_converter)
-        .flatten()
-        .map(|converter| {
-            let fiat = converter.convert(event.amount);
-            format!(
-                "{} {} · current rate",
-                fiat.to_formatted_string(),
-                fiat.currency()
-            )
-        });
-    activity_row(
-        ActivityRow {
-            identity: ActivityIdentity {
-                cube: cube_id.to_owned(),
-                wallet: "Vault".into(),
-                payment: Some(format!("{}:{}", event.outpoint.txid, event.outpoint.vout)),
-            },
-            rail: Some("Bitcoin on-chain".into()),
-            date: event
-                .time
-                .as_ref()
-                .map(|time| {
-                    time.with_timezone(&Local)
-                        .format("%b %-d, %H:%M")
-                        .to_string()
-                })
-                .unwrap_or_else(|| "Time unknown".into()),
-            timezone_tooltip: Some("Local time".into()),
-            direction,
-            label,
-            wallet_caption: None,
-            amount: amount.map_or_else(AmountCell::masked, |amount| {
-                AmountCell::shown(amount, fiat_amount)
-            }),
-            status: if event.time.is_some() {
-                ActivityStatus::Complete
-            } else {
-                ActivityStatus::Unconfirmed
-            },
-        },
-        false,
-        Some(Message::SelectPayment(event.outpoint)),
-        Message::FocusAction,
-    )
 }
 
 pub fn payment_view<'a>(
@@ -876,29 +702,11 @@ mod balance_state_tests {
 mod capture_tests {
     use super::*;
     use crate::app::view::shared::landing::capture;
-    use coincube_core::miniscript::bitcoin::{OutPoint, Txid};
-    use std::str::FromStr;
-
-    fn event(known_time: bool) -> Payment {
-        Payment {
-            label: Some("Long Vault beneficiary label that should wrap safely on a compact landing while the amount remains right aligned".into()),
-            address: None,
-            address_label: None,
-            amount: bitcoin::Amount::from_sat(99_999_999_999),
-            outpoint: OutPoint {
-                txid: Txid::from_str(&"1".repeat(64)).unwrap(),
-                vout: 0,
-            },
-            time: known_time.then(|| DateTime::<Utc>::from_timestamp(1_722_000_000, 0).unwrap()),
-            kind: PaymentKind::Incoming,
-        }
-    }
 
     #[test]
-    fn hidden_overview_redacts_balance_and_recent_payment() {
+    fn hidden_overview_redacts_balance() {
         let balance = bitcoin::Amount::from_sat(12_345_678);
         let zero = bitcoin::Amount::ZERO;
-        let events = [event(true)];
         let mounted = capture::inspect(
             "vault-hidden-amounts",
             vault_overview_view(
@@ -907,13 +715,8 @@ mod capture_tests {
                 &None,
                 None,
                 &[],
-                &events,
-                "synthetic-cube",
-                true,
-                false,
-                false,
-                true,
                 None,
+                "synthetic-cube",
                 &SyncStatus::Synced,
                 false,
                 false,
@@ -931,7 +734,6 @@ mod capture_tests {
         );
         assert!(mounted.contains("••••••"));
         assert!(!mounted.contains("12,345,678"));
-        assert!(!mounted.contains("99,999,999,999"));
     }
 
     #[test]
@@ -953,13 +755,8 @@ mod capture_tests {
                     &None,
                     None,
                     &[],
-                    &[],
-                    "synthetic-cube",
-                    true,
-                    false,
-                    false,
-                    true,
                     None,
+                    "synthetic-cube",
                     &SyncStatus::Synced,
                     false,
                     false,
@@ -988,7 +785,6 @@ mod capture_tests {
 
     #[test]
     fn r06a_vault_headless_content_matrix() {
-        let normal_events = vec![event(true), event(false)];
         let balance = bitcoin::Amount::from_sat(250_000);
         let zero = bitcoin::Amount::ZERO;
         let none_sequence = None;
@@ -1003,20 +799,15 @@ mod capture_tests {
         ] {
             for outer in [(1024, 768), (1440, 900)] {
                 macro_rules! render {
-                    ($balance:expr, $events:expr, $sync:expr, $history_loaded:expr, $rescan:expr, $error:expr $(,)?) => {
+                    ($balance:expr, $sync:expr, $rescan:expr $(,)?) => {
                         vault_overview_view(
                             $balance,
                             &zero,
                             &none_sequence,
                             None,
                             &[],
-                            $events,
+                            None,
                             "synthetic-cube",
-                            true,
-                            false,
-                            false,
-                            $history_loaded,
-                            $error,
                             $sync,
                             $rescan,
                             $rescan,
@@ -1032,22 +823,12 @@ mod capture_tests {
                 }
                 let normal = capture::inspect(
                     "vault-normal",
-                    render!(
-                        &balance,
-                        &normal_events,
-                        &SyncStatus::Synced,
-                        true,
-                        false,
-                        None,
-                    ),
+                    render!(&balance, &SyncStatus::Synced, false),
                     outer,
                     appearance,
                     theme,
                 );
-                assert!(normal.contains("Recent activity"));
-                assert!(normal.contains("View All Transactions"));
-                assert!(normal.contains("Unconfirmed"));
-                for control in ["flip-balance", "send-btc", "receive-btc", "history"] {
+                for control in ["flip-balance", "send-btc", "receive-btc"] {
                     assert!(normal.has_focus(landing_control_id(
                         "synthetic-cube",
                         "Vault",
@@ -1055,26 +836,14 @@ mod capture_tests {
                     )));
                 }
 
-                let empty = capture::inspect(
-                    "vault-known-zero-loaded-empty",
-                    render!(&zero, &[], &SyncStatus::Synced, true, false, None),
-                    outer,
-                    appearance,
-                    theme,
-                );
-                assert!(empty.contains("View All Transactions"));
-
                 let unfinished = capture::inspect(
                     "vault-rescan-date-unknown",
                     render!(
                         &zero,
-                        &[],
                         &SyncStatus::WalletFullScan {
                             progress: Some(0.25),
                         },
-                        false,
                         true,
-                        None,
                     ),
                     outer,
                     appearance,
@@ -1085,20 +854,12 @@ mod capture_tests {
 
                 let stale = capture::inspect(
                     "vault-retained-success-error",
-                    render!(
-                        &balance,
-                        &normal_events,
-                        &failing,
-                        true,
-                        false,
-                        Some("history refresh failed"),
-                    ),
+                    render!(&balance, &failing, false),
                     outer,
                     appearance,
                     theme,
                 );
                 assert!(stale.contains("Last known balance"));
-                assert!(stale.contains("Last known activity"));
             }
         }
     }

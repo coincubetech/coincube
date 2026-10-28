@@ -91,6 +91,17 @@ impl SparkOverview {
         cache: &'a Cache,
         address: Option<Element<'a, view::Message>>,
     ) -> Element<'a, view::Message> {
+        view::dashboard(menu, cache, self.page_body(cache, address, None))
+    }
+
+    /// The balance, "Recent activity" (from Activity, mounted by App) and
+    /// the landing's address and Stable Balance context.
+    pub fn page_body<'a>(
+        &'a self,
+        cache: &'a Cache,
+        address: Option<Element<'a, view::Message>>,
+        recent_activity: Option<Element<'a, view::Message>>,
+    ) -> Element<'a, view::Message> {
         let fiat_converter: Option<FiatAmountConverter> =
             cache.fiat_price.as_ref().and_then(|p| p.try_into().ok());
 
@@ -106,6 +117,7 @@ impl SparkOverview {
             SparkStatus::Loading
         };
 
+        let status_connected = matches!(status, SparkStatus::Connected(_));
         let overview = SparkOverviewView {
             status,
             recent_transactions: &self.recent_transactions,
@@ -123,6 +135,11 @@ impl SparkOverview {
         .map(view::Message::SparkOverview);
 
         let mut content = iced::widget::Column::new().push(overview);
+        // Only beside a balance: not under "Connecting" or a bridge error.
+        // Inside the overview's own 16px inset, like the balance above it.
+        if let Some(recent) = recent_activity.filter(|_| status_connected) {
+            content = content.push(iced::widget::container(recent).padding([0, 16]));
+        }
         if let Some(address) = address.filter(|_| self.backend.is_some()) {
             content = content.push(view::spark::overview::spark_landing_context(
                 address,
@@ -132,7 +149,7 @@ impl SparkOverview {
                 &cache.cube_id,
             ));
         }
-        view::dashboard(menu, cache, content)
+        content.into()
     }
 
     /// The address confirmation must cover the full Spark page, rather than
@@ -141,10 +158,17 @@ impl SparkOverview {
         &'a self,
         menu: &'a Menu,
         cache: &'a Cache,
-        address: Element<'a, view::Message>,
+        address: impl Fn() -> Element<'a, view::Message> + 'a,
+        recent_activity: impl Fn() -> Element<'a, view::Message> + 'a,
+        detail: impl Fn() -> Option<Element<'a, view::Message>> + 'a,
         confirmation: Option<Element<'a, view::Message>>,
     ) -> Element<'a, view::Message> {
-        let page = self.view_with_address(menu, cache, Some(address));
+        let page = view::dashboard_with_detail(
+            menu,
+            cache,
+            move || self.page_body(cache, Some(address()), Some(recent_activity())),
+            detail,
+        );
         if let Some(confirmation) = confirmation.filter(|_| self.backend.is_some()) {
             coincube_ui::widget::modal::Modal::new(page, confirmation)
                 .on_blur(Some(view::Message::ConnectCube(
@@ -154,6 +178,11 @@ impl SparkOverview {
         } else {
             page
         }
+    }
+
+    #[cfg(test)]
+    pub fn has_snapshot_for_tests(&self) -> bool {
+        self.snapshot.is_some()
     }
 
     /// A save result is routed through App even if the user left this panel.

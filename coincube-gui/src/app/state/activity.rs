@@ -15,7 +15,10 @@ use crate::{
         cache::Cache,
         menu::Menu,
         message::Message,
-        view::{self, activity::ActivityMessage},
+        view::{
+            self,
+            activity::{ActivityMessage, WalletFilter},
+        },
         wallet::Wallet,
         wallets::{DomainPayment, DomainRefundableSwap, LiquidBackend, SparkBackend},
     },
@@ -64,6 +67,14 @@ pub struct Activity {
     wallet: Option<Arc<Wallet>>,
     pub vault_has_more: bool,
     pub spark_has_more: bool,
+    /// A wallet page asked for fresh rows while that source was loading:
+    /// refresh again once the answer lands, so a payment seen meanwhile
+    /// still reaches "Recent activity".
+    vault_stale: bool,
+    spark_stale: bool,
+    /// Spark refreshes asked for (Spark's bridge has no test double).
+    #[cfg(test)]
+    pub spark_refresh_requests: u64,
     pub liquid_has_more: bool,
     vault_limit: u64,
     generation: u64,
@@ -110,6 +121,10 @@ impl Activity {
             vault_has_more: false,
             spark_has_more: false,
             liquid_has_more: false,
+            vault_stale: false,
+            spark_stale: false,
+            #[cfg(test)]
+            spark_refresh_requests: 0,
             vault_limit: HISTORY_LIMIT,
             generation: 0,
             label_draft: None,
@@ -150,6 +165,78 @@ impl Activity {
 
     pub fn details_open_for(&self, entry_id: &str) -> bool {
         self.details_open.as_deref() == Some(entry_id)
+    }
+
+    /// One wallet's rows, newest first: the Vault and Spark pages' "Recent
+    /// activity" reads the same rows and labels as this page.
+    pub fn wallet_entries(&self, wallet: WalletFilter) -> Vec<view::activity::Entry> {
+        self.entries()
+            .into_iter()
+            .filter(|entry| entry.wallet == wallet)
+            .collect()
+    }
+
+    /// No row selected: a wallet page opens without a detail pane.
+    pub fn clear_selection(&mut self) {
+        self.selected_id = None;
+        self.details_open = None;
+        self.label_draft = None;
+    }
+
+    /// Re-read one wallet's newest page for its own page's "Recent activity".
+    /// Unlike [`State::reload`] the loaded rows stay on screen until the
+    /// answer replaces them, so a background refresh never flashes "Loading".
+    /// A source already loading is left to finish.
+    pub fn refresh_wallet(
+        &mut self,
+        source: WalletFilter,
+        daemon: Option<Arc<dyn Daemon + Sync + Send>>,
+        wallet: Option<Arc<Wallet>>,
+    ) -> Task<Message> {
+        if wallet.is_some() {
+            self.wallet = wallet;
+        }
+        let generation = self.generation;
+        let mut tasks = Vec::new();
+        match source {
+            WalletFilter::Vault => {
+                let Some(daemon) = daemon else {
+                    return Task::none();
+                };
+                if self.vault_loading {
+                    self.vault_stale = true;
+                } else {
+                    self.vault_loading = true;
+                    self.vault_limit = HISTORY_LIMIT;
+                    tasks.push(vault_history(
+                        daemon.clone(),
+                        self.wallet.clone(),
+                        HISTORY_LIMIT,
+                        generation,
+                    ));
+                }
+                if !self.psbt_loading && self.vault_supports_replacement() {
+                    self.psbt_loading = true;
+                    tasks.push(vault_proposals(daemon, generation));
+                }
+            }
+            WalletFilter::Spark => {
+                #[cfg(test)]
+                {
+                    self.spark_refresh_requests += 1;
+                }
+                if self.spark_loading {
+                    self.spark_stale = true;
+                } else if let Some(spark) = self.spark_backend.clone() {
+                    self.spark_loading = true;
+                    tasks.push(spark_payments(spark, 0, move |result| {
+                        Message::ActivitySparkRefreshed(generation, result)
+                    }));
+                }
+            }
+            WalletFilter::All | WalletFilter::Liquid => {}
+        }
+        Task::batch(tasks)
     }
 
     /// The label `entry` edits, read from the entry's own row: other rows
@@ -364,48 +451,16 @@ impl Activity {
                 let limit = self.vault_limit;
                 let wallet = self.wallet.clone();
                 self.vault_loading = true;
-                tasks.push(Task::perform(
-                    async move {
-                        let upper = now().as_secs().min(u32::MAX as u64) as u32;
-                        let mut rows = daemon
-                            .list_history_txs(0, upper, limit + 1)
-                            .await
-                            .map_err(|e| e.to_string())?;
-                        let more = rows.len() as u64 > limit;
-                        rows.truncate(limit as usize);
-                        let mut pending =
-                            daemon.list_pending_txs().await.map_err(|e| e.to_string())?;
-                        if let Some(wallet) = wallet {
-                            let known: HashSet<_> = pending.iter().map(|tx| tx.txid).collect();
-                            pending.extend(wallet.synthesized_pending_history_txs(&known));
-                        }
-                        let known: HashSet<_> = pending.iter().map(|tx| tx.txid).collect();
-                        pending.extend(rows.into_iter().filter(|tx| !known.contains(&tx.txid)));
-                        Ok::<_, String>((pending, more))
-                    },
-                    move |result| Message::ActivityVaultLoaded(generation, result),
-                ));
+                tasks.push(vault_history(daemon, wallet, limit, generation));
             }
         }
         if self.spark_has_more && !self.spark_loading {
             if let Some(spark) = self.spark_backend.clone() {
                 self.spark_loading = true;
                 let offset = self.spark.len() as u32;
-                tasks.push(Task::perform(
-                    async move {
-                        spark
-                            .list_payments(Some(HISTORY_LIMIT as u32 + 1), Some(offset))
-                            .await
-                            .map(|page| {
-                                let mut rows = page.payments;
-                                let more = rows.len() as u64 > HISTORY_LIMIT;
-                                rows.truncate(HISTORY_LIMIT as usize);
-                                (rows, more)
-                            })
-                            .map_err(|e| e.to_string())
-                    },
-                    move |result| Message::ActivitySparkLoaded(generation, result),
-                ));
+                tasks.push(spark_payments(spark, offset, move |result| {
+                    Message::ActivitySparkLoaded(generation, result)
+                }));
             }
         }
         if self.liquid_has_more && !self.liquid_loading {
@@ -430,6 +485,73 @@ impl Activity {
         }
         Task::batch(tasks)
     }
+}
+
+/// The Vault's newest `limit` history rows, pending first, as Activity lists
+/// them.
+fn vault_history(
+    daemon: Arc<dyn Daemon + Sync + Send>,
+    wallet: Option<Arc<Wallet>>,
+    limit: u64,
+    generation: u64,
+) -> Task<Message> {
+    Task::perform(
+        async move {
+            let upper = now().as_secs().min(u32::MAX as u64) as u32;
+            let mut rows = daemon
+                .list_history_txs(0, upper, limit + 1)
+                .await
+                .map_err(|e| e.to_string())?;
+            let more = rows.len() as u64 > limit;
+            rows.truncate(limit as usize);
+            let mut pending = daemon.list_pending_txs().await.map_err(|e| e.to_string())?;
+            if let Some(wallet) = wallet {
+                let known: HashSet<_> = pending.iter().map(|tx| tx.txid).collect();
+                pending.extend(wallet.synthesized_pending_history_txs(&known));
+            }
+            let known: HashSet<_> = pending.iter().map(|tx| tx.txid).collect();
+            pending.extend(rows.into_iter().filter(|tx| !known.contains(&tx.txid)));
+            Ok::<_, String>((pending, more))
+        },
+        move |result| Message::ActivityVaultLoaded(generation, result),
+    )
+}
+
+fn vault_proposals(daemon: Arc<dyn Daemon + Sync + Send>, generation: u64) -> Task<Message> {
+    Task::perform(
+        async move {
+            daemon
+                .list_spend_transactions(None)
+                .await
+                .map_err(|e| e.to_string())
+        },
+        move |result| Message::ActivityPsbtLoaded(generation, result),
+    )
+}
+
+type SparkPage = Result<(Vec<PaymentSummary>, bool), String>;
+
+/// One page of Spark payments from `offset`, answered by `done`.
+fn spark_payments(
+    spark: Arc<SparkBackend>,
+    offset: u32,
+    done: impl FnOnce(SparkPage) -> Message + Send + 'static,
+) -> Task<Message> {
+    Task::perform(
+        async move {
+            spark
+                .list_payments(Some(HISTORY_LIMIT as u32 + 1), Some(offset))
+                .await
+                .map(|page| {
+                    let mut rows = page.payments;
+                    let more = rows.len() as u64 > HISTORY_LIMIT;
+                    rows.truncate(HISTORY_LIMIT as usize);
+                    (rows, more)
+                })
+                .map_err(|e| e.to_string())
+        },
+        done,
+    )
 }
 
 impl State for Activity {
@@ -458,6 +580,9 @@ impl State for Activity {
                     }
                     Err(error) => self.vault_error = Some(error),
                 }
+                if std::mem::take(&mut self.vault_stale) {
+                    return self.refresh_wallet(WalletFilter::Vault, _daemon, None);
+                }
             }
             Message::ActivityPsbtLoaded(generation, result) if generation == self.generation => {
                 self.psbt_loading = false;
@@ -482,6 +607,25 @@ impl State for Activity {
                         self.spark_error = None;
                     }
                     Err(error) => self.spark_error = Some(error),
+                }
+                if std::mem::take(&mut self.spark_stale) {
+                    return self.refresh_wallet(WalletFilter::Spark, None, None);
+                }
+            }
+            Message::ActivitySparkRefreshed(generation, result)
+                if generation == self.generation =>
+            {
+                self.spark_loading = false;
+                match result {
+                    Ok((rows, more)) => {
+                        self.spark = rows;
+                        self.spark_has_more = more;
+                        self.spark_error = None;
+                    }
+                    Err(error) => self.spark_error = Some(error),
+                }
+                if std::mem::take(&mut self.spark_stale) {
+                    return self.refresh_wallet(WalletFilter::Spark, None, None);
                 }
             }
             Message::ActivityLiquidLoaded(generation, result) if generation == self.generation => {
@@ -589,9 +733,20 @@ impl State for Activity {
                     });
                 }
                 ActivityMessage::Retry => return self.reload(_daemon, self.wallet.clone()),
+                ActivityMessage::RetryWallet(wallet) => {
+                    return self.refresh_wallet(wallet, _daemon, None)
+                }
                 ActivityMessage::LoadMore => return self.load_more(_daemon),
                 ActivityMessage::OpenDetail(target) => {
                     return Task::done(Message::ActivityOpenDetail(target))
+                }
+                ActivityMessage::ViewAll(wallet) => {
+                    // App switches to Activity; it opens on this wallet alone.
+                    self.clear_selection();
+                    self.filters = view::activity::Filters {
+                        wallet,
+                        ..Default::default()
+                    };
                 }
             },
             _ => {}
@@ -615,6 +770,8 @@ impl State for Activity {
         self.vault_has_more = false;
         self.spark_has_more = false;
         self.liquid_has_more = false;
+        self.vault_stale = false;
+        self.spark_stale = false;
         self.vault.clear();
         self.psbts.clear();
         self.spark.clear();
@@ -637,56 +794,16 @@ impl State for Activity {
         let mut tasks = Vec::new();
         if let Some(daemon) = daemon {
             if self.psbt_loading {
-                let psbt_daemon = daemon.clone();
-                tasks.push(Task::perform(
-                    async move {
-                        psbt_daemon
-                            .list_spend_transactions(None)
-                            .await
-                            .map_err(|e| e.to_string())
-                    },
-                    move |result| Message::ActivityPsbtLoaded(generation, result),
-                ));
+                tasks.push(vault_proposals(daemon.clone(), generation));
             }
-            tasks.push(Task::perform(
-                async move {
-                    let upper = now().as_secs().min(u32::MAX as u64) as u32;
-                    let mut rows = daemon
-                        .list_history_txs(0, upper, HISTORY_LIMIT + 1)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    let more = rows.len() as u64 > HISTORY_LIMIT;
-                    rows.truncate(HISTORY_LIMIT as usize);
-                    let mut pending = daemon.list_pending_txs().await.map_err(|e| e.to_string())?;
-                    if let Some(wallet) = wallet {
-                        let known: HashSet<_> = pending.iter().map(|tx| tx.txid).collect();
-                        pending.extend(wallet.synthesized_pending_history_txs(&known));
-                    }
-                    let known: HashSet<_> = pending.iter().map(|tx| tx.txid).collect();
-                    pending.extend(rows.drain(..).filter(|tx| !known.contains(&tx.txid)));
-                    Ok::<_, String>((pending, more))
-                },
-                move |result| Message::ActivityVaultLoaded(generation, result),
-            ));
+            tasks.push(vault_history(daemon, wallet, HISTORY_LIMIT, generation));
         } else {
             self.vault.clear();
         }
         if let Some(spark) = self.spark_backend.clone() {
-            tasks.push(Task::perform(
-                async move {
-                    spark
-                        .list_payments(Some(HISTORY_LIMIT as u32 + 1), Some(0))
-                        .await
-                        .map(|page| {
-                            let mut rows = page.payments;
-                            let more = rows.len() as u64 > HISTORY_LIMIT;
-                            rows.truncate(HISTORY_LIMIT as usize);
-                            (rows, more)
-                        })
-                        .map_err(|e| e.to_string())
-                },
-                move |result| Message::ActivitySparkLoaded(generation, result),
-            ));
+            tasks.push(spark_payments(spark, 0, move |result| {
+                Message::ActivitySparkLoaded(generation, result)
+            }));
         } else {
             self.spark.clear();
         }

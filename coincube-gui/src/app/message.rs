@@ -48,6 +48,12 @@ pub enum Message {
         u64,
         Result<(Vec<coincube_spark_protocol::PaymentSummary>, bool), String>,
     ),
+    /// A wallet page's quiet refresh of Spark's first page: it replaces the
+    /// loaded rows instead of extending them like a "Load older" page.
+    ActivitySparkRefreshed(
+        u64,
+        Result<(Vec<coincube_spark_protocol::PaymentSummary>, bool), String>,
+    ),
     ActivityLiquidLoaded(
         u64,
         Result<(Vec<crate::app::wallets::DomainPayment>, bool), String>,
