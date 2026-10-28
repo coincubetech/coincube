@@ -45,10 +45,15 @@ pub(super) const SLOT_HEIGHT: f32 = 344.0;
 pub(super) const ROW_GUTTER: f32 = 80.0;
 /// `.floor` with `clip-path: polygon(14% 0, 86% 0, 100% 100%, 0 100%)`.
 /// The prototype's `top: 40%` put the horizon at the resting Cubes' center
-/// (300 of 742px); the row now rests on the stage's midline, so the horizon
-/// moves with it and the Cubes keep standing on the floor's back edge.
-pub(super) const FLOOR_TOP: f32 = 0.5;
+/// (300 of 742px); [`Layout::horizon`] keeps it there wherever the row sits.
 pub(super) const FLOOR_INSET: f32 = 0.14;
+/// `.cb { padding-bottom: 10px }`: the label's foot above the slot's.
+const LABEL_FOOT: f32 = 10.0;
+/// A hovered resting Cube floats this many pixels up and back, once a
+/// [`BOB_PERIOD`], and settles over [`BOB_SETTLE`] when the pointer leaves.
+pub(super) const BOB_HEIGHT: f32 = 6.0;
+pub(super) const BOB_PERIOD: Duration = Duration::from_millis(2000);
+pub(super) const BOB_SETTLE: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy)]
 pub(super) struct FaceText<'a> {
@@ -69,7 +74,17 @@ pub(crate) struct CubeMarks {
     /// Spark comes with every Cube on a network it supports.
     pub spark: bool,
     pub passkey: bool,
-    pub backup_confirmed: bool,
+    pub backup: BackupMark,
+}
+
+/// The right face's backup badge, P-Launcher's `.bdg`: "!" while the seed
+/// backup is not confirmed, "?" when this device cannot tell, and none once
+/// it is confirmed, so a badge always asks for attention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum BackupMark {
+    Confirmed,
+    NotConfirmed,
+    Unknown,
 }
 
 /// Which `.cb` phase the timeline describes. Every Cube on a page reads the
@@ -162,6 +177,7 @@ impl Motion {
                         // A handoff target was dimmed; a browse selection was not.
                         dim: if handoff { 1.0 - fade } else { 0.0 },
                         shadow: 1.0 - fade,
+                        lift: 0.0,
                     }
                 } else if previous.as_ref() == Some(key) {
                     Pose {
@@ -169,6 +185,7 @@ impl Motion {
                         second: 0.0,
                         dim: fade,
                         shadow: fade,
+                        lift: 0.0,
                     }
                 } else {
                     Pose {
@@ -184,6 +201,7 @@ impl Motion {
                         second: 0.0,
                         dim: 0.0,
                         shadow: fade,
+                        lift: 0.0,
                     }
                 } else {
                     Pose {
@@ -208,13 +226,15 @@ pub(super) fn settled_pose(key: &CubeCatalogKey, selected: Option<&CubeCatalogKe
 /// One Cube's animated inputs. `spin` drives the shared transform list from
 /// the resting pose (0) to the centered details face (1). `second` turns that
 /// face on to the unlock face (yaw 180 -> 270). `dim` and `shadow` follow the
-/// 500ms `.cb.dim .scene` and `.cb.active .shadow` transitions.
+/// 500ms `.cb.dim .scene` and `.cb.active .shadow` transitions. `lift`
+/// raises a resting Cube off its shadow by that many design pixels (hover).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct Pose {
     pub spin: f32,
     pub second: f32,
     pub dim: f32,
     pub shadow: f32,
+    pub lift: f32,
 }
 
 impl Pose {
@@ -223,18 +243,21 @@ impl Pose {
         second: 0.0,
         dim: 0.0,
         shadow: 1.0,
+        lift: 0.0,
     };
     pub const DETAILS: Self = Self {
         spin: 1.0,
         second: 0.0,
         dim: 0.0,
         shadow: 0.0,
+        lift: 0.0,
     };
     pub const DIMMED: Self = Self {
         spin: 0.0,
         second: 0.0,
         dim: 1.0,
         shadow: 1.0,
+        lift: 0.0,
     };
 
     pub fn unlock(second: f32) -> Self {
@@ -243,6 +266,22 @@ impl Pose {
             ..Self::DETAILS
         }
     }
+
+    pub fn lifted(self, lift: f32) -> Self {
+        Self { lift, ..self }
+    }
+}
+
+/// The hover float `hovered` into it, eased up from rest so it never jumps:
+/// half a cosine up to [`BOB_HEIGHT`] and back down, once a [`BOB_PERIOD`].
+pub(super) fn bob(hovered: Duration) -> f32 {
+    let phase = hovered.as_secs_f32() / BOB_PERIOD.as_secs_f32() * std::f32::consts::TAU;
+    BOB_HEIGHT * (1.0 - phase.cos()) / 2.0
+}
+
+/// Settling from `from` after the pointer left `left` ago.
+pub(super) fn settle(from: f32, left: Duration) -> f32 {
+    from * (1.0 - ease(left.as_secs_f32() / BOB_SETTLE.as_secs_f32()))
 }
 
 /// `cubic-bezier(0.22, 1, 0.36, 1)`, inverted from x to y like CSS.
@@ -308,10 +347,20 @@ impl Layout {
         SLOT_GAP * self.scale
     }
 
-    /// Top of the slots, placed so the resting Cubes' centers fall on the
-    /// stage's midline. The prototype's slots began 168px above that center.
+    /// Top of the slots. A resting Cube and its name label read as one
+    /// block, from the Cube's top corner to the label's foot, and that block
+    /// is centered on the stage's midline. Centering the Cube alone left the
+    /// label hanging below it and the row looking low.
     pub fn rows_top(&self) -> f32 {
-        self.height / 2.0 - self.rest_drop()
+        let (_, top, _, _) = bounds(self, (0.0, 0.0), Pose::REST);
+        let foot = self.slot_height() - LABEL_FOOT - self.rest_drop();
+        self.height / 2.0 - (top + foot) / 2.0 - self.rest_drop()
+    }
+
+    /// The resting Cubes' center line: the page arrows and the floor's back
+    /// edge both sit on it.
+    pub fn horizon(&self) -> f32 {
+        self.rows_top() + self.rest_drop()
     }
 
     /// From the top of a slot down to its resting Cube's center.
@@ -331,13 +380,19 @@ impl Layout {
         let x0 = (self.width - row) / 2.0;
         (
             x0 + index as f32 * (self.slot() + self.gap()) + self.slot() / 2.0,
-            self.rows_top() + self.rest_drop(),
+            self.horizon(),
         )
     }
 
-    /// Where the details face is centered.
+    /// Where the details face is centered: on the arrows' line, as far as
+    /// the face still clears the stage's edges by 24px.
     pub fn target(&self) -> (f32, f32) {
-        (self.width / 2.0, self.height / 2.0)
+        let half = self.face() / 2.0 + 24.0;
+        let y = self
+            .horizon()
+            .min(self.height - half)
+            .max(half.min(self.height / 2.0));
+        (self.width / 2.0, y)
     }
 
     /// The face size on screen at the target, bounded by the stage height.
@@ -458,7 +513,10 @@ pub(super) fn project(
     pose: Pose,
 ) -> (SceneFrame, Vec<ProjectedFace>) {
     let s = layout.size();
-    let (tx, ty) = layout.target();
+    let p = pose.spin.clamp(0.0, 1.0);
+    // A resting Cube never reads the target, which is placed from the
+    // resting Cubes' own bounds (`Layout::rows_top`).
+    let (tx, ty) = if p > 0.0 { layout.target() } else { rest };
     let face = layout.face();
     // translate3d(dx, dy, 0) scale(k). CSS `scale(k)` is two-dimensional:
     // it never stretches z, so the zoomed face still sits only s/2 in front
@@ -467,7 +525,6 @@ pub(super) fn project(
     // controls laid over it, are 420px, so k is solved for that with the
     // same 2D-scale depth.
     let k_end = face * (PERSPECTIVE - s / 2.0) / PERSPECTIVE / s;
-    let p = pose.spin.clamp(0.0, 1.0);
     let dx = (tx - rest.0) * p;
     let dy = (ty - rest.1) * p;
     let k = 1.0 + (k_end - 1.0) * p;
@@ -487,7 +544,10 @@ pub(super) fn project(
             scene_center.1 + (y - scene_center.1) * scene_scale,
         )
     };
-    let center = (rest.0 + dx, rest.1 + dy);
+    // A hover lift is a plain translate: the Cube rises, its shadow stays.
+    let lift = pose.lift * layout.scale * (1.0 - p);
+    let origin = (origin.0, origin.1 - lift);
+    let center = (rest.0 + dx, rest.1 + dy - lift);
     let mut faces = Vec::with_capacity(3);
     for which in Face::ALL {
         let mut corners = [(0.0, 0.0); 4];
@@ -513,13 +573,14 @@ pub(super) fn project(
             faces.push(projected);
         }
     }
-    let shadow = |v: f32| v * scene_scale;
+    let rise = (pose.lift / BOB_HEIGHT).clamp(0.0, 1.0) * (1.0 - p);
+    let shadow = |v: f32| v * scene_scale * (1.0 - 0.08 * rise);
     let frame = SceneFrame {
         opacity: 1.0 - 0.6 * dim,
         shadow_center: dimmed((rest.0 + 0.058 * s, rest.1 + 0.525 * s)),
         shadow_radii: (shadow(0.725 * s), shadow(0.31 * s)),
         shadow_sigma: shadow(0.055 * s),
-        shadow_opacity: pose.shadow.clamp(0.0, 1.0),
+        shadow_opacity: pose.shadow.clamp(0.0, 1.0) * (1.0 - 0.25 * rise),
     };
     (frame, faces)
 }
@@ -537,7 +598,7 @@ pub(super) fn bounds(layout: &Layout, rest: (f32, f32), pose: Pose) -> (f32, f32
 /// The label strip at the foot of slot `index`.
 pub(super) fn label_rect(layout: &Layout, index: usize, count: usize) -> (f32, f32, f32, f32) {
     let (cx, _) = layout.rest_center(index, count);
-    let bottom = layout.rows_top() + layout.slot_height() - 10.0;
+    let bottom = layout.rows_top() + layout.slot_height() - LABEL_FOOT;
     (
         cx - layout.slot() / 2.0,
         bottom - 40.0,
@@ -582,8 +643,10 @@ impl Palette {
         } else {
             Self {
                 background: [0x16, 0x17, 0x16],
-                floor: [0x1b, 0x1c, 0x1a],
-                floor_rule: [0x2b, 0x2c, 0x29],
+                // Lighter than the prototype's #1b1c1a, which sat within five
+                // levels of the background: the floor's step matches light's.
+                floor: [0x24, 0x25, 0x22],
+                floor_rule: [0x3a, 0x3b, 0x37],
                 shadow: [0, 0, 0, 153],
                 ink: [0xf5, 0xf0, 0xe8],
                 top: [0x41, 0x42, 0x3e],
@@ -639,7 +702,11 @@ const IMPORTED: &str = "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M10 7.5v9m0-9h3c2.4 0
 const LOCKED: &str = "M7 11h10v9H7zM9 11V8a3 3 0 0 1 6 0v3";
 const SPARK: &str = "M13 3L5 13.5h6L10 21l8-10.5h-6z";
 const PASSKEY: &str = "M9 5a4 4 0 1 0 0 8a4 4 0 1 0 0-8M12 11.5l7 7m-3-3 2.5-2.5m-.5 5 2.5-2.5";
-const CHECK: &str = "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M8.5 12.2l2.4 2.4 4.6-5.1";
+const CIRCLE: &str = "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18";
+/// `.bdg.warn`: backup not confirmed.
+const ATTENTION: &str = "M12 7.5v5.5M12 16.2v.3";
+/// `.bdg.unk`: backup status unknown.
+const QUESTION: &str = "M9.6 9.6a2.4 2.4 0 1 1 3.4 2.2c-.7.3-1 .8-1 1.5v.4M12 16.3v.3";
 
 fn icon(svg: &mut String, path: &str, x: f32, y: f32, size: f32, ink: &str) {
     let k = size / 24.0;
@@ -735,7 +802,14 @@ pub(super) fn rest_face_svg(face: Face, marks: CubeMarks, light: bool) -> Option
             let pad = s * 0.36;
             let badge = s * 0.21;
             let gap = s * 0.02;
-            let row = if marks.backup_confirmed {
+            let warn = if light { "#77450b" } else { "#f3b465" };
+            let muted = if light { "#575a54" } else { "#b9bbb5" };
+            let mark = match marks.backup {
+                BackupMark::Confirmed => None,
+                BackupMark::NotConfirmed => Some((ATTENTION, warn)),
+                BackupMark::Unknown => Some((QUESTION, muted)),
+            };
+            let row = if mark.is_some() {
                 pad + gap + badge
             } else {
                 pad
@@ -750,8 +824,9 @@ pub(super) fn rest_face_svg(face: Face, marks: CubeMarks, light: bool) -> Option
                 pad,
                 &ink,
             );
-            if marks.backup_confirmed {
-                icon(&mut svg, CHECK, x + pad + gap, y - s * 0.03, badge, &ink);
+            if let Some((glyph, tone)) = mark {
+                let path = format!("{CIRCLE}{glyph}");
+                icon(&mut svg, &path, x + pad + gap, y - s * 0.03, badge, tone);
             }
         }
         Face::BackLeft | Face::BackRight => return None,
@@ -932,8 +1007,8 @@ mod tests {
             assert!((c[1].0 - c[0].0 - FACE_SIZE).abs() < 0.05);
             assert!((c[3].1 - c[0].1 - FACE_SIZE).abs() < 0.05);
             assert!((c[0].0 - (720.0 - 210.0)).abs() < 0.05);
-            // Centered on the stage's midline, the page arrows' line.
-            assert!((c[0].1 - (DESIGN_STAGE_HEIGHT / 2.0 - 210.0)).abs() < 0.05);
+            // Centered on the page arrows' line, the resting Cubes' center.
+            assert!((c[0].1 - (layout.horizon() - 210.0)).abs() < 0.05);
             assert_eq!(frame.shadow_opacity, 0.0);
         }
     }
@@ -1001,7 +1076,7 @@ mod tests {
             imported_bitcoin: false,
             spark: false,
             passkey: false,
-            backup_confirmed: true,
+            backup: BackupMark::NotConfirmed,
         };
         let top = rest_face_svg(Face::Top, marks, false).unwrap();
         assert!(top.contains("rotate(45 "));
@@ -1028,17 +1103,29 @@ mod tests {
             .unwrap()
             .contains(SPARK));
         let right = rest_face_svg(Face::Right, marks, true).unwrap();
-        assert!(right.contains(LOCKED) && right.contains(CHECK));
+        assert!(right.contains(LOCKED) && right.contains(ATTENTION));
+        assert!(right.contains("#77450b"), "light warn tone");
+        assert!(!right.contains(QUESTION));
+        let unknown = CubeMarks {
+            backup: BackupMark::Unknown,
+            ..marks
+        };
+        let right = rest_face_svg(Face::Right, unknown, false).unwrap();
+        assert!(right.contains(QUESTION) && right.contains("#b9bbb5"));
+        assert!(!right.contains(ATTENTION));
         let unmarked = CubeMarks {
             vault: false,
-            backup_confirmed: false,
+            backup: BackupMark::Confirmed,
             passkey: true,
             network: ChainId::Bitcoin,
             ..marks
         };
         assert!(rest_face_svg(Face::Left, unmarked, false).is_none());
         let right = rest_face_svg(Face::Right, unmarked, false).unwrap();
-        assert!(right.contains(PASSKEY) && !right.contains(CHECK));
+        assert!(
+            right.contains(PASSKEY) && !right.contains(CIRCLE),
+            "no badge"
+        );
         assert!(!rest_face_svg(Face::Top, unmarked, false)
             .unwrap()
             .contains("<text"));
@@ -1057,5 +1144,50 @@ mod tests {
         assert!(details.contains("Alice &amp; &lt;Bob&gt;"));
         assert!(!details.contains("Alice & <Bob>"));
         assert!(unlock_svg(ChainId::Bitcoin, false, "A<B", false).contains("Open A&lt;B"));
+    }
+
+    #[test]
+    fn cube_and_label_block_is_centered_with_arrows_on_the_cube_line() {
+        for (width, height) in [(1024.0, 600.0), (1440.0, 742.0), (2000.0, 1100.0)] {
+            let layout = Layout::new(width, height);
+            let rest = layout.rest_center(0, 4);
+            let (_, top, _, _) = bounds(&layout, rest, Pose::REST);
+            let (_, _, _, foot) = label_rect(&layout, 0, 4);
+            assert!(
+                ((top + foot) / 2.0 - height / 2.0).abs() < 0.01,
+                "block centered at {}x{}",
+                width,
+                height
+            );
+            assert_eq!(rest.1, layout.horizon());
+            assert!(
+                layout.horizon() < height / 2.0,
+                "the Cube sits above the label"
+            );
+        }
+    }
+
+    #[test]
+    fn hover_bob_rises_from_rest_and_lifts_the_cube_off_its_shadow() {
+        assert_eq!(bob(Duration::ZERO), 0.0);
+        assert!((bob(BOB_PERIOD / 2) - BOB_HEIGHT).abs() < 1e-4);
+        assert!(bob(BOB_PERIOD) < 1e-4);
+        assert!(bob(Duration::from_millis(16)) < 0.01, "no jump on enter");
+        assert_eq!(settle(BOB_HEIGHT, Duration::ZERO), BOB_HEIGHT);
+        assert_eq!(settle(BOB_HEIGHT, BOB_SETTLE), 0.0);
+
+        let layout = Layout::new(DESIGN_STAGE_WIDTH, DESIGN_STAGE_HEIGHT);
+        let rest = layout.rest_center(1, 4);
+        let (still, a) = project(&layout, rest, Pose::REST);
+        let (up, b) = project(&layout, rest, Pose::REST.lifted(BOB_HEIGHT));
+        for (a, b) in a.iter().zip(&b) {
+            for (p, q) in a.corners.iter().zip(&b.corners) {
+                assert!((p.0 - q.0).abs() < 1e-3);
+                assert!((p.1 - q.1 - BOB_HEIGHT).abs() < 1e-3);
+            }
+        }
+        assert_eq!(up.shadow_center, still.shadow_center);
+        assert!(up.shadow_radii.0 < still.shadow_radii.0);
+        assert!(up.shadow_opacity < still.shadow_opacity);
     }
 }

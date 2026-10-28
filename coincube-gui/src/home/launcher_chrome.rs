@@ -46,13 +46,16 @@ const LOCK: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 2
 const PASSKEY: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5a4 4 0 1 0 0 8a4 4 0 1 0 0-8M12 11.5l7 7m-3-3 2.5-2.5m-.5 5 2.5-2.5"/></svg>"##;
 const CHEVRON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 10l5 5 5-5"/></svg>"##;
 const TICK: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>"##;
-const CHECK: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M8.5 12.2l2.4 2.4 4.6-5.1"/></svg>"##;
+const ATTENTION: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3"/></svg>"##;
+const QUESTION: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M9.6 9.6a2.4 2.4 0 1 1 3.4 2.2c-.7.3-1 .8-1 1.5v.4M12 16.3v.3"/></svg>"##;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Ink {
     Body,
     Muted,
     Accent,
+    /// `--warn`: a backup that needs attention.
+    Warn,
     /// `--on-accent`, text and icons on the primary fill.
     OnAccent,
     /// Lays out like the bar's brand without drawing it, to align a menu.
@@ -75,6 +78,7 @@ fn ink(theme: &theme::Theme, tone: Ink) -> Color {
         Ink::Body => shell.ink,
         Ink::Muted => shell.muted,
         Ink::Accent => shell.accent_ink,
+        Ink::Warn => shell.warn,
         Ink::OnAccent => iced::color!(0x201407),
         Ink::Clear => Color::TRANSPARENT,
     }
@@ -748,9 +752,16 @@ pub(super) fn key_card<'a>(home: &Home) -> Element<'a, ViewMessage> {
                 vec![
                     glyph(LOCK, 16.0, Ink::Body),
                     glyph(PASSKEY, 16.0, Ink::Body),
-                    glyph(CHECK, 16.0, Ink::Body),
                 ],
-                "Right: lock, backup",
+                "Right: PIN or passkey lock",
+            ))
+            .push(legend_row(
+                vec![glyph(ATTENTION, 16.0, Ink::Warn)],
+                "Backup not confirmed",
+            ))
+            .push(legend_row(
+                vec![glyph(QUESTION, 16.0, Ink::Muted)],
+                "Backup status unknown",
             ))
             .push(legend_row(edges, "Edge: network family")),
     )
