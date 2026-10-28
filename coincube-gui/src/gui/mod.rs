@@ -4811,69 +4811,81 @@ mod app_preferences_sheet_tests {
 
     #[test]
     fn connect_sheet_keeps_launcher_origin_and_closes_on_escape() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let _enter = runtime.enter();
-        let path = std::env::temp_dir().join(format!(
-            "tenshu-connect-sheet-origin-{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        let root = CoincubeDirectory::new(path.clone());
-        let mut gui = launcher_gui(&root);
-        let pane_id = gui.focus.unwrap();
-        let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
+        // Measured at about 2 MiB of stack in debug builds; keep Windows headroom.
+        let result = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = runtime.enter();
+                let path = std::env::temp_dir().join(format!(
+                    "tenshu-connect-sheet-origin-{}",
+                    uuid::Uuid::new_v4()
+                ));
+                std::fs::create_dir_all(&path).unwrap();
+                let root = CoincubeDirectory::new(path.clone());
+                let mut gui = launcher_gui(&root);
+                let pane_id = gui.focus.unwrap();
+                let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
 
-        drop(gui.update(Message::Pane(
-            pane_id,
-            pane::Message::tab(
-                tab_id,
-                tab::Message::Launch(home::Message::View(home::ViewMessage::GoToSection(
-                    home::HomeSection::Connect(crate::app::menu::ConnectSubMenu::PlanBilling),
-                ))),
-            ),
-        )));
-        let sheet = gui.connect_sheet.as_ref().expect("Connect sheet mounted");
-        assert_eq!(
-            sheet.page,
-            ConnectSheetPage::Sections(ConnectSheetSection::PlanBilling)
-        );
-        assert!(gui.overlay_origin_is_current(&sheet.origin));
-        assert_eq!(gui.panes.get(pane_id).unwrap().tabs[0].id, tab_id);
-        assert!(matches!(&gui.panes.get(pane_id).unwrap().tabs[0].state,
-            tab::State::Home(home) if !matches!(home.active_section,
-                home::HomeSection::Connect(_))));
+                drop(gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::tab(
+                        tab_id,
+                        tab::Message::Launch(home::Message::View(home::ViewMessage::GoToSection(
+                            home::HomeSection::Connect(
+                                crate::app::menu::ConnectSubMenu::PlanBilling,
+                            ),
+                        ))),
+                    ),
+                )));
+                let sheet = gui.connect_sheet.as_ref().expect("Connect sheet mounted");
+                assert_eq!(
+                    sheet.page,
+                    ConnectSheetPage::Sections(ConnectSheetSection::PlanBilling)
+                );
+                assert!(gui.overlay_origin_is_current(&sheet.origin));
+                assert_eq!(gui.panes.get(pane_id).unwrap().tabs[0].id, tab_id);
+                assert!(matches!(&gui.panes.get(pane_id).unwrap().tabs[0].state,
+                    tab::State::Home(home) if !matches!(home.active_section,
+                        home::HomeSection::Connect(_))));
 
-        drop(
-            gui.update(Message::ConnectSheet(ConnectSheetMessage::SelectSection(
-                ConnectSheetSection::Contacts,
-            ))),
-        );
-        assert_eq!(
-            gui.connect_sheet.as_ref().unwrap().page,
-            ConnectSheetPage::Sections(ConnectSheetSection::Contacts)
-        );
-        drop(gui.update(Message::ConnectSheet(
-            ConnectSheetMessage::OpenAuthentication {
-                create_account: true,
-            },
-        )));
-        assert_eq!(
-            gui.connect_sheet.as_ref().unwrap().page,
-            ConnectSheetPage::Authentication
-        );
-        assert!(matches!(
-            &gui.panes.get(pane_id).unwrap().tabs[0].state,
-            tab::State::Home(home) if matches!(home.connect_account.step,
-                crate::app::state::connect::ConnectFlowStep::Register { .. })
-        ));
-        drop(gui.update(Message::KeyPressed(Key::Escape)));
-        assert!(gui.connect_sheet.is_none());
-        assert_eq!(gui.panes.get(pane_id).unwrap().tabs[0].id, tab_id);
-        drop(gui);
-        std::fs::remove_dir_all(path).ok();
+                drop(
+                    gui.update(Message::ConnectSheet(ConnectSheetMessage::SelectSection(
+                        ConnectSheetSection::Contacts,
+                    ))),
+                );
+                assert_eq!(
+                    gui.connect_sheet.as_ref().unwrap().page,
+                    ConnectSheetPage::Sections(ConnectSheetSection::Contacts)
+                );
+                drop(gui.update(Message::ConnectSheet(
+                    ConnectSheetMessage::OpenAuthentication {
+                        create_account: true,
+                    },
+                )));
+                assert_eq!(
+                    gui.connect_sheet.as_ref().unwrap().page,
+                    ConnectSheetPage::Authentication
+                );
+                assert!(matches!(
+                    &gui.panes.get(pane_id).unwrap().tabs[0].state,
+                    tab::State::Home(home) if matches!(home.connect_account.step,
+                        crate::app::state::connect::ConnectFlowStep::Register { .. })
+                ));
+                drop(gui.update(Message::KeyPressed(Key::Escape)));
+                assert!(gui.connect_sheet.is_none());
+                assert_eq!(gui.panes.get(pane_id).unwrap().tabs[0].id, tab_id);
+                drop(gui);
+                std::fs::remove_dir_all(path).ok();
+            })
+            .unwrap()
+            .join();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
     }
 
     #[test]
@@ -4917,83 +4929,94 @@ mod app_preferences_sheet_tests {
 
     #[test]
     fn connect_sheet_plan_cta_and_sections_use_existing_account_loaders() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let _enter = runtime.enter();
-        let path = std::env::temp_dir().join(format!(
-            "tenshu-connect-sheet-routing-{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        let root = CoincubeDirectory::new(path.clone());
-        let mut gui = launcher_gui(&root);
-        let pane_id = gui.focus.unwrap();
-        let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
-        let tab::State::Home(home) = &mut gui.panes.get_mut(pane_id).unwrap().tabs[0].state else {
-            unreachable!()
-        };
-        home.connect_account.user = Some(crate::services::coincube::User {
-            id: 7,
-            email: "shell@example.invalid".into(),
-            email_verified: Some(true),
-        });
-        home.connect_account.step = crate::app::state::connect::ConnectFlowStep::Dashboard;
+        // Measured at about 2 MiB of stack in debug builds; keep Windows headroom.
+        let result = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = runtime.enter();
+                let path = std::env::temp_dir().join(format!(
+                    "tenshu-connect-sheet-routing-{}",
+                    uuid::Uuid::new_v4()
+                ));
+                std::fs::create_dir_all(&path).unwrap();
+                let root = CoincubeDirectory::new(path.clone());
+                let mut gui = launcher_gui(&root);
+                let pane_id = gui.focus.unwrap();
+                let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
+                let tab::State::Home(home) = &mut gui.panes.get_mut(pane_id).unwrap().tabs[0].state
+                else {
+                    unreachable!()
+                };
+                home.connect_account.user = Some(crate::services::coincube::User {
+                    id: 7,
+                    email: "shell@example.invalid".into(),
+                    email_verified: Some(true),
+                });
+                home.connect_account.step = crate::app::state::connect::ConnectFlowStep::Dashboard;
 
-        drop(gui.update(Message::Pane(
-            pane_id,
-            pane::Message::tab(
-                tab_id,
-                tab::Message::Launch(home::Message::View(home::ViewMessage::GoToSection(
-                    home::HomeSection::Connect(crate::app::menu::ConnectSubMenu::Overview),
-                ))),
-            ),
-        )));
-        assert_eq!(
-            gui.connect_sheet.as_ref().unwrap().page,
-            ConnectSheetPage::Sections(ConnectSheetSection::Account)
-        );
-        drop(
-            gui.update(Message::ConnectSheet(ConnectSheetMessage::Account(
-                crate::app::view::ConnectAccountMessage::OpenPlanBilling,
-            ))),
-        );
-        assert_eq!(
-            gui.connect_sheet.as_ref().unwrap().page,
-            ConnectSheetPage::Sections(ConnectSheetSection::PlanBilling)
-        );
-        let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[0].state else {
-            unreachable!()
-        };
-        assert_eq!(
-            home.connect_account.active_sub,
-            crate::app::menu::ConnectSubMenu::PlanBilling
-        );
+                drop(gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::tab(
+                        tab_id,
+                        tab::Message::Launch(home::Message::View(home::ViewMessage::GoToSection(
+                            home::HomeSection::Connect(crate::app::menu::ConnectSubMenu::Overview),
+                        ))),
+                    ),
+                )));
+                assert_eq!(
+                    gui.connect_sheet.as_ref().unwrap().page,
+                    ConnectSheetPage::Sections(ConnectSheetSection::Account)
+                );
+                drop(
+                    gui.update(Message::ConnectSheet(ConnectSheetMessage::Account(
+                        crate::app::view::ConnectAccountMessage::OpenPlanBilling,
+                    ))),
+                );
+                assert_eq!(
+                    gui.connect_sheet.as_ref().unwrap().page,
+                    ConnectSheetPage::Sections(ConnectSheetSection::PlanBilling)
+                );
+                let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[0].state else {
+                    unreachable!()
+                };
+                assert_eq!(
+                    home.connect_account.active_sub,
+                    crate::app::menu::ConnectSubMenu::PlanBilling
+                );
 
-        drop(
-            gui.update(Message::ConnectSheet(ConnectSheetMessage::SelectSection(
-                ConnectSheetSection::Contacts,
-            ))),
-        );
-        let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[0].state else {
-            unreachable!()
-        };
-        assert!(home.connect_account.contacts_state.loading);
-        assert_eq!(
-            home.connect_account.active_sub,
-            crate::app::menu::ConnectSubMenu::Contacts
-        );
-        assert!(
-            gui.update(Message::ConnectSheet(ConnectSheetMessage::SelectSection(
-                ConnectSheetSection::DevicesSecurity
-            ),))
-                .units()
-                > 0
-        );
+                drop(
+                    gui.update(Message::ConnectSheet(ConnectSheetMessage::SelectSection(
+                        ConnectSheetSection::Contacts,
+                    ))),
+                );
+                let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[0].state else {
+                    unreachable!()
+                };
+                assert!(home.connect_account.contacts_state.loading);
+                assert_eq!(
+                    home.connect_account.active_sub,
+                    crate::app::menu::ConnectSubMenu::Contacts
+                );
+                assert!(
+                    gui.update(Message::ConnectSheet(ConnectSheetMessage::SelectSection(
+                        ConnectSheetSection::DevicesSecurity
+                    ),))
+                        .units()
+                        > 0
+                );
 
-        drop(gui);
-        std::fs::remove_dir_all(path).ok();
+                drop(gui);
+                std::fs::remove_dir_all(path).ok();
+            })
+            .unwrap()
+            .join();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
     }
 
     #[test]
