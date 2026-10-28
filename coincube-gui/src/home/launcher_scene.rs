@@ -700,13 +700,26 @@ fn xml_text(value: &str) -> String {
 const SHIELD: &str = "M12 3l7 3v5.5c0 4.3-3 7.6-7 9.5-4-1.9-7-5.2-7-9.5V6z";
 const IMPORTED: &str = "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M10 7.5v9m0-9h3c2.4 0 2.4 4 0 4h-3m0 0h3.6c2.6 0 2.6 4.5 0 4.5H10M11.5 6v1.5m0 9V18";
 const LOCKED: &str = "M7 11h10v9H7zM9 11V8a3 3 0 0 1 6 0v3";
-const SPARK: &str = "M13 3L5 13.5h6L10 21l8-10.5h-6z";
+/// Spark's asterisk, the same path as `coincube-ui`'s `spark_badge.svg`. It
+/// is a filled mark in a 67.3 x 64 box, so [`spark`] fits it to the 24-unit
+/// icon grid instead of stroking it like the other marks.
+const SPARK: &str = "M39.7159 25.248L40.8727 0.570312H26.4219L27.5787 25.2483L4.46555 16.5221L0 30.2656L23.8282 36.7915L8.38717 56.0763L20.0781 64.5703L33.6483 43.9245L47.2179 64.5695L58.9089 56.0755L43.4679 36.7909L67.2937 30.2657L62.8281 16.5221L39.7159 25.248Z";
 const PASSKEY: &str = "M9 5a4 4 0 1 0 0 8a4 4 0 1 0 0-8M12 11.5l7 7m-3-3 2.5-2.5m-.5 5 2.5-2.5";
 const CIRCLE: &str = "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18";
 /// `.bdg.warn`: backup not confirmed.
 const ATTENTION: &str = "M12 7.5v5.5M12 16.2v.3";
 /// `.bdg.unk`: backup status unknown.
 const QUESTION: &str = "M9.6 9.6a2.4 2.4 0 1 1 3.4 2.2c-.7.3-1 .8-1 1.5v.4M12 16.3v.3";
+
+/// The Spark mark, filled, about 18 units wide and centered in the 24-unit
+/// cell the stroked icons use.
+fn spark(svg: &mut String, x: f32, y: f32, size: f32, ink: &str) {
+    let k = size / 24.0;
+    let _ = write!(
+        svg,
+        "<g transform=\"translate({x:.3} {y:.3}) scale({k:.5}) translate(3 3.4) scale(0.2675)\"><path d=\"{SPARK}\" fill=\"{ink}\" fill-rule=\"evenodd\"/></g>"
+    );
+}
 
 fn icon(svg: &mut String, path: &str, x: f32, y: f32, size: f32, ink: &str) {
     let k = size / 24.0;
@@ -787,14 +800,13 @@ pub(super) fn rest_face_svg(face: Face, marks: CubeMarks, light: bool) -> Option
             let gap = s * 0.04;
             let row = paths.len() as f32 * size + (paths.len() - 1) as f32 * gap;
             for (i, path) in paths.into_iter().enumerate() {
-                icon(
-                    &mut svg,
-                    path,
-                    (s - row) / 2.0 + i as f32 * (size + gap),
-                    (s - size) / 2.0,
-                    size,
-                    &ink,
-                );
+                let x = (s - row) / 2.0 + i as f32 * (size + gap);
+                let y = (s - size) / 2.0;
+                if path == SPARK {
+                    spark(&mut svg, x, y, size, &ink);
+                } else {
+                    icon(&mut svg, path, x, y, size, &ink);
+                }
             }
         }
         Face::Right => {
@@ -1099,9 +1111,17 @@ mod tests {
             spark: true,
             ..marks
         };
-        assert!(rest_face_svg(Face::Left, spark_only, false)
-            .unwrap()
-            .contains(SPARK));
+        let spark_only = rest_face_svg(Face::Left, spark_only, false).unwrap();
+        assert!(
+            spark_only.contains(&format!("<path d=\"{}\" fill=\"#", SPARK)),
+            "{}",
+            "Spark is the filled asterisk, not a stroked outline"
+        );
+        assert!(
+            include_str!("../../../coincube-ui/static/logos/spark_badge.svg").contains(SPARK),
+            "{}",
+            "the face draws the same mark as the app's Spark badge"
+        );
         let right = rest_face_svg(Face::Right, marks, true).unwrap();
         assert!(right.contains(LOCKED) && right.contains(ATTENTION));
         assert!(right.contains("#77450b"), "light warn tone");
