@@ -1,0 +1,15 @@
+---
+description: Load COINCUBE workspace, company brain, and shared policy before work in this repository
+alwaysApply: true
+---
+
+# COINCUBE startup
+
+Before planning, reviewing, or editing work in this repository:
+
+1. Verify this checkout's Git origin is `coincubetech/coincube`. Locate the separate `coincubetech/workspace`, `coincubetech/company-brain`, and `tirith-tech/agent-ops` checkouts by their verified Git origins. Cloud paths can differ from this Mac's paths; do not infer a checkout from its directory name alone.
+2. Read the workspace checkout's root `AGENTS.md`. Follow its COINCUBE context order, reading `MEMORY.md`, `USER.md`, `AGENTS.md`, `PROJECTS.md`, and `projects/coincube-desktop/PROJECT.md` from the separate company-brain checkout. Read any further project context the task needs.
+3. Read this repository's root and applicable path-local instructions. Follow the workspace instructions to verify the agent-ops origin, fetch reviewed `main`, pin its full commit SHA, and read the required policy files with `git show` at that SHA. Do not substitute dirty or unmerged policy files.
+4. Record the instruction paths and policy SHA in the engineering task's issue or PR. If a required checkout or policy read is unavailable, report that limitation before dependent engineering work. Edit only repositories and paths authorized by the task.
+
+For Cursor Cloud runs, the workspace repository does not contain the other repositories in a fresh cloud clone. Use a multi-repository environment that includes all four repositories above.
