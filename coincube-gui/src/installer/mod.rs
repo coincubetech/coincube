@@ -2401,6 +2401,53 @@ mod proposal_handoff_flow_tests {
         assert!(installer.proposal_locked);
         drop(installer.view());
     }
+
+    #[test]
+    fn ending_handoff_at_first_step_routes_to_launcher_and_closes_proposal() {
+        use iced_runtime::futures::futures::StreamExt;
+
+        let _guard = crate::app::session::test_guard();
+        let root = TestDir::new();
+        let (mut ctx, session) = fixture(root.path());
+        let cube = crate::app::settings::Settings::from_file(
+            &ctx.coincube_directory
+                .network_directory(crate::chain::ChainId::Regtest),
+        )
+        .unwrap()
+        .cubes
+        .remove(0);
+        let (mut installer, _) = Installer::try_new_for_chain(
+            ctx.coincube_directory.clone(),
+            crate::chain::ChainId::Regtest,
+            None,
+            UserFlow::CreateWallet,
+            true,
+            Some(cube),
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        ctx.mcp_proposal = None;
+        installer.context = ctx;
+        let session = Arc::try_unwrap(session).ok().unwrap();
+        let _ = installer.use_mcp_proposal(crate::app::local_mcp::Settings::default(), session);
+        let proposal = installer.context.mcp_proposal.as_ref().unwrap().clone();
+        assert_eq!(installer.current, 0);
+        assert!(proposal.active());
+
+        let task = installer.update(Message::Previous);
+        let mut stream = iced_runtime::task::into_stream(task).unwrap();
+        let action = iced::futures::executor::block_on(stream.next()).unwrap();
+        assert!(matches!(
+            action,
+            iced_runtime::Action::Output(Message::BackToApp(bitcoin::Network::Regtest))
+        ));
+        installer.stop();
+        assert!(!proposal.active());
+        assert!(!crate::app::session::is_open());
+    }
 }
 
 #[cfg(test)]

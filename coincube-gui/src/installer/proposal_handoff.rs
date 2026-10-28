@@ -41,11 +41,11 @@ impl Step for ProposalHandoff {
         let handoff = card::simple(
             column![
                 caption(if active { "PROPOSAL PREPARED · WAITING FOR YOU" } else { "PROPOSAL ACCESS ENDED" }),
-                h3(if active { "Continue setup in Tenshu" } else { "Return to the Cube" }),
+                h3(if active { "Continue setup in Tenshu" } else { "Setup ended" }),
                 text(if active {
                     "A paired client prepared a policy proposal. No Vault has been created. You will select the real keys and review the compiled descriptor in Tenshu before creation."
                 } else {
-                    "This proposal can no longer continue. Return to the Cube and prepare a fresh proposal after unlocking."
+                    "This proposal can no longer continue. Return to the launcher, unlock this Cube, and ask the paired client to prepare a fresh proposal."
                 }),
             ]
             .spacing(12),
@@ -94,11 +94,11 @@ impl Step for ProposalHandoff {
             text("This opt-in handoff is available only for an empty Regtest Cube. Tenshu keeps creation approval with you."),
             handoff,
             row![plan, checks].spacing(16).width(Length::Fill),
-            caption("Creating the Vault does not grant the paired client read access. Ending this setup keeps its existing pairing until you revoke it."),
+            caption("No read access is granted. Ending setup locks this Cube and discards this proposal; pairing remains until revoked."),
             row![
                 button::primary_action("proposal-handoff-continue", None, "Continue to key selection", Message::FocusAction)
                     .on_press_maybe(active.then_some(Message::Next)),
-                button::secondary_action("proposal-handoff-return", None, "Return to Cube", Message::FocusAction)
+                button::secondary_action("proposal-handoff-return", None, if active { "End setup" } else { "Return to launcher" }, Message::FocusAction)
                     .on_press(if active { Message::Previous } else { Message::BackToApp(coincube_core::miniscript::bitcoin::Network::Regtest) }),
             ]
             .spacing(12),
@@ -195,6 +195,11 @@ mod tests {
                 .labels
                 .iter()
                 .any(|s| s == "Recovery test · not verified"));
+            assert!(probe.labels.iter().any(|s| s == "End setup"));
+            assert!(probe
+                .labels
+                .iter()
+                .any(|s| s.contains("locks this Cube and discards this proposal")));
             assert!(probe.focus.contains(&Id::new("proposal-handoff-continue")));
             assert!(probe.focus.contains(&Id::new("proposal-handoff-return")));
             let mut messages = Vec::new();
@@ -241,6 +246,8 @@ mod tests {
         let mut probe = Probe::default();
         ui.operate(&renderer, &mut operation::black_box(&mut probe));
         assert!(probe.labels.iter().any(|s| s == "PROPOSAL ACCESS ENDED"));
+        assert!(probe.labels.iter().any(|s| s == "Setup ended"));
+        assert!(probe.labels.iter().any(|s| s == "Return to launcher"));
         assert!(!probe.focus.contains(&Id::new("proposal-handoff-continue")));
         assert!(probe.focus.contains(&Id::new("proposal-handoff-return")));
     }
