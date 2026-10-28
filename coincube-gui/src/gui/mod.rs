@@ -5512,6 +5512,11 @@ mod fork_auth_dispatch_tests {
 
     #[test]
     fn home_open_only_adopts_completed_scoped_identity() {
+        // Launching a Cube from Home retires the public owners, which closes
+        // the process-global session. Hold the shared guard (on this thread,
+        // across the worker's join) so that close cannot land inside a sibling
+        // test's open session.
+        let _guard = crate::app::session::test_guard();
         let result = std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
             .spawn(|| {
