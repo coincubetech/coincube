@@ -10,6 +10,8 @@ pub(crate) mod migration;
 mod prompt;
 #[cfg(feature = "mcp-proposals")]
 pub(crate) mod proposal;
+#[cfg(feature = "mcp-proposals")]
+pub(crate) mod proposal_handoff;
 pub(crate) mod step;
 mod view;
 
@@ -939,6 +941,7 @@ impl Installer {
         self.context.remote_backend = RemoteBackend::None;
         self.context.use_coincube_connect = false;
         self.steps = vec![
+            Box::new(proposal_handoff::ProposalHandoff::new(proposal.clone())),
             DefineDescriptor::new(self.network, self.signer.clone()).into(),
             BackupMnemonic::new(self.signer.clone()).into(),
             BackupDescriptor::default().into(),
@@ -2352,6 +2355,51 @@ impl std::fmt::Display for Error {
             Self::HardwareWallet(e) => write!(f, "Hardware Wallet: {}", e),
             Self::Backup(e) => write!(f, "Backup: {:?}", e),
         }
+    }
+}
+
+#[cfg(all(test, feature = "mcp-proposals"))]
+mod proposal_handoff_flow_tests {
+    use super::proposal::tests::{fixture, TestDir};
+    use super::*;
+
+    #[test]
+    fn prepared_handoff_continues_to_native_selection_and_lock_stops_navigation() {
+        let _guard = crate::app::session::test_guard();
+        let root = TestDir::new();
+        let (mut ctx, session) = fixture(root.path());
+        let cube = crate::app::settings::Settings::from_file(
+            &ctx.coincube_directory
+                .network_directory(crate::chain::ChainId::Regtest),
+        )
+        .unwrap()
+        .cubes
+        .remove(0);
+        let (mut installer, _) = Installer::try_new_for_chain(
+            ctx.coincube_directory.clone(),
+            crate::chain::ChainId::Regtest,
+            None,
+            UserFlow::CreateWallet,
+            true,
+            Some(cube),
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        ctx.mcp_proposal = None;
+        installer.context = ctx;
+        let session = Arc::try_unwrap(session).ok().unwrap();
+        let _ = installer.use_mcp_proposal(crate::app::local_mcp::Settings::default(), session);
+        assert_eq!(installer.current, 0);
+        let _ = installer.update(Message::Next);
+        assert_eq!(installer.current, 1, "Continue enters native key selection");
+        installer.expire_mcp_proposal();
+        let _ = installer.update(Message::Previous);
+        assert_eq!(installer.current, 1, "ended access blocks navigation");
+        assert!(installer.proposal_locked);
+        drop(installer.view());
     }
 }
 
