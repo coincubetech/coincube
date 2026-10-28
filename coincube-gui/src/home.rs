@@ -1007,43 +1007,55 @@ impl Home {
             .unwrap_or_else(|| self.account_tier.cube_limit())
     }
 
+    /// Cubes on `chain` that count toward its limit: (on this device,
+    /// registered in Connect but not on this device). The current network's
+    /// local Cubes come from the checked list; another network's from its
+    /// read-only catalog copy. Blake2b Cubes are never registered in Connect.
+    pub(super) fn cube_usage(&self, chain: ChainId) -> (usize, usize) {
+        let local = if chain == self.network {
+            if let State::Cubes { cubes, .. } = &self.state {
+                cubes.len()
+            } else {
+                0
+            }
+        } else {
+            self.network_catalog(chain).len()
+        };
+        let remote = if chain.is_blake2b() {
+            0
+        } else {
+            let network_str = settings::network_to_api_str(chain);
+            self.remote_cubes
+                .iter()
+                .filter(|rc| rc.network == network_str)
+                .count()
+        };
+        (local, remote)
+    }
+
     /// Total cube count (local + remote) for the current network.
     /// The server limit applies across all devices, so remote-only cubes
     /// must be included when checking the limit.
     fn total_cube_count(&self) -> usize {
-        let local_count = if let State::Cubes { cubes, .. } = &self.state {
-            cubes.len()
-        } else {
-            0
-        };
-        let network_str = settings::network_to_api_str(self.network);
-        let remote_count = self
-            .remote_cubes
-            .iter()
-            .filter(|rc| !self.network.is_blake2b() && rc.network == network_str)
-            .count();
-        local_count + remote_count
+        let (local, remote) = self.cube_usage(self.network);
+        local + remote
     }
 
     /// "Bitcoin mainnet: 7/7 Cubes on the Estate plan, 2 of them not on this
     /// device." The limit is per network and counts Cubes registered from
     /// other devices, so the copy names both rather than a bare ratio that
-    /// disagrees with the Cubes the user can see here.
-    fn cube_limit_summary(&self) -> String {
-        let total = self.total_cube_count();
-        let local = if let State::Cubes { cubes, .. } = &self.state {
-            cubes.len()
-        } else {
-            0
-        };
+    /// disagrees with the Cubes the user can see here. `chain` is the network
+    /// the copy is about: the current one for Create, the refused Cube's own
+    /// for a sync refusal, which may be listed from another network.
+    fn cube_limit_summary(&self, chain: ChainId) -> String {
+        let (local, remote) = self.cube_usage(chain);
         let mut summary = format!(
             "{}: {}/{} Cubes on the {} plan",
-            launcher_chrome::network_name(self.network),
-            total,
+            launcher_chrome::network_name(chain),
+            local + remote,
             self.cube_limit(),
             self.account_tier.display_name(),
         );
-        let remote = total.saturating_sub(local);
         if remote > 0 {
             summary.push_str(&format!(
                 ", {} of them registered in Connect but not on this device",
@@ -1075,7 +1087,7 @@ impl Home {
                  {} Upgrade your Connect account, or delete a Cube on this \
                  network you no longer need, and this one will sync \
                  automatically.",
-                self.cube_limit_summary(),
+                self.cube_limit_summary(cube.network),
             ));
         }
         Some(format!(
@@ -2185,7 +2197,7 @@ impl Home {
                     self.error = Some(format!(
                         "Cube limit reached. {} Upgrade your Connect account \
                          or delete a Cube on this network to create more.",
-                        self.cube_limit_summary(),
+                        self.cube_limit_summary(self.network),
                     ));
                     return Task::none();
                 }
@@ -5720,7 +5732,7 @@ impl Home {
                                                     p1_regular(format!(
                                                         "Cube limit reached. {} \
                                                          Upgrade your Connect account or delete a remote Cube to create one here.",
-                                                        self.cube_limit_summary(),
+                                                        self.cube_limit_summary(self.network),
                                                     ))
                                                     .style(theme::text::secondary),
                                                 )
@@ -9937,6 +9949,22 @@ mod tests {
         assert!(hint.contains("Out of Cube slots"), "{}", hint);
         assert!(hint.contains("2/2"), "{}", hint);
         assert!(hint.contains("Upgrade"), "{}", hint);
+
+        // A Cube listed from another network's read-only catalog is described
+        // by its own network's count, not the current network's.
+        let mut other = local.clone();
+        other.id = "testnet4-cube".to_string();
+        other.network = ChainId::Testnet4;
+        home.network_catalog = vec![(ChainId::Testnet4, vec![other.clone()])];
+        home.cube_sync_errors.insert(
+            other.id.clone(),
+            "Cube limit reached for this network".to_string(),
+        );
+        let hint = home
+            .cube_sync_hint(&other)
+            .expect("a refusal must be shown");
+        assert!(hint.contains("Testnet4: 1/2"), "{}", hint);
+        assert!(!hint.contains("Bitcoin mainnet"), "{}", hint);
 
         // Any other refusal is surfaced verbatim rather than mislabelled.
         home.cube_sync_errors

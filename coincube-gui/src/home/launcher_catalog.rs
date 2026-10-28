@@ -1212,7 +1212,8 @@ pub(super) struct Projection<'a> {
     /// Every listed network with its local Cube count, in the canvas order.
     pub(super) network_counts: Vec<(ChainId, usize)>,
     /// Each network's use of the plan's per-network Cube limit, in the canvas
-    /// order: the current network always, others only when they hold a Cube.
+    /// order: the current network always, others only when they hold a Cube
+    /// here or in Connect, listed or not.
     pub(super) usage: Vec<NetworkUsage>,
     pub(super) filter: NetworkFilter,
 }
@@ -1332,37 +1333,28 @@ pub(super) fn project(home: &Home) -> Projection<'_> {
             });
         }
     }
-    // Remote Cubes of every network, not just the filtered current one: the
-    // plan line names each network's count whatever the filter shows.
-    let remote_on = |chain: ChainId| {
-        if chain.is_blake2b() {
-            return 0;
+    // Every network with a Cube, local or only in Connect, whatever the
+    // filter shows and whether or not the network is listed here (Developer
+    // mode off lists Bitcoin alone, yet Connect may hold a Testnet4 Cube).
+    let mut usage: Vec<NetworkUsage> = Vec::new();
+    for chain in home.ordered_networks().into_iter().chain(ChainId::LAUNCHER) {
+        if usage.iter().any(|u| u.chain == chain) {
+            continue;
         }
-        let api = settings::network_to_api_str(chain);
-        home.remote_cubes
+        let local = network_counts
             .iter()
-            .filter(|rc| rc.network == api)
-            .count()
-    };
-    let mut usage: Vec<NetworkUsage> = network_counts
-        .iter()
-        .map(|&(chain, local)| NetworkUsage {
-            chain,
-            local,
-            remote: remote_on(chain),
-        })
-        .filter(|u| u.chain == network || u.total() > 0)
-        .collect();
-    if !usage.iter().any(|u| u.chain == network) {
-        usage.insert(
-            0,
-            NetworkUsage {
-                chain: network,
-                local: 0,
-                remote: remote_on(network),
-            },
-        );
+            .find(|(c, _)| *c == chain)
+            .map_or_else(|| home.cube_usage(chain).0, |(_, count)| *count);
+        let remote = home.cube_usage(chain).1;
+        if chain == network || local + remote > 0 {
+            usage.push(NetworkUsage {
+                chain,
+                local,
+                remote,
+            });
+        }
     }
+    usage.sort_by_key(|u| network_rank(u.chain));
     let network_str = settings::network_to_api_string(network);
     let all_remotes: Vec<&RemoteCube> = home
         .remote_cubes
@@ -3070,6 +3062,29 @@ mod tests {
         assert!(tree.contains("delete a Bitcoin mainnet Cube to create more there."));
         assert!(tree.contains("Testnet4 3/7"));
         assert!(!tree.has(&create_id()));
+
+        // Developer mode off lists Bitcoin alone, but a Signet Cube held only
+        // in Connect still uses a Signet slot and is named.
+        home.displayed_networks = vec![ChainId::Bitcoin];
+        home.network_catalog.clear();
+        let mut signet = remote("s1", "Lab", true, true, false, false);
+        signet.network = settings::network_to_api_string(ChainId::Signet);
+        home.remote_cubes.push(signet);
+        let projection = project(&home);
+        assert!(projection.usage.contains(&NetworkUsage {
+            chain: ChainId::Signet,
+            local: 0,
+            remote: 1,
+        }));
+        let tree = home_tree(
+            "plan-usage-hidden",
+            &home,
+            WIDE,
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(tree.contains("Signet 1/7 (1 not on this device)"));
+        home.remote_cubes.pop();
 
         // A Cube going elsewhere frees the slot; the line stays as a quota.
         home.remote_cubes.pop();
