@@ -18,6 +18,7 @@ pub mod foreign_wallet_source;
 // Only owner-verified import removal calls it in production at this head.
 #[allow(dead_code)]
 pub(crate) mod imported_keys;
+pub(crate) mod imported_inventory_anchor;
 #[cfg(test)]
 pub(crate) mod imported_signer;
 pub mod psbt_file;
