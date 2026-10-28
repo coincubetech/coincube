@@ -72,6 +72,8 @@ fn save_scrolled<M>(
             .operate(&mut tree, Layout::new(&node), renderer, &mut snap);
     }
     let viewport = Rectangle::with_size(size);
+    // Frames of different sizes share the renderer; clip to this one.
+    renderer.reset(viewport);
     let mut messages = Vec::new();
     element.as_widget_mut().update(
         &mut tree,
@@ -165,6 +167,47 @@ fn key(i: usize) -> CubeCatalogKey {
     CubeCatalogKey {
         chain: ChainId::Bitcoin,
         cube_id: format!("cube-{i}"),
+    }
+}
+
+/// The floor of twelve Cubes at the minimum window, a 1280px laptop window
+/// and a 2000px desktop window: four, four and six Cubes a page, each row
+/// centered on the page arrows' line.
+#[test]
+#[ignore = "writes PNG frames; needs a GPU adapter"]
+fn launcher_capture_sizes() {
+    let Ok(directory) = std::env::var("LAUNCHER_CAPTURE_DIR") else {
+        return;
+    };
+    let directory = PathBuf::from(directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let mut renderer = renderer().expect("wgpu headless renderer");
+    for light in [false, true] {
+        let appearance = if light { "light" } else { "dark" };
+        let palette = if light {
+            theme::Theme::light()
+        } else {
+            theme::Theme::dark()
+        };
+        let mut home = home(light);
+        if let State::Cubes { cubes, .. } = &mut home.state {
+            for i in cubes.len()..12 {
+                cubes.push(CubeSettings::new_with_raw_id(
+                    format!("cube-{i}"),
+                    format!("Cube {}", i + 1),
+                    ChainId::Bitcoin,
+                ));
+            }
+        }
+        for (width, height) in [(1024.0, 768.0), (1280.0, 800.0), (2000.0, 1250.0)] {
+            save(
+                &mut renderer,
+                super::launcher_catalog::launcher_view(&home),
+                Size::new(width, height),
+                &palette,
+                directory.join(format!("{appearance}-13-floor-{width}x{height}.png")),
+            );
+        }
     }
 }
 

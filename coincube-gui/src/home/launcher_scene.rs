@@ -23,7 +23,7 @@ pub(super) const TURN: Duration = Duration::from_millis(820);
 pub(super) const HANDOFF: Duration = Duration::from_millis(160);
 /// `.scene { transition: opacity 500ms, transform 500ms }` and `.shadow`.
 pub(super) const PEERS: Duration = Duration::from_millis(500);
-/// `T.s`: one Cube size, four Cubes per page.
+/// `T.s`: one Cube size.
 pub(super) const REST_SIZE: f32 = 152.0;
 /// `.scene { perspective: 1100px }`.
 pub(super) const PERSPECTIVE: f32 = 1100.0;
@@ -40,11 +40,14 @@ pub(super) const DESIGN_STAGE_HEIGHT: f32 = 742.0;
 pub(super) const SLOT: f32 = 232.0;
 pub(super) const SLOT_GAP: f32 = 40.0;
 pub(super) const SLOT_HEIGHT: f32 = 344.0;
-pub(super) const ROWS_TOP: f32 = 168.0;
-/// Spin target: face center at stage (720, 392).
-pub(super) const TARGET_Y: f32 = 392.0;
-/// `.floor { top: 40% }` with `clip-path: polygon(14% 0, 86% 0, 100% 100%, 0 100%)`.
-pub(super) const FLOOR_TOP: f32 = 0.40;
+/// Kept clear on each side of the row for the page arrows: an 18px inset,
+/// the 44px button and 18px of air.
+pub(super) const ROW_GUTTER: f32 = 80.0;
+/// `.floor` with `clip-path: polygon(14% 0, 86% 0, 100% 100%, 0 100%)`.
+/// The prototype's `top: 40%` put the horizon at the resting Cubes' center
+/// (300 of 742px); the row now rests on the stage's midline, so the horizon
+/// moves with it and the Cubes keep standing on the floor's back edge.
+pub(super) const FLOOR_TOP: f32 = 0.5;
 pub(super) const FLOOR_INSET: f32 = 0.14;
 
 #[derive(Clone, Copy)]
@@ -268,36 +271,28 @@ pub(super) fn second_turn_progress(started: Instant, now: Instant) -> f32 {
 }
 
 /// Stage geometry for a width. The prototype only defines the 1440px board;
-/// narrower windows scale the row and Cube uniformly so four Cubes still fit,
-/// while the focused face stays 420px whenever the stage is tall enough.
+/// narrower windows scale the row and Cube uniformly so a page of Cubes still
+/// fits, while the focused face stays 420px whenever the stage is tall enough.
+/// The row and the focused face are centered on the stage's midline, the line
+/// the page arrows are centered on, at every stage size.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct Layout {
     pub width: f32,
     pub height: f32,
     pub scale: f32,
-    /// A lone unlock Cube sits at the center of its own screen.
-    centered: bool,
 }
 
 impl Layout {
     pub fn new(width: f32, height: f32) -> Self {
-        let row = 4.0 * SLOT + 3.0 * SLOT_GAP;
-        let scale = ((width - 96.0) / row)
+        let columns = super::launcher_catalog::floor_page_size(width) as f32;
+        let row = columns * SLOT + (columns - 1.0) * SLOT_GAP;
+        let scale = ((width - 2.0 * ROW_GUTTER) / row)
             .min(height / DESIGN_STAGE_HEIGHT)
             .clamp(0.6, 1.0);
         Self {
             width,
             height,
             scale,
-            centered: false,
-        }
-    }
-
-    /// One Cube, already turned to its face, centered in the whole area.
-    pub fn centered(width: f32, height: f32) -> Self {
-        Self {
-            centered: true,
-            ..Self::new(width, height)
         }
     }
 
@@ -313,8 +308,15 @@ impl Layout {
         SLOT_GAP * self.scale
     }
 
+    /// Top of the slots, placed so the resting Cubes' centers fall on the
+    /// stage's midline. The prototype's slots began 168px above that center.
     pub fn rows_top(&self) -> f32 {
-        ROWS_TOP * self.scale
+        self.height / 2.0 - self.rest_drop()
+    }
+
+    /// From the top of a slot down to its resting Cube's center.
+    fn rest_drop(&self) -> f32 {
+        8.0 * self.scale + 1.72 * self.size() * 0.475
     }
 
     /// `.cb` width x height for the labels and hit areas laid over the scene.
@@ -327,23 +329,15 @@ impl Layout {
         let count = count.max(1) as f32;
         let row = count * self.slot() + (count - 1.0) * self.gap();
         let x0 = (self.width - row) / 2.0;
-        let s = self.size();
         (
             x0 + index as f32 * (self.slot() + self.gap()) + self.slot() / 2.0,
-            self.rows_top() + 8.0 * self.scale + 1.72 * s * 0.475,
+            self.rows_top() + self.rest_drop(),
         )
     }
 
     /// Where the details face is centered.
     pub fn target(&self) -> (f32, f32) {
-        if self.centered {
-            return (self.width / 2.0, self.height / 2.0);
-        }
-        (
-            self.width / 2.0,
-            // `TY` is a fixed 392px; only a short stage pulls it up.
-            TARGET_Y * (self.height / DESIGN_STAGE_HEIGHT).min(1.0),
-        )
+        (self.width / 2.0, self.height / 2.0)
     }
 
     /// The face size on screen at the target, bounded by the stage height.
@@ -938,7 +932,8 @@ mod tests {
             assert!((c[1].0 - c[0].0 - FACE_SIZE).abs() < 0.05);
             assert!((c[3].1 - c[0].1 - FACE_SIZE).abs() < 0.05);
             assert!((c[0].0 - (720.0 - 210.0)).abs() < 0.05);
-            assert!((c[0].1 - (392.0 - 210.0)).abs() < 0.05);
+            // Centered on the stage's midline, the page arrows' line.
+            assert!((c[0].1 - (DESIGN_STAGE_HEIGHT / 2.0 - 210.0)).abs() < 0.05);
             assert_eq!(frame.shadow_opacity, 0.0);
         }
     }
