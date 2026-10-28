@@ -435,6 +435,12 @@ where
                             .line_height(iced::widget::text::LineHeight::Relative(
                                 type_size::LINE_HEIGHT,
                             ));
+                        // `.subnav button`: an optional glyph 8px before the
+                        // label, ink on the current tab and muted otherwise.
+                        let color = if is_selected { ink } else { muted };
+                        let icon =
+                            icon.map(|icon| glyph(icon, size::ICON_SMALL, color, interactive));
+                        let label = with_icon(icon, label, 8.0);
                         let underline = Container::new(iced::widget::Space::new())
                             .width(Length::Fill)
                             .height(Length::Fixed(2.0))

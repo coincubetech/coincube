@@ -367,6 +367,39 @@ fn every_choice_form_selects_by_pointer_keys_and_arrows() {
 }
 
 #[test]
+fn a_tab_with_an_icon_mounts_its_glyph_beside_the_label() {
+    let glyph = |icon: crate::widget::Text<'static>| {
+        let mut probe = Mounted::new(padded(icon), Size::new(100.0, 100.0));
+        probe.texts().pop().expect("an icon is a glyph text")
+    };
+    let coins = glyph(icon::coins_outline_icon());
+    let receipt = glyph(icon::receipt_icon());
+    let mut mounted = Mounted::new(
+        padded(
+            tabs(
+                [
+                    segment("tab-coins", 0u8, "Coin control").icon(icon::coins_outline_icon()),
+                    segment("tab-psbts", 1, "PSBT proposals").icon(icon::receipt_icon()),
+                    segment("tab-plain", 2, "Split coins"),
+                ],
+                Some(0),
+                Msg::Focus,
+            )
+            .on_select(selected("tab")),
+        ),
+        Size::new(900.0, 120.0),
+    );
+    let texts = mounted.texts();
+    for expected in [&coins, &receipt] {
+        assert!(texts.contains(expected), "missing glyph {:?}", expected);
+    }
+    for label in ["Coin control", "PSBT proposals", "Split coins"] {
+        assert!(texts.contains(&label.to_string()), "missing {}", label);
+    }
+    assert_eq!(texts.len(), 5, "two glyphs and three labels: {:?}", texts);
+}
+
+#[test]
 fn current_tab_is_underlined_and_current_chip_outlined_in_the_accent() {
     for (name, theme) in themes() {
         let shell = theme.colors.shell;
