@@ -1283,17 +1283,16 @@ fn page_dot<'a>(index: usize, active: bool) -> Element<'a, ViewMessage> {
 }
 
 /// The stage fills the body between the bars, as `.stage { flex: 1 }`
-/// does, but never drops below the height its Cubes were laid out for.
-fn stage_height(width: f32, available: f32) -> f32 {
-    let least = if width < 1200.0 {
-        600.0
+/// does, so its midline (the Cubes' and the arrows' line) is the body's.
+/// The Layout scales the Cubes down to fit a short body; only a body
+/// shorter than the minimum window's (768px less both bars) scrolls.
+const MIN_STAGE_HEIGHT: f32 = 600.0;
+
+fn stage_height(available: f32) -> f32 {
+    if available.is_finite() {
+        available.max(MIN_STAGE_HEIGHT)
     } else {
         launcher_scene::DESIGN_STAGE_HEIGHT
-    };
-    if available.is_finite() {
-        available.max(least)
-    } else {
-        least
     }
 }
 
@@ -1306,13 +1305,10 @@ fn floor_layout<'a>(
     motion: Option<&launcher_scene::Motion>,
 ) -> Element<'a, ViewMessage> {
     debug_assert!(!projection.locals.is_empty());
-    let stage_height = stage_height(width, available);
+    let stage_height = stage_height(available);
     let layout = launcher_scene::Layout::new(width, stage_height);
-    let pages = projection
-        .locals
-        .len()
-        .div_ceil(launcher_catalog::FLOOR_PAGE_SIZE)
-        .max(1);
+    let per_page = launcher_catalog::floor_page_size(width);
+    let pages = launcher_catalog::floor_pages(projection.locals.len(), per_page);
     let page = page.min(pages - 1);
     let selected = projection
         .selected
@@ -1321,8 +1317,8 @@ fn floor_layout<'a>(
     let visible: Vec<_> = projection
         .locals
         .iter()
-        .skip(page * launcher_catalog::FLOOR_PAGE_SIZE)
-        .take(launcher_catalog::FLOOR_PAGE_SIZE)
+        .skip(page * per_page)
+        .take(per_page)
         .collect();
     let now = std::time::Instant::now();
     let pose = |key: &CubeCatalogKey| match motion {
@@ -1493,7 +1489,7 @@ pub(super) fn floor_body_in(home: &Home, available: f32) -> Element<'_, ViewMess
     );
     let motion = home.catalog.motion.clone();
     let scene = project_catalog(&projection);
-    responsive(move |size: Size| {
+    let floor = responsive(move |size: Size| {
         if size.width < 840.0 {
             list_layout(&projection, &scene, size.width, light)
         } else {
@@ -1507,8 +1503,12 @@ pub(super) fn floor_body_in(home: &Home, available: f32) -> Element<'_, ViewMess
             )
         }
     })
-    .height(Length::Shrink)
-    .into()
+    .height(Length::Shrink);
+    // The page size follows the laid-out width; report it so keyboard,
+    // wheel and dot paging count the same Cubes a page as the screen.
+    iced::widget::sensor(floor)
+        .on_resize(|size| ViewMessage::Catalog(CatalogMessage::StageWidth(size.width)))
+        .into()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1551,7 +1551,7 @@ fn lone_cube<'a, M: 'a>(
     // persisted grant alone decides, for the moment the face is in view.
     let wallets = local_wallets(&cube, false);
     responsive(move |size: Size| {
-        let layout = launcher_scene::Layout::centered(size.width, size.height);
+        let layout = launcher_scene::Layout::new(size.width, size.height);
         let name = crate::cube_display::name(&cube.name);
         launcher_gpu::stage(launcher_gpu::StageData::new(
             &layout,
@@ -1661,7 +1661,7 @@ fn unlock_floor_stage<'a, M: 'a + 'static>(
     let light = matches!(mode, coincube_ui::theme::palette::ThemeMode::Light);
     // The same body the Launcher gives its stage: the window less both bars
     // and their 1px rules, so the floor does not move at the handoff.
-    let stage_height = stage_height(width, size.height - 2.0 * launcher_chrome::BAR_HEIGHT - 2.0);
+    let stage_height = stage_height(size.height - 2.0 * launcher_chrome::BAR_HEIGHT - 2.0);
     let layout = launcher_scene::Layout::new(width, stage_height);
     let count = context.peers.len();
     let name = crate::cube_display::name(&cube.name);
@@ -2012,8 +2012,10 @@ mod tests {
                 .find(|(value, _)| value.starts_with("Open Everyday"))
                 .map(|(_, bounds)| *bounds)
                 .expect("selected unlock face caption");
-            // Face top = 64px bar + target (392px of a 742px stage) - 210.
-            let expected = if width == 1024 { 199.0 } else { 274.0 };
+            // The inspector lays the scene out unbounded, so the stage is the
+            // 742px design height at both widths. Caption top = 64px bar + 1px
+            // rule + target (the stage midline, 371px) - 210 + 28px padding.
+            let expected = 254.0;
             assert!(
                 (face.y - expected).abs() < 22.0,
                 "{}px floor face moved from its selected pose: {:?}",
@@ -2771,6 +2773,226 @@ mod tests {
                     .windows(2)
                     .all(|pair| { pair[0].x + pair[0].width <= pair[1].x + 0.5 }));
             }
+        }
+    }
+
+    fn home_with_floor(count: usize) -> Home {
+        let mut home = home_with_cubes();
+        home.catalog.mode = LauncherMode::Cubes;
+        home.catalog.selected = None;
+        if let super::super::State::Cubes { cubes, .. } = &mut home.state {
+            for index in cubes.len()..count {
+                cubes.push(crate::app::settings::CubeSettings::new_with_raw_id(
+                    format!("cube-{index}"),
+                    format!("Cube {index}"),
+                    ChainId::Bitcoin,
+                ));
+            }
+        }
+        home
+    }
+
+    fn floor_key(index: usize) -> CubeCatalogKey {
+        CubeCatalogKey {
+            chain: ChainId::Bitcoin,
+            cube_id: match index {
+                0 => "first".into(),
+                1 => "second".into(),
+                index => format!("cube-{index}"),
+            },
+        }
+    }
+
+    #[test]
+    fn floor_page_size_switches_to_six_at_the_wide_breakpoint() {
+        use launcher_catalog::{floor_page_size, FLOOR_WIDE_MIN_WIDTH};
+        // 1024 is the minimum window; 1440 and 1680 keep the four-up board.
+        for width in [
+            840.0,
+            1024.0,
+            1280.0,
+            1440.0,
+            1680.0,
+            FLOOR_WIDE_MIN_WIDTH - 1.0,
+        ] {
+            assert_eq!(floor_page_size(width), 4, "at {}", width);
+        }
+        for width in [FLOOR_WIDE_MIN_WIDTH, 2000.0, 2560.0, 3840.0] {
+            assert_eq!(floor_page_size(width), 6, "at {}", width);
+        }
+    }
+
+    #[test]
+    fn floor_pages_and_anchor_page_follow_the_page_size() {
+        use launcher_catalog::{floor_page_keeping, floor_pages};
+        assert_eq!(floor_pages(0, 4), 1);
+        assert_eq!(floor_pages(1, 6), 1);
+        assert_eq!(floor_pages(4, 4), 1);
+        assert_eq!(floor_pages(5, 4), 2);
+        assert_eq!(floor_pages(12, 4), 3);
+        assert_eq!(floor_pages(12, 6), 2);
+        assert_eq!(floor_pages(13, 6), 3);
+        // A Cube's page at each size, and never past the last page.
+        assert_eq!(floor_page_keeping(0, 6, 12), 0);
+        assert_eq!(floor_page_keeping(5, 6, 12), 0);
+        assert_eq!(floor_page_keeping(6, 6, 12), 1);
+        assert_eq!(floor_page_keeping(8, 4, 12), 2);
+        assert_eq!(floor_page_keeping(11, 6, 12), 1);
+        assert_eq!(floor_page_keeping(40, 6, 12), 1);
+    }
+
+    #[test]
+    fn stage_width_sets_page_size_for_keyboard_and_dot_paging() {
+        let mut home = home_with_floor(12);
+        assert_eq!(home.catalog.page_size(), 4, "four until measured");
+        let _ = home.update_catalog(CatalogMessage::StageWidth(2000.0));
+        assert_eq!(home.catalog.page_size(), 6);
+        // Arrow keys: two pages of six, and no third.
+        let _ = home.update_catalog(CatalogMessage::Step(1));
+        assert_eq!(home.catalog.page, 1);
+        let _ = home.update_catalog(CatalogMessage::Step(1));
+        assert_eq!(home.catalog.page, 1);
+        let _ = home.update_catalog(CatalogMessage::Step(-1));
+        assert_eq!(home.catalog.page, 0);
+        // A dot past the last six-up page is refused.
+        let _ = home.update_catalog(CatalogMessage::Page(2));
+        assert_eq!(home.catalog.page, 0);
+        let _ = home.update_catalog(CatalogMessage::StageWidth(1280.0));
+        assert_eq!(home.catalog.page_size(), 4);
+        let _ = home.update_catalog(CatalogMessage::Page(2));
+        assert_eq!(home.catalog.page, 2);
+    }
+
+    #[test]
+    fn wheel_pages_at_six_up() {
+        let mut home = home_with_floor(12);
+        let _ = home.update_catalog(CatalogMessage::StageWidth(2000.0));
+        let _ = home.update_catalog(CatalogMessage::Wheel(iced::mouse::ScrollDelta::Pixels {
+            x: -80.0,
+            y: 0.0,
+        }));
+        assert_eq!(home.catalog.page, 1);
+        let mounted = capture::inspect_full_window(
+            "launcher-floor-six-up-page2",
+            floor_body_in(&home, 1100.0),
+            (2000, 1250),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(mounted.contains("Page 2 of 2"));
+        assert!(mounted.contains("Cube 11"));
+        assert!(!mounted.contains("Cube 5"));
+    }
+
+    #[test]
+    fn crossing_the_breakpoint_keeps_the_shown_cubes_on_screen() {
+        let mut home = home_with_floor(12);
+        // Four-up page 3 shows Cubes 8..12; six-up they are on page 2.
+        let _ = home.update_catalog(CatalogMessage::Page(2));
+        let _ = home.update_catalog(CatalogMessage::StageWidth(2000.0));
+        assert_eq!(home.catalog.page, 1);
+        // Six-up page 2 starts at Cube 6, which is on four-up page 2.
+        let _ = home.update_catalog(CatalogMessage::StageWidth(1440.0));
+        assert_eq!(home.catalog.page, 1);
+        // A selected Cube stays on screen, with its face, across the change.
+        let _ = home.update_catalog(CatalogMessage::SelectFloor(floor_key(5)));
+        assert_eq!(home.catalog.page, 1);
+        let _ = home.update_catalog(CatalogMessage::StageWidth(2000.0));
+        assert_eq!(home.catalog.page, 0);
+        assert_eq!(home.catalog.selected, Some(floor_key(5)));
+        // An unchanged page size leaves the page alone.
+        let _ = home.update_catalog(CatalogMessage::StageWidth(2400.0));
+        assert_eq!(home.catalog.page, 0);
+    }
+
+    #[test]
+    fn floor_row_is_centered_on_the_arrow_line_at_every_size() {
+        let home = home_with_floor(12);
+        // Page one: Next is live (and focusable); Previous is drawn disabled
+        // in the mirror position, 18px in from the left edge.
+        let next = Id::from("tenshu.launcher.page.next");
+        // (window, body between the bars, Cubes a page)
+        for ((width, height), per_page) in [
+            ((1024u32, 768u32), 4usize),
+            ((1280, 800), 4),
+            ((1440, 900), 4),
+            ((2000, 1250), 6),
+            ((2560, 1440), 6),
+        ] {
+            let body = height as f32 - 2.0 * launcher_chrome::BAR_HEIGHT - 2.0;
+            let mounted = capture::inspect_full_window(
+                &format!("launcher-floor-centered-{width}x{height}"),
+                floor_body_in(&home, body),
+                (width, height),
+                "dark",
+                theme::Theme::dark(),
+            );
+            let bounds = |id: &Id| {
+                mounted
+                    .focus
+                    .iter()
+                    .find(|(actual, _)| actual == id)
+                    .map(|(_, bounds)| *bounds)
+                    .unwrap_or_else(|| panic!("{:?} is mounted at {}", id, width))
+            };
+            let slots: Vec<_> = (0..per_page)
+                .map(|index| bounds(&launcher_catalog::select_id(&floor_key(index))))
+                .collect();
+            assert!(
+                mounted
+                    .focus
+                    .iter()
+                    .all(|(id, _)| id != &launcher_catalog::select_id(&floor_key(per_page))),
+                "page one holds {} Cubes at {}",
+                per_page,
+                width
+            );
+            assert!(mounted.contains(&format!("Page 1 of {}", 12usize.div_ceil(per_page))));
+            let layout = launcher_scene::Layout::new(width as f32, stage_height(body));
+            // Horizontally: the row's margins match.
+            let left = slots[0].x;
+            let right = width as f32 - (slots[per_page - 1].x + slots[per_page - 1].width);
+            assert!(
+                (left - right).abs() <= 1.0,
+                "row off center at {}: {} vs {}",
+                width,
+                left,
+                right
+            );
+            // Vertically: each Cube's center is on the arrows' center line,
+            // which is the stage's midline.
+            let next = bounds(&next);
+            let arrows = next.center_y();
+            assert!(
+                (arrows - stage_height(body) / 2.0).abs() <= 1.0,
+                "arrows at {}",
+                arrows
+            );
+            for (index, slot) in slots.iter().enumerate() {
+                let (_, cube) = layout.rest_center(index, per_page);
+                assert!((slot.y - layout.rows_top()).abs() <= 1.0);
+                assert!(
+                    (cube - arrows).abs() <= 1.0,
+                    "Cube {} at {}, arrows at {}, {}x{}",
+                    index,
+                    cube,
+                    arrows,
+                    width,
+                    height
+                );
+            }
+            // Neither arrow crowds a slot.
+            assert!((width as f32 - (next.x + next.width) - 18.0).abs() <= 0.5);
+            assert!(
+                18.0 + next.width <= slots[0].x,
+                "left arrow over row at {}",
+                width
+            );
+            assert!(
+                slots[per_page - 1].x + slots[per_page - 1].width <= next.x,
+                "right arrow over row at {}",
+                width
+            );
         }
     }
 

@@ -1199,7 +1199,7 @@ impl Home {
         {
             let projection = launcher_catalog::project(self);
             if projection.floor_eligible(self.catalog.mode)
-                && projection.locals.len() > launcher_catalog::FLOOR_PAGE_SIZE
+                && projection.locals.len() > self.catalog.page_size()
             {
                 let paging = iced::event::listen_with(launcher_catalog::floor_event);
                 if self.catalog.motion.is_some() {

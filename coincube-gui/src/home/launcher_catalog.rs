@@ -99,6 +99,30 @@ pub enum LauncherMode {
 }
 
 pub(super) const FLOOR_PAGE_SIZE: usize = 4;
+/// Six Cubes a page once the stage is wide enough to hold them at full
+/// size with the page arrows clear of the outer slots: 6 x 232 + 5 x 40 =
+/// 1592px of row plus the 80px arrow gutter each side, rounded up.
+pub(super) const FLOOR_WIDE_PAGE_SIZE: usize = 6;
+pub(super) const FLOOR_WIDE_MIN_WIDTH: f32 = 1760.0;
+
+/// Cubes per floor page for a stage `width` pixels wide.
+pub(super) fn floor_page_size(width: f32) -> usize {
+    if width >= FLOOR_WIDE_MIN_WIDTH {
+        FLOOR_WIDE_PAGE_SIZE
+    } else {
+        FLOOR_PAGE_SIZE
+    }
+}
+
+/// Pages for `cubes` Cubes at `per_page` a page; an empty floor is one page.
+pub(super) fn floor_pages(cubes: usize, per_page: usize) -> usize {
+    cubes.div_ceil(per_page.max(1)).max(1)
+}
+
+/// The page that shows the Cube at `anchor` when pages hold `per_page`.
+pub(super) fn floor_page_keeping(anchor: usize, per_page: usize, cubes: usize) -> usize {
+    (anchor / per_page.max(1)).min(floor_pages(cubes, per_page) - 1)
+}
 pub(super) const FLOOR_MAX_CUBES: usize = 20;
 
 /// Only presentation data from the page that contained the selected Cube.
@@ -253,6 +277,16 @@ pub(super) struct CatalogState {
     pub(super) last_wheel_input: Option<Instant>,
     pub(super) last_wheel_page: Option<Instant>,
     pub(super) wheel_consumed: bool,
+    /// The floor's width as last laid out, reported by its sensor. Paging
+    /// messages use it so they count the same Cubes a page as the screen.
+    pub(super) stage_width: Option<f32>,
+}
+
+impl CatalogState {
+    /// Cubes per floor page at the measured width; four until measured.
+    pub(super) fn page_size(&self) -> usize {
+        self.stage_width.map_or(FLOOR_PAGE_SIZE, floor_page_size)
+    }
 }
 
 const WHEEL_PAGE_THRESHOLD: f32 = 24.0;
@@ -486,6 +520,8 @@ pub enum CatalogMessage {
     Step(i8),
     /// Horizontal wheel/trackpad movement in Iced's native scroll direction.
     Wheel(mouse::ScrollDelta),
+    /// The floor's laid-out width, from its sensor, which sets the page size.
+    StageWidth(f32),
     /// A shared Action's pointer-down request: apply whole-tree focus.
     Focus(Id),
 }
@@ -519,12 +555,12 @@ impl Home {
         let Some(current) = projection.locals.get(index) else {
             return false;
         };
-        let Some(first) = self.catalog.page.checked_mul(FLOOR_PAGE_SIZE) else {
+        let Some(first) = self.catalog.page.checked_mul(self.catalog.page_size()) else {
             return false;
         };
         if index
             .checked_sub(first)
-            .is_none_or(|slot| slot >= FLOOR_PAGE_SIZE)
+            .is_none_or(|slot| slot >= self.catalog.page_size())
         {
             return false;
         }
@@ -576,16 +612,16 @@ impl Home {
             return None;
         }
         let page = self.catalog.page;
-        let first = page.checked_mul(FLOOR_PAGE_SIZE)?;
+        let first = page.checked_mul(self.catalog.page_size())?;
         let selected_slot = index.checked_sub(first)?;
-        if selected_slot >= FLOOR_PAGE_SIZE {
+        if selected_slot >= self.catalog.page_size() {
             return None;
         }
         let peers = projection
             .locals
             .iter()
             .skip(first)
-            .take(FLOOR_PAGE_SIZE)
+            .take(self.catalog.page_size())
             .map(|row| LauncherScenePeer {
                 key: row.key.clone(),
                 name: row.name.clone(),
@@ -608,7 +644,7 @@ impl Home {
             connect: selected.connect.1.clone(),
             wallets: selected.wallets.clone(),
             peers,
-            pages: projection.locals.len().div_ceil(FLOOR_PAGE_SIZE).max(1),
+            pages: floor_pages(projection.locals.len(), self.catalog.page_size()),
             chrome: super::launcher_chrome::snapshot(self, &projection),
         })
     }
@@ -634,7 +670,7 @@ impl Home {
                 self.catalog.motion = None;
                 self.catalog.open_from_floor = false;
                 if let Some(index) = project(self).locals.iter().position(|row| row.key == key) {
-                    self.catalog.page = index / FLOOR_PAGE_SIZE;
+                    self.catalog.page = index / self.catalog.page_size();
                 }
                 Task::none()
             }
@@ -653,7 +689,7 @@ impl Home {
                     self.catalog.motion = Some(super::launcher_scene::Motion::new(previous));
                 }
                 if let Some(index) = project(self).locals.iter().position(|row| row.key == key) {
-                    self.catalog.page = index / FLOOR_PAGE_SIZE;
+                    self.catalog.page = index / self.catalog.page_size();
                 }
                 if self.catalog.selected.as_ref() == Some(&key) {
                     iced::widget::operation::focus(select_id(&key))
@@ -764,7 +800,7 @@ impl Home {
                 Task::none()
             }
             CatalogMessage::Page(page) => {
-                let pages = project(self).locals.len().div_ceil(FLOOR_PAGE_SIZE).max(1);
+                let pages = floor_pages(project(self).locals.len(), self.catalog.page_size());
                 if page < pages {
                     self.catalog.page = page;
                     self.catalog.selected = None;
@@ -779,6 +815,21 @@ impl Home {
             }
             CatalogMessage::Step(direction) => self.step_floor_page(direction),
             CatalogMessage::Wheel(delta) => self.wheel_floor_page(delta, Instant::now()),
+            CatalogMessage::StageWidth(width) => {
+                let before = self.catalog.page_size();
+                self.catalog.stage_width = Some(width);
+                let after = self.catalog.page_size();
+                if after != before {
+                    // Keep the selected Cube, else the page's first, on screen.
+                    let projection = project(self);
+                    let anchor = projection
+                        .selected
+                        .unwrap_or(self.catalog.page.saturating_mul(before));
+                    let page = floor_page_keeping(anchor, after, projection.locals.len());
+                    self.catalog.page = page;
+                }
+                Task::none()
+            }
             CatalogMessage::Focus(id) => iced::widget::operation::focus(id),
         }
     }
@@ -788,7 +839,7 @@ impl Home {
         if !catalog_visible(self) || !projection.floor_eligible(self.catalog.mode) {
             return Task::none();
         }
-        let pages = projection.locals.len().div_ceil(FLOOR_PAGE_SIZE);
+        let pages = floor_pages(projection.locals.len(), self.catalog.page_size());
         let target = if direction < 0 {
             self.catalog.page.checked_sub(1)
         } else if direction > 0 {
@@ -881,13 +932,13 @@ impl Home {
         if project(self).filtered_total == 0 {
             self.catalog.key = KeyCard::default();
         }
-        let pages = project(self).locals.len().div_ceil(FLOOR_PAGE_SIZE).max(1);
+        let pages = floor_pages(project(self).locals.len(), self.catalog.page_size());
         self.catalog.page = self.catalog.page.min(pages - 1);
         if let Some(key) = &self.catalog.selected {
             let hidden_on_floor = self.catalog.mode == LauncherMode::Cubes
                 && project(self)
                     .selected
-                    .is_some_and(|index| index / FLOOR_PAGE_SIZE != self.catalog.page);
+                    .is_some_and(|index| index / self.catalog.page_size() != self.catalog.page);
             if !self.catalog_selectable(key) || hidden_on_floor {
                 self.catalog.selected = None;
                 self.catalog.motion = None;
