@@ -117,6 +117,7 @@ impl SparkOverview {
             SparkStatus::Loading
         };
 
+        let status_connected = matches!(status, SparkStatus::Connected(_));
         let overview = SparkOverviewView {
             status,
             recent_transactions: &self.recent_transactions,
@@ -134,8 +135,10 @@ impl SparkOverview {
         .map(view::Message::SparkOverview);
 
         let mut content = iced::widget::Column::new().push(overview);
-        if let Some(recent) = recent_activity.filter(|_| self.backend.is_some()) {
-            content = content.push(recent);
+        // Only beside a balance: not under "Connecting" or a bridge error.
+        // Inside the overview's own 16px inset, like the balance above it.
+        if let Some(recent) = recent_activity.filter(|_| status_connected) {
+            content = content.push(iced::widget::container(recent).padding([0, 16]));
         }
         if let Some(address) = address.filter(|_| self.backend.is_some()) {
             content = content.push(view::spark::overview::spark_landing_context(

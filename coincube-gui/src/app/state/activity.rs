@@ -67,6 +67,11 @@ pub struct Activity {
     wallet: Option<Arc<Wallet>>,
     pub vault_has_more: bool,
     pub spark_has_more: bool,
+    /// A wallet page asked for fresh rows while that source was loading:
+    /// refresh again once the answer lands, so a payment seen meanwhile
+    /// still reaches "Recent activity".
+    vault_stale: bool,
+    spark_stale: bool,
     pub liquid_has_more: bool,
     vault_limit: u64,
     generation: u64,
@@ -113,6 +118,8 @@ impl Activity {
             vault_has_more: false,
             spark_has_more: false,
             liquid_has_more: false,
+            vault_stale: false,
+            spark_stale: false,
             vault_limit: HISTORY_LIMIT,
             generation: 0,
             label_draft: None,
@@ -191,7 +198,9 @@ impl Activity {
                 let Some(daemon) = daemon else {
                     return Task::none();
                 };
-                if !self.vault_loading {
+                if self.vault_loading {
+                    self.vault_stale = true;
+                } else {
                     self.vault_loading = true;
                     self.vault_limit = HISTORY_LIMIT;
                     tasks.push(vault_history(
@@ -207,7 +216,9 @@ impl Activity {
                 }
             }
             WalletFilter::Spark => {
-                if let Some(spark) = self.spark_backend.clone().filter(|_| !self.spark_loading) {
+                if self.spark_loading {
+                    self.spark_stale = true;
+                } else if let Some(spark) = self.spark_backend.clone() {
                     self.spark_loading = true;
                     tasks.push(spark_payments(spark, 0, move |result| {
                         Message::ActivitySparkRefreshed(generation, result)
@@ -560,6 +571,9 @@ impl State for Activity {
                     }
                     Err(error) => self.vault_error = Some(error),
                 }
+                if std::mem::take(&mut self.vault_stale) {
+                    return self.refresh_wallet(WalletFilter::Vault, _daemon, None);
+                }
             }
             Message::ActivityPsbtLoaded(generation, result) if generation == self.generation => {
                 self.psbt_loading = false;
@@ -585,6 +599,9 @@ impl State for Activity {
                     }
                     Err(error) => self.spark_error = Some(error),
                 }
+                if std::mem::take(&mut self.spark_stale) {
+                    return self.refresh_wallet(WalletFilter::Spark, None, None);
+                }
             }
             Message::ActivitySparkRefreshed(generation, result)
                 if generation == self.generation =>
@@ -597,6 +614,9 @@ impl State for Activity {
                         self.spark_error = None;
                     }
                     Err(error) => self.spark_error = Some(error),
+                }
+                if std::mem::take(&mut self.spark_stale) {
+                    return self.refresh_wallet(WalletFilter::Spark, None, None);
                 }
             }
             Message::ActivityLiquidLoaded(generation, result) if generation == self.generation => {
@@ -704,6 +724,9 @@ impl State for Activity {
                     });
                 }
                 ActivityMessage::Retry => return self.reload(_daemon, self.wallet.clone()),
+                ActivityMessage::RetryWallet(wallet) => {
+                    return self.refresh_wallet(wallet, _daemon, None)
+                }
                 ActivityMessage::LoadMore => return self.load_more(_daemon),
                 ActivityMessage::OpenDetail(target) => {
                     return Task::done(Message::ActivityOpenDetail(target))
@@ -738,6 +761,8 @@ impl State for Activity {
         self.vault_has_more = false;
         self.spark_has_more = false;
         self.liquid_has_more = false;
+        self.vault_stale = false;
+        self.spark_stale = false;
         self.vault.clear();
         self.psbts.clear();
         self.spark.clear();

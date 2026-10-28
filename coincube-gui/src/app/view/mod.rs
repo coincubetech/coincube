@@ -272,6 +272,8 @@ fn dashboard_with_info_layout<'a, T: Into<Element<'a, Message>>>(
     )
 }
 
+const WALLET_PAGE_SCROLL_ID: &str = "tenshu.wallet.page.scroll";
+
 /// A reading page with Activity's detail pane (`.det`) for a selected row:
 /// beside the page at the content's right edge when both fit, else over the
 /// page from that edge. `content` and `detail` are rebuilt per layout width.
@@ -282,7 +284,7 @@ pub fn dashboard_with_detail<'a>(
     detail: impl Fn() -> Option<Element<'a, Message>> + 'a,
 ) -> Element<'a, Message> {
     let body = iced::widget::responsive(move |size: iced::Size| {
-        let page_body: Element<'a, Message> = Container::new(
+        let page_body = Container::new(
             scrollable(page(
                 Column::new()
                     .push_maybe(settings::frame::in_content_navigation(menu, cache))
@@ -290,27 +292,37 @@ pub fn dashboard_with_detail<'a>(
                     .width(Length::Fill),
                 PageWidth::Reading,
             ))
+            .id(iced::advanced::widget::Id::from(WALLET_PAGE_SCROLL_ID))
             .on_scroll(|w| Message::Scroll(w.absolute_offset().y)),
         )
         .width(Length::Fill)
         .style(theme::container::background)
-        .height(Length::Fill)
-        .into();
-        let Some(detail) = detail() else {
-            return page_body;
-        };
-        let pane = activity::detail_column(detail);
-        if activity::wallet_detail_beside(size.width) {
-            row![page_body, iced::widget::rule::vertical(1), pane].into()
-        } else {
-            iced::widget::Stack::new()
-                .push(page_body)
-                .push(row![
+        .height(Length::Fill);
+        // The page keeps one place in the tree, pane or not, beside or over:
+        // otherwise Iced drops its scroll offset when a row is selected.
+        let detail = detail();
+        let beside = activity::wallet_detail_beside(size.width);
+        let mut split = Row::new().push(page_body).height(Length::Fill);
+        let mut over: Element<'a, Message> = Space::new().into();
+        match detail {
+            Some(detail) if beside => {
+                split = split
+                    .push(iced::widget::rule::vertical(1))
+                    .push(activity::detail_column(detail));
+            }
+            Some(detail) => {
+                over = row![
                     Space::new().width(Length::Fill),
-                    iced::widget::opaque(row![iced::widget::rule::vertical(1), pane])
-                ])
-                .into()
+                    iced::widget::opaque(row![
+                        iced::widget::rule::vertical(1),
+                        activity::detail_column(detail)
+                    ])
+                ]
+                .into();
+            }
+            None => {}
         }
+        iced::widget::Stack::new().push(split).push(over).into()
     });
     let content_column: Element<'_, Message> = Column::new()
         .push(warn(None))

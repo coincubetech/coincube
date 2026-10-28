@@ -11689,6 +11689,7 @@ impl App {
                         activity,
                         cache,
                         view::activity::WalletFilter::Spark,
+                        None,
                     )
                 },
                 move || {
@@ -11714,11 +11715,12 @@ impl App {
             panel.view_with_recent_activity(
                 &self.panels.current,
                 cache,
-                move || {
+                move |unknown_history| {
                     view::activity::wallet_recent_activity(
                         activity,
                         cache,
                         view::activity::WalletFilter::Vault,
+                        unknown_history,
                     )
                 },
                 move || {
@@ -19465,6 +19467,65 @@ mod wallet_recent_activity_tests {
             vec![0],
             Network::Regtest,
         )
+    }
+
+    /// The Vault page's own payment refresh re-reads Activity's Vault rows
+    /// there and nowhere else; a request made while a read is in flight is
+    /// served once that read lands; a wallet page's Retry keeps other rows.
+    #[test]
+    fn vault_page_refreshes_its_rows_without_dropping_a_request() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("recent-refresh-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+
+        app.panels.current = Menu::Cube(menu::CubeSubMenu::Overview);
+        drop(app.update(Message::Payments(Ok(Vec::new()))));
+        assert!(!app.panels.activity.vault_loading, "off the Vault page");
+
+        app.panels.current = Menu::Vault(menu::VaultSubMenu::Overview);
+        drop(app.update(Message::Payments(Ok(Vec::new()))));
+        assert!(app.panels.activity.vault_loading, "on the Vault page");
+
+        // Asked again mid-read: no second read now, one when the first lands.
+        let again = app.panels.activity.refresh_wallet(
+            view::activity::WalletFilter::Vault,
+            app.daemon.clone(),
+            None,
+        );
+        assert_eq!(again.units(), 0);
+        let generation = app.panels.activity.generation_for_tests();
+        let followup = app.panels.activity.update(
+            app.daemon.clone(),
+            &app.cache,
+            Message::ActivityVaultLoaded(generation, Ok((Vec::new(), false))),
+        );
+        assert!(followup.units() > 0, "the stale request is served");
+        assert!(app.panels.activity.vault_loading);
+        let settled = app.panels.activity.update(
+            app.daemon.clone(),
+            &app.cache,
+            Message::ActivityVaultLoaded(generation, Ok((vec![vault_payment()], false))),
+        );
+        assert_eq!(settled.units(), 0, "served once");
+
+        // Retry on the Vault page re-reads the Vault and keeps Spark's rows.
+        drop(app.update(Message::ActivitySparkLoaded(
+            generation,
+            Ok((vec![receipt("recv-2")], false)),
+        )));
+        drop(app.update(Message::View(view::Message::Activity(
+            view::activity::ActivityMessage::RetryWallet(view::activity::WalletFilter::Vault),
+        ))));
+        assert!(app.panels.activity.vault_loading);
+        assert_eq!(app.panels.activity.generation_for_tests(), generation);
+        assert_eq!(
+            app.panels
+                .activity
+                .wallet_entries(view::activity::WalletFilter::Spark)
+                .len(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The Vault and Spark pages show Activity's rows and detail pane, so

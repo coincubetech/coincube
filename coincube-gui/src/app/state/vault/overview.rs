@@ -115,17 +115,34 @@ impl VaultOverview {
         &'a self,
         menu: &'a Menu,
         cache: &'a Cache,
-        recent_activity: impl Fn() -> Element<'a, view::Message> + 'a,
+        recent_activity: impl Fn(Option<&'static str>) -> Element<'a, view::Message> + 'a,
         detail: impl Fn() -> Option<Element<'a, view::Message>> + 'a,
     ) -> Element<'a, view::Message> {
         if let Some(page) = self.full_page_view(menu, cache) {
             return page;
         }
+        let unknown_history = self.history_unknown().then_some(
+            // Nothing is listed until the history is in: an empty answer
+            // from an unfinished scan says nothing about the payments.
+            "Transactions appear once the Vault's history has loaded",
+        );
         view::dashboard_with_detail(
             menu,
             cache,
-            move || self.page_body(cache, Some(recent_activity())),
+            move || self.page_body(cache, Some(recent_activity(unknown_history))),
             detail,
+        )
+    }
+
+    /// The balance row's own test: the Vault's history is not known yet.
+    fn history_unknown(&self) -> bool {
+        matches!(
+            view::vault::overview::balance_sync_state(
+                &self.sync_status,
+                self.balance + self.unconfirmed_balance,
+                self.awaiting_rescan_date,
+            ),
+            view::wallet_header::SyncState::Unknown { .. }
         )
     }
 
