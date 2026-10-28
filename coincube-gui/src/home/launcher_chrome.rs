@@ -1062,27 +1062,34 @@ fn quota_text(projection: &Projection<'_>) -> String {
         .usage
         .iter()
         .map(|usage| {
-            let mut entry = format!("{} {}/{}", network_name(usage.chain), usage.total(), limit);
-            if usage.total() >= limit {
+            let name = network_name(usage.chain);
+            let Some(total) = usage.total() else {
+                // This device's share is unknown: say what Connect holds
+                // rather than print a ratio that may be short.
+                return if usage.remote > 0 {
+                    format!(
+                        "{name} {} in Connect, this device not counted",
+                        usage.remote
+                    )
+                } else {
+                    format!("{name} not counted")
+                };
+            };
+            let mut entry = format!("{name} {total}/{limit}");
+            if total >= limit {
                 entry.push_str(" full");
             }
             if usage.remote > 0 {
-                entry.push_str(&format!(" ({} not on this device)", usage.remote));
+                entry.push_str(&format!(" ({} only in Connect)", usage.remote));
             }
             entry
         })
         .collect::<Vec<_>>()
         .join(" · ");
-    let plan = format!(
-        "{} plan: {} {} per network · {}",
-        projection.tier,
-        limit,
-        if limit == 1 { "Cube" } else { "Cubes" },
-        networks,
-    );
+    let plan = format!("{} plan: {limit} per network · {networks}", projection.tier);
     if projection.at_limit() {
         format!(
-            "{plan}. Upgrade your Connect account or delete a {} Cube to create more there.",
+            "{plan}. Upgrade, or delete a {} Cube, to add one.",
             network_name(projection.network),
         )
     } else {

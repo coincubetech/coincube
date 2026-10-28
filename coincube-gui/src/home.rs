@@ -1008,18 +1008,25 @@ impl Home {
     }
 
     /// Cubes on `chain` that count toward its limit: (on this device,
-    /// registered in Connect but not on this device). The current network's
-    /// local Cubes come from the checked list; another network's from its
-    /// read-only catalog copy. Blake2b Cubes are never registered in Connect.
-    pub(super) fn cube_usage(&self, chain: ChainId) -> (usize, usize) {
-        let local = if chain == self.network {
-            if let State::Cubes { cubes, .. } = &self.state {
-                cubes.len()
-            } else {
-                0
-            }
-        } else {
-            self.network_catalog(chain).len()
+    /// registered in Connect but not on this device). Blake2b Cubes are never
+    /// registered in Connect.
+    ///
+    /// The local count is `None` when this device's list for `chain` cannot be
+    /// counted right now: the checked list is still another network's (a
+    /// network switch whose read is pending or failed), or `chain` is not
+    /// listed here (Developer mode off) or its catalog read failed. Callers
+    /// show that as unknown rather than as 0 — a 0 would misstate a network
+    /// that may hold Cubes on disk.
+    pub(super) fn cube_usage(&self, chain: ChainId) -> (Option<usize>, usize) {
+        let local = match &self.state {
+            State::Cubes { cubes, source, .. } if *source == chain => Some(cubes.len()),
+            State::NoCube { .. } if chain == self.network => Some(0),
+            _ if self.network_catalog_unread.contains(&chain) => None,
+            _ => self
+                .network_catalog
+                .iter()
+                .find(|(c, _)| *c == chain)
+                .map(|(_, cubes)| cubes.len()),
         };
         let remote = if chain.is_blake2b() {
             0
@@ -1035,10 +1042,13 @@ impl Home {
 
     /// Total cube count (local + remote) for the current network.
     /// The server limit applies across all devices, so remote-only cubes
-    /// must be included when checking the limit.
+    /// must be included when checking the limit. While this device's count
+    /// is unknown (see [`Self::cube_usage`]) only the Connect-only Cubes are
+    /// counted: the client check is advisory, and Connect refuses a
+    /// registration over the limit, leaving that Cube on this device only.
     fn total_cube_count(&self) -> usize {
         let (local, remote) = self.cube_usage(self.network);
-        local + remote
+        local.unwrap_or(0) + remote
     }
 
     /// "Bitcoin mainnet: 7/7 Cubes on the Estate plan, 2 of them not on this
@@ -1049,12 +1059,18 @@ impl Home {
     /// for a sync refusal, which may be listed from another network.
     fn cube_limit_summary(&self, chain: ChainId) -> String {
         let (local, remote) = self.cube_usage(chain);
+        let name = launcher_chrome::network_name(chain);
+        let limit = self.cube_limit();
+        let tier = self.account_tier.display_name();
+        let Some(local) = local else {
+            return format!(
+                "{name}: {remote} Cubes registered in Connect, of {limit} on the \
+                 {tier} plan; this device's Cubes there could not be counted."
+            );
+        };
         let mut summary = format!(
-            "{}: {}/{} Cubes on the {} plan",
-            launcher_chrome::network_name(chain),
-            local + remote,
-            self.cube_limit(),
-            self.account_tier.display_name(),
+            "{name}: {}/{limit} Cubes on the {tier} plan",
+            local + remote
         );
         if remote > 0 {
             summary.push_str(&format!(
