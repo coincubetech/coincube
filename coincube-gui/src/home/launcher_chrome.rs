@@ -605,15 +605,13 @@ pub(super) fn dock<'a>(
                 ViewMessage::GoToSection(HomeSection::RecoverVault),
             )
         });
-    let limit = at_limit.then(|| {
-        text(limit_text(projection))
-            .size(12)
-            .style(|theme: &theme::Theme| text::Style {
-                color: Some(theme.colors.shell.muted),
-            })
-            .wrapping(text::Wrapping::WordOrGlyph)
-            .width(Length::Fill)
-    });
+    let quota = text(quota_text(projection))
+        .size(12)
+        .style(|theme: &theme::Theme| text::Style {
+            color: Some(theme.colors.shell.muted),
+        })
+        .wrapping(text::Wrapping::WordOrGlyph)
+        .width(Length::Fill);
     let key = (projection.filtered_total > 0).then(|| key_button(home.catalog.key_open()));
     let target = dock_target(home, projection)
         .map(|caption| words(caption, 12.0, font::REGULAR, Ink::Muted));
@@ -627,8 +625,7 @@ pub(super) fn dock<'a>(
             .push(target)
             .push(recover)
             .push(Space::new().width(Length::Fixed(16.0)))
-            .push(limit)
-            .push((!at_limit).then(|| Space::new().width(Length::Fill)))
+            .push(quota)
             .push(key),
     )
     .height(Length::Fixed(BAR_HEIGHT))
@@ -978,7 +975,8 @@ pub(crate) struct ChromeSnapshot {
     links: Vec<&'static str>,
     /// The dock's "New Cubes: <network>" caption, when it shows.
     pub(super) target: Option<String>,
-    limit: Option<String>,
+    /// The dock's per-network plan usage line.
+    pub(super) quota: String,
     key: bool,
 }
 
@@ -1011,7 +1009,6 @@ pub(super) fn snapshot(home: &Home, projection: &Projection<'_>) -> ChromeSnapsh
         connect.push(dot());
         connect.push(("Sign in".to_string(), Ink::Accent, 13.0, true));
     }
-    let at_limit = projection.at_limit();
     let mut links = Vec::new();
     if account.is_authenticated()
         && !home.network.is_blake2b()
@@ -1036,7 +1033,7 @@ pub(super) fn snapshot(home: &Home, projection: &Projection<'_>) -> ChromeSnapsh
         connect,
         links,
         target: dock_target(home, projection),
-        limit: at_limit.then(|| limit_text(projection)),
+        quota: quota_text(projection),
         key: projection.filtered_total > 0,
     }
 }
@@ -1056,17 +1053,40 @@ fn count_text(shown: usize, total: usize) -> String {
     }
 }
 
-fn limit_text(projection: &Projection<'_>) -> String {
-    if projection.has_local_list {
+/// The plan's per-network limit and each network's use of it. Cubes that are
+/// registered in Connect but not on this device are called out, because they
+/// fill a slot without appearing in any list here.
+fn quota_text(projection: &Projection<'_>) -> String {
+    let limit = projection.cube_limit;
+    let networks = projection
+        .usage
+        .iter()
+        .map(|usage| {
+            let mut entry = format!("{} {}/{}", network_name(usage.chain), usage.total(), limit);
+            if usage.total() >= limit {
+                entry.push_str(" full");
+            }
+            if usage.remote > 0 {
+                entry.push_str(&format!(" ({} not on this device)", usage.remote));
+            }
+            entry
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let plan = format!(
+        "{} plan: {} {} per network · {}",
+        projection.tier,
+        limit,
+        if limit == 1 { "Cube" } else { "Cubes" },
+        networks,
+    );
+    if projection.at_limit() {
         format!(
-            "Cube limit reached ({}/{}) on the {} plan. Upgrade your Connect account to create more.",
-            projection.total_count, projection.cube_limit, projection.tier,
+            "{plan}. Upgrade your Connect account or delete a {} Cube to create more there.",
+            network_name(projection.network),
         )
     } else {
-        format!(
-            "Cube limit reached ({}/{}) on the {} plan. Upgrade your Connect account or delete a remote Cube to create one here.",
-            projection.total_count, projection.cube_limit, projection.tier,
-        )
+        plan
     }
 }
 
@@ -1208,18 +1228,15 @@ pub(crate) fn quiet_dock<'a, M: 'a>(chrome: &ChromeSnapshot) -> Element<'a, M> {
         );
     }
     row = row.push(Space::new().width(Length::Fixed(16.0)));
-    row = match &chrome.limit {
-        Some(limit) => row.push(
-            text(limit.clone())
-                .size(12)
-                .style(|theme: &theme::Theme| text::Style {
-                    color: Some(theme.colors.shell.muted),
-                })
-                .wrapping(text::Wrapping::WordOrGlyph)
-                .width(Length::Fill),
-        ),
-        None => row.push(Space::new().width(Length::Fill)),
-    };
+    row = row.push(
+        text(chrome.quota.clone())
+            .size(12)
+            .style(|theme: &theme::Theme| text::Style {
+                color: Some(theme.colors.shell.muted),
+            })
+            .wrapping(text::Wrapping::WordOrGlyph)
+            .width(Length::Fill),
+    );
     // `.keybtn` is outside `.quiet`'s selectors, so it keeps its ink.
     let key = chrome.key.then(|| {
         resting(
