@@ -144,8 +144,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn proposal_handoff_shows_actual_plan_and_only_active_actions_focus() {
+    #[test]
+    fn proposal_handoff_shows_actual_plan_and_only_active_actions_focus() {
         let _guard = crate::app::session::test_guard();
         let dir = TestDir::new();
         let (mut ctx, session) = fixture(dir.path());
@@ -162,9 +162,14 @@ mod tests {
                 .unwrap()
                 .load_font(bytes);
         }
-        let mut renderer = <Renderer as Headless>::new(font::REGULAR, 16.into(), Some("tiny-skia"))
-            .await
-            .unwrap();
+        // `block_on` keeps this a synchronous test. An `.await` here would
+        // hold `test_guard`'s MutexGuard across the await point.
+        let mut renderer = iced::futures::executor::block_on(<Renderer as Headless>::new(
+            font::REGULAR,
+            16.into(),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
         for (name, palette) in [
             ("dark", theme::Theme::dark()),
             ("light", theme::Theme::light()),
