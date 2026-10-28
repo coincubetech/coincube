@@ -282,6 +282,8 @@ pub(super) struct CatalogState {
     pub(super) stage_width: Option<f32>,
     /// Resting Cubes under the pointer, or settling after it left.
     pub(super) hover: Vec<FloorHover>,
+    /// Network activity in the sky above the Cubes, and its dock menu.
+    pub(super) activity: super::launcher_activity::ActivityState,
 }
 
 /// A resting Cube floats while the pointer is over it (see
@@ -591,6 +593,8 @@ pub enum CatalogMessage {
     CubeHover(CubeCatalogKey, bool),
     /// A shared Action's pointer-down request: apply whole-tree focus.
     Focus(Id),
+    /// Network activity reads, its arrival frames and the dock's source menu.
+    Activity(super::launcher_activity::ActivityMessage),
 }
 
 impl Home {
@@ -729,6 +733,7 @@ impl Home {
 
     pub(super) fn update_catalog(&mut self, message: CatalogMessage) -> Task<Message> {
         match message {
+            CatalogMessage::Activity(message) => self.update_activity(message),
             CatalogMessage::Select(key) => {
                 if let Some(task) = self.select_on_other_network(&key, PendingIntent::Select) {
                     return task;
@@ -1926,6 +1931,7 @@ pub(super) fn launcher_view(home: &Home) -> Element<'_, ViewMessage> {
             .height(Length::Fill)
             .push(screen)
             .push(super::launcher_chrome::key_layer(home))
+            .push(super::launcher_chrome::activity_layer(home))
             .push(super::launcher_chrome::network_layer(home, &projection)),
     )
     .width(Length::Fill)

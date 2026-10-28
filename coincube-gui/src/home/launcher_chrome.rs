@@ -15,10 +15,12 @@ use coincube_ui::{
 };
 
 use super::{
+    launcher_activity::{self, ActivityMessage},
     launcher_catalog::{self, CatalogMessage, KeyPart, NetworkFilter, Projection},
     launcher_coin, launcher_scene, Home, HomeSection, ViewMessage,
 };
 use crate::{
+    app::settings::preferences::{NetworkActivitySource, PreferenceChange},
     app::state::preferences::{BalancePrivacy, BalancePrivacyChrome},
     chain::{ChainId, ChainIdExt},
     feature_flags,
@@ -31,6 +33,10 @@ const GUTTER: f32 = 24.0;
 const KEY_CARD_WIDTH: f32 = 264.0;
 /// `.keybtn { height: 32px }`.
 const KEY_BUTTON_HEIGHT: f32 = 32.0;
+const ACTIVITY_MENU_WIDTH: f32 = 300.0;
+/// About the Key button's width, so the activity menu opens over its own
+/// button rather than the Key's.
+const KEY_BUTTON_WIDTH: f32 = 72.0;
 
 const CUBE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linejoin="round"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/></svg>"##;
 const EYE_OPEN: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></svg>"##;
@@ -633,6 +639,7 @@ pub(super) fn dock<'a>(
             .push(Space::new().width(Length::Fixed(16.0)))
             .push(limit)
             .push((!at_limit).then(|| Space::new().width(Length::Fill)))
+            .push(activity_button(home))
             .push(key),
     )
     .height(Length::Fixed(BAR_HEIGHT))
@@ -640,6 +647,239 @@ pub(super) fn dock<'a>(
     .width(Length::Fill)
     .style(rail)
     .into()
+}
+
+fn activity_id() -> Id {
+    Id::new("tenshu.launcher.activity")
+}
+
+fn activity_option_id(source: NetworkActivitySource) -> Id {
+    Id::new(match source {
+        NetworkActivitySource::Automatic => "tenshu.launcher.activity.automatic",
+        NetworkActivitySource::LocalNode => "tenshu.launcher.activity.local",
+        NetworkActivitySource::Connect => "tenshu.launcher.activity.connect",
+    })
+}
+
+/// The network activity's source selector: the shown block and where it came
+/// from, or why nothing shows. A click opens the source menu above it.
+fn activity_button<'a>(home: &Home) -> Option<Element<'a, ViewMessage>> {
+    if !home.activity_wanted() {
+        return None;
+    }
+    let chain = home.activity_chain();
+    let light = matches!(
+        home.theme_mode,
+        coincube_ui::theme::palette::ThemeMode::Light
+    );
+    let (label, dot) = match home.catalog.activity.current(chain) {
+        Some(Ok(snapshot)) => (
+            format!(
+                "Block {} · {}",
+                launcher_activity::block_label(snapshot.tip),
+                snapshot.via.label()
+            ),
+            Some(launcher_scene::edge(chain, light)),
+        ),
+        Some(Err(why)) => (why.label().to_string(), None),
+        None => ("Reading network activity".to_string(), None),
+    };
+    let open = home.catalog.activity.menu;
+    let dot = Container::new(Space::new())
+        .width(Length::Fixed(8.0))
+        .height(Length::Fixed(8.0))
+        .style(move |theme: &theme::Theme| container::Style {
+            background: dot.map(|c| {
+                iced::Background::Color(Color::from_rgba8(
+                    c[0],
+                    c[1],
+                    c[2],
+                    f32::from(c[3]) / 255.0,
+                ))
+            }),
+            border: Border {
+                color: theme.colors.shell.line,
+                width: if dot.is_some() { 0.0 } else { 1.0 },
+                radius: 2.0.into(),
+            },
+            ..Default::default()
+        });
+    Some(
+        Action::new(
+            activity_id(),
+            Container::new(
+                Row::new()
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .push(dot)
+                    .push(words(label, 13.0, font::REGULAR, Ink::Muted))
+                    .push(glyph(CHEVRON, 14.0, Ink::Muted)),
+            )
+            .center_y(Length::Fill),
+            focus,
+        )
+        .height(Length::Fixed(KEY_BUTTON_HEIGHT))
+        .padding([0.0, 10.0])
+        .style(move |theme: &theme::Theme, status| {
+            let mut style = bar_button(theme, status, false);
+            if open {
+                style.background = Some(iced::Background::Color(theme.colors.shell.panel));
+                style.border.color = theme.colors.shell.line;
+            }
+            style
+        })
+        .on_press(ViewMessage::Catalog(CatalogMessage::Activity(
+            ActivityMessage::Menu(!open),
+        )))
+        .into(),
+    )
+}
+
+/// The activity source menu, above its dock button. It follows the Network
+/// filter; picking a source saves the device preference.
+pub(super) fn activity_layer<'a>(home: &Home) -> Option<Element<'a, ViewMessage>> {
+    if !home.catalog.activity.menu || !home.activity_wanted() {
+        return None;
+    }
+    let close = ViewMessage::Catalog(CatalogMessage::Activity(ActivityMessage::Menu(false)));
+    let current = home.catalog.activity.source;
+    let option = |source: NetworkActivitySource, label: &'static str| {
+        let on = source == current;
+        Action::new(
+            activity_option_id(source),
+            Container::new(
+                Row::new()
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .push(
+                        Container::new(on.then(|| glyph(TICK, 14.0, Ink::Body)))
+                            .width(Length::Fixed(14.0))
+                            .height(Length::Fixed(14.0)),
+                    )
+                    .push(words(
+                        label,
+                        13.0,
+                        if on { font::SEMIBOLD } else { font::REGULAR },
+                        Ink::Body,
+                    )),
+            )
+            .center_y(Length::Fill),
+            focus,
+        )
+        .width(Length::Fill)
+        .height(Length::Fixed(34.0))
+        .padding([0.0, 10.0])
+        .style(|theme: &theme::Theme, status| {
+            let shell = theme.colors.shell;
+            iced_button::Style {
+                background: matches!(
+                    status,
+                    iced_button::Status::Hovered | iced_button::Status::Pressed
+                )
+                .then_some(iced::Background::Color(shell.selected)),
+                text_color: shell.ink,
+                border: Border {
+                    radius: 6.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        })
+        .on_press(ViewMessage::ChangeDevicePreference(
+            PreferenceChange::NetworkActivitySource(source),
+        ))
+    };
+    let rule = Container::new(Space::new())
+        .width(Length::Fill)
+        .height(Length::Fixed(1.0))
+        .style(|theme: &theme::Theme| container::Style {
+            background: Some(iced::Background::Color(theme.colors.shell.line)),
+            ..Default::default()
+        });
+    let menu = Container::new(
+        Column::new()
+            .spacing(0)
+            .push(
+                Container::new(words(
+                    format!(
+                        "Network activity · {}",
+                        network_menu_name(home.activity_chain())
+                    ),
+                    12.0,
+                    font::REGULAR,
+                    Ink::Muted,
+                ))
+                .padding([6.0, 10.0]),
+            )
+            .push(option(NetworkActivitySource::Automatic, "Automatic"))
+            .push(option(NetworkActivitySource::LocalNode, "Local node"))
+            .push(option(NetworkActivitySource::Connect, "COINCUBE | Connect"))
+            .push(
+                Column::new()
+                    .padding(Padding {
+                        top: 6.0,
+                        right: 6.0,
+                        bottom: 4.0,
+                        left: 6.0,
+                    })
+                    .spacing(8)
+                    .push(rule)
+                    .push(
+                        text(
+                            "Follows the Network filter. Automatic reads a local node that is \
+                             already running, else COINCUBE | Connect. The Launcher never starts \
+                             a node.",
+                        )
+                        .size(12)
+                        .style(|theme: &theme::Theme| text::Style {
+                            color: Some(theme.colors.shell.muted),
+                        })
+                        .wrapping(text::Wrapping::WordOrGlyph),
+                    )
+                    .push(small_link(
+                        Id::new("tenshu.launcher.activity.preferences"),
+                        "Turn off in App preferences",
+                        ViewMessage::OpenAppPreferences,
+                    )),
+            ),
+    )
+    .width(Length::Fixed(ACTIVITY_MENU_WIDTH))
+    .padding(6)
+    .style(|theme: &theme::Theme| container::Style {
+        background: Some(iced::Background::Color(theme.colors.shell.panel)),
+        border: Border {
+            color: theme.colors.shell.line,
+            width: 1.0,
+            radius: 10.0.into(),
+        },
+        shadow: iced::Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
+            offset: iced::Vector::new(0.0, 18.0),
+            blur_radius: 40.0,
+        },
+        ..Default::default()
+    });
+    // `bottom: calc(100% + 8px)` of its 32px button, like the Key card.
+    let button_top = (BAR_HEIGHT + KEY_BUTTON_HEIGHT) / 2.0 + 8.0;
+    let placed = Container::new(iced::widget::opaque(menu))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(iced::alignment::Horizontal::Right)
+        .align_y(iced::alignment::Vertical::Bottom)
+        .padding(Padding {
+            top: 0.0,
+            right: GUTTER + KEY_BUTTON_WIDTH + 8.0,
+            bottom: button_top,
+            left: 0.0,
+        });
+    Some(
+        iced::widget::Stack::new()
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(close))
+            .push(placed)
+            .into(),
+    )
 }
 
 /// `.keybtn`: hover peeks, a click pins, a second click or Escape shuts.

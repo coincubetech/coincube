@@ -57,6 +57,7 @@ use crate::{
 };
 use coincube_core::signer::{MasterSigner, MASTER_SEED_LABEL};
 
+mod launcher_activity;
 #[cfg(test)]
 mod launcher_capture;
 mod launcher_catalog;
@@ -724,6 +725,7 @@ impl Home {
                 rename_cube_modal: None,
                 catalog: Box::new(launcher_catalog::CatalogState {
                     mode: Self::load_launcher_mode(&datadir_path, system_reduces_motion),
+                    activity: launcher_activity::ActivityState::load(&datadir_path),
                     ..Default::default()
                 }),
                 pending_remote_rename: None,
@@ -1134,27 +1136,35 @@ impl Home {
     }
 
     pub fn subscription(&self, foreground: bool) -> Subscription<Message> {
-        let base = self.launcher_subscription(foreground);
-        // Escape closes the network menu first, then shuts the Key card.
+        let base = Subscription::batch([
+            self.launcher_subscription(foreground),
+            self.activity_subscription(foreground),
+        ]);
+        // Escape closes the network menu first, then the activity source
+        // menu, then shuts the Key card.
         let menu = self.catalog.network_menu;
+        let activity = self.catalog.activity.menu;
         if foreground
-            && (menu || self.catalog.key_open())
+            && (menu || activity || self.catalog.key_open())
             && launcher_catalog::catalog_visible(self)
         {
-            let escape =
-                iced::keyboard::listen()
-                    .with(menu)
-                    .filter_map(|(menu, event)| match event {
-                        iced::keyboard::Event::KeyPressed {
-                            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
-                            ..
-                        } => Some(Message::View(ViewMessage::Catalog(if menu {
-                            launcher_catalog::CatalogMessage::NetworkMenu(false)
-                        } else {
-                            launcher_catalog::CatalogMessage::KeyClose
-                        }))),
-                        _ => None,
-                    });
+            let escape = iced::keyboard::listen().with((menu, activity)).filter_map(
+                |((menu, activity), event)| match event {
+                    iced::keyboard::Event::KeyPressed {
+                        key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+                        ..
+                    } => Some(Message::View(ViewMessage::Catalog(if menu {
+                        launcher_catalog::CatalogMessage::NetworkMenu(false)
+                    } else if activity {
+                        launcher_catalog::CatalogMessage::Activity(
+                            launcher_activity::ActivityMessage::Menu(false),
+                        )
+                    } else {
+                        launcher_catalog::CatalogMessage::KeyClose
+                    }))),
+                    _ => None,
+                },
+            );
             return Subscription::batch([base, escape]);
         }
         base
@@ -1459,6 +1469,7 @@ impl Home {
     }
 
     fn apply_launcher_mode(&mut self) {
+        self.catalog.activity.apply_preferences(&self.datadir_path);
         let launcher_mode =
             Self::load_launcher_mode(&self.datadir_path, self.system_reduces_motion);
         if self.catalog.mode != launcher_mode {
