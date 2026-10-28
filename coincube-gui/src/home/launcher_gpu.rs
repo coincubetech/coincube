@@ -161,6 +161,8 @@ struct SceneLayer {
 pub(super) struct StageData {
     width: f32,
     height: f32,
+    /// The floor's back edge, on the resting Cubes' center line.
+    horizon: f32,
     palette: Palette,
     floor: bool,
     layers: Vec<SceneLayer>,
@@ -229,6 +231,7 @@ impl StageData {
         Self {
             width: layout.width,
             height: layout.height,
+            horizon: layout.horizon(),
             palette,
             floor,
             layers,
@@ -900,9 +903,9 @@ impl shader::Primitive for StagePrimitive {
         let none = [0.0; 4];
         let kind = |k: f32| [0.0, 0.0, 0.0, k];
         if data.floor {
-            // `.floor`: top 40%, inset 14% at the top, full width at the
-            // bottom, with its 1px top rule between the insets.
-            let top = data.height * launcher_scene::FLOOR_TOP;
+            // `.floor`: from the Cubes' line, inset 14% at the top, full
+            // width at the bottom, with its 1px top rule between the insets.
+            let top = data.horizon;
             let inset = data.width * launcher_scene::FLOOR_INSET;
             let floor = [
                 (inset, top),
@@ -1181,7 +1184,7 @@ pub(super) fn marks(cube: &crate::app::settings::CubeSettings) -> CubeMarks {
         imported_bitcoin: wallet == super::launcher_presenter::WalletFaceMark::ImportedBitcoin,
         spark: crate::app::features::spark(cube.network).is_available(),
         passkey: cube.is_passkey_cube(),
-        backup_confirmed: cube.backed_up || cube.has_recovery_kit(),
+        backup: super::launcher_presenter::backup_mark(cube),
     }
 }
 
@@ -1189,7 +1192,7 @@ pub(super) fn marks(cube: &crate::app::settings::CubeSettings) -> CubeMarks {
 mod tests {
     use super::*;
     use crate::chain::ChainId;
-    use crate::home::launcher_scene::DESIGN_STAGE_HEIGHT;
+    use crate::home::launcher_scene::{BackupMark, DESIGN_STAGE_HEIGHT};
 
     #[test]
     fn spark_is_marked_on_every_cube_whose_network_supports_it() {
@@ -1210,7 +1213,7 @@ mod tests {
             imported_bitcoin: false,
             spark: false,
             passkey: false,
-            backup_confirmed: true,
+            backup: BackupMark::Confirmed,
         };
         let svg = rest_face_svg(Face::Top, marks, false).unwrap();
         let a = art(&svg, 64).expect("coin face rasterizes");
@@ -1276,7 +1279,7 @@ mod tests {
             imported_bitcoin: false,
             spark: false,
             passkey: false,
-            backup_confirmed: false,
+            backup: BackupMark::NotConfirmed,
         };
         let text = FaceText {
             name: "Everyday",

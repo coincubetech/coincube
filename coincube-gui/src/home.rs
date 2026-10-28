@@ -1202,7 +1202,7 @@ impl Home {
                 && projection.locals.len() > self.catalog.page_size()
             {
                 let paging = iced::event::listen_with(launcher_catalog::floor_event);
-                if self.catalog.motion.is_some() {
+                if self.catalog.animating() {
                     return Subscription::batch([
                         paging,
                         iced::window::frames().map(|now| {
@@ -1215,7 +1215,7 @@ impl Home {
                 return paging;
             }
         }
-        if foreground && self.catalog.motion.is_some() && launcher_catalog::catalog_visible(self) {
+        if foreground && self.catalog.animating() && launcher_catalog::catalog_visible(self) {
             return iced::window::frames().map(|now| {
                 Message::View(ViewMessage::Catalog(
                     launcher_catalog::CatalogMessage::MotionTick(now),

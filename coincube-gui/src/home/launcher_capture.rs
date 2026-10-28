@@ -198,8 +198,29 @@ fn launcher_capture_sizes() {
                     ChainId::Bitcoin,
                 ));
             }
+            // Every backup badge: "?" (no seed recorded), "!", and none.
+            for (i, cube) in cubes.iter_mut().enumerate() {
+                if i % 3 != 0 {
+                    cube.master_signer_fingerprint = Some([1, 2, 3, i as u8].into());
+                    cube.backed_up = i % 3 == 2;
+                }
+            }
         }
-        for (width, height) in [(1024.0, 768.0), (1280.0, 800.0), (2000.0, 1250.0)] {
+        // The second Cube on the page is at the top of its hover float.
+        let floating = super::launcher_catalog::project(&home).locals[1]
+            .key
+            .clone();
+        home.catalog.hover(
+            floating,
+            true,
+            std::time::Instant::now() - super::launcher_scene::BOB_PERIOD / 2,
+        );
+        for (width, height) in [
+            (1024.0, 768.0),
+            (1280.0, 800.0),
+            (2000.0, 1083.0),
+            (2000.0, 1250.0),
+        ] {
             save(
                 &mut renderer,
                 super::launcher_catalog::launcher_view(&home),
@@ -208,6 +229,14 @@ fn launcher_capture_sizes() {
                 directory.join(format!("{appearance}-13-floor-{width}x{height}.png")),
             );
         }
+        home.catalog.key.mode = super::launcher_catalog::KeyMode::Pinned;
+        save(
+            &mut renderer,
+            super::launcher_catalog::launcher_view(&home),
+            Size::new(1440.0, 900.0),
+            &palette,
+            directory.join(format!("{appearance}-14-floor-key-1440x900.png")),
+        );
     }
 }
 

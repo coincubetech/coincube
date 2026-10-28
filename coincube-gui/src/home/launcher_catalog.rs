@@ -280,12 +280,77 @@ pub(super) struct CatalogState {
     /// The floor's width as last laid out, reported by its sensor. Paging
     /// messages use it so they count the same Cubes a page as the screen.
     pub(super) stage_width: Option<f32>,
+    /// Resting Cubes under the pointer, or settling after it left.
+    pub(super) hover: Vec<FloorHover>,
+}
+
+/// A resting Cube floats while the pointer is over it (see
+/// [`super::launcher_scene::bob`]) and settles once the pointer leaves.
+#[derive(Debug, Clone)]
+pub(super) struct FloorHover {
+    pub(super) key: CubeCatalogKey,
+    entered: Instant,
+    /// When the pointer left, and the lift at that moment.
+    left: Option<(Instant, f32)>,
+}
+
+impl FloorHover {
+    pub(super) fn lift(&self, now: Instant) -> f32 {
+        match self.left {
+            None => super::launcher_scene::bob(now.saturating_duration_since(self.entered)),
+            Some((at, from)) => {
+                super::launcher_scene::settle(from, now.saturating_duration_since(at))
+            }
+        }
+    }
+
+    fn settled(&self, now: Instant) -> bool {
+        self.left.is_some_and(|(at, _)| {
+            now.saturating_duration_since(at) >= super::launcher_scene::BOB_SETTLE
+        })
+    }
 }
 
 impl CatalogState {
     /// Cubes per floor page at the measured width; four until measured.
     pub(super) fn page_size(&self) -> usize {
         self.stage_width.map_or(FLOOR_PAGE_SIZE, floor_page_size)
+    }
+
+    /// The scene needs frames: a turn is running or a Cube is floating.
+    pub(super) fn animating(&self) -> bool {
+        self.motion.is_some() || !self.hover.is_empty()
+    }
+
+    /// How far a resting Cube floats at `now`.
+    pub(super) fn lift(&self, key: &CubeCatalogKey, now: Instant) -> f32 {
+        self.hover
+            .iter()
+            .find(|hover| &hover.key == key)
+            .map_or(0.0, |hover| hover.lift(now))
+    }
+
+    pub(super) fn hover(&mut self, key: CubeCatalogKey, over: bool, now: Instant) {
+        let lift = self.lift(&key, now);
+        self.hover.retain(|hover| hover.key != key);
+        if over {
+            // Re-entering a settling Cube picks the float up where it is.
+            let phase = (1.0 - 2.0 * lift / super::launcher_scene::BOB_HEIGHT)
+                .clamp(-1.0, 1.0)
+                .acos();
+            let into = super::launcher_scene::BOB_PERIOD.mul_f32(phase / std::f32::consts::TAU);
+            self.hover.push(FloorHover {
+                key,
+                entered: now.checked_sub(into).unwrap_or(now),
+                left: None,
+            });
+        } else if lift > 0.0 {
+            self.hover.push(FloorHover {
+                key,
+                entered: now,
+                left: Some((now, lift)),
+            });
+        }
     }
 }
 
@@ -522,6 +587,8 @@ pub enum CatalogMessage {
     Wheel(mouse::ScrollDelta),
     /// The floor's laid-out width, from its sensor, which sets the page size.
     StageWidth(f32),
+    /// The pointer entered or left a resting Cube's slot.
+    CubeHover(CubeCatalogKey, bool),
     /// A shared Action's pointer-down request: apply whole-tree focus.
     Focus(Id),
 }
@@ -681,6 +748,7 @@ impl Home {
                 let previous = self.catalog.selected.clone();
                 self.catalog.selected = self.catalog_selectable(&key).then_some(key.clone());
                 self.catalog.motion = None;
+                self.catalog.hover.clear();
                 self.catalog.open_from_floor = false;
                 if self.catalog.mode == LauncherMode::Cubes
                     && self.catalog.selected.as_ref() == Some(&key)
@@ -747,6 +815,22 @@ impl Home {
                 }
             }
             CatalogMessage::MotionTick(now) => {
+                // Settled floats, and Cubes paged or selected away, stop.
+                let browsing = self.catalog.selected.is_none();
+                let on_page: Vec<_> = if browsing && !self.catalog.hover.is_empty() {
+                    project(self)
+                        .locals
+                        .iter()
+                        .skip(self.catalog.page * self.catalog.page_size())
+                        .take(self.catalog.page_size())
+                        .map(|row| row.key.clone())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                self.catalog
+                    .hover
+                    .retain(|hover| !hover.settled(now) && on_page.contains(&hover.key));
                 if self
                     .catalog
                     .motion
@@ -828,6 +912,13 @@ impl Home {
                     let page = floor_page_keeping(anchor, after, projection.locals.len());
                     self.catalog.page = page;
                 }
+                Task::none()
+            }
+            CatalogMessage::CubeHover(key, over) => {
+                if over && self.catalog.selected.is_some() {
+                    return Task::none();
+                }
+                self.catalog.hover(key, over, Instant::now());
                 Task::none()
             }
             CatalogMessage::Focus(id) => iced::widget::operation::focus(id),
@@ -2577,12 +2668,49 @@ mod tests {
     }
 
     #[test]
+    fn hovered_cube_floats_settles_and_stops_when_selected() {
+        use super::super::launcher_scene::{BOB_HEIGHT, BOB_PERIOD, BOB_SETTLE};
+        let mut home = home_with(&[("a", "Alpha"), ("b", "Beta")]);
+        let start = Instant::now();
+        assert!(!home.catalog.animating());
+        home.catalog.hover(key("a"), true, start);
+        assert!(home.catalog.animating(), "a floating Cube needs frames");
+        let top = start + BOB_PERIOD / 2;
+        assert!((home.catalog.lift(&key("a"), top) - BOB_HEIGHT).abs() < 1e-3);
+        assert_eq!(home.catalog.lift(&key("b"), top), 0.0);
+
+        // Leaving settles from the current height instead of dropping.
+        home.catalog.hover(key("a"), false, top);
+        assert!((home.catalog.lift(&key("a"), top) - BOB_HEIGHT).abs() < 1e-3);
+        // Re-entering mid-settle picks the float up where it is.
+        let back = top + BOB_SETTLE / 2;
+        let height = home.catalog.lift(&key("a"), back);
+        home.catalog.hover(key("a"), true, back);
+        assert!((home.catalog.lift(&key("a"), back) - height).abs() < 0.05);
+        home.catalog.hover(key("a"), false, back);
+        catalog(&mut home, CatalogMessage::MotionTick(back + BOB_SETTLE));
+        assert!(!home.catalog.animating(), "a settled Cube stops the frames");
+
+        // A selection settles every Cube and ignores new hovers.
+        catalog(&mut home, CatalogMessage::CubeHover(key("b"), true));
+        assert!(home.catalog.animating());
+        catalog(&mut home, CatalogMessage::SelectFloor(key("b")));
+        home.catalog.motion = None;
+        assert!(home.catalog.hover.is_empty());
+        catalog(&mut home, CatalogMessage::CubeHover(key("a"), true));
+        assert!(home.catalog.hover.is_empty());
+    }
+
+    #[test]
     fn list_facts_report_lock_backup_and_wallets_from_recorded_metadata() {
         use super::super::launcher_presenter::{local_wallets, lock_state};
         let wallets = |cube: &CubeSettings| local_wallets(cube, false);
         let mut home = home_with(&[("a", "Alpha")]);
         assert_eq!(lock_state(project(&home).locals[0].open), "Locked");
         let cube = &mut cubes_mut(&mut home)[0];
+        // No master seed recorded for this Cube: this device cannot tell.
+        assert_eq!(backup_caption(cube), (Tone::Muted, "Status unknown"));
+        cube.master_signer_fingerprint = Some([1, 2, 3, 4].into());
         // Matches the open Cube's "Backup not confirmed" warning.
         assert_eq!(backup_caption(cube), (Tone::Warn, "Not confirmed"));
         // A Recovery Kit is shown on the Connect line, not here.
@@ -2668,7 +2796,7 @@ mod tests {
             assert!(tree.has(&open_id(&key("a"))));
             assert!(tree.has(&details_open_id(&key("a"))));
             assert!(tree.contains("Locked"));
-            assert!(tree.contains("Not confirmed"));
+            assert!(tree.contains("Status unknown"));
             // The presenter draws these rows: the network is a coin mark and
             // label in both layouts, and the compact List folds Wallets and
             // Backup into one caption that the wide table splits into columns.
@@ -2725,7 +2853,7 @@ mod tests {
                 theme::Theme::light(),
             );
             assert_eq!(inspection.contains("Network: Bitcoin"), !table);
-            assert!(inspection.contains("Backup: Not confirmed") || table);
+            assert!(inspection.contains("Backup: Status unknown") || table);
             let bounds = focus_bounds(layout(&projection, body_width), body_width);
             let select = bounds_of(&bounds, &select_id(&key("a")));
             let long_name = inspection

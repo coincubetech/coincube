@@ -25,6 +25,7 @@ use crate::{
     chain::{ChainId, ChainIdExt},
     loader,
 };
+use launcher_scene::BackupMark;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct LauncherScene {
@@ -218,12 +219,24 @@ pub(super) fn local_wallets(
 
 /// Matches the Cube's own "Backup not confirmed" warning: `backed_up` is set
 /// once the user confirms the seed phrase backup. The Recovery Kit is a
-/// Connect fact and shows on the Connect line.
-pub(super) fn backup(cube: &crate::app::settings::CubeSettings) -> (&'static str, tenshu::Tone) {
+/// Connect fact and shows on the Connect line. A Cube with no recorded master
+/// seed (created before it was tracked, or elsewhere) may hold no seed on
+/// this device at all, so its status is unknown rather than a warning.
+pub(super) fn backup_mark(cube: &crate::app::settings::CubeSettings) -> BackupMark {
     if cube.backed_up {
-        ("Confirmed", tenshu::Tone::Good)
+        BackupMark::Confirmed
+    } else if cube.master_signer_fingerprint.is_none() {
+        BackupMark::Unknown
     } else {
-        ("Not confirmed", tenshu::Tone::Warn)
+        BackupMark::NotConfirmed
+    }
+}
+
+pub(super) fn backup(cube: &crate::app::settings::CubeSettings) -> (&'static str, tenshu::Tone) {
+    match backup_mark(cube) {
+        BackupMark::Confirmed => ("Confirmed", tenshu::Tone::Good),
+        BackupMark::NotConfirmed => ("Not confirmed", tenshu::Tone::Warn),
+        BackupMark::Unknown => ("Status unknown", tenshu::Tone::Muted),
     }
 }
 
@@ -995,7 +1008,7 @@ fn floor_slot<'a>(
             .push(label)
             .into()
     };
-    Action::new(launcher_catalog::select_id(&row.key), content, focus)
+    let slot = Action::new(launcher_catalog::select_id(&row.key), content, focus)
         .width(Length::Fixed(layout.slot()))
         .height(Length::Fixed(layout.slot_height()))
         .padding(iced::Padding {
@@ -1008,7 +1021,17 @@ fn floor_slot<'a>(
         .on_press_maybe(
             row.actionable
                 .then(|| ViewMessage::Catalog(CatalogMessage::SelectFloor(row.key.clone()))),
-        )
+        );
+    // A resting Cube floats while the pointer is over its slot.
+    iced::widget::mouse_area(slot)
+        .on_enter(ViewMessage::Catalog(CatalogMessage::CubeHover(
+            row.key.clone(),
+            true,
+        )))
+        .on_exit(ViewMessage::Catalog(CatalogMessage::CubeHover(
+            row.key.clone(),
+            false,
+        )))
         .into()
 }
 
@@ -1211,6 +1234,7 @@ fn dot_style(active: bool) -> impl Fn(&theme::Theme) -> container::Style {
 fn paging_layers<'a, M: 'a>(
     stage: Stack<'a, M, theme::Theme>,
     stage_height: f32,
+    arrow_line: f32,
     arrows: [Element<'a, M>; 2],
     dots: Vec<Element<'a, M>>,
     caption: Element<'a, M>,
@@ -1222,6 +1246,7 @@ fn paging_layers<'a, M: 'a>(
     }
     stage
         .push(
+            // `.pgbtn`: 44px arrows centered on the resting Cubes' line.
             Container::new(
                 Row::new()
                     .width(Length::Fill)
@@ -1232,8 +1257,12 @@ fn paging_layers<'a, M: 'a>(
             )
             .width(Length::Fill)
             .height(Length::Fixed(stage_height))
-            .padding([0, 18])
-            .align_y(iced::alignment::Vertical::Center),
+            .padding(iced::Padding {
+                top: (arrow_line - 22.0).max(0.0),
+                right: 18.0,
+                bottom: 0.0,
+                left: 18.0,
+            }),
         )
         .push(
             Container::new(
@@ -1303,8 +1332,15 @@ fn floor_layout<'a>(
     available: f32,
     light: bool,
     motion: Option<&launcher_scene::Motion>,
+    hover: &[launcher_catalog::FloorHover],
 ) -> Element<'a, ViewMessage> {
     debug_assert!(!projection.locals.is_empty());
+    let hover = |key: &CubeCatalogKey, now| {
+        hover
+            .iter()
+            .find(|hover| &hover.key == key)
+            .map_or(0.0, |hover| hover.lift(now))
+    };
     let stage_height = stage_height(available);
     let layout = launcher_scene::Layout::new(width, stage_height);
     let per_page = launcher_catalog::floor_page_size(width);
@@ -1321,9 +1357,17 @@ fn floor_layout<'a>(
         .take(per_page)
         .collect();
     let now = std::time::Instant::now();
-    let pose = |key: &CubeCatalogKey| match motion {
-        Some(motion) => motion.pose(key, selected_key, now),
-        None => launcher_scene::settled_pose(key, selected_key),
+    let pose = |key: &CubeCatalogKey| {
+        let pose = match motion {
+            Some(motion) => motion.pose(key, selected_key, now),
+            None => launcher_scene::settled_pose(key, selected_key),
+        };
+        // Only a browsing floor floats; a selection settles every Cube.
+        if selected_key.is_none() {
+            pose.lifted(hover(key, now))
+        } else {
+            pose
+        }
     };
     // Paint order follows the DOM and z-index: peers, `.cb.prev`, `.cb.lead`.
     let previous = motion.and_then(|m| m.previous().or(m.returning_key()));
@@ -1418,6 +1462,7 @@ fn floor_layout<'a>(
         stage = paging_layers(
             stage,
             stage_height,
+            layout.horizon(),
             [
                 page_arrow(true, page.checked_sub(1)),
                 page_arrow(false, (page + 1 < pages).then_some(page + 1)),
@@ -1488,6 +1533,7 @@ pub(super) fn floor_body_in(home: &Home, available: f32) -> Element<'_, ViewMess
         coincube_ui::theme::palette::ThemeMode::Light
     );
     let motion = home.catalog.motion.clone();
+    let hover = home.catalog.hover.clone();
     let scene = project_catalog(&projection);
     let floor = responsive(move |size: Size| {
         if size.width < 840.0 {
@@ -1500,6 +1546,7 @@ pub(super) fn floor_body_in(home: &Home, available: f32) -> Element<'_, ViewMess
                 available,
                 light,
                 motion.as_ref(),
+                &hover,
             )
         }
     })
@@ -1761,6 +1808,7 @@ fn unlock_floor_stage<'a, M: 'a + 'static>(
         stage = paging_layers(
             stage,
             stage_height,
+            layout.horizon(),
             [
                 resting_arrow(true, page > 0),
                 resting_arrow(false, page + 1 < pages),
@@ -2014,8 +2062,12 @@ mod tests {
                 .expect("selected unlock face caption");
             // The inspector lays the scene out unbounded, so the stage is the
             // 742px design height at both widths. Caption top = 64px bar + 1px
-            // rule + target (the stage midline, 371px) - 210 + 28px padding.
-            let expected = 254.0;
+            // rule + target (the arrows' line) - 210 + 28px padding.
+            let target =
+                launcher_scene::Layout::new(width as f32, launcher_scene::DESIGN_STAGE_HEIGHT)
+                    .target()
+                    .1;
+            let expected = 64.0 + 1.0 + target - 210.0 + 28.0;
             assert!(
                 (face.y - expected).abs() < 22.0,
                 "{}px floor face moved from its selected pose: {:?}",
@@ -2445,15 +2497,26 @@ mod tests {
             ChainId::Bitcoin,
         );
         let lock = "M7 11h10v9H7z";
-        let check = "M8.5 12.2l2.4 2.4 4.6-5.1";
+        let attention = "M12 7.5v5.5";
+        let question = "M9.6 9.6a2.4";
+        // No master seed recorded for this Cube: this device cannot tell.
         let unknown_backup = rest_face_svg(Face::Right, launcher_gpu::marks(&cube), false).unwrap();
         assert_eq!(unlock_prompt(&cube), "PIN prompt");
+        assert_eq!(backup(&cube), ("Status unknown", tenshu::Tone::Muted));
         assert!(unknown_backup.contains(lock));
-        assert!(!unknown_backup.contains(check));
+        assert!(unknown_backup.contains(question) && !unknown_backup.contains(attention));
+
+        cube.master_signer_fingerprint = Some([1, 2, 3, 4].into());
+        let unconfirmed = rest_face_svg(Face::Right, launcher_gpu::marks(&cube), false).unwrap();
+        assert_eq!(backup(&cube), ("Not confirmed", tenshu::Tone::Warn));
+        assert!(unconfirmed.contains(attention) && !unconfirmed.contains(question));
+        // A Recovery Kit is not the seed phrase backup the Cube asks for.
+        cube.recovery_kit_password_backed_up = true;
+        assert_eq!(launcher_gpu::marks(&cube).backup, BackupMark::NotConfirmed);
 
         cube.backed_up = true;
         let recorded_backup = rest_face_svg(Face::Right, launcher_gpu::marks(&cube), true).unwrap();
-        assert!(recorded_backup.contains(check));
+        assert!(!recorded_backup.contains(attention) && !recorded_backup.contains(question));
         assert!(recorded_backup.contains("#202020"), "light ink");
 
         cube.passkey_metadata = Some(crate::app::settings::PasskeyMetadata {
@@ -2661,7 +2724,7 @@ mod tests {
             fingerprint: Some("12345678".into()),
         });
         let marks = launcher_gpu::marks(&cube);
-        assert!(marks.vault && marks.backup_confirmed && !marks.passkey);
+        assert!(marks.vault && marks.backup == BackupMark::Confirmed && !marks.passkey);
         for light in [false, true] {
             let top = rest_face_svg(Face::Top, marks, light).unwrap();
             assert!(
@@ -2673,7 +2736,7 @@ mod tests {
                 .contains("M12 3l7 3v5.5"));
             assert!(rest_face_svg(Face::Right, marks, light)
                 .unwrap()
-                .contains("M8.5 12.2l2.4"));
+                .contains("M7 11h10v9H7z"));
             // The same marks paint the resting floor and every motion frame:
             // the stage reads them from one persisted record.
             assert_eq!(
@@ -2960,13 +3023,30 @@ mod tests {
                 right
             );
             // Vertically: each Cube's center is on the arrows' center line,
-            // which is the stage's midline.
+            // and the Cube-and-label block is centered on the stage.
             let next = bounds(&next);
             let arrows = next.center_y();
             assert!(
-                (arrows - stage_height(body) / 2.0).abs() <= 1.0,
+                (arrows - layout.horizon()).abs() <= 1.0,
                 "arrows at {}",
                 arrows
+            );
+            let label = launcher_scene::label_rect(&layout, 0, per_page);
+            let (_, cube_top, _, _) = launcher_scene::bounds(
+                &layout,
+                layout.rest_center(0, per_page),
+                launcher_scene::Pose::REST,
+            );
+            let block = (cube_top + label.3) / 2.0;
+            assert!(
+                (block - stage_height(body) / 2.0).abs() <= 1.0,
+                "Cube and label block at {} in a {} stage",
+                block,
+                stage_height(body)
+            );
+            assert!(
+                slots[0].y + slots[0].height - label.3 >= 9.0,
+                "label foot inside its slot"
             );
             for (index, slot) in slots.iter().enumerate() {
                 let (_, cube) = layout.rest_center(index, per_page);
@@ -3018,7 +3098,7 @@ mod tests {
                 assert!(mounted.contains("Everyday"));
                 assert!(mounted.contains("Travel"));
                 assert!(mounted.contains("Locked"));
-                assert!(mounted.contains("Not confirmed"));
+                assert!(mounted.contains("Status unknown"));
                 assert!(!mounted.contains("Balance"));
                 assert!(!mounted.contains("Checks passed"));
                 assert!(mounted.has_focus(search_id().into()));
