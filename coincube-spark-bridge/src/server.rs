@@ -36,8 +36,8 @@ use coincube_spark_protocol::{
     CheckLightningAddressAvailableOk, ClaimDepositOk, DepositInfo, ErrorKind,
     Event as ProtocolEvent, Frame, GetInfoOk, GetLightningAddressOk, GetUserSettingsOk,
     LightningAddressInfo as ProtocolLightningAddressInfo, ListPaymentsOk, ListUnclaimedDepositsOk,
-    Method, OkPayload, ParseInputKind, ParseInputOk, PaymentSummary, PrepareSendOk,
-    ReceivePaymentOk, RegisterLightningAddressOk, Request, Response, SendPaymentOk,
+    Method, OkPayload, ParseInputKind, ParseInputOk, PaymentDetailSummary, PaymentSummary,
+    PrepareSendOk, ReceivePaymentOk, RegisterLightningAddressOk, Request, Response, SendPaymentOk,
     SetStableBalanceParams, StableBalanceSnapshot,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -659,6 +659,59 @@ fn payment_to_summary(p: breez_sdk_spark::Payment) -> PaymentSummary {
         direction: format!("{:?}", p.payment_type),
         method: format!("{}", p.method),
         description,
+        details: detail_summary(p.details.as_ref()),
+    }
+}
+
+/// The identifiers and destination Activity shows for one payment.
+fn detail_summary(details: Option<&PaymentDetails>) -> PaymentDetailSummary {
+    let non_empty = |value: &str| Some(value.to_owned()).filter(|value| !value.is_empty());
+    match details {
+        Some(PaymentDetails::Lightning {
+            invoice,
+            htlc_details,
+            lnurl_pay_info,
+            ..
+        }) => PaymentDetailSummary {
+            payment_hash: non_empty(&htlc_details.payment_hash),
+            invoice: non_empty(invoice),
+            lightning_address: lnurl_pay_info
+                .as_ref()
+                .and_then(|info| info.ln_address.as_deref())
+                .and_then(non_empty),
+            tx_id: None,
+        },
+        Some(PaymentDetails::Spark {
+            invoice_details,
+            htlc_details,
+            ..
+        }) => PaymentDetailSummary {
+            payment_hash: htlc_details
+                .as_ref()
+                .and_then(|htlc| non_empty(&htlc.payment_hash)),
+            invoice: invoice_details
+                .as_ref()
+                .and_then(|invoice| non_empty(&invoice.invoice)),
+            ..Default::default()
+        },
+        Some(PaymentDetails::Token {
+            tx_hash,
+            invoice_details,
+            ..
+        }) => PaymentDetailSummary {
+            invoice: invoice_details
+                .as_ref()
+                .and_then(|invoice| non_empty(&invoice.invoice)),
+            tx_id: non_empty(tx_hash),
+            ..Default::default()
+        },
+        Some(PaymentDetails::Withdraw { tx_id } | PaymentDetails::Deposit { tx_id, .. }) => {
+            PaymentDetailSummary {
+                tx_id: non_empty(tx_id),
+                ..Default::default()
+            }
+        }
+        None => PaymentDetailSummary::default(),
     }
 }
 
@@ -3073,5 +3126,72 @@ mod cross_chain_tests {
         );
         assert!(route_accepts_btc(&r));
         assert!(route_is_retry_safe(&r));
+    }
+}
+
+#[cfg(test)]
+mod detail_summary_tests {
+    use super::*;
+    use breez_sdk_spark::{LnurlPayInfo, SparkHtlcDetails, SparkHtlcStatus};
+
+    fn htlc(payment_hash: &str) -> SparkHtlcDetails {
+        SparkHtlcDetails {
+            payment_hash: payment_hash.into(),
+            preimage: Some("preimage-stays-in-the-bridge".into()),
+            expiry_time: 0,
+            status: SparkHtlcStatus::PreimageShared,
+        }
+    }
+
+    #[test]
+    fn lightning_send_carries_hash_invoice_and_address_but_not_the_preimage() {
+        let details = PaymentDetails::Lightning {
+            description: None,
+            invoice: "lnbc42u1synthetic".into(),
+            destination_pubkey: "02synthetic".into(),
+            htlc_details: htlc("4c8dsynthetic"),
+            lnurl_pay_info: Some(LnurlPayInfo {
+                ln_address: Some("shop@example.test".into()),
+                comment: None,
+                domain: None,
+                metadata: None,
+                processed_success_action: None,
+                raw_success_action: None,
+            }),
+            lnurl_withdraw_info: None,
+            lnurl_receive_metadata: None,
+            conversion_info: None,
+        };
+        let summary = detail_summary(Some(&details));
+        assert_eq!(
+            summary,
+            PaymentDetailSummary {
+                payment_hash: Some("4c8dsynthetic".into()),
+                invoice: Some("lnbc42u1synthetic".into()),
+                lightning_address: Some("shop@example.test".into()),
+                tx_id: None,
+            }
+        );
+        assert!(!format!("{summary:?}").contains("preimage-stays-in-the-bridge"));
+    }
+
+    #[test]
+    fn on_chain_legs_carry_their_txid_and_empty_values_are_dropped() {
+        assert_eq!(
+            detail_summary(Some(&PaymentDetails::Deposit {
+                tx_id: "0a9bsynthetic".into(),
+                vout: 1,
+            }))
+            .tx_id
+            .as_deref(),
+            Some("0a9bsynthetic")
+        );
+        assert_eq!(
+            detail_summary(Some(&PaymentDetails::Withdraw {
+                tx_id: String::new()
+            })),
+            PaymentDetailSummary::default()
+        );
+        assert_eq!(detail_summary(None), PaymentDetailSummary::default());
     }
 }

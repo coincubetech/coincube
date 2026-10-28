@@ -1712,6 +1712,19 @@ impl Step for SaveSpend {
         cache: &Cache,
         message: Message,
     ) -> Task<Message> {
+        if self.mcp_review {
+            match &message {
+                #[cfg(feature = "mcp-transactions")]
+                Message::View(view::Message::Spend(
+                    view::SpendTxMessage::ContinueNativeSigning,
+                )) => {
+                    self.mcp_review = false;
+                    return Task::none();
+                }
+                Message::View(view::Message::Spend(_)) => return Task::none(),
+                _ => {}
+            }
+        }
         if let Some((psbt_state, _)) = &mut self.spend {
             psbt_state.update(daemon, cache, message)
         } else {

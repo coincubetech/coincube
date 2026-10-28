@@ -52,6 +52,10 @@ pub enum DaemonError {
     CoinSelectionError,
     /// Not implemented feature
     NotImplemented,
+    /// Construction fee exceeded the caller's ceiling before a change index was committed.
+    FeeCeilingExceeded,
+    /// Measured sat/vB exceeded the requested rate before a change index was committed.
+    FeeRateExceeded,
 }
 
 impl std::fmt::Display for DaemonError {
@@ -70,6 +74,8 @@ impl std::fmt::Display for DaemonError {
             Self::ClientNotSupported => write!(f, "Daemon communication is not supported"),
             Self::CoinSelectionError => write!(f, "Coin selection error"),
             Self::NotImplemented => write!(f, "This feature is not implemented for this backend"),
+            Self::FeeCeilingExceeded => write!(f, "Actual fee exceeds the supplied ceiling"),
+            Self::FeeRateExceeded => write!(f, "Measured fee rate exceeds the supplied rate"),
         }
     }
 }
@@ -154,6 +160,19 @@ pub trait Daemon: Debug {
         feerate_vb: u64,
         change_address: Option<Address<address::NetworkUnchecked>>,
     ) -> Result<model::CreateSpendResult, DaemonError>;
+    /// Same construction as [`Self::create_spend_tx`], rejecting an over-ceiling
+    /// fee or measured rate before the daemon commits a change index.
+    /// Backends without this check fail closed.
+    async fn create_spend_tx_capped(
+        &self,
+        _coins_outpoints: &[OutPoint],
+        _destinations: &HashMap<Address<address::NetworkUnchecked>, u64>,
+        _feerate_vb: u64,
+        _change_address: Option<Address<address::NetworkUnchecked>>,
+        _max_fee_sats: u64,
+    ) -> Result<model::CreateSpendResult, DaemonError> {
+        Err(DaemonError::NotImplemented)
+    }
     async fn rbf_psbt(
         &self,
         txid: &Txid,

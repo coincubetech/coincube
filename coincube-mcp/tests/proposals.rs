@@ -260,11 +260,13 @@ async fn sdk_proposals_are_state_changing_strict_and_do_not_upgrade_read_access(
     };
     let tool = tools()
         .into_iter()
-        .find(|t| t.name == "tenshu_prepare_wallet_proposal")
-        .unwrap();
-    let annotations = tool.annotations.unwrap();
-    assert_eq!(annotations.read_only_hint, Some(false));
-    assert_eq!(annotations.idempotent_hint, Some(true));
+        .find(|t| t.name == "tenshu_prepare_wallet_proposal");
+    assert_eq!(tool.is_some(), cfg!(feature = "native-proposals"));
+    if let Some(tool) = tool {
+        let annotations = tool.annotations.unwrap();
+        assert_eq!(annotations.read_only_hint, Some(false));
+        assert_eq!(annotations.idempotent_hint, Some(true));
+    }
     for field in [
         "xpub",
         "descriptor",

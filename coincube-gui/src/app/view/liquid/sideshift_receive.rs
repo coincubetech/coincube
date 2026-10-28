@@ -96,7 +96,7 @@ fn network_picker_view() -> Element<'static, SideshiftReceiveMessage> {
             .max_width(600)
             .width(Length::Fill),
     )
-    .center_x(Length::Fill)
+    .width(Length::Fill)
     .into()
 }
 
@@ -198,7 +198,7 @@ fn external_setup_view<'a>(
         .push(back_btn)
         .push(
             Container::new(inner.push(generate_btn).max_width(520).width(Length::Fill))
-                .center_x(Length::Fill),
+                .width(Length::Fill),
         )
         .width(Length::Fill)
         .into()
@@ -225,7 +225,7 @@ fn loading_view(phase: &ReceivePhase) -> Element<'static, SideshiftReceiveMessag
             .max_width(520)
             .width(Length::Fill),
     )
-    .center_x(Length::Fill)
+    .width(Length::Fill)
     .into()
 }
 
@@ -358,7 +358,7 @@ fn active_shift_view<'a>(
                     .max_width(520)
                     .width(Length::Fill),
             )
-            .center_x(Length::Fill),
+            .width(Length::Fill),
         )
         .width(Length::Fill)
         .into()
@@ -388,7 +388,7 @@ fn error_view(error: Option<&str>) -> Element<SideshiftReceiveMessage> {
             .max_width(520)
             .width(Length::Fill),
     )
-    .center_x(Length::Fill)
+    .width(Length::Fill)
     .into()
 }
 

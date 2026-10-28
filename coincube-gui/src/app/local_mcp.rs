@@ -53,6 +53,10 @@ impl Drop for PairedRuntime {
 /// Actions emitted only by the trusted desktop AI access settings.
 #[derive(Debug, Clone)]
 pub enum Message {
+    /// Open or close one paired client's controls under its row.
+    ManageClient(String),
+    /// Open or close the pairing form under "Pair a client".
+    TogglePairing,
     /// Enable or disable MCP for the current unlocked session.
     Enable(bool),
     /// Select whether the current Vault may be shared.
@@ -124,6 +128,11 @@ pub struct Settings {
     pairing_poisoned: bool,
     pairing_generation: Option<u64>,
     revoke_confirmation: Option<String>,
+    last_poll_at_startup: Option<u32>,
+    /// The paired client whose controls are open on AI access.
+    managing: Option<String>,
+    /// Whether the pairing form is open on AI access.
+    pairing_open: bool,
 }
 pub(crate) struct PairingContext<'a> {
     pub root: &'a std::path::Path,
@@ -133,7 +142,8 @@ pub(crate) struct PairingContext<'a> {
     pub daemon: Option<Arc<dyn Daemon + Send + Sync>>,
     pub supported: bool,
     pub proposal_supported: bool,
-    #[cfg(feature = "mcp-transactions")]
+    /// Poll timestamp captured when this Cube's session started. A summary is
+    /// not synced until a later poll completes.
     pub last_poll_at_startup: Option<u32>,
 }
 impl Settings {
@@ -232,9 +242,9 @@ impl Settings {
             daemon,
             supported,
             proposal_supported,
-            #[cfg(feature = "mcp-transactions")]
             last_poll_at_startup,
         } = context;
+        self.last_poll_at_startup = last_poll_at_startup;
         if super::session::generation_for(cube_id).is_none() || self.pairing_poisoned {
             return;
         }
@@ -331,6 +341,8 @@ impl Settings {
                                 chain,
                                 daemon: daemon.clone(),
                                 wallet_id: opaque.clone(),
+                                activity_key: new_activity_key(),
+                                last_poll_at_startup,
                             });
                             (reader, grant)
                         })
@@ -581,6 +593,18 @@ impl Settings {
         cube_id: &str,
     ) -> Option<String> {
         match message {
+            Message::ManageClient(id) => {
+                self.managing = if self.managing.as_deref() == Some(id.as_str()) {
+                    None
+                } else {
+                    Some(id)
+                };
+                return None;
+            }
+            Message::TogglePairing => {
+                self.pairing_open = !self.pairing_open;
+                return None;
+            }
             #[cfg(feature = "mcp-transactions")]
             Message::ReviewTransaction { .. } => return None,
             Message::Enable(value) => {
@@ -654,6 +678,9 @@ impl Settings {
                 return None;
             }
             Message::RequestRevokePair(id) => {
+                // Keep the client's controls open so focus can return to its
+                // Revoke action when the dialog is dismissed.
+                self.managing = Some(id.clone());
                 self.revoke_confirmation = self
                     .pairing_store
                     .as_ref()
@@ -662,7 +689,11 @@ impl Settings {
                 return None;
             }
             Message::CancelRevokePair => {
-                self.revoke_confirmation = None;
+                // Return to the client's open controls, where focus lands
+                // back on its Revoke action.
+                if let Some(id) = self.revoke_confirmation.take() {
+                    self.managing = Some(id);
+                }
                 return None;
             }
             Message::CopyPair(id) => {
@@ -752,6 +783,8 @@ impl Settings {
                         chain: wallet.chain,
                         daemon,
                         wallet_id,
+                        activity_key: new_activity_key(),
+                        last_poll_at_startup: self.last_poll_at_startup,
                     });
                     match wire::ipc::Server::start(reader, grant) {
                         Ok(server) => {
@@ -958,6 +991,26 @@ struct VaultReader {
     chain: crate::chain::ChainId,
     daemon: Arc<dyn Daemon + Send + Sync>,
     wallet_id: String,
+    /// Per-grant key for opaque activity ids. It never leaves the desktop.
+    activity_key: [u8; 32],
+    last_poll_at_startup: Option<u32>,
+}
+
+#[cfg(any(unix, windows))]
+fn new_activity_key() -> [u8; 32] {
+    use rand::RngCore;
+    let mut key = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut key);
+    key
+}
+
+#[cfg(any(unix, windows))]
+fn activity_id(key: &[u8; 32], txid: &coincube_core::miniscript::bitcoin::Txid) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(key);
+    hasher.update(txid.to_string().as_bytes());
+    hex::encode(&hasher.finalize()[..16])
 }
 #[cfg(any(unix, windows))]
 impl wire::Reader for VaultReader {
@@ -1044,7 +1097,7 @@ impl VaultReader {
                     info.block_height,
                     info.sync,
                     info.last_poll_timestamp,
-                    None,
+                    self.last_poll_at_startup,
                     &info.history_sync,
                 );
                 let sync_state = match sync {
@@ -1074,19 +1127,30 @@ impl VaultReader {
                 }))
             }
             wire::Request::History(input) => {
-                let transactions = self
+                let mut transactions = self
                     .daemon
                     .list_history_txs(0, u32::MAX, u64::from(input.limit))
                     .await
                     .map_err(|_| wire::Error::Unavailable)?;
+                // The confirmed-history query applies DISTINCT after ORDER BY,
+                // which does not preserve newest-first. Sort before projecting
+                // so exact time, height and chain ID never cross the MCP boundary.
+                transactions.sort_by(|left, right| {
+                    right
+                        .time
+                        .cmp(&left.time)
+                        .then(right.height.cmp(&left.height))
+                        .then(left.txid.cmp(&right.txid))
+                });
+                let transactions: Vec<_> = transactions
+                    .into_iter()
+                    .take(usize::from(input.limit))
+                    .map(|tx| project_transaction(&tx, &self.activity_key))
+                    .collect();
                 Ok(wire::Response::History(wire::History {
                     wallet_id: self.wallet_id.clone(),
                     confirmed_only: true,
-                    transactions: transactions
-                        .into_iter()
-                        .take(usize::from(input.limit))
-                        .map(project_transaction)
-                        .collect(),
+                    transactions,
                 }))
             }
             wire::Request::Policy(_) => {
@@ -1124,19 +1188,20 @@ impl VaultReader {
 }
 
 #[cfg(any(unix, windows))]
-fn project_transaction(tx: crate::daemon::model::HistoryTransaction) -> wire::Transaction {
+fn project_transaction(
+    tx: &crate::daemon::model::HistoryTransaction,
+    activity_key: &[u8; 32],
+) -> wire::Transaction {
     wire::Transaction {
-        txid: tx.txid.to_string(),
-        incoming_sats: tx.incoming_amount.to_sat(),
-        // The model totals every non-wallet output even for a deposit. In that
-        // case those outputs belong to the sender, not this Vault's spending.
-        outgoing_sats: if tx.is_external() {
-            0
+        activity_id: activity_id(activity_key, &tx.txid),
+        kind: if tx.is_external() {
+            wire::TransactionKind::Incoming
+        } else if tx.is_send_to_self() {
+            wire::TransactionKind::SelfTransfer
         } else {
-            tx.outgoing_amount.to_sat()
+            wire::TransactionKind::Outgoing
         },
-        timestamp: tx.time,
-        height: tx.height,
+        status: wire::TransactionStatus::Confirmed,
     }
 }
 
@@ -1447,7 +1512,7 @@ mod tests {
         apply_task(&mut ui, &renderer, confirm);
         assert_eq!(
             focused(&mut ui, &renderer),
-            Some(Id::from("tenshu.ai-access.enable"))
+            Some(Id::from("tenshu.ai-access.open"))
         );
         drop(ui);
         drop(app);
@@ -1510,14 +1575,14 @@ mod tests {
             vec![0, 2],
             Network::Regtest,
         );
-        let projected_batch = project_transaction(batch_history);
-        assert_eq!(projected_batch.incoming_sats, 1_100_000);
-        assert_eq!(projected_batch.outgoing_sats, 0);
-        for (wallet_inputs, wallet_outputs, expected_incoming, expected_outgoing) in [
-            (vec![], vec![0], 1_000_000, 0),
-            (vec![], vec![0, 1], 4_999_999_844, 0),
-            (vec![coin.clone()], vec![0], 1_000_000, 4_998_999_844),
-            (vec![coin], vec![0, 1], 4_999_999_844, 0),
+        let activity_key = [7u8; 32];
+        let projected_batch = project_transaction(&batch_history, &activity_key);
+        assert_eq!(projected_batch.kind, wire::TransactionKind::Incoming);
+        for (wallet_inputs, wallet_outputs, expected_kind) in [
+            (vec![], vec![0], wire::TransactionKind::Incoming),
+            (vec![], vec![0, 1], wire::TransactionKind::Incoming),
+            (vec![coin.clone()], vec![0], wire::TransactionKind::Outgoing),
+            (vec![coin], vec![0, 1], wire::TransactionKind::SelfTransfer),
         ] {
             let history = HistoryTransaction::new(
                 transaction.clone(),
@@ -1527,14 +1592,34 @@ mod tests {
                 wallet_outputs,
                 Network::Regtest,
             );
-            let projected = project_transaction(history);
-            assert_eq!(projected.txid, transaction.compute_txid().to_string());
-            assert_eq!(projected.incoming_sats, expected_incoming);
-            assert_eq!(projected.outgoing_sats, expected_outgoing);
+            let projected = project_transaction(&history, &activity_key);
+            let chain_id = transaction.compute_txid().to_string();
+            assert_eq!(projected.activity_id.len(), 32);
+            assert!(projected.activity_id.bytes().all(|b| b.is_ascii_hexdigit()));
+            assert!(!projected.activity_id.contains(chain_id.as_str()));
             assert_eq!(
-                (projected.height, projected.timestamp),
-                (Some(103), Some(1234))
+                project_transaction(&history, &activity_key).activity_id,
+                projected.activity_id
             );
+            assert_ne!(
+                project_transaction(&history, &[9u8; 32]).activity_id,
+                projected.activity_id
+            );
+            assert_eq!(projected.kind, expected_kind);
+            assert_eq!(projected.status, wire::TransactionStatus::Confirmed);
+            let json = serde_json::to_value(&projected).unwrap();
+            let row = json.as_object().unwrap();
+            assert_eq!(row.len(), 3);
+            for key in [
+                "incoming_sats",
+                "outgoing_sats",
+                "timestamp",
+                "height",
+                "txid",
+            ] {
+                assert!(!row.contains_key(key));
+            }
+            assert!(!json.to_string().contains(&chain_id));
         }
     }
 
@@ -1612,9 +1697,13 @@ mod tests {
         let location = pairings::Location::new(&root, chain, cube).unwrap();
         super::super::session::open_without_pin(cube);
 
-        let empty = Settings::default();
+        let empty = Settings {
+            pairing_open: true,
+            ..Settings::default()
+        };
         let mut paired = Settings {
             enabled: true,
+            pairing_open: true,
             pairing_location: Some(location.clone()),
             pairing_store: Some(
                 pairings::Store::open(location, zeroize::Zeroizing::new([51; 32]), true).unwrap(),
@@ -1643,10 +1732,14 @@ mod tests {
             daemon: Some(daemon.clone()),
             supported: true,
             proposal_supported: false,
-            #[cfg(feature = "mcp-transactions")]
             last_poll_at_startup: None,
         });
         assert_eq!(paired.paired.len(), 1);
+        paired.managing = Some(
+            paired.pairing_store.as_ref().unwrap().clients()[0]
+                .id
+                .clone(),
+        );
         let render = |scenario: &str, settings: &Settings| {
             for (size, appearance, palette) in [
                 ((1024, 768), "dark", theme::Theme::dark()),
@@ -1661,9 +1754,8 @@ mod tests {
                     appearance,
                     palette,
                 );
-                assert!(inspection.contains("Today · Persistent per-client read access"));
-                assert!(inspection.contains("Your AI provider may receive financial information"));
-                assert!(inspection.contains("Guided pairing · Planned"));
+                assert!(inspection.contains("Pair a client"));
+                assert!(inspection.contains("A local connection is not a private one"));
                 assert!(!inspection.contains("TENSHU_MCP_CREDENTIAL"));
             }
         };
@@ -2139,7 +2231,7 @@ mod tests {
         apply_task(&mut ui, &renderer, confirm);
         assert_eq!(
             focused(&mut ui, &renderer),
-            Some(Id::from("tenshu.ai-access.enable"))
+            Some(Id::from("tenshu.ai-access.open"))
         );
         drop(ui);
         drop(app);
@@ -2179,7 +2271,6 @@ mod tests {
                     daemon: Some(daemon.clone()),
                     supported: true,
                     proposal_supported: false,
-                    #[cfg(feature = "mcp-transactions")]
                     last_poll_at_startup: None,
                 })
             };
@@ -2387,7 +2478,6 @@ mod tests {
                 daemon: Some(daemon.clone()),
                 supported: true,
                 proposal_supported: false,
-                #[cfg(feature = "mcp-transactions")]
                 last_poll_at_startup: None,
             });
             assert!(
@@ -2470,14 +2560,14 @@ mod tests {
             let tools = discovered["tools"].as_array().unwrap();
             let names: std::collections::BTreeSet<_> = tools.iter()
                 .map(|tool| tool["name"].as_str().unwrap()).collect();
-            assert_eq!(tools.len(), 10);
+            // CI builds the companion with `--features adapter` only. Optional
+            // Regtest tools remain callable for a denied-access check below,
+            // but are not advertised by this default read-only build.
+            assert_eq!(tools.len(), 5);
             assert_eq!(names, std::collections::BTreeSet::from([
                 "tenshu_get_capabilities", "tenshu_list_wallets",
                 "tenshu_get_wallet_summary", "tenshu_get_transactions",
-                "tenshu_get_wallet_policy_summary", "tenshu_prepare_wallet_proposal",
-                "tenshu_get_wallet_proposal", "tenshu_prepare_wallet_creation",
-                "tenshu_prepare_transaction",
-                "tenshu_get_prepared_transaction",
+                "tenshu_get_wallet_policy_summary",
             ]));
             let call = |id, name: &str, arguments: Value| json!({"jsonrpc":"2.0", "id":id, "method":"tools/call", "params":{"name":name,"arguments":arguments}});
             let listed = response(&mut stdin, &mut stdout, call(3, "tenshu_list_wallets", json!({}))).await;
@@ -2485,8 +2575,13 @@ mod tests {
             let summary = response(&mut stdin, &mut stdout, call(4, "tenshu_get_wallet_summary", json!({"wallet_id":id}))).await;
             assert_eq!(summary["structuredContent"]["confirmed_sats"], 55_000);
             let history = response(&mut stdin, &mut stdout, call(5, "tenshu_get_transactions", json!({"wallet_id":id,"limit":10}))).await;
-            assert_eq!(history["structuredContent"]["transactions"][0]["incoming_sats"], 55_000);
-            assert_eq!(history["structuredContent"]["transactions"][0]["outgoing_sats"], 0);
+            let row = history["structuredContent"]["transactions"][0].as_object().unwrap();
+            assert_eq!(row["kind"], "incoming");
+            assert_eq!(row["status"], "confirmed");
+            assert_eq!(row.len(), 3);
+            for key in ["incoming_sats", "outgoing_sats", "timestamp", "height", "txid"] {
+                assert!(!row.contains_key(key));
+            }
             let policy = response(&mut stdin, &mut stdout, call(6, "tenshu_get_wallet_policy_summary", json!({"wallet_id":id}))).await;
             assert_eq!(policy["structuredContent"]["recovery"][0]["relative_delay_blocks"], 144);
             let denied = response(&mut stdin, &mut stdout, call(7, "tenshu_get_wallet_summary", json!({"wallet_id":"another-wallet"}))).await;
@@ -2537,6 +2632,9 @@ mod tests {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             super::super::session::open_without_pin("mcp-fixture");
             let (root, wallet, daemon) = fixture();
+            let chain_txid = daemon.list_history_txs(0, u32::MAX, 1).await.unwrap()[0]
+                .txid
+                .to_string();
             let mut settings = Settings::default();
             assert!(!settings.enabled && settings.server.is_none());
             settings.update(
@@ -2604,8 +2702,27 @@ mod tests {
                 panic!("expected history")
             };
             assert_eq!(history.transactions.len(), 1);
-            assert_eq!(history.transactions[0].incoming_sats, 55_000);
-            assert_eq!(history.transactions[0].outgoing_sats, 0);
+            assert_eq!(
+                history.transactions[0].kind,
+                wire::TransactionKind::Incoming
+            );
+            assert_eq!(
+                history.transactions[0].status,
+                wire::TransactionStatus::Confirmed
+            );
+            let history_json = serde_json::to_value(&history).unwrap();
+            let row = history_json["transactions"][0].as_object().unwrap();
+            assert_eq!(row.len(), 3);
+            for key in [
+                "incoming_sats",
+                "outgoing_sats",
+                "timestamp",
+                "height",
+                "txid",
+            ] {
+                assert!(!row.contains_key(key));
+            }
+            assert!(!history_json.to_string().contains(&chain_txid));
             let policy = wire::ipc::call(&socket, &credential, wire::Request::Policy(input(id)))
                 .await
                 .unwrap();
@@ -2847,7 +2964,6 @@ mod proposal_consent_tests {
                     daemon: None,
                     supported: false,
                     proposal_supported: true,
-                    #[cfg(feature = "mcp-transactions")]
                     last_poll_at_startup: None,
                 })
             };
@@ -2953,7 +3069,6 @@ mod proposal_consent_tests {
                     daemon: None,
                     supported: false,
                     proposal_supported: true,
-                    #[cfg(feature = "mcp-transactions")]
                     last_poll_at_startup: None,
                 })
             };

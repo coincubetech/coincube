@@ -15,7 +15,6 @@ mod view;
 
 // Shared node-resources control (prune + mempool presets/fields + disk
 // estimate), reused by the Vault node settings so the two surfaces never drift.
-pub(crate) use view::node_resources_controls;
 
 /// Connect's Esplora proxy for a chain, keyed on the chain's *identity*:
 /// `/api/v1/esplora/bitcoin/<net>` for the Bitcoin family and

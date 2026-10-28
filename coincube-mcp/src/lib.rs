@@ -127,19 +127,30 @@ pub struct Summary {
     /// Data is a daemon snapshot, not a guarantee of completeness.
     pub sync_state: String,
 }
-/// Minimized transaction projection using the existing UI's amount semantics.
+/// Coarse confirmed activity without chain-searchable transaction metadata.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Transaction {
-    /// Public transaction identifier, without raw transaction or script data.
-    pub txid: String,
-    /// Incoming amount as represented by the existing wallet UI, in satoshis.
-    pub incoming_sats: u64,
-    /// Wallet spending to non-wallet outputs, in satoshis; zero for incoming payments.
-    pub outgoing_sats: u64,
-    /// Confirmation timestamp when available, in Unix seconds.
-    pub timestamp: Option<u32>,
-    /// Confirmation height when available.
-    pub height: Option<i32>,
+    /// Session-scoped activity id. It is not a chain transaction id and cannot
+    /// be looked up on a block explorer. A new unlock mints a new id.
+    pub activity_id: String,
+    /// Coarse wallet-relative activity type; no amounts or counterparties.
+    pub kind: TransactionKind,
+    /// History currently contains confirmed transactions only.
+    pub status: TransactionStatus,
+}
+/// Wallet-relative activity type, without the payment amount or recipient.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TransactionKind {
+    Incoming,
+    Outgoing,
+    SelfTransfer,
+}
+/// Coarse confirmation state of a history row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TransactionStatus {
+    Confirmed,
 }
 /// Bounded confirmed-history result without addresses, scripts or labels.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -209,6 +220,8 @@ pub enum Error {
     InsufficientFunds,
     /// Actual total fee exceeds the explicitly supplied ceiling.
     FeeLimitExceeded,
+    /// Measured sat/vB, rounded up, exceeds the explicitly supplied rate.
+    FeeRateExceeded,
 }
 impl Error {
     /// Return the stable machine-readable code exposed in MCP tool errors.
@@ -221,6 +234,7 @@ impl Error {
             Self::TransactionConflict => "transaction_conflict",
             Self::InsufficientFunds => "insufficient_funds",
             Self::FeeLimitExceeded => "fee_limit_exceeded",
+            Self::FeeRateExceeded => "fee_rate_exceeded",
         }
     }
 }

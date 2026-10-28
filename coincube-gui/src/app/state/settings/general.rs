@@ -1013,6 +1013,11 @@ pub struct GeneralSettingsState {
     currencies: Vec<Currency>,
     show_direction_badges: bool,
     saved: bool,
+    /// The Cube name as typed on Display & appearance, until it is saved.
+    /// `None` shows the Cube's current name.
+    name_input: Option<String>,
+    /// Payment checks is asking before turning recipient checks off.
+    confirm_checks_off: bool,
     error: Option<Error>,
     /// Master seed backup flow state.
     pub backup_state: BackupSeedState,
@@ -1055,6 +1060,8 @@ impl GeneralSettingsState {
             currencies: Vec::new(),
             show_direction_badges,
             saved: false,
+            name_input: None,
+            confirm_checks_off: false,
             error: None,
             backup_state: BackupSeedState::None,
             backup_pin: PinInput::new(),
@@ -1578,6 +1585,39 @@ pub(super) fn is_wrong_pin(e: &SignerError) -> bool {
 }
 
 impl GeneralSettingsState {
+    /// A typed Cube name that differs from the saved one, to save when the
+    /// field is left by moving to another Settings section.
+    pub fn pending_cube_name(&self, current: &str) -> Option<String> {
+        self.name_input
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty() && *name != current)
+            .map(str::to_owned)
+    }
+
+    /// The Display & appearance content without the dashboard, so the App
+    /// can show the avatar flow inline beneath Cube identity.
+    pub fn display_content<'a>(
+        &'a self,
+        cache: &'a Cache,
+        avatar_flow: Option<Element<'a, view::Message>>,
+    ) -> Element<'a, view::Message> {
+        crate::app::view::settings::general::display_content(
+            cache,
+            &self.new_price_setting,
+            &self.new_unit_setting,
+            &self.currencies,
+            self.show_direction_badges,
+            self.saved,
+            self.name_input.as_deref(),
+            avatar_flow,
+        )
+    }
+
+    pub fn section(&self) -> SettingsSection {
+        self.section
+    }
+
     /// Variant of `view` that also threads the Cube Recovery Kit
     /// status through so the "Back up your Recovery Kit" card can
     /// render. `SettingsState::view` (the outer wrapper) calls this
@@ -1605,6 +1645,8 @@ impl GeneralSettingsState {
             self.backup_mnemonic.as_deref().map(|v| v.as_slice()),
             Some(rk),
             Some(ra),
+            self.name_input.as_deref(),
+            self.confirm_checks_off,
         )
     }
 }
@@ -1629,6 +1671,8 @@ impl State for GeneralSettingsState {
             self.backup_mnemonic.as_deref().map(|v| v.as_slice()),
             None,
             None,
+            self.name_input.as_deref(),
+            self.confirm_checks_off,
         )
     }
 
@@ -1664,6 +1708,17 @@ impl State for GeneralSettingsState {
             self.saved = false;
         }
         match message {
+            Message::View(view::Message::Settings(view::SettingsMessage::CubeNameEdited(name))) => {
+                self.saved = false;
+                self.name_input = Some(name);
+                Task::none()
+            }
+            // The App saved the name; show the Cube's name again.
+            Message::View(view::Message::Settings(view::SettingsMessage::CubeNameSubmitted(_))) => {
+                self.name_input = None;
+                self.saved = true;
+                Task::none()
+            }
             Message::Fiat(FiatMessage::SaveChanges) => {
                 self.error = None;
                 tracing::info!(
@@ -1870,8 +1925,21 @@ impl State for GeneralSettingsState {
                 );
             }
             Message::View(view::Message::Settings(
+                view::SettingsMessage::AskRecipientChecksOff,
+            )) => {
+                self.confirm_checks_off = true;
+                Task::none()
+            }
+            Message::View(view::Message::Settings(
+                view::SettingsMessage::CancelRecipientChecksOff,
+            )) => {
+                self.confirm_checks_off = false;
+                Task::none()
+            }
+            Message::View(view::Message::Settings(
                 view::SettingsMessage::ToggleRecipientIdentityChecks(enabled),
             )) => {
+                self.confirm_checks_off = false;
                 // Enforce privacy before touching disk. Keep writes ordered with
                 // user actions so rapid toggles cannot persist an older choice.
                 crate::services::branta::set_enabled(enabled);

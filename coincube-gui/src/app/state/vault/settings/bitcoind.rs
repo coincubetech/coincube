@@ -1373,6 +1373,8 @@ impl State for BitcoindSettingsState {
         let can_do_rescan = !self.rescan_settings.processing && !settings_edit;
         let content = view::vault::settings::bitcoind_settings(menu, cache, {
             let mut setting_panels = Vec::new();
+            let mut advanced_disclosure = false;
+            let mut advanced_panels: Vec<Element<'_, view::Message>> = Vec::new();
 
             // Top panel: either Connect re-login flow or backend status + switch.
             let map_node_msg =
@@ -1553,20 +1555,18 @@ impl State for BitcoindSettingsState {
                 if self.full_config.as_ref().is_some_and(|cfg| {
                     matches!(cfg.bitcoin_backend, Some(BitcoinBackend::Bitcoind(_)))
                 }) {
-                    setting_panels.push(
-                        coincube_ui::component::button::transparent(
-                            None,
-                            if self.node_advanced {
-                                "Hide advanced node settings"
-                            } else {
-                                "Advanced node settings"
-                            },
-                        )
-                        .on_press(map_node_msg(view::NodeSettingsMessage::NodeAdvancedToggled))
-                        .into(),
-                    );
+                    // The artboard's "Advanced node settings" disclosure holds
+                    // the node's own settings, Tor, resources and rescan.
+                    advanced_disclosure = true;
+                    setting_panels.push(crate::app::view::settings::page::disclosure(
+                        "tenshu.settings.node.advanced",
+                        "Advanced node settings",
+                        None,
+                        self.node_advanced,
+                        map_node_msg(view::NodeSettingsMessage::NodeAdvancedToggled),
+                    ));
                     if self.node_advanced {
-                        setting_panels.push(
+                        advanced_panels.push(
                             view::vault::settings::rolling_retention_section(
                                 &self.retention_days,
                                 &cache.node_history,
@@ -1576,10 +1576,12 @@ impl State for BitcoindSettingsState {
                     }
                 }
             }
+            // Panels below join the disclosure when there is one.
+            let mut node_panels = Vec::new();
 
             if self.bitcoind_settings.is_some() || self.electrum_settings.is_some() {
                 if let Some(settings) = self.bitcoind_settings.as_ref() {
-                    setting_panels.push(settings.view(cache, can_edit_bitcoind_settings).map(
+                    node_panels.push(settings.view(cache, can_edit_bitcoind_settings).map(
                         move |msg| {
                             view::Message::Settings(view::SettingsMessage::BitcoindSettings(msg))
                         },
@@ -1599,18 +1601,15 @@ impl State for BitcoindSettingsState {
                         Some(BitcoinBackend::Bitcoind(_))
                     )
                 {
-                    setting_panels.push(
-                        view::vault::settings::inbound_tor_section(
-                            self.inbound_tor_pref.enabled,
-                            self.inbound_tor_pref.outbound_via_tor,
-                            self.inbound_tor_pref.max_upload_target_mb_day.is_some(),
-                            crate::node::tor::managed_tor_ports().is_some(),
-                            crate::node::tor::onion_key_exists(&cache.datadir_path, cache.network),
-                            crate::node::bitcoind::tor_supported_on_host(),
-                            cache.node_net_stats.as_ref(),
-                        )
-                        .map(map_node_msg),
-                    );
+                    node_panels.push(view::vault::settings::inbound_tor_section(
+                        self.inbound_tor_pref.enabled,
+                        self.inbound_tor_pref.outbound_via_tor,
+                        self.inbound_tor_pref.max_upload_target_mb_day.is_some(),
+                        crate::node::tor::managed_tor_ports().is_some(),
+                        crate::node::tor::onion_key_exists(&cache.datadir_path, cache.network),
+                        crate::node::bitcoind::tor_supported_on_host(),
+                        cache.node_net_stats.as_ref(),
+                    ));
                 }
 
                 // "Node resources": prune target + mempool cap for the internal
@@ -1629,14 +1628,11 @@ impl State for BitcoindSettingsState {
                         Some(BitcoinBackend::Bitcoind(_))
                     )
                 {
-                    setting_panels.push(
-                        view::vault::settings::node_resources_section(
-                            &self.node_prune_mb,
-                            &self.node_max_mempool_mb,
-                            false,
-                        )
-                        .map(map_node_msg),
-                    );
+                    node_panels.push(view::vault::settings::node_resources_section(
+                        &self.node_prune_mb,
+                        &self.node_max_mempool_mb,
+                        false,
+                    ));
                 }
 
                 // "Your own Esplora": only meaningful when the chain source
@@ -1650,7 +1646,7 @@ impl State for BitcoindSettingsState {
                         Some(BitcoinBackend::Esplora(_))
                     )
                 {
-                    setting_panels.push(
+                    node_panels.push(
                         view::vault::settings::custom_esplora_section(
                             &self.custom_esplora_url,
                             self.custom_esplora_probing,
@@ -1661,20 +1657,30 @@ impl State for BitcoindSettingsState {
                 }
 
                 if let Some(settings) = self.electrum_settings.as_ref() {
-                    setting_panels.push(settings.view(cache, can_edit_electrum_settings).map(
+                    node_panels.push(settings.view(cache, can_edit_electrum_settings).map(
                         move |msg| {
                             view::Message::Settings(view::SettingsMessage::ElectrumSettings(msg))
                         },
                     ));
                 }
             }
-            setting_panels.push(
+            node_panels.push(
                 self.rescan_settings
                     .view(cache, can_do_rescan)
                     .map(move |msg| {
                         view::Message::Settings(view::SettingsMessage::RescanSettings(msg))
                     }),
             );
+            if advanced_disclosure {
+                if self.node_advanced {
+                    advanced_panels.extend(node_panels);
+                    setting_panels.push(crate::app::view::settings::page::disclosure_body(
+                        advanced_panels,
+                    ));
+                }
+            } else {
+                setting_panels.extend(node_panels);
+            }
             setting_panels
         });
 

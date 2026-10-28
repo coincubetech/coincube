@@ -97,6 +97,7 @@ pub fn spend_view<'a>(
                 saved,
                 replay,
                 broadcast_ready,
+                !mcp_review,
             ))
             .push(
                 Column::new()
@@ -146,10 +147,19 @@ pub fn spend_view<'a>(
                     )
                     .push(Space::new().width(Length::Fill))
                     .push(
-                        button::secondary(None, "Save")
-                            .width(Length::Fixed(150.0))
+                        button::secondary(None, if mcp_review { "Sign in Tenshu" } else { "Save" })
+                            .width(Length::Fixed(if mcp_review { 180.0 } else { 150.0 }))
                             .on_press_maybe(if currently_signing {
                                 None
+                            } else if mcp_review {
+                                #[cfg(feature = "mcp-transactions")]
+                                {
+                                    Some(Message::Spend(SpendTxMessage::ContinueNativeSigning))
+                                }
+                                #[cfg(not(feature = "mcp-transactions"))]
+                                {
+                                    None
+                                }
                             } else {
                                 Some(Message::Spend(SpendTxMessage::Save))
                             }),
@@ -211,7 +221,7 @@ where
             .size(20),
         )
         .push(iced::widget::text(
-            "MCP cannot sign or broadcast this transaction.",
+            "This screen cannot sign or broadcast yet. Choose Sign in Tenshu to open the ordinary signing controls. A successful preparation may already have reserved a change address.",
         ))
         .push(iced::widget::text(format!(
             "Payment total: {} sats",
@@ -926,7 +936,7 @@ pub fn create_spend_tx<'a>(
                 .push(balance_context)
                 .push(compose_card),
         )
-        .center_x(Length::Fill),
+        .width(Length::Fill),
     )
 }
 

@@ -360,6 +360,9 @@ pub enum ImportSpendMessage {
 pub enum SpendTxMessage {
     Delete,
     Sign,
+    /// Leave the view-only MCP review and show the ordinary save and sign controls.
+    #[cfg(feature = "mcp-transactions")]
+    ContinueNativeSigning,
     /// Request a Keychain signature from one specific signer, chosen from
     /// the unified signing picker. Carries the descriptor fingerprint of
     /// the keychain signer to address. Creates just that signer's
@@ -485,7 +488,15 @@ pub enum SettingsMessage {
     WalletAliasEdited(String),
     Save,
     GeneralSection,
+    /// The inline Cube name field on Display & appearance changed.
+    CubeNameEdited(String),
+    /// Save the Cube name typed on Display & appearance (Return or leaving
+    /// the field). The App writes it locally, then to Connect.
+    CubeNameSubmitted(String),
     PaymentChecksSection,
+    /// Ask before turning recipient checks off (Payment checks).
+    AskRecipientChecksOff,
+    CancelRecipientChecksOff,
     /// Install the Recovery settings section (backup + Recovery Kit + alerts).
     RecoverySection,
     DisplayUnitChanged(BitcoinDisplayUnit),
@@ -520,6 +531,8 @@ pub enum SettingsMessage {
 /// these messages. `Debug` is derived.
 #[derive(Debug, Clone)]
 pub enum RecoveryAlertsMessage {
+    /// Open or close the alerts controls under the Recovery alerts row.
+    ToggleManage,
     /// Fetch the vault's monitoring status (resolves the Connect vault id,
     /// then GETs `/vaults/{id}/monitoring`). Fired on entering General
     /// settings and after a successful change.
@@ -2339,6 +2352,8 @@ pub enum HomeMessage {
     /// Commit a wallet selection from the popup; the state layer applies it to
     /// the side currently being edited and recomputes `transfer_direction`.
     SelectWalletInPicker(WalletKind),
+    /// Choose a source or destination directly from the Transfer form.
+    SelectTransferWallet(PickerSide, WalletKind),
     AmountEdited(String),
     NextStep,
     PreviousStep,

@@ -466,12 +466,12 @@ pub fn liquid_receive_view<'a>(
             )
             .push(
                 Container::new(Container::new(body).width(Length::Fill).max_width(960.0))
-                    .center_x(Length::Fill),
+                    .width(Length::Fill),
             )
             .into()
     } else {
         Container::new(Container::new(body).width(Length::Fill).max_width(960.0))
-            .center_x(Length::Fill)
+            .width(Length::Fill)
             .into()
     }
 }

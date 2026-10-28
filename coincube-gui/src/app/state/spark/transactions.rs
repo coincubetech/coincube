@@ -438,6 +438,7 @@ mod tests {
             },
             method: "lightning".to_string(),
             description: Some(format!("payment {id}")),
+            details: Default::default(),
         }
     }
 

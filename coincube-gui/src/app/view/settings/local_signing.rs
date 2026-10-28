@@ -1,21 +1,33 @@
-//! View for the "Paired phones" / local LAN signer settings section.
+//! View for Vault → Settings → Pair with Keychain: the key the phone will
+//! hold, the pairing steps, and the phones already paired.
 
 use iced::widget::{
     qr_code::{self, QRCode},
-    text_input, Column, Container, Row, Space,
+    Column, Container, Row, Space,
 };
-use iced::{Alignment, Font, Length};
+use iced::{Alignment, Length};
 
-use coincube_ui::component::{badge, button, card, separation, text::*};
+use coincube_ui::component::tenshu::{self, radio_list, segment, FieldSize, Tone};
+use coincube_ui::component::text::*;
 use coincube_ui::widget::Element;
-use coincube_ui::{icon, theme};
 
 use crate::app::cache;
-use crate::app::menu::Menu;
+use crate::app::menu::{Menu, SettingsOption, VaultSubMenu};
 use crate::app::state::settings::local_signing::{LocalSigningState, PairableKey, PairingFlow};
 use crate::app::view::dashboard;
 use crate::app::view::message::{LocalSigningMessage, Message, SettingsMessage};
+use crate::app::view::settings::page;
 use crate::phone_signer::errors::PairingError;
+
+fn local(message: LocalSigningMessage) -> Message {
+    Message::Settings(SettingsMessage::LocalSigning(message))
+}
+
+const PAIR_ID: &str = "tenshu.settings.pair.start";
+const PAIR_CANCEL_ID: &str = "tenshu.settings.pair.cancel";
+const PAIR_RETRY_ID: &str = "tenshu.settings.pair.retry";
+const RENAME_KEYS_ID: &str = "tenshu.settings.pair.rename-keys";
+const DETAILS_ID: &str = "tenshu.settings.pair.details";
 
 pub fn section<'a>(
     menu: &'a Menu,
@@ -23,134 +35,89 @@ pub fn section<'a>(
     state: &'a LocalSigningState,
 ) -> Element<'a, Message> {
     let mut col = Column::new()
-        .spacing(20)
-        .push(super::header(
-            "Pair with Keychain",
-            SettingsMessage::LocalSigningSection,
-        ))
-        .push(text(
-            "Select a Keychain key held by the phone, then pair over the same Wi-Fi. Local phone signing does not require a Connect account.",
-        ))
-        .push(pairing_card(state))
-        .push(paired_phones_card(state))
-        .width(Length::Fill);
+        .width(Length::Fill)
+        .push(key_group(state))
+        .push(pair_group(state))
+        .push(paired_phones_group(state));
 
     if !matches!(state.flow, PairingFlow::Waiting { .. }) {
         if let Some(fp) = state.wallet_fingerprint {
-            col = col.push(
-                text(format!(
-                    "Phones paired through this panel will sign for this vault \
-                     (id {}). This identifier is derived from the vault \
-                     descriptor and is distinct from any individual signer's \
-                     master fingerprint.",
-                    fp
-                ))
-                .style(theme::text::secondary),
-            );
+            col = col.push(page::caption(format!(
+                "Phones paired here sign for this Vault (id {}). This identifier is derived \
+                 from the Vault descriptor and is distinct from any signer's master fingerprint.",
+                fp
+            )));
         }
     }
 
     dashboard(menu, cache, col)
 }
 
-fn pairing_card<'a>(state: &'a LocalSigningState) -> Element<'a, Message> {
-    let header = Row::new()
-        .push(badge::badge(icon::tooltip_icon()))
-        .push(text("Pair a phone").bold())
-        .padding(10)
-        .spacing(20)
-        .align_y(Alignment::Center)
-        .width(Length::Fill);
-
-    let body: Element<'a, Message> = match &state.flow {
-        PairingFlow::Idle => idle_body(state),
-        PairingFlow::PhonePicker { discovered } => picker_body(discovered),
-        PairingFlow::Waiting { phone, offer, qr } => waiting_body(phone, offer, qr.as_ref()),
-        PairingFlow::Error(e) => error_body(e),
-    };
-
-    card::simple(
-        Column::new()
-            .push(header)
-            .push(separation().width(Length::Fill))
-            .push(Space::new().height(Length::Fixed(10.0)))
-            .push(body),
-    )
-    .into()
-}
-
-fn idle_body<'a>(state: &'a LocalSigningState) -> Element<'a, Message> {
-    let intro = text("Choose the key the phone will hold:");
+/// "Key for the phone": the Vault's Keychain keys as radio rows.
+fn key_group<'a>(state: &'a LocalSigningState) -> Element<'a, Message> {
     if state.keychain_keys_recorded && state.vault_keys.is_empty() {
-        return Column::new()
-            .padding(10)
-            .spacing(8)
-            .push(no_keychain_keys())
-            .into();
+        return page::group(
+            "Key for the phone",
+            None,
+            page::rows([page::row("No Keychain keys to pair")
+                .description(
+                    "This Vault doesn't have a key from the COINCUBE Keychain app, so there's \
+                     no phone that can sign for it. Keychain keys are added when you create a Vault.",
+                )
+                .into()]),
+        );
     }
-
-    let mut pair_btn = button::secondary(None, "Pair phone");
-    if state.wallet_fingerprint.is_some() && state.selected_key.is_some() {
-        pair_btn = pair_btn.on_press(Message::Settings(SettingsMessage::LocalSigning(
-            LocalSigningMessage::StartPairing,
-        )));
-    }
-    let prompt = if state.vault_keys.len() == 1 {
-        "The Keychain key this phone will sign for:"
-    } else {
-        "Select the key held by this phone:"
-    };
-    let mut keys = Column::new().spacing(8).push(text(prompt));
-    for key in &state.vault_keys {
-        keys = keys.push(key_row(
-            key,
-            state.selected_key.as_ref() == Some(&key.xpub),
-            state.show_key_details,
-        ));
-    }
-    let details = button::link(
-        None,
-        if state.show_key_details {
-            "Hide key details"
-        } else {
-            "Show key details"
-        },
-    )
-    .on_press(Message::Settings(SettingsMessage::LocalSigning(
-        LocalSigningMessage::ToggleKeyDetails,
-    )));
-    Column::new()
-        .padding(10)
-        .spacing(8)
-        .push(intro)
-        .push(keys)
-        .push(details)
-        .push(text(
-            "How pairing works · The desktop and phone exchange a short-lived offer on the same Wi-Fi. Pairing does not move a key to the phone.",
-        ).style(theme::text::secondary))
-        .push(
-            text("Key names can be changed in Vault → Settings → Wallet & signers.")
-                .style(theme::text::secondary),
-        )
-        .push(pair_btn)
-        .into()
-}
-
-/// The Vault has no key from the Keychain app, so no phone holds a key it
-/// could sign with. Says so instead of offering a pairing that must fail.
-fn no_keychain_keys<'a>() -> Element<'a, Message> {
-    Column::new()
-        .spacing(4)
-        .push(text("No Keychain keys to pair").bold())
-        .push(
-            text(
-                "This Vault doesn't have a key from the COINCUBE Keychain \
-                 app, so there's no phone that can sign for it. Keychain \
-                 keys are added when you create a Vault.",
+    let selected = state
+        .vault_keys
+        .iter()
+        .position(|key| state.selected_key.as_ref() == Some(&key.xpub));
+    let xpubs: Vec<String> = state.vault_keys.iter().map(|k| k.xpub.clone()).collect();
+    let keys = radio_list(
+        state.vault_keys.iter().enumerate().map(|(index, key)| {
+            let mut detail = key_subtitle(key).unwrap_or_default();
+            if state.show_key_details {
+                detail = format!("{}\n{}", detail, key.descriptor_key);
+            }
+            segment(
+                iced::advanced::widget::Id::from(format!("tenshu.settings.pair.key.{}", index)),
+                index,
+                key_title(key),
             )
-            .style(theme::text::secondary),
-        )
-        .into()
+            .description(detail)
+        }),
+        selected,
+        Message::FocusAction,
+    )
+    .on_select(move |index| local(LocalSigningMessage::SelectKey(xpubs[index].clone())));
+    let content = Column::new()
+        .width(Length::Fill)
+        .push(keys)
+        .push(page::rule())
+        .push(Space::new().height(Length::Fixed(8.0)))
+        .push(
+            Row::new()
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .push(page::muted("Rename keys in"))
+                .push(page::link(
+                    RENAME_KEYS_ID,
+                    "Wallet & signers",
+                    Message::Menu(Menu::Vault(VaultSubMenu::Settings(Some(
+                        SettingsOption::Wallet,
+                    )))),
+                ))
+                .push(Space::new().width(Length::Fill))
+                .push(page::link(
+                    DETAILS_ID,
+                    if state.show_key_details {
+                        "Hide key details"
+                    } else {
+                        "Show key details"
+                    },
+                    local(LocalSigningMessage::ToggleKeyDetails),
+                )),
+        );
+    page::group("Key for the phone", None, content)
 }
 
 /// A key's display name: the name the user gave it, else a generic label
@@ -175,64 +142,55 @@ fn key_subtitle(key: &PairableKey) -> Option<String> {
     }
 }
 
-fn key_row<'a>(key: &'a PairableKey, selected: bool, show_details: bool) -> Element<'a, Message> {
-    let mut content = Column::new()
-        .spacing(2)
-        .width(Length::Fill)
-        .push(text(key_title(key)).bold());
-    if let Some(subtitle) = key_subtitle(key) {
-        content = content.push(text(subtitle).style(theme::text::secondary));
-    }
-    if show_details {
-        content = content.push(
-            text(&key.descriptor_key)
-                .font(Font::MONOSPACE)
-                .size(12)
-                .style(theme::text::secondary)
-                .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
-        );
-    }
-    let mut row = Row::new()
-        .spacing(12)
-        .align_y(Alignment::Center)
-        .push(content);
-    if selected {
-        row = row.push(
-            Row::new()
-                .spacing(6)
-                .align_y(Alignment::Center)
-                .push(icon::check_icon())
-                .push(text("Selected")),
-        );
-    }
-    // The button styles are fully rounded, so the text needs room to clear
-    // the corners. The orange outline marks the choice, as it does for the
-    // fee presets on the Send screen.
-    iced::widget::Button::new(row)
-        .width(Length::Fill)
-        .padding([12, 20])
-        .style(if selected {
-            theme::button::orange_outline
-        } else {
-            theme::button::secondary
-        })
-        .on_press(Message::Settings(SettingsMessage::LocalSigning(
-            LocalSigningMessage::SelectKey(key.xpub.clone()),
-        )))
-        .into()
+/// "Pair a phone": the current pairing step.
+fn pair_group<'a>(state: &'a LocalSigningState) -> Element<'a, Message> {
+    let body: Element<'a, Message> = match &state.flow {
+        PairingFlow::Idle => idle_body(state),
+        PairingFlow::PhonePicker { discovered } => picker_body(discovered),
+        PairingFlow::Waiting { phone, offer, qr } => waiting_body(phone, offer, qr.as_ref()),
+        PairingFlow::Error(e) => error_body(e),
+    };
+    page::group(
+        "Pair a phone",
+        Some(
+            "Same Wi-Fi. No Connect account needed. Pairing does not move a key to the phone."
+                .into(),
+        ),
+        body,
+    )
 }
 
-/// Leaves the pairing steps for key selection, keeping the chosen key.
-/// Every step past key selection starts with it, so there is always a way
-/// back, including from an error that can't be retried. Fixed width as on
-/// the SideShift screens: `button::secondary` otherwise fills the card.
-fn back_button<'a>() -> Element<'a, Message> {
-    button::secondary(Some(icon::previous_icon()), "Back")
-        .width(Length::Fixed(150.0))
-        .on_press(Message::Settings(SettingsMessage::LocalSigning(
-            LocalSigningMessage::CancelPairing,
-        )))
-        .into()
+fn idle_body<'a>(state: &'a LocalSigningState) -> Element<'a, Message> {
+    if state.keychain_keys_recorded && state.vault_keys.is_empty() {
+        return page::rows([page::row("")
+            .line(page::status(
+                page::Status::Off,
+                "No Keychain-eligible key in this Vault",
+            ))
+            .control(page::button(PAIR_ID, "Pair phone", None))
+            .into()]);
+    }
+    let ready = state.wallet_fingerprint.is_some() && state.selected_key.is_some();
+    let hint = if state.selected_key.is_none() {
+        "Select a key above, then open Keychain on the phone."
+    } else {
+        "Open Keychain on the phone first."
+    };
+    page::rows([page::row(hint)
+        .control(page::primary(
+            PAIR_ID,
+            "Pair phone",
+            ready.then(|| local(LocalSigningMessage::StartPairing)),
+        ))
+        .into()])
+}
+
+fn cancel<'a>(label: &'static str) -> Element<'a, Message> {
+    page::button(
+        PAIR_CANCEL_ID,
+        label,
+        Some(local(LocalSigningMessage::CancelPairing)),
+    )
 }
 
 fn waiting_body<'a>(
@@ -241,91 +199,95 @@ fn waiting_body<'a>(
     qr: Option<&'a qr_code::Data>,
 ) -> Element<'a, Message> {
     let remaining = crate::phone_signer::pairing::seconds_remaining(offer);
-    let countdown = if remaining > 0 {
-        format!("Waiting for {} — expires in {}s", phone.cert_fp8, remaining)
-    } else {
-        "Pairing offer expired.".to_string()
-    };
-
-    let countdown_label = if remaining > 0 {
-        text(countdown).style(theme::text::secondary)
-    } else {
-        text(countdown).style(theme::text::error)
-    };
-    let scan_guidance = if remaining > 0 {
-        format!(
-            "Scan this QR with the Keychain app on phone {} ({}).",
-            phone.cert_fp8, phone.addr
-        )
-    } else {
-        "This offer can no longer be scanned. Go Back and start a fresh pairing offer.".to_string()
-    };
-    let mut offer_col = Column::new()
-        .spacing(10)
-        .align_x(Alignment::Center)
-        .push(text("Scan with the selected Keychain phone").bold())
-        .push(countdown_label)
-        .push(text(scan_guidance))
-        .push(
-            text("The phone and Tenshu verify pairing automatically. Pairing does not transfer a private key from this computer.")
-                .style(theme::text::secondary),
-        );
+    let mut info = Column::new()
+        .spacing(4)
+        .width(Length::Fill)
+        .push(tenshu::label(format!("Scan with Keychain on phone {}", phone.cert_fp8)))
+        .push(page::muted(if remaining > 0 {
+            format!(
+                "Phone at {}. The phone and Tenshu verify pairing automatically; no private key leaves this computer.",
+                phone.addr
+            )
+        } else {
+            "This offer can no longer be scanned. Start a fresh pairing offer.".to_string()
+        }))
+        .push(Space::new().height(Length::Fixed(6.0)))
+        .push(if remaining > 0 {
+            page::status(
+                page::Status::Busy,
+                format!("Waiting · expires in {}s", remaining),
+            )
+        } else {
+            page::status(page::Status::Bad, "Pairing offer expired")
+        })
+        .push(Space::new().height(Length::Fixed(6.0)))
+        .push(cancel("Cancel pairing"));
+    let mut row = Row::new().spacing(24).align_y(Alignment::Start);
     if let Some(qr) = qr.filter(|_| remaining > 0) {
-        offer_col = offer_col.push(
-            Container::new(QRCode::<coincube_ui::theme::Theme>::new(qr).cell_size(4)).padding(10),
+        row = row.push(
+            Container::new(QRCode::<coincube_ui::theme::Theme>::new(qr).cell_size(4))
+                .padding(8)
+                .style(|_| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(iced::Color::WHITE)),
+                    border: iced::Border {
+                        radius: 8.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
         );
     }
-    Column::new()
-        .padding(10)
-        .spacing(10)
-        .push(back_button())
-        .push(offer_col)
-        .into()
+    info = info.width(Length::Fill);
+    page::rows([
+        Container::new(row.push(info))
+            .padding([16, 0])
+            .width(Length::Fill)
+            .into(),
+        page::rule(),
+    ])
 }
 
 fn picker_body<'a>(
     discovered: &'a [crate::phone_signer::mdns::DiscoveredPhone],
 ) -> Element<'a, Message> {
-    if discovered.is_empty() {
-        return Column::new()
-            .padding(10)
-            .spacing(8)
-            .push(back_button())
-            .push(text("Looking for phones…").bold())
-            .push(text(
-                "No phones found on this Wi-Fi yet. Open the Keychain \
-                 app on a phone on the same network and make sure it's \
-                 unlocked, then wait a few seconds.",
-            ))
-            .into();
-    }
-    let mut col = Column::new()
-        .padding(10)
-        .spacing(8)
-        .push(back_button())
-        .push(text("Pick a phone to pair with").bold())
-        .push(text(
-            "These are the Keychain phones currently advertising on \
-             this Wi-Fi. The list refreshes every second.",
-        ));
-    for d in discovered {
+    let mut rows: Vec<Element<'a, Message>> = Vec::new();
+    for (i, d) in discovered.iter().enumerate() {
         let fp8 = d.cert_fp8.clone();
-        let row = Row::new()
-            .padding([6, 0])
-            .spacing(12)
-            .align_y(Alignment::Center)
-            .push(
-                Column::new()
-                    .push(text(format!("Phone {}", d.cert_fp8)).bold())
-                    .push(text(format!("{}", d.addr)).style(theme::text::secondary))
-                    .width(Length::FillPortion(3)),
-            )
-            .push(button::secondary(None, "Pair").on_press(Message::Settings(
-                SettingsMessage::LocalSigning(LocalSigningMessage::PickPhone(fp8)),
-            )));
-        col = col.push(row);
+        let press = Some(local(LocalSigningMessage::PickPhone(fp8)));
+        let id =
+            iced::advanced::widget::Id::from(format!("tenshu.settings.pair.phone.{}", d.cert_fp8));
+        rows.push(
+            page::row(format!("Phone {}", d.cert_fp8))
+                .description(d.addr.to_string())
+                .control(if i == 0 {
+                    page::primary(id, "Pair", press)
+                } else {
+                    page::button(id, "Pair", press)
+                })
+                .into(),
+        );
     }
-    col.into()
+    Column::new()
+        .width(Length::Fill)
+        .push(page::status(page::Status::Busy, "Looking for phones on this Wi-Fi…"))
+        .push(Space::new().height(Length::Fixed(12.0)))
+        .push(page::rows(rows))
+        .push(Space::new().height(Length::Fixed(12.0)))
+        .push(
+            Row::new()
+                .spacing(16)
+                .align_y(Alignment::Center)
+                .push(
+                    Container::new(page::muted(if discovered.is_empty() {
+                        "No phones yet. Open Keychain on a phone on the same network and keep it unlocked."
+                    } else {
+                        "Not listed? Check both are on the same Wi-Fi."
+                    }))
+                    .width(Length::Fill),
+                )
+                .push(cancel("Cancel")),
+        )
+        .into()
 }
 
 fn error_body<'a>(err: &'a PairingError) -> Element<'a, Message> {
@@ -382,37 +344,31 @@ fn error_body<'a>(err: &'a PairingError) -> Element<'a, Message> {
         ),
         PairingError::InternalError(s) => ("Pairing failed", s.clone()),
     };
-
-    let mut col = Column::new()
-        .padding(10)
-        .spacing(8)
-        .push(back_button())
-        .push(text(title).bold().style(theme::text::error))
-        .push(text(body).style(theme::text::error));
+    let mut actions = Row::new().spacing(8);
     if err.is_retriable() {
-        col = col.push(
-            button::secondary(None, "Try again").on_press(Message::Settings(
-                SettingsMessage::LocalSigning(LocalSigningMessage::StartPairing),
-            )),
-        );
+        actions = actions.push(page::primary(
+            PAIR_RETRY_ID,
+            "Try again",
+            Some(local(LocalSigningMessage::StartPairing)),
+        ));
     }
-    col.into()
+    actions = actions.push(cancel("Cancel"));
+    page::note(
+        Tone::Bad,
+        Column::new()
+            .spacing(2)
+            .push(text(title).size(13).bold())
+            .push(page::muted(body)),
+        Some(actions.into()),
+    )
 }
 
-fn paired_phones_card<'a>(state: &'a LocalSigningState) -> Element<'a, Message> {
-    let header = Row::new()
-        .push(badge::badge(icon::tooltip_icon()))
-        .push(text("Paired phones").bold())
-        .padding(10)
-        .spacing(20)
-        .align_y(Alignment::Center)
-        .width(Length::Fill);
-
+/// "Paired phones": each phone paired with this Vault, its binding status,
+/// name, fallback address and removal.
+fn paired_phones_group<'a>(state: &'a LocalSigningState) -> Element<'a, Message> {
     // Pairing is vault-scoped: only list phones paired with the
     // currently-loaded vault, so this list agrees with the pairing
-    // card's "will sign for this vault" copy and the hw refresh loop's
-    // scoping. A phone paired for another vault is managed from that
-    // vault's panel.
+    // group's "sign for this Vault" copy and the hw refresh loop's scoping.
     let phones_for_vault: Vec<&crate::phone_signer::pairing_store::PairedPhone> =
         match state.wallet_fingerprint {
             Some(vid) => state
@@ -424,165 +380,151 @@ fn paired_phones_card<'a>(state: &'a LocalSigningState) -> Element<'a, Message> 
             None => Vec::new(),
         };
 
-    let body: Element<'a, Message> = if phones_for_vault.is_empty() {
-        text(
-            "No paired phones for this vault yet. Use 'Pair phone' \
-             above to add one. Paired phones appear as a signer \
-             whenever they're reachable on your Wi-Fi.",
-        )
-        .style(theme::text::secondary)
-        .into()
-    } else {
-        let mut rows = Column::new().padding(10).spacing(10);
-        for p in phones_for_vault {
-            let fp8 = crate::phone_signer::identity::pin_hex8(&p.cert_pin);
-            let draft = state.row_drafts.get(&fp8);
-            let name_value = draft.map(|d| d.name.as_str()).unwrap_or(&p.name);
-            let fallback_value = draft
-                .map(|d| d.fallback.as_str())
-                .unwrap_or_else(|| p.fallback_addr.as_deref().unwrap_or(""));
-            let fp8_for_name = fp8.clone();
-            let fp8_for_fb = fp8.clone();
-            let fp8_for_save = fp8.clone();
-            // Must be the same predicate signing and the hw refresh loop
-            // apply. Matching only `descriptor_sha256` here would report
-            // "Exact vault key paired" for a phone whose binding fails on
-            // key id, vault id, or key membership — a healthy row the user
-            // then can't sign with.
-            let has_full_binding = p
-                .signer_binding
-                .as_ref()
-                .is_some_and(|binding| binding.descriptor_sha256.len() == 32);
-            let removable = p.signer_binding.as_ref().is_some_and(|binding| {
-                binding.descriptor_sha256.len() == 32
-                    && hex::encode(&binding.descriptor_sha256) == state.descriptor_sha256
-            });
-            let identity_status = if p
-                .exact_signer_against(&state.descriptor_sha256, &state.vault_key_fingerprints)
-                .is_ok()
-            {
-                "Exact vault key paired"
-            } else if has_full_binding && !removable {
-                "This pairing belongs to a different Vault descriptor."
-            } else {
-                "Pair again and select the exact vault key held by this phone."
-            };
-            let mut row = Column::new()
-                .push(text(identity_status))
-                .padding([6, 0])
-                .spacing(6)
-                .push(
-                    Row::new()
-                        .spacing(8)
-                        .align_y(Alignment::Center)
-                        .push(
-                            text_input("Phone name", name_value)
-                                .on_input(move |s| {
-                                    Message::Settings(SettingsMessage::LocalSigning(
-                                        LocalSigningMessage::DraftName(fp8_for_name.clone(), s),
-                                    ))
-                                })
-                                .width(Length::FillPortion(3)),
-                        )
-                        .push(
-                            Container::new(
-                                text(fp8.clone())
-                                    .size(P2_SIZE)
-                                    .font(Font::MONOSPACE)
-                                    .style(theme::text::secondary),
-                            )
-                            .padding([2, 6])
-                            .width(Length::Shrink),
-                        ),
+    let mut rows: Vec<Element<'a, Message>> = Vec::new();
+    if phones_for_vault.is_empty() {
+        rows.push(
+            page::row("No phones paired yet.")
+                .description(
+                    "Paired phones appear as a signer whenever they're reachable on your Wi-Fi.",
                 )
-                .push(
+                .into(),
+        );
+    }
+    for p in phones_for_vault {
+        let fp8 = crate::phone_signer::identity::pin_hex8(&p.cert_pin);
+        let draft = state.row_drafts.get(&fp8);
+        let name_value = draft.map(|d| d.name.as_str()).unwrap_or(&p.name);
+        let fallback_value = draft
+            .map(|d| d.fallback.as_str())
+            .unwrap_or_else(|| p.fallback_addr.as_deref().unwrap_or(""));
+        let fp8_for_name = fp8.clone();
+        let fp8_for_fb = fp8.clone();
+        let fp8_for_save = fp8.clone();
+        // Must be the same predicate signing and the hw refresh loop apply.
+        let has_full_binding = p
+            .signer_binding
+            .as_ref()
+            .is_some_and(|binding| binding.descriptor_sha256.len() == 32);
+        let removable = p.signer_binding.as_ref().is_some_and(|binding| {
+            binding.descriptor_sha256.len() == 32
+                && hex::encode(&binding.descriptor_sha256) == state.descriptor_sha256
+        });
+        let exact = p
+            .exact_signer_against(&state.descriptor_sha256, &state.vault_key_fingerprints)
+            .is_ok();
+        let (kind, word, detail) = if exact {
+            (page::Status::Ok, "Paired", "Exact vault key paired.")
+        } else if has_full_binding && !removable {
+            (
+                page::Status::Warn,
+                "Other Vault",
+                "This pairing belongs to a different Vault descriptor. Open that Vault to remove it.",
+            )
+        } else {
+            (
+                page::Status::Warn,
+                "Pair again",
+                "Pair again and select the exact vault key held by this phone. If the phone is lost, a separate recovery flow is needed.",
+            )
+        };
+        rows.push(
+            page::row(if p.name.is_empty() {
+                "Phone"
+            } else {
+                p.name.as_str()
+            })
+            .accessory(page::status(kind, word))
+            .line(tenshu::mono(fp8.clone()))
+            .description(detail)
+            .control(page::button(
+                iced::advanced::widget::Id::from(format!("tenshu.settings.pair.{}.unpair", fp8)),
+                "Unpair…",
+                removable.then(|| local(LocalSigningMessage::ReviewRemovePhone(fp8.clone()))),
+            ))
+            .into(),
+        );
+        let field = |id: String, label: &'static str, value: &'a str| {
+            tenshu::text_field(
+                iced::advanced::widget::Id::from(id),
+                label,
+                value,
+                Message::FocusAction,
+            )
+            .size(FieldSize::Compact)
+            .width(Length::Fill)
+        };
+        let edit = Row::new()
+            .spacing(12)
+            .align_y(Alignment::End)
+            .push(
+                field(
+                    format!("tenshu.settings.pair.{}.name", fp8),
+                    "Phone name",
+                    name_value,
+                )
+                .on_input(move |s| local(LocalSigningMessage::DraftName(fp8_for_name.clone(), s))),
+            )
+            .push(
+                field(
+                    format!("tenshu.settings.pair.{}.fallback", fp8),
+                    "Fallback host:port",
+                    fallback_value,
+                )
+                .placeholder("For networks that block mDNS")
+                .on_input(move |s| {
+                    local(LocalSigningMessage::DraftFallback(fp8_for_fb.clone(), s))
+                }),
+            )
+            .push(page::button(
+                iced::advanced::widget::Id::from(format!("tenshu.settings.pair.{}.save", fp8)),
+                "Save",
+                Some(local(LocalSigningMessage::SaveRow(fp8_for_save))),
+            ));
+        let mut detail_col = Column::new().spacing(10).push(edit);
+        if state.pending_remove_phone.as_deref() == Some(fp8.as_str()) {
+            detail_col = detail_col.push(page::note(
+                Tone::Bad,
+                Column::new()
+                    .spacing(2)
+                    .push(text("Remove this local pairing?").size(13).bold())
+                    .push(page::muted(
+                        "This removes the phone from this desktop's paired list and tries to notify it if reachable. It does not delete the key held on the phone or prove remote removal.",
+                    )),
+                Some(
                     Row::new()
                         .spacing(8)
-                        .align_y(Alignment::Center)
-                        .push(
-                            text_input(
-                                "Fallback host:port (mDNS-blocked networks)",
-                                fallback_value,
-                            )
-                            .on_input(move |s| {
-                                Message::Settings(SettingsMessage::LocalSigning(
-                                    LocalSigningMessage::DraftFallback(fp8_for_fb.clone(), s),
-                                ))
-                            })
-                            .width(Length::FillPortion(3)),
-                        )
-                        .push(
-                            button::secondary(None, "Save")
-                                .on_press(Message::Settings(SettingsMessage::LocalSigning(
-                                    LocalSigningMessage::SaveRow(fp8_for_save),
-                                )))
-                                .width(Length::Shrink),
-                        )
-                        .push(
-                            button::secondary(None, "Review removal…")
-                                .on_press_maybe(removable.then(|| {
-                                    Message::Settings(SettingsMessage::LocalSigning(
-                                        LocalSigningMessage::ReviewRemovePhone(fp8.clone()),
-                                    ))
-                                }))
-                                .width(Length::Shrink),
-                        ),
-                );
-            if !removable {
-                let removal_copy = if has_full_binding {
-                    "Open the Vault this phone was paired with to remove it. If that Vault is unavailable, a separate recovery flow is needed."
-                } else {
-                    "This older pairing has no verified Vault identity. Re-pair the phone before removing it. If the phone is lost, a separate recovery flow is needed."
-                };
-                row = row.push(text(removal_copy).style(theme::text::secondary));
-            }
-            if state.pending_remove_phone.as_deref() == Some(fp8.as_str()) {
-                row = row.push(
-                    Column::new()
-                        .spacing(8)
-                        .push(text("Remove this local pairing?").bold())
-                        .push(text(
-                            "This removes the phone from this desktop's paired list and tries to notify it if reachable. It does not delete the key held on the phone or prove remote removal.",
+                        .push(page::primary(
+                            "tenshu.settings.pair.remove",
+                            "Remove local pairing",
+                            Some(local(LocalSigningMessage::RemovePhone(fp8.clone()))),
                         ))
-                        .push(
-                            Row::new()
-                                .spacing(8)
-                                .push(
-                                    button::secondary(None, "Keep phone").on_press(
-                                        Message::Settings(SettingsMessage::LocalSigning(
-                                            LocalSigningMessage::CancelRemovePhone,
-                                        )),
-                                    ),
-                                )
-                                .push(
-                                    button::primary(None, "Remove local pairing").on_press(
-                                        Message::Settings(SettingsMessage::LocalSigning(
-                                            LocalSigningMessage::RemovePhone(fp8.clone()),
-                                        )),
-                                    ),
-                                ),
-                        ),
-                );
-            }
-            rows = rows.push(row);
-            rows = rows.push(separation().width(Length::Fill));
+                        .push(page::button(
+                            "tenshu.settings.pair.keep",
+                            "Keep phone",
+                            Some(local(LocalSigningMessage::CancelRemovePhone)),
+                        ))
+                        .into(),
+                ),
+            ));
         }
-        rows.into()
-    };
+        rows.push(
+            Column::new()
+                .push(page::disclosure_body([Container::new(detail_col)
+                    .padding([12, 0])
+                    .width(Length::Fill)
+                    .into()]))
+                .push(page::rule())
+                .into(),
+        );
+    }
 
-    let notice = state.unpaired_notice.as_ref().map(|notice| {
-        Container::new(text(notice.as_str()).style(theme::text::secondary)).padding([0, 10])
-    });
-
-    card::simple(
-        Column::new()
-            .push(header)
-            .push(separation().width(Length::Fill))
-            .push(Space::new().height(Length::Fixed(10.0)))
-            .push(notice)
-            .push(body),
-    )
-    .into()
+    let mut content = Column::new().width(Length::Fill);
+    if let Some(notice) = state.unpaired_notice.as_ref() {
+        content = content
+            .push(page::note(Tone::Muted, page::muted(notice.as_str()), None))
+            .push(Space::new().height(Length::Fixed(12.0)));
+    }
+    page::group("Paired phones", None, content.push(page::rows(rows)))
 }
 
 #[cfg(test)]

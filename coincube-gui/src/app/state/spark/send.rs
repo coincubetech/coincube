@@ -3367,6 +3367,7 @@ mod tests {
             direction: direction.to_string(),
             method: "lightning".to_string(),
             description: None,
+            details: Default::default(),
         }
     }
 

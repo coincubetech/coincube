@@ -175,6 +175,8 @@ pub fn create_imported_spend(
         max_sat_weight,
         is_segwit,
         destinations.is_empty(),
+        spend::DUST_OUTPUT_SATS,
+        true,
     )
     .map_err(SpendCreationError::CoinSelection)?;
     let has_change = change_amount.to_sat() > 0;
