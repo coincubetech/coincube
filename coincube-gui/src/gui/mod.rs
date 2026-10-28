@@ -4518,6 +4518,8 @@ mod app_preferences_sheet_tests {
 
     #[test]
     fn settings_restore_intent_stays_in_cube_without_opening_account_sheet() {
+        // GUI updates reach teardown paths that close the process-global session.
+        let _guard = crate::app::session::test_guard();
         // The full GUI update path overflows libtest's 2 MiB thread on Windows
         // debug builds; give it the headroom the sibling GUI tests use.
         let result = std::thread::Builder::new()
@@ -4604,6 +4606,8 @@ mod app_preferences_sheet_tests {
     /// (`.tbtn.on`) only while the sheet is open over that Launcher.
     #[test]
     fn launcher_entry_shows_open_preferences_sheet() {
+        // GUI updates reach teardown paths that close the process-global session.
+        let _guard = crate::app::session::test_guard();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -4645,6 +4649,8 @@ mod app_preferences_sheet_tests {
 
     #[test]
     fn background_refresh_does_not_move_preferences_or_disable_controls() {
+        // GUI updates reach teardown paths that close the process-global session.
+        let _guard = crate::app::session::test_guard();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -4771,6 +4777,8 @@ mod app_preferences_sheet_tests {
 
     #[test]
     fn launcher_sheet_keeps_its_tab_and_routes_a_device_change() {
+        // GUI updates reach teardown paths that close the process-global session.
+        let _guard = crate::app::session::test_guard();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -4811,6 +4819,8 @@ mod app_preferences_sheet_tests {
 
     #[test]
     fn connect_sheet_keeps_launcher_origin_and_closes_on_escape() {
+        // GUI updates reach teardown paths that close the process-global session.
+        let _guard = crate::app::session::test_guard();
         // Measured at about 2 MiB of stack in debug builds; keep Windows headroom.
         let result = std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
@@ -4890,6 +4900,8 @@ mod app_preferences_sheet_tests {
 
     #[test]
     fn stale_connect_sheet_discards_queued_account_action() {
+        // GUI updates reach teardown paths that close the process-global session.
+        let _guard = crate::app::session::test_guard();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -4929,6 +4941,8 @@ mod app_preferences_sheet_tests {
 
     #[test]
     fn connect_sheet_plan_cta_and_sections_use_existing_account_loaders() {
+        // GUI updates reach teardown paths that close the process-global session.
+        let _guard = crate::app::session::test_guard();
         // Measured at about 2 MiB of stack in debug builds; keep Windows headroom.
         let result = std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
@@ -5021,6 +5035,8 @@ mod app_preferences_sheet_tests {
 
     #[test]
     fn home_overlay_and_queued_intent_expire_when_unlock_replaces_home() {
+        // GUI updates reach teardown paths that close the process-global session.
+        let _guard = crate::app::session::test_guard();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -5066,6 +5082,8 @@ mod app_preferences_sheet_tests {
 
     #[test]
     fn ordinary_refresh_and_display_edits_preserve_home_split_flow() {
+        // GUI updates reach teardown paths that close the process-global session.
+        let _guard = crate::app::session::test_guard();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -5180,6 +5198,8 @@ mod fork_auth_dispatch_tests {
 
     #[test]
     fn new_home_reuses_connect_client_while_sibling_is_being_admitted() {
+        // GUI updates reach teardown paths that close the process-global session.
+        let _guard = crate::app::session::test_guard();
         let root_path =
             std::env::temp_dir().join(format!("connect-home-reuse-{}", uuid::Uuid::new_v4()));
         let root = CoincubeDirectory::new(root_path.clone());
@@ -5233,6 +5253,8 @@ mod fork_auth_dispatch_tests {
 
     #[test]
     fn accepted_home_login_reaches_an_already_open_fork_pin() {
+        // GUI updates reach teardown paths that close the process-global session.
+        let _guard = crate::app::session::test_guard();
         let result = std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
             .spawn(|| {
@@ -5512,6 +5534,8 @@ mod fork_auth_dispatch_tests {
 
     #[test]
     fn home_open_only_adopts_completed_scoped_identity() {
+        // GUI updates reach teardown paths that close the process-global session.
+        let _guard = crate::app::session::test_guard();
         let result = std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
             .spawn(|| {
@@ -5705,6 +5729,8 @@ mod fork_auth_dispatch_tests {
 
     #[test]
     fn shared_home_restore_ready_reaches_pending_pin_without_set_session() {
+        // GUI updates reach teardown paths that close the process-global session.
+        let _guard = crate::app::session::test_guard();
         let result = std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
             .spawn(|| {
@@ -5866,6 +5892,8 @@ mod fork_auth_dispatch_tests {
 
     #[test]
     fn app_auth_dispatch_runs_home_startup_for_every_invalidated_installer() {
+        // GUI updates reach teardown paths that close the process-global session.
+        let _guard = crate::app::session::test_guard();
         // Like the completion fixture, keep large inline GUI states off the
         // default libtest stack without changing the runner configuration.
         let result = std::thread::Builder::new()
