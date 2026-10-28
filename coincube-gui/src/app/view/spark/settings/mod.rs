@@ -124,7 +124,14 @@ impl SparkSettingsView {
                 }),
             (ConnectionStatus::DeviceRejected, true) => page::row("Cube service session")
                 .accessory(page::status(page::Status::Bad, "Device not recognized"))
-                .description(crate::app::DEVICE_REJECTED_HINT),
+                .description(crate::app::DEVICE_REJECTED_HINT)
+                .control(page::button(
+                    "tenshu.settings.spark.reregister",
+                    "Re-register…",
+                    Some(Message::Menu(
+                        crate::app::view::nav::shell::DEVICE_REJECTED_ROUTE,
+                    )),
+                )),
             (ConnectionStatus::Error(e), true) => page::row("Cube service session")
                 .accessory(page::status(page::Status::Bad, "Reconnect required"))
                 .description(e.clone()),

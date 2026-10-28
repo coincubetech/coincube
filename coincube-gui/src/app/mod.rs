@@ -1523,15 +1523,16 @@ pub enum ConnectionStatus {
     /// most recent error suitable for a tooltip. Render red.
     Error(String),
     /// `ConnectStreamMessage::DeviceRejected`: Connect refused this
-    /// device's id, and the stream has stopped. Unlike `Error` nothing is
-    /// retrying; the user re-registers the device to recover. Render red.
+    /// device's id. Unlike `Error` there is no fast retry (only a slow
+    /// same-id re-check); the user re-registers the device to recover.
+    /// Render red.
     DeviceRejected,
 }
 
 /// What to do when Connect no longer recognizes this device. Shared by
 /// every surface that shows `ConnectionStatus::DeviceRejected`.
 pub const DEVICE_REJECTED_HINT: &str = "COINCUBE | Connect doesn't recognize this device. \
-     Re-register it in Settings → About to resume live updates.";
+     Re-register it to resume live updates.";
 
 impl ConnectionStatus {
     /// True for any state that the nav should surface (i.e. anything
@@ -7338,10 +7339,12 @@ impl App {
     /// id. Swap it into the stream config: the subscription is keyed on
     /// `device_id`, so a stream stopped by `DeviceRejected` (or one still
     /// using the stale id) is replaced by one that says hello with the new id.
+    /// A result landing after sign-out (which clears the stream config) is
+    /// ignored, so it can't bring the device card back for a signed-out user.
     fn adopt_reregistered_device(&mut self, device_id: &str) -> Option<Task<Message>> {
-        self.cache.connect_device_id = Some(device_id.to_owned());
         let cfg = self.connect_stream_config.as_mut()?;
         cfg.device_id = device_id.to_owned();
+        self.cache.connect_device_id = Some(device_id.to_owned());
         self.cache.connect_stream_status = ConnectionStatus::Connecting;
         Some(stream_health_dispatch(ConnectionStatus::Connecting))
     }
@@ -14429,6 +14432,27 @@ pub(crate) mod tests {
             ConnectionStatus::DeviceRejected
         );
 
+        // The rejected chip's route opens the About state, which owns the
+        // Re-register action: pressing it there starts the registration RPC.
+        app.cache.connect_grpc_url = Some("https://grpc.example.invalid".into());
+        app.cache.connect_tokens = app
+            .connect_stream_config
+            .as_ref()
+            .map(|cfg| cfg.tokens.clone());
+        app.cache.connect_email = Some("rejected@example.invalid".into());
+        drop(app.update(Message::View(view::Message::Menu(
+            view::nav::shell::DEVICE_REJECTED_ROUTE,
+        ))));
+        assert_eq!(app.panels.current, view::nav::shell::DEVICE_REJECTED_ROUTE);
+        assert!(
+            app.update(Message::View(view::Message::Settings(
+                view::SettingsMessage::ReregisterConnectDevice,
+            )))
+            .units()
+                > 0,
+            "Re-register must start the RPC from the chip's destination"
+        );
+
         // A failed re-register changes nothing.
         drop(app.update(Message::View(view::Message::Settings(
             view::SettingsMessage::ConnectDeviceReregistered(Err("offline".into())),
@@ -14448,6 +14472,14 @@ pub(crate) mod tests {
             app.cache.connect_stream_status,
             ConnectionStatus::Connecting
         );
+
+        // A result landing after sign-out must not resurrect the device id.
+        app.connect_stream_config = None;
+        app.cache.connect_device_id = None;
+        drop(app.update(Message::View(view::Message::Settings(
+            view::SettingsMessage::ConnectDeviceReregistered(Ok("43".into())),
+        ))));
+        assert_eq!(app.cache.connect_device_id, None);
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -26,6 +26,10 @@ use iced::{
     Alignment, Length,
 };
 
+/// Where a rejected device is re-registered (Cube Settings → About).
+pub const DEVICE_REJECTED_ROUTE: Menu =
+    Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::About));
+
 pub const FULL_WIDTH: f32 = 248.0;
 pub const COMPACT_WIDTH: f32 = 208.0;
 pub const TOP_BAR_HEIGHT: f32 = 56.0;
@@ -34,6 +38,7 @@ pub const CUBE_SWITCHER_ID: &str = "tenshu.cube.switcher";
 pub const CUBE_LOCK_ID: &str = "tenshu.cube.lock.ask";
 pub const CUBE_LOCK_CANCEL_ID: &str = "tenshu.cube.lock.cancel";
 pub const SETTINGS_ID: &str = "tenshu.shell.settings";
+pub const CONNECT_REREGISTER_ID: &str = "tenshu.connect.reregister";
 pub const MIDDLE_SCROLL_ID: &str = "tenshu.shell.middle-scroll";
 pub const BALANCE_PRIVACY_ID: &str = "tenshu.balance-privacy.toggle";
 pub const APP_PREFERENCES_ID: &str = "tenshu.shell.app-preferences";
@@ -201,14 +206,35 @@ pub fn top_bar_with_privacy<'a>(
         ConnectionStatus::DeviceRejected => ("Device not recognized", false),
         ConnectionStatus::Inactive => ("Not checked", false),
     };
-    let connection_chip = container(status(connection, healthy))
-        .padding([7, 11])
-        .style(theme::container::shell_chip);
+    // A rejected device has one fix, re-registering it, and its only button
+    // is on the About page. The chip is the way there.
+    let connection_chip: Element<'a, Message> =
+        if *ctx.connect_stream_status == ConnectionStatus::DeviceRejected {
+            container(
+                Action::new(
+                    CONNECT_REREGISTER_ID,
+                    status(connection, healthy),
+                    Message::FocusAction,
+                )
+                .padding([6, 11])
+                .style(theme::button::shell_nav)
+                .on_press(Message::Menu(DEVICE_REJECTED_ROUTE)),
+            )
+            .style(theme::container::shell_chip)
+            .into()
+        } else {
+            container(status(connection, healthy))
+                .padding([7, 11])
+                .style(theme::container::shell_chip)
+                .into()
+        };
     let connection = iced::widget::tooltip(
         connection_chip,
         container(muted(
             match ctx.connect_stream_status {
-                ConnectionStatus::DeviceRejected => crate::app::DEVICE_REJECTED_HINT.to_owned(),
+                ConnectionStatus::DeviceRejected => {
+                    format!("{} Click to re-register.", crate::app::DEVICE_REJECTED_HINT)
+                }
                 _ => format!("Cube connection: {connection}"),
             },
             12,
