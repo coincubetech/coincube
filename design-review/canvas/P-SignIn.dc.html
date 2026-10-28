@@ -129,6 +129,7 @@ a.tbtn,a.tbtn:hover{color:var(--ink);text-decoration:none}
 .sfoot{flex:none;display:flex;align-items:center;gap:12px;padding:14px 28px;border-top:1px solid var(--line)}
 .foot{height:28px;flex:none;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--muted);border-top:1px solid var(--line);background:var(--bg)}
 a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color:var(--acc-ink)}
+.provides .soon{display:inline-block;margin-left:6px;padding:0 7px;border:1px solid var(--line);border-radius:6px;font-size:11.5px;font-weight:500;line-height:18px;color:var(--muted);white-space:nowrap;vertical-align:1px}
 </style>
 </helmet>
 <div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
@@ -213,7 +214,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
           <p class="lead">Create a free COINCUBE | Connect account to unlock:</p>
           <ul class="provides" aria-label="What Connect provides">
             <sc-for list="{{ provides }}" as="p" hint-placeholder-count="4">
-              <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ p.icon }}"></path></svg><span>{{ p.text }}</span></li>
+              <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ p.icon }}"></path></svg><span>{{ p.text }}<sc-if value="{{ p.soon }}" hint-placeholder-val="{{ false }}"> <span class="soon">Coming soon</span></sc-if></span></li>
             </sc-for>
           </ul>
           <p class="lead">Enter your email address to receive a verification code.</p>
@@ -231,7 +232,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
           <p class="lead">Create a COINCUBE | Connect account to access these features:</p>
           <ul class="provides" aria-label="What Connect provides">
             <sc-for list="{{ provides }}" as="p" hint-placeholder-count="8">
-              <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ p.icon }}"></path></svg><span>{{ p.text }}</span></li>
+              <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ p.icon }}"></path></svg><span>{{ p.text }}<sc-if value="{{ p.soon }}" hint-placeholder-val="{{ false }}"> <span class="soon">Coming soon</span></sc-if></span></li>
             </sc-for>
           </ul>
           <div class="fld">
@@ -339,9 +340,9 @@ class Component extends DCLogic {
       { icon: I.bolt, text: 'Hosted Esplora server \u2014 use your Vault instantly while your node syncs' },
       { icon: I.device, text: 'Sign Vault transactions from your phone with the companion Keychain app' },
       { icon: I.key, text: 'Lightning Address and avatar for Spark wallets' },
-      { icon: I.lock, text: 'Duress mode and Connect-enforced spending policies (Pro and Estate)' },
-      { icon: I.cart, text: 'Buy/Sell and P2P marketplace access' }
-    ];
+      // Robert (2026-10-27): Duress is not enabled yet, so it says Coming soon; Buy/Sell and P2P are not enabled and are not listed.
+      { icon: I.lock, text: 'Duress mode and Connect-enforced spending policies (Pro and Estate)', soon: true }
+    ].map((p) => Object.assign({ soon: false }, p));
 
     const ORDER = ['email', 'token', 'done'];
     const LABELS = { email: 'Email', token: 'Token', done: 'Done' };
