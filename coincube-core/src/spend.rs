@@ -201,8 +201,8 @@ impl fmt::Display for SpendCreationError {
             Self::CoinSelection(e) => write!(f, "Coin selection error: '{}'", e),
             Self::SanityCheckFailure(psbt) => write!(
                 f,
-                "BUG! Please report this. Failed sanity checks for PSBT '{}'.",
-                psbt
+                "BUG! Please report this. Failed sanity checks for PSBT {}.",
+                psbt.unsigned_tx.compute_txid()
             ),
             Self::FeeEstimationFailed => write!(f, "Fee Estimation Failed"),
         }
@@ -844,9 +844,9 @@ pub struct CreateSpendRes {
 ///   coin selection algorithm will be run to spend the most efficient subset of them to meet the
 ///   `destinations` requirements.
 /// * `fees`: the target feerate (in sats/vb) and, if necessary, minimum absolute fee for this tx.
-/// * `change_addr`: the address to use for a change output if we need to create one. Can be set to
-///   an external address (if combined with an empty list of `destinations` it's useful to sweep some
-///   or all coins of a wallet to an external address).
+/// * `change_addr`: the address to use for a change output if we need to create one. The daemon
+///   accepts an external address only when `destinations` is empty, which sweeps the selected
+///   coins to that single output. A partial payment must use a change-branch address of the wallet.
 /// * `locktime`: the locktime to use for the transaction.
 #[allow(clippy::too_many_arguments)]
 pub fn create_spend(

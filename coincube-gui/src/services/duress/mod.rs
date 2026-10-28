@@ -181,12 +181,34 @@ impl DuressLocalState {
     /// Loads the persisted state, returning [`DuressLocalState::default`] when
     /// the file does not exist yet (first launch / never enrolled).
     pub fn load(coincube_dir: &Path) -> io::Result<Self> {
-        load_json(&Self::path(coincube_dir))
+        match std::fs::read(Self::path(coincube_dir)) {
+            Ok(bytes) => {
+                let plain = cipher::open_json(coincube_dir, &bytes)?;
+                serde_json::from_slice(&plain)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(e),
+        }
     }
 
-    /// Atomically persists the state to the state file.
+    /// Atomically persists the state. Enrollment fields are sealed under
+    /// `duress.key` so `enrolled: true` is not readable as plaintext. A
+    /// default state on a device with no key stays plaintext and does not
+    /// create one.
     pub fn save(&self, coincube_dir: &Path) -> io::Result<()> {
-        write_json_atomic(&Self::path(coincube_dir), self)
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let sensitive = self.enrolled
+            || self.active
+            || self.arming
+            || self.duress_code.is_some()
+            || self.account_id.is_some()
+            || self.pending_activation.is_some()
+            || self.unlock_at.is_some()
+            || self.last_activation_attempt.is_some();
+        let bytes = cipher::seal_json(coincube_dir, &json, sensitive)?;
+        write_bytes_atomic(&Self::path(coincube_dir), &bytes)
     }
 
     /// Resets this state to the un-enrolled baseline for a duress *disable*
@@ -208,35 +230,24 @@ impl DuressLocalState {
     }
 }
 
-/// Reads and deserializes a JSON document, treating "file not found" as
-/// `T::default()`. Any other I/O or parse error is surfaced.
-fn load_json<T: Default + for<'de> Deserialize<'de>>(path: &Path) -> io::Result<T> {
-    match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(T::default()),
-        Err(e) => Err(e),
-    }
-}
-
-/// Serializes `value` to pretty JSON and writes it to `path` atomically:
-/// write to a sibling `*.tmp`, `fsync`, then `rename` over the target. The
-/// rename is atomic on every supported platform, so a reader never observes a
-/// torn write and a crash leaves either the old file or the new one — never a
-/// truncated document.
-fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
-    let bytes = serde_json::to_vec_pretty(value)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+/// Writes `bytes` to `path` atomically: sibling `*.tmp`, `fsync`, then
+/// `rename`. The file mode is owner-only on Unix.
+fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("tmp");
     {
         let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(&bytes)?;
+        f.write_all(bytes)?;
         f.sync_all()?;
     }
     std::fs::rename(&tmp, path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
     Ok(())
 }
 
@@ -363,6 +374,11 @@ mod tests {
         state.save(&dir).unwrap();
         let loaded = DuressLocalState::load(&dir).unwrap();
         assert_eq!(state, loaded);
+        let on_disk = std::fs::read(DuressLocalState::path(&dir)).unwrap();
+        assert!(
+            !on_disk.windows(8).any(|w| w == b"enrolled"),
+            "enrollment must not be grep-able on disk"
+        );
         // No stray temp file left behind.
         assert!(!dir.join("duress-state.tmp").exists());
         let _ = std::fs::remove_dir_all(&dir);

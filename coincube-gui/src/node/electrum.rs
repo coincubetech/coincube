@@ -11,8 +11,8 @@ pub enum ConfigField {
 pub const ADDRESS_NOTES: &str = "Note: include \"ssl://\" as a prefix \
     for SSL connections.";
 
-pub const VALID_SSL_DOMAIN_NOTES: &str = "Do not validate SSL Domain \
-    (check this only if you want to use a self-signed certificate)";
+pub const VALID_SSL_DOMAIN_NOTES: &str = "Do not validate the SSL hostname \
+    (only for a self-signed certificate you trust). A bad certificate can then impersonate this server.";
 
 impl fmt::Display for ConfigField {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {

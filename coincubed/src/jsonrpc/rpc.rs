@@ -174,6 +174,8 @@ impl From<commands::CommandError> for Error {
             | commands::CommandError::EmptyFilterList
             | commands::CommandError::RecoveryNotAvailable
             | commands::CommandError::OutpointNotRecoverable(..)
+            | commands::CommandError::ExternalChangeNotAllowed
+            | commands::CommandError::SignatureForDifferentTransaction
             | commands::CommandError::FeeCeilingExceeded
             | commands::CommandError::FeeRateExceeded
             | commands::CommandError::FeeMeasurement => {

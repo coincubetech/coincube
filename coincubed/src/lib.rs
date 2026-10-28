@@ -398,6 +398,8 @@ pub enum StartupError {
     MissingBitcoinBackendConfig,
     DbMigrateBitcoinTxs(&'static str),
     Database(SqliteDbError),
+    /// Another process already holds this data directory's lock.
+    AlreadyRunning,
     Bitcoind(BitcoindError),
     Electrum(ElectrumError),
     Esplora(EsploraError),
@@ -456,6 +458,10 @@ impl fmt::Display for StartupError {
                 "Error when migrating Bitcoin transaction from Bitcoin backend to database: {}.", msg
             ),
             Self::Database(e) => write!(f, "Error initializing database: '{}'.", e),
+            Self::AlreadyRunning => write!(
+                f,
+                "Another coincubed is already using this data directory."
+            ),
             Self::Bitcoind(e) => write!(f, "Error setting up bitcoind interface: '{}'.", e),
             Self::Electrum(e) => write!(f, "Error setting up Electrum interface: '{}'.", e),
             Self::Esplora(e) => write!(f, "Error setting up Esplora interface: '{}'.", e),
@@ -1174,6 +1180,9 @@ pub enum DaemonHandle {
         /// blocking the poller join on requests to dead/throttled providers.
         /// Unused (but harmless) for the bitcoind/electrum backends.
         scan_abort: sync::Arc<sync::atomic::AtomicBool>,
+        /// Held until this handle stops, so a second process cannot serve the
+        /// same wallet. `None` only for synthetic handles built in tests.
+        datadir_lock: Option<datadir::DaemonLock>,
     },
     Server {
         poller_sender: mpsc::SyncSender<poller::PollerMessage>,
@@ -1182,6 +1191,8 @@ pub enum DaemonHandle {
         rpcserver_handle: thread::JoinHandle<Result<(), io::Error>>,
         /// See [`DaemonHandle::Controller::scan_abort`].
         scan_abort: sync::Arc<sync::atomic::AtomicBool>,
+        /// See [`DaemonHandle::Controller::datadir_lock`].
+        datadir_lock: Option<datadir::DaemonLock>,
     },
 }
 
@@ -1390,6 +1401,16 @@ impl DaemonHandle {
                 data_dir.path().to_string_lossy()
             );
         }
+        // The RPC socket name is random, so two processes would otherwise both
+        // bind and the second would overwrite `rpc.socket`. Hold the datadir
+        // before any database or socket setup, and keep it until stop.
+        let datadir_lock = match data_dir.try_lock() {
+            Ok(lock) => lock,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(StartupError::AlreadyRunning);
+            }
+            Err(e) => return Err(StartupError::Io(e)),
+        };
 
         // Set up the connection to bitcoind (if using it) first as we may need it for the database
         // migration when setting up SQLite below.
@@ -1510,8 +1531,10 @@ impl DaemonHandle {
                 .spawn({
                     let shutdown = rpcserver_shutdown.clone();
                     move || {
-                        server::run(&data_dir.coincubed_rpc_socket_path(), control, shutdown)?;
-                        Ok(())
+                        let socket_path = data_dir.publish_rpc_socket()?;
+                        let result = server::run(&socket_path, control, shutdown);
+                        data_dir.retire_published_socket(&socket_path);
+                        result
                     }
                 })
                 .expect("Spawning the RPC server thread should never fail.");
@@ -1522,6 +1545,7 @@ impl DaemonHandle {
                 rpcserver_shutdown,
                 rpcserver_handle,
                 scan_abort,
+                datadir_lock: Some(datadir_lock),
             });
         }
 
@@ -1530,6 +1554,7 @@ impl DaemonHandle {
             poller_handle,
             control,
             scan_abort,
+            datadir_lock: Some(datadir_lock),
         })
     }
 
@@ -1593,6 +1618,7 @@ impl DaemonHandle {
                 rpcserver_shutdown,
                 rpcserver_handle,
                 scan_abort,
+                datadir_lock,
             } => {
                 scan_abort.store(true, sync::atomic::Ordering::Relaxed);
                 rpcserver_shutdown.store(true, sync::atomic::Ordering::Relaxed);
@@ -1602,11 +1628,13 @@ impl DaemonHandle {
                     .map_err(|_| failure())
                     .and_then(|result| result);
                 let poller_result = poller_handle.join().map_err(|_| failure());
-                rpc_result.and(poller_result).and(if disconnected {
+                let result = rpc_result.and(poller_result).and(if disconnected {
                     Err(failure())
                 } else {
                     Ok(())
-                })
+                });
+                drop(datadir_lock);
+                result
             }
         }
     }
@@ -1635,16 +1663,19 @@ impl DaemonHandle {
                 rpcserver_shutdown,
                 rpcserver_handle,
                 scan_abort,
+                datadir_lock,
             } => {
                 scan_abort.store(true, sync::atomic::Ordering::Relaxed);
                 poller_sender
                     .send(poller::PollerMessage::Shutdown)
                     .expect("The other end should never have hung up before this.");
                 rpcserver_shutdown.store(true, sync::atomic::Ordering::Relaxed);
-                rpcserver_handle
+                let rpc_result = rpcserver_handle
                     .join()
-                    .expect("Poller thread must not panic")?;
+                    .expect("Poller thread must not panic");
                 poller_handle.join().expect("Poller thread must not panic");
+                drop(datadir_lock);
+                rpc_result?;
                 Ok(())
             }
         }
@@ -1675,6 +1706,7 @@ mod cleanup_tests {
                 rpcserver_shutdown: shutdown.clone(),
                 rpcserver_handle: rpc,
                 scan_abort: abort.clone(),
+                datadir_lock: None,
             };
             assert!(handle.stop_for_cleanup().is_err());
             assert!(abort.load(sync::atomic::Ordering::Relaxed));
@@ -1697,6 +1729,7 @@ mod cleanup_tests {
             rpcserver_shutdown: sync::Arc::new(sync::atomic::AtomicBool::new(false)),
             rpcserver_handle: rpc,
             scan_abort: sync::Arc::new(sync::atomic::AtomicBool::new(false)),
+            datadir_lock: None,
         };
         assert!(handle.stop_for_cleanup().is_ok());
     }

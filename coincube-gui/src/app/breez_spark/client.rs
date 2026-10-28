@@ -971,7 +971,10 @@ fn resolve_bridge_path() -> Result<PathBuf, SparkClientError> {
     if let Ok(override_path) = std::env::var("COINCUBE_SPARK_BRIDGE_PATH") {
         let p = PathBuf::from(override_path);
         if p.exists() {
-            return Ok(p);
+            // The bridge receives the BIP39 mnemonic on stdin. An override is
+            // only accepted when the file itself is not writable by anyone
+            // else, so a swapped binary is not a silent path to the seed.
+            return accept_bridge_binary(p);
         }
         return Err(SparkClientError::BridgeUnavailable(format!(
             "COINCUBE_SPARK_BRIDGE_PATH={} does not exist",
@@ -989,7 +992,7 @@ fn resolve_bridge_path() -> Result<PathBuf, SparkClientError> {
         if let Some(dir) = current_exe.parent() {
             let sibling = dir.join(exe_name);
             if sibling.exists() {
-                return Ok(sibling);
+                return accept_bridge_binary(sibling);
             }
         }
     }
@@ -1005,7 +1008,7 @@ fn resolve_bridge_path() -> Result<PathBuf, SparkClientError> {
             .join(profile)
             .join(exe_name);
         if candidate.exists() {
-            return Ok(candidate);
+            return accept_bridge_binary(candidate);
         }
     }
 
@@ -1014,6 +1017,55 @@ fn resolve_bridge_path() -> Result<PathBuf, SparkClientError> {
          --manifest-path coincube-spark-bridge/Cargo.toml` first",
         exe_name
     )))
+}
+
+/// The bridge process is inside the trusted base: `Init` sends it the
+/// mnemonic on stdin. Only a regular file that is not group- or
+/// world-writable is accepted, and on Linux it must be owned by this user.
+fn accept_bridge_binary(path: PathBuf) -> Result<PathBuf, SparkClientError> {
+    let path = path.canonicalize().map_err(|e| {
+        SparkClientError::BridgeUnavailable(format!(
+            "spark bridge path {} could not be resolved: {e}",
+            path.display()
+        ))
+    })?;
+    let meta = std::fs::metadata(&path).map_err(|e| {
+        SparkClientError::BridgeUnavailable(format!(
+            "spark bridge path {} could not be read: {e}",
+            path.display()
+        ))
+    })?;
+    if !meta.is_file() {
+        return Err(SparkClientError::BridgeUnavailable(format!(
+            "spark bridge path {} is not a regular file",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.mode() & 0o022 != 0 {
+            return Err(SparkClientError::BridgeUnavailable(format!(
+                "spark bridge path {} is group- or world-writable",
+                path.display()
+            )));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let self_meta = std::fs::metadata("/proc/self").map_err(|e| {
+                SparkClientError::BridgeUnavailable(format!(
+                    "could not read /proc/self to check the spark bridge owner: {e}"
+                ))
+            })?;
+            if meta.uid() != self_meta.uid() {
+                return Err(SparkClientError::BridgeUnavailable(format!(
+                    "spark bridge path {} is not owned by this user",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(path)
 }
 
 // ---------------------------------------------------------------------------

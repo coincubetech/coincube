@@ -21,6 +21,9 @@ use std::{
 
 // Maximum number of concurrent RPC connections we may accept.
 const MAX_CONNECTIONS: u32 = 16;
+// One JSON-RPC message. Caps the doubling read buffer so a peer cannot force
+// an unbounded allocation while holding a connection slot.
+const MAX_RPC_MESSAGE: usize = 4 * 1024 * 1024;
 // An idle local client must eventually release its handler slot. This bounds
 // waiting for the next request byte, not execution of a wallet operation.
 const CONNECTION_IDLE_TIMEOUT: time::Duration = time::Duration::from_secs(30);
@@ -48,16 +51,7 @@ fn read_command(
     loop {
         // First off, check if there are no existing commands in the buffer.
         let pos = buf[*cursor..*end].iter().position(|byt| byt == &b'\n');
-        log::trace!(
-            "pos: {:?}, buf[cur..end]: {:?}",
-            pos,
-            String::from_utf8_lossy(&buf[*cursor..*end])
-        );
         if let Some(pos) = pos {
-            log::trace!(
-                "Parsing Request from: {:?}",
-                String::from_utf8_lossy(&buf[..*cursor + pos])
-            );
             // TODO: don't return an io::Error here, instead try to parse a Request. Failing that,
             // try to parse a serde_json::Value. Then return accordingly a JSONRPC "malformed
             // request" or "invalid JSON" error.
@@ -77,9 +71,22 @@ fn read_command(
 
         // If we filled the buffer, increase its size and try again.
         *end += new_read;
+        if *end > MAX_RPC_MESSAGE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "JSON-RPC message exceeds 4 MiB",
+            ));
+        }
         let buffer_filled = *end == buf.len();
         if buffer_filled {
-            buf.resize(buf.len() * 2, 0);
+            let next = buf.len().saturating_mul(2).min(MAX_RPC_MESSAGE);
+            if next <= buf.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "JSON-RPC message exceeds 4 MiB",
+                ));
+            }
+            buf.resize(next, 0);
             continue;
         }
     }
@@ -121,10 +128,10 @@ fn connection_handler(
             log::info!("Stopping the coincube daemon.");
         }
 
-        log::trace!("JSONRPC request: {:?}", serde_json::to_string(&req));
+        log::trace!("JSONRPC request method={} id={:?}", req.method, req.id);
         let response =
             api::handle_request(&mut control, req).unwrap_or_else(|e| Response::error(req_id, e));
-        log::trace!("JSONRPC response: {:?}", serde_json::to_string(&response));
+        log::trace!("JSONRPC response written");
         if let Err(e) = serde_json::to_writer(&stream, &response) {
             log::error!("Error writing response: '{}'", e);
             return Ok(());
@@ -138,11 +145,13 @@ fn connection_handler(
 /// The main event loop. Wait for connections, and treat requests sent through them.
 pub fn rpcserver_loop(
     listener: net::UnixListener,
+    socket_path: &path::Path,
     daemon_control: DaemonControl,
     shutdown: sync::Arc<atomic::AtomicBool>,
 ) -> Result<(), io::Error> {
     rpcserver_loop_with_timeout(
         listener,
+        socket_path,
         daemon_control,
         shutdown,
         CONNECTION_IDLE_TIMEOUT,
@@ -150,8 +159,79 @@ pub fn rpcserver_loop(
     )
 }
 
+/// Reject a peer whose uid is not the socket file's owner. Mode `0600` already
+/// blocks other users on Linux; this catches a socket whose mode was widened.
+fn ensure_peer_owns_socket(stream: &net::UnixStream, socket_path: &path::Path) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let owner = fs::metadata(socket_path)?.uid();
+    let Some(peer) = peer_uid(stream)? else {
+        return Ok(());
+    };
+    if peer != owner {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "JSON-RPC peer uid does not own the socket",
+        ));
+    }
+    Ok(())
+}
+
+/// `None` on a Unix where peer credentials are not available. Callers then
+/// rely on the socket mode alone.
+fn peer_uid(stream: &net::UnixStream) -> io::Result<Option<u32>> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                &mut cred as *mut libc::ucred as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Some(cred.uid))
+    }
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
+    {
+        use std::os::unix::io::AsRawFd;
+        let mut uid: libc::uid_t = 0;
+        let mut gid: libc::gid_t = 0;
+        let rc = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Some(uid as u32))
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    )))]
+    {
+        let _ = stream;
+        Ok(None)
+    }
+}
+
 fn rpcserver_loop_with_timeout(
     listener: net::UnixListener,
+    socket_path: &path::Path,
     daemon_control: DaemonControl,
     shutdown: sync::Arc<atomic::AtomicBool>,
     idle_timeout: time::Duration,
@@ -190,6 +270,10 @@ fn rpcserver_loop_with_timeout(
                 "Discarding JSONRPC client: read timeout setup failed: {}",
                 error
             );
+            continue;
+        }
+        if let Err(error) = ensure_peer_owns_socket(&connection, socket_path) {
+            log::warn!("Discarding JSONRPC client: {}", error);
             continue;
         }
         log::trace!("New JSONRPC connection");
@@ -303,8 +387,9 @@ mod tests {
         let control = daemon.control().clone();
         let flag = shutdown.clone();
         let active = counter.clone();
+        let server_path = socket_path.clone();
         let server = thread::spawn(move || {
-            rpcserver_loop_with_timeout(listener, control, flag, idle_timeout, active)
+            rpcserver_loop_with_timeout(listener, &server_path, control, flag, idle_timeout, active)
         });
         let idle: Vec<_> = (0..if saturate { MAX_CONNECTIONS } else { 0 })
             .map(|_| net::UnixStream::connect(&socket_path).unwrap())
@@ -415,9 +500,11 @@ mod tests {
             let server = thread::spawn({
                 let control = daemon.control().clone();
                 let shutdown = shutdown.clone();
+                let server_path = socket_path.clone();
                 move || {
                     rpcserver_loop_with_timeout(
                         listener,
+                        &server_path,
                         control,
                         shutdown,
                         time::Duration::from_secs(30),
@@ -501,7 +588,8 @@ mod tests {
         let server = thread::spawn({
             let control = ms.control().clone();
             let shutdown = shutdown.clone();
-            move || rpcserver_loop(listener, control, shutdown)
+            let server_path = socket_path.clone();
+            move || rpcserver_loop(listener, &server_path, control, shutdown)
         });
 
         let mut client = net::UnixStream::connect(&socket_path).unwrap();
@@ -708,12 +796,14 @@ mod tests {
             crate::testutils::DummyBitcoind::new(),
             crate::testutils::DummyDatabase::new(),
         );
-        // Derive the socket path exactly as the daemon does. The server no
-        // longer binds inside the datadir: `coincubed_rpc_socket_path` hashes
-        // the datadir into a short `$TMPDIR/cc<hash>.sock` name so it fits
-        // sun_path. Hard-coding `<datadir>/coincubed_rpc` here meant waiting
-        // on a file that is never created — and the unbounded loop below then
-        // hung CI until the 6-hour job timeout.
+        // Derive the socket path exactly as the daemon does. The server binds a
+        // random `$TMPDIR/cc-<hex>.sock` and publishes it in `rpc.socket`.
+        // `coincubed_rpc_socket_path` returns that path only while something is
+        // listening; before the bind it falls back to the legacy hash, which
+        // is not created, so this loop keeps waiting. Hard-coding
+        // `<datadir>/coincubed_rpc` meant waiting on a file that is never
+        // created — and an unbounded loop then hung CI until the 6-hour job
+        // timeout.
         let data_directory: path::PathBuf = [
             ms.tmp_dir.as_path(),
             path::Path::new("d"),
@@ -721,19 +811,24 @@ mod tests {
         ]
         .iter()
         .collect();
-        let socket_path =
-            crate::datadir::DataDirectory::new(data_directory).coincubed_rpc_socket_path();
-
-        // Bound the wait so a regression fails the test instead of hanging it.
+        // The daemon publishes a random socket name under the datadir. Re-read
+        // it until the socket exists; the legacy hash is only a fallback when
+        // that record has not been written yet.
+        let data_dir = crate::datadir::DataDirectory::new(data_directory);
         let deadline = time::Instant::now() + time::Duration::from_secs(30);
-        while !socket_path.exists() {
-            assert!(
-                time::Instant::now() < deadline,
-                "RPC socket never appeared at {}",
-                socket_path.display()
-            );
+        let socket_path = loop {
+            let candidate = data_dir.coincubed_rpc_socket_path();
+            if candidate.exists()
+                && data_dir
+                    .path()
+                    .join(crate::datadir::RPC_SOCKET_RECORD)
+                    .is_file()
+            {
+                break candidate;
+            }
+            assert!(time::Instant::now() < deadline, "RPC socket never appeared");
             thread::sleep(time::Duration::from_millis(100));
-        }
+        };
 
         let stop_req = Request {
             jsonrpc: "2.0".to_string(),

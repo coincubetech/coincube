@@ -172,10 +172,15 @@ pub async fn fetch_and_decrypt_wallet_kit(
     let kit = client
         .download_recovery_kit(cube_id, password.as_str())
         .await?;
+    let cube = cube_id.to_string();
     let seed = if kit.encrypted_cube_seed.is_empty() {
         None
     } else {
-        Some(decrypt_seed_blob(&kit.encrypted_cube_seed, password)?)
+        Some(decrypt_seed_blob(
+            &kit.encrypted_cube_seed,
+            password,
+            &cube,
+        )?)
     };
     let wallet = if kit.encrypted_wallet_descriptor.is_empty() {
         None
@@ -183,6 +188,7 @@ pub async fn fetch_and_decrypt_wallet_kit(
         Some(decrypt_wallet_descriptor_blob(
             &kit.encrypted_wallet_descriptor,
             password,
+            &cube,
         )?)
     };
     Ok(RecoveredKit { seed, wallet })
@@ -191,8 +197,9 @@ pub async fn fetch_and_decrypt_wallet_kit(
 pub fn decrypt_wallet_descriptor_blob(
     ciphertext_b64: &str,
     password: &Zeroizing<String>,
+    cube_id: &str,
 ) -> Result<RecoveredWalletBlob, RestoreError> {
-    let bytes = decrypt(ciphertext_b64, password)?;
+    let bytes = decrypt(ciphertext_b64, password, cube_id)?;
     parse_wallet_descriptor_blob(&bytes)
 }
 
@@ -231,8 +238,9 @@ pub fn parse_wallet_descriptor_blob(bytes: &[u8]) -> Result<RecoveredWalletBlob,
 pub fn decrypt_seed_blob(
     ciphertext_b64: &str,
     password: &Zeroizing<String>,
+    cube_id: &str,
 ) -> Result<SeedBlob, RestoreError> {
-    let bytes = decrypt(ciphertext_b64, password)?;
+    let bytes = decrypt(ciphertext_b64, password, cube_id)?;
     let blob: SeedBlob = serde_json::from_slice(&bytes)
         .map_err(|e| RestoreError::BlobParse(format!("seed blob: {}", e)))?;
     check_blob_version("seed blob", blob.version)?;
@@ -245,8 +253,9 @@ pub fn decrypt_seed_blob(
 pub fn decrypt_descriptor_blob(
     ciphertext_b64: &str,
     password: &Zeroizing<String>,
+    cube_id: &str,
 ) -> Result<DescriptorBlob, RestoreError> {
-    let bytes = decrypt(ciphertext_b64, password)?;
+    let bytes = decrypt(ciphertext_b64, password, cube_id)?;
     let blob: DescriptorBlob = serde_json::from_slice(&bytes)
         .map_err(|e| RestoreError::BlobParse(format!("descriptor blob: {}", e)))?;
     check_blob_version("descriptor blob", blob.version)?;
@@ -286,10 +295,15 @@ pub async fn fetch_and_decrypt_kit(
     // Empty strings on the wire mean "this half wasn't uploaded."
     // Treat them the same as `None` here so the caller can pattern-
     // match cleanly.
+    let cube = cube_id.to_string();
     let seed = if kit.encrypted_cube_seed.is_empty() {
         None
     } else {
-        Some(decrypt_seed_blob(&kit.encrypted_cube_seed, password)?)
+        Some(decrypt_seed_blob(
+            &kit.encrypted_cube_seed,
+            password,
+            &cube,
+        )?)
     };
     let descriptor = if kit.encrypted_wallet_descriptor.is_empty() {
         None
@@ -297,6 +311,7 @@ pub async fn fetch_and_decrypt_kit(
         Some(decrypt_descriptor_blob(
             &kit.encrypted_wallet_descriptor,
             password,
+            &cube,
         )?)
     };
 
@@ -438,9 +453,9 @@ mod tests {
         let password = pw("correct horse battery staple");
         let blob = sample_seed_blob();
         let bytes = serde_json::to_vec(&blob).unwrap();
-        let envelope = encrypt(&bytes, &password, TEST_PARAMS).unwrap();
+        let envelope = encrypt(&bytes, &password, TEST_PARAMS, "42").unwrap();
 
-        let got = decrypt_seed_blob(&envelope, &password).unwrap();
+        let got = decrypt_seed_blob(&envelope, &password, "42").unwrap();
         assert_eq!(got.cube.uuid, blob.cube.uuid);
         assert_eq!(got.mnemonic.phrase, blob.mnemonic.phrase);
     }
@@ -457,9 +472,10 @@ mod tests {
         let mut blob = sample_seed_blob();
         blob.version = BLOB_VERSION + 1;
         let bytes = serde_json::to_vec(&blob).unwrap();
-        let envelope = encrypt(&bytes, &password, TEST_PARAMS).unwrap();
+        let envelope = encrypt(&bytes, &password, TEST_PARAMS, "42").unwrap();
 
-        let err = decrypt_seed_blob(&envelope, &password).expect_err("expected version rejection");
+        let err =
+            decrypt_seed_blob(&envelope, &password, "42").expect_err("expected version rejection");
         match err {
             RestoreError::BlobParse(msg) => {
                 assert!(msg.contains("not supported"), "got: {}", msg);
@@ -475,10 +491,10 @@ mod tests {
         let mut blob = sample_descriptor_blob();
         blob.version = BLOB_VERSION + 1;
         let bytes = serde_json::to_vec(&blob).unwrap();
-        let envelope = encrypt(&bytes, &password, TEST_PARAMS).unwrap();
+        let envelope = encrypt(&bytes, &password, TEST_PARAMS, "42").unwrap();
 
-        let err =
-            decrypt_descriptor_blob(&envelope, &password).expect_err("expected version rejection");
+        let err = decrypt_descriptor_blob(&envelope, &password, "42")
+            .expect_err("expected version rejection");
         match err {
             RestoreError::BlobParse(msg) => {
                 assert!(msg.contains("not supported"), "got: {}", msg);
@@ -497,10 +513,10 @@ mod tests {
         let mut blob = sample_seed_blob();
         blob.version = 0;
         let bytes = serde_json::to_vec(&blob).unwrap();
-        let envelope = encrypt(&bytes, &password, TEST_PARAMS).unwrap();
+        let envelope = encrypt(&bytes, &password, TEST_PARAMS, "42").unwrap();
 
         assert!(matches!(
-            decrypt_seed_blob(&envelope, &password),
+            decrypt_seed_blob(&envelope, &password, "42"),
             Err(RestoreError::BlobParse(_))
         ));
     }
@@ -510,9 +526,9 @@ mod tests {
         let password = pw("correct horse battery staple");
         let blob = sample_descriptor_blob();
         let bytes = serde_json::to_vec(&blob).unwrap();
-        let envelope = encrypt(&bytes, &password, TEST_PARAMS).unwrap();
+        let envelope = encrypt(&bytes, &password, TEST_PARAMS, "42").unwrap();
 
-        let got = decrypt_descriptor_blob(&envelope, &password).unwrap();
+        let got = decrypt_descriptor_blob(&envelope, &password, "42").unwrap();
         assert_eq!(got.vault.name, blob.vault.name);
         assert_eq!(got.vault.descriptor, blob.vault.descriptor);
     }
@@ -521,10 +537,15 @@ mod tests {
     fn typed_wallet_decrypt_keeps_legacy_vault_v1() {
         let password = pw("correct horse battery staple");
         let blob = sample_descriptor_blob();
-        let envelope =
-            encrypt(&serde_json::to_vec(&blob).unwrap(), &password, TEST_PARAMS).unwrap();
+        let envelope = encrypt(
+            &serde_json::to_vec(&blob).unwrap(),
+            &password,
+            TEST_PARAMS,
+            "42",
+        )
+        .unwrap();
         let RecoveredWalletBlob::Vault(got) =
-            decrypt_wallet_descriptor_blob(&envelope, &password).unwrap()
+            decrypt_wallet_descriptor_blob(&envelope, &password, "42").unwrap()
         else {
             panic!("legacy v1 Kit must remain a Vault blob");
         };
@@ -535,8 +556,8 @@ mod tests {
     #[test]
     fn wrong_password_maps_to_bad_or_corrupt() {
         let bytes = serde_json::to_vec(&sample_seed_blob()).unwrap();
-        let envelope = encrypt(&bytes, &pw("right"), TEST_PARAMS).unwrap();
-        let err = decrypt_seed_blob(&envelope, &pw("wrong")).unwrap_err();
+        let envelope = encrypt(&bytes, &pw("right"), TEST_PARAMS, "42").unwrap();
+        let err = decrypt_seed_blob(&envelope, &pw("wrong"), "42").unwrap_err();
         assert!(matches!(err, RestoreError::BadPasswordOrCorrupt));
     }
 
@@ -546,8 +567,8 @@ mod tests {
         // decrypt step succeeds but JSON parsing fails — this is a
         // separate error case from a wrong password / tampered tag.
         let password = pw("pw");
-        let envelope = encrypt(b"not-json", &password, TEST_PARAMS).unwrap();
-        let err = decrypt_seed_blob(&envelope, &password).unwrap_err();
+        let envelope = encrypt(b"not-json", &password, TEST_PARAMS, "42").unwrap();
+        let err = decrypt_seed_blob(&envelope, &password, "42").unwrap_err();
         assert!(
             matches!(err, RestoreError::BlobParse(_)),
             "expected BlobParse, got {:?}",
@@ -640,12 +661,14 @@ mod integration_tests {
             &serde_json::to_vec(&sample_seed_blob()).unwrap(),
             &password,
             TEST_PARAMS,
+            "42",
         )
         .unwrap();
         let desc_ct = encrypt(
             &serde_json::to_vec(&sample_descriptor_blob()).unwrap(),
             &password,
             TEST_PARAMS,
+            "42",
         )
         .unwrap();
 
@@ -687,6 +710,7 @@ mod integration_tests {
             &serde_json::to_vec(&sample_seed_blob()).unwrap(),
             &password,
             TEST_PARAMS,
+            "42",
         )
         .unwrap();
 
@@ -729,6 +753,7 @@ mod integration_tests {
             &serde_json::to_vec(&sample_seed_blob()).unwrap(),
             &password,
             TEST_PARAMS,
+            "42",
         )
         .unwrap();
 
@@ -769,6 +794,7 @@ mod integration_tests {
             &serde_json::to_vec(&sample_descriptor_blob()).unwrap(),
             &password,
             TEST_PARAMS,
+            "42",
         )
         .unwrap();
 
@@ -847,6 +873,7 @@ mod integration_tests {
             &serde_json::to_vec(&sample_seed_blob()).unwrap(),
             &right_pw,
             TEST_PARAMS,
+            "42",
         )
         .unwrap();
 

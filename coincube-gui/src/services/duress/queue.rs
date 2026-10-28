@@ -85,17 +85,24 @@ impl DuressQueue {
     }
 
     fn read_locked(&self) -> io::Result<Vec<PendingActivation>> {
-        match std::fs::read(self.path.as_path()) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
-            Err(e) => Err(e),
-        }
+        let bytes = match std::fs::read(self.path.as_path()) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        let dir = self.path.parent().unwrap_or_else(|| Path::new("."));
+        let plain = super::cipher::open_json(dir, &bytes)?;
+        serde_json::from_slice(&plain).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
     fn write_locked(&self, items: &[PendingActivation]) -> io::Result<()> {
-        let bytes = serde_json::to_vec_pretty(items)
+        let json = serde_json::to_string_pretty(items)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let dir = self.path.parent().unwrap_or_else(|| Path::new("."));
+        // A nonempty queue creates the device key. An empty queue does not,
+        // so saving "nothing pending" on a fresh install does not plant
+        // `duress.key`.
+        let bytes = super::cipher::seal_json(dir, &json, !items.is_empty())?;
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -106,6 +113,11 @@ impl DuressQueue {
             f.sync_all()?;
         }
         std::fs::rename(&tmp, self.path.as_path())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(self.path.as_path(), std::fs::Permissions::from_mode(0o600))?;
+        }
         Ok(())
     }
 }

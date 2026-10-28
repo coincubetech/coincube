@@ -11,6 +11,33 @@ use super::auth::{AccessTokenResponse, AuthClient, AuthError};
 
 pub const CONNECT_CACHE_FILENAME: &str = "connect.json";
 
+/// Opens `connect.json` for read/write, creating it owner-only. An existing
+/// file is tightened to `0600` as well: the cache holds refresh tokens.
+async fn open_owner_cache(path: &std::path::Path) -> std::io::Result<tokio::fs::File> {
+    let mut opts = OpenOptions::new();
+    opts.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    if !path.exists() {
+        // Create owner-only before the tokio open. Tokio's OpenOptions on
+        // this toolchain cannot set the mode itself.
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(path)?;
+    }
+    let file = opts.open(path).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .await?;
+    }
+    Ok(file)
+}
+
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
 pub struct ConnectCache {
     #[serde(default)]
@@ -100,12 +127,7 @@ pub async fn update_connect_cache(
 
     let file_exists = tokio::fs::try_exists(&path).await.unwrap_or(false);
 
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&path)
+    let mut file = open_owner_cache(&path)
         .await
         .map_err(|e| ConnectCacheError::ReadingFile(format!("Opening file: {}", e)))?
         .lock_write()
@@ -189,12 +211,7 @@ pub async fn set_device_id_for_email(
     let mut path = network_dir.path().to_path_buf();
     path.push(CONNECT_CACHE_FILENAME);
 
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&path)
+    let mut file = open_owner_cache(&path)
         .await
         .map_err(|e| ConnectCacheError::ReadingFile(format!("Opening file: {}", e)))?
         .lock_write()
@@ -260,12 +277,7 @@ pub async fn set_last_seen_event_seq_for_email(
     let mut path = network_dir.path().to_path_buf();
     path.push(CONNECT_CACHE_FILENAME);
 
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&path)
+    let mut file = open_owner_cache(&path)
         .await
         .map_err(|e| ConnectCacheError::ReadingFile(format!("Opening file: {}", e)))?
         .lock_write()
@@ -326,12 +338,7 @@ pub async fn filter_connect_cache(
 
     let file_exists = tokio::fs::try_exists(&path).await.unwrap_or(false);
 
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&path)
+    let mut file = open_owner_cache(&path)
         .await
         .map_err(|e| ConnectCacheError::ReadingFile(format!("Opening file: {}", e)))?
         .lock_write()

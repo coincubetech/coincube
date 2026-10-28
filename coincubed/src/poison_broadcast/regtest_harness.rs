@@ -142,6 +142,7 @@ impl RegtestTransport {
                 poller_sender: sender,
                 poller_handle: worker,
                 scan_abort: Arc::new(AtomicBool::new(false)),
+                datadir_lock: None,
             },
         ))
     }

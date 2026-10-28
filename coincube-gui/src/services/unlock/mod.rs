@@ -587,10 +587,6 @@ pub(crate) fn open_seed_by_fingerprint(
     cube_id: &str,
 ) -> Result<MasterSigner, SignerError> {
     let chain = chain.into();
-    // "No entry for this Cube" is `None`, not an error — a v2 file needs no
-    // secret and must keep opening without one.
-    let secret = device_secret::load_optional(cube_id)
-        .map_err(|e| SignerError::DecryptionFailed(e.to_string()))?;
 
     for (path, named) in seed_files(datadir_root, chain)? {
         // The duress marker deliberately shares this filename grammar, but its
@@ -601,6 +597,17 @@ pub(crate) fn open_seed_by_fingerprint(
         if named != fingerprint {
             continue;
         }
+        let data = std::fs::read(&path).map_err(SignerError::MnemonicStorage)?;
+        // A v2 file has no device secret. Asking the keystore first would fail
+        // the open when the Secret Service is down even though the PIN alone
+        // can decrypt it. v3 still requires the keystore, and a missing or
+        // unreachable one stays `DecryptionFailed` rather than a wrong PIN.
+        let secret = if coincube_core::seed_crypt::format_version(&data) == Some(3) {
+            device_secret::load_optional(cube_id)
+                .map_err(|e| SignerError::DecryptionFailed(e.to_string()))?
+        } else {
+            None
+        };
         return open_seed_at(
             &path,
             chain.bitcoin_network(),

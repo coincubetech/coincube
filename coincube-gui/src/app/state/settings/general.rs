@@ -1518,28 +1518,22 @@ impl GeneralSettingsState {
 ///
 /// # Where the words come from
 ///
-/// Bitcoin uses the session cache first; BTCB2 always opens its chain-bound seed. The
-/// unlock that opened this Cube already paid the ~831 ms Argon2id pass and is
-/// holding the decrypted signer, so re-reading the seed file buys nothing.
-/// Reading from disk is the fallback for the entry points that have no session
-/// — a Cube the installer just restored lands in the app without one.
+/// Always the seed file for this chain. A Bitcoin Blake2b Cube opens its
+/// chain-bound seed. A Cube the installer just restored has no session, and an
+/// already-unlocked Cube still re-derives so the PIN check is not cheaper than
+/// unlock.
 ///
 /// # What checks the PIN
 ///
-/// Not the decryption, on the fast path: there is no decryption on it.
-/// `session::unlocked_signer_with_pin_verification` compares against the PIN the
-/// unlock authenticated, under the session lock, which proves the same thing —
-/// nothing is handed back without the PIN that opened this Cube. What it does
-/// *not* do is cost 831 ms a guess, so the escalating lockout in
-/// `services::unlock::throttle` is what rate-limits this surface. Backup and
-/// Recovery Kit callers run this whole decryption inside its serialized
-/// check/trial/update helper; see [`is_wrong_pin`].
+/// The seed file. Every guess pays a full Argon2id trial decryption, including
+/// when this Cube is already unlocked. The session cache is deliberately not
+/// consulted: comparing the cached PIN is microseconds and would turn Backup
+/// and Recovery Kit into a cheap oracle for a short PIN. The escalating lockout
+/// in `services::unlock::throttle` still applies. Backup and Recovery Kit
+/// callers run this inside its serialized check/trial/update helper; see
+/// [`is_wrong_pin`].
 ///
-/// A wrong PIN short-circuits rather than falling through to disk. Falling
-/// through would pay a full Argon2id pass to re-derive an answer the session has
-/// already given, and would report `InvalidPassword` either way.
-///
-/// The disk fallback goes through `services::unlock`, **not**
+/// The disk read goes through `services::unlock`, **not**
 /// `MasterSigner::from_datadir_by_fingerprint`: `coincube-core` has no keystore
 /// access, so it answers `DeviceSecretRequired` for every `ENCRYPTED_V3` file —
 /// which, once the Tier 1 migration has run, is every Cube. Using it here is
@@ -1557,31 +1551,18 @@ pub(super) fn load_mnemonic_words(
     cube_id: &str,
 ) -> Result<Vec<String>, SignerError> {
     let network = network.into();
-    // The legacy session is keyed by Cube ID and fingerprint, not chain.
-    // A fork must authenticate its own seed file even if a Bitcoin twin is unlocked.
-    let signer = if network.is_blake2b() {
-        crate::services::unlock::open_seed_by_fingerprint(
-            datadir,
-            network,
-            fingerprint,
-            pin,
-            cube_id,
-        )?
-    } else {
-        crate::app::session::unlocked_signer_with_pin_verification(cube_id, fingerprint, pin)
-            .or_else(|e| {
-                if matches!(e, SignerError::InvalidPassword) {
-                    return Err(e);
-                }
-                crate::services::unlock::open_seed_by_fingerprint(
-                    datadir,
-                    network,
-                    fingerprint,
-                    pin,
-                    cube_id,
-                )
-            })?
-    };
+    // Seed reveal always trial-decrypts the seed file. The session cache can
+    // answer in microseconds, which would let someone at an unlocked Cube grind
+    // a short PIN against Backup and Recovery Kit. One Argon2id pass per guess
+    // is the same cost as unlock. Callers still charge `InvalidPassword` to the
+    // UI throttle.
+    let signer = crate::services::unlock::open_seed_by_fingerprint(
+        datadir,
+        network,
+        fingerprint,
+        pin,
+        cube_id,
+    )?;
 
     Ok(signer.words().iter().map(|w| (*w).to_string()).collect())
 }

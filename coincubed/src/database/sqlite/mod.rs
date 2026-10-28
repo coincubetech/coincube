@@ -1909,6 +1909,27 @@ CREATE TABLE labels (
     }
 
     #[test]
+    fn a_fresh_database_recognizes_its_own_change_address() {
+        use crate::database::DatabaseConnection;
+        let (dir, options, secp, db) = dummy_db();
+        let change = options
+            .main_descriptor
+            .change_descriptor()
+            .derive(1.into(), &secp)
+            .address(ChainId::Bitcoin.bitcoin_network());
+        let mut conn = db.connection().unwrap();
+        assert_eq!(
+            conn.derivation_index_by_address(&change),
+            Some((1.into(), true))
+        );
+        let external = bitcoin::Address::from_str("bc1qnsexk3gnuyayu92fc3tczvc7k62u22a22ua2kv")
+            .unwrap()
+            .assume_checked();
+        assert_eq!(conn.derivation_index_by_address(&external), None);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn change_reservation_rolls_back_errors_and_refuses_overflow() {
         use crate::database::{DatabaseInterface, ReservationError};
         let (dir, options, secp, db) = dummy_db();

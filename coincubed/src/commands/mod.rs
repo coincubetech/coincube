@@ -132,6 +132,12 @@ pub enum CommandError {
     FeeMeasurement,
     RbfError(RbfErrorInfo),
     EmptyFilterList,
+    /// A vault change address is not a change-branch script of this descriptor,
+    /// and the spend is not a sweep whose only output is that address.
+    ExternalChangeNotAllowed,
+    /// `updatespend` carried signatures for a different unsigned transaction
+    /// than the one already stored.
+    SignatureForDifferentTransaction,
 }
 
 impl fmt::Display for CommandError {
@@ -153,10 +159,10 @@ impl fmt::Display for CommandError {
             Self::InsufficientFunds(in_val, out_val, feerate) => {
                 if let Some(out_val) = out_val {
                     write!(
-                    f,
-                    "Cannot create a {} sat/vb transaction with input value {} and output value {}",
-                    feerate, in_val, out_val
-                )
+                        f,
+                        "Cannot create a {} sat/vb transaction with input value {} and output value {}",
+                        feerate, in_val, out_val
+                    )
                 } else {
                     write!(
                         f,
@@ -243,6 +249,14 @@ impl fmt::Display for CommandError {
             Self::FeeMeasurement => write!(f, "Could not measure the transaction fee."),
             Self::RbfError(e) => write!(f, "RBF error: '{}'.", e),
             Self::EmptyFilterList => write!(f, "Filter list is empty, should supply None instead."),
+            Self::ExternalChangeNotAllowed => write!(
+                f,
+                "Change address is not a wallet change address. A vault spend can send change to an external address only when that address is the sole output (a sweep)."
+            ),
+            Self::SignatureForDifferentTransaction => write!(
+                f,
+                "Refusing to merge signatures for a different unsigned transaction."
+            ),
         }
     }
 }
@@ -270,7 +284,10 @@ impl fmt::Display for RbfErrorInfo {
                 write!(f, "A feerate must be provided if not creating a cancel.")
             }
             Self::SuperfluousFeerate => {
-                write!(f, "A feerate must not be provided if creating a cancel. We'll always use the smallest one which satisfies the RBF rules.")
+                write!(
+                    f,
+                    "A feerate must not be provided if creating a cancel. We'll always use the smallest one which satisfies the RBF rules."
+                )
             }
             Self::TooLowFeerate(r, m) => {
                 write!(f, "Feerate {} too low for minimum feerate {}.", r, m)
@@ -380,6 +397,88 @@ fn enforce_legacy_signature_policy(
     })
 }
 
+/// Economic and derivation checks for a vault PSBT that `updatespend` is about
+/// to store for the first time. Input amounts come from the wallet's coins:
+/// the public contract still accepts a PSBT whose previous transactions have
+/// not been attached yet, and broadcast repeats full prevout authentication.
+fn validate_new_vault_psbt(
+    vault: &coincube_core::descriptors::CoincubeDescriptor,
+    psbt: &Psbt,
+    coins: &HashMap<bitcoin::OutPoint, Coin>,
+    network: bitcoin::Network,
+    secp: &bitcoin::secp256k1::Secp256k1<bitcoin::secp256k1::VerifyOnly>,
+) -> Result<(), CommandError> {
+    let tx = &psbt.unsigned_tx;
+    if psbt.inputs.len() != tx.input.len()
+        || psbt.outputs.len() != tx.output.len()
+        || tx.output.is_empty()
+    {
+        return Err(SpendCreationError::SanityCheckFailure(psbt.clone()).into());
+    }
+    let mut value_in: u64 = 0;
+    for txin in &tx.input {
+        let coin = coins
+            .get(&txin.previous_output)
+            .ok_or(CommandError::UnknownOutpoint(txin.previous_output))?;
+        value_in = value_in.checked_add(coin.amount.to_sat()).ok_or_else(|| {
+            CommandError::from(SpendCreationError::SanityCheckFailure(psbt.clone()))
+        })?;
+    }
+    let value_out: u64 = tx.output.iter().map(|o| o.value.to_sat()).sum();
+    let fee = value_in.checked_sub(value_out).ok_or(CommandError::from(
+        SpendCreationError::InsaneFees(spend::InsaneFeeInfo::NegativeFee),
+    ))?;
+    if fee > spend::MAX_FEE.to_sat() {
+        return Err(SpendCreationError::InsaneFees(spend::InsaneFeeInfo::TooHighFee(fee)).into());
+    }
+    let feerate_ok = [true, false].iter().any(|primary| {
+        let vb = vault.unsigned_tx_max_vbytes(tx, *primary);
+        vb > 0 && (1..=spend::MAX_FEERATE).contains(&(fee / vb))
+    });
+    if !feerate_ok {
+        return Err(SpendCreationError::InsaneFees(spend::InsaneFeeInfo::InvalidFeerate).into());
+    }
+    for txo in &tx.output {
+        if txo.value < txo.script_pubkey.minimal_non_dust() {
+            return Err(SpendCreationError::SanityCheckFailure(psbt.clone()).into());
+        }
+    }
+    for (index, psbt_out) in psbt.outputs.iter().enumerate() {
+        let has_deriv =
+            !psbt_out.bip32_derivation.is_empty() || !psbt_out.tap_key_origins.is_empty();
+        if !has_deriv {
+            continue;
+        }
+        let Some(child) = psbt_out
+            .bip32_derivation
+            .values()
+            .next()
+            .map(|(_, path)| path)
+            .or_else(|| {
+                psbt_out
+                    .tap_key_origins
+                    .values()
+                    .next()
+                    .map(|(_, (_, path))| path)
+            })
+            .and_then(|path| path.into_iter().last().copied())
+        else {
+            return Err(SpendCreationError::SanityCheckFailure(psbt.clone()).into());
+        };
+        let txo = &tx.output[index];
+        let Ok(index) = bitcoin::bip32::ChildNumber::from_normal_idx(u32::from(child)) else {
+            return Err(SpendCreationError::SanityCheckFailure(psbt.clone()).into());
+        };
+        let matches = |branch: &coincube_core::descriptors::SinglePathCoincubeDesc| {
+            branch.derive(index, secp).address(network).script_pubkey() == txo.script_pubkey
+        };
+        if !matches(vault.change_descriptor()) && !matches(vault.receive_descriptor()) {
+            return Err(SpendCreationError::SanityCheckFailure(psbt.clone()).into());
+        }
+    }
+    Ok(())
+}
+
 /// Merge the signatures of an incoming PSBT for a spend already stored, keyed on
 /// the chain the daemon runs on.
 ///
@@ -428,6 +527,9 @@ fn merge_spend_signatures(
         return Ok(stored.psbt().clone());
     }
 
+    if psbt.unsigned_tx != db_psbt.unsigned_tx {
+        return Err(CommandError::SignatureForDifferentTransaction);
+    }
     let tx = &psbt.unsigned_tx;
     let db_tx = db_psbt.unsigned_tx.clone();
     for i in 0..db_tx.input.len() {
@@ -700,6 +802,67 @@ impl DaemonControl {
             .map_err(CommandError::ChangeReservation)
     }
 
+    /// A vault change output must pay a change-branch script of this descriptor,
+    /// unless the spend is a sweep (no other destinations), in which case the
+    /// address is the sole payment and is shown as such.
+    ///
+    /// Change index 0 is accepted even when it is not stored yet. The desktop
+    /// uses that address to size a preview without reserving a fresh index.
+    /// Any change script at an index this wallet has already reached is also
+    /// owned: the address table can miss it (the in-memory test database never
+    /// stores addresses) and a row in that table is not itself proof.
+    fn authorize_vault_change(
+        &self,
+        change: &SpendOutputAddress,
+        destinations: &[(SpendOutputAddress, bitcoin::Amount)],
+        last_change: bip32::ChildNumber,
+    ) -> Result<(), CommandError> {
+        if self.change_script_is_owned(change, last_change) {
+            return Ok(());
+        }
+        if destinations.is_empty() {
+            return Ok(());
+        }
+        Err(CommandError::ExternalChangeNotAllowed)
+    }
+
+    fn change_script_is_owned(
+        &self,
+        change: &SpendOutputAddress,
+        last_change: bip32::ChildNumber,
+    ) -> bool {
+        let script = change.addr.script_pubkey();
+        let matches_index = |index: u32| -> bool {
+            let Ok(derived) = self
+                .config
+                .main_descriptor
+                .change_descriptor()
+                .derive(index)
+            else {
+                return false;
+            };
+            derived
+                .address(self.config.bitcoin_config.network)
+                .map(|addr| addr.script_pubkey() == script)
+                .unwrap_or(false)
+        };
+        if let Some(AddrInfo {
+            index,
+            is_change: true,
+        }) = change.info
+        {
+            // Re-derive the claimed index. A database row cannot bless a script
+            // this descriptor does not produce.
+            if matches_index(u32::from(index)) {
+                return true;
+            }
+        }
+        // Index 0 covers a preview. The rest covers a change address this
+        // wallet already derived, including one the address table does not list.
+        let last = u32::from(last_change).min(10_000);
+        (0..=last).any(matches_index)
+    }
+
     // If we detect the given address as ours, and it has a higher derivation index than our last
     // derivation index, update our last derivation index to the given value.
     fn maybe_increase_last_deriv_index(
@@ -871,7 +1034,7 @@ impl DaemonControl {
                         "cannot work out the fee of {}, which the replacement of {} must outbid, \
                          from our records",
                         conflict, txid
-                    )))
+                    )));
                 }
                 None => log::warn!(
                     "Cannot price {} from our records: the replacement of {} may pay too little \
@@ -1494,6 +1657,10 @@ impl DaemonControl {
             Some(addr) => self.spend_addr(&mut db_conn, self.validate_address(addr)?),
             None => self.next_change_addr(&mut db_conn)?,
         };
+        if self.config.main_descriptor.as_vault().is_some() {
+            let last_change = db_conn.change_index();
+            self.authorize_vault_change(&change_address, &destinations_checked, last_change)?;
+        }
 
         // The candidate coins will be either all optional or all mandatory.
         // If no coins have been specified, then coins will be selected automatically for
@@ -1745,6 +1912,15 @@ impl DaemonControl {
                         return Err(CommandError::UnknownOutpoint(op));
                     }
                 }
+            }
+            if let Some(vault) = self.config.main_descriptor.as_vault() {
+                validate_new_vault_psbt(
+                    vault,
+                    &psbt,
+                    &coins,
+                    self.config.bitcoin_config.network,
+                    &self.secp,
+                )?;
             }
         }
 
@@ -3592,6 +3768,43 @@ mod tests {
             Ok(CreateSpendResult::Success { .. })
         ));
         assert_eq!(db_conn.change_index(), before.increment().unwrap());
+    }
+
+    #[test]
+    fn vault_change_must_be_owned_unless_the_spend_is_a_sweep() {
+        const COIN_VALUE: u64 = 100_000;
+        let ms = DummyCoincube::new(DummyBitcoind::new(), DummyDatabase::new());
+        let control = &ms.control();
+        let mut db_conn = control.db().lock().unwrap().connection();
+        let dummy_tx = funding_tx(control, &[(0, COIN_VALUE, 13, false)]);
+        let dummy_op = bitcoin::OutPoint::new(dummy_tx.compute_txid(), 0);
+        db_conn.new_txs(std::slice::from_ref(&dummy_tx));
+        db_conn.new_unspent_coins(&[Coin {
+            outpoint: dummy_op,
+            is_immature: false,
+            block_info: None,
+            amount: bitcoin::Amount::from_sat(COIN_VALUE),
+            derivation_index: bip32::ChildNumber::from(13),
+            is_change: false,
+            spend_txid: None,
+            spend_block: None,
+            is_from_self: false,
+        }]);
+        let mut destinations = <HashMap<bitcoin::Address<address::NetworkUnchecked>, u64>>::new();
+        destinations.insert(
+            bitcoin::Address::from_str("bc1qnsexk3gnuyayu92fc3tczvc7k62u22a22ua2kv").unwrap(),
+            10_000,
+        );
+        let external =
+            bitcoin::Address::from_str("bc1q39srgatmkp6k2ne3l52yhkjprdvunvspqydmkx").unwrap();
+        let refused = control.create_spend(&destinations, &[dummy_op], 1, Some(external.clone()));
+        assert!(matches!(
+            refused,
+            Err(CommandError::ExternalChangeNotAllowed)
+        ));
+
+        let swept = control.create_spend(&HashMap::new(), &[dummy_op], 1, Some(external));
+        assert!(matches!(swept, Ok(CreateSpendResult::Success { .. })));
     }
 
     #[test]

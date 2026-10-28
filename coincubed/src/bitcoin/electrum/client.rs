@@ -97,6 +97,12 @@ impl Client {
         electrum_config: &config::ElectrumConfig,
         retries: u8,
     ) -> Result<Self, Error> {
+        if !electrum_config.validate_domain {
+            log::warn!(
+                "Electrum TLS hostname verification is disabled for {}. A network peer can present any certificate.",
+                electrum_config.addr
+            );
+        }
         // First use a dummy config to check connectivity (no retries, short timeout).
         let dummy_config = Config::builder()
             .retry(0)
