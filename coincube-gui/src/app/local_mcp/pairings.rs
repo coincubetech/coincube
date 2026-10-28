@@ -483,19 +483,25 @@ mod tests {
         fs::create_dir_all(root.join("regtest")).unwrap();
         Location::new(root, crate::chain::ChainId::Regtest, cube).unwrap()
     }
+    /// Build the registry directories in the order lock_lifecycle and
+    /// Store::open do: protect the parent before creating the child. On Windows
+    /// protect_new sets a protected, non-inheritable DACL, and setting it on a
+    /// parent strips a pre-existing child's inherited ACEs, leaving it an empty
+    /// DACL. That denies the WRITE_OWNER access protect_new needs to set the
+    /// child's owner (ERROR_ACCESS_DENIED).
+    fn create_private_registry(location: &Location) {
+        let parent = location.directory.parent().unwrap();
+        fs::create_dir(parent).unwrap();
+        protect_new(parent, true).unwrap();
+        fs::create_dir(&location.directory).unwrap();
+        protect_new(&location.directory, true).unwrap();
+    }
     #[test]
     fn cube_removal_recovers_from_partial_directory_and_key_deletion() {
         let root = std::env::temp_dir().join(format!("mcp-delete-retry-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&root).unwrap();
         let location = location(&root, "retry");
-        // Protect the parent before the leaf exists. Windows applies a
-        // directory ACL to children that are already there and can remove
-        // their access, so protecting the parent afterwards is denied.
-        let parent = location.directory.parent().unwrap();
-        fs::create_dir_all(parent).unwrap();
-        protect_new(parent, true).unwrap();
-        fs::create_dir(&location.directory).unwrap();
-        protect_new(&location.directory, true).unwrap();
+        create_private_registry(&location);
         fs::write(location.directory.join("clients.enc"), b"partial").unwrap();
         assert!(
             remove_cube_at(&location, || Ok(())).is_err(),
@@ -531,11 +537,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("mcp-delete-legacy-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&root).unwrap();
         let location = location(&root, "legacy");
-        let parent = location.directory.parent().unwrap();
-        fs::create_dir_all(parent).unwrap();
-        protect_new(parent, true).unwrap();
-        fs::create_dir(&location.directory).unwrap();
-        protect_new(&location.directory, true).unwrap();
+        create_private_registry(&location);
         let child = location.directory.join("owner.lock");
         let holder = fs::File::create(&child).unwrap();
         protect_new(&child, false).unwrap();
