@@ -1522,7 +1522,16 @@ pub enum ConnectionStatus {
     /// or the stream surfaced a transport failure. The string is the
     /// most recent error suitable for a tooltip. Render red.
     Error(String),
+    /// `ConnectStreamMessage::DeviceRejected`: Connect refused this
+    /// device's id, and the stream has stopped. Unlike `Error` nothing is
+    /// retrying; the user re-registers the device to recover. Render red.
+    DeviceRejected,
 }
+
+/// What to do when Connect no longer recognizes this device. Shared by
+/// every surface that shows `ConnectionStatus::DeviceRejected`.
+pub const DEVICE_REJECTED_HINT: &str = "COINCUBE | Connect doesn't recognize this device. \
+     Re-register it in Settings → About to resume live updates.";
 
 impl ConnectionStatus {
     /// True for any state that the nav should surface (i.e. anything
@@ -1545,6 +1554,7 @@ impl ConnectionStatus {
             Self::Error(_) => {
                 "Can't reach COINCUBE | Connect — retrying. Live updates are paused.".to_string()
             }
+            Self::DeviceRejected => DEVICE_REJECTED_HINT.to_string(),
         }
     }
 }
@@ -7146,6 +7156,11 @@ impl App {
                 self.cache.connect_stream_status = ConnectionStatus::Connecting;
                 stream_health_dispatch(ConnectionStatus::Connecting)
             }
+            M::DeviceRejected(reason) => {
+                log::warn!("[CONNECT GRPC] Device rejected: {}", reason);
+                self.cache.connect_stream_status = ConnectionStatus::DeviceRejected;
+                stream_health_dispatch(ConnectionStatus::DeviceRejected)
+            }
             M::Error(err) => {
                 log::warn!("[CONNECT GRPC] Stream error: {}", err);
                 let status = ConnectionStatus::Error(err);
@@ -7304,6 +7319,34 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        // Observe, don't consume: the About settings state still needs the
+        // result to render its banner, so it keeps its normal route.
+        let health = match &message {
+            Message::View(view::Message::Settings(
+                view::SettingsMessage::ConnectDeviceReregistered(Ok(device_id)),
+            )) => self.adopt_reregistered_device(device_id),
+            _ => None,
+        };
+        let task = self.route(message);
+        match health {
+            Some(health) => Task::batch([health, task]),
+            None => task,
+        }
+    }
+
+    /// A successful Settings → About re-register hands back the new device
+    /// id. Swap it into the stream config: the subscription is keyed on
+    /// `device_id`, so a stream stopped by `DeviceRejected` (or one still
+    /// using the stale id) is replaced by one that says hello with the new id.
+    fn adopt_reregistered_device(&mut self, device_id: &str) -> Option<Task<Message>> {
+        self.cache.connect_device_id = Some(device_id.to_owned());
+        let cfg = self.connect_stream_config.as_mut()?;
+        cfg.device_id = device_id.to_owned();
+        self.cache.connect_stream_status = ConnectionStatus::Connecting;
+        Some(stream_health_dispatch(ConnectionStatus::Connecting))
+    }
+
+    fn route(&mut self, message: Message) -> Task<Message> {
         self.refresh_mcp_pairings();
         if let Message::View(view::Message::LocalMcp(message)) = message {
             let focus_after = match &message {
@@ -14340,6 +14383,74 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// A device Connect refuses must read as rejected (not "Checking…"), and
+    /// a successful re-register must swap the new id into the stream config
+    /// so the keyed subscription restarts instead of staying stopped.
+    #[test]
+    fn device_rejection_holds_until_reregister_restarts_the_stream() {
+        let _guard = crate::app::session::test_guard();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = rt.enter();
+        let root =
+            std::env::temp_dir().join(format!("connect-device-rejected-{}", uuid::Uuid::new_v4()));
+        let mut app = local_app(&root);
+        // `local_app` is a Blake2b fork Cube, whose dispatch guard drops every
+        // Connect stream message. The stream only runs on Bitcoin-family Cubes.
+        app.cache.fiat_chain = crate::chain::ChainId::Bitcoin;
+        app.connect_stream_config = Some(
+            crate::services::connect::grpc::stream::ConnectStreamConfig {
+                grpc_url: "https://grpc.example.invalid".into(),
+                tokens: Arc::new(tokio::sync::RwLock::new(
+                    crate::services::connect::client::auth::AccessTokenResponse {
+                        access_token: "fixture".into(),
+                        refresh_token: "fixture-refresh".into(),
+                        expires_at: 1,
+                    },
+                )),
+                device_id: "1".into(),
+                user_agent: "test".into(),
+                vault_ids: Vec::new(),
+                last_seen_seq: 0,
+            },
+        );
+        app.cache.connect_device_id = Some("1".into());
+        app.cache.connect_stream_status = ConnectionStatus::Connecting;
+
+        drop(app.update(Message::ConnectStream(
+            crate::services::connect::grpc::ConnectStreamMessage::DeviceRejected(
+                "device not found or not owned by user".into(),
+            ),
+        )));
+        assert_eq!(
+            app.cache.connect_stream_status,
+            ConnectionStatus::DeviceRejected
+        );
+
+        // A failed re-register changes nothing.
+        drop(app.update(Message::View(view::Message::Settings(
+            view::SettingsMessage::ConnectDeviceReregistered(Err("offline".into())),
+        ))));
+        assert_eq!(
+            app.cache.connect_stream_status,
+            ConnectionStatus::DeviceRejected
+        );
+        assert_eq!(app.connect_stream_config.as_ref().unwrap().device_id, "1");
+
+        drop(app.update(Message::View(view::Message::Settings(
+            view::SettingsMessage::ConnectDeviceReregistered(Ok("42".into())),
+        ))));
+        assert_eq!(app.connect_stream_config.as_ref().unwrap().device_id, "42");
+        assert_eq!(app.cache.connect_device_id.as_deref(), Some("42"));
+        assert_eq!(
+            app.cache.connect_stream_status,
+            ConnectionStatus::Connecting
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn local_global_revocation_closes_the_app_and_rejects_late_results() {
         let _guard = crate::app::session::test_guard();
@@ -16269,6 +16380,12 @@ pub(crate) mod tests {
         // transport error back at the user.
         assert!(err.tooltip().starts_with("Can't reach COINCUBE | Connect"));
         assert!(!err.tooltip().contains("socket closed"));
+
+        // A rejected device is not "retrying": the copy must name the fix.
+        let rejected = ConnectionStatus::DeviceRejected;
+        assert!(rejected.is_visible());
+        assert!(!rejected.tooltip().contains("retrying"));
+        assert!(rejected.tooltip().contains("Re-register"));
     }
 
     #[test]

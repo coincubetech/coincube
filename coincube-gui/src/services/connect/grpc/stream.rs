@@ -211,6 +211,12 @@ pub fn connect_stream(
                                                 );
                                                 return;
                                             }
+                                            if is_device_rejection(&e) {
+                                                // Revoked mid-stream: same
+                                                // answer on every retry.
+                                                reject_device(&mut channel, &e).await;
+                                                return;
+                                            }
                                             log::error!("[CONNECT GRPC] Stream error: {}", e);
                                             break;
                                         }
@@ -224,6 +230,10 @@ pub fn connect_stream(
                                     log::info!(
                                         "[CONNECT GRPC] Connect attempt superseded by newer connection; stopping stale stream"
                                     );
+                                    return;
+                                }
+                                if is_device_rejection(&e) {
+                                    reject_device(&mut channel, &e).await;
                                     return;
                                 }
                                 // Distinguish auth failures so the App
@@ -313,6 +323,35 @@ pub fn connect_stream(
     )
 }
 
+/// True when the server refused the device itself rather than the
+/// connection. The API answers `PERMISSION_DENIED` only for a device id that
+/// is missing, owned by another account, or revoked (`realtime_server.go`),
+/// so reconnecting with the same id can never succeed.
+fn is_device_rejection(status: &tonic::Status) -> bool {
+    status.code() == tonic::Code::PermissionDenied
+}
+
+/// Report a terminal device rejection. The caller stops the stream after
+/// this; no `Disconnected` follows, so the status stays on the rejection
+/// instead of flipping back to "reconnecting".
+async fn reject_device(
+    channel: &mut iced::futures::channel::mpsc::Sender<ConnectStreamMessage>,
+    status: &tonic::Status,
+) {
+    log::warn!(
+        "[CONNECT GRPC] Device rejected ({}); stopping stream until it is re-registered",
+        status
+    );
+    if let Err(e) = channel
+        .send(ConnectStreamMessage::DeviceRejected(
+            status.message().to_string(),
+        ))
+        .await
+    {
+        log::warn!("[CONNECT GRPC] Failed to forward DeviceRejected: {}", e);
+    }
+}
+
 /// Pure jitter helper exposed for unit testing the backoff math. Given
 /// a nominal backoff `d` returns a value in `[d/2, d)` — never longer
 /// than `d`, so callers can rely on the configured cap as a true upper
@@ -326,6 +365,26 @@ fn jittered(d: Duration) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_permission_denied_is_a_device_rejection() {
+        assert!(is_device_rejection(&tonic::Status::permission_denied(
+            "device not found or not owned by user"
+        )));
+        assert!(is_device_rejection(&tonic::Status::permission_denied(
+            "device revoked"
+        )));
+        // Transient or session-level failures keep the reconnect loop.
+        for status in [
+            tonic::Status::unavailable("upstream down"),
+            tonic::Status::unauthenticated("token expired"),
+            tonic::Status::aborted("connection superseded"),
+            tonic::Status::internal("failed to register connection"),
+            tonic::Status::invalid_argument("invalid device_id"),
+        ] {
+            assert!(!is_device_rejection(&status), "{:?}", status.code());
+        }
+    }
 
     #[test]
     fn jitter_stays_within_half_open_window() {

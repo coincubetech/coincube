@@ -20,6 +20,12 @@ pub enum ConnectStreamMessage {
     SessionEvent(connect_v1::SessionEvent),
     Disconnected(String),
     Error(String),
+    /// The server refused this device (`PERMISSION_DENIED`: the cached
+    /// device id is missing, owned by another account, or revoked). Terminal:
+    /// the stream stops instead of reconnecting, since every retry with the
+    /// same id gets the same answer. Recovery is the user re-registering the
+    /// device; we never re-register silently, which would undo a revoke.
+    DeviceRejected(String),
     /// Duress was activated elsewhere (Keychain Settings, email-link, Approach
     /// C, another desktop's PIN). Phase 7b: the receiving desktop locks into the
     /// cryptic screen but does **NOT** wipe — remote activation can be

@@ -122,6 +122,9 @@ impl SparkSettingsView {
                 } else {
                     "Realtime connection open. This Cube is not registered with Connect yet."
                 }),
+            (ConnectionStatus::DeviceRejected, true) => page::row("Cube service session")
+                .accessory(page::status(page::Status::Bad, "Device not recognized"))
+                .description(crate::app::DEVICE_REJECTED_HINT),
             (ConnectionStatus::Error(e), true) => page::row("Cube service session")
                 .accessory(page::status(page::Status::Bad, "Reconnect required"))
                 .description(e.clone()),

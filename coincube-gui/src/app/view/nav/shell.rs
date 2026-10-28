@@ -198,6 +198,7 @@ pub fn top_bar_with_privacy<'a>(
         ConnectionStatus::Connected => ("Connected", true),
         ConnectionStatus::Connecting => ("Checking…", false),
         ConnectionStatus::Error(_) => ("Reconnect required", false),
+        ConnectionStatus::DeviceRejected => ("Device not recognized", false),
         ConnectionStatus::Inactive => ("Not checked", false),
     };
     let connection_chip = container(status(connection, healthy))
@@ -205,9 +206,15 @@ pub fn top_bar_with_privacy<'a>(
         .style(theme::container::shell_chip);
     let connection = iced::widget::tooltip(
         connection_chip,
-        container(muted(format!("Cube connection: {connection}"), 12))
-            .padding([6, 10])
-            .style(theme::container::shell_menu),
+        container(muted(
+            match ctx.connect_stream_status {
+                ConnectionStatus::DeviceRejected => crate::app::DEVICE_REJECTED_HINT.to_owned(),
+                _ => format!("Cube connection: {connection}"),
+            },
+            12,
+        ))
+        .padding([6, 10])
+        .style(theme::container::shell_menu),
         iced::widget::tooltip::Position::Bottom,
     );
 

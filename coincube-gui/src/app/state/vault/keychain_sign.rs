@@ -546,6 +546,10 @@ impl KeychainSignModal {
                  server-side; updates will catch up once the connection comes back."
                     .to_string(),
             ),
+            crate::app::ConnectionStatus::DeviceRejected => Some(format!(
+                "{} Your signing requests are still active server-side.",
+                crate::app::DEVICE_REJECTED_HINT,
+            )),
             crate::app::ConnectionStatus::Error(e) => Some(format!(
                 "Connection error ({}). Your signing requests are still active server-side; \
                  reconnect to see updates.",
@@ -2097,6 +2101,12 @@ impl Modal for KeychainSignModal {
                          still active server-side; updates will catch up once the \
                          connection comes back.",
                     ));
+                }
+                crate::app::ConnectionStatus::DeviceRejected => {
+                    col = col.push(p1_regular(format!(
+                        "{} Your signing requests are still active server-side.",
+                        crate::app::DEVICE_REJECTED_HINT,
+                    )));
                 }
                 crate::app::ConnectionStatus::Error(e) => {
                     col = col.push(p1_regular(format!(
