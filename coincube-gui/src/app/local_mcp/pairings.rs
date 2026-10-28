@@ -1,7 +1,7 @@
 //! Authenticated, device-local client registry. Never a source of Cube unlock.
 use chacha20poly1305::{
-    aead::{Aead, Payload},
     ChaCha20Poly1305, KeyInit, Nonce,
+    aead::{Aead, Payload},
 };
 use coincube_mcp::pairing::{check_private, protect_new};
 use fs4::fs_std::FileExt;
@@ -488,8 +488,13 @@ mod tests {
         let root = std::env::temp_dir().join(format!("mcp-delete-retry-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&root).unwrap();
         let location = location(&root, "retry");
-        fs::create_dir_all(&location.directory).unwrap();
-        protect_new(location.directory.parent().unwrap(), true).unwrap();
+        // Protect the parent before the leaf exists. Windows applies a
+        // directory ACL to children that are already there and can remove
+        // their access, so protecting the parent afterwards is denied.
+        let parent = location.directory.parent().unwrap();
+        fs::create_dir_all(parent).unwrap();
+        protect_new(parent, true).unwrap();
+        fs::create_dir(&location.directory).unwrap();
         protect_new(&location.directory, true).unwrap();
         fs::write(location.directory.join("clients.enc"), b"partial").unwrap();
         assert!(
@@ -526,8 +531,10 @@ mod tests {
         let root = std::env::temp_dir().join(format!("mcp-delete-legacy-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&root).unwrap();
         let location = location(&root, "legacy");
-        fs::create_dir_all(&location.directory).unwrap();
-        protect_new(location.directory.parent().unwrap(), true).unwrap();
+        let parent = location.directory.parent().unwrap();
+        fs::create_dir_all(parent).unwrap();
+        protect_new(parent, true).unwrap();
+        fs::create_dir(&location.directory).unwrap();
         protect_new(&location.directory, true).unwrap();
         let child = location.directory.join("owner.lock");
         let holder = fs::File::create(&child).unwrap();
@@ -717,10 +724,12 @@ mod tests {
         let mut store = Store::open(location.clone(), Zeroizing::new([7; 32]), true).unwrap();
         let id = store.add("fixture".into(), Scope::Proposal).unwrap();
         let credential = store.clients()[0].credential.clone();
-        assert!(!fs::read(location.directory.join("clients.enc"))
-            .unwrap()
-            .windows(credential.len())
-            .any(|v| v == credential.as_bytes()));
+        assert!(
+            !fs::read(location.directory.join("clients.enc"))
+                .unwrap()
+                .windows(credential.len())
+                .any(|v| v == credential.as_bytes())
+        );
         assert!(
             Store::open(location.clone(), Zeroizing::new([7; 32]), false).is_err(),
             "competing owner must fail"
