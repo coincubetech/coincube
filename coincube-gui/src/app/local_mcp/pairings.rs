@@ -1,7 +1,7 @@
 //! Authenticated, device-local client registry. Never a source of Cube unlock.
 use chacha20poly1305::{
-    ChaCha20Poly1305, KeyInit, Nonce,
     aead::{Aead, Payload},
+    ChaCha20Poly1305, KeyInit, Nonce,
 };
 use coincube_mcp::pairing::{check_private, protect_new};
 use fs4::fs_std::FileExt;
@@ -726,12 +726,10 @@ mod tests {
         let mut store = Store::open(location.clone(), Zeroizing::new([7; 32]), true).unwrap();
         let id = store.add("fixture".into(), Scope::Proposal).unwrap();
         let credential = store.clients()[0].credential.clone();
-        assert!(
-            !fs::read(location.directory.join("clients.enc"))
-                .unwrap()
-                .windows(credential.len())
-                .any(|v| v == credential.as_bytes())
-        );
+        assert!(!fs::read(location.directory.join("clients.enc"))
+            .unwrap()
+            .windows(credential.len())
+            .any(|v| v == credential.as_bytes()));
         assert!(
             Store::open(location.clone(), Zeroizing::new([7; 32]), false).is_err(),
             "competing owner must fail"

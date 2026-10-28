@@ -7,18 +7,18 @@ mod utils;
 pub use crate::bitcoin::{HistorySync, PollFailure};
 
 use crate::{
-    DaemonControl, VERSION,
     bitcoin::BitcoinInterface,
     database::{Coin, DatabaseConnection, DatabaseInterface, ReservationError},
     miniscript::bitcoin::absolute::LockTime,
     poller::PollerMessage,
+    DaemonControl, VERSION,
 };
 
 pub use crate::database::{CoinStatus, LabelItem};
 
 use coincube_core::spend::{
-    self, AddrInfo, AncestorInfo, CandidateCoin, CreateSpendRes, SpendCreationError,
-    SpendOutputAddress, SpendTxFees, TxGetter, create_spend,
+    self, create_spend, AddrInfo, AncestorInfo, CandidateCoin, CreateSpendRes, SpendCreationError,
+    SpendOutputAddress, SpendTxFees, TxGetter,
 };
 use coincube_core::{imported_spend, wallet_descriptor::WalletDescriptor};
 
@@ -28,7 +28,7 @@ use utils::{
 };
 
 use std::{
-    collections::{HashMap, HashSet, hash_map},
+    collections::{hash_map, HashMap, HashSet},
     convert::TryInto,
     fmt,
     sync::{self, mpsc},
@@ -383,7 +383,7 @@ fn enforce_legacy_signature_policy(
     secp: &bitcoin::secp256k1::Secp256k1<bitcoin::secp256k1::VerifyOnly>,
 ) -> Result<(), CommandError> {
     use coincube_core::unified_finalize::{
-        UnifiedFinalizeError, ensure_no_unsafe_legacy_alternative,
+        ensure_no_unsafe_legacy_alternative, UnifiedFinalizeError,
     };
     ensure_no_unsafe_legacy_alternative(psbt, secp).map_err(|error| match error {
         UnifiedFinalizeError::UnsafeLegacyAlternative {
@@ -508,7 +508,7 @@ fn merge_spend_signatures(
         // Blake2b Vault is native P2WSH — Taproot is not offered on that chain
         // — so the adapter's ECDSA-only view of signatures is the whole
         // picture there.)
-        use coincube_core::psbt_unified::{UnifiedPsbt, merge_signatures};
+        use coincube_core::psbt_unified::{merge_signatures, UnifiedPsbt};
         let mut stored = UnifiedPsbt::from_psbt(db_psbt)
             .map_err(|e| CommandError::UnifiedSignatureMerge(e.to_string()))?;
         let incoming = UnifiedPsbt::from_psbt(psbt.clone())
@@ -2830,12 +2830,12 @@ mod tests {
     use coincube_core::spend::InsaneFeeInfo;
 
     use bitcoin::{
-        Amount, OutPoint, ScriptBuf, Sequence, Transaction, Txid, Witness,
         bip32::{self, ChildNumber},
         blockdata::transaction::{TxIn, TxOut, Version as TxVersion},
         locktime::absolute,
+        Amount, OutPoint, ScriptBuf, Sequence, Transaction, Txid, Witness,
     };
-    use spend::{DUST_OUTPUT_SATS, InsufficientFunds};
+    use spend::{InsufficientFunds, DUST_OUTPUT_SATS};
     use std::{collections::BTreeMap, str::FromStr};
 
     const DUST: u64 = DUST_OUTPUT_SATS;
@@ -2949,11 +2949,9 @@ mod tests {
             1_000,
             2
         ));
-        assert!(
-            control
-                .verify_capped_broadcast_fee(&psbt, &finalized, (1_000, 2))
-                .is_ok()
-        );
+        assert!(control
+            .verify_capped_broadcast_fee(&psbt, &finalized, (1_000, 2))
+            .is_ok());
         assert!(matches!(
             control.verify_capped_broadcast_fee(&psbt, &finalized, (fee - 1, 2)),
             Err(CommandError::FeeCeilingExceeded)
@@ -3642,12 +3640,11 @@ mod tests {
             .derive(3)
             .unwrap()
             .script_pubkey();
-        assert!(
-            psbt.unsigned_tx
-                .output
-                .iter()
-                .any(|output| output.script_pubkey == committed_script)
-        );
+        assert!(psbt
+            .unsigned_tx
+            .output
+            .iter()
+            .any(|output| output.script_pubkey == committed_script));
         daemon.shutdown();
 
         let (daemon, conflicts, outpoint, destination) =
@@ -4453,13 +4450,11 @@ mod tests {
         // import) is backfilled from the wallet and then passes re-verification.
         let mut stripped = psbt.clone();
         stripped.inputs[0].non_witness_utxo = None;
-        assert!(
-            spend::reverify_spend_before_broadcast(
-                control.config.main_descriptor.as_vault().unwrap(),
-                &stripped
-            )
-            .is_err()
-        );
+        assert!(spend::reverify_spend_before_broadcast(
+            control.config.main_descriptor.as_vault().unwrap(),
+            &stripped
+        )
+        .is_err());
         backfill_previous_transactions(&mut stripped, &mut DbTxGetter::new(&control.db())).unwrap();
         assert_eq!(
             stripped.inputs[0].non_witness_utxo.as_ref(),
@@ -5541,16 +5536,12 @@ mod tests {
 
         // If we use a smaller timelock value it works, even though we don't have any such
         // recovery timelock (see https://github.com/wizardsardine/coincube/issues/1089).
-        assert!(
-            control
-                .create_recovery(dummy_addr.clone(), &[], 1, Some(9))
-                .is_ok()
-        );
-        assert!(
-            control
-                .create_recovery(dummy_addr.clone(), &[dummy_op], 1, Some(9))
-                .is_ok()
-        );
+        assert!(control
+            .create_recovery(dummy_addr.clone(), &[], 1, Some(9))
+            .is_ok());
+        assert!(control
+            .create_recovery(dummy_addr.clone(), &[dummy_op], 1, Some(9))
+            .is_ok());
 
         // Remove coin, re-add and confirm such that recovery available at next block.
         db_conn.remove_coins(&[dummy_op]);
@@ -5648,16 +5639,12 @@ mod tests {
             Err(CommandError::OutpointNotRecoverable(dummy_op_2, 10)),
         );
         // Using a shorter timelock parameter works:
-        assert!(
-            control
-                .create_recovery(dummy_addr.clone(), &[], 1, Some(9))
-                .is_ok()
-        );
-        assert!(
-            control
-                .create_recovery(dummy_addr.clone(), &[dummy_op, dummy_op_2], 1, Some(9))
-                .is_ok()
-        );
+        assert!(control
+            .create_recovery(dummy_addr.clone(), &[], 1, Some(9))
+            .is_ok());
+        assert!(control
+            .create_recovery(dummy_addr.clone(), &[dummy_op, dummy_op_2], 1, Some(9))
+            .is_ok());
 
         // Now re-add the coin with a confirmation one block earlier.
         db_conn.remove_coins(&[dummy_op_2]);
@@ -5677,9 +5664,7 @@ mod tests {
         // Amount is coin value minus fee.
         assert_eq!(
             psbt.unsigned_tx.output.first().unwrap().value,
-            Amount::from_sat(
-                /* coin 1 */ DUST + 126 + /* coin 2 */10_000 - /* fee */ 211
-            )
+            Amount::from_sat(/* coin 1 */ DUST + 126 + /* coin 2 */10_000 - /* fee */ 211)
         );
 
         // Do the same again, now specifying the outpoints explicitly.
@@ -5694,9 +5679,7 @@ mod tests {
         );
         assert_eq!(
             psbt.unsigned_tx.output.first().unwrap().value,
-            Amount::from_sat(
-                /* coin 1 */ DUST + 126 + /* coin 2 */10_000 - /* fee */ 211
-            )
+            Amount::from_sat(/* coin 1 */ DUST + 126 + /* coin 2 */10_000 - /* fee */ 211)
         );
 
         // Now check that increasing the feerate increases the fee.
@@ -5705,9 +5688,7 @@ mod tests {
         let psbt = res.unwrap().psbt;
         assert_eq!(
             psbt.unsigned_tx.output.first().unwrap().value,
-            Amount::from_sat(
-                /* coin 1 */ DUST + 126 + /* coin 2 */10_000 - /* fee */ 2 * 211
-            )
+            Amount::from_sat(/* coin 1 */ DUST + 126 + /* coin 2 */10_000 - /* fee */ 2 * 211)
         );
 
         ms.shutdown();
@@ -5858,13 +5839,13 @@ mod tests {
             descriptors::{CoincubeDescriptor, CoincubePolicy, PathInfo},
             miniscript::{
                 bitcoin::{
-                    self as btc, Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut,
-                    absolute, bip32::DerivationPath, ecdsa, secp256k1, sighash::EcdsaSighashType,
-                    transaction,
+                    self as btc, absolute, bip32::DerivationPath, ecdsa, secp256k1,
+                    sighash::EcdsaSighashType, transaction, Amount, OutPoint, ScriptBuf, Sequence,
+                    Transaction, TxIn, TxOut,
                 },
                 descriptor::{DerivPaths, DescriptorMultiXKey, DescriptorPublicKey, Wildcard},
             },
-            psbt_unified::{UnifiedPsbt, unified_signatures},
+            psbt_unified::{unified_signatures, UnifiedPsbt},
             signer::MasterSigner,
             unified_signing::sign_p2wsh_all_unified,
         };
@@ -6025,29 +6006,24 @@ mod tests {
                 control.rbf_psbt(&txid, false, Some(1)),
                 Err(CommandError::ImportedSpendValidation(_))
             ));
-            assert!(
-                control
-                    .db()
-                    .lock()
-                    .unwrap()
-                    .connection()
-                    .spend_tx(&txid)
-                    .is_none()
-            );
-            assert!(
-                backend
-                    .lock()
-                    .unwrap()
-                    .broadcasted
-                    .lock()
-                    .unwrap()
-                    .is_empty()
-            );
-            assert!(
-                psbt.inputs
-                    .iter()
-                    .all(|input| input.partial_sigs.is_empty())
-            );
+            assert!(control
+                .db()
+                .lock()
+                .unwrap()
+                .connection()
+                .spend_tx(&txid)
+                .is_none());
+            assert!(backend
+                .lock()
+                .unwrap()
+                .broadcasted
+                .lock()
+                .unwrap()
+                .is_empty());
+            assert!(psbt
+                .inputs
+                .iter()
+                .all(|input| input.partial_sigs.is_empty()));
         }
 
         fn unified(psbt: &Psbt, signer: &MasterSigner) -> Psbt {
@@ -6366,10 +6342,12 @@ mod tests {
                         is_from_self: false,
                     }]);
                 let good = legacy(&legacy(&psbt, &signers[0]), &signers[1]);
-                assert!(
-                    finalize_spend_for_chain(ChainId::BitcoinBlake2b, good.clone(), &verify_only())
-                        .is_ok()
-                );
+                assert!(finalize_spend_for_chain(
+                    ChainId::BitcoinBlake2b,
+                    good.clone(),
+                    &verify_only()
+                )
+                .is_ok());
                 let mut bad = good;
                 let secp = secp256k1::Secp256k1::new();
                 let secret = secp256k1::SecretKey::from_slice(&[5u8; 32]).unwrap();
