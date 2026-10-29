@@ -8130,6 +8130,9 @@ impl App {
                                 .find(|a| a.email == email_for_task)
                             {
                                 acct.tokens = tokens.clone();
+                                if acct.reregister_claim.is_some() {
+                                    acct.device_id = None;
+                                }
                                 acct.reregister_claim = None;
                             } else {
                                 cache.accounts.push(

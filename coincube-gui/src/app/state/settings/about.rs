@@ -96,7 +96,7 @@ impl State for AboutSettingsState {
                             Ok(Some(claim)) => claim,
                             Ok(None) => return Err("Connect registration changed. Refresh this page and try again.".to_string()),
                             Err(e) => {
-                                tracing::warn!("Re-register: failed to clear cached device_id: {}", e);
+                                tracing::warn!("Re-register: failed to claim cached registration: {}", e);
                                 return Err("Couldn't reset this device's registration. \
                                     Check that Tenshu can write to its data folder, then try again."
                                     .to_string());
@@ -120,8 +120,8 @@ impl State for AboutSettingsState {
                                 device_id,
                             })
                             .map_err(|e| e.to_string());
-                        // Roll back only if this request still owns the cache.
-                        // A newer same-email login must keep its own device id.
+                        // Release this request's claim on failure. The old id
+                        // remained cached; a newer login keeps its own id.
                         if result.is_err() {
                             if let Err(e) =
                                 crate::services::connect::client::cache::finish_device_reregistration(
@@ -133,7 +133,7 @@ impl State for AboutSettingsState {
                                 .await
                             {
                                 tracing::warn!(
-                                    "Re-register: failed to restore previous device_id: {}",
+                                    "Re-register: failed to release registration claim: {}",
                                     e,
                                 );
                             }

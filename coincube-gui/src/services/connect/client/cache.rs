@@ -17,6 +17,48 @@ fn process_claim_prefix() -> &'static str {
     PREFIX.get_or_init(|| format!("{}:{}:", std::process::id(), uuid::Uuid::new_v4()))
 }
 
+fn claim_owner_alive(claim: &str) -> bool {
+    if claim.starts_with(process_claim_prefix()) {
+        return true;
+    }
+    let Some(pid) = claim
+        .split(':')
+        .next()
+        .and_then(|part| part.parse::<u32>().ok())
+    else {
+        // Unknown claims are not proof that their owner exited.
+        return true;
+    };
+    #[cfg(unix)]
+    {
+        if pid > i32::MAX as u32 {
+            return true;
+        }
+        // `kill(pid, 0)` checks existence without sending a signal. An
+        // inaccessible process is conservatively treated as alive.
+        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER};
+        use windows::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        // Access denial is inconclusive and must preserve the live claim.
+        let handle = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
+            Ok(handle) => handle,
+            Err(e) => {
+                return e.code() != windows::core::HRESULT::from_win32(ERROR_INVALID_PARAMETER.0);
+            }
+        };
+        let mut exit_code = 0u32;
+        let status = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
+        let _ = unsafe { CloseHandle(handle) };
+        status.is_err() || exit_code == 259 // STILL_ACTIVE
+    }
+}
+
 /// Opens `connect.json` for read/write, creating it owner-only. An existing
 /// file is tightened to `0600` as well: the cache holds refresh tokens.
 async fn open_owner_cache(path: &std::path::Path) -> std::io::Result<tokio::fs::File> {
@@ -88,6 +130,9 @@ impl ConnectCache {
             // A new foreground login, including a login for the same email,
             // supersedes any re-registration started by the prior session.
             if let Some(account) = self.accounts.iter_mut().find(|a| a.email == email) {
+                if account.reregister_claim.is_some() {
+                    account.device_id = None;
+                }
                 account.reregister_claim = None;
             }
             self.active_email = Some(email.to_string());
@@ -127,7 +172,7 @@ impl Account {
     pub(crate) fn has_live_reregister_claim(&self) -> bool {
         self.reregister_claim
             .as_deref()
-            .is_some_and(|claim| claim.starts_with(process_claim_prefix()))
+            .is_some_and(claim_owner_alive)
     }
 
     pub fn from_cache(
@@ -243,8 +288,9 @@ pub async fn set_device_id_for_email(
     .await
 }
 
-/// Atomically clear the current id and claim the replacement for this login.
-/// A subsequent foreground login invalidates the claim, even for the same email.
+/// Atomically claim a replacement while preserving the old id for crash
+/// recovery. A subsequent foreground login invalidates the claim and old id,
+/// even for the same email, so that login registers its own device.
 pub async fn begin_device_reregistration(
     network_dir: &NetworkDirectory,
     email: &str,
@@ -338,20 +384,16 @@ async fn mutate_device_registration(
         DeviceRegistrationUpdate::Begin { expected_id, claim } => {
             if !is_active
                 || account.device_id.as_deref() != Some(expected_id)
-                || account.reregister_claim.is_some()
+                || account.has_live_reregister_claim()
             {
                 return Ok(false);
             }
-            account.device_id = None;
             account.reregister_claim = Some(claim.to_string());
             true
         }
         DeviceRegistrationUpdate::Set { device_id, claim } => {
             if let Some(claim) = claim {
-                if !is_active
-                    || account.reregister_claim.as_deref() != Some(claim)
-                    || account.device_id.is_some()
-                {
+                if !is_active || account.reregister_claim.as_deref() != Some(claim) {
                     return Ok(false);
                 }
                 account.device_id = device_id.map(str::to_string);
@@ -365,8 +407,8 @@ async fn mutate_device_registration(
                     return Ok(true);
                 }
                 account.device_id = device_id.map(str::to_string);
-                // Treat an earlier process's claim as abandoned on startup.
-                // Its late completion still needs the exact claim to commit.
+                // An exited process's claim is abandoned. Its late completion
+                // still needs the exact claim to commit.
                 account.reregister_claim = None;
                 true
             }
@@ -585,13 +627,15 @@ mod tests {
                 .unwrap()
                 .active_account()
                 .unwrap()
-                .device_id,
-            None
+                .device_id
+                .as_deref(),
+            Some("device-a")
         );
 
         // B signs in to the same email before A's RegisterDevice RPC returns.
         let mut b_cache = ConnectCache::from_file(&dir).unwrap();
         b_cache.upsert_credential(email, tokens("b"), true);
+        assert!(b_cache.active_account().unwrap().device_id.is_none());
         std::fs::write(&path, serde_json::to_vec(&b_cache).unwrap()).unwrap();
         assert!(
             !finish_device_reregistration(&dir, email, &claim, Some("late-a"))
@@ -707,7 +751,10 @@ mod tests {
                 .unwrap()
         );
         let claimed = ConnectCache::from_file(&dir).unwrap();
-        assert!(claimed.active_account().unwrap().device_id.is_none());
+        assert_eq!(
+            claimed.active_account().unwrap().device_id.as_deref(),
+            Some("device-a")
+        );
         assert_eq!(
             claimed
                 .active_account()
@@ -734,30 +781,46 @@ mod tests {
         std::fs::remove_dir_all(dir.path()).unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn abandoned_process_claim_recovers_without_accepting_late_completion() {
+        let mut prior_process = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let prior_pid = prior_process.id();
+        prior_process.kill().unwrap();
+        prior_process.wait().unwrap();
         let dir = test_network_dir();
         let path = dir.path().join(CONNECT_CACHE_FILENAME);
         let email = "alice@example.com";
         let mut cache = ConnectCache::default();
         cache.upsert_credential(email, tokens("a"), true);
-        cache.accounts[0].reregister_claim = Some("prior-process:claim-a".into());
+        cache.accounts[0].device_id = Some("device-a".into());
+        let prior_claim = format!("{prior_pid}:prior-nonce:claim-a");
+        cache.accounts[0].reregister_claim = Some(prior_claim.clone());
         std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
 
         assert!(!cache.accounts[0].has_live_reregister_claim());
+        assert_eq!(
+            ConnectCache::from_file(&dir)
+                .unwrap()
+                .active_account()
+                .unwrap()
+                .device_id
+                .as_deref(),
+            Some("device-a")
+        );
         assert!(
             set_device_id_for_email(&dir, email, Some("recovered-device"))
                 .await
                 .unwrap()
         );
-        assert!(!finish_device_reregistration(
-            &dir,
-            email,
-            "prior-process:claim-a",
-            Some("late-a")
-        )
-        .await
-        .unwrap());
+        assert!(
+            !finish_device_reregistration(&dir, email, &prior_claim, Some("late-a"))
+                .await
+                .unwrap()
+        );
         let restored = ConnectCache::from_file(&dir).unwrap();
         assert_eq!(
             restored.active_account().unwrap().device_id.as_deref(),
@@ -768,6 +831,76 @@ mod tests {
             .unwrap()
             .reregister_claim
             .is_none());
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn second_live_process_cannot_take_over_about_claim() {
+        use std::sync::Arc;
+
+        let mut owner = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let dir = test_network_dir();
+        let path = dir.path().join(CONNECT_CACHE_FILENAME);
+        let email = "alice@example.com";
+        let claim = format!("{}:other-process:claim-a", owner.id());
+        let mut cache = ConnectCache::default();
+        cache.upsert_credential(email, tokens("a"), true);
+        cache.accounts[0].device_id = Some("device-a".into());
+        cache.accounts[0].reregister_claim = Some(claim.clone());
+        std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
+
+        assert!(cache.accounts[0].has_live_reregister_claim());
+        assert!(begin_device_reregistration(&dir, email, "device-a")
+            .await
+            .unwrap()
+            .is_none());
+        let result = crate::services::connect::grpc::bootstrap::ensure_device_registered(
+            "invalid://must-not-reach-network",
+            Arc::new(tokio::sync::RwLock::new(tokens("a"))),
+            &dir,
+            email,
+            "test desktop".into(),
+            "test".into(),
+            "test".into(),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(crate::services::connect::grpc::bootstrap::BootstrapError::Superseded)
+        ));
+        assert!(!set_device_id_for_email(&dir, email, Some("device-b"))
+            .await
+            .unwrap());
+        let persisted = ConnectCache::from_file(&dir).unwrap();
+        assert_eq!(
+            persisted.active_account().unwrap().device_id.as_deref(),
+            Some("device-a")
+        );
+        assert_eq!(
+            persisted
+                .active_account()
+                .unwrap()
+                .reregister_claim
+                .as_deref(),
+            Some(claim.as_str())
+        );
+
+        owner.kill().unwrap();
+        owner.wait().unwrap();
+        let new_claim = begin_device_reregistration(&dir, email, "device-a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(new_claim, claim);
+        assert!(
+            finish_device_reregistration(&dir, email, &new_claim, Some("device-b"))
+                .await
+                .unwrap()
+        );
         std::fs::remove_dir_all(dir.path()).unwrap();
     }
 

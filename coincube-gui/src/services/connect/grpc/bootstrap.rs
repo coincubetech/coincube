@@ -138,8 +138,9 @@ async fn register_device(
             .as_ref()
             .is_some_and(Account::has_live_reregister_claim)
         {
-            // About owns this registration in this process. Claims from an
-            // earlier process are recoverable after a crash or forced exit.
+            // A live About request owns this registration, including one in
+            // another Tenshu process sharing the cache. Exited owners can be
+            // superseded without touching a live request.
             return Err(BootstrapError::Superseded);
         }
         if let Some(existing) = cached
