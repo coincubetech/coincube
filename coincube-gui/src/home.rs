@@ -10555,11 +10555,13 @@ mod tests {
             assert_eq!(active.border.color, bad, "{name} action border");
             assert!(
                 theme::tenshu::contrast(active.text_color, panel) >= 4.5,
-                "{name} action label on panel"
+                "{} action label on panel",
+                name
             );
             assert!(
                 theme::tenshu::contrast(hovered.text_color, bad) >= 4.5,
-                "{name} hovered action label on danger fill"
+                "{} hovered action label on danger fill",
+                name
             );
             assert_eq!(disabled.text_color.a, 0.5, "{name} disabled label");
         }
