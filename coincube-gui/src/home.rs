@@ -3008,8 +3008,15 @@ impl Home {
                 Task::none()
             }
             Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::CloseRemoteModal)) => {
+                let opener = self
+                    .delete_remote_cube_modal
+                    .as_ref()
+                    .map(|modal| modal.cube.uuid.clone());
                 self.delete_remote_cube_modal = None;
-                Task::none()
+                opener
+                    .as_deref()
+                    .map(|uuid| focus_remote_delete_opener(self, uuid))
+                    .unwrap_or_else(Task::none)
             }
             Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::ConfirmRemoteDelete(
                 uuid,
@@ -3181,13 +3188,20 @@ impl Home {
                 }
             }
             Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::CloseModal)) => {
+                let opener = self.delete_cube_modal.as_ref().map(|modal| CubeCatalogKey {
+                    chain: modal.cube.network,
+                    cube_id: modal.cube.id.clone(),
+                });
                 self.delete_cube_modal = None;
                 if self.network == ChainId::Testnet
                     && !has_existing_wallet(&self.datadir_path, Network::Testnet)
                 {
                     self.network = ChainId::Testnet4;
                 }
-                Task::none()
+                opener
+                    .as_ref()
+                    .map(|key| focus_local_delete_opener(self, key))
+                    .unwrap_or_else(Task::none)
             }
             Message::Checked { for_chain, res } => match res {
                 // The probe was started for a network the user has since
@@ -7231,12 +7245,75 @@ fn delete_modal_focus(id: Id) -> ViewMessage {
     ViewMessage::Catalog(launcher_catalog::CatalogMessage::Focus(id))
 }
 
+fn focus_local_delete_opener(home: &Home, key: &CubeCatalogKey) -> Task<Message> {
+    if !launcher_catalog::catalog_visible(home) {
+        return Task::none();
+    }
+    let projection = launcher_catalog::project(home);
+    let row = projection
+        .locals
+        .iter()
+        .position(|row| row.key == *key && row.actionable);
+    let mounted = row.is_some_and(|index| {
+        !projection.floor_eligible(home.catalog.mode) || projection.selected == Some(index)
+    });
+    if mounted {
+        iced::widget::operation::focus(launcher_catalog::delete_id(key))
+    } else {
+        Task::none()
+    }
+}
+
+fn focus_remote_delete_opener(home: &Home, uuid: &str) -> Task<Message> {
+    if !launcher_catalog::catalog_visible(home) {
+        return Task::none();
+    }
+    let projection = launcher_catalog::project(home);
+    let mounted = !projection.floor_eligible(home.catalog.mode)
+        && projection.remotes.iter().any(|cube| cube.uuid == uuid);
+    if mounted {
+        iced::widget::operation::focus(launcher_catalog::remote_delete_id(uuid))
+    } else {
+        Task::none()
+    }
+}
+
 fn delete_modal_card(theme: &theme::Theme) -> iced::widget::container::Style {
     let mut style = theme::card::modal(theme);
     style.background = Some(iced::Background::Color(theme.colors.shell.panel));
     style.border.color = theme.colors.shell.line;
     style.border.width = 1.0;
     style.border.radius = 12.0.into();
+    style
+}
+
+fn delete_modal_danger_text(theme: &theme::Theme) -> iced::widget::text::Style {
+    iced::widget::text::Style {
+        color: Some(theme.colors.shell.bad),
+    }
+}
+
+fn delete_modal_danger_button(
+    theme: &theme::Theme,
+    status: iced::widget::button::Status,
+) -> iced::widget::button::Style {
+    use iced::widget::button::Status;
+
+    let bad = theme.colors.shell.bad;
+    let mut style = theme::button::secondary(theme, status);
+    style.border.color = bad;
+    style.background = Some(iced::Background::Color(theme.colors.shell.panel));
+    match status {
+        Status::Active => style.text_color = bad,
+        Status::Hovered | Status::Pressed => {
+            style.background = Some(iced::Background::Color(bad));
+            style.text_color = theme.colors.shell.background;
+        }
+        Status::Disabled => {
+            style.text_color = iced::Color { a: 0.5, ..bad };
+            style.border.color = iced::Color { a: 0.5, ..bad };
+        }
+    }
     style
 }
 
@@ -7252,7 +7329,7 @@ impl DeleteRemoteCubeModal {
             .spacing(10)
             .push(Container::new(
                 h4_bold(format!("Delete Remote Cube \"{}\"", display_name))
-                    .style(theme::text::destructive)
+                    .style(delete_modal_danger_text)
                     .width(Length::Fill),
             ))
             .push(text(
@@ -7284,7 +7361,7 @@ impl DeleteRemoteCubeModal {
             delete_modal_focus,
         )
         .width(Length::Fixed(250.0))
-        .style(theme::button::destructive);
+        .style(delete_modal_danger_button);
         if !self.deleting {
             delete_btn = delete_btn.on_press(ViewMessage::DeleteCube(
                 DeleteCubeMessage::ConfirmRemoteDelete(self.cube.uuid.clone()),
@@ -7565,7 +7642,7 @@ impl DeleteCubeModal {
             delete_modal_focus,
         )
         .width(Length::Fixed(200.0))
-        .style(theme::button::destructive);
+        .style(delete_modal_danger_button);
         if can_delete {
             confirm_button = confirm_button.on_press(ViewMessage::DeleteCube(
                 DeleteCubeMessage::Confirm(self.cube.id.clone()),
@@ -7609,7 +7686,7 @@ impl DeleteCubeModal {
             .spacing(10)
             .push(Container::new(
                 h4_bold(format!("Delete Cube \"{}\"", display_name))
-                    .style(theme::text::destructive)
+                    .style(delete_modal_danger_text)
                     .width(Length::Fill),
             ))
             .push(Row::new().push(text(help_text_1)))
@@ -10458,6 +10535,115 @@ mod tests {
         );
         assert!(!deleting_view.has_focus(remote_cancel));
         assert!(!deleting_view.has_focus(remote_confirm));
+    }
+
+    #[test]
+    fn delete_modal_danger_ink_matches_canvas_and_meets_body_contrast() {
+        use iced::widget::button::Status;
+
+        for (name, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            let bad = theme.colors.shell.bad;
+            let panel = theme.colors.shell.panel;
+            let title = delete_modal_danger_text(&theme);
+            let active = delete_modal_danger_button(&theme, Status::Active);
+            let hovered = delete_modal_danger_button(&theme, Status::Hovered);
+            let disabled = delete_modal_danger_button(&theme, Status::Disabled);
+
+            assert_eq!(title.color, Some(bad), "{name} title");
+            assert_eq!(active.text_color, bad, "{name} action ink");
+            assert_eq!(active.border.color, bad, "{name} action border");
+            assert!(
+                theme::tenshu::contrast(active.text_color, panel) >= 4.5,
+                "{name} action label on panel"
+            );
+            assert!(
+                theme::tenshu::contrast(hovered.text_color, bad) >= 4.5,
+                "{name} hovered action label on danger fill"
+            );
+            assert_eq!(disabled.text_color.a, 0.5, "{name} disabled label");
+        }
+    }
+
+    #[test]
+    fn closing_delete_modals_returns_focus_only_to_a_visible_opener() {
+        use iced_runtime::futures::futures::StreamExt;
+
+        fn has_focus_operation(task: Task<Message>) -> bool {
+            let Some(stream) = iced_runtime::task::into_stream(task) else {
+                return false;
+            };
+            iced_runtime::futures::futures::executor::block_on(stream.collect::<Vec<_>>())
+                .iter()
+                .any(|action| matches!(action, iced_runtime::Action::Widget(_)))
+        }
+
+        let local_cube = cube("local-a", "Local A", Network::Bitcoin);
+        let mut home = home();
+        home.state = State::Cubes {
+            cubes: vec![local_cube.clone()],
+            create_cube: false,
+            source: ChainId::Bitcoin,
+        };
+        home.catalog.mode = launcher_catalog::LauncherMode::List;
+        home.delete_cube_modal = Some(DeleteCubeModal::new(
+            local_cube.clone(),
+            home.datadir_path.network_directory(Network::Bitcoin),
+            home.datadir_path.path().to_path_buf(),
+            None,
+            Some(true),
+            false,
+        ));
+        assert!(has_focus_operation(home.update(Message::View(
+            ViewMessage::DeleteCube(DeleteCubeMessage::CloseModal)
+        ))));
+        assert!(home.delete_cube_modal.is_none());
+
+        let local_key = CubeCatalogKey {
+            chain: ChainId::Bitcoin,
+            cube_id: local_cube.id,
+        };
+        home.catalog.mode = launcher_catalog::LauncherMode::Cubes;
+        home.catalog.selected = Some(local_key.clone());
+        assert!(has_focus_operation(focus_local_delete_opener(
+            &home, &local_key
+        )));
+        home.catalog.selected = None;
+        assert!(!has_focus_operation(focus_local_delete_opener(
+            &home, &local_key
+        )));
+        home.catalog.mode = launcher_catalog::LauncherMode::List;
+        home.catalog.query = "not this Cube".into();
+        assert!(!has_focus_operation(focus_local_delete_opener(
+            &home, &local_key
+        )));
+        home.catalog.query.clear();
+
+        let remote_cube = remote_cube("remote-a", "Remote A", Network::Bitcoin);
+        home.remote_cubes = vec![remote_cube.clone()];
+        home.delete_remote_cube_modal = Some(DeleteRemoteCubeModal {
+            cube: remote_cube.clone(),
+            deleting: false,
+            error: None,
+        });
+        assert!(has_focus_operation(home.update(Message::View(
+            ViewMessage::DeleteCube(DeleteCubeMessage::CloseRemoteModal)
+        ))));
+        assert!(home.delete_remote_cube_modal.is_none());
+
+        home.catalog.mode = launcher_catalog::LauncherMode::Cubes;
+        assert!(!has_focus_operation(focus_remote_delete_opener(
+            &home,
+            &remote_cube.uuid
+        )));
+        home.catalog.mode = launcher_catalog::LauncherMode::List;
+        home.catalog.query = "not this Cube".into();
+        assert!(!has_focus_operation(focus_remote_delete_opener(
+            &home,
+            &remote_cube.uuid
+        )));
     }
 
     #[tokio::test(flavor = "multi_thread")]
