@@ -5,6 +5,7 @@ use coincube_ui::component::text::Text;
 use coincube_ui::{
     color,
     component::{amount::*, button, form, spinner, text::*},
+    font::MEDIUM,
     icon::{
         arrow_down_up_icon, arrow_right, check_circle_icon, check_icon, clipboard_icon, clock_icon,
         cross_icon, cube_outline_icon, dash_circle_icon, droplet_fill_icon,
