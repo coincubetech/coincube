@@ -7,7 +7,6 @@
 //! picker, diagnostics). [`SparkPlaceholderView`] is kept around
 //! as a generic "coming soon" slot for future panels.
 
-pub mod last_tx;
 pub mod overview;
 pub mod receive;
 pub mod send;
@@ -64,8 +63,7 @@ pub enum SparkTransactionsMessage {
     /// at that index in the current `recent_transactions` list.
     Select(usize),
     /// Preselect a specific payment to display in the detail pane —
-    /// used by Overview / Send / Receive to hand off a row when the
-    /// user taps there. The panel switches into detail mode without
+    /// used by Overview to hand off a row when the user taps there. The panel switches into detail mode without
     /// needing an index lookup against its own list.
     Preselect(crate::app::view::spark::SparkRecentTransaction),
     /// Empty-state navigation: "Send sats" button.
@@ -134,14 +132,8 @@ pub enum SparkSendMessage {
     /// Balance snapshot, folded into a unified total by the handler. `None` when
     /// the `get_info` fetch failed; the card keeps its last value.
     BalanceLoaded(Option<(u64, Option<coincube_spark_protocol::StableBalanceSnapshot>)>),
-    /// A `list_payments` RPC completed — used to populate the Last
-    /// Transactions section under the Send form.
-    PaymentsLoaded(Vec<coincube_spark_protocol::PaymentSummary>),
-    /// A `list_payments` RPC failed — silently clears the list.
-    PaymentsFailed(String),
-    /// User tapped a row in Last Transactions.
-    SelectTransaction(usize),
-    /// User tapped "View All Transactions".
+    /// User tapped "View transactions" (unknown outcome) or "Check
+    /// status" (failed cross-chain send): open Transactions.
     History,
 
     // ── Cross-chain stablecoin send ─────────────────────────────────────
@@ -275,15 +267,6 @@ pub enum SparkReceiveMessage {
     /// Stable Balance snapshot, folded into a unified total by the handler.
     /// `None` when `get_info` failed; the card keeps its last value.
     BalanceLoaded(Option<(u64, Option<coincube_spark_protocol::StableBalanceSnapshot>)>),
-    /// A `list_payments` RPC completed — used to populate the Last
-    /// Transactions section under the Receive form.
-    PaymentsLoaded(Vec<coincube_spark_protocol::PaymentSummary>),
-    /// A `list_payments` RPC failed — silently clears the list.
-    PaymentsFailed(String),
-    /// User tapped a row in Last Transactions.
-    SelectTransaction(usize),
-    /// User tapped "View All Transactions".
-    History,
     /// User tapped "Copy" under the generated payment request. Routed
     /// through the panel rather than the app-level `Message::Clipboard`
     /// so the handler can pair the clipboard write with a confirmation
