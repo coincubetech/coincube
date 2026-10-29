@@ -45,7 +45,7 @@ fn vault_display_name(wallet: &Wallet) -> &str {
         .alias
         .as_deref()
         .filter(|alias| !alias.trim().is_empty())
-        .unwrap_or("Unnamed")
+        .unwrap_or("Unnamed Vault")
 }
 
 fn zero_balance_known(status: &SyncStatus, rescan_pending: bool) -> bool {
@@ -150,6 +150,8 @@ pub struct VaultReceivePanel {
     warning: Option<Error>,
     processing: bool,
     generating: bool,
+    /// Refreshed on panel updates and reload, never by `view`.
+    restore_rescan_clear: bool,
 }
 
 impl VaultReceivePanel {
@@ -174,7 +176,12 @@ impl VaultReceivePanel {
             // Mirrors `VaultTransactionsPanel::new`.
             processing: true,
             generating: false,
+            restore_rescan_clear: false,
         }
+    }
+
+    fn refresh_restore_rescan(&mut self) {
+        self.restore_rescan_clear = no_pending_restore_rescan(&self.data_dir, &self.wallet);
     }
 
     pub fn address(&self, i: usize) -> Option<&Address> {
@@ -220,12 +227,8 @@ impl State for VaultReceivePanel {
                     cache.last_poll_at_startup,
                     cache.history_sync(),
                 );
-                // Receive is not sent UpdatePanelCache; check the persisted
-                // restore obligation afresh only for a visible, synced zero.
-                // A cached "no obligation" could briefly expose a false zero
-                // if a new restore rescan is scheduled while this page is open.
                 zero_balance_known(&status, cache.rescan_progress().is_some())
-                    && no_pending_restore_rescan(&self.data_dir, &self.wallet)
+                    && self.restore_rescan_clear
             });
         let balance_display = balance_label(balance, cache.bitcoin_unit, masked, zero_known);
         let content = view::dashboard(
@@ -275,6 +278,12 @@ impl State for VaultReceivePanel {
         message: Message,
     ) -> Task<Message> {
         let daemon = daemon.expect("Daemon required for vault receive panel");
+        // App forwards each Tick to the current panel. Keep disk I/O off
+        // redraws and interactive actions. A new restore obligation written
+        // while Receive is open revokes a known zero on the next tick.
+        if matches!(message, Message::Tick | Message::UpdatePanelCache(_)) {
+            self.refresh_restore_rescan();
+        }
         match message {
             Message::View(view::Message::VaultReceive(msg)) => match msg {
                 view::VaultReceiveMessage::Copy(address) => {
@@ -493,6 +502,7 @@ impl State for VaultReceivePanel {
         // `Self::new` already starts in the loading state, so the fetch
         // below is covered from the first frame after navigation.
         *self = Self::new(data_dir, wallet);
+        self.refresh_restore_rescan();
         self.daemon_backend = Some(daemon.backend());
         Task::perform(
             async move {
@@ -716,7 +726,7 @@ mod tests {
         assert_ne!(vault_display_name(&wallet), wallet.name);
 
         let unnamed = wallet.with_alias(Some("  ".to_string()));
-        assert_eq!(vault_display_name(&unnamed), "Unnamed");
+        assert_eq!(vault_display_name(&unnamed), "Unnamed Vault");
     }
 
     #[test]
@@ -769,6 +779,67 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
         assert!(!known(), "unreadable endpoint cannot prove a zero");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn receive_refreshes_restore_status_on_reload_and_tick() {
+        let root = std::env::temp_dir().join(format!("receive-update-{}", uuid::Uuid::new_v4()));
+        let data_dir = CoincubeDirectory::new(root.clone());
+        let wallet = Arc::new(Wallet::new(CoincubeDescriptor::from_str(DESC).unwrap()));
+        let network_dir = data_dir.network_directory(wallet.chain);
+        std::fs::create_dir_all(network_dir.path()).unwrap();
+        let path = network_dir.path().join(settings::SETTINGS_FILE_NAME);
+        let mut settings = settings::Settings {
+            wallets: vec![WalletSettings {
+                name: wallet.name.clone(),
+                alias: None,
+                descriptor_checksum: wallet.descriptor_checksum.clone(),
+                pinned_at: None,
+                keys: Vec::new(),
+                hardware_wallets: Vec::new(),
+                remote_backend_auth: None,
+                start_internal_bitcoind: None,
+                pending_rescan: Some(PendingRescan::DateUnknown),
+                keychain_keys_recorded: false,
+            }],
+            ..Default::default()
+        };
+        let write = |settings: &settings::Settings| {
+            std::fs::write(&path, serde_json::to_vec(settings).unwrap()).unwrap();
+        };
+        let daemon = Arc::new(Coincubed::new(Daemon::new(vec![]).run()));
+        let cache = Cache::default();
+        let mut panel = VaultReceivePanel::new(data_dir, wallet.clone());
+        assert!(!panel.restore_rescan_clear, "first render must fail closed");
+
+        write(&settings);
+        drop(panel.reload(Some(daemon.clone()), Some(wallet)));
+        assert!(!panel.restore_rescan_clear, "reload sees pending restore");
+
+        settings.wallets[0].pending_rescan = None;
+        write(&settings);
+        drop(panel.update(Some(daemon.clone()), &cache, Message::Tick));
+        assert!(
+            panel.restore_rescan_clear,
+            "retired marker permits known zero"
+        );
+
+        settings.wallets[0].pending_rescan = Some(PendingRescan::DateUnknown);
+        write(&settings);
+        drop(panel.update(Some(daemon.clone()), &cache, Message::Tick));
+        assert!(
+            !panel.restore_rescan_clear,
+            "new pending marker revokes known zero"
+        );
+
+        settings.wallets[0].pending_rescan = None;
+        write(&settings);
+        drop(panel.update(Some(daemon.clone()), &cache, Message::Tick));
+        assert!(panel.restore_rescan_clear);
+        std::fs::write(&path, b"{broken").unwrap();
+        drop(panel.update(Some(daemon), &cache, Message::Tick));
+        assert!(!panel.restore_rescan_clear, "corrupt settings fail closed");
         std::fs::remove_dir_all(root).unwrap();
     }
 

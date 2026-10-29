@@ -766,13 +766,16 @@ pub fn receive<'a>(
             p2_regular("On-chain deposits appear after the Vault syncs.")
                 .style(theme::text::secondary),
         )
-        .push(action(
-            control_id("activity"),
-            "See all in Activity",
-            None,
-            Some(Message::Menu(Menu::Cube(CubeSubMenu::Activity))),
-            activity_link_style,
-        ));
+        .push(
+            Action::new(
+                control_id("activity"),
+                p2_medium("See all in Activity"),
+                Message::FocusAction,
+            )
+            .padding([8, 0])
+            .style(activity_link_style)
+            .on_press(Message::Menu(Menu::Cube(CubeSubMenu::Activity))),
+        );
 
     Column::new()
         .width(Length::Fill)
@@ -1107,6 +1110,12 @@ mod tests {
                         .find(|(value, _)| value == "Receiving into")
                         .expect("receive aside");
                     assert!(aside.1.x >= 720.0, "aside should sit beside the 680px card");
+                    let link = centered
+                        .text
+                        .iter()
+                        .find(|(value, _)| value == "See all in Activity")
+                        .expect("Activity link");
+                    assert_eq!(link.1.x, aside.1.x, "Activity link should align with aside");
                 }
                 assert!(ready.contains("Bitcoin address"));
                 assert!(ready.contains(&addr(3).to_string()));
