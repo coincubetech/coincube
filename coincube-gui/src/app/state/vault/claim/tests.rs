@@ -5103,11 +5103,12 @@ mod flow {
         let _ = std::fs::remove_dir_all(&f.root);
     }
 
-    fn seed_refresh_cache(app: &crate::app::App) {
+    fn seed_refresh_cache(app: &mut crate::app::App) {
         use crate::services::connect::client::{
             auth::AccessTokenResponse,
             cache::{Account, ConnectCache, CONNECT_CACHE_FILENAME},
         };
+        app.cache.datadir_path = app.datadir.clone();
         let dir = app.cache.datadir_path.network_directory(app.cache.network);
         std::fs::create_dir_all(dir.path()).unwrap();
         let cache = ConnectCache {
@@ -5500,9 +5501,9 @@ mod flow {
 
     #[cfg(any(unix, windows))]
     #[test]
-    fn reviewer_originating_setsession_lifts_hold_after_gui_broadcast() {
+    fn reviewer_originating_refresh_commit_lifts_hold_after_gui_broadcast() {
         reviewer_gui_flow_on_bounded_stack(
-            "reviewer_originating_setsession_lifts_hold_after_gui_broadcast",
+            "reviewer_originating_refresh_commit_lifts_hold_after_gui_broadcast",
             || async {
                 let first = reviewer_blank_app();
                 let mut second = reviewer_blank_app();
@@ -5512,6 +5513,7 @@ mod flow {
                 let mut gui = crate::gui::GUI::reviewer_claim_gui(first, second);
                 gui.reviewer_app_mut(0).invalidate_claim_session();
                 assert!(gui.reviewer_app_mut(0).claim_session_invalidated);
+                seed_refresh_cache(gui.reviewer_app_mut(0));
                 // A real operation begun in the held tab after the hold: its refresh
                 // against the HTTP fixture, whose SetSession completion is then
                 // routed through the real GUI broadcaster.
@@ -5534,10 +5536,17 @@ mod flow {
                 for message in gui_outputs(refresh).await {
                     if crate::gui::GUI::reviewer_is_set_session(&message) {
                         routed += 1;
-                        drop(gui.update(message));
+                        let mut pending = std::collections::VecDeque::from(
+                            gui_outputs(gui.update(message)).await,
+                        );
+                        while let Some(follow) = pending.pop_front() {
+                            if crate::gui::GUI::reviewer_is_auth_commit(&follow) {
+                                pending.extend(gui_outputs(gui.update(follow)).await);
+                            }
+                        }
                     }
                 }
-                assert_eq!(routed, 1, "the real refresh handed back one SetSession");
+                assert_eq!(routed, 1, "the real refresh handed back one completion");
                 assert!(
                     !gui.reviewer_app_mut(0).claim_session_invalidated,
                     "same-tab hook must run AFTER broadcast so it lifts that tab's hold"

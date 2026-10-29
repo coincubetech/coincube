@@ -6655,8 +6655,9 @@ mod fork_auth_dispatch_tests {
             root.network_directory(ChainId::BitcoinBlake2b)
                 .init()
                 .unwrap();
-            // Inject the App message at the GUI seam. A Home source ignores
-            // Run, isolating dispatch from account storage and network calls.
+            // A sign-in must be accepted by its Home origin before GUI
+            // broadcasts it; the logout case still exercises a stale App
+            // message after the old fork App was replaced by Home.
             let (home, _) = home::Home::new_for_chain(root.clone(), Some(ChainId::BitcoinBlake2b));
             let mut pane = pane::Pane::new_with_tab(tab::State::Home(home));
             pane.tabs.push(tab::Tab::new(2, installer_state(&root)));
@@ -6685,14 +6686,16 @@ mod fork_auth_dispatch_tests {
                 preferences: unresolved_test_preferences(),
                 zoom: ZoomState::default(),
             };
+            let account_message = if matches!(&auth, ConnectAccountMessage::SetSession(..)) {
+                tab::Message::Launch(home::Message::View(home::ViewMessage::ConnectAccount(auth)))
+            } else {
+                tab::Message::Run(AppMessage::View(crate::app::view::Message::ConnectAccount(
+                    auth,
+                )))
+            };
             let task = gui.update(Message::Pane(
                 source,
-                pane::Message::tab(
-                    1,
-                    tab::Message::Run(AppMessage::View(crate::app::view::Message::ConnectAccount(
-                        auth,
-                    ))),
-                ),
+                pane::Message::tab(1, account_message),
             ));
             let mut checked = HashSet::new();
             if let Some(mut stream) = iced_runtime::task::into_stream(task) {
@@ -6938,7 +6941,13 @@ mod fork_auth_revocation_tests {
                 unreachable!()
             };
             assert_eq!(home.connect_account.client.token(), Some("synthetic-login"));
-            gui.panes.get_mut(pane_id).unwrap().tabs.pop();
+            // The sibling above adopted the App's bearer and intentionally
+            // refuses an unsolicited SetSession. Use a fresh Home panel as
+            // the origin of the replacement login under test.
+            let (fresh_home, startup) =
+                home::Home::new_for_chain(gui.config.coincube_directory.clone(), None);
+            drop(startup);
+            gui.panes.get_mut(pane_id).unwrap().tabs[1].state = tab::State::Home(fresh_home);
             app::session::open(cube_id.clone(), zeroize::Zeroizing::new("2468".into()));
             let select = || {
                 tab::Message::Run(AppMessage::View(view::Message::Spend(
@@ -6950,6 +6959,10 @@ mod fork_auth_revocation_tests {
             assert!(signed.iter().any(|msg| matches!(msg,
                 tab::Message::ForkAsync(_, inner) if matches!(inner.as_ref(), tab::Message::Run(AppMessage::Signed(_, Ok(_)))))));
             let pending = tab.update(select());
+            let auth_epoch = match &gui.panes.get(pane_id).unwrap().tabs[1].state {
+                tab::State::Home(home) => home.connect_account.auth_epoch(),
+                _ => unreachable!(),
+            };
             let auth = if replace {
                 ConnectAccountMessage::SetSession(
                     serde_json::from_value(serde_json::json!({
@@ -6957,7 +6970,7 @@ mod fork_auth_revocation_tests {
                         "user":{"id":8,"email":"fixture@example.invalid","email_verified":true}
                     }))
                     .unwrap(),
-                    0,
+                    auth_epoch,
                 )
             } else {
                 ConnectAccountMessage::LogOut
@@ -6966,13 +6979,19 @@ mod fork_auth_revocation_tests {
             drop(gui.update(Message::Pane(
                 pane_id,
                 pane::Message::tab(
-                    1,
-                    tab::Message::Run(AppMessage::View(view::Message::ConnectAccount(auth))),
+                    2,
+                    tab::Message::Launch(home::Message::View(home::ViewMessage::ConnectAccount(
+                        auth,
+                    ))),
                 ),
             )));
-            assert!(outputs(pending).await.is_empty());
             let tab = &mut gui.panes.get_mut(pane_id).unwrap().tabs[0];
-            assert!(matches!(tab.state, tab::State::Home(_)));
+            assert!(
+                matches!(tab.state, tab::State::Home(_)),
+                "replace={}",
+                replace
+            );
+            assert!(outputs(pending).await.is_empty());
             if replace {
                 let tab::State::Home(home) = &tab.state else {
                     unreachable!()
@@ -8172,6 +8191,9 @@ impl GUI {
     /// Account traffic of any tab plus the Home sign-in bubble and its pane
     /// rebroadcast: the messages that carry a sign-in to other open Cubes.
     pub(crate) fn reviewer_is_session_propagation(message: &Message) -> bool {
+        if Self::reviewer_is_auth_commit(message) {
+            return true;
+        }
         match message {
             Message::Pane(_, pane::Message::View(pane::ViewMessage::ConnectSignedIn)) => true,
             Message::Pane(_, pane::Message::Tab(_, inner)) => matches!(

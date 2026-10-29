@@ -18342,6 +18342,29 @@ pub(crate) mod claim_step1_tests {
         .unwrap()
     }
 
+    fn seed_home_login_cache(root: &std::path::Path) {
+        let dir =
+            CoincubeDirectory::new(root.to_path_buf()).network_directory(bitcoin::Network::Bitcoin);
+        std::fs::create_dir_all(dir.path()).unwrap();
+        std::fs::write(
+            dir.path()
+                .join(crate::services::connect::client::cache::CONNECT_CACHE_FILENAME),
+            serde_json::to_vec(&serde_json::json!({
+                "active_email": "fixture@example.invalid",
+                "accounts": [{
+                    "email": "fixture@example.invalid",
+                    "tokens": {
+                        "access_token": "home-session",
+                        "refresh_token": "home-refresh",
+                        "expires_at": chrono::Utc::now().timestamp() + 3600
+                    }
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
     /// L11 (2026-10-21 walkthrough): a Bitcoin Cube already open and signed
     /// out, then a sign-in completed in a Home tab. The Cube must re-evaluate
     /// its account-backed settings instead of staying on "Sign in to Connect"
@@ -18361,6 +18384,7 @@ pub(crate) mod claim_step1_tests {
                 rt.block_on(async {
                     let server = signin_server(200).await;
                     let (mut cube, _) = bitcoin_app(&root);
+                    cube.cache.datadir_path = CoincubeDirectory::new(root.clone());
                     cube.panels.connect.account.client =
                         crate::services::coincube::CoincubeClient::for_test(server.base_url());
                     let (mut home, _) = crate::home::Home::new_for_chain(
@@ -18381,6 +18405,7 @@ pub(crate) mod claim_step1_tests {
                         .is_authenticated());
                     // Home's OTP verification completes.
                     let epoch = gui.reviewer_home_mut(1).connect_account.auth_epoch();
+                    seed_home_login_cache(&root);
                     let task = gui.reviewer_home_account(
                         2,
                         view::ConnectAccountMessage::SetSession(home_login(), epoch),
@@ -18421,6 +18446,7 @@ pub(crate) mod claim_step1_tests {
                 rt.block_on(async {
                     let failing = signin_server(503).await;
                     let (mut cube, _) = bitcoin_app(&root);
+                    cube.cache.datadir_path = CoincubeDirectory::new(root.clone());
                     cube.panels.connect.account.client =
                         crate::services::coincube::CoincubeClient::for_test(failing.base_url());
                     let (mut home, _) = crate::home::Home::new_for_chain(
@@ -18433,6 +18459,7 @@ pub(crate) mod claim_step1_tests {
                     let task = gui.reviewer_account(1, view::ConnectAccountMessage::Init);
                     settle_signin(&mut gui, task).await;
                     let epoch = gui.reviewer_home_mut(1).connect_account.auth_epoch();
+                    seed_home_login_cache(&root);
                     let task = gui.reviewer_home_account(
                         2,
                         view::ConnectAccountMessage::SetSession(home_login(), epoch),
@@ -18481,6 +18508,7 @@ pub(crate) mod claim_step1_tests {
                 rt.block_on(async {
                     let server = signin_server(200).await;
                     let (mut cube, _) = bitcoin_app(&root);
+                    cube.cache.datadir_path = CoincubeDirectory::new(root.clone());
                     cube.panels.connect.account.client =
                         crate::services::coincube::CoincubeClient::for_test(server.base_url());
                     let (mut home, _) = crate::home::Home::new_for_chain(
@@ -18501,6 +18529,7 @@ pub(crate) mod claim_step1_tests {
                         .account
                         .is_authenticated());
                     let epoch = gui.reviewer_home_mut(0).connect_account.auth_epoch();
+                    seed_home_login_cache(&root);
                     let task = gui.reviewer_home_account(
                         2,
                         view::ConnectAccountMessage::SetSession(home_login(), epoch),
