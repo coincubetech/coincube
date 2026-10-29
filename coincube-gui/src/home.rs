@@ -1167,6 +1167,12 @@ impl Home {
         }
     }
 
+    fn showing_create_journey(&self) -> bool {
+        matches!(self.active_section, HomeSection::Cubes)
+            && (matches!(self.state, State::CreationBackup(_))
+                || (self.showing_create_form() && self.pending_bitcoin_import.is_none()))
+    }
+
     pub fn stop(&mut self) {}
 
     /// Set a top-level error message shown on the home screen.
@@ -5499,9 +5505,17 @@ impl Home {
         )
     }
 
-    /// Return the ID of the Connect control actually mounted by this Launcher
-    /// mode. The no-Cube creation form uses the legacy rail, not the catalog.
+    /// Return the ID of the Connect control actually mounted by Home.
     pub(crate) fn connect_sheet_origin_id(&self) -> Id {
+        // Create takes precedence over the catalog when an empty Cube list
+        // falls directly into the journey. Its top bar retains these IDs.
+        if self.showing_create_journey() {
+            return Id::new(if self.connect_account.is_authenticated() {
+                LEGACY_CONNECT_ENTRY_ID
+            } else {
+                LEGACY_CONNECT_SIGN_IN_ID
+            });
+        }
         if launcher_catalog::catalog_visible(self) {
             return if self.connect_account.is_authenticated() {
                 launcher_catalog::connect_id()
@@ -5538,10 +5552,7 @@ impl Home {
     pub fn view_with_privacy(&self, mask_amounts: bool) -> Element<Message> {
         // The Launcher and Create journey own their chrome and body scrolling.
         // Other Home sections keep the legacy frame.
-        let layout: Element<Message> = if matches!(self.active_section, HomeSection::Cubes)
-            && (matches!(self.state, State::CreationBackup(_))
-                || (self.showing_create_form() && self.pending_bitcoin_import.is_none()))
-        {
+        let layout: Element<Message> = if self.showing_create_journey() {
             self.create_journey_view()
         } else if launcher_catalog::catalog_visible(self) {
             launcher_catalog::launcher_view(self).map(Message::View)
@@ -5804,7 +5815,13 @@ impl Home {
             "Sign in"
         };
         let connect = FocusableAction::new(
-            Id::new("tenshu.create:connect"),
+            // The Connect sheet records these existing Home focus IDs. Its
+            // Close/Escape return must land on the mounted Create top bar.
+            Id::new(if self.connect_account.is_authenticated() {
+                LEGACY_CONNECT_ENTRY_ID
+            } else {
+                LEGACY_CONNECT_SIGN_IN_ID
+            }),
             Row::new()
                 .spacing(6)
                 .align_y(Alignment::Center)
