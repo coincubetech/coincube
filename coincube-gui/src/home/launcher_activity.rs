@@ -57,6 +57,7 @@ const EMPTY_BACKLOG: f64 = 0.05;
 pub enum Via {
     LocalNode,
     Connect,
+    MempoolSpace,
 }
 
 impl Via {
@@ -64,7 +65,24 @@ impl Via {
         match self {
             Via::LocalNode => "Local node",
             Via::Connect => "COINCUBE | Connect",
+            Via::MempoolSpace => "mempool.space",
         }
+    }
+}
+
+/// The public explorer for `chain`: Connect for the networks its proxy
+/// serves, mempool.space for the test networks it does not, and none for
+/// regtest. Its base URL, and how the selector names it.
+pub(super) fn public_source(chain: ChainId) -> Option<(Via, String)> {
+    match chain {
+        ChainId::Bitcoin | ChainId::BitcoinBlake2b | ChainId::BitcoinBlake2bTestnet4 => {
+            Some((Via::Connect, connect_base(chain)))
+        }
+        ChainId::Testnet | ChainId::Testnet4 | ChainId::Signet => Some((
+            Via::MempoolSpace,
+            crate::installer::public_esplora_url(chain.bitcoin_network()),
+        )),
+        ChainId::Regtest => None,
     }
 }
 
@@ -84,7 +102,8 @@ pub struct Snapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unavailable {
     LocalNodeNotRunning,
-    ConnectUnreachable,
+    /// The public explorer for the network did not answer.
+    Unreachable(Via),
     NoSource,
 }
 
@@ -92,7 +111,8 @@ impl Unavailable {
     pub(super) fn label(self) -> &'static str {
         match self {
             Unavailable::LocalNodeNotRunning => "Local node isn't running",
-            Unavailable::ConnectUnreachable => "Connect is unreachable",
+            Unavailable::Unreachable(Via::MempoolSpace) => "mempool.space is unreachable",
+            Unavailable::Unreachable(_) => "Connect is unreachable",
             Unavailable::NoSource => "No activity source",
         }
     }
@@ -341,8 +361,8 @@ pub(super) async fn read(
             Ok(snapshot) => Ok(snapshot),
             Err(error) => {
                 tracing::debug!("Launcher activity: no local node for {chain}: {error}");
-                connect(chain).await.map_err(|error| {
-                    tracing::debug!("Launcher activity: Connect for {chain}: {error}");
+                public(chain).await.map_err(|error| {
+                    tracing::debug!("Launcher activity: public explorer for {chain}: {error}");
                     Unavailable::NoSource
                 })
             }
@@ -351,10 +371,15 @@ pub(super) async fn read(
             tracing::debug!("Launcher activity: no local node for {chain}: {error}");
             Unavailable::LocalNodeNotRunning
         }),
-        NetworkActivitySource::Connect => connect(chain).await.map_err(|error| {
-            tracing::debug!("Launcher activity: Connect for {chain}: {error}");
-            Unavailable::ConnectUnreachable
-        }),
+        NetworkActivitySource::Connect => {
+            let Some((via, _)) = public_source(chain) else {
+                return Err(Unavailable::NoSource);
+            };
+            public(chain).await.map_err(|error| {
+                tracing::debug!("Launcher activity: public explorer for {chain}: {error}");
+                Unavailable::Unreachable(via)
+            })
+        }
     }
 }
 
@@ -407,6 +432,7 @@ pub(super) fn from_esplora(
     mut blocks: Vec<EsploraBlock>,
     mempool: EsploraMempool,
     fees: &HashMap<String, f64>,
+    via: Via,
 ) -> Result<Snapshot, String> {
     blocks.sort_by_key(|block| block.height);
     let tip = blocks.last().ok_or("No blocks")?;
@@ -426,7 +452,7 @@ pub(super) fn from_esplora(
         mempool_vsize: mempool.vsize,
         next_block_fee: fees.get("1").copied(),
         difficulty,
-        via: Via::Connect,
+        via,
     })
 }
 
@@ -445,15 +471,15 @@ async fn get<T: serde::de::DeserializeOwned>(
         .map_err(|e| e.to_string())
 }
 
-async fn connect(chain: ChainId) -> Result<Snapshot, String> {
+async fn public(chain: ChainId) -> Result<Snapshot, String> {
+    let (via, base) = public_source(chain).ok_or("No public explorer for this network")?;
     let client = http()?;
-    let base = connect_base(chain);
     let (blocks, mempool, fees) = tokio::try_join!(
         get::<Vec<EsploraBlock>>(&client, format!("{base}/blocks")),
         get::<EsploraMempool>(&client, format!("{base}/mempool")),
         get::<HashMap<String, f64>>(&client, format!("{base}/fee-estimates")),
     )?;
-    from_esplora(blocks, mempool, &fees)
+    from_esplora(blocks, mempool, &fees, via)
 }
 
 struct NodeRpc {
@@ -716,6 +742,7 @@ pub(super) fn facts(chain: ChainId, snapshot: &Snapshot, today: chrono::NaiveDat
             note: match snapshot.via {
                 Via::LocalNode => "from your node".into(),
                 Via::Connect => "from Connect".into(),
+                Via::MempoolSpace => "from mempool.space".into(),
             },
         },
         Fact {
@@ -1014,7 +1041,7 @@ mod tests {
                 .unwrap();
         let fees: HashMap<String, f64> =
             serde_json::from_value(json!({"1": 6.5, "6": 3.0})).unwrap();
-        let snapshot = from_esplora(blocks, mempool, &fees).unwrap();
+        let snapshot = from_esplora(blocks, mempool, &fees, Via::Connect).unwrap();
         assert_eq!(snapshot.tip, 102);
         assert_eq!(snapshot.tx_counts, vec![10, 20, 30]);
         assert_eq!(snapshot.mempool_vsize, 2_200_000);
@@ -1028,10 +1055,22 @@ mod tests {
         let blocks: Vec<EsploraBlock> =
             serde_json::from_value(json!([{"height": 7, "tx_count": 1, "bits": 486604799u32}]))
                 .unwrap();
-        let snapshot = from_esplora(blocks, EsploraMempool { vsize: 0 }, &HashMap::new()).unwrap();
+        let snapshot = from_esplora(
+            blocks,
+            EsploraMempool { vsize: 0 },
+            &HashMap::new(),
+            Via::MempoolSpace,
+        )
+        .unwrap();
         assert!((snapshot.difficulty - 1.0).abs() < 1e-9);
         assert_eq!(snapshot.next_block_fee, None);
-        assert!(from_esplora(Vec::new(), EsploraMempool { vsize: 0 }, &HashMap::new()).is_err());
+        assert!(from_esplora(
+            Vec::new(),
+            EsploraMempool { vsize: 0 },
+            &HashMap::new(),
+            Via::Connect
+        )
+        .is_err());
     }
 
     #[test]
@@ -1061,6 +1100,40 @@ mod tests {
         assert!(connect_base(ChainId::BitcoinBlake2bTestnet4)
             .ends_with("/api/v1/esplora/bitcoin-blake2b/testnet4"));
         assert!(connect_base(ChainId::Bitcoin).ends_with("/api/v1/esplora/bitcoin/mainnet"));
+    }
+
+    #[test]
+    fn each_network_reads_an_explorer_that_serves_it() {
+        // Connect's Esplora proxy serves Bitcoin and both Blake2b networks;
+        // it answers 404 for testnet4 and signet.
+        for chain in [
+            ChainId::Bitcoin,
+            ChainId::BitcoinBlake2b,
+            ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            let (via, base) = public_source(chain).unwrap();
+            assert_eq!(via, Via::Connect);
+            assert_eq!(base, connect_base(chain));
+        }
+        for (chain, base) in [
+            (ChainId::Testnet, "https://mempool.space/testnet/api"),
+            (ChainId::Testnet4, "https://mempool.space/testnet4/api"),
+            (ChainId::Signet, "https://mempool.space/signet/api"),
+        ] {
+            assert_eq!(
+                public_source(chain),
+                Some((Via::MempoolSpace, base.to_string()))
+            );
+        }
+        assert_eq!(public_source(ChainId::Regtest), None);
+        assert_eq!(
+            Unavailable::Unreachable(Via::MempoolSpace).label(),
+            "mempool.space is unreachable"
+        );
+        let mut testnet = snapshot(120_000);
+        testnet.via = Via::MempoolSpace;
+        let block = &facts(ChainId::Testnet4, &testnet, today())[0];
+        assert_eq!(block.note, "from mempool.space");
     }
 
     #[test]

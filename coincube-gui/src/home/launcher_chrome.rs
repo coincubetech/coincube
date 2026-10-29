@@ -813,7 +813,11 @@ pub(super) fn activity_layer<'a>(home: &Home) -> Option<Element<'a, ViewMessage>
             )
             .push(option(NetworkActivitySource::Automatic, "Automatic"))
             .push(option(NetworkActivitySource::LocalNode, "Local node"))
-            .push(option(NetworkActivitySource::Connect, "COINCUBE | Connect"))
+            .push(option(
+                NetworkActivitySource::Connect,
+                launcher_activity::public_source(home.activity_chain())
+                    .map_or("COINCUBE | Connect", |(via, _)| via.label()),
+            ))
             .push(
                 Column::new()
                     .padding(Padding {
@@ -827,8 +831,9 @@ pub(super) fn activity_layer<'a>(home: &Home) -> Option<Element<'a, ViewMessage>
                     .push(
                         text(
                             "Follows the Network filter. Automatic reads a local node that is \
-                             already running, else COINCUBE | Connect. The Launcher never starts \
-                             a node.",
+                             already running, else COINCUBE | Connect, or mempool.space for the \
+                             test networks Connect does not serve. The Launcher never starts a \
+                             node.",
                         )
                         .size(12)
                         .style(|theme: &theme::Theme| text::Style {

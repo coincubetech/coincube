@@ -468,7 +468,8 @@ fn section_content<'a>(
                     .trailing_tag()
                     .description(
                         "Automatic reads a local node that is already running, else COINCUBE | \
-                         Connect. The Launcher never starts a node.",
+                         Connect, or mempool.space for the test networks Connect does not \
+                         serve. The Launcher never starts a node.",
                     )
                     .into(),
                 );
