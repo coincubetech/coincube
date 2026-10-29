@@ -80,51 +80,50 @@ pub async fn ensure_device_registered(
     os_version: String,
 ) -> Result<String, BootstrapError> {
     register_device(
-        network_dir,
-        email,
-        grpc_url,
-        tokens,
-        device_name,
-        app_version,
-        os_version,
+        DeviceRegistration {
+            grpc_url,
+            tokens,
+            network_dir,
+            email,
+            device_name,
+            app_version,
+            os_version,
+        },
         None,
     )
     .await
 }
 
+pub struct DeviceRegistration<'a> {
+    pub grpc_url: &'a str,
+    pub tokens: Arc<RwLock<AccessTokenResponse>>,
+    pub network_dir: &'a NetworkDirectory,
+    pub email: &'a str,
+    pub device_name: String,
+    pub app_version: String,
+    pub os_version: String,
+}
+
 pub async fn register_device_for_claim(
-    grpc_url: &str,
-    tokens: Arc<RwLock<AccessTokenResponse>>,
-    network_dir: &NetworkDirectory,
-    email: &str,
-    device_name: String,
-    app_version: String,
-    os_version: String,
+    registration: DeviceRegistration<'_>,
     claim: &str,
 ) -> Result<String, BootstrapError> {
-    register_device(
-        network_dir,
-        email,
-        grpc_url,
-        tokens,
-        device_name,
-        app_version,
-        os_version,
-        Some(claim),
-    )
-    .await
+    register_device(registration, Some(claim)).await
 }
 
 async fn register_device(
-    network_dir: &NetworkDirectory,
-    email: &str,
-    grpc_url: &str,
-    tokens: Arc<RwLock<AccessTokenResponse>>,
-    device_name: String,
-    app_version: String,
-    os_version: String,
+    registration: DeviceRegistration<'_>,
     claim: Option<&str>,
 ) -> Result<String, BootstrapError> {
+    let DeviceRegistration {
+        grpc_url,
+        tokens,
+        network_dir,
+        email,
+        device_name,
+        app_version,
+        os_version,
+    } = registration;
     if let Some(claim) = claim {
         let owns_claim = Account::from_cache(network_dir, email)?
             .is_some_and(|account| account.reregister_claim.as_deref() == Some(claim));

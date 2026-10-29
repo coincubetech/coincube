@@ -104,13 +104,15 @@ impl State for AboutSettingsState {
                         };
                         let result =
                             crate::services::connect::grpc::bootstrap::register_device_for_claim(
-                                &grpc_url,
-                                tokens,
-                                &network_dir,
-                                &email,
-                                device_name,
-                                app_version,
-                                os_version,
+                                crate::services::connect::grpc::bootstrap::DeviceRegistration {
+                                    grpc_url: &grpc_url,
+                                    tokens,
+                                    network_dir: &network_dir,
+                                    email: &email,
+                                    device_name,
+                                    app_version,
+                                    os_version,
+                                },
                                 &claim,
                             )
                             .await
