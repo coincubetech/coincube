@@ -4234,7 +4234,7 @@ mod node_management_chain_tests {
                     None,
                 ),
                 "tenshu.installer.restore.42.cube.7",
-                keyboard::Key::Named(key.clone()),
+                keyboard::Key::Named(key),
                 true,
             );
             assert!(matches!(
