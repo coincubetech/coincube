@@ -105,5 +105,20 @@ fn wallet_on_chain(
         false,
     )
     .unwrap();
+    if chain == coincube_core::chain::ChainId::Regtest {
+        // The MCP transaction tests start from a polled wallet. The poller runs
+        // on another thread, so waiting for its first scheduled tick in each
+        // caller can time out on a busy CI runner before it publishes sync.
+        let (done, received) = std::sync::mpsc::sync_channel(0);
+        let DaemonHandle::Controller { poller_sender, .. } = &handle else {
+            unreachable!("the test fixture starts an embedded daemon");
+        };
+        poller_sender
+            .send(crate::bitcoin::poller::PollerMessage::PollNow(done))
+            .expect("request synthetic wallet poll");
+        received
+            .recv_timeout(Duration::from_secs(30))
+            .expect("synthetic wallet poll completed");
+    }
     (config, handle)
 }
