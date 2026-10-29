@@ -21,7 +21,10 @@
 //! audited in one place.
 
 use crate::installer::context::RestoreSource;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 use coincube_core::{
     descriptors::CoincubeDescriptor, miniscript::bitcoin::Network, signer::MasterSigner,
@@ -73,10 +76,7 @@ pub enum Phase {
     OtpEntry,
     /// Fetching the cube list to let the user pick.
     LoadingCubes,
-    /// Show cubes; user selects one to restore from. `selected` is
-    /// reserved for a future "highlight-then-confirm" UX; today the
-    /// picker advances on click, so it's always `None` in practice.
-    #[allow(dead_code)]
+    /// Show cubes; selection is confirmed before opening its password form.
     CubePicker {
         cubes: Vec<RestoreCubeCandidate>,
         selected: Option<u64>,
@@ -116,14 +116,17 @@ pub struct RestoreCubeCandidate {
 }
 
 /// The step itself — self-contained with its own internal state.
+static NEXT_RESTORE_UI_INSTANCE: AtomicU64 = AtomicU64::new(1);
+
 pub struct RecoveryKitRestoreStep {
+    ui_instance: u64,
     scope: RestoreScope,
     /// Network filter applied to the cube picker. The user can only
     /// restore into the same network they're installing for.
     network_filter: String,
     /// When set (W13 launched from a home "Your Cubes" row), the cube
     /// list is filtered to just this uuid so `phase_after_cubes_loaded`
-    /// auto-selects it and the picker is skipped entirely.
+    /// shows the matching Cube already selected for confirmation.
     preselect_uuid: Option<String>,
     client: CoincubeClient,
     phase: Phase,
@@ -151,6 +154,7 @@ impl RecoveryKitRestoreStep {
         preselect_uuid: Option<String>,
     ) -> Self {
         Self {
+            ui_instance: NEXT_RESTORE_UI_INSTANCE.fetch_add(1, Ordering::Relaxed),
             scope,
             network_filter,
             preselect_uuid,
@@ -219,8 +223,14 @@ impl RecoveryKitRestoreStep {
         let client = self.client.clone();
         let network = self.network_filter.clone();
         let preselect_uuid = self.preselect_uuid.clone();
+        let entered_email = self.email.value.clone();
         Task::perform(
             async move {
+                // A Home-launched restore inherits a verified Connect token
+                // and skips this step's email form. Resolve that token's
+                // account before showing a picker that asks the user to
+                // confirm the account and network.
+                let account_email = account_email_for_picker(&client, entered_email).await?;
                 let all = client.list_cubes().await.map_err(|e| e.to_string())?;
                 // Filter to cubes on the requested network. We don't
                 // filter by `has_recovery_kit` at list time because the
@@ -230,7 +240,7 @@ impl RecoveryKitRestoreStep {
                 // When a specific cube was preselected (home restore
                 // row), narrow to just that uuid so the loaded list has
                 // a single entry and `phase_after_cubes_loaded`
-                // auto-selects it, skipping the picker.
+                // shows that Cube selected in the picker.
                 let matches: Vec<CubeResponse> = all
                     .into_iter()
                     .filter(|c| {
@@ -276,9 +286,9 @@ impl RecoveryKitRestoreStep {
                         status,
                     });
                 }
-                Ok(out)
+                Ok((out, account_email))
             },
-            |res: Result<Vec<RestoreCubeCandidate>, String>| {
+            |res: Result<(Vec<RestoreCubeCandidate>, String), String>| {
                 Message::RecoveryKitRestore(RecoveryKitRestoreMsg::CubesLoaded(res))
             },
         )
@@ -512,7 +522,7 @@ pub(crate) fn stage_restore(
 /// specific cube was preselected from a home "Your Cubes" row — only
 /// the row with that uuid. Both conditions must hold; a preselected
 /// uuid that lives on a different network is still excluded, so the
-/// caller never probes (or auto-selects) a cross-network cube.
+/// caller never probes or displays a cross-network cube.
 /// Extracted as a pure fn so the network×preselect matrix is
 /// unit-testable without standing up the async task.
 fn cube_passes_filter(
@@ -522,6 +532,26 @@ fn cube_passes_filter(
     preselect_uuid: Option<&str>,
 ) -> bool {
     cube_network == network && preselect_uuid.is_none_or(|uuid| cube_uuid == uuid)
+}
+
+/// Use the verified in-step email, or resolve the account represented by an
+/// inherited Home token before showing the picker.
+async fn account_email_for_picker(
+    client: &CoincubeClient,
+    entered_email: String,
+) -> Result<String, String> {
+    if !entered_email.is_empty() {
+        return Ok(entered_email);
+    }
+    let user = client
+        .get_user()
+        .await
+        .map_err(|e| format!("Couldn't identify Connect account: {e}"))?;
+    let email = user.email.trim();
+    if !email_address::EmailAddress::is_valid(email) {
+        return Err("Connect account has no valid email to confirm.".into());
+    }
+    Ok(email.to_string())
 }
 
 /// Does `c` carry the specific encrypted half this restore flow
@@ -544,12 +574,12 @@ fn has_required_half(scope: RestoreScope, c: &RestoreCubeCandidate) -> bool {
 
 /// Transition function called after `list_cubes` + per-cube status
 /// probes resolve. Extracted as a pure function over the Phase enum
-/// so the auto-select vs picker vs error decision is unit-testable
+/// so the picker vs error decision is unit-testable
 /// without standing up the whole installer step.
 ///
 /// Branches:
-/// - Exactly one cube with the required half → auto-select it
-///   (common restore path)
+/// - Exactly one cube with the required half → show it selected in the picker
+///   so the account, network and kit availability are visible before Next
 /// - Exactly one cube **without** the required half → `Phase::Error`
 ///   with a specific message naming the missing half; the picker's
 ///   disabled-row affordance doesn't help when there's only one row
@@ -562,9 +592,9 @@ fn phase_after_cubes_loaded(scope: RestoreScope, cubes: Vec<RestoreCubeCandidate
         // without moving; handle with `match` on length-1 form.
         let c = cubes.into_iter().next().expect("len == 1");
         if has_required_half(scope, &c) {
-            Phase::PasswordEntry {
-                selected: c,
-                attempts: 0,
+            Phase::CubePicker {
+                selected: Some(c.id),
+                cubes: vec![c],
             }
         } else {
             let (needed, hint) = match scope {
@@ -726,7 +756,11 @@ impl Step for RecoveryKitRestoreStep {
             }
             RecoveryKitRestoreMsg::CubesLoaded(res) => {
                 match res {
-                    Ok(cubes) => self.set_phase(phase_after_cubes_loaded(self.scope, cubes)),
+                    Ok((cubes, account_email)) => {
+                        self.email.value = account_email;
+                        self.email.valid = true;
+                        self.set_phase(phase_after_cubes_loaded(self.scope, cubes));
+                    }
                     Err(e) => {
                         self.set_phase(Phase::Error {
                             message: format!("Couldn't load cubes: {}", e),
@@ -736,17 +770,27 @@ impl Step for RecoveryKitRestoreStep {
                 Task::none()
             }
             RecoveryKitRestoreMsg::SelectCube(id) => {
-                if let Phase::CubePicker { cubes, .. } = &self.phase {
-                    // Re-check `has_required_half` in case the view's
-                    // disabled-row rendering ever falls out of sync
-                    // with the state-machine gate. Defensive — the
-                    // picker's `on_press` is gated on the same
-                    // predicate.
-                    if let Some(c) = cubes
+                let scope = self.scope;
+                if let Phase::CubePicker { cubes, selected } = &mut self.phase {
+                    // Re-check availability in state even when a stale view
+                    // sends a selection for a disabled row.
+                    if cubes
                         .iter()
-                        .find(|c| c.id == id && has_required_half(self.scope, c))
-                        .cloned()
+                        .any(|c| c.id == id && has_required_half(scope, c))
                     {
+                        *selected = Some(id);
+                    }
+                }
+                Task::none()
+            }
+            RecoveryKitRestoreMsg::ConfirmCube => {
+                if let Phase::CubePicker { cubes, selected } = &self.phase {
+                    if let Some(c) = selected.and_then(|id| {
+                        cubes
+                            .iter()
+                            .find(|c| c.id == id && has_required_half(self.scope, c))
+                            .cloned()
+                    }) {
                         self.set_phase(Phase::PasswordEntry {
                             selected: c,
                             attempts: 0,
@@ -763,7 +807,7 @@ impl Step for RecoveryKitRestoreStep {
                 Task::none()
             }
             RecoveryKitRestoreMsg::SubmitPassword => {
-                if self.processing {
+                if self.processing || self.password.is_empty() {
                     return Task::none();
                 }
                 // Do NOT enforce `MIN_PASSWORD_LEN` here. That floor
@@ -774,9 +818,8 @@ impl Step for RecoveryKitRestoreStep {
                 // different rules). A hardcoded gate here silently
                 // blocks a correct password from ever reaching the
                 // AES-GCM tag check, which is the only authoritative
-                // validator of "is this the right password". The
-                // view disables Submit when the input is empty, so
-                // no input-required guard is needed here either.
+                // validator of "is this the right password".
+                // A nonempty input is still required before decrypting.
                 let Phase::PasswordEntry { selected, attempts } = &self.phase else {
                     return Task::none();
                 };
@@ -834,10 +877,9 @@ impl Step for RecoveryKitRestoreStep {
                             seed,
                             descriptor,
                         });
-                        // Auto-advance — the user clicked Submit and the
-                        // decrypt succeeded; no reason to make them
-                        // click Next again.
-                        Task::done(Message::Next)
+                        // Let the user review the matched Cube and network
+                        // before the installer's Next action applies the kit.
+                        Task::none()
                     }
                     Err(e) => {
                         if is_retryable_on_password_screen(&e) {
@@ -1040,13 +1082,11 @@ impl Step for RecoveryKitRestoreStep {
         progress: (usize, usize),
         _email: Option<&'a str>,
     ) -> Element<'a, Message> {
-        // Placeholder view — re-uses existing installer text layout.
-        // A polished design pass is a follow-up; what matters here is
-        // that each Phase has a reachable interaction so the flow
-        // progresses.
         view::recovery_kit_restore(
             progress,
+            self.ui_instance,
             self.scope,
+            &self.network_filter,
             &self.phase,
             &self.email,
             &self.otp,
@@ -1079,7 +1119,7 @@ mod tests {
     /// A server-side Bitcoin Blake2b Cube never passes a Bitcoin-family
     /// network filter, and vice versa: the Connect strings differ on purpose
     /// (`ChainId::api_str`), so a restore flow installing for mainnet can
-    /// neither list nor auto-select the BTCB2 twin — its identity is not
+    /// neither list nor select the BTCB2 twin — its identity is not
     /// collapsed to "mainnet" at this boundary. (BTCB2 plan PR 2.)
     #[test]
     fn a_blake2b_server_cube_never_passes_a_bitcoin_family_filter() {
@@ -1153,6 +1193,90 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn inherited_connect_session_resolves_account_email() {
+        use httpmock::{Method, MockServer};
+
+        let server = MockServer::start();
+        let user = server.mock(|when, then| {
+            when.method(Method::GET).path("/api/v1/user");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"id":7,"email":"session@example.com","emailVerified":true}"#);
+        });
+        let mut client = CoincubeClient::for_test(server.base_url());
+        client.set_token("synthetic-token");
+
+        assert_eq!(
+            account_email_for_picker(&client, String::new()).await,
+            Ok("session@example.com".to_string())
+        );
+        user.assert_hits(1);
+    }
+
+    #[tokio::test]
+    async fn entered_email_does_not_request_account_again() {
+        use httpmock::{Method, MockServer};
+
+        let server = MockServer::start();
+        let user = server.mock(|when, then| {
+            when.method(Method::GET).path("/api/v1/user");
+            then.status(500);
+        });
+        let client = CoincubeClient::for_test(server.base_url());
+
+        assert_eq!(
+            account_email_for_picker(&client, "entered@example.com".into()).await,
+            Ok("entered@example.com".to_string())
+        );
+        user.assert_hits(0);
+    }
+
+    #[tokio::test]
+    async fn inherited_session_with_invalid_account_email_stops_before_picker() {
+        use httpmock::{Method, MockServer};
+
+        let server = MockServer::start();
+        let user = server.mock(|when, then| {
+            when.method(Method::GET).path("/api/v1/user");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"id":7,"email":" ","emailVerified":true}"#);
+        });
+        let client = CoincubeClient::for_test(server.base_url());
+
+        assert!(account_email_for_picker(&client, String::new())
+            .await
+            .is_err());
+        user.assert_hits(1);
+    }
+
+    #[test]
+    fn loaded_cubes_bind_resolved_account_to_picker() {
+        let mut step = RecoveryKitRestoreStep::new(RestoreScope::Full, "mainnet".into(), None);
+        step.phase = Phase::LoadingCubes;
+        let mut hws = HardwareWallets::new(
+            crate::dir::CoincubeDirectory::new("/synthetic/recovery-account".into()),
+            Network::Bitcoin,
+        );
+
+        let _ = step.update(
+            &mut hws,
+            Message::RecoveryKitRestore(RecoveryKitRestoreMsg::CubesLoaded(Ok((
+                vec![candidate("My Cube", true)],
+                "session@example.com".into(),
+            )))),
+        );
+        assert_eq!(step.email.value, "session@example.com");
+        assert!(matches!(
+            step.phase,
+            Phase::CubePicker {
+                selected: Some(1),
+                ..
+            }
+        ));
+    }
+
     // --- `cube_passes_filter`: the network × preselect matrix that
     // `list_cubes_task` uses to narrow the server cube list. ---
 
@@ -1170,7 +1294,7 @@ mod tests {
     #[test]
     fn filter_drops_mismatched_uuid_when_preselected() {
         // Right network, wrong uuid → excluded so only the clicked cube
-        // survives to auto-select.
+        // survives to the picker.
         assert!(!cube_passes_filter(
             "mainnet",
             "cube-b",
@@ -1205,39 +1329,34 @@ mod tests {
     }
 
     #[test]
-    fn preselect_then_auto_select_advances_to_password() {
-        // End-to-end of the home restore path: after the filter narrows
-        // to the single preselected cube, `phase_after_cubes_loaded`
-        // auto-selects it (no picker). Model the survivor as a
-        // restorable candidate and confirm the auto-select branch.
-        let survivors: Vec<RestoreCubeCandidate> =
-            vec![candidate("Preselected", true), candidate("Other", true)]
-                .into_iter()
-                .filter(|c| cube_passes_filter(&c.network, "uuid", "mainnet", Some("uuid")))
-                .collect();
-        // Both share the test uuid "uuid"; the point exercised here is
-        // the auto-select on a single-entry list.
-        let phase = phase_after_cubes_loaded(RestoreScope::Full, vec![survivors[0].clone()]);
+    fn home_preselection_still_waits_for_picker_confirmation() {
+        let mut other = candidate("Other", true);
+        other.uuid = "other-uuid".into();
+        let survivors: Vec<RestoreCubeCandidate> = vec![candidate("Preselected", true), other]
+            .into_iter()
+            .filter(|c| cube_passes_filter(&c.network, &c.uuid, "mainnet", Some("uuid")))
+            .collect();
+        assert_eq!(survivors.len(), 1);
+        let phase = phase_after_cubes_loaded(RestoreScope::Full, survivors);
         assert!(
-            matches!(phase, Phase::PasswordEntry { .. }),
-            "single preselected restorable cube should auto-advance to PasswordEntry"
+            matches!(phase, Phase::CubePicker { cubes, selected: Some(1) } if cubes.len() == 1 && cubes[0].name == "Preselected")
         );
     }
 
-    // Regression tests for the auto-select-skips-kit-check bug. Before
+    // Regression tests for the single-cube-skips-kit-check bug. Before
     // this fix, a single cube without a kit would land the user on
     // the password screen, which would then 404 at decrypt time —
     // a worse UX than a direct "no kit yet" message up front.
 
     #[test]
-    fn single_cube_with_kit_auto_advances_to_password() {
+    fn single_cube_with_kit_waits_for_picker_confirmation() {
         let phase = phase_after_cubes_loaded(RestoreScope::Full, vec![candidate("My Cube", true)]);
         match phase {
-            Phase::PasswordEntry { selected, attempts } => {
-                assert_eq!(selected.name, "My Cube");
-                assert_eq!(attempts, 0);
+            Phase::CubePicker { cubes, selected } => {
+                assert_eq!(cubes[0].name, "My Cube");
+                assert_eq!(selected, Some(cubes[0].id));
             }
-            other => panic!("expected PasswordEntry, got {:?}", other),
+            other => panic!("expected CubePicker, got {:?}", other),
         }
     }
 
@@ -1494,6 +1613,103 @@ mod tests {
             }
             other => panic!("expected CubePicker, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn picker_requires_available_selection_then_explicit_confirmation() {
+        let mut available = candidate("Available", true);
+        available.id = 7;
+        let mut unavailable = candidate("No Kit", false);
+        unavailable.id = 8;
+        let mut step = RecoveryKitRestoreStep::new(RestoreScope::Full, "mainnet".into(), None);
+        step.phase = Phase::CubePicker {
+            cubes: vec![available, unavailable],
+            selected: None,
+        };
+        let mut hws = HardwareWallets::new(
+            crate::dir::CoincubeDirectory::new("/synthetic/recovery-picker".into()),
+            Network::Bitcoin,
+        );
+
+        let _ = step.update(
+            &mut hws,
+            Message::RecoveryKitRestore(RecoveryKitRestoreMsg::ConfirmCube),
+        );
+        assert!(matches!(
+            &step.phase,
+            Phase::CubePicker { selected: None, .. }
+        ));
+        let _ = step.update(
+            &mut hws,
+            Message::RecoveryKitRestore(RecoveryKitRestoreMsg::SelectCube(8)),
+        );
+        assert!(matches!(
+            &step.phase,
+            Phase::CubePicker { selected: None, .. }
+        ));
+        let _ = step.update(
+            &mut hws,
+            Message::RecoveryKitRestore(RecoveryKitRestoreMsg::SelectCube(7)),
+        );
+        assert!(matches!(
+            &step.phase,
+            Phase::CubePicker {
+                selected: Some(7),
+                ..
+            }
+        ));
+        let _ = step.update(
+            &mut hws,
+            Message::RecoveryKitRestore(RecoveryKitRestoreMsg::ConfirmCube),
+        );
+        assert!(matches!(&step.phase, Phase::PasswordEntry { selected, .. } if selected.id == 7));
+    }
+
+    #[test]
+    fn successful_decrypt_waits_on_ready_without_advancing() {
+        let selected = candidate("Recovered Cube", true);
+        let seed = seed_blob_for(&selected.uuid, &selected.network);
+        let mut step = RecoveryKitRestoreStep::new(RestoreScope::Full, "mainnet".into(), None);
+        step.phase = Phase::Decrypting {
+            selected: selected.clone(),
+        };
+        let mut hws = HardwareWallets::new(
+            crate::dir::CoincubeDirectory::new("/synthetic/recovery-ready".into()),
+            Network::Bitcoin,
+        );
+
+        let task = step.update(
+            &mut hws,
+            Message::RecoveryKitRestore(RecoveryKitRestoreMsg::DecryptResult(Ok((
+                Some(seed),
+                None,
+            )))),
+        );
+        assert!(iced_runtime::task::into_stream(task).is_none());
+        assert!(
+            matches!(&step.phase, Phase::Ready { selected: ready, .. } if ready.uuid == selected.uuid)
+        );
+    }
+
+    #[test]
+    fn empty_password_message_does_not_start_decrypt() {
+        let mut step = RecoveryKitRestoreStep::new(RestoreScope::Full, "mainnet".into(), None);
+        step.phase = Phase::PasswordEntry {
+            selected: candidate("Recovered Cube", true),
+            attempts: 0,
+        };
+        let mut hws = HardwareWallets::new(
+            crate::dir::CoincubeDirectory::new("/synthetic/recovery-empty-password".into()),
+            Network::Bitcoin,
+        );
+
+        let task = step.update(
+            &mut hws,
+            Message::RecoveryKitRestore(RecoveryKitRestoreMsg::SubmitPassword),
+        );
+        assert!(iced_runtime::task::into_stream(task).is_none());
+        assert!(matches!(step.phase, Phase::PasswordEntry { .. }));
+        assert!(!step.processing);
     }
 
     #[test]

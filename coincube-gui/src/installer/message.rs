@@ -295,8 +295,17 @@ pub enum RecoveryKitRestoreMsg {
     OtpSent(Result<(), String>),
     OtpEdited(zeroize::Zeroizing<String>),
     OtpVerified(Result<zeroize::Zeroizing<String>, String>),
-    CubesLoaded(Result<Vec<super::step::recovery_kit_restore::RestoreCubeCandidate>, String>),
+    CubesLoaded(
+        Result<
+            (
+                Vec<super::step::recovery_kit_restore::RestoreCubeCandidate>,
+                String,
+            ),
+            String,
+        >,
+    ),
     SelectCube(u64),
+    ConfirmCube,
     PasswordEdited(zeroize::Zeroizing<String>),
     SubmitPassword,
     /// Carries the typed `RestoreError` rather than a flattened
@@ -331,8 +340,14 @@ impl std::fmt::Debug for RecoveryKitRestoreMsg {
                 .debug_tuple("OtpVerified")
                 .field(&Err::<(), _>(e))
                 .finish(),
-            Self::CubesLoaded(r) => f.debug_tuple("CubesLoaded").field(r).finish(),
+            Self::CubesLoaded(Ok((cubes, _))) => f
+                .debug_struct("CubesLoaded")
+                .field("cube_count", &cubes.len())
+                .field("account_email", &"<redacted>")
+                .finish(),
+            Self::CubesLoaded(Err(e)) => f.debug_tuple("CubesLoaded").field(e).finish(),
             Self::SelectCube(id) => f.debug_tuple("SelectCube").field(id).finish(),
+            Self::ConfirmCube => write!(f, "ConfirmCube"),
             Self::PasswordEdited(_) => f
                 .debug_tuple("PasswordEdited")
                 .field(&"<redacted>")

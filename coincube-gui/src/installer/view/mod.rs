@@ -2748,7 +2748,9 @@ pub(super) fn layout<'a>(
 #[allow(clippy::too_many_arguments)]
 pub fn recovery_kit_restore<'a>(
     _progress: (usize, usize),
+    ui_instance: u64,
     scope: crate::installer::step::RestoreScope,
+    network: &str,
     phase: &'a crate::installer::step::recovery_kit_restore::RestorePhase,
     email: &'a form::Value<String>,
     otp: &'a form::Value<String>,
@@ -2800,13 +2802,43 @@ pub fn recovery_kit_restore<'a>(
             "Review the error below, then try again.".to_string(),
         ),
     };
+    let active_stage = match phase {
+        RestorePhase::Email | RestorePhase::OtpEntry => 1,
+        RestorePhase::LoadingCubes | RestorePhase::CubePicker { .. } => 2,
+        RestorePhase::PasswordEntry { .. }
+        | RestorePhase::Decrypting { .. }
+        | RestorePhase::Ready { .. } => 3,
+        RestorePhase::Error { .. } => 0,
+    };
+    let stages = ["1  Sign in", "2  Choose Cube", "3  Open Kit"];
+    let mut stepper = Row::new().spacing(12).width(Length::Fill);
+    for (index, label) in stages.iter().enumerate() {
+        let stage = index + 1;
+        let style = if stage == active_stage {
+            theme::text::primary
+        } else {
+            theme::text::secondary
+        };
+        stepper = stepper.push(
+            Container::new(p2_regular(*label).style(style))
+                .padding([8, 12])
+                .width(Length::FillPortion(1)),
+        );
+    }
     let mut content: Column<'a, Message> = Column::new()
-        .spacing(20)
+        .spacing(16)
         .width(Length::Fill)
-        .max_width(700)
+        .max_width(780)
         .push(p2_regular(format!("{flow_label} · {stage_label}")).style(theme::text::secondary))
         .push(h4_bold(step_title))
+        .push(stepper)
         .push(p2_regular(step_detail).style(theme::text::secondary));
+
+    if let Some(e) = error {
+        content = content.push(card::simple(
+            text::text(e.to_string()).style(theme::text::warning),
+        ));
+    }
 
     match phase {
         RestorePhase::Email => {
@@ -2823,16 +2855,17 @@ pub fn recovery_kit_restore<'a>(
                     .padding(10),
                 )
                 .push({
-                    let btn = button::primary(None, "Send code")
-                        .width(Length::Fixed(220.0))
-                        .padding([10, 20]);
-                    if email.valid && !processing {
-                        btn.on_press(Message::RecoveryKitRestore(
-                            RecoveryKitRestoreMsg::RequestOtp,
-                        ))
-                    } else {
-                        btn
-                    }
+                    let btn = button::primary_action(
+                        format!("tenshu.installer.restore.{ui_instance}.send-code"),
+                        None,
+                        "Send code",
+                        Message::FocusAction,
+                    )
+                    .width(Length::Fixed(220.0))
+                    .padding([10, 20]);
+                    btn.on_press_maybe((email.valid && !processing).then_some(
+                        Message::RecoveryKitRestore(RecoveryKitRestoreMsg::RequestOtp),
+                    ))
                 });
         }
         RestorePhase::OtpEntry => {
@@ -2859,14 +2892,30 @@ pub fn recovery_kit_restore<'a>(
         RestorePhase::LoadingCubes => {
             content = content.push(text::text("Loading your Cubes from Connect…"));
         }
-        RestorePhase::CubePicker { cubes, .. } => {
-            content = content.push(p2_regular(match scope {
-                crate::installer::step::RestoreScope::Full => "Recovery Kit availability",
-                crate::installer::step::RestoreScope::DescriptorOnly => {
-                    "Wallet descriptor availability"
-                }
-            }));
-            let mut col = Column::new().spacing(10);
+        RestorePhase::CubePicker { cubes, selected } => {
+            use crate::chain::ChainId;
+            let network_name = match ChainId::from_api_str(network) {
+                Some(ChainId::Bitcoin) => "Bitcoin mainnet",
+                Some(ChainId::Testnet) => "Bitcoin Testnet",
+                Some(ChainId::Testnet4) => "Bitcoin Testnet4",
+                Some(ChainId::Signet) => "Bitcoin Signet",
+                Some(ChainId::Regtest) => "Bitcoin Regtest",
+                Some(ChainId::BitcoinBlake2b) => "Bitcoin Blake2b mainnet",
+                Some(ChainId::BitcoinBlake2bTestnet4) => "Bitcoin Blake2b Testnet4",
+                None => network,
+            };
+            content = content
+                .push(p2_regular(format!(
+                    "Cubes on {} · {}",
+                    email.value, network_name
+                )))
+                .push(p2_regular(match scope {
+                    crate::installer::step::RestoreScope::Full => "Recovery Kit availability",
+                    crate::installer::step::RestoreScope::DescriptorOnly => {
+                        "Wallet descriptor availability"
+                    }
+                }));
+            let mut col = Column::new().spacing(8).width(Length::Fill);
             if cubes.is_empty() {
                 col = col.push(text::text(
                     "No Cubes found on this Connect account for the current network.",
@@ -2888,49 +2937,75 @@ pub fn recovery_kit_restore<'a>(
                                 c.status.has_encrypted_wallet_descriptor
                             }
                         };
-                    let label = if available {
+                    let availability = if available {
                         match scope {
-                            crate::installer::step::RestoreScope::Full => {
-                                format!("{} · Recovery Kit available", c.name)
-                            }
+                            crate::installer::step::RestoreScope::Full => "Recovery Kit available",
                             crate::installer::step::RestoreScope::DescriptorOnly => {
-                                format!("{} · Wallet descriptor available", c.name)
+                                "Wallet descriptor available"
                             }
                         }
                     } else if !c.status.has_recovery_kit {
-                        format!("{} · No Recovery Kit", c.name)
+                        "No Recovery Kit"
                     } else {
                         match scope {
-                            crate::installer::step::RestoreScope::Full => {
-                                format!("{} · No Master Seed in kit", c.name)
-                            }
+                            crate::installer::step::RestoreScope::Full => "No Master Seed in kit",
                             crate::installer::step::RestoreScope::DescriptorOnly => {
-                                format!("{} · No descriptor in kit", c.name)
+                                "No descriptor in kit"
                             }
                         }
                     };
                     let id = c.id;
-                    // Raw `iced::widget::Button` because the labels are
-                    // built from dynamic `String`s — `button::secondary`
-                    // requires `&'static str`.
-                    let row_text = text::text(label).style(if available {
-                        theme::text::primary
+                    let chosen = *selected == Some(id);
+                    let row_text = Column::new()
+                        .spacing(4)
+                        .push(
+                            p2_regular(if chosen {
+                                format!("◉  Selected · {}", c.name)
+                            } else {
+                                format!("○  {}", c.name)
+                            })
+                            .style(if available {
+                                theme::text::primary
+                            } else {
+                                theme::text::secondary
+                            }),
+                        )
+                        .push(p2_regular(availability).style(if available {
+                            theme::text::primary
+                        } else {
+                            theme::text::secondary
+                        }));
+                    let btn = Action::new(
+                        format!("tenshu.installer.restore.{ui_instance}.cube.{id}"),
+                        row_text,
+                        Message::FocusAction,
+                    )
+                    .width(Length::Fill)
+                    .padding([10, 18])
+                    .style(if chosen {
+                        theme::button::orange_outline
                     } else {
-                        theme::text::secondary
-                    });
-                    let mut btn = Button::new(row_text)
-                        .width(Length::Fill)
-                        .padding([8, 16])
-                        .style(theme::button::secondary);
-                    if available {
-                        btn = btn.on_press(Message::RecoveryKitRestore(
-                            RecoveryKitRestoreMsg::SelectCube(id),
-                        ));
-                    }
+                        theme::button::secondary
+                    })
+                    .on_press_maybe(available.then_some(
+                        Message::RecoveryKitRestore(RecoveryKitRestoreMsg::SelectCube(id)),
+                    ));
                     col = col.push(btn);
                 }
             }
-            content = content.push(col);
+            content = content.push(col).push(
+                button::primary_action(
+                    format!("tenshu.installer.restore.{ui_instance}.next"),
+                    None,
+                    "Next",
+                    Message::FocusAction,
+                )
+                .on_press_maybe(
+                    selected
+                        .map(|_| Message::RecoveryKitRestore(RecoveryKitRestoreMsg::ConfirmCube)),
+                )
+                .width(Length::Fixed(220.0)),
+            );
         }
         RestorePhase::PasswordEntry { selected, .. } => {
             content = content
@@ -2940,6 +3015,9 @@ pub fn recovery_kit_restore<'a>(
                 )))
                 .push(
                     TextInput::new("Recovery password", password)
+                        .id(format!(
+                            "tenshu.installer.restore.{ui_instance}.password-input"
+                        ))
                         .on_input(|v| {
                             // Wrap the password in `Zeroizing` before
                             // it enters the message queue — see
@@ -2952,66 +3030,92 @@ pub fn recovery_kit_restore<'a>(
                             ))
                         })
                         .secure(true)
+                        .on_submit_maybe((!password.is_empty() && !processing).then_some(
+                            Message::RecoveryKitRestore(RecoveryKitRestoreMsg::SubmitPassword),
+                        ))
                         .size(16)
                         .padding(12)
                         .width(Length::Fixed(400.0)),
                 )
                 .push({
-                    let btn = button::primary(None, "Restore")
-                        .width(Length::Fixed(220.0))
-                        .padding([10, 20]);
-                    if !password.is_empty() && !processing {
-                        btn.on_press(Message::RecoveryKitRestore(
-                            RecoveryKitRestoreMsg::SubmitPassword,
-                        ))
-                    } else {
-                        btn
-                    }
+                    let btn = button::primary_action(
+                        format!("tenshu.installer.restore.{ui_instance}.restore"),
+                        None,
+                        "Restore",
+                        Message::FocusAction,
+                    )
+                    .width(Length::Fixed(220.0))
+                    .padding([10, 20]);
+                    btn.on_press_maybe((!password.is_empty() && !processing).then_some(
+                        Message::RecoveryKitRestore(RecoveryKitRestoreMsg::SubmitPassword),
+                    ))
                 });
         }
         RestorePhase::Decrypting { .. } => {
-            content = content.push(text::text(
-                "Decrypting your Recovery Kit on this device. This can take a moment.",
+            content = content.push(card::simple(
+                p1_regular("Decrypting your Recovery Kit. This takes a moment.")
+                    .style(theme::text::secondary),
             ));
         }
-        RestorePhase::Ready { .. } => {
-            // The happy path after a successful decrypt fires
-            // `Message::Next` automatically, so the user rarely
-            // lingers on this screen. But a user can land here
-            // again by navigating back through the installer —
-            // without an explicit Next button they'd be stuck.
-            content = content.push(
-                button::primary(None, "Next")
+        RestorePhase::Ready { selected, .. } => {
+            content = content
+                .push(card::simple(
+                    Column::new()
+                        .spacing(8)
+                        .push(p1_bold(format!(
+                            "Ready to restore from \"{}\".",
+                            selected.name
+                        )))
+                        .push(p2_regular("Cube and network match this Recovery Kit.")),
+                ))
+                .push(
+                    button::primary_action(
+                        format!("tenshu.installer.restore.{ui_instance}.ready-next"),
+                        None,
+                        "Next",
+                        Message::FocusAction,
+                    )
                     .on_press(Message::Next)
                     .width(Length::Fixed(220.0))
                     .padding([10, 20]),
-            );
+                );
         }
         RestorePhase::Error { message } => {
             content = content
-                .push(text::text(message.clone()).style(theme::text::warning))
+                .push(card::simple(
+                    Column::new()
+                        .spacing(8)
+                        .push(p1_bold("Recovery needs attention"))
+                        .push(text::text(message.clone()).style(theme::text::warning)),
+                ))
                 .push(
-                    button::secondary(None, "Try again")
-                        .on_press(Message::RecoveryKitRestore(
-                            RecoveryKitRestoreMsg::RetryFromStart,
-                        ))
-                        .width(Length::Fixed(220.0))
-                        .padding([10, 20]),
+                    button::secondary_action(
+                        format!("tenshu.installer.restore.{ui_instance}.retry"),
+                        None,
+                        "Try again",
+                        Message::FocusAction,
+                    )
+                    .on_press(Message::RecoveryKitRestore(
+                        RecoveryKitRestoreMsg::RetryFromStart,
+                    ))
+                    .width(Length::Fixed(220.0))
+                    .padding([10, 20]),
                 );
         }
-    }
-
-    if let Some(e) = error {
-        content = content.push(text::text(e.to_string()).style(theme::text::warning));
     }
 
     // Skip button — only for DescriptorOnly scopes.
     if matches!(scope, crate::installer::step::RestoreScope::DescriptorOnly) {
         content = content.push(
-            button::secondary(None, "Skip — restore later")
-                .on_press(Message::RecoveryKitRestore(RecoveryKitRestoreMsg::Skip))
-                .width(Length::Fixed(220.0))
-                .padding([10, 20]),
+            button::secondary_action(
+                format!("tenshu.installer.restore.{ui_instance}.skip"),
+                None,
+                "Skip — restore later",
+                Message::FocusAction,
+            )
+            .on_press(Message::RecoveryKitRestore(RecoveryKitRestoreMsg::Skip))
+            .width(Length::Fixed(220.0))
+            .padding([10, 20]),
         );
     }
 
@@ -3286,7 +3390,9 @@ mod tests {
         for phase in &phases {
             let _ = recovery_kit_restore(
                 (1, 5),
+                1,
                 RestoreScope::DescriptorOnly,
+                "mainnet",
                 phase,
                 &email,
                 &otp,
@@ -3298,7 +3404,9 @@ mod tests {
 
         let _ = recovery_kit_restore(
             (1, 5),
+            1,
             RestoreScope::Full,
+            "mainnet",
             &RestorePhase::CubePicker {
                 cubes: vec![candidate(4, "Seed Only", true, true, false)],
                 selected: None,
@@ -3430,7 +3538,7 @@ mod tests {
                 candidate(2, "Travel fund", true, false, true),
                 candidate(3, "Archive", false, false, false),
             ],
-            selected: None,
+            selected: Some(1),
         };
 
         for (scope, expected, availability, theme_name, theme) in [
@@ -3449,8 +3557,18 @@ mod tests {
                 theme::Theme::light(),
             ),
         ] {
-            let mut element =
-                recovery_kit_restore((1, 8), scope, &phase, &email, &otp, "", false, None);
+            let mut element = recovery_kit_restore(
+                (1, 8),
+                1,
+                scope,
+                "mainnet",
+                &phase,
+                &email,
+                &otp,
+                "",
+                false,
+                None,
+            );
             let mut tree = Tree::new(element.as_widget());
             let size = iced::Size::new(1024.0, 768.0);
             let node = element.as_widget_mut().layout(
@@ -3475,6 +3593,22 @@ mod tests {
                 scope,
                 labels
             );
+            assert!(labels
+                .0
+                .iter()
+                .any(|(label, _)| label == "Cubes on user@example.com · Bitcoin mainnet"));
+            if scope == RestoreScope::DescriptorOnly {
+                let skip = labels
+                    .0
+                    .iter()
+                    .find(|(label, _)| label == "Skip — restore later")
+                    .expect("descriptor restore skip action");
+                assert!(
+                    skip.1.y + skip.1.height <= size.height,
+                    "skip must be visible at 1024×768: {:?}",
+                    skip.1
+                );
+            }
             assert!(
                 !labels.0.iter().any(|(label, _)| label == "1 | 8"),
                 "{:?}: {:?}",
@@ -3504,11 +3638,16 @@ mod tests {
                 title_x,
                 eyebrow_x
             );
+            assert!(labels
+                .0
+                .iter()
+                .any(|(label, _)| label == "◉  Selected · Everyday"));
             let available_label = match scope {
-                RestoreScope::Full => "Everyday · Recovery Kit available",
-                RestoreScope::DescriptorOnly => "Everyday · Wallet descriptor available",
+                RestoreScope::Full => "Recovery Kit available",
+                RestoreScope::DescriptorOnly => "Wallet descriptor available",
             };
             assert!(labels.0.iter().any(|(label, _)| label == available_label));
+            assert!(labels.0.iter().any(|(label, _)| label == "2  Choose Cube"));
             assert!(!labels
                 .0
                 .iter()
@@ -3854,7 +3993,11 @@ mod policy_layout_tests {
 #[cfg(test)]
 mod node_management_chain_tests {
     use super::*;
-    use crate::{chain::ChainId, node::bitcoind::NodeFlavor};
+    use crate::{
+        chain::ChainId,
+        installer::step::{recovery_kit_restore::RestorePhase, RestoreScope},
+        node::bitcoind::NodeFlavor,
+    };
     use iced::advanced::{
         layout,
         renderer::Headless,
@@ -3862,6 +4005,32 @@ mod node_management_chain_tests {
         Layout,
     };
     use iced::{keyboard, mouse, Event, Rectangle, Size};
+
+    fn restore_email() -> form::Value<String> {
+        form::Value {
+            value: "user@example.com".into(),
+            valid: true,
+            ..form::Value::default()
+        }
+    }
+
+    fn restore_candidate() -> crate::installer::step::recovery_kit_restore::RestoreCubeCandidate {
+        crate::installer::step::recovery_kit_restore::RestoreCubeCandidate {
+            id: 7,
+            uuid: "cube-7".into(),
+            name: "Everyday".into(),
+            network: "mainnet".into(),
+            status: crate::services::coincube::RecoveryKitStatus {
+                has_recovery_kit: true,
+                has_encrypted_seed: true,
+                has_encrypted_wallet_descriptor: true,
+                encryption_scheme: "aes-256-gcm".into(),
+                created_at: None,
+                updated_at: None,
+                owner_self: None,
+            },
+        }
+    }
 
     #[derive(Default)]
     struct Labels(Vec<String>);
@@ -3982,7 +4151,7 @@ mod node_management_chain_tests {
     }
 
     fn activate_node_action(
-        mut element: Element<'static, Message>,
+        mut element: Element<'_, Message>,
         target: &str,
         key: keyboard::Key,
         focus_with_tab: bool,
@@ -4064,6 +4233,243 @@ mod node_management_chain_tests {
             );
         }
         emitted
+    }
+
+    #[test]
+    fn recovery_picker_rows_and_next_activate_from_keyboard() {
+        use crate::installer::{
+            message::RecoveryKitRestoreMsg,
+            step::{recovery_kit_restore::RestoreCubeCandidate, RestoreScope},
+        };
+
+        let candidate = RestoreCubeCandidate {
+            id: 7,
+            uuid: "cube-7".into(),
+            name: "Everyday".into(),
+            network: "mainnet".into(),
+            status: crate::services::coincube::RecoveryKitStatus {
+                has_recovery_kit: true,
+                has_encrypted_seed: true,
+                has_encrypted_wallet_descriptor: true,
+                encryption_scheme: "aes-256-gcm".into(),
+                created_at: None,
+                updated_at: None,
+                owner_self: None,
+            },
+        };
+        let email = form::Value {
+            value: "user@example.com".into(),
+            valid: true,
+            ..form::Value::default()
+        };
+        let otp = form::Value::default();
+        for key in [keyboard::key::Named::Enter, keyboard::key::Named::Space] {
+            let phase = crate::installer::step::recovery_kit_restore::RestorePhase::CubePicker {
+                cubes: vec![candidate.clone()],
+                selected: None,
+            };
+            let messages = activate_node_action(
+                recovery_kit_restore(
+                    (1, 8),
+                    42,
+                    RestoreScope::Full,
+                    "mainnet",
+                    &phase,
+                    &email,
+                    &otp,
+                    "",
+                    false,
+                    None,
+                ),
+                "tenshu.installer.restore.42.cube.7",
+                keyboard::Key::Named(key),
+                true,
+            );
+            assert!(matches!(
+                messages.as_slice(),
+                [Message::RecoveryKitRestore(
+                    RecoveryKitRestoreMsg::SelectCube(7)
+                )]
+            ));
+
+            let phase = crate::installer::step::recovery_kit_restore::RestorePhase::CubePicker {
+                cubes: vec![candidate.clone()],
+                selected: Some(7),
+            };
+            let messages = activate_node_action(
+                recovery_kit_restore(
+                    (1, 8),
+                    42,
+                    RestoreScope::Full,
+                    "mainnet",
+                    &phase,
+                    &email,
+                    &otp,
+                    "",
+                    false,
+                    None,
+                ),
+                "tenshu.installer.restore.42.next",
+                keyboard::Key::Named(key),
+                false,
+            );
+            assert!(matches!(
+                messages.as_slice(),
+                [Message::RecoveryKitRestore(
+                    RecoveryKitRestoreMsg::ConfirmCube
+                )]
+            ));
+        }
+    }
+
+    #[test]
+    fn recovery_sign_in_and_fallback_actions_activate_from_keyboard() {
+        use crate::installer::message::RecoveryKitRestoreMsg;
+
+        let email = restore_email();
+        let otp = form::Value::default();
+        for key in [keyboard::key::Named::Enter, keyboard::key::Named::Space] {
+            let messages = activate_node_action(
+                recovery_kit_restore(
+                    (1, 8),
+                    42,
+                    RestoreScope::Full,
+                    "mainnet",
+                    &RestorePhase::Email,
+                    &email,
+                    &otp,
+                    "",
+                    false,
+                    None,
+                ),
+                "tenshu.installer.restore.42.send-code",
+                keyboard::Key::Named(key),
+                false,
+            );
+            assert!(matches!(
+                messages.as_slice(),
+                [Message::RecoveryKitRestore(
+                    RecoveryKitRestoreMsg::RequestOtp
+                )]
+            ));
+
+            let error = RestorePhase::Error {
+                message: "Try again".into(),
+            };
+            let messages = activate_node_action(
+                recovery_kit_restore(
+                    (1, 8),
+                    42,
+                    RestoreScope::Full,
+                    "mainnet",
+                    &error,
+                    &email,
+                    &otp,
+                    "",
+                    false,
+                    None,
+                ),
+                "tenshu.installer.restore.42.retry",
+                keyboard::Key::Named(key),
+                false,
+            );
+            assert!(matches!(
+                messages.as_slice(),
+                [Message::RecoveryKitRestore(
+                    RecoveryKitRestoreMsg::RetryFromStart
+                )]
+            ));
+
+            let messages = activate_node_action(
+                recovery_kit_restore(
+                    (1, 8),
+                    42,
+                    RestoreScope::DescriptorOnly,
+                    "mainnet",
+                    &error,
+                    &email,
+                    &otp,
+                    "",
+                    false,
+                    None,
+                ),
+                "tenshu.installer.restore.42.skip",
+                keyboard::Key::Named(key),
+                false,
+            );
+            assert!(matches!(
+                messages.as_slice(),
+                [Message::RecoveryKitRestore(RecoveryKitRestoreMsg::Skip)]
+            ));
+        }
+    }
+
+    #[test]
+    fn recovery_password_enter_and_restore_action_require_input() {
+        use crate::installer::message::RecoveryKitRestoreMsg;
+
+        fn password_view<'a>(
+            phase: &'a RestorePhase,
+            email: &'a form::Value<String>,
+            otp: &'a form::Value<String>,
+            password: &'a str,
+            processing: bool,
+        ) -> Element<'a, Message> {
+            recovery_kit_restore(
+                (1, 8),
+                42,
+                RestoreScope::Full,
+                "mainnet",
+                phase,
+                email,
+                otp,
+                password,
+                processing,
+                None,
+            )
+        }
+
+        let email = restore_email();
+        let otp = form::Value::default();
+        let phase = RestorePhase::PasswordEntry {
+            selected: restore_candidate(),
+            attempts: 0,
+        };
+        let messages = activate_node_action(
+            password_view(&phase, &email, &otp, "secret", false),
+            "tenshu.installer.restore.42.password-input",
+            keyboard::Key::Named(keyboard::key::Named::Enter),
+            false,
+        );
+        assert!(matches!(
+            messages.as_slice(),
+            [Message::RecoveryKitRestore(
+                RecoveryKitRestoreMsg::SubmitPassword
+            )]
+        ));
+        for (password, processing) in [("", false), ("secret", true)] {
+            let messages = activate_node_action(
+                password_view(&phase, &email, &otp, password, processing),
+                "tenshu.installer.restore.42.password-input",
+                keyboard::Key::Named(keyboard::key::Named::Enter),
+                false,
+            );
+            assert!(messages.is_empty());
+        }
+        for key in [keyboard::key::Named::Enter, keyboard::key::Named::Space] {
+            let messages = activate_node_action(
+                password_view(&phase, &email, &otp, "secret", false),
+                "tenshu.installer.restore.42.restore",
+                keyboard::Key::Named(key),
+                false,
+            );
+            assert!(matches!(
+                messages.as_slice(),
+                [Message::RecoveryKitRestore(
+                    RecoveryKitRestoreMsg::SubmitPassword
+                )]
+            ));
+        }
     }
 
     #[test]
