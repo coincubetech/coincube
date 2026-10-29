@@ -132,7 +132,7 @@ empty on the right.
 | Gutter | `clamp(24px, 3vw, 48px)` on both sides (30.7px at the 1024 minimum window, 43.2px at 1440, 48px from 1600). In the app: `(0.03 × window width).clamp(24, 48)`. |
 | Top padding | 28px above the page title on every page; 48px bottom padding. |
 | Page width | Content is at most 960px wide on every page, Activity included. 960 is what Send and Receive need for their 680px form and 240px step column side by side. |
-| Activity | The title, filters and table sit on the page column. The detail panel (420px) sits at the content area's right edge; the column stays where it is when the panel fits in the right margin, else it centres in the space left of the panel. |
+| Activity | The title, filters and table sit on the page column. The detail panel (420px) sits at the content area's right edge; the column stays where it is while it clears the panel by a gutter, then slides left, then narrows once it reaches the left gutter, so it never jumps as the window is resized. |
 | Page header | The same on every page: title, then the Cube and network line. A right-side item (Overview's network line, Activity's result count) sits at the container's right edge. |
 
 Inner layouts sit inside this container and start at its left edge. For example,

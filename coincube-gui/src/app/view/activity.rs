@@ -838,23 +838,26 @@ struct Frame {
 
 /// Activity's header, filters and rows share the page column every Cube page
 /// uses (`tenshu::page`), centred. A detail pane beside the list sits at the
-/// pane's right edge; the column keeps its place when the pane fits in the
-/// right margin, else it is centred in the space left of the pane.
+/// pane's right edge. The column keeps its place while it clears the pane by a
+/// gutter, then slides left, then narrows once it reaches the left gutter, so
+/// it never jumps as the window is resized.
 fn column_frame(width: f32, detail_beside: bool) -> Frame {
     let gutter = super::page_gutter(width);
-    let frame = |space: f32| {
-        let (left, column) = tenshu::content_frame(space, PageWidth::Reading, gutter);
-        Frame {
-            left,
+    let (centred_left, centred_column) = tenshu::content_frame(width, PageWidth::Reading, gutter);
+    let (left, column) = if detail_beside {
+        let space = width - DETAIL_SPAN;
+        let column = centred_column.min((space - 2.0 * gutter).max(0.0));
+        (
+            centred_left.min(space - gutter - column).max(gutter),
             column,
-            right: width - left - column,
-        }
-    };
-    let centred = frame(width);
-    if !detail_beside || centred.right >= DETAIL_SPAN + gutter {
-        centred
+        )
     } else {
-        frame(width - DETAIL_SPAN)
+        (centred_left, centred_column)
+    };
+    Frame {
+        left,
+        column,
+        right: width - left - column,
     }
 }
 
@@ -2521,6 +2524,30 @@ mod tests {
         assert!(beside.left < column_frame(1192.0, false).left);
         assert_eq!(beside.left + beside.column + beside.right, 1192.0);
         assert!(beside.right >= DETAIL_SPAN);
+    }
+
+    #[test]
+    fn the_column_never_jumps_as_a_window_with_the_detail_pane_is_resized() {
+        // 1897px once moved the column about 211px left of where 1898px put it.
+        let mut previous = column_frame(1000.0, true);
+        for width in 1001..=2600 {
+            let width = width as f32;
+            let frame = column_frame(width, true);
+            assert!(
+                (frame.left - previous.left).abs() <= 1.0
+                    && (frame.column - previous.column).abs() <= 1.0,
+                "{:?} -> {:?} at {}",
+                previous,
+                frame,
+                width
+            );
+            assert!(
+                frame.right >= DETAIL_SPAN + super::super::page_gutter(width) - 0.01,
+                "the pane covers the column at {}",
+                width
+            );
+            previous = frame;
+        }
     }
 
     #[test]
