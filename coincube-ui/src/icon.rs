@@ -502,14 +502,30 @@ mod tests {
 
     #[test]
     fn coincube_icons_is_loaded_under_the_name_spark_icon_asks_for() {
-        // iced falls back to another font, without an error, when no loaded
-        // font has the family name a `Font::with_name` asks for.
+        // iced falls back to another font, without an error, when its font
+        // database skips a font or no face has the family name a
+        // `Font::with_name` asks for. Load the bytes into that database.
+        use iced::advanced::graphics::text::cosmic_text::{self, fontdb};
         let bytes = crate::font::COINCUBE_ICONS_BYTES;
-        let name = b"coincube-icons";
-        assert!(bytes.windows(name.len()).any(|window| window == name));
-        assert_eq!(COINCUBE_ICONS, Font::with_name("coincube-icons"));
         assert!(crate::font::load()
             .iter()
             .any(|font| font.as_ref() == bytes));
+        let mut db = fontdb::Database::new();
+        db.load_font_data(bytes.to_vec());
+        let face = db
+            .query(&fontdb::Query {
+                families: &[fontdb::Family::Name("coincube-icons")],
+                ..fontdb::Query::default()
+            })
+            .and_then(|id| db.face(id))
+            .expect("coincube-icons.ttf loads as the coincube-icons family");
+        assert_eq!(COINCUBE_ICONS, Font::with_name("coincube-icons"));
+        let font = cosmic_text::Font::new(&db, face.id, face.weight).expect("shapeable font");
+        assert_ne!(
+            font.as_swash().charmap().map('\u{E000}'),
+            0,
+            "{}",
+            "U+E000 maps to the Spark glyph"
+        );
     }
 }

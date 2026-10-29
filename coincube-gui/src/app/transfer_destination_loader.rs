@@ -39,6 +39,25 @@ pub(crate) enum Refusal {
     Locked(Duration),
 }
 
+impl Refusal {
+    /// What the Unlock page says about a refusal. Duress never reaches it.
+    pub(crate) fn reason(self) -> String {
+        match self {
+            Self::Stale => "This step expired. Start the unlock again.".into(),
+            Self::Unsupported => "This Cube can't receive a cross-Cube transfer.".into(),
+            Self::SameWallet => "That Cube holds the same Vault as this one.".into(),
+            Self::IdentityChanged => "The other Cube changed. Choose it again.".into(),
+            Self::BackendUnavailable => "The other Cube's Vault isn't available.".into(),
+            Self::WrongCredential => "That PIN or passkey didn't unlock it.".into(),
+            Self::Duress => "The other Cube can't be used.".into(),
+            Self::Locked(remaining) => format!(
+                "Too many attempts. Try again in {} s.",
+                remaining.as_secs().max(1)
+            ),
+        }
+    }
+}
+
 /// One exact local catalog snapshot. Re-read before and after every async
 /// backend call; no caller-provided Cube label or address is trusted.
 fn selected(
@@ -67,6 +86,66 @@ fn selected(
         .find(|wallet| wallet.wallet_id() == *wallet_id)
         .ok_or(Refusal::IdentityChanged)?;
     Ok((cube, wallet))
+}
+
+/// One row of the Other Cube picker, read without unlocking anything.
+/// Locked Cubes show no balances. Only a Bitcoin mainnet Cube with its own
+/// Vault can receive a cross-Cube transfer today; every other Cube is listed
+/// with the reason it cannot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CubeChoice {
+    pub cube_id: String,
+    pub name: String,
+    pub chain: ChainId,
+    pub has_vault: bool,
+    pub passkey: bool,
+    pub vault_wallet_id: Option<WalletId>,
+    pub refusal: Option<&'static str>,
+}
+
+/// Every other local Cube on every chain, Bitcoin mainnet first.
+pub(crate) fn other_cubes(root: &CoincubeDirectory, source: &Source) -> Vec<CubeChoice> {
+    let mut choices: Vec<CubeChoice> = ChainId::ALL
+        .iter()
+        .flat_map(|chain| {
+            Settings::from_file(&root.network_directory(*chain))
+                .map(|settings| settings.cubes)
+                .unwrap_or_default()
+        })
+        .filter(|cube| cube.id != source.cube_id)
+        .map(|cube| {
+            let has_vault = cube.vault_wallet_id.is_some() && cube.bitcoin_import.is_none();
+            let shares_source = cube.vault_wallet_id.as_ref().is_some_and(|id| {
+                source
+                    .wallet
+                    .shares_vault_descriptor(&WalletIdentity::Vault(id.clone()))
+            });
+            let refusal = if cube.network != source.chain {
+                Some("Different network: can’t receive this transfer")
+            } else if !has_vault {
+                Some("No Vault to receive this transfer")
+            } else if shares_source {
+                Some("Same Vault as the source")
+            } else if cube.master_signer_fingerprint.is_none()
+                || cube.vault_fingerprint.as_deref().is_none_or(str::is_empty)
+            {
+                Some("Not ready for a cross-Cube transfer")
+            } else {
+                None
+            };
+            CubeChoice {
+                name: crate::cube_display::name(&cube.name),
+                chain: cube.network,
+                has_vault,
+                passkey: cube.is_passkey_cube(),
+                vault_wallet_id: cube.vault_wallet_id.clone(),
+                cube_id: cube.id,
+                refusal,
+            }
+        })
+        .collect();
+    choices.sort_by_key(|choice| (choice.chain != ChainId::Bitcoin, choice.refusal.is_some()));
+    choices
 }
 
 fn same_selection(expected: &CubeSettings, current: &CubeSettings) -> bool {
@@ -151,10 +230,6 @@ impl ScopedDestination {
         })
     }
 
-    pub(crate) fn generation(&self) -> AppGeneration {
-        self.generation
-    }
-
     fn current(&self, source: &Source) -> Result<(), Refusal> {
         if !operation_live(
             &self.source,
@@ -201,6 +276,7 @@ impl ScopedDestination {
             wallet_id: self.wallet_id.clone(),
             pin,
             generation,
+            origin: source.clone(),
             cancelled: Arc::clone(&self.cancelled),
             busy: Arc::clone(&self.pin_busy),
             signer_slot: Arc::clone(&self.pin_signer),
@@ -345,6 +421,61 @@ impl ScopedDestination {
         Ok(())
     }
 
+    /// Asks the bound destination Vault for a fresh receive address. The
+    /// job carries no credential; it only reaches B's own daemon.
+    pub(crate) fn request_address(&self, source: &Source) -> Result<AddressRequest, Refusal> {
+        self.current(source)?;
+        let backend = self.backend.as_ref().ok_or(Refusal::BackendUnavailable)?;
+        if !self.verified {
+            return Err(Refusal::WrongCredential);
+        }
+        Ok(AddressRequest {
+            daemon: Arc::clone(&backend.daemon),
+            generation: self.generation,
+            cancelled: Arc::clone(&self.cancelled),
+        })
+    }
+
+    /// Admits a daemon reply only if this operation is still live and the
+    /// address re-derives from B's verified descriptor at the reported
+    /// index. A daemon string alone is never trusted as B's address.
+    pub(crate) fn accept_address(
+        &self,
+        source: &Source,
+        reply: AddressReply,
+    ) -> Result<DestinationAddress, Refusal> {
+        self.current(source)?;
+        let backend = self.backend.as_ref().ok_or(Refusal::BackendUnavailable)?;
+        if !self.verified || reply.generation != self.generation {
+            return Err(Refusal::Stale);
+        }
+        let (address, index) = reply.result?;
+        derived_receive_address(&backend.descriptor, address, index)
+    }
+}
+
+/// The address is B's only if B's verified descriptor derives it, as a
+/// receive (not change) address, at the reported normal index.
+fn derived_receive_address(
+    descriptor: &coincube_core::descriptors::CoincubeDescriptor,
+    address: coincube_core::miniscript::bitcoin::Address,
+    index: coincube_core::miniscript::bitcoin::bip32::ChildNumber,
+) -> Result<DestinationAddress, Refusal> {
+    if !index.is_normal() {
+        return Err(Refusal::IdentityChanged);
+    }
+    let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only();
+    let expected = descriptor
+        .receive_descriptor()
+        .derive(index, &secp)
+        .address(Network::Bitcoin);
+    if expected != address {
+        return Err(Refusal::IdentityChanged);
+    }
+    Ok(DestinationAddress { address, index })
+}
+
+impl ScopedDestination {
     pub(crate) fn revoke(&mut self) {
         self.cancelled.store(true, Ordering::Release);
         self.pin_attempt = None;
@@ -363,9 +494,21 @@ impl ScopedDestination {
 /// The only result permitted through an Iced message is a classification.
 /// There is no signer, PIN, or PRF output here.
 #[derive(Debug, Clone)]
-pub(crate) struct PinCheck {
+pub struct PinCheck {
     generation: AppGeneration,
     verdict: Result<PinVerdict, Refusal>,
+    /// Present only for a duress match: the one-use activation proof.
+    duress: Option<crate::services::unlock::throttle::VerifiedSeedExportDuress>,
+}
+
+impl PinCheck {
+    /// A duress PIN for the destination Cube. The caller must hand this to
+    /// the tab (`DuressActivateLocal`) whatever else has changed.
+    pub(crate) fn duress_proof(
+        &self,
+    ) -> Option<crate::services::unlock::throttle::VerifiedSeedExportDuress> {
+        self.duress.clone()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -382,13 +525,29 @@ pub(crate) struct PinRequest {
     wallet_id: WalletId,
     pin: Zeroizing<String>,
     generation: AppGeneration,
+    /// The open (source) Cube: the tab accepts a duress proof only from
+    /// the App it hosts, and duress then arms every Cube of the root.
+    origin: Source,
     cancelled: Arc<AtomicBool>,
     busy: Arc<AtomicBool>,
     signer_slot: Arc<Mutex<Option<MasterSigner>>>,
 }
 
 impl PinRequest {
+    /// `run` on the blocking pool (Argon2 must not stall the UI thread).
+    pub(crate) async fn run_blocking(self) -> PinCheck {
+        let generation = self.generation;
+        tokio::task::spawn_blocking(move || self.run())
+            .await
+            .unwrap_or(PinCheck {
+                generation,
+                verdict: Err(Refusal::BackendUnavailable),
+                duress: None,
+            })
+    }
+
     pub(crate) fn run(self) -> PinCheck {
+        let mut duress = None;
         let verdict = if self.cancelled.load(Ordering::Acquire) {
             Err(Refusal::Stale)
         } else {
@@ -411,7 +570,15 @@ impl PinRequest {
             {
                 Ok(PinAttempt::Locked(remaining)) => Ok(PinVerdict::Locked(remaining)),
                 Ok(PinAttempt::Classified(PinOutcome::Wrong)) => Ok(PinVerdict::Wrong),
-                Ok(PinAttempt::Classified(PinOutcome::Duress)) => Ok(PinVerdict::Duress),
+                Ok(PinAttempt::Classified(PinOutcome::Duress)) => {
+                    duress = Some(unlock::throttle::destination_unlock_duress(
+                        self.root.path(),
+                        &self.origin.cube_id,
+                        self.origin.chain,
+                        self.origin.app,
+                    ));
+                    Ok(PinVerdict::Duress)
+                }
                 Ok(PinAttempt::Classified(PinOutcome::Unlock(signer))) => {
                     match self.signer_slot.lock() {
                         Ok(mut slot) if !self.cancelled.load(Ordering::Acquire) => {
@@ -428,6 +595,7 @@ impl PinRequest {
         PinCheck {
             generation: self.generation,
             verdict,
+            duress,
         }
     }
 }
@@ -435,6 +603,12 @@ impl PinRequest {
 impl Drop for PinRequest {
     fn drop(&mut self) {
         self.busy.store(false, Ordering::Release);
+    }
+}
+
+impl std::fmt::Debug for ScopedDestination {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ScopedDestination(<destination Cube>)")
     }
 }
 
@@ -453,10 +627,6 @@ pub(crate) struct BackendRequest {
 }
 
 impl BackendRequest {
-    pub(crate) fn generation(&self) -> AppGeneration {
-        self.generation
-    }
-
     pub(crate) async fn run(self) -> Result<BoundBackend, Refusal> {
         if self.cancelled.load(Ordering::Acquire) {
             return Err(Refusal::Stale);
@@ -516,10 +686,103 @@ impl BackendRequest {
             .map_err(|_| Refusal::IdentityChanged)?;
         Ok(BoundBackend {
             wallet_id: self.wallet_id,
-            _daemon: daemon,
+            descriptor: descriptor.clone(),
+            daemon,
             _lease: lease,
         })
     }
+}
+
+/// Carries one `BackendRequest` result through an Iced message. Cloning
+/// shares the slot; the first `ScopedDestination::accept_backend_reply` takes
+/// it, and dropping the last clone stops an owned daemon.
+#[derive(Clone)]
+pub struct BackendReply {
+    generation: AppGeneration,
+    slot: Arc<Mutex<Option<Result<BoundBackend, Refusal>>>>,
+}
+
+impl std::fmt::Debug for BackendReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BackendReply(<destination backend>)")
+    }
+}
+
+impl BackendRequest {
+    pub(crate) async fn run_reply(self) -> BackendReply {
+        let generation = self.generation;
+        BackendReply {
+            generation,
+            slot: Arc::new(Mutex::new(Some(self.run().await))),
+        }
+    }
+}
+
+impl ScopedDestination {
+    pub(crate) fn accept_backend_reply(
+        &mut self,
+        source: &Source,
+        reply: BackendReply,
+    ) -> Result<(), Refusal> {
+        let result = reply
+            .slot
+            .lock()
+            .map_err(|_| Refusal::BackendUnavailable)?
+            .take()
+            .ok_or(Refusal::Stale)?;
+        self.accept_backend(source, reply.generation, result?)
+    }
+
+    pub(crate) fn is_passkey(&self) -> bool {
+        self.cube.is_passkey_cube()
+    }
+}
+
+/// One `get_new_address` call on B's bound daemon.
+pub(crate) struct AddressRequest {
+    daemon: Arc<dyn Daemon + Send + Sync>,
+    generation: AppGeneration,
+    cancelled: Arc<AtomicBool>,
+}
+
+/// The reply passed back through an Iced message: an unverified address and
+/// index, checked by `ScopedDestination::accept_address`.
+#[derive(Debug, Clone)]
+pub struct AddressReply {
+    generation: AppGeneration,
+    result: Result<
+        (
+            coincube_core::miniscript::bitcoin::Address,
+            coincube_core::miniscript::bitcoin::bip32::ChildNumber,
+        ),
+        Refusal,
+    >,
+}
+
+impl AddressRequest {
+    pub(crate) async fn run(self) -> AddressReply {
+        let result = if self.cancelled.load(Ordering::Acquire) {
+            Err(Refusal::Stale)
+        } else {
+            self.daemon
+                .get_new_address()
+                .await
+                .map(|res| (res.address, res.derivation_index))
+                .map_err(|_| Refusal::BackendUnavailable)
+        };
+        AddressReply {
+            generation: self.generation,
+            result,
+        }
+    }
+}
+
+/// A receive address of the destination Cube's Vault, re-derived from its
+/// verified descriptor.
+#[derive(Debug, Clone)]
+pub(crate) struct DestinationAddress {
+    pub address: coincube_core::miniscript::bitcoin::Address,
+    pub index: coincube_core::miniscript::bitcoin::bip32::ChildNumber,
 }
 
 async fn destination_daemon(
@@ -590,7 +853,9 @@ impl Drop for OwnedEmbeddedDestination {
 /// daemons carry a guard that stops them at the operation boundary.
 pub(crate) struct BoundBackend {
     wallet_id: WalletId,
-    _daemon: Arc<dyn Daemon + Send + Sync>,
+    /// B's descriptor as checked against its settings and fingerprint.
+    descriptor: coincube_core::descriptors::CoincubeDescriptor,
+    daemon: Arc<dyn Daemon + Send + Sync>,
     _lease: BackendLease,
 }
 
@@ -901,6 +1166,7 @@ mod tests {
             wallet_id: WalletId::new("destination".into(), Some(1)),
             pin: Zeroizing::new("1234".into()),
             generation: AppGeneration::next(),
+            origin: source(),
             cancelled,
             busy: Arc::clone(&busy),
             signer_slot: Arc::clone(&signer_slot),
@@ -939,10 +1205,56 @@ mod tests {
         let result = PinCheck {
             generation: AppGeneration::next(),
             verdict: Ok(PinVerdict::Duress),
+            duress: None,
         };
         assert_eq!(owner.accept_pin(&changed, result), Err(Refusal::Duress));
         assert!(cancelled.load(Ordering::Acquire));
         assert!(!owner.verified);
+    }
+
+    #[test]
+    fn destination_address_must_derive_from_the_verified_descriptor() {
+        use coincube_core::descriptors::CoincubeDescriptor;
+        use coincube_core::miniscript::bitcoin::{bip32::ChildNumber, secp256k1::Secp256k1};
+        use std::str::FromStr;
+        let descriptor = CoincubeDescriptor::from_str("wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#d72le4dr").unwrap();
+        let secp = Secp256k1::verification_only();
+        let index = ChildNumber::from(3);
+        let receive = descriptor
+            .receive_descriptor()
+            .derive(index, &secp)
+            .address(Network::Bitcoin);
+        let accepted = derived_receive_address(&descriptor, receive.clone(), index).unwrap();
+        assert_eq!(accepted.address, receive);
+
+        // Same descriptor, other index: not the reported address.
+        let other_index = descriptor
+            .receive_descriptor()
+            .derive(ChildNumber::from(4), &secp)
+            .address(Network::Bitcoin);
+        assert_eq!(
+            derived_receive_address(&descriptor, other_index, index).unwrap_err(),
+            Refusal::IdentityChanged
+        );
+        // A change address at the same index is not a receive address.
+        let change = descriptor
+            .change_descriptor()
+            .derive(index, &secp)
+            .address(Network::Bitcoin);
+        assert_eq!(
+            derived_receive_address(&descriptor, change, index).unwrap_err(),
+            Refusal::IdentityChanged
+        );
+        // Hardened indexes are never receive indexes.
+        assert_eq!(
+            derived_receive_address(
+                &descriptor,
+                receive,
+                ChildNumber::from_hardened_idx(3).unwrap()
+            )
+            .unwrap_err(),
+            Refusal::IdentityChanged
+        );
     }
 
     #[test]
@@ -971,6 +1283,7 @@ mod tests {
         let old = PinCheck {
             generation: AppGeneration::next(),
             verdict: Ok(PinVerdict::Unlock),
+            duress: None,
         };
         assert_eq!(owner.accept_pin(&original, old), Err(Refusal::Stale));
         assert_eq!(owner.pin_attempt, Some(newer));

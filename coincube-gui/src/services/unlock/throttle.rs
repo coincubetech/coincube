@@ -112,6 +112,32 @@ impl VerifiedSeedExportDuress {
     }
 }
 
+/// The cross-Cube Transfer's destination unlock runs the same throttled
+/// trial (`classify_pin_scoped`) on another Cube of this root. A duress match
+/// there is the same emergency: mint the one-use proof the App hands to the
+/// tab, exactly as the seed-export trial does. Its origin is the open Cube's
+/// App (`cube_id`, `chain`, `app`), the only origin the tab accepts; duress
+/// then arms every Cube of `root`. Called only by that trial's
+/// `PinOutcome::Duress` arm.
+pub(crate) fn destination_unlock_duress(
+    root: &Path,
+    cube_id: &str,
+    chain: crate::chain::ChainId,
+    app: crate::app::cache::AppGeneration,
+) -> VerifiedSeedExportDuress {
+    let account_id = crate::services::duress::DuressLocalState::load(root)
+        .map(|state| state.account_id)
+        .unwrap_or(None);
+    VerifiedSeedExportDuress {
+        root: root.to_path_buf(),
+        cube_id: cube_id.to_string(),
+        chain,
+        app,
+        account_id,
+        claimed: Arc::new(AtomicBool::new(false)),
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn verified_seed_export_duress_for_test(
     root: PathBuf,
