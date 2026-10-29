@@ -1926,6 +1926,8 @@ CREATE TABLE labels (
             .unwrap()
             .assume_checked();
         assert_eq!(conn.derivation_index_by_address(&external), None);
+        // Close the SQLite file before directory removal on Windows.
+        drop(conn);
         fs::remove_dir_all(dir).unwrap();
     }
 
