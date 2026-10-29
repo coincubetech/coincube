@@ -2490,10 +2490,9 @@ mod tests {
         assert!(detail_beside_list(activity_content(1440.0)));
         // The canvas's 1440px frame: a 248px rail, the list and the 420px pane.
         assert_eq!(activity_content(1440.0), 1192.0);
-        // Rows and their gutter insets fit beside the pane at 1440 (1150.4px
-        // needed of 1192), not at a 1100px pane (1144.9px needed).
-        let needed =
-            |pane: f32| MIN_ACTIVITY_ROWS_WIDTH + 2.0 * list_inset(pane) + SELECTED_DETAIL_WIDTH;
+        // Rows, their gutter insets and the pane with its rule fit at 1440
+        // (1151.4px needed of 1192), not at a 1100px pane (1145.9px needed).
+        let needed = |pane: f32| MIN_ACTIVITY_ROWS_WIDTH + 2.0 * list_inset(pane) + DETAIL_SPAN;
         assert!(needed(1192.0) <= 1192.0);
         assert!(!detail_beside_list(1100.0));
         assert!(needed(1100.0) > 1100.0);
