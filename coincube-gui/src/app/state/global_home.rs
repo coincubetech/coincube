@@ -657,78 +657,88 @@ impl State for GlobalHome {
                 vault_pending,
             });
 
-        let content = view::dashboard(
-            menu,
-            cache,
-            view::global_home::global_home_view(GlobalViewConfig {
-                cube_id: &self.cube_id,
-                liquid_balance,
-                spark_balance: self.spark_balance,
-                spark_btc_balance: self.spark_btc_balance,
-                spark_stable_balance: self.spark_stable_balance.as_ref(),
-                spark_balance_error: self.spark_balance_error,
-                usdt_balance,
-                usdt_balance_error,
-                vault_balance,
-                imported_balance: self.imported_balance,
-                imported_installed: self.imported_installed,
-                fiat_converter,
-                balance_masked: cache.balance_amounts_masked(),
-                total_balance_loading,
-                spark_balance_loaded: self.spark_balance_loaded,
-                liquid_balance_loaded: self.liquid_balance_loaded,
-                liquid_balance_error: self.liquid_balance_error,
-                usdt_balance_loaded: self.usdt_balance_loaded,
-                vault_loaded: !vault_pending,
-                display_mode: cache.display_mode,
-                has_vault: cache.has_vault,
-                has_imported_bitcoin: cache.has_imported_bitcoin,
-                has_spark,
-                has_liquid,
-                current_view: self.current_view,
-                transfer_direction: self.transfer_direction,
-                transfer_from: self.transfer_from,
-                transfer_to: self.transfer_to,
-                wallet_picker: self.wallet_picker,
-                entered_amount: &self.entered_amount,
-                receive_address: self.receive_address_info.as_ref().map(|info| &info.address),
-                destination_ready: self.destination_is_ready(),
-                transfer_action_ready: self.destination_is_ready()
-                    && self.transfer_direction.is_some_and(|direction| {
-                        match direction.from_kind() {
-                            WalletKind::Vault => true,
-                            WalletKind::Liquid => self.prepare_onchain_send_response.is_some(),
-                            WalletKind::Spark => self.spark_send_handle.is_some(),
-                        }
+        let (overview, transfer) = view::global_home::global_home_view(GlobalViewConfig {
+            cube_id: &self.cube_id,
+            liquid_balance,
+            spark_balance: self.spark_balance,
+            spark_btc_balance: self.spark_btc_balance,
+            spark_stable_balance: self.spark_stable_balance.as_ref(),
+            spark_balance_error: self.spark_balance_error,
+            usdt_balance,
+            usdt_balance_error,
+            vault_balance,
+            imported_balance: self.imported_balance,
+            imported_installed: self.imported_installed,
+            fiat_converter,
+            balance_masked: cache.balance_amounts_masked(),
+            total_balance_loading,
+            spark_balance_loaded: self.spark_balance_loaded,
+            liquid_balance_loaded: self.liquid_balance_loaded,
+            liquid_balance_error: self.liquid_balance_error,
+            usdt_balance_loaded: self.usdt_balance_loaded,
+            vault_loaded: !vault_pending,
+            display_mode: cache.display_mode,
+            has_vault: cache.has_vault,
+            has_imported_bitcoin: cache.has_imported_bitcoin,
+            has_spark,
+            has_liquid,
+            current_view: self.current_view,
+            transfer_direction: self.transfer_direction,
+            transfer_from: self.transfer_from,
+            transfer_to: self.transfer_to,
+            wallet_picker: self.wallet_picker,
+            entered_amount: &self.entered_amount,
+            receive_address: self.receive_address_info.as_ref().map(|info| &info.address),
+            destination_ready: self.destination_is_ready(),
+            transfer_action_ready: self.destination_is_ready()
+                && self
+                    .transfer_direction
+                    .is_some_and(|direction| match direction.from_kind() {
+                        WalletKind::Vault => true,
+                        WalletKind::Liquid => self.prepare_onchain_send_response.is_some(),
+                        WalletKind::Spark => self.spark_send_handle.is_some(),
                     }),
-                receive_index: self.receive_address_info.as_ref().map(|info| &info.index),
-                labels: self
-                    .receive_address_info
-                    .as_ref()
-                    .map_or(&self.empty_labels, |info| &info.labels),
-                labels_editing: self.labels_edited.cache(),
-                address_expanded: self.address_expanded,
-                bitcoin_unit: cache.bitcoin_unit,
-                onchain_send_limit: self.onchain_send_limit,
-                onchain_receive_limit: self.onchain_receive_limit,
-                is_sending: self.is_sending,
-                is_tx_signed: self.transfer_signed,
-                prepare_onchain_send_response: self.prepare_onchain_send_response.as_ref(),
-                spend_tx_fees: self.spend_tx_fees,
-                transfer_feerate: &self.transfer_feerate,
-                transfer_feerate_loading: self.transfer_feerate_loading,
-                spark_send_fee_sat: self.spark_send_fee_sat,
-                pending_spark_incoming: self.pending_spark_incoming,
-                pending_liquid_send_sats: self.pending_liquid_send_sats,
-                pending_usdt_send_sats: self.pending_usdt_send_sats,
-                pending_liquid_receive_sats: self.pending_liquid_receive_sats,
-                pending_usdt_receive_sats: self.pending_usdt_receive_sats,
-                vault_pending_send_sats,
-                vault_pending_receive_sats,
-                pending_vault_incoming: self.pending_vault_incoming,
-                btc_usd_price: cache.btc_usd_price,
-            }),
-        );
+            receive_index: self.receive_address_info.as_ref().map(|info| &info.index),
+            labels: self
+                .receive_address_info
+                .as_ref()
+                .map_or(&self.empty_labels, |info| &info.labels),
+            labels_editing: self.labels_edited.cache(),
+            address_expanded: self.address_expanded,
+            bitcoin_unit: cache.bitcoin_unit,
+            onchain_send_limit: self.onchain_send_limit,
+            onchain_receive_limit: self.onchain_receive_limit,
+            is_sending: self.is_sending,
+            is_tx_signed: self.transfer_signed,
+            prepare_onchain_send_response: self.prepare_onchain_send_response.as_ref(),
+            spend_tx_fees: self.spend_tx_fees,
+            transfer_feerate: &self.transfer_feerate,
+            transfer_feerate_loading: self.transfer_feerate_loading,
+            spark_send_fee_sat: self.spark_send_fee_sat,
+            pending_spark_incoming: self.pending_spark_incoming,
+            pending_liquid_send_sats: self.pending_liquid_send_sats,
+            pending_usdt_send_sats: self.pending_usdt_send_sats,
+            pending_liquid_receive_sats: self.pending_liquid_receive_sats,
+            pending_usdt_receive_sats: self.pending_usdt_receive_sats,
+            vault_pending_send_sats,
+            vault_pending_receive_sats,
+            pending_vault_incoming: self.pending_vault_incoming,
+            btc_usd_price: cache.btc_usd_price,
+        });
+        let content = view::dashboard(menu, cache, overview);
+        // The transfer steps are a dialog over the Overview. Clicking outside
+        // or Escape cancels the flow, except on the review step: a signed or
+        // in-flight transfer there is left only through its own controls.
+        let content = match transfer {
+            Some(dialog) => {
+                let dismiss = (self.current_view.step != 2)
+                    .then_some(view::Message::Home(HomeMessage::BackToHome));
+                coincube_ui::widget::modal::Modal::new(content, dialog)
+                    .on_blur(dismiss)
+                    .into()
+            }
+            None => content,
+        };
 
         let overlay = match &self.modal {
             Modal::ShowQrCode(m) => m.view(),

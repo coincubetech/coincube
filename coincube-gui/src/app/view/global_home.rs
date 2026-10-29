@@ -6,8 +6,8 @@ use coincube_ui::{
     color,
     component::{amount::*, button, form, spinner, text::*},
     icon::{
-        arrow_down_up_icon, arrow_right, check_circle_icon, clock_icon, droplet_fill_icon,
-        spark_icon, usd_icon, vault_icon, warning_icon,
+        arrow_down_up_icon, arrow_right, check_circle_icon, check_icon, clipboard_icon, clock_icon,
+        cross_icon, droplet_fill_icon, spark_icon, usd_icon, vault_icon, warning_icon,
     },
     theme,
     widget::{action::Action, *},
@@ -22,10 +22,7 @@ use crate::app::view::shared::landing::{
     amount_cell, landing_button, landing_card_style, landing_control_id, AmountCell, AmountTier,
 };
 use crate::app::view::wallet_header::{wallet_header, HeaderVariant, SyncState, WalletHeaderProps};
-use crate::app::{
-    menu::Menu,
-    view::{vault::receive::address_card, FiatAmountConverter},
-};
+use crate::app::{menu::Menu, view::FiatAmountConverter};
 use crate::app::{
     menu::{LiquidSubMenu, VaultSubMenu},
     view::message::{HomeMessage, Message},
@@ -528,7 +525,144 @@ where
     }
 }
 
-/// Inline wallet choice matching P-Transfer's From and To rows.
+/// Steps of the transfer dialog, in order. Labels stay one or two words.
+const TRANSFER_STEPS: [&str; 3] = ["Wallets & amount", "Review", "Done"];
+
+/// Step strip shared by every transfer step, modelled on the Claim
+/// workflow's stepper: a finished step carries a check, the current one is
+/// filled and outlined in the accent, later steps stay muted.
+fn transfer_steps<'a>(active: usize) -> Element<'a, Message> {
+    let mut steps = Row::new().spacing(8).width(Length::Fill);
+    for (index, label) in TRANSFER_STEPS.iter().enumerate() {
+        let current = index == active;
+        let done = index < active;
+        let marker: Element<'a, Message> = if done {
+            check_icon()
+                .size(12)
+                .style(theme::tenshu::text::accent)
+                .into()
+        } else {
+            text((index + 1).to_string())
+                .size(P2_SIZE)
+                .bold()
+                .style(move |t: &theme::Theme| iced::widget::text::Style {
+                    // Dark ink on the accent fill, as on primary buttons.
+                    color: Some(if current {
+                        color::LIGHT_BLACK
+                    } else {
+                        t.colors.shell.muted
+                    }),
+                })
+                .into()
+        };
+        let marker = Container::new(marker)
+            .center_x(Length::Fixed(24.0))
+            .center_y(Length::Fixed(24.0))
+            .style(move |t: &theme::Theme| iced::widget::container::Style {
+                background: current.then_some(iced::Background::Color(t.colors.shell.accent)),
+                border: iced::Border {
+                    color: if current || done {
+                        t.colors.shell.accent
+                    } else {
+                        t.colors.shell.line
+                    },
+                    width: 1.0,
+                    radius: 12.0.into(),
+                },
+                ..Default::default()
+            });
+        let title = if current {
+            text(*label).size(P2_SIZE).bold()
+        } else {
+            text(*label).size(P2_SIZE).style(theme::text::secondary)
+        };
+        steps = steps.push(
+            Container::new(
+                Row::new()
+                    .spacing(10)
+                    .align_y(Alignment::Center)
+                    .push(marker)
+                    .push(title),
+            )
+            .padding([10, 12])
+            .width(Length::FillPortion(1))
+            .style(move |t: &theme::Theme| iced::widget::container::Style {
+                background: current.then_some(iced::Background::Color(t.colors.shell.selected)),
+                border: iced::Border {
+                    color: if current {
+                        t.colors.shell.accent
+                    } else {
+                        t.colors.shell.line
+                    },
+                    width: 1.0,
+                    radius: 10.0.into(),
+                },
+                ..Default::default()
+            }),
+        );
+    }
+    steps.into()
+}
+
+/// Quiet outlined panel for the review summary and address.
+fn review_panel_style(t: &theme::Theme) -> iced::widget::container::Style {
+    iced::widget::container::Style {
+        border: iced::Border {
+            color: t.colors.shell.line,
+            width: 1.0,
+            radius: 12.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+/// The transfer flow is a dialog over the Overview: a title with a close
+/// control, the step strip, then the step's body, which scrolls when the
+/// window is too short for it. `close` is `None` while a send is in flight.
+fn transfer_dialog<'a>(
+    active: usize,
+    close: Option<Message>,
+    body: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let header = Row::new()
+        .spacing(12)
+        .align_y(Alignment::Center)
+        .push(
+            text("Transfer between wallets")
+                .bold()
+                .size(H4_SIZE)
+                .width(Length::Fill),
+        )
+        .push(
+            Button::new(cross_icon().size(16).style(theme::text::secondary))
+                .padding(8)
+                .style(theme::button::transparent)
+                .on_press_maybe(close),
+        );
+    Container::new(
+        Container::new(
+            Column::new()
+                .spacing(20)
+                .push(header)
+                .push(transfer_steps(active))
+                .push(iced::widget::scrollable(Container::new(body).padding(
+                    iced::Padding {
+                        right: 12.0,
+                        ..Default::default()
+                    },
+                ))),
+        )
+        .padding(24)
+        .width(Length::Fill)
+        .max_width(680)
+        .style(landing_card_style),
+    )
+    .padding(24)
+    .into()
+}
+
+/// Inline wallet choice matching P-Transfer's From and To rows. The selected
+/// row is marked by its fill alone.
 #[allow(clippy::too_many_arguments)]
 fn transfer_wallet_row<'a>(
     cube_id: &str,
@@ -548,11 +682,9 @@ fn transfer_wallet_row<'a>(
     } else {
         balance.to_formatted_string_with_unit(bitcoin_unit)
     };
-    let selection_mark = if selected { "◉" } else { "○" };
     let content = Row::new()
         .spacing(12)
         .align_y(Alignment::Center)
-        .push(text(selection_mark).size(18))
         .push(wallet_kind_icon::<Message>(kind, 18.0))
         .push(text(kind.label()).size(P1_SIZE).bold())
         .push(Space::new().width(Length::Fill))
@@ -566,7 +698,7 @@ fn transfer_wallet_row<'a>(
                 ),
         );
     let row = Container::new(content)
-        .padding([12, 14])
+        .padding([10, 14])
         .width(Length::Fill)
         .style(move |t| iced::widget::container::Style {
             background: selected.then_some(iced::Background::Color(t.colors.shell.selected)),
@@ -618,12 +750,18 @@ fn transfer_wallet_section<'a>(
         PickerSide::To => direction.to_kind(),
     };
     let mut col = Column::new().spacing(4).push(
-        text(match side {
-            PickerSide::From => "From",
-            PickerSide::To => "To",
-        })
-        .size(P1_SIZE)
-        .bold(),
+        Container::new(
+            text(match side {
+                PickerSide::From => "From",
+                PickerSide::To => "To",
+            })
+            .size(P1_SIZE)
+            .bold(),
+        )
+        .padding(iced::Padding {
+            bottom: 4.0,
+            ..Default::default()
+        }),
     );
     for (kind, balance, available) in [
         (WalletKind::Spark, spark_balance, has_spark),
@@ -670,90 +808,81 @@ fn enter_amount_card<'a>(
     } else {
         None
     };
-    let content = Column::new()
-        .push(text("Amount").bold().size(P1_SIZE))
+    // Helper text reflects the per-direction effective minimum (§Design
+    // section 4) composed with Breez's SDK limits on swap-involving legs.
+    let effective_min = crate::app::state::effective_transfer_min_sat(
+        direction,
+        onchain_send_limit,
+        onchain_receive_limit,
+    );
+    let effective_max = crate::app::state::effective_transfer_max_sat(
+        direction,
+        onchain_send_limit,
+        onchain_receive_limit,
+    );
+    let limits = match (effective_min, effective_max) {
+        (Some(min), Some(max)) => format!(
+            "Enter an amount between {} and {} {}",
+            Amount::from_sat(min).to_formatted_string_with_unit(bitcoin_unit),
+            Amount::from_sat(max).to_formatted_string_with_unit(bitcoin_unit),
+            bitcoin_unit,
+        ),
+        (Some(min), None) => format!(
+            "Minimum transfer: {} {}",
+            Amount::from_sat(min).to_formatted_string_with_unit(bitcoin_unit),
+            bitcoin_unit,
+        ),
+        _ => "Loading limits…".to_string(),
+    };
+
+    Column::new()
+        .spacing(16)
+        .width(Length::Fill)
         .push(
-            Row::new()
+            Column::new()
                 .spacing(4)
-                .push(text("Sending from"))
-                .push(text(direction.display()).bold()),
+                .push(text("Amount").bold().size(P1_SIZE))
+                .push(
+                    Row::new()
+                        .spacing(4)
+                        .push(text("Sending from").style(theme::text::secondary))
+                        .push(text(direction.display()).bold()),
+                ),
         )
         .push(
             Column::new()
+                .spacing(8)
                 .push(
-                    Column::new()
-                        .push(Container::new(
-                            match bitcoin_unit {
-                                BitcoinDisplayUnit::BTC => {
-                                    form::Form::new_amount_btc("Amount in BTC", amount, |msg| {
-                                        Message::Home(HomeMessage::AmountEdited(msg))
-                                    })
-                                }
-                                BitcoinDisplayUnit::Sats => {
-                                    form::Form::new_amount_sats("Amount in sats", amount, |msg| {
-                                        Message::Home(HomeMessage::AmountEdited(msg))
-                                    })
-                                }
-                            }
-                            .size(20)
-                            .padding(10),
-                        ))
-                        .push({
-                            // Helper text reflects the per-direction effective
-                            // minimum (§Design section 4) composed with Breez's
-                            // SDK limits on swap-involving legs.
-                            let effective_min = crate::app::state::effective_transfer_min_sat(
-                                direction,
-                                onchain_send_limit,
-                                onchain_receive_limit,
-                            );
-                            let effective_max = crate::app::state::effective_transfer_max_sat(
-                                direction,
-                                onchain_send_limit,
-                                onchain_receive_limit,
-                            );
-                            Container::new(
-                                text(match (effective_min, effective_max) {
-                                    (Some(min), Some(max)) => format!(
-                                        "Enter an amount between {} and {} {}",
-                                        Amount::from_sat(min)
-                                            .to_formatted_string_with_unit(bitcoin_unit),
-                                        Amount::from_sat(max)
-                                            .to_formatted_string_with_unit(bitcoin_unit),
-                                        bitcoin_unit,
-                                    ),
-                                    (Some(min), None) => format!(
-                                        "Minimum transfer: {} {}",
-                                        Amount::from_sat(min)
-                                            .to_formatted_string_with_unit(bitcoin_unit),
-                                        bitcoin_unit,
-                                    ),
-                                    _ => "Loading limits…".to_string(),
-                                })
-                                .size(12),
-                            )
-                            .padding(7)
-                        })
-                        .push_maybe(fiat_estimate.map(|estimate| {
-                            text(estimate).size(P2_SIZE).style(theme::text::secondary)
-                        })),
+                    match bitcoin_unit {
+                        BitcoinDisplayUnit::BTC => {
+                            form::Form::new_amount_btc("Amount in BTC", amount, |msg| {
+                                Message::Home(HomeMessage::AmountEdited(msg))
+                            })
+                        }
+                        BitcoinDisplayUnit::Sats => {
+                            form::Form::new_amount_sats("Amount in sats", amount, |msg| {
+                                Message::Home(HomeMessage::AmountEdited(msg))
+                            })
+                        }
+                    }
+                    .size(20)
+                    .padding(10),
                 )
-                .push(button::primary(None, "Next").on_press_maybe(
-                    if amount.value.is_empty() || !amount.valid {
-                        None
-                    } else {
-                        Some(Message::Home(HomeMessage::NextStep))
-                    },
-                ))
-                .spacing(16)
-                .width(Length::Fill),
+                .push(text(limits).size(12).style(theme::text::secondary))
+                .push_maybe(
+                    fiat_estimate
+                        .map(|estimate| text(estimate).size(P2_SIZE).style(theme::text::secondary)),
+                ),
         )
-        .width(Length::Fill)
-        .align_x(Alignment::Center);
-
-    Container::new(content)
-        .padding(0)
-        .width(Length::Fill)
+        .push(
+            button::primary(None, "Next")
+                .width(Length::Fill)
+                .on_press_maybe(if amount.value.is_empty() || !amount.valid {
+                    None
+                } else {
+                    Some(Message::Home(HomeMessage::NextStep))
+                }),
+        )
         .into()
 }
 
@@ -774,77 +903,141 @@ fn enter_amount_view<'a>(
     onchain_receive_limit: Option<(u64, u64)>,
     balance_masked: bool,
 ) -> Element<'a, Message> {
-    let content = Column::new()
-        .spacing(16)
-        .push(
-            button::secondary(None, "‹ Overview")
-                .on_press(Message::Home(HomeMessage::PreviousStep)),
-        )
-        .push(text("Transfer").bold().size(H2_SIZE))
-        .push(
-            text("1  Wallets & amount     2  Review     3  Done")
-                .size(P2_SIZE)
-                .style(theme::text::secondary),
-        )
-        .push(
-            Container::new(
-                Column::new()
-                    .spacing(18)
-                    .push(text("Transfer between wallets").bold().size(H4_SIZE))
-                    .push(transfer_wallet_section(
-                        cube_id,
-                        PickerSide::From,
-                        direction,
-                        has_vault,
-                        has_spark,
-                        has_liquid,
-                        liquid_balance,
-                        spark_balance,
-                        vault_balance,
-                        fiat_converter,
-                        bitcoin_unit,
-                        balance_masked,
-                    ))
-                    .push(iced::widget::rule::horizontal(1))
-                    .push(transfer_wallet_section(
-                        cube_id,
-                        PickerSide::To,
-                        direction,
-                        has_vault,
-                        has_spark,
-                        has_liquid,
-                        liquid_balance,
-                        spark_balance,
-                        vault_balance,
-                        fiat_converter,
-                        bitcoin_unit,
-                        balance_masked,
-                    ))
-                    .push(iced::widget::rule::horizontal(1))
-                    .push(enter_amount_card(
-                        direction,
-                        entered_amount,
-                        fiat_converter,
-                        onchain_send_limit,
-                        onchain_receive_limit,
-                        bitcoin_unit,
-                    )),
-            )
-            .padding(24)
-            .width(Length::Fill)
-            .style(landing_card_style),
-        )
-        .max_width(760)
-        .width(Length::Fill);
+    transfer_dialog(
+        0,
+        Some(Message::Home(HomeMessage::BackToHome)),
+        Column::new()
+            .spacing(18)
+            .push(transfer_wallet_section(
+                cube_id,
+                PickerSide::From,
+                direction,
+                has_vault,
+                has_spark,
+                has_liquid,
+                liquid_balance,
+                spark_balance,
+                vault_balance,
+                fiat_converter,
+                bitcoin_unit,
+                balance_masked,
+            ))
+            .push(iced::widget::rule::horizontal(1))
+            .push(transfer_wallet_section(
+                cube_id,
+                PickerSide::To,
+                direction,
+                has_vault,
+                has_spark,
+                has_liquid,
+                liquid_balance,
+                spark_balance,
+                vault_balance,
+                fiat_converter,
+                bitcoin_unit,
+                balance_masked,
+            ))
+            .push(iced::widget::rule::horizontal(1))
+            .push(enter_amount_card(
+                direction,
+                entered_amount,
+                fiat_converter,
+                onchain_send_limit,
+                onchain_receive_limit,
+                bitcoin_unit,
+            )),
+    )
+}
 
-    Container::new(content)
-        .width(Length::Fill)
-        .center_x(Length::Fill)
+/// One labelled line of the review summary.
+fn review_row<'a>(
+    label: &'static str,
+    value: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    Row::new()
+        .align_y(Alignment::Center)
+        .push(text(label).style(theme::text::secondary))
+        .push(Space::new().width(Length::Fill))
+        .push(value)
+        .into()
+}
+
+fn review_wallet<'a>(kind: WalletKind) -> Element<'a, Message> {
+    Row::new()
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .push(wallet_kind_icon::<Message>(kind, 16.0))
+        .push(text(kind.label()).bold())
+        .into()
+}
+
+/// The full destination address with a copy control. Its label and QR code
+/// sit behind a disclosure whose chevron and caption say it expands.
+fn receiving_address<'a>(
+    cube_id: &str,
+    addr: &'a coincube_core::miniscript::bitcoin::Address,
+    labels: &'a std::collections::HashMap<String, String>,
+    labels_editing: &'a std::collections::HashMap<String, form::Value<String>>,
+    expanded: bool,
+) -> Element<'a, Message> {
+    let addr_str = addr.to_string();
+    let address = Container::new(
+        Row::new()
+            .spacing(12)
+            .align_y(Alignment::Center)
+            .push(
+                coincube_ui::component::tenshu::mono(addr_str.clone())
+                    .size(P1_SIZE)
+                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+                    .width(Length::Fill),
+            )
+            .push(
+                Button::new(clipboard_icon().style(theme::text::secondary))
+                    .padding(6)
+                    .style(theme::button::transparent_border)
+                    .on_press(Message::CopyWithToast(
+                        addr_str.clone(),
+                        "Address copied".to_string(),
+                    )),
+            ),
+    )
+    .padding([12, 16])
+    .width(Length::Fill)
+    .style(review_panel_style);
+
+    let details = Column::new()
+        .spacing(10)
+        .push(if let Some(label) = labels_editing.get(&addr_str) {
+            crate::app::view::vault::label::label_editing(vec![addr_str.clone()], label, P1_SIZE)
+        } else {
+            crate::app::view::vault::label::label_editable(
+                vec![addr_str.clone()],
+                labels.get(&addr_str),
+                P1_SIZE,
+            )
+        })
+        .push(button::secondary(None, "Show QR code").on_press(Message::ShowQrCode(0)));
+
+    Column::new()
+        .spacing(10)
+        .push(address)
+        .push(
+            coincube_ui::component::tenshu::disclosure(
+                landing_control_id(cube_id, "transfer", "address-details"),
+                "Address details",
+                expanded,
+                Message::FocusAction,
+            )
+            .caption("Label, QR code")
+            .on_toggle(|_| Message::SelectAddress(addr.clone()))
+            .content(details),
+        )
         .into()
 }
 
 #[allow(clippy::too_many_arguments)]
 fn confirm_transfer_view<'a>(
+    cube_id: &str,
     direction: TransferDirection,
     amount: &'a form::Value<String>,
     receive_address: Option<&'a coincube_core::miniscript::bitcoin::Address>,
@@ -862,9 +1055,6 @@ fn confirm_transfer_view<'a>(
     transfer_feerate_loading: Option<crate::app::view::shared::feerate_picker::FeeratePreset>,
     spark_send_fee_sat: Option<u64>,
 ) -> Element<'a, Message> {
-    let spark_fee_amount = spark_send_fee_sat.map(Amount::from_sat);
-    const NUM_ADDR_CHARS: usize = 16;
-    let mut liquid_to_vault_fees = None;
     let amount = Amount::from_str_in(
         &amount.value,
         if matches!(bitcoin_unit, BitcoinDisplayUnit::BTC) {
@@ -872,377 +1062,165 @@ fn confirm_transfer_view<'a>(
         } else {
             Denomination::Satoshi
         },
-    );
-    if let Some(prepare_response) = prepare_onchain_send_response {
-        liquid_to_vault_fees = Some(Amount::from_sat(prepare_response.total_fees_sat));
-    }
+    )
+    .ok();
+    let fees = match direction {
+        TransferDirection::LiquidToVault | TransferDirection::LiquidToSpark => {
+            prepare_onchain_send_response.map(|response| Amount::from_sat(response.total_fees_sat))
+        }
+        TransferDirection::VaultToLiquid | TransferDirection::VaultToSpark => vault_to_liquid_fees,
+        // Spark-sourced: `spark.prepare_send` quoted a `fee_sat` at step
+        // 1→2 and the state layer stashed it on `spark_send_fee_sat`.
+        TransferDirection::SparkToLiquid | TransferDirection::SparkToVault => {
+            spark_send_fee_sat.map(Amount::from_sat)
+        }
+    };
 
-    let content = Column::new()
-        .width(Length::Fill)
-        .push(Space::new().height(Length::Fixed(60.0)))
+    let summary = Container::new(
+        Column::new()
+            .spacing(12)
+            .push(review_row("From", review_wallet(direction.from_kind())))
+            .push(review_row("To", review_wallet(direction.to_kind())))
+            .push(iced::widget::rule::horizontal(1))
+            .push_maybe(amount.map(|amount| {
+                review_row(
+                    "Amount",
+                    text(amount.to_formatted_string_with_unit(bitcoin_unit)),
+                )
+            }))
+            .push_maybe(fees.map(|fees| {
+                review_row(
+                    "Fees",
+                    text(fees.to_formatted_string_with_unit(bitcoin_unit)),
+                )
+            }))
+            .push_maybe(fees.zip(amount).map(|(fees, amount)| {
+                review_row(
+                    "Total",
+                    text((fees + amount).to_formatted_string_with_unit(bitcoin_unit)).bold(),
+                )
+            })),
+    )
+    .padding(16)
+    .width(Length::Fill)
+    .style(review_panel_style);
+
+    let destination = Column::new()
+        .spacing(10)
         .push(
-            button::secondary(None, "< Back")
-                .width(Length::Fixed(150.0))
-                .on_press_maybe((!is_sending).then_some(Message::Home(HomeMessage::PreviousStep))),
-        )
-        .push(Space::new().height(Length::Fixed(20.0)))
-        .push(Container::new(
             Column::new()
+                .spacing(4)
+                .push(text("Receiving address").bold())
+                .push_maybe((direction.to_kind() != WalletKind::Vault).then(|| {
+                    text(format!(
+                        "Deposit address for your {} wallet",
+                        direction.to_wallet()
+                    ))
+                    .size(P2_SIZE)
+                    .style(theme::text::secondary)
+                })),
+        )
+        .push(match receive_address {
+            Some(addr) => {
+                receiving_address(cube_id, addr, labels, labels_editing, address_expanded)
+            }
+            None => text("No receiving address available. Please generate one first.")
+                .style(theme::text::secondary)
+                .into(),
+        });
+
+    // §Design section 9: Vault-sourced transfers build a standard on-chain
+    // Bitcoin tx, so the user controls the sats/vbyte rate. Presets fetch a
+    // mempool estimate and write it into the text input.
+    let feerate = (direction.from_kind() == WalletKind::Vault).then(|| {
+        Container::new(
+            Column::new()
+                .spacing(10)
+                .push(text("Fee rate (sats/vbyte)").bold())
                 .push(
-                    Column::new()
-                        .spacing(10)
-                        .push(text("Confirm Transfer").bold().size(H2_SIZE))
-                        .push(
-                            Row::new()
-                                .spacing(4)
-                                .push(text("Sending from"))
-                                .push(text(direction.display()).bold()),
-                        )
-                        .align_x(Alignment::Center)
-                        .width(Length::Fill),
-                )
-                .push(Space::new().height(60))
-                .push(match direction {
-                    TransferDirection::LiquidToVault
-                    | TransferDirection::SparkToVault
-                    | TransferDirection::VaultToSpark => Some(
-                        Column::new()
-                            .spacing(10)
-                            .push(
-                                text("Receiving Address")
-                                    .bold()
-                                    .width(Length::Fill)
-                                    .align_x(Alignment::Center),
-                            )
-                            .push(receive_address.map(|addr| -> Element<'a, Message> {
-                                if address_expanded {
-                                    Button::new(address_card(0, addr, labels, labels_editing))
-                                        .padding(0)
-                                        .on_press(Message::SelectAddress(addr.clone()))
-                                        .style(theme::button::transparent_border)
-                                        .into()
-                                } else {
-                                    let addr_str = addr.to_string();
-                                    let addr_len = addr_str.chars().count();
-
-                                    Container::new(
-                                        Button::new(
-                                            Row::new()
-                                                .spacing(10)
-                                                .push(
-                                                    Container::new(
-                                                        p2_regular(
-                                                            if addr_len > 2 * NUM_ADDR_CHARS {
-                                                                format!(
-                                                                    "{}...{}",
-                                                                    addr_str
-                                                                        .chars()
-                                                                        .take(NUM_ADDR_CHARS)
-                                                                        .collect::<String>(),
-                                                                    addr_str
-                                                                        .chars()
-                                                                        .skip(
-                                                                            addr_len
-                                                                                - NUM_ADDR_CHARS
-                                                                        )
-                                                                        .collect::<String>(),
-                                                                )
-                                                            } else {
-                                                                addr_str.clone()
-                                                            },
-                                                        )
-                                                        .small()
-                                                        .style(theme::text::secondary),
-                                                    )
-                                                    .padding(10)
-                                                    .width(Length::Fixed(350.0)),
-                                                )
-                                                .push(
-                                                    Container::new(
-                                                        text(
-                                                            labels
-                                                                .get(&addr_str)
-                                                                .cloned()
-                                                                .unwrap_or_default(),
-                                                        )
-                                                        .small()
-                                                        .style(theme::text::secondary),
-                                                    )
-                                                    .padding(10)
-                                                    .width(Length::Fill),
-                                                )
-                                                .align_y(Alignment::Center),
-                                        )
-                                        .on_press(Message::SelectAddress(addr.clone()))
-                                        .padding(20)
-                                        .width(Length::Fill)
-                                        .style(theme::button::secondary),
-                                    )
-                                    .style(theme::card::simple)
-                                    .into()
-                                }
-                            }))
-                            .push(receive_address.is_none().then(|| {
-                                text("No receiving address available. Please generate one first.")
-                                    .style(theme::text::secondary)
-                            })),
-                    ),
-                    TransferDirection::VaultToLiquid
-                    | TransferDirection::SparkToLiquid
-                    | TransferDirection::LiquidToSpark => {
-                        let destination_label = direction.to_wallet();
-                        Some(
-                            Column::new()
-                                .spacing(10)
-                                .push(text("Receiving Wallet").bold())
-                                .push(
-                                    text(format!(
-                                        "Transferring to {destination_label} wallet"
-                                    ))
-                                        .style(theme::text::secondary),
-                                )
-                                .push_maybe(receive_address.map(|addr| -> Element<'a, Message> {
-                                    if address_expanded {
-                                        Button::new(address_card(0, addr, labels, labels_editing))
-                                            .padding(0)
-                                            .on_press(Message::SelectAddress(addr.clone()))
-                                            .style(theme::button::transparent_border)
-                                            .into()
-                                    } else {
-                                        let addr_str = addr.to_string();
-                                        let addr_len = addr_str.chars().count();
-
-                                        Container::new(
-                                            Button::new(
-                                                Row::new()
-                                                    .spacing(10)
-                                                    .push(
-                                                        Container::new(
-                                                            p2_regular(
-                                                                if addr_len > 2 * NUM_ADDR_CHARS {
-                                                                    format!(
-                                                                    "{}...{}",
-                                                                    addr_str
-                                                                        .chars()
-                                                                        .take(NUM_ADDR_CHARS)
-                                                                        .collect::<String>(),
-                                                                    addr_str
-                                                                        .chars()
-                                                                        .skip(
-                                                                            addr_len
-                                                                                - NUM_ADDR_CHARS
-                                                                        )
-                                                                        .collect::<String>(),
-                                                                )
-                                                                } else {
-                                                                    addr_str.clone()
-                                                                },
-                                                            )
-                                                            .small()
-                                                            .style(theme::text::secondary),
-                                                        )
-                                                        .padding(10)
-                                                        .width(Length::Fixed(350.0)),
-                                                    )
-                                                    .push(
-                                                        Container::new(
-                                                            text(
-                                                                labels
-                                                                    .get(&addr_str)
-                                                                    .cloned()
-                                                                    .unwrap_or_default(),
-                                                            )
-                                                            .small()
-                                                            .style(theme::text::secondary),
-                                                        )
-                                                        .padding(10)
-                                                        .width(Length::Fill),
-                                                    )
-                                                    .align_y(Alignment::Center),
-                                            )
-                                            .on_press(Message::SelectAddress(addr.clone()))
-                                            .padding(20)
-                                            .width(Length::Fill)
-                                            .style(theme::button::secondary),
-                                        )
-                                        .style(theme::card::simple)
-                                        .into()
-                                    }
-                                })).
-                            push_maybe(receive_address.is_none().then(|| {
-                                text("No receiving address available. Please generate one first.")
-                                    .style(theme::text::secondary)
-                            })),
-                        )
-                    }
-                }),
-        ))
-        .push(Space::new().height(Length::Fixed(20.0)))
-        .push({
-            Container::new(
-                Row::new()
-                    .padding(20)
-                    .push(text("Amount:"))
-                    .push(Space::new().width(Length::Fill))
-                    .push_maybe(if amount.is_ok() {
-                        Some(text(
-                            amount
-                                .clone()
-                                .unwrap()
-                                .to_formatted_string_with_unit(bitcoin_unit),
-                        ))
-                    } else {
-                        None
-                    }),
-            )
-            .width(Length::Fill)
-            .style(theme::card::simple)
-        })
-        .push_maybe((direction.from_kind() == WalletKind::Vault).then(|| {
-            // §Design section 9: Vault-sourced transfers build a standard on-chain
-            // Bitcoin tx, so the user controls the sats/vbyte rate. Presets fetch
-            // a mempool estimate and write it into the text input.
-            Container::new(
-                Column::new()
-                    .padding(20)
-                    .spacing(10)
-                    .push(text("Feerate (sats/vbyte):"))
-                    .push(
-                        crate::app::view::shared::feerate_picker::feerate_presets_row::<Message>(
-                            transfer_feerate_loading,
-                            |preset| Message::Home(HomeMessage::FetchTransferFeeratePreset(preset)),
-                            is_tx_signed || is_sending,
-                        ),
-                    )
-                    .push(crate::app::view::shared::feerate_picker::feerate_input::<
-                        Message,
-                        _,
-                    >(
-                        transfer_feerate,
-                        |s| Message::Home(HomeMessage::SetTransferFeerate(s)),
+                    crate::app::view::shared::feerate_picker::feerate_presets_row::<Message>(
+                        transfer_feerate_loading,
+                        |preset| Message::Home(HomeMessage::FetchTransferFeeratePreset(preset)),
                         is_tx_signed || is_sending,
-                    )),
-            )
-            .width(Length::Fill)
-            .style(theme::card::simple)
-        }))
-        .push(Space::new().height(3))
-        .push_maybe({
-            let fees = match direction {
-                TransferDirection::LiquidToVault | TransferDirection::LiquidToSpark => {
-                    liquid_to_vault_fees
-                }
-                TransferDirection::VaultToLiquid | TransferDirection::VaultToSpark => {
-                    vault_to_liquid_fees
-                }
-                // Spark-sourced: `spark.prepare_send` quoted a `fee_sat` at step
-                // 1→2 and the state layer stashed it on `spark_send_fee_sat`.
-                TransferDirection::SparkToLiquid | TransferDirection::SparkToVault => {
-                    spark_fee_amount
-                }
-            };
-
-            fees.map(|fees| {
-                Container::new(
-                    Row::new()
-                        .padding(20)
-                        .push(text("Fees:"))
-                        .push(Space::new().width(Length::Fill))
-                        .push(text(fees.to_formatted_string_with_unit(bitcoin_unit))),
+                    ),
                 )
-                .width(Length::Fill)
-                .style(theme::card::simple)
-            })
-        })
-        .push(Space::new().height(3))
-        .push_maybe({
-            let fees = match direction {
-                TransferDirection::LiquidToVault | TransferDirection::LiquidToSpark => {
-                    liquid_to_vault_fees
-                }
-                TransferDirection::VaultToLiquid | TransferDirection::VaultToSpark => {
-                    vault_to_liquid_fees
-                }
-                // Spark-sourced: `spark.prepare_send` quoted a `fee_sat` at step
-                // 1→2 and the state layer stashed it on `spark_send_fee_sat`.
-                TransferDirection::SparkToLiquid | TransferDirection::SparkToVault => {
-                    spark_fee_amount
-                }
-            };
+                .push(crate::app::view::shared::feerate_picker::feerate_input::<
+                    Message,
+                    _,
+                >(
+                    transfer_feerate,
+                    |s| Message::Home(HomeMessage::SetTransferFeerate(s)),
+                    is_tx_signed || is_sending,
+                )),
+        )
+        .padding(16)
+        .width(Length::Fill)
+        .style(review_panel_style)
+    });
 
-            if let Some(fees) = fees {
-                if let Ok(amount) = amount {
-                    Some(
-                        Container::new(
-                            Row::new()
-                                .padding(20)
-                                .push(text("Total:"))
-                                .push(Space::new().width(Length::Fill))
-                                .push(text(
-                                    (fees + amount).to_formatted_string_with_unit(bitcoin_unit),
-                                )),
-                        )
-                        .width(Length::Fill)
-                        .style(theme::card::simple),
-                    )
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        })
-        .push(Space::new().height(Length::Fixed(60.0)))
-        .push(match direction {
-            // Vault-sourced: sign the on-chain tx first, then broadcast. Shared
-            // signer path handles both Liquid and Spark destinations.
-            TransferDirection::VaultToLiquid | TransferDirection::VaultToSpark => {
-                if is_tx_signed {
-                    button::primary_loading(
-                        None,
-                        "Confirm & Broadcast",
-                        is_sending,
-                        transfer_action_ready
-                            .then_some(Message::Home(HomeMessage::ConfirmTransfer)),
-                    )
-                } else {
-                    button::primary_loading(
-                        None,
-                        "Sign Transaction",
-                        is_sending,
-                        (transfer_feerate.valid && destination_ready)
-                            .then_some(Message::Home(HomeMessage::SignVaultToLiquidTx)),
-                    )
-                }
-            }
-            TransferDirection::LiquidToVault | TransferDirection::LiquidToSpark => {
+    let primary = match direction {
+        // Vault-sourced: sign the on-chain tx first, then broadcast. Shared
+        // signer path handles both Liquid and Spark destinations.
+        TransferDirection::VaultToLiquid | TransferDirection::VaultToSpark => {
+            if is_tx_signed {
                 button::primary_loading(
                     None,
-                    "Confirm Transfer",
+                    "Confirm & Broadcast",
                     is_sending,
                     transfer_action_ready.then_some(Message::Home(HomeMessage::ConfirmTransfer)),
                 )
-            }
-            // Spark-sourced: the prepare handle was fetched at step 1→2. Confirm
-            // calls `spark.send_payment(handle)` synchronously from the UI's
-            // perspective; stage flips to PendingDeposit on success.
-            TransferDirection::SparkToLiquid | TransferDirection::SparkToVault => {
+            } else {
                 button::primary_loading(
                     None,
-                    "Confirm Transfer",
+                    "Sign Transaction",
                     is_sending,
-                    transfer_action_ready.then_some(Message::Home(HomeMessage::ConfirmSparkSend)),
+                    (transfer_feerate.valid && destination_ready)
+                        .then_some(Message::Home(HomeMessage::SignVaultToLiquidTx)),
                 )
             }
-        });
+        }
+        TransferDirection::LiquidToVault | TransferDirection::LiquidToSpark => {
+            button::primary_loading(
+                None,
+                "Confirm Transfer",
+                is_sending,
+                transfer_action_ready.then_some(Message::Home(HomeMessage::ConfirmTransfer)),
+            )
+        }
+        // Spark-sourced: the prepare handle was fetched at step 1→2. Confirm
+        // calls `spark.send_payment(handle)` synchronously from the UI's
+        // perspective; stage flips to PendingDeposit on success.
+        TransferDirection::SparkToLiquid | TransferDirection::SparkToVault => {
+            button::primary_loading(
+                None,
+                "Confirm Transfer",
+                is_sending,
+                transfer_action_ready.then_some(Message::Home(HomeMessage::ConfirmSparkSend)),
+            )
+        }
+    };
+    let actions = Row::new()
+        .spacing(12)
+        .push(
+            button::secondary(None, "Back")
+                .width(Length::FillPortion(1))
+                .on_press_maybe((!is_sending).then_some(Message::Home(HomeMessage::PreviousStep))),
+        )
+        .push(primary.width(Length::FillPortion(2)));
 
-    Container::new(content)
-        .width(Length::Fill)
-        .center_x(Length::Fill)
-        .into()
+    transfer_dialog(
+        1,
+        (!is_sending).then_some(Message::Home(HomeMessage::BackToHome)),
+        Column::new()
+            .spacing(20)
+            .push(summary)
+            .push(destination)
+            .push_maybe(feerate)
+            .push(actions),
+    )
 }
 
-/// "Pending Deposit" success screen.
+/// "Pending Deposit" success screen, the dialog's Done step.
 ///
 /// Every transfer direction settles via an on-chain hop, so no destination is
 /// instant — the broadcast landing is the most the user can know synchronously.
@@ -1253,70 +1231,37 @@ pub fn transfer_successful_view<'a>(
     direction: TransferDirection,
     _pending_vault_incoming: Option<PendingTransfer>,
 ) -> Element<'a, Message> {
-    use coincube_ui::widget::{Column, Row};
     let destination = direction.to_wallet();
 
-    Column::new()
-        .spacing(20)
-        .width(Length::Fill)
-        .push(Space::new().height(Length::Fixed(20.0)))
-        .push(
-            Row::new()
+    transfer_dialog(
+        2,
+        Some(Message::Home(HomeMessage::BackToHome)),
+        Column::new()
+            .spacing(16)
+            .padding([12, 0])
+            .width(Length::Fill)
+            .align_x(Alignment::Center)
+            .push(check_circle_icon().size(72).color(color::ORANGE))
+            .push(h3("Transfer broadcast"))
+            .push(
+                text(format!(
+                    "Your transfer has been broadcast on-chain. \
+                     It will appear in your {destination} wallet \
+                     once it confirms. You can close this window — \
+                     we'll update the wallet when the deposit is ready."
+                ))
+                .size(P1_SIZE)
+                .style(theme::text::secondary)
                 .width(Length::Fill)
-                .align_y(Alignment::Center)
-                .push(Space::new().width(Length::Fill))
-                .push(check_circle_icon().size(140).color(color::ORANGE))
-                .push(Space::new().width(Length::Fill)),
-        )
-        .push(Space::new().height(Length::Fixed(16.0)))
-        .push(
-            Row::new()
-                .width(Length::Fill)
-                .align_y(Alignment::Center)
-                .push(Space::new().width(Length::Fill))
-                .push(
-                    Column::new()
-                        .width(Length::Shrink)
-                        .align_x(Alignment::Center)
-                        .push(h3("Transfer broadcast")),
-                )
-                .push(Space::new().width(Length::Fill)),
-        )
-        .push(
-            Row::new()
-                .width(Length::Fill)
-                .align_y(Alignment::Center)
-                .push(Space::new().width(Length::Fill))
-                .push(
-                    Container::new(
-                        text(format!(
-                            "Your transfer has been broadcast on-chain. \
-                             It will appear in your {destination} wallet \
-                             once it confirms. You can close this screen — \
-                             we'll update the wallet when the deposit is ready."
-                        ))
-                        .size(P1_SIZE)
-                        .style(theme::text::secondary)
-                        .align_x(Alignment::Center),
-                    )
-                    .max_width(520),
-                )
-                .push(Space::new().width(Length::Fill)),
-        )
-        .push(Space::new().height(Length::Fixed(20.0)))
-        .push(
-            Row::new()
-                .width(Length::Fill)
-                .align_y(Alignment::Center)
-                .push(Space::new().width(Length::Fill))
-                .push(
-                    button::primary(None, "Done")
-                        .width(Length::Fixed(150.0))
-                        .on_press(Message::Home(HomeMessage::BackToHome)),
-                )
-                .push(Space::new().width(Length::Fill)),
-        )
-        .into()
+                .align_x(Alignment::Center),
+            )
+            .push(Space::new().height(Length::Fixed(4.0)))
+            .push(
+                button::primary(None, "Done")
+                    .width(Length::Fixed(200.0))
+                    .on_press(Message::Home(HomeMessage::BackToHome)),
+            ),
+    )
 }
 
 /// One of the three on-dashboard wallets. Used to address the source and destination
@@ -1635,7 +1580,11 @@ impl HomeView {
     }
 }
 
-pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message> {
+/// The Overview, and the transfer dialog to lay over it while a transfer step
+/// (1–3) is active.
+pub fn global_home_view<'a>(
+    config: GlobalViewConfig<'a>,
+) -> (Element<'a, Message>, Option<Element<'a, Message>>) {
     let GlobalViewConfig {
         cube_id,
         liquid_balance,
@@ -1697,60 +1646,49 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
 
     // Post-Phase-3 step machine:
     //   0 — overview (wallet cards + page-level Transfer button)
-    //   1 — amount entry (may overlay the wallet-picker popup)
+    //   1 — amount entry
     //   2 — confirm
     //   3 — success
-    match current_view.step {
-        1 => {
-            if let Some(direction) = transfer_direction {
-                return enter_amount_view(
-                    cube_id,
-                    direction,
-                    liquid_balance,
-                    spark_balance,
-                    vault_balance,
-                    has_vault,
-                    has_spark,
-                    has_liquid,
-                    fiat_converter,
-                    entered_amount,
-                    bitcoin_unit,
-                    onchain_send_limit,
-                    onchain_receive_limit,
-                    balance_masked,
-                );
-            }
-        }
-        2 => {
-            if let Some(direction) = transfer_direction {
-                return confirm_transfer_view(
-                    direction,
-                    entered_amount,
-                    receive_address,
-                    destination_ready,
-                    transfer_action_ready,
-                    labels,
-                    labels_editing,
-                    address_expanded,
-                    is_sending,
-                    is_tx_signed,
-                    bitcoin_unit,
-                    prepare_onchain_send_response,
-                    spend_tx_fees,
-                    transfer_feerate,
-                    transfer_feerate_loading,
-                    spark_send_fee_sat,
-                );
-            }
-        }
-        3 => {
-            if let Some(direction) = transfer_direction {
-                return transfer_successful_view(direction, pending_vault_incoming);
-            }
-        }
-        0 => {}
-        _ => {}
-    }
+    // Steps 1–3 are a dialog the state layer lays over the overview.
+    let transfer = transfer_direction.and_then(|direction| match current_view.step {
+        1 => Some(enter_amount_view(
+            cube_id,
+            direction,
+            liquid_balance,
+            spark_balance,
+            vault_balance,
+            has_vault,
+            has_spark,
+            has_liquid,
+            fiat_converter,
+            entered_amount,
+            bitcoin_unit,
+            onchain_send_limit,
+            onchain_receive_limit,
+            balance_masked,
+        )),
+        2 => Some(confirm_transfer_view(
+            cube_id,
+            direction,
+            entered_amount,
+            receive_address,
+            destination_ready,
+            transfer_action_ready,
+            labels,
+            labels_editing,
+            address_expanded,
+            is_sending,
+            is_tx_signed,
+            bitcoin_unit,
+            prepare_onchain_send_response,
+            spend_tx_fees,
+            transfer_feerate,
+            transfer_feerate_loading,
+            spark_send_fee_sat,
+        )),
+        3 => Some(transfer_successful_view(direction, pending_vault_incoming)),
+        _ => None,
+    });
 
     // --- Combined Liquid card (L-BTC + USDt) ---
     // USDt is pegged to USD, so always use BTC/USD price for conversion.
@@ -2382,7 +2320,7 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
             }),
         );
 
-    Container::new(
+    let overview = Container::new(
         Column::new()
             .spacing(12)
             .push(total_balance_block)
@@ -2442,7 +2380,9 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
             ),
     )
     .padding([0, 16])
-    .into()
+    .into();
+
+    (overview, transfer)
 }
 
 /// Gate for the page-level Transfer button: a transfer needs two wallets to
@@ -2474,6 +2414,18 @@ fn transfer_available(has_liquid: bool, has_vault: bool, has_spark: bool) -> boo
 mod tests {
     use super::*;
     use crate::app::view::shared::landing::capture;
+
+    /// The Overview a step renders beneath any transfer dialog.
+    fn overview(config: GlobalViewConfig<'_>) -> Element<'_, Message> {
+        global_home_view(config).0
+    }
+
+    /// The dialog a transfer step (1–3) lays over the Overview.
+    fn transfer_dialog_for(config: GlobalViewConfig<'_>) -> Element<'_, Message> {
+        global_home_view(config)
+            .1
+            .expect("a transfer step renders its dialog")
+    }
     use crate::{
         app::{
             cache::FiatPriceRequest,
@@ -2680,7 +2632,7 @@ mod tests {
             for outer in [(1024, 768), (1440, 900)] {
                 let normal = capture::inspect(
                     "hub-normal",
-                    global_home_view(fixture.config(0, None, None)),
+                    overview(fixture.config(0, None, None)),
                     outer,
                     appearance,
                     theme,
@@ -2705,7 +2657,7 @@ mod tests {
                 presync.total_balance_loading = true;
                 let before = capture::inspect(
                     "hub-presync-usdb",
-                    global_home_view(presync),
+                    overview(presync),
                     outer,
                     appearance,
                     theme,
@@ -2719,7 +2671,7 @@ mod tests {
                 first_error.spark_balance_error = true;
                 let failed = capture::inspect(
                     "hub-presync-error",
-                    global_home_view(first_error),
+                    overview(first_error),
                     outer,
                     appearance,
                     theme,
@@ -2733,7 +2685,7 @@ mod tests {
                 trusted.btc_usd_price = None;
                 let shown = capture::inspect(
                     "hub-usdb-missing-quote",
-                    global_home_view(trusted),
+                    overview(trusted),
                     outer,
                     appearance,
                     theme,
@@ -2744,13 +2696,8 @@ mod tests {
                 let mut masked = fixture.config(0, None, None);
                 masked.spark_stable_balance = Some(&usdb);
                 masked.balance_masked = true;
-                let hidden = capture::inspect(
-                    "hub-masked",
-                    global_home_view(masked),
-                    outer,
-                    appearance,
-                    theme,
-                );
+                let hidden =
+                    capture::inspect("hub-masked", overview(masked), outer, appearance, theme);
                 assert!(!hidden.contains(&raw_usdb));
                 assert!(!hidden.contains("31,000"));
 
@@ -2760,7 +2707,7 @@ mod tests {
                 absent_vault.imported_installed = false;
                 let import = capture::inspect(
                     "hub-import-pending",
-                    global_home_view(absent_vault),
+                    overview(absent_vault),
                     outer,
                     appearance,
                     theme,
@@ -2777,7 +2724,7 @@ mod tests {
                 known_zero.vault_balance = Amount::ZERO;
                 let zero = capture::inspect(
                     "hub-known-zero",
-                    global_home_view(known_zero),
+                    overview(known_zero),
                     outer,
                     appearance,
                     theme,
@@ -2795,7 +2742,7 @@ mod tests {
         let inspect = |config| {
             capture::inspect(
                 "hub-import-balance",
-                global_home_view(config),
+                overview(config),
                 (1024, 768),
                 "dark",
                 theme::Theme::dark(),
@@ -2864,7 +2811,7 @@ mod tests {
                 ("Liquid", Menu::Liquid(LiquidSubMenu::Overview)),
             ] {
                 let messages = capture::activate(
-                    global_home_view(fixture.config(0, None, None)),
+                    overview(fixture.config(0, None, None)),
                     landing_control_id("test-cube", wallet, "open"),
                     (1024, 768),
                     pointer,
@@ -2905,7 +2852,7 @@ mod tests {
             for outer in [(1024, 768), (1440, 900)] {
                 let normal = capture::inspect(
                     "overview-vault-recovery",
-                    global_home_view(fixture.config(0, None, None)),
+                    overview(fixture.config(0, None, None)),
                     outer,
                     appearance,
                     theme,
@@ -2917,7 +2864,7 @@ mod tests {
                 masked.balance_masked = true;
                 let hidden = capture::inspect(
                     "overview-vault-recovery-masked",
-                    global_home_view(masked),
+                    overview(masked),
                     outer,
                     appearance,
                     theme,
@@ -2932,7 +2879,7 @@ mod tests {
                 imported_only.imported_installed = true;
                 let imported = capture::inspect(
                     "overview-imported-without-vault",
-                    global_home_view(imported_only),
+                    overview(imported_only),
                     outer,
                     appearance,
                     theme,
@@ -2945,7 +2892,7 @@ mod tests {
             // continue to catch width overflow and privacy regressions.
             let full_card = capture::inspect(
                 "overview-vault-recovery-full-card",
-                global_home_view(fixture.config(0, None, None)),
+                overview(fixture.config(0, None, None)),
                 (1440, 1400),
                 appearance,
                 theme,
@@ -2955,7 +2902,7 @@ mod tests {
 
         for pointer in [false, true] {
             let messages = capture::activate(
-                global_home_view(fixture.config(0, None, None)),
+                overview(fixture.config(0, None, None)),
                 target.clone(),
                 // The footer is below the fold at the minimum window size;
                 // this viewport exposes it for the pointer probe.
@@ -3121,7 +3068,7 @@ mod tests {
             config.total_balance_loading = snapshot.total_balance_loading;
             let inspection = capture::inspect(
                 &format!("hub-transfer-{}", snapshot.name),
-                global_home_view(config),
+                overview(config),
                 (1440, 900),
                 "dark",
                 theme::Theme::dark(),
@@ -3155,7 +3102,7 @@ mod tests {
                 config.spark_balance_loaded = snapshot.spark_balance_loaded;
                 config.spark_balance_error = snapshot.spark_balance_error;
                 config.total_balance_loading = snapshot.total_balance_loading;
-                let messages = activate_transfer(global_home_view(config), text_bounds, trigger);
+                let messages = activate_transfer(overview(config), text_bounds, trigger);
                 let next_steps = messages
                     .iter()
                     .filter(|message| matches!(message, Message::Home(HomeMessage::NextStep)))
@@ -3178,7 +3125,7 @@ mod tests {
         amount.spark_balance = trusted.spark_balance;
         let entered = capture::inspect(
             "hub-transfer-trusted-amount",
-            global_home_view(amount),
+            transfer_dialog_for(amount),
             (1440, 900),
             "dark",
             theme::Theme::dark(),
@@ -3221,7 +3168,7 @@ mod tests {
             config.balance_masked = masked;
             capture::inspect(
                 "hub-transfer-privacy-amount",
-                global_home_view(config),
+                transfer_dialog_for(config),
                 (1440, 900),
                 "dark",
                 theme::Theme::dark(),
@@ -3286,7 +3233,7 @@ mod tests {
             ] {
                 let snapshot = capture::inspect(
                     "transfer-wallets-amount",
-                    global_home_view(fixture.config(
+                    transfer_dialog_for(fixture.config(
                         1,
                         Some(TransferDirection::SparkToVault),
                         None,
@@ -3318,7 +3265,7 @@ mod tests {
         let fixture = ViewFixture::new();
         for key in [Named::Enter, Named::Space] {
             let content =
-                global_home_view(fixture.config(1, Some(TransferDirection::SparkToVault), None));
+                transfer_dialog_for(fixture.config(1, Some(TransferDirection::SparkToVault), None));
             let messages = capture::activate_with_key(
                 content,
                 landing_control_id("test-cube", "Vault", "transfer-from"),
@@ -3454,12 +3401,12 @@ mod tests {
     fn global_home_overview_builds_loaded_masked_loading_and_absent_wallet_states() {
         let fixture = ViewFixture::new();
 
-        let _ = global_home_view(fixture.config(0, None, None));
+        let _ = overview(fixture.config(0, None, None));
 
         let mut masked = fixture.config(0, None, None);
         masked.balance_masked = true;
         masked.display_mode = DisplayMode::BitcoinNative;
-        let _ = global_home_view(masked);
+        let _ = overview(masked);
 
         let mut loading = fixture.config(0, None, None);
         loading.total_balance_loading = true;
@@ -3468,7 +3415,7 @@ mod tests {
         loading.usdt_balance_loaded = false;
         loading.vault_loaded = false;
         loading.usdt_balance_error = true;
-        let _ = global_home_view(loading);
+        let _ = overview(loading);
 
         // A failed fetch: loaded (so the aggregate settles) but flagged, so the
         // row says "Balance unavailable" rather than rendering the zero it
@@ -3476,7 +3423,7 @@ mod tests {
         let mut liquid_failed = fixture.config(0, None, None);
         liquid_failed.liquid_balance_loaded = true;
         liquid_failed.liquid_balance_error = true;
-        let _ = global_home_view(liquid_failed);
+        let _ = overview(liquid_failed);
 
         let mut spark_only = fixture.config(0, None, None);
         spark_only.has_liquid = false;
@@ -3486,7 +3433,7 @@ mod tests {
             amount: Amount::from_sat(11_000),
             stage: TransferStage::Completed,
         });
-        let _ = global_home_view(spark_only);
+        let _ = overview(spark_only);
     }
 
     #[test]
@@ -3494,12 +3441,12 @@ mod tests {
         let fixture = ViewFixture::new();
 
         for direction in directions() {
-            let _ = global_home_view(fixture.config(1, Some(direction), None));
+            let _ = transfer_dialog_for(fixture.config(1, Some(direction), None));
         }
 
         let mut no_liquid = fixture.config(1, Some(TransferDirection::VaultToSpark), None);
         no_liquid.has_liquid = false;
-        let _ = global_home_view(no_liquid);
+        let _ = transfer_dialog_for(no_liquid);
     }
 
     #[test]
@@ -3513,31 +3460,31 @@ mod tests {
             total_fees_sat: 1_000,
         };
         liquid_to_vault.prepare_onchain_send_response = Some(&liquid_prepare);
-        let _ = global_home_view(liquid_to_vault);
+        let _ = transfer_dialog_for(liquid_to_vault);
 
         let mut vault_to_spark = fixture.config(2, Some(TransferDirection::VaultToSpark), None);
         vault_to_spark.address_expanded = true;
         vault_to_spark.spend_tx_fees = Some(Amount::from_sat(750));
         vault_to_spark.transfer_feerate_loading = Some(FeeratePreset::Fast);
-        let _ = global_home_view(vault_to_spark);
+        let _ = transfer_dialog_for(vault_to_spark);
 
         let mut vault_to_liquid_signed =
             fixture.config(2, Some(TransferDirection::VaultToLiquid), None);
         vault_to_liquid_signed.is_tx_signed = true;
         vault_to_liquid_signed.is_sending = true;
         vault_to_liquid_signed.spend_tx_fees = Some(Amount::from_sat(900));
-        let _ = global_home_view(vault_to_liquid_signed);
+        let _ = transfer_dialog_for(vault_to_liquid_signed);
 
         let mut spark_to_liquid = fixture.config(2, Some(TransferDirection::SparkToLiquid), None);
         spark_to_liquid.spark_send_fee_sat = Some(222);
         spark_to_liquid.receive_address = None;
-        let _ = global_home_view(spark_to_liquid);
+        let _ = transfer_dialog_for(spark_to_liquid);
 
         let mut invalid_vault_send =
             fixture.config(2, Some(TransferDirection::VaultToLiquid), None);
         invalid_vault_send.entered_amount = &fixture.invalid_amount;
         invalid_vault_send.transfer_feerate = &fixture.invalid_feerate;
-        let _ = global_home_view(invalid_vault_send);
+        let _ = transfer_dialog_for(invalid_vault_send);
     }
 
     #[test]
@@ -3545,10 +3492,72 @@ mod tests {
         let fixture = ViewFixture::new();
 
         for direction in directions() {
-            let _ = global_home_view(fixture.config(3, Some(direction), None));
+            let _ = transfer_dialog_for(fixture.config(3, Some(direction), None));
         }
 
-        let _ = global_home_view(fixture.config(99, Some(TransferDirection::LiquidToVault), None));
+        assert!(
+            global_home_view(fixture.config(99, Some(TransferDirection::LiquidToVault), None))
+                .1
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn transfer_dialog_shows_every_step_and_the_full_review_address() {
+        let fixture = ViewFixture::new();
+        for step in 1..=3 {
+            let snapshot = capture::inspect(
+                "transfer-dialog-steps",
+                transfer_dialog_for(fixture.config(
+                    step,
+                    Some(TransferDirection::SparkToVault),
+                    None,
+                )),
+                (1024, 768),
+                "dark",
+                theme::Theme::dark(),
+            );
+            for label in TRANSFER_STEPS {
+                assert!(snapshot.contains(label), "step {}: {}", step, label);
+            }
+        }
+
+        let amount = capture::inspect(
+            "transfer-dialog-amount",
+            transfer_dialog_for(fixture.config(1, Some(TransferDirection::SparkToVault), None)),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(!amount.contains("◉") && !amount.contains("○"));
+
+        let review = capture::inspect(
+            "transfer-dialog-review",
+            transfer_dialog_for(fixture.config(2, Some(TransferDirection::SparkToVault), None)),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(
+            review.contains(MAINNET_ADDR),
+            "review shows the whole address"
+        );
+        assert!(!review.contains("..."));
+        assert!(review.contains("Address details"));
+        // Collapsed, the label editor and QR control are not laid out.
+        assert!(!review.contains("Show QR code"));
+
+        let mut expanded = fixture.config(2, Some(TransferDirection::SparkToVault), None);
+        expanded.address_expanded = true;
+        let expanded = capture::inspect(
+            "transfer-dialog-review-expanded",
+            transfer_dialog_for(expanded),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(expanded.contains("Show QR code"));
+        assert!(expanded.contains("Vault receive"));
     }
 
     /// Transfer needs two wallets to move funds between: any one wallet alone

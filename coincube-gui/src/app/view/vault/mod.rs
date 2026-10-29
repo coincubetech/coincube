@@ -1,4 +1,4 @@
-mod label;
+pub(crate) mod label;
 
 pub mod ancestry_coins;
 pub mod claim;
