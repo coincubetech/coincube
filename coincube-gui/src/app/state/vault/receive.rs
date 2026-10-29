@@ -3,9 +3,12 @@ use std::sync::Arc;
 
 use coincube_core::miniscript::bitcoin::{
     bip32::{ChildNumber, Fingerprint},
-    Address, Network,
+    Address, Amount, Network,
 };
-use coincube_ui::widget::{modal, Element};
+use coincube_ui::{
+    component::amount::{BitcoinDisplayUnit, DisplayAmount},
+    widget::{modal, Element},
+};
 use iced::{
     advanced::widget::Id,
     clipboard,
@@ -21,7 +24,7 @@ use crate::{
         error::Error,
         menu::Menu,
         message::Message,
-        state::{vault::label::LabelsEdited, State},
+        state::{coins_summary, vault::label::LabelsEdited, State},
         view,
         wallet::Wallet,
     },
@@ -34,6 +37,20 @@ use crate::daemon::{
 };
 
 const PREV_ADDRESSES_PAGE_SIZE: usize = 20;
+
+fn balance_label(balance: Amount, unit: BitcoinDisplayUnit, masked: bool) -> String {
+    if masked {
+        "••••••".to_string()
+    } else if balance.to_sat() > 0 {
+        format!(
+            "{} {}",
+            balance.to_formatted_string_with_unit(unit),
+            unit.label()
+        )
+    } else {
+        "Check balance on Vault Overview".to_string()
+    }
+}
 
 pub enum Modal {
     VerifyAddress(VerifyAddressModal),
@@ -70,6 +87,7 @@ pub struct VaultReceivePanel {
     data_dir: CoincubeDirectory,
     wallet: Arc<Wallet>,
     addresses: Addresses,
+    current_qr: Option<qr_code::Data>,
     prev_addresses: Addresses,
     prev_continue_from: Option<ChildNumber>,
     show_prev_addresses: bool,
@@ -88,6 +106,7 @@ impl VaultReceivePanel {
             data_dir,
             wallet,
             addresses: Addresses::default(),
+            current_qr: None,
             prev_addresses: Addresses::default(),
             prev_continue_from: None,
             show_prev_addresses: false,
@@ -128,11 +147,26 @@ impl VaultReceivePanel {
 
 impl State for VaultReceivePanel {
     fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
+        // Reuse Overview's coin accounting. A zero in the coin cache can
+        // also mean a restored Vault has not scanned its history yet; this
+        // panel does not own Overview's rescan-date state, so avoid showing
+        // a confident zero here.
+        let (confirmed, unconfirmed, _, _) = coins_summary(
+            cache.coins(),
+            cache.blockheight().max(0) as u32,
+            self.wallet.recovery_timelock(),
+        );
+        let balance = confirmed + unconfirmed;
+        let balance_display =
+            balance_label(balance, cache.bitcoin_unit, cache.balance_amounts_masked());
         let content = view::dashboard(
             menu,
             cache,
             view::vault::receive::receive(
                 &self.addresses.list,
+                self.current_qr.as_ref(),
+                &cache.cube_name,
+                balance_display,
                 &self.addresses.labels,
                 &self.prev_addresses.list,
                 &self.prev_addresses.labels,
@@ -205,6 +239,7 @@ impl State for VaultReceivePanel {
                 match res {
                     Ok((address, derivation_index)) => {
                         self.warning = None;
+                        self.current_qr = ShowQrCodeModal::qr_data(&address, derivation_index);
                         self.addresses.list.push(address);
                         self.addresses.derivation_indexes.push(derivation_index);
                         Task::none()
@@ -521,13 +556,15 @@ pub struct ShowQrCodeModal {
 }
 
 impl ShowQrCodeModal {
+    fn qr_data(address: &Address, index: ChildNumber) -> Option<qr_code::Data> {
+        qr_code::Data::new(format!("bitcoin:{}?index={}", address, index)).ok()
+    }
+
     pub fn new(address: &Address, index: ChildNumber) -> Option<Self> {
-        qr_code::Data::new(format!("bitcoin:{}?index={}", address, index))
-            .ok()
-            .map(|qr_code| Self {
-                qr_code,
-                address: address.to_string(),
-            })
+        Self::qr_data(address, index).map(|qr_code| Self {
+            qr_code,
+            address: address.to_string(),
+        })
     }
 
     pub fn view(&self) -> Element<'_, view::Message> {
@@ -564,6 +601,23 @@ mod tests {
     use std::{path::PathBuf, str::FromStr};
 
     const DESC: &str = "wsh(or_d(multi(2,[ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<0;1>/*,[de6eb005/48'/1'/0'/2']tpubDFGuYfS2JwiUSEXiQuNGdT3R7WTDhbaE6jbUhgYSSdhmfQcSx7ZntMPPv7nrkvAqjpj3jX9wbhSGMeKVao4qAzhbNyBi7iQmv5xxQk6H6jz/<0;1>/*),and_v(v:pkh([ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<2;3>/*),older(3))))#p9ax3xxp";
+
+    #[test]
+    fn receive_aside_masks_a_known_balance_and_avoids_an_unverified_zero() {
+        let balance = Amount::from_sat(250_000);
+        assert_eq!(
+            balance_label(balance, BitcoinDisplayUnit::Sats, false),
+            "250,000 SATS"
+        );
+        assert_eq!(
+            balance_label(balance, BitcoinDisplayUnit::Sats, true),
+            "••••••"
+        );
+        assert_eq!(
+            balance_label(Amount::ZERO, BitcoinDisplayUnit::Sats, false),
+            "Check balance on Vault Overview"
+        );
+    }
 
     #[tokio::test]
     async fn test_receive_panel() {
@@ -630,5 +684,6 @@ mod tests {
 
         let panel = sandbox.state();
         assert_eq!(panel.addresses.list, vec![addr]);
+        assert!(panel.current_qr.is_some());
     }
 }
