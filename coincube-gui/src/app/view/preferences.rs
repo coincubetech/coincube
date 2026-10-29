@@ -360,15 +360,7 @@ fn section_content<'a>(
                 .into(),
             );
             let max_zoom = model.max_zoom.unwrap_or(Zoom::LARGEST);
-            let zoom_note = if max_zoom < Zoom::LARGEST {
-                format!(
-                    "{} This screen fits up to {}%.",
-                    zoom_shortcuts(),
-                    max_zoom.percent()
-                )
-            } else {
-                zoom_shortcuts().to_string()
-            };
+            let (zoom_selected, zoom_note) = zoom_choice(saved.zoom, max_zoom);
             rows.push(
                 setting_row(
                     "Zoom",
@@ -381,8 +373,7 @@ fn section_content<'a>(
                             )
                             .enabled(zoom <= max_zoom)
                         }),
-                        // A saved step over the cap is shown as the one in use.
-                        Some(saved.zoom.min(max_zoom)),
+                        Some(zoom_selected),
                         Message::FocusAction,
                     )
                     .size(SegmentSize::Compact)
@@ -1091,6 +1082,21 @@ fn link_action<'a>(
 /// user may persist an explicit choice only when the shared balance controls
 /// are interactive and no load or save is in flight.
 /// Neither button is a fallback default.
+/// The step the Zoom row shows selected and its note. A saved step over the
+/// screen's cap is shown as the one in use, and the note says why.
+fn zoom_choice(saved: Zoom, max_zoom: Zoom) -> (Zoom, String) {
+    let note = if max_zoom < Zoom::LARGEST {
+        format!(
+            "{} This screen fits up to {}%.",
+            zoom_shortcuts(),
+            max_zoom.percent()
+        )
+    } else {
+        zoom_shortcuts().to_string()
+    };
+    (saved.min(max_zoom), note)
+}
+
 /// The keys `gui::ignored_shell_key` reads, named for this platform.
 fn zoom_shortcuts() -> &'static str {
     if cfg!(target_os = "macos") {
@@ -1312,6 +1318,16 @@ mod tests {
                 modifiers,
             })
         }
+    }
+
+    #[test]
+    fn a_saved_zoom_over_the_cap_shows_the_step_in_use_and_why() {
+        let (selected, note) = zoom_choice(Zoom::LARGEST, Zoom::from(125));
+        assert_eq!(selected, Zoom::from(125));
+        assert!(note.ends_with("This screen fits up to 125%."), "{}", note);
+        let (selected, note) = zoom_choice(Zoom::from(110), Zoom::LARGEST);
+        assert_eq!(selected, Zoom::from(110));
+        assert_eq!(note, zoom_shortcuts());
     }
 
     #[test]

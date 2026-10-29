@@ -2869,8 +2869,15 @@ impl GUI {
                 Task::batch([screen, size])
             }
             Message::ScreenSize(size, zoom) => {
+                // Iced measures the answer at the zoom in effect when it runs
+                // the query, after the rest of its batch. If the zoom changed
+                // since it was asked, the tag no longer scales it: ask again.
+                if zoom != self.current_zoom() {
+                    return self.query_screen_size();
+                }
                 if let Some(size) = size {
-                    self.zoom.screen_width = Some(size.width * zoom.factor());
+                    // Rounded: f32 scaling puts a 1536-point screen at 1535.9999.
+                    self.zoom.screen_width = Some((size.width * zoom.factor()).round());
                 }
                 Task::none()
             }
@@ -5566,10 +5573,10 @@ mod app_preferences_sheet_tests {
         std::fs::create_dir_all(&path).unwrap();
         let root = CoincubeDirectory::new(path.clone());
         let mut gui = launcher_gui(&root);
-        // A 1440-point laptop reported at 125%: 1152 zoomed units wide.
+        // A 1440-point laptop, reported at 100%.
         drop(gui.update(Message::ScreenSize(
-            Some(Size::new(1152.0, 720.0)),
-            Zoom::from(125),
+            Some(Size::new(1440.0, 900.0)),
+            Zoom::ACTUAL_SIZE,
         )));
         assert_eq!(gui.zoom.screen_width, Some(1440.0));
         for _ in 0..10 {
@@ -5607,6 +5614,40 @@ mod app_preferences_sheet_tests {
         assert_eq!(gui.scale_factor(), 1.25);
         gui.zoom.screen_width = Some(2560.0);
         assert_eq!(gui.scale_factor(), 1.5, "back on the monitor, unchanged");
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn a_screen_size_asked_at_another_zoom_is_asked_again() {
+        let _guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path = std::env::temp_dir().join(format!("tenshu-zoom-stale-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        let root = CoincubeDirectory::new(path.clone());
+        let mut gui = launcher_gui(&root);
+        gui.window_id = Some(Id::unique());
+        gui.zoom.pending = Some(Zoom::from(125));
+        // Asked at 110%, measured at 125% on a 1440-point laptop: 1152 x 1.1
+        // would read as 1267 points and cap the zoom at 110%.
+        drop(gui.update(Message::ScreenSize(
+            Some(Size::new(1152.0, 720.0)),
+            Zoom::from(110),
+        )));
+        assert_eq!(gui.zoom.screen_width, None);
+        assert_eq!(gui.current_zoom(), Zoom::from(125));
+        // f32 scaling leaves a 1536-point screen a hair short of 150%.
+        gui.zoom.pending = Some(Zoom::from(90));
+        drop(gui.update(Message::ScreenSize(
+            Some(Size::new(1706.6665, 960.0)),
+            Zoom::from(90),
+        )));
+        assert_eq!(gui.zoom.screen_width, Some(1536.0));
+        assert_eq!(gui.max_zoom(), Zoom::LARGEST);
         drop(gui);
         std::fs::remove_dir_all(path).ok();
     }
