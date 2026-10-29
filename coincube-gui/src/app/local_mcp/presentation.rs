@@ -391,7 +391,7 @@ fn transaction_card(client_id: &str, draft: Prepared) -> Ui<'static> {
         .push(transaction_field(
             "Miner fee",
             format!(
-                "{} sats · {} sat/vB · added on top",
+                "{} sats · estimated {} sat/vB · added on top",
                 draft.fee_sats, draft.fee_rate_sat_vb
             ),
             true,
@@ -403,7 +403,11 @@ fn transaction_card(client_id: &str, draft: Prepared) -> Ui<'static> {
         ))
         .push(transaction_field(
             "Change",
-            format!("{} sats returned to this Vault", draft.change_sats),
+            if draft.change_sats == 0 {
+                "No change output".to_owned()
+            } else {
+                format!("{} sats returned to this Vault", draft.change_sats)
+            },
             true,
         ))
         .push(transaction_field(
