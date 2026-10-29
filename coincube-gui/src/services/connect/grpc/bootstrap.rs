@@ -136,10 +136,10 @@ async fn register_device(
         let cached = Account::from_cache(network_dir, email).ok().flatten();
         if cached
             .as_ref()
-            .is_some_and(|account| account.reregister_claim.is_some())
+            .is_some_and(Account::has_live_reregister_claim)
         {
-            // About owns this registration. Foreground cache activation clears
-            // abandoned claims on the next launch before bootstrap runs.
+            // About owns this registration in this process. Claims from an
+            // earlier process are recoverable after a crash or forced exit.
             return Err(BootstrapError::Superseded);
         }
         if let Some(existing) = cached

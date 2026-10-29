@@ -3,6 +3,7 @@ use async_fd_lock::LockWrite;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::io::SeekFrom;
+use std::sync::OnceLock;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncSeekExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -10,6 +11,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use super::auth::{AccessTokenResponse, AuthClient, AuthError};
 
 pub const CONNECT_CACHE_FILENAME: &str = "connect.json";
+
+fn process_claim_prefix() -> &'static str {
+    static PREFIX: OnceLock<String> = OnceLock::new();
+    PREFIX.get_or_init(|| format!("{}:{}:", std::process::id(), uuid::Uuid::new_v4()))
+}
 
 /// Opens `connect.json` for read/write, creating it owner-only. An existing
 /// file is tightened to `0600` as well: the cache holds refresh tokens.
@@ -54,6 +60,11 @@ impl ConnectCache {
             None if self.accounts.len() == 1 => self.accounts.first(),
             None => None,
         }
+    }
+
+    fn active_email_matches(&self, email: &str) -> bool {
+        self.active_account()
+            .is_some_and(|account| account.email == email)
     }
 
     fn upsert_credential(
@@ -113,6 +124,12 @@ pub struct Account {
 }
 
 impl Account {
+    pub(crate) fn has_live_reregister_claim(&self) -> bool {
+        self.reregister_claim
+            .as_deref()
+            .is_some_and(|claim| claim.starts_with(process_claim_prefix()))
+    }
+
     pub fn from_cache(
         network_dir: &NetworkDirectory,
         email: &str,
@@ -233,7 +250,7 @@ pub async fn begin_device_reregistration(
     email: &str,
     expected_id: &str,
 ) -> Result<Option<String>, ConnectCacheError> {
-    let claim = uuid::Uuid::new_v4().to_string();
+    let claim = format!("{}{}", process_claim_prefix(), uuid::Uuid::new_v4());
     let applied = mutate_device_registration(
         network_dir,
         email,
@@ -313,12 +330,13 @@ async fn mutate_device_registration(
         }
     };
 
+    let is_active = cache.active_email_matches(email);
     let Some(account) = cache.accounts.iter_mut().find(|a| a.email == email) else {
         return Ok(false);
     };
     let changed = match update {
         DeviceRegistrationUpdate::Begin { expected_id, claim } => {
-            if cache.active_email.as_deref() != Some(email)
+            if !is_active
                 || account.device_id.as_deref() != Some(expected_id)
                 || account.reregister_claim.is_some()
             {
@@ -330,7 +348,7 @@ async fn mutate_device_registration(
         }
         DeviceRegistrationUpdate::Set { device_id, claim } => {
             if let Some(claim) = claim {
-                if cache.active_email.as_deref() != Some(email)
+                if !is_active
                     || account.reregister_claim.as_deref() != Some(claim)
                     || account.device_id.is_some()
                 {
@@ -340,13 +358,16 @@ async fn mutate_device_registration(
                 account.reregister_claim = None;
                 true
             } else {
-                if account.reregister_claim.is_some() {
+                if account.has_live_reregister_claim() {
                     return Ok(false);
                 }
-                if account.device_id.as_deref() == device_id {
+                if account.device_id.as_deref() == device_id && account.reregister_claim.is_none() {
                     return Ok(true);
                 }
                 account.device_id = device_id.map(str::to_string);
+                // Treat an earlier process's claim as abandoned on startup.
+                // Its late completion still needs the exact claim to commit.
+                account.reregister_claim = None;
                 true
             }
         }
@@ -709,6 +730,72 @@ mod tests {
                 .device_id
                 .as_deref(),
             Some("device-a-new")
+        );
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn abandoned_process_claim_recovers_without_accepting_late_completion() {
+        let dir = test_network_dir();
+        let path = dir.path().join(CONNECT_CACHE_FILENAME);
+        let email = "alice@example.com";
+        let mut cache = ConnectCache::default();
+        cache.upsert_credential(email, tokens("a"), true);
+        cache.accounts[0].reregister_claim = Some("prior-process:claim-a".into());
+        std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
+
+        assert!(!cache.accounts[0].has_live_reregister_claim());
+        assert!(
+            set_device_id_for_email(&dir, email, Some("recovered-device"))
+                .await
+                .unwrap()
+        );
+        assert!(!finish_device_reregistration(
+            &dir,
+            email,
+            "prior-process:claim-a",
+            Some("late-a")
+        )
+        .await
+        .unwrap());
+        let restored = ConnectCache::from_file(&dir).unwrap();
+        assert_eq!(
+            restored.active_account().unwrap().device_id.as_deref(),
+            Some("recovered-device")
+        );
+        assert!(restored
+            .active_account()
+            .unwrap()
+            .reregister_claim
+            .is_none());
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_single_account_can_begin_and_finish_reregistration() {
+        let dir = test_network_dir();
+        let path = dir.path().join(CONNECT_CACHE_FILENAME);
+        let email = "alice@example.com";
+        let mut cache = ConnectCache::default();
+        cache.upsert_credential(email, tokens("a"), false);
+        cache.accounts[0].device_id = Some("device-a".into());
+        assert!(cache.active_email.is_none());
+        std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
+
+        let claim = begin_device_reregistration(&dir, email, "device-a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            finish_device_reregistration(&dir, email, &claim, Some("device-b"))
+                .await
+                .unwrap()
+        );
+        let restored = ConnectCache::from_file(&dir).unwrap();
+        assert!(restored.active_email.is_none());
+        assert_eq!(
+            restored.active_account().unwrap().device_id.as_deref(),
+            Some("device-b")
         );
         std::fs::remove_dir_all(dir.path()).unwrap();
     }
