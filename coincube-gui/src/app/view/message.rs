@@ -2337,6 +2337,10 @@ pub enum AvatarMessage {
 
 #[derive(Debug, Clone)]
 pub enum HomeMessage {
+    /// Toggle only the Overview aggregate; the global privacy setting still wins.
+    ToggleTotalBalance,
+    /// Toggle only the Overview wallet cards; the global privacy setting still wins.
+    ToggleWalletBalances,
     /// Navigate to Liquid Send with asset preset.
     SendAsset(crate::app::state::liquid::send::SendAsset),
     /// Navigate to Liquid Receive with asset preset.
