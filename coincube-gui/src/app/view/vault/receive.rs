@@ -773,10 +773,15 @@ pub fn receive<'a>(
             Row::new()
                 .spacing(40)
                 .align_y(Alignment::Start)
-                .push(Container::new(payment_card).width(Length::Fixed(680.0)))
+                .push(
+                    Container::new(payment_card)
+                        .width(Length::Fill)
+                        .max_width(680.0),
+                )
                 .push(Container::new(aside).width(Length::Fixed(240.0)))
                 .wrap()
-                .vertical_spacing(20),
+                .vertical_spacing(20)
+                .into(),
         ))
         .push(earlier.map(gap_above))
         .push(previous.map(gap_above))
@@ -1055,6 +1060,32 @@ mod tests {
                 assert!(ready.contains("250,000 SATS"));
                 assert!(ready.contains("On-chain deposits appear after the Vault syncs."));
                 assert!(ready.has_focus(control_id("activity")));
+                if outer == COMPACT {
+                    let generate = ready
+                        .focus
+                        .iter()
+                        .find(|(id, _)| *id == generate_id())
+                        .expect("new address action");
+                    let compact_width = ((COMPACT.0 as f32 - 208.0) * 0.8).floor();
+                    assert!(
+                        generate.1.x + generate.1.width <= compact_width,
+                        "new address action exceeds compact content width"
+                    );
+                    let centered = capture::inspect_wide_content(
+                        "vault-receive-centered-960",
+                        f.view(),
+                        WIDE,
+                        appearance,
+                        theme,
+                        960,
+                    );
+                    let aside = centered
+                        .text
+                        .iter()
+                        .find(|(value, _)| value == "Receiving into")
+                        .expect("receive aside");
+                    assert!(aside.1.x >= 720.0, "aside should sit beside the 680px card");
+                }
                 assert!(ready.contains("Bitcoin address"));
                 assert!(ready.contains(&addr(3).to_string()));
                 assert!(ready.contains("Salary · synthetic"));
