@@ -28,12 +28,15 @@ use coincube_ui::{
 };
 
 use crate::{
-    app::view::{
-        loading_placeholder,
-        message::VaultReceiveMessage,
-        placeholder,
-        shared::landing::{landing_card_style, landing_subtle_button_style},
-        vault::{hw, label},
+    app::{
+        menu::{CubeSubMenu, Menu},
+        view::{
+            loading_placeholder,
+            message::VaultReceiveMessage,
+            placeholder,
+            shared::landing::{landing_card_style, landing_subtle_button_style},
+            vault::{hw, label},
+        },
     },
     hw::HardwareWallet,
 };
@@ -286,6 +289,14 @@ fn generate_style(
     }
 }
 
+fn activity_link_style(theme: &theme::Theme, status: iced_button::Status) -> iced_button::Style {
+    let mut style = theme::button::link(theme, status);
+    // The shared link's idle grey misses P-Receive's orange text-link cue.
+    // accent_ink keeps that cue readable in both dark and light themes.
+    style.text_color = theme.colors.shell.accent_ink;
+    style
+}
+
 fn truncate_middle(address: &str) -> String {
     let len = address.chars().count();
     if len > 2 * NUM_ADDR_CHARS {
@@ -406,11 +417,12 @@ fn address_details<'a>(
 fn current_address<'a>(
     row_index: usize,
     address: &'a bitcoin::Address,
+    qr: Option<&'a qr_code::Data>,
     labels: &'a HashMap<String, String>,
     labels_editing: &'a HashMap<String, form::Value<String>>,
 ) -> Element<'a, Message> {
     let addr = address.to_string();
-    Column::new()
+    let details = Column::new()
         .spacing(16)
         .push(
             Column::new()
@@ -425,9 +437,33 @@ fn current_address<'a>(
                         .style(theme::text::secondary),
                 ),
         )
-        .push(address_actions(Scope::Generated, row_index, &addr))
-        .push(label_block(&addr, labels, labels_editing))
-        .into()
+        .push(action(
+            address_control_id(Scope::Generated, Control::Verify, &addr),
+            "Verify on hardware device",
+            Some(icon::usb_icon()),
+            Some(Message::Select(row_index)),
+            landing_subtle_button_style,
+        ))
+        .push(label_block(&addr, labels, labels_editing));
+    if let Some(qr) = qr {
+        Row::new()
+            .spacing(24)
+            .align_y(Alignment::Start)
+            .width(Length::Fill)
+            .push(
+                Container::new(QRCode::<coincube_ui::theme::Theme>::new(qr).total_size(160))
+                    .padding(8)
+                    .style(field_style),
+            )
+            .push(Container::new(details).width(Length::Fill))
+            .into()
+    } else {
+        Column::new()
+            .spacing(12)
+            .push(p2_regular("QR code unavailable for this address.").style(theme::text::secondary))
+            .push(details)
+            .into()
+    }
 }
 
 fn route_tile<'a>(caption: &'static str, rail: &'static str) -> Element<'a, Message> {
@@ -540,6 +576,9 @@ fn gap_above<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
 #[allow(clippy::too_many_arguments)]
 pub fn receive<'a>(
     addresses: &'a [bitcoin::Address],
+    current_qr: Option<&'a qr_code::Data>,
+    vault_name: &'a str,
+    balance_display: String,
     labels: &'a HashMap<String, String>,
     prev_addresses: &'a [bitcoin::Address],
     prev_labels: &'a HashMap<String, String>,
@@ -560,7 +599,7 @@ pub fn receive<'a>(
     let body: Element<'a, Message> = if let Some((i, address)) =
         addresses.iter().enumerate().next_back()
     {
-        current_address(i, address, labels, labels_editing)
+        current_address(i, address, current_qr, labels, labels_editing)
     } else if !prev_addresses.is_empty() {
         p2_regular(
             "Generate a new address for this deposit. Earlier addresses still awaiting a deposit are listed below.",
@@ -717,10 +756,44 @@ pub fn receive<'a>(
             .into()
     });
 
+    let aside = Column::new()
+        .spacing(8)
+        .push(p2_regular("Receiving into").style(theme::text::secondary))
+        .push(p1_bold(format!("Vault · {vault_name}")))
+        .push(p2_bold(balance_display))
+        .push(iced::widget::rule::horizontal(1))
+        .push(
+            p2_regular("On-chain deposits appear after the Vault syncs.")
+                .style(theme::text::secondary),
+        )
+        .push(
+            Action::new(
+                control_id("activity"),
+                p2_medium("See all in Activity"),
+                Message::FocusAction,
+            )
+            .padding([8, 0])
+            .style(activity_link_style)
+            .on_press(Message::Menu(Menu::Cube(CubeSubMenu::Activity))),
+        );
+
     Column::new()
         .width(Length::Fill)
         .push(header)
-        .push(gap_above(payment_card.into()))
+        .push(gap_above(
+            Row::new()
+                .spacing(40)
+                .align_y(Alignment::Start)
+                .push(
+                    Container::new(payment_card)
+                        .width(Length::Fill)
+                        .max_width(680.0),
+                )
+                .push(Container::new(aside).width(Length::Fixed(240.0)))
+                .wrap()
+                .vertical_spacing(20)
+                .into(),
+        ))
         .push(earlier.map(gap_above))
         .push(previous.map(gap_above))
         .into()
@@ -861,6 +934,7 @@ mod tests {
 
     struct Fixture {
         addresses: Vec<Address>,
+        current_qr: Option<qr_code::Data>,
         labels: HashMap<String, String>,
         prev: Vec<Address>,
         prev_labels: HashMap<String, String>,
@@ -876,6 +950,7 @@ mod tests {
         fn empty() -> Self {
             Self {
                 addresses: Vec::new(),
+                current_qr: None,
                 labels: HashMap::new(),
                 prev: Vec::new(),
                 prev_labels: HashMap::new(),
@@ -893,6 +968,10 @@ mod tests {
         fn populated() -> Self {
             let mut f = Self::empty();
             f.addresses = vec![addr(1), addr(2), addr(3)];
+            f.current_qr = Some(
+                qr_code::Data::new(format!("bitcoin:{}?index=3", addr(3)))
+                    .expect("synthetic address fits a QR code"),
+            );
             f.labels
                 .insert(addr(3).to_string(), "Salary · synthetic".into());
             f.prev = vec![addr(10), addr(11)];
@@ -909,6 +988,9 @@ mod tests {
         fn view(&self) -> Element<'_, Message> {
             receive(
                 &self.addresses,
+                self.current_qr.as_ref(),
+                "Family Vault",
+                "250,000 SATS".to_string(),
                 &self.labels,
                 &self.prev,
                 &self.prev_labels,
@@ -935,6 +1017,19 @@ mod tests {
             ("dark", theme::Theme::dark()),
             ("light", theme::Theme::light()),
         ]
+    }
+
+    #[test]
+    fn activity_link_uses_the_readable_accent_without_a_button_box() {
+        for (_, theme) in themes() {
+            let style = activity_link_style(&theme, iced_button::Status::Active);
+            assert_eq!(style.text_color, theme.colors.shell.accent_ink);
+            assert_eq!(style.border.color.a, 0.0);
+            assert!(matches!(
+                style.background,
+                Some(iced::Background::Color(color)) if color.a == 0.0
+            ));
+        }
     }
 
     /// The single non-focus message from activating `target` on the real
@@ -984,6 +1079,44 @@ mod tests {
                 let f = Fixture::populated();
                 let ready = inspect("vault-receive-generated-previous-expanded", &f);
                 assert!(ready.contains("Payment details"));
+                assert!(ready.contains("Receiving into"));
+                assert!(ready.contains("Vault · Family Vault"));
+                assert!(!ready.contains("Vault · Family Cube"));
+                assert!(ready.contains("250,000 SATS"));
+                assert!(ready.contains("On-chain deposits appear after the Vault syncs."));
+                assert!(ready.has_focus(control_id("activity")));
+                if outer == COMPACT {
+                    let generate = ready
+                        .focus
+                        .iter()
+                        .find(|(id, _)| *id == generate_id())
+                        .expect("new address action");
+                    let compact_width = ((COMPACT.0 as f32 - 208.0) * 0.8).floor();
+                    assert!(
+                        generate.1.x + generate.1.width <= compact_width,
+                        "new address action exceeds compact content width"
+                    );
+                    let centered = capture::inspect_wide_content(
+                        "vault-receive-centered-960",
+                        f.view(),
+                        WIDE,
+                        appearance,
+                        theme,
+                        960,
+                    );
+                    let aside = centered
+                        .text
+                        .iter()
+                        .find(|(value, _)| value == "Receiving into")
+                        .expect("receive aside");
+                    assert!(aside.1.x >= 720.0, "aside should sit beside the 680px card");
+                    let link = centered
+                        .text
+                        .iter()
+                        .find(|(value, _)| value == "See all in Activity")
+                        .expect("Activity link");
+                    assert_eq!(link.1.x, aside.1.x, "Activity link should align with aside");
+                }
                 assert!(ready.contains("Bitcoin address"));
                 assert!(ready.contains(&addr(3).to_string()));
                 assert!(ready.contains("Salary · synthetic"));
@@ -991,7 +1124,7 @@ mod tests {
                 assert!(ready.contains("Generated earlier in this session"));
                 for n in [1, 2, 3] {
                     assert!(ready.contains(&addr(n).to_string()));
-                    for control in [Control::Copy, Control::Qr, Control::Verify] {
+                    for control in [Control::Copy, Control::Verify] {
                         assert!(
                             ready.has_focus(generated(control, n)),
                             "{} {:?}",
@@ -999,6 +1132,10 @@ mod tests {
                             control
                         );
                     }
+                }
+                assert!(!ready.has_focus(generated(Control::Qr, 3)));
+                for n in [1, 2] {
+                    assert!(ready.has_focus(generated(Control::Qr, n)));
                 }
                 assert!(ready.has_focus(previous_disclosure_id()));
                 assert!(ready.has_focus(previous(Control::Toggle, 10)));
@@ -1072,10 +1209,12 @@ mod tests {
                     activate_once(f.view(), generated(Control::Verify, n), pointer),
                     Message::Select(i) if i == index
                 ));
-                assert!(matches!(
-                    activate_once(f.view(), generated(Control::Qr, n), pointer),
-                    Message::ShowQrCode(i) if i == index
-                ));
+                if n != 3 {
+                    assert!(matches!(
+                        activate_once(f.view(), generated(Control::Qr, n), pointer),
+                        Message::ShowQrCode(i) if i == index
+                    ));
+                }
             }
             // Previous rows continue after the generated addresses: the
             // second previous address is row 3 + 1. Its nested actions
@@ -1107,6 +1246,10 @@ mod tests {
             assert!(matches!(
                 activate_once(f.view(), generate_id(), pointer),
                 Message::NextReceiveAddress
+            ));
+            assert!(matches!(
+                activate_once(f.view(), control_id("activity"), pointer),
+                Message::Menu(Menu::Cube(CubeSubMenu::Activity))
             ));
 
             // The first previous address is row 3 + 0.
@@ -1250,9 +1393,9 @@ mod tests {
         // Current address card, then the card footer.
         order.extend([
             generated(Control::Copy, 3),
-            generated(Control::Qr, 3),
             generated(Control::Verify, 3),
             generate_id(),
+            control_id("activity"),
         ]);
         // Earlier generated addresses, newest first.
         for n in [2, 1] {
@@ -1361,6 +1504,7 @@ mod tests {
         for (named, target) in [
             (keyboard::key::Named::Space, generate_id()),
             (keyboard::key::Named::Enter, previous(Control::Copy, 11)),
+            (keyboard::key::Named::Space, control_id("activity")),
         ] {
             operate(
                 &mut element,
@@ -1384,6 +1528,8 @@ mod tests {
                     keyboard::key::Named::Enter,
                     Message::VaultReceive(VaultReceiveMessage::Copy(a)),
                 ) if a == &addr(11).to_string() => {}
+                (keyboard::key::Named::Space, Message::Menu(Menu::Cube(CubeSubMenu::Activity))) => {
+                }
                 other => panic!("unexpected activation {:?}", other),
             }
         }
