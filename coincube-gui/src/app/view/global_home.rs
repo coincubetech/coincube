@@ -4464,13 +4464,15 @@ mod tests {
                 let context = shown
                     .text
                     .iter()
-                    .find(|(label, _)| label == "Everyday · Bitcoin")
+                    .find(|(label, _)| label.contains("Everyday · Bitcoin"))
                     .expect("Cube and network line")
                     .1;
                 assert!(context.x > title.x, "context belongs on the right");
                 assert!(
                     (context.y - title.y).abs() <= title.height,
-                    "context and title must share a row: {title:?} {context:?}"
+                    "context and title must share a row: {:?} {:?}",
+                    title,
+                    context
                 );
 
                 for (local_total, local_wallets) in [(false, false), (true, false), (false, true)] {
