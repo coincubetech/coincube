@@ -7361,8 +7361,8 @@ impl App {
         // result to render its banner, so it keeps its normal route.
         let health = match &message {
             Message::View(view::Message::Settings(
-                view::SettingsMessage::ConnectDeviceReregistered(Ok((email, device_id))),
-            )) => self.adopt_reregistered_device(email, device_id),
+                view::SettingsMessage::ConnectDeviceReregistered(Ok(registered)),
+            )) => self.adopt_reregistered_device(registered),
             _ => None,
         };
         let task = self.route(message);
@@ -7376,21 +7376,26 @@ impl App {
     /// id. Swap it into the stream config: the subscription is keyed on
     /// `device_id`, so a stream stopped by `DeviceRejected` (or one still
     /// using the stale id) is replaced by one that says hello with the new id.
-    /// A result landing after sign-out (which clears the stream config) or
-    /// for another account than the signed-in one is ignored, so it can't
-    /// bring the device card back or hand this account's stream a foreign id.
+    /// The swap only applies to the stream the request was started from: a
+    /// result landing after sign-out (which clears the stream config), for
+    /// another account, or after a newer sign-in already moved the stream to
+    /// a different id is ignored, so it can't bring the device card back or
+    /// replace a newer registration.
     /// An unchanged id leaves the status alone: the subscription key doesn't
     /// change, so nothing restarts and "Connecting" would never settle.
-    fn adopt_reregistered_device(&mut self, email: &str, device_id: &str) -> Option<Task<Message>> {
-        if self.connect_email.as_deref() != Some(email) {
+    fn adopt_reregistered_device(
+        &mut self,
+        registered: &view::ReregisteredDevice,
+    ) -> Option<Task<Message>> {
+        if self.connect_email.as_deref() != Some(registered.email.as_str()) {
             return None;
         }
         let cfg = self.connect_stream_config.as_mut()?;
-        if cfg.device_id == device_id {
+        if cfg.device_id != registered.replaces || cfg.device_id == registered.device_id {
             return None;
         }
-        cfg.device_id = device_id.to_owned();
-        self.cache.connect_device_id = Some(device_id.to_owned());
+        cfg.device_id = registered.device_id.clone();
+        self.cache.connect_device_id = Some(registered.device_id.clone());
         self.cache.connect_stream_status = ConnectionStatus::Connecting;
         Some(stream_health_dispatch(ConnectionStatus::Connecting))
     }
@@ -14574,6 +14579,12 @@ pub(crate) mod tests {
     /// so the keyed subscription restarts instead of staying stopped.
     #[test]
     fn device_rejection_holds_until_reregister_restarts_the_stream() {
+        // Every result below was requested while the stream ran on id "1".
+        let reregistered = |email: &str, device_id: &str| view::ReregisteredDevice {
+            email: email.into(),
+            replaces: "1".into(),
+            device_id: device_id.into(),
+        };
         let _guard = crate::app::session::test_guard();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -14649,9 +14660,9 @@ pub(crate) mod tests {
 
         // A result for another account (switched mid-flight) is ignored.
         drop(app.update(Message::View(view::Message::Settings(
-            view::SettingsMessage::ConnectDeviceReregistered(Ok((
-                "other@example.invalid".into(),
-                "41".into(),
+            view::SettingsMessage::ConnectDeviceReregistered(Ok(reregistered(
+                "other@example.invalid",
+                "41",
             ))),
         ))));
         assert_eq!(app.connect_stream_config.as_ref().unwrap().device_id, "1");
@@ -14662,9 +14673,9 @@ pub(crate) mod tests {
 
         // The same id again restarts nothing, so the rejection stays visible.
         drop(app.update(Message::View(view::Message::Settings(
-            view::SettingsMessage::ConnectDeviceReregistered(Ok((
-                "rejected@example.invalid".into(),
-                "1".into(),
+            view::SettingsMessage::ConnectDeviceReregistered(Ok(reregistered(
+                "rejected@example.invalid",
+                "1",
             ))),
         ))));
         assert_eq!(
@@ -14673,9 +14684,9 @@ pub(crate) mod tests {
         );
 
         drop(app.update(Message::View(view::Message::Settings(
-            view::SettingsMessage::ConnectDeviceReregistered(Ok((
-                "rejected@example.invalid".into(),
-                "42".into(),
+            view::SettingsMessage::ConnectDeviceReregistered(Ok(reregistered(
+                "rejected@example.invalid",
+                "42",
             ))),
         ))));
         assert_eq!(app.connect_stream_config.as_ref().unwrap().device_id, "42");
@@ -14685,13 +14696,24 @@ pub(crate) mod tests {
             ConnectionStatus::Connecting
         );
 
+        // A late result from the earlier request (still replacing "1") must
+        // not overwrite the registration the stream has moved on to.
+        drop(app.update(Message::View(view::Message::Settings(
+            view::SettingsMessage::ConnectDeviceReregistered(Ok(reregistered(
+                "rejected@example.invalid",
+                "44",
+            ))),
+        ))));
+        assert_eq!(app.connect_stream_config.as_ref().unwrap().device_id, "42");
+        assert_eq!(app.cache.connect_device_id.as_deref(), Some("42"));
+
         // A result landing after sign-out must not resurrect the device id.
         app.connect_stream_config = None;
         app.cache.connect_device_id = None;
         drop(app.update(Message::View(view::Message::Settings(
-            view::SettingsMessage::ConnectDeviceReregistered(Ok((
-                "rejected@example.invalid".into(),
-                "43".into(),
+            view::SettingsMessage::ConnectDeviceReregistered(Ok(reregistered(
+                "rejected@example.invalid",
+                "43",
             ))),
         ))));
         assert_eq!(app.cache.connect_device_id, None);

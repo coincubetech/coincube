@@ -67,10 +67,11 @@ impl State for AboutSettingsState {
                 // grpc_url and tokens there's nothing we can do —
                 // surface a clear error rather than silently swallow
                 // the click.
-                let (Some(grpc_url), Some(tokens), Some(email)) = (
+                let (Some(grpc_url), Some(tokens), Some(email), Some(replaces)) = (
                     cache.connect_grpc_url.clone(),
                     cache.connect_tokens.clone(),
                     cache.connect_email.clone(),
+                    cache.connect_device_id.clone(),
                 ) else {
                     self.reregister_status = Some(Err(
                         "Connect isn't ready yet. Wait a moment, then try again.".to_string(),
@@ -111,11 +112,13 @@ impl State for AboutSettingsState {
                             )
                             .await
                         {
-                            // Best-effort: a cache write failure here
-                            // just means the next launch may still
-                            // hit the existing id. Don't block the
-                            // RPC on it.
+                            // Registering with the id still cached would
+                            // short-circuit to that same id and report a
+                            // success that registered nothing.
                             tracing::warn!("Re-register: failed to clear cached device_id: {}", e,);
+                            return Err("Couldn't reset this device's registration. \
+                                 Check that Tenshu can write to its data folder, then try again."
+                                .to_string());
                         }
                         let result =
                             crate::services::connect::grpc::bootstrap::ensure_device_registered(
@@ -128,7 +131,11 @@ impl State for AboutSettingsState {
                                 os_version,
                             )
                             .await
-                            .map(|device_id| (email.clone(), device_id))
+                            .map(|device_id| view::ReregisteredDevice {
+                                email: email.clone(),
+                                replaces,
+                                device_id,
+                            })
                             .map_err(|e| e.to_string());
                         // On failure the cache was left cleared — restore
                         // the prior id (best-effort) so a transient RPC
@@ -161,7 +168,7 @@ impl State for AboutSettingsState {
                 view::SettingsMessage::ConnectDeviceReregistered(res),
             )) => {
                 self.reregistering = false;
-                self.reregister_status = Some(res.map(|(_, device_id)| device_id));
+                self.reregister_status = Some(res.map(|r| r.device_id));
             }
             _ => {}
         }
