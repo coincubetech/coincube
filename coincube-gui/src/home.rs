@@ -5686,6 +5686,10 @@ impl Home {
         let backing_up = matches!(self.state, State::CreationBackup(_));
         let selecting_network = !backing_up && !self.create_network_confirmed;
         let blake2b = self.network.is_blake2b();
+        let light = matches!(
+            self.theme_mode,
+            coincube_ui::theme::palette::ThemeMode::Light
+        );
         // Match the prototype's route through the installer without claiming
         // that Home owns its later steps. The fork has its own ordered path.
         let steps: &[&str] = if blake2b {
@@ -5719,7 +5723,7 @@ impl Home {
             1
         };
         let progress = steps.iter().enumerate().fold(
-            Row::new().spacing(8).align_y(Alignment::Center),
+            Row::new().spacing(3).align_y(Alignment::Center),
             |row, (index, label)| {
                 let current = index == active_step;
                 let done = index < active_step;
@@ -5744,19 +5748,32 @@ impl Home {
                         },
                         ..Default::default()
                     });
-                row.push(
+                let row = row.push(
                     Row::new()
-                        .spacing(5)
+                        .spacing(4)
                         .align_y(Alignment::Center)
                         .push(number)
-                        .push(p2_regular(*label).size(12).style(move |theme| {
+                        .push(p2_regular(*label).size(11).style(move |theme| {
                             if current || done {
                                 theme::text::primary(theme)
                             } else {
                                 theme::text::secondary(theme)
                             }
                         })),
-                )
+                );
+                if index + 1 < steps.len() {
+                    row.push(
+                        Container::new(Space::new())
+                            .width(Length::Fixed(18.0))
+                            .height(Length::Fixed(1.0))
+                            .style(|theme: &theme::Theme| iced::widget::container::Style {
+                                background: Some(iced::Background::Color(theme.colors.shell.line)),
+                                ..Default::default()
+                            }),
+                    )
+                } else {
+                    row
+                }
             },
         );
 
@@ -5826,10 +5843,9 @@ impl Home {
         .width(Length::Fill)
         .style(theme::container::shell_rail);
 
-        let header = Row::new()
+        let mut identity = Row::new()
+            .spacing(8)
             .align_y(Alignment::Center)
-            .spacing(16)
-            .push(p2_regular("Create Cube"))
             .push(p2_regular(
                 if self.create_cube_name.value.trim().is_empty() {
                     "New Cube"
@@ -5837,24 +5853,51 @@ impl Home {
                     self.create_cube_name.value.trim()
                 },
             ))
-            .push(p2_regular(self.network.label()).style(theme::text::secondary))
+            .push(p2_regular("·").style(theme::text::secondary))
+            .push(create_journey_coin(self.network, light, 16.0))
+            .push(p2_regular(self.network.label()).style(theme::text::secondary));
+        if launcher_coin::is_test_network(self.network) {
+            identity = identity.push(create_journey_tag(self.network.label(), false));
+        }
+        let header = Row::new()
+            .align_y(Alignment::Center)
+            .spacing(12)
+            .push(p2_regular("Create Cube"))
+            .push(
+                Container::new(Space::new())
+                    .width(Length::Fixed(1.0))
+                    .height(Length::Fixed(20.0))
+                    .style(|theme: &theme::Theme| iced::widget::container::Style {
+                        background: Some(iced::Background::Color(theme.colors.shell.line)),
+                        ..Default::default()
+                    }),
+            )
+            .push(identity)
             .push(Space::new().width(Length::Fill));
 
         let body: Element<ViewMessage> = if selecting_network {
             let network_row = |chain: ChainId| -> Element<ViewMessage> {
                 let available = self.chain_availability(chain).is_available();
                 let selected = chain == self.network;
-                let subtitle = match chain {
-                    ChainId::Bitcoin => "Spark · Liquid · Vault",
-                    ChainId::Regtest => "Spark · Vault. Liquid isn't available on Regtest.",
-                    ChainId::BitcoinBlake2b | ChainId::BitcoinBlake2bTestnet4 => {
-                        "Bitcoin Blake2b supports Vault creation only"
+                let subtitle = if chain.is_blake2b() && !available {
+                    "Bitcoin Blake2b availability could not be verified. Vault creation is disabled."
+                } else {
+                    match chain {
+                        ChainId::Bitcoin => "Spark · Liquid · Vault",
+                        ChainId::Regtest => "Spark · Vault. Liquid isn't available on Regtest.",
+                        ChainId::BitcoinBlake2b | ChainId::BitcoinBlake2bTestnet4 => {
+                            "Bitcoin Blake2b supports Vault creation only"
+                        }
+                        ChainId::Testnet => {
+                            "Vault only. Spark and Liquid aren't available on Testnet."
+                        }
+                        ChainId::Testnet4 => {
+                            "Vault only. Spark and Liquid aren't available on Testnet4."
+                        }
+                        ChainId::Signet => {
+                            "Vault only. Spark and Liquid aren't available on Signet."
+                        }
                     }
-                    ChainId::Testnet => "Vault only. Spark and Liquid aren't available on Testnet.",
-                    ChainId::Testnet4 => {
-                        "Vault only. Spark and Liquid aren't available on Testnet4."
-                    }
-                    ChainId::Signet => "Vault only. Spark and Liquid aren't available on Signet.",
                 };
                 let id = Id::new(format!(
                     "tenshu.create:network:{}",
@@ -5863,10 +5906,13 @@ impl Home {
                 let mut name = Row::new()
                     .spacing(8)
                     .align_y(Alignment::Center)
-                    .push(icon::bitcoin_icon())
+                    .push(create_journey_coin(chain, light, 18.0))
                     .push(p2_regular(chain.label()));
-                if chain.is_blake2b() {
-                    name = name.push(p2_regular("Blake2b").style(theme::text::secondary));
+                if chain.is_blake2b() && !launcher_coin::is_test_network(chain) {
+                    name = name.push(create_journey_tag("Blake2b", true));
+                }
+                if launcher_coin::is_test_network(chain) {
+                    name = name.push(create_journey_tag(chain.label(), false));
                 }
                 let row = FocusableAction::new(
                     id,
@@ -5911,18 +5957,29 @@ impl Home {
                     })
                     .into()
             };
-            let live = self
+            let mut live = self
                 .displayed_networks
                 .iter()
                 .copied()
                 .filter(|chain| matches!(chain, ChainId::Bitcoin | ChainId::BitcoinBlake2b))
                 .collect::<Vec<_>>();
-            let test = self
+            let mut test = self
                 .displayed_networks
                 .iter()
                 .copied()
                 .filter(|chain| !matches!(chain, ChainId::Bitcoin | ChainId::BitcoinBlake2b))
                 .collect::<Vec<_>>();
+            // The per-device toggle controls visibility. An enabled device may
+            // still be waiting for feature verification: explain that state
+            // with disabled rows, while SelectNetwork remains fail-closed.
+            if self.connect_account.bitcoin_blake2b_opt_in {
+                if !live.contains(&ChainId::BitcoinBlake2b) {
+                    live.push(ChainId::BitcoinBlake2b);
+                }
+                if self.developer_mode && !test.contains(&ChainId::BitcoinBlake2bTestnet4) {
+                    test.push(ChainId::BitcoinBlake2bTestnet4);
+                }
+            }
             let mut content = Column::new()
                 .spacing(16)
                 .max_width(680)
@@ -6375,6 +6432,36 @@ const LEGACY_CONNECT_ENTRY_ID: &str = "tenshu.launcher.legacy:connect:entry";
 
 fn create_journey_focus(id: Id) -> ViewMessage {
     ViewMessage::Catalog(launcher_catalog::CatalogMessage::Focus(id))
+}
+
+/// The same supplied coin art used by the Launcher, including the dashed and
+/// faded ring on test networks. Kept in Home so Create can render it without
+/// changing the Launcher or a shared widget.
+fn create_journey_coin(chain: ChainId, light: bool, size: f32) -> Element<'static, ViewMessage> {
+    iced::widget::Svg::new(iced::widget::svg::Handle::from_memory(
+        launcher_coin::widget_source(chain, size, 1.0, light).into_bytes(),
+    ))
+    .width(Length::Fixed(size))
+    .height(Length::Fixed(size))
+    .into()
+}
+
+fn create_journey_tag<'a>(label: &'a str, blake2b: bool) -> Element<'a, ViewMessage> {
+    Container::new(p2_regular(label).size(12))
+        .padding([2, 6])
+        .style(move |theme: &theme::Theme| iced::widget::container::Style {
+            border: iced::Border {
+                color: if blake2b {
+                    theme.colors.shell.warn
+                } else {
+                    theme.colors.shell.muted
+                },
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            ..Default::default()
+        })
+        .into()
 }
 
 fn legacy_connect_focus(id: Id) -> Message {
