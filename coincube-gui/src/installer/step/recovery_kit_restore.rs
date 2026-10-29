@@ -73,10 +73,7 @@ pub enum Phase {
     OtpEntry,
     /// Fetching the cube list to let the user pick.
     LoadingCubes,
-    /// Show cubes; user selects one to restore from. `selected` is
-    /// reserved for a future "highlight-then-confirm" UX; today the
-    /// picker advances on click, so it's always `None` in practice.
-    #[allow(dead_code)]
+    /// Show cubes; selection is confirmed before opening its password form.
     CubePicker {
         cubes: Vec<RestoreCubeCandidate>,
         selected: Option<u64>,
@@ -736,17 +733,27 @@ impl Step for RecoveryKitRestoreStep {
                 Task::none()
             }
             RecoveryKitRestoreMsg::SelectCube(id) => {
-                if let Phase::CubePicker { cubes, .. } = &self.phase {
-                    // Re-check `has_required_half` in case the view's
-                    // disabled-row rendering ever falls out of sync
-                    // with the state-machine gate. Defensive — the
-                    // picker's `on_press` is gated on the same
-                    // predicate.
-                    if let Some(c) = cubes
+                let scope = self.scope;
+                if let Phase::CubePicker { cubes, selected } = &mut self.phase {
+                    // Re-check availability in state even when a stale view
+                    // sends a selection for a disabled row.
+                    if cubes
                         .iter()
-                        .find(|c| c.id == id && has_required_half(self.scope, c))
-                        .cloned()
+                        .any(|c| c.id == id && has_required_half(scope, c))
                     {
+                        *selected = Some(id);
+                    }
+                }
+                Task::none()
+            }
+            RecoveryKitRestoreMsg::ConfirmCube => {
+                if let Phase::CubePicker { cubes, selected } = &self.phase {
+                    if let Some(c) = selected.and_then(|id| {
+                        cubes
+                            .iter()
+                            .find(|c| c.id == id && has_required_half(self.scope, c))
+                            .cloned()
+                    }) {
                         self.set_phase(Phase::PasswordEntry {
                             selected: c,
                             attempts: 0,
@@ -1494,6 +1501,56 @@ mod tests {
             }
             other => panic!("expected CubePicker, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn picker_requires_available_selection_then_explicit_confirmation() {
+        let mut available = candidate("Available", true);
+        available.id = 7;
+        let mut unavailable = candidate("No Kit", false);
+        unavailable.id = 8;
+        let mut step = RecoveryKitRestoreStep::new(RestoreScope::Full, "mainnet".into(), None);
+        step.phase = Phase::CubePicker {
+            cubes: vec![available, unavailable],
+            selected: None,
+        };
+        let mut hws = HardwareWallets::new(
+            crate::dir::CoincubeDirectory::new("/synthetic/recovery-picker".into()),
+            Network::Bitcoin,
+        );
+
+        let _ = step.update(
+            &mut hws,
+            Message::RecoveryKitRestore(RecoveryKitRestoreMsg::ConfirmCube),
+        );
+        assert!(matches!(
+            &step.phase,
+            Phase::CubePicker { selected: None, .. }
+        ));
+        let _ = step.update(
+            &mut hws,
+            Message::RecoveryKitRestore(RecoveryKitRestoreMsg::SelectCube(8)),
+        );
+        assert!(matches!(
+            &step.phase,
+            Phase::CubePicker { selected: None, .. }
+        ));
+        let _ = step.update(
+            &mut hws,
+            Message::RecoveryKitRestore(RecoveryKitRestoreMsg::SelectCube(7)),
+        );
+        assert!(matches!(
+            &step.phase,
+            Phase::CubePicker {
+                selected: Some(7),
+                ..
+            }
+        ));
+        let _ = step.update(
+            &mut hws,
+            Message::RecoveryKitRestore(RecoveryKitRestoreMsg::ConfirmCube),
+        );
+        assert!(matches!(&step.phase, Phase::PasswordEntry { selected, .. } if selected.id == 7));
     }
 
     #[test]

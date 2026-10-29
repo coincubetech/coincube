@@ -2800,13 +2800,43 @@ pub fn recovery_kit_restore<'a>(
             "Review the error below, then try again.".to_string(),
         ),
     };
+    let active_stage = match phase {
+        RestorePhase::Email | RestorePhase::OtpEntry => 1,
+        RestorePhase::LoadingCubes | RestorePhase::CubePicker { .. } => 2,
+        RestorePhase::PasswordEntry { .. }
+        | RestorePhase::Decrypting { .. }
+        | RestorePhase::Ready { .. } => 3,
+        RestorePhase::Error { .. } => 0,
+    };
+    let stages = ["1  Sign in", "2  Choose Cube", "3  Open Kit"];
+    let mut stepper = Row::new().spacing(12).width(Length::Fill);
+    for (index, label) in stages.iter().enumerate() {
+        let stage = index + 1;
+        let style = if stage == active_stage {
+            theme::text::primary
+        } else {
+            theme::text::secondary
+        };
+        stepper = stepper.push(
+            Container::new(p2_regular(*label).style(style))
+                .padding([10, 12])
+                .width(Length::FillPortion(1)),
+        );
+    }
     let mut content: Column<'a, Message> = Column::new()
-        .spacing(20)
+        .spacing(22)
         .width(Length::Fill)
-        .max_width(700)
+        .max_width(780)
         .push(p2_regular(format!("{flow_label} · {stage_label}")).style(theme::text::secondary))
         .push(h4_bold(step_title))
+        .push(stepper)
         .push(p2_regular(step_detail).style(theme::text::secondary));
+
+    if let Some(e) = error {
+        content = content.push(card::simple(
+            text::text(e.to_string()).style(theme::text::warning),
+        ));
+    }
 
     match phase {
         RestorePhase::Email => {
@@ -2859,14 +2889,14 @@ pub fn recovery_kit_restore<'a>(
         RestorePhase::LoadingCubes => {
             content = content.push(text::text("Loading your Cubes from Connect…"));
         }
-        RestorePhase::CubePicker { cubes, .. } => {
+        RestorePhase::CubePicker { cubes, selected } => {
             content = content.push(p2_regular(match scope {
                 crate::installer::step::RestoreScope::Full => "Recovery Kit availability",
                 crate::installer::step::RestoreScope::DescriptorOnly => {
                     "Wallet descriptor availability"
                 }
             }));
-            let mut col = Column::new().spacing(10);
+            let mut col = Column::new().spacing(10).width(Length::Fill);
             if cubes.is_empty() {
                 col = col.push(text::text(
                     "No Cubes found on this Connect account for the current network.",
@@ -2888,40 +2918,52 @@ pub fn recovery_kit_restore<'a>(
                                 c.status.has_encrypted_wallet_descriptor
                             }
                         };
-                    let label = if available {
+                    let availability = if available {
                         match scope {
-                            crate::installer::step::RestoreScope::Full => {
-                                format!("{} · Recovery Kit available", c.name)
-                            }
+                            crate::installer::step::RestoreScope::Full => "Recovery Kit available",
                             crate::installer::step::RestoreScope::DescriptorOnly => {
-                                format!("{} · Wallet descriptor available", c.name)
+                                "Wallet descriptor available"
                             }
                         }
                     } else if !c.status.has_recovery_kit {
-                        format!("{} · No Recovery Kit", c.name)
+                        "No Recovery Kit"
                     } else {
                         match scope {
-                            crate::installer::step::RestoreScope::Full => {
-                                format!("{} · No Master Seed in kit", c.name)
-                            }
+                            crate::installer::step::RestoreScope::Full => "No Master Seed in kit",
                             crate::installer::step::RestoreScope::DescriptorOnly => {
-                                format!("{} · No descriptor in kit", c.name)
+                                "No descriptor in kit"
                             }
                         }
                     };
                     let id = c.id;
-                    // Raw `iced::widget::Button` because the labels are
-                    // built from dynamic `String`s — `button::secondary`
-                    // requires `&'static str`.
-                    let row_text = text::text(label).style(if available {
-                        theme::text::primary
-                    } else {
-                        theme::text::secondary
-                    });
+                    let chosen = *selected == Some(id);
+                    let row_text = Column::new()
+                        .spacing(4)
+                        .push(
+                            p2_regular(if chosen {
+                                format!("◉  Selected · {}", c.name)
+                            } else {
+                                format!("○  {}", c.name)
+                            })
+                            .style(if available {
+                                theme::text::primary
+                            } else {
+                                theme::text::secondary
+                            }),
+                        )
+                        .push(p2_regular(availability).style(if available {
+                            theme::text::primary
+                        } else {
+                            theme::text::secondary
+                        }));
                     let mut btn = Button::new(row_text)
                         .width(Length::Fill)
-                        .padding([8, 16])
-                        .style(theme::button::secondary);
+                        .padding([14, 18])
+                        .style(if chosen {
+                            theme::button::orange_outline
+                        } else {
+                            theme::button::secondary
+                        });
                     if available {
                         btn = btn.on_press(Message::RecoveryKitRestore(
                             RecoveryKitRestoreMsg::SelectCube(id),
@@ -2930,7 +2972,14 @@ pub fn recovery_kit_restore<'a>(
                     col = col.push(btn);
                 }
             }
-            content = content.push(col);
+            content =
+                content.push(col).push(
+                    button::primary(None, "Next")
+                        .on_press_maybe(selected.map(|_| {
+                            Message::RecoveryKitRestore(RecoveryKitRestoreMsg::ConfirmCube)
+                        }))
+                        .width(Length::Fixed(220.0)),
+                );
         }
         RestorePhase::PasswordEntry { selected, .. } => {
             content = content
@@ -2970,26 +3019,42 @@ pub fn recovery_kit_restore<'a>(
                 });
         }
         RestorePhase::Decrypting { .. } => {
-            content = content.push(text::text(
-                "Decrypting your Recovery Kit on this device. This can take a moment.",
+            content = content.push(card::simple(
+                p1_regular("Decrypting your Recovery Kit. This takes a moment.")
+                    .style(theme::text::secondary),
             ));
         }
-        RestorePhase::Ready { .. } => {
+        RestorePhase::Ready { selected, .. } => {
             // The happy path after a successful decrypt fires
             // `Message::Next` automatically, so the user rarely
             // lingers on this screen. But a user can land here
             // again by navigating back through the installer —
             // without an explicit Next button they'd be stuck.
-            content = content.push(
-                button::primary(None, "Next")
-                    .on_press(Message::Next)
-                    .width(Length::Fixed(220.0))
-                    .padding([10, 20]),
-            );
+            content = content
+                .push(card::simple(
+                    Column::new()
+                        .spacing(8)
+                        .push(p1_bold(format!(
+                            "Ready to restore from \"{}\".",
+                            selected.name
+                        )))
+                        .push(p2_regular("Cube and network match this Recovery Kit.")),
+                ))
+                .push(
+                    button::primary(None, "Next")
+                        .on_press(Message::Next)
+                        .width(Length::Fixed(220.0))
+                        .padding([10, 20]),
+                );
         }
         RestorePhase::Error { message } => {
             content = content
-                .push(text::text(message.clone()).style(theme::text::warning))
+                .push(card::simple(
+                    Column::new()
+                        .spacing(8)
+                        .push(p1_bold("Recovery needs attention"))
+                        .push(text::text(message.clone()).style(theme::text::warning)),
+                ))
                 .push(
                     button::secondary(None, "Try again")
                         .on_press(Message::RecoveryKitRestore(
@@ -2999,10 +3064,6 @@ pub fn recovery_kit_restore<'a>(
                         .padding([10, 20]),
                 );
         }
-    }
-
-    if let Some(e) = error {
-        content = content.push(text::text(e.to_string()).style(theme::text::warning));
     }
 
     // Skip button — only for DescriptorOnly scopes.
@@ -3430,7 +3491,7 @@ mod tests {
                 candidate(2, "Travel fund", true, false, true),
                 candidate(3, "Archive", false, false, false),
             ],
-            selected: None,
+            selected: Some(1),
         };
 
         for (scope, expected, availability, theme_name, theme) in [
@@ -3504,11 +3565,16 @@ mod tests {
                 title_x,
                 eyebrow_x
             );
+            assert!(labels
+                .0
+                .iter()
+                .any(|(label, _)| label == "◉  Selected · Everyday"));
             let available_label = match scope {
-                RestoreScope::Full => "Everyday · Recovery Kit available",
-                RestoreScope::DescriptorOnly => "Everyday · Wallet descriptor available",
+                RestoreScope::Full => "Recovery Kit available",
+                RestoreScope::DescriptorOnly => "Wallet descriptor available",
             };
             assert!(labels.0.iter().any(|(label, _)| label == available_label));
+            assert!(labels.0.iter().any(|(label, _)| label == "2  Choose Cube"));
             assert!(!labels
                 .0
                 .iter()

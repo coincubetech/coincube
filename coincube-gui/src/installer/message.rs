@@ -297,6 +297,7 @@ pub enum RecoveryKitRestoreMsg {
     OtpVerified(Result<zeroize::Zeroizing<String>, String>),
     CubesLoaded(Result<Vec<super::step::recovery_kit_restore::RestoreCubeCandidate>, String>),
     SelectCube(u64),
+    ConfirmCube,
     PasswordEdited(zeroize::Zeroizing<String>),
     SubmitPassword,
     /// Carries the typed `RestoreError` rather than a flattened
@@ -333,6 +334,7 @@ impl std::fmt::Debug for RecoveryKitRestoreMsg {
                 .finish(),
             Self::CubesLoaded(r) => f.debug_tuple("CubesLoaded").field(r).finish(),
             Self::SelectCube(id) => f.debug_tuple("SelectCube").field(id).finish(),
+            Self::ConfirmCube => write!(f, "ConfirmCube"),
             Self::PasswordEdited(_) => f
                 .debug_tuple("PasswordEdited")
                 .field(&"<redacted>")
