@@ -484,6 +484,12 @@ pub struct Home {
     create_cube_name: coincube_ui::component::form::Value<String>,
     create_cube_pin: pin_input::PinInput,
     create_cube_pin_confirm: pin_input::PinInput,
+    /// Presentation only: network selection precedes the existing Cube form.
+    /// No seed, unlock or persistence decision depends on this flag.
+    create_network_confirmed: bool,
+    /// Keep the Create form open when its network picker triggers a datadir
+    /// probe. The probe replaces `State`, including its navigation flag.
+    create_network_selection_pending: bool,
     /// A stable operation identity selected before Cube creation. It is
     /// persisted with the Cube only after the normal backup gate succeeds.
     pending_bitcoin_import: Option<Box<BitcoinImport>>,
@@ -681,6 +687,8 @@ impl Home {
                 create_cube_name: coincube_ui::component::form::Value::default(),
                 create_cube_pin: pin_input::PinInput::new(),
                 create_cube_pin_confirm: pin_input::PinInput::new(),
+                create_network_confirmed: false,
+                create_network_selection_pending: false,
                 pending_bitcoin_import: None,
                 open_created_import_cube: None,
                 creating_cube: false,
@@ -2117,6 +2125,8 @@ impl Home {
                 self.catalog.dismiss_popovers();
                 if show {
                     self.pending_bitcoin_import = None;
+                    self.create_network_confirmed = false;
+                    self.create_network_selection_pending = false;
                     // Opening the form picks the default afresh: whether the
                     // passkey path can demonstrate a backup depends on the
                     // Connect session, which can change between visits.
@@ -2133,6 +2143,8 @@ impl Home {
                     _ => false,
                 };
                 if toggled && !show {
+                    self.create_network_confirmed = false;
+                    self.create_network_selection_pending = false;
                     self.pending_bitcoin_import = None;
                     self.create_cube_name = coincube_ui::component::form::Value::default();
                     self.create_cube_pin = pin_input::PinInput::new();
@@ -2148,6 +2160,22 @@ impl Home {
                         word.shrink_to_fit();
                     }
                     self.recovery_active_index = None;
+                }
+                Task::none()
+            }
+            Message::View(ViewMessage::ConfirmCreateNetwork) => {
+                if matches!(self.active_section, HomeSection::Cubes)
+                    && self.showing_create_form()
+                    && self.pending_bitcoin_import.is_none()
+                    && self.chain_availability(self.network).is_available()
+                {
+                    self.create_network_confirmed = true;
+                }
+                Task::none()
+            }
+            Message::View(ViewMessage::BackToCreateNetwork) => {
+                if !self.creating_cube && self.showing_create_form() {
+                    self.create_network_confirmed = false;
                 }
                 Task::none()
             }
@@ -3060,6 +3088,10 @@ impl Home {
                     self.catalog.pending_select = None;
                     return Task::none();
                 }
+                self.create_network_selection_pending =
+                    matches!(self.active_section, HomeSection::Cubes)
+                        && self.showing_create_form()
+                        && self.pending_bitcoin_import.is_none();
                 self.network = network;
                 self.open_created_import_cube = None;
                 if network != ChainId::Bitcoin {
@@ -3204,10 +3236,19 @@ impl Home {
                 }
                 Err(e) => {
                     self.catalog.pending_select = None;
+                    self.create_network_selection_pending = false;
                     self.error = Some(e.to_string());
                     Task::none()
                 }
                 Ok(mut state) => {
+                    if self.create_network_selection_pending {
+                        if let State::Cubes { create_cube, .. } | State::NoCube { create_cube } =
+                            &mut state
+                        {
+                            *create_cube = true;
+                        }
+                        self.create_network_selection_pending = false;
+                    }
                     if self.pending_bitcoin_import.is_some() {
                         match &mut state {
                             State::Cubes { create_cube, .. } | State::NoCube { create_cube } => {
@@ -5486,9 +5527,14 @@ impl Home {
     }
 
     pub fn view_with_privacy(&self, mask_amounts: bool) -> Element<Message> {
-        // The visible Launcher List has its own compact chrome and owns its
-        // body scrolling. Every other Home screen keeps the legacy frame.
-        let layout: Element<Message> = if launcher_catalog::catalog_visible(self) {
+        // The Launcher and Create journey own their chrome and body scrolling.
+        // Other Home sections keep the legacy frame.
+        let layout: Element<Message> = if matches!(self.active_section, HomeSection::Cubes)
+            && (matches!(self.state, State::CreationBackup(_))
+                || (self.showing_create_form() && self.pending_bitcoin_import.is_none()))
+        {
+            self.create_journey_view()
+        } else if launcher_catalog::catalog_visible(self) {
             launcher_catalog::launcher_view(self).map(Message::View)
         } else {
             self.legacy_frame(mask_amounts)
@@ -5629,6 +5675,150 @@ impl Home {
         } else {
             layout
         }
+    }
+
+    /// Create-only presentation around the existing network, Cube and backup
+    /// state machines. The controls below dispatch their original messages;
+    /// the journey does not hold a second copy of any wallet material.
+    fn create_journey_view(&self) -> Element<Message> {
+        let backing_up = matches!(self.state, State::CreationBackup(_));
+        let selecting_network = !backing_up && !self.create_network_confirmed;
+        let step_label = |number: u8, label: &'static str, current: bool| {
+            let label = format!("{number}  {label}");
+            if current {
+                p2_regular(label).style(theme::text::primary)
+            } else {
+                p2_regular(label).style(theme::text::secondary)
+            }
+        };
+
+        let progress = Row::new()
+            .spacing(24)
+            .push(step_label(1, "Network", selecting_network))
+            .push(step_label(2, "Cube", !selecting_network && !backing_up))
+            .push(step_label(3, "Backup", backing_up));
+
+        let mut header = Row::new()
+            .align_y(Alignment::Center)
+            .spacing(16)
+            .push(h4_bold("Create Cube"))
+            .push(p2_regular(self.network.label()).style(theme::text::secondary))
+            .push(Space::new().width(Length::Fill));
+        if !backing_up && self.has_cube_list() {
+            header = header.push(
+                button::secondary(None, "Back to Cube list")
+                    .on_press(ViewMessage::ShowCreateCube(false)),
+            );
+        }
+
+        let body: Element<ViewMessage> = if selecting_network {
+            let network_rows = self.displayed_networks.iter().copied().fold(
+                Column::new().spacing(10),
+                |rows, chain| {
+                    let available = self.chain_availability(chain).is_available();
+                    let label = if chain == self.network {
+                        format!("{}  ·  Selected", chain.label())
+                    } else {
+                        chain.label().to_string()
+                    };
+                    let row = coincube_ui::widget::Button::new(text(label)).width(Length::Fill);
+                    let row = if chain == self.network {
+                        row.style(theme::button::menu_pressed)
+                    } else {
+                        row.style(theme::button::secondary)
+                    };
+                    rows.push(
+                        row.on_press_maybe(
+                            (available && chain != self.network)
+                                .then_some(ViewMessage::SelectNetwork(chain)),
+                        ),
+                    )
+                },
+            );
+            let mut content = Column::new()
+                .spacing(18)
+                .max_width(640)
+                .push(h4_bold("Network"))
+                .push(p2_regular("Choose the network for this Cube.").style(theme::text::secondary))
+                .push(network_rows);
+            if let Some(error) = &self.error {
+                content = content.push(p2_regular(error).style(theme::text::error));
+            }
+            if !self.developer_mode {
+                content = content.push(
+                    Row::new()
+                        .spacing(12)
+                        .align_y(Alignment::Center)
+                        .push(
+                            p2_regular("Test networks appear when Developer mode is on.")
+                                .style(theme::text::secondary),
+                        )
+                        .push(
+                            button::transparent(None, "App preferences")
+                                .on_press(ViewMessage::OpenAppPreferences),
+                        ),
+                );
+            }
+            if self.network.is_blake2b() {
+                content = content.push(
+                    p2_regular("Bitcoin Blake2b supports Vault creation only.")
+                        .style(theme::text::secondary),
+                );
+            }
+            content = content.push(
+                button::primary(None, "Continue").on_press_maybe(
+                    self.chain_availability(self.network)
+                        .is_available()
+                        .then_some(ViewMessage::ConfirmCreateNetwork),
+                ),
+            );
+            content.into()
+        } else if let State::CreationBackup(step) = &self.state {
+            creation_backup_view(
+                step,
+                self.creation_backup_words.as_ref().map(|w| w.as_slice()),
+                self.creating_cube,
+                self.creating_passkey_cube(),
+                &self.creation_kit_password,
+                &self.creation_kit_confirm,
+                self.creation_kit_acknowledged,
+                self.creation_kit_error.as_deref(),
+                self.can_create_recovery_kit(),
+            )
+        } else {
+            Column::new()
+                .spacing(16)
+                .push(
+                    button::transparent(Some(icon::previous_icon()), "Back to networks")
+                        .on_press_maybe(
+                            (!self.creating_cube).then_some(ViewMessage::BackToCreateNetwork),
+                        ),
+                )
+                .push(self.creation_form())
+                .into()
+        };
+
+        let region = Column::new()
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .push(Container::new(header).padding(20).width(Length::Fill))
+            .push(Container::new(progress).padding(20).width(Length::Fill))
+            .push(
+                scrollable(Container::new(body).padding(24).width(Length::Fill))
+                    .height(Length::Fill),
+            );
+        let frame: Element<ViewMessage> = Container::new(
+            Container::new(region)
+                .style(theme::card::simple)
+                .width(Length::Fill)
+                .max_width(940),
+        )
+        .padding(24)
+        .center_x(Length::Fill)
+        .height(Length::Fill)
+        .style(theme::container::background)
+        .into();
+        frame.map(Message::View)
     }
 
     /// Home's frame for every screen except the visible Launcher List: the
@@ -6169,8 +6359,9 @@ fn create_cube_form<'a>(
 
     let mut column = Column::new()
         .spacing(20)
-        .align_x(Alignment::Center)
-        .width(Length::Fixed(500.0))
+        .align_x(if importing_bitcoin { Alignment::Center } else { Alignment::Start })
+        .width(Length::Fill)
+        .max_width(if importing_bitcoin { 500.0 } else { 640.0 })
         .push(h4_bold(if importing_bitcoin {
             "Create a Cube for your Bitcoin wallet"
         } else {
@@ -6376,10 +6567,14 @@ fn create_cube_form<'a>(
         );
     }
 
-    Container::new(column)
-        .padding(20)
-        .center_x(Length::Fill)
-        .into()
+    let form = Container::new(column)
+        .padding(if importing_bitcoin { 20 } else { 0 })
+        .width(Length::Fill);
+    if importing_bitcoin {
+        form.center_x(Length::Fill).into()
+    } else {
+        form.into()
+    }
 }
 
 /// The Vault line under a Cube's name on the Cubes list.
@@ -7111,6 +7306,8 @@ pub enum ViewMessage {
     /// Dismiss the recovery-method picker without choosing.
     CloseRecoveryMethodPicker,
     ShowCreateCube(bool),
+    ConfirmCreateNetwork,
+    BackToCreateNetwork,
     ShowImportBitcoin,
     CubeNameEdited(String),
     CreateCube,
