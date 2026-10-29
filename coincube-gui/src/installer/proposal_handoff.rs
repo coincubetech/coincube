@@ -121,7 +121,8 @@ mod tests {
             renderer::Headless,
             widget::{operation, operation::Focusable, Id, Operation},
         },
-        mouse, Rectangle, Size,
+        keyboard::{self, key},
+        mouse, Point, Rectangle, Size,
     };
     use iced_runtime::user_interface::{Cache, UserInterface};
 
@@ -129,6 +130,7 @@ mod tests {
     struct Probe {
         labels: Vec<String>,
         focus: Vec<Id>,
+        focus_bounds: Vec<(Id, Rectangle)>,
     }
     impl Operation for Probe {
         fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
@@ -137,9 +139,10 @@ mod tests {
         fn text(&mut self, _: Option<&Id>, _: Rectangle, value: &str) {
             self.labels.push(value.to_owned());
         }
-        fn focusable(&mut self, id: Option<&Id>, _: Rectangle, _: &mut dyn Focusable) {
+        fn focusable(&mut self, id: Option<&Id>, bounds: Rectangle, _: &mut dyn Focusable) {
             if let Some(id) = id {
                 self.focus.push(id.clone());
+                self.focus_bounds.push((id.clone(), bounds));
             }
         }
     }
@@ -234,6 +237,60 @@ mod tests {
                 )
                 .unwrap();
             }
+            if name == "dark" {
+                let return_bounds = probe
+                    .focus_bounds
+                    .iter()
+                    .find(|(id, _)| *id == Id::new("proposal-handoff-return"))
+                    .unwrap()
+                    .1;
+                let cursor = mouse::Cursor::Available(Point::new(
+                    return_bounds.x + return_bounds.width / 2.0,
+                    return_bounds.y + return_bounds.height / 2.0,
+                ));
+                let mut messages = Vec::new();
+                ui.update(
+                    &[iced::Event::Mouse(mouse::Event::ButtonPressed(
+                        mouse::Button::Left,
+                    ))],
+                    cursor,
+                    &mut renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut messages,
+                );
+                assert!(matches!(
+                    messages.as_slice(),
+                    [Message::FocusAction(id)] if *id == Id::new("proposal-handoff-return")
+                ));
+                messages.clear();
+                ui.update(
+                    &[iced::Event::Mouse(mouse::Event::ButtonReleased(
+                        mouse::Button::Left,
+                    ))],
+                    cursor,
+                    &mut renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut messages,
+                );
+                assert!(matches!(messages.as_slice(), [Message::Previous]));
+                messages.clear();
+                ui.update(
+                    &[iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                        key: keyboard::Key::Named(key::Named::Enter),
+                        modified_key: keyboard::Key::Named(key::Named::Enter),
+                        physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+                        location: keyboard::Location::Standard,
+                        modifiers: keyboard::Modifiers::empty(),
+                        text: None,
+                        repeat: false,
+                    })],
+                    mouse::Cursor::Unavailable,
+                    &mut renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut messages,
+                );
+                assert!(matches!(messages.as_slice(), [Message::Previous]));
+            }
         }
         session.revoke();
         assert!(!step.apply(&mut ctx));
@@ -250,5 +307,63 @@ mod tests {
         assert!(probe.labels.iter().any(|s| s == "Return to launcher"));
         assert!(!probe.focus.contains(&Id::new("proposal-handoff-continue")));
         assert!(probe.focus.contains(&Id::new("proposal-handoff-return")));
+        let return_bounds = probe
+            .focus_bounds
+            .iter()
+            .find(|(id, _)| *id == Id::new("proposal-handoff-return"))
+            .unwrap()
+            .1;
+        let cursor = mouse::Cursor::Available(Point::new(
+            return_bounds.x + return_bounds.width / 2.0,
+            return_bounds.y + return_bounds.height / 2.0,
+        ));
+        let mut messages = Vec::new();
+        ui.update(
+            &[iced::Event::Mouse(mouse::Event::ButtonPressed(
+                mouse::Button::Left,
+            ))],
+            cursor,
+            &mut renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut messages,
+        );
+        assert!(matches!(
+            messages.as_slice(),
+            [Message::FocusAction(id)] if *id == Id::new("proposal-handoff-return")
+        ));
+        messages.clear();
+        ui.update(
+            &[iced::Event::Mouse(mouse::Event::ButtonReleased(
+                mouse::Button::Left,
+            ))],
+            cursor,
+            &mut renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut messages,
+        );
+        assert!(matches!(
+            messages.as_slice(),
+            [Message::BackToApp(Network::Regtest)]
+        ));
+        messages.clear();
+        ui.update(
+            &[iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                key: keyboard::Key::Named(key::Named::Enter),
+                modified_key: keyboard::Key::Named(key::Named::Enter),
+                physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::empty(),
+                text: None,
+                repeat: false,
+            })],
+            mouse::Cursor::Unavailable,
+            &mut renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut messages,
+        );
+        assert!(matches!(
+            messages.as_slice(),
+            [Message::BackToApp(Network::Regtest)]
+        ));
     }
 }

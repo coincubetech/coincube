@@ -1071,6 +1071,7 @@ impl Installer {
                     | Message::CubeSaveFailed(..)
                     | Message::RetryCubeSave
                     | Message::BackToApp(..)
+                    | Message::FocusAction(..)
             )
         {
             self.navigation_error = Some("Proposal access ended. Reopen the Cube and start a new proposal. An already admitted native install may still finish; inspect its result before retrying.".into());
@@ -1337,6 +1338,14 @@ impl Installer {
             );
 
         let content = if let Some(error) = &self.navigation_error {
+            #[cfg(feature = "mcp-proposals")]
+            let return_label = if self.context.mcp_proposal.is_some() {
+                "Return to launcher"
+            } else {
+                "Return to Bitcoin Cube"
+            };
+            #[cfg(not(feature = "mcp-proposals"))]
+            let return_label = "Return to Bitcoin Cube";
             Column::new()
                 .push(
                     coincube_ui::widget::Container::new(
@@ -1344,11 +1353,8 @@ impl Installer {
                             .spacing(10)
                             .push(coincube_ui::component::card::warning(error.clone()))
                             .push(
-                                coincube_ui::component::button::secondary(
-                                    None,
-                                    "Return to Bitcoin Cube",
-                                )
-                                .on_press(Message::BackToApp(self.network)),
+                                coincube_ui::component::button::secondary(None, return_label)
+                                    .on_press(Message::BackToApp(self.network)),
                             ),
                     )
                     .padding(20),
@@ -2447,6 +2453,54 @@ mod proposal_handoff_flow_tests {
         installer.stop();
         assert!(!proposal.active());
         assert!(!crate::app::session::is_open());
+    }
+
+    #[test]
+    fn ended_handoff_focus_keeps_exit_control_available() {
+        let _guard = crate::app::session::test_guard();
+        let root = TestDir::new();
+        let (mut ctx, session) = fixture(root.path());
+        let cube = crate::app::settings::Settings::from_file(
+            &ctx.coincube_directory
+                .network_directory(crate::chain::ChainId::Regtest),
+        )
+        .unwrap()
+        .cubes
+        .remove(0);
+        let (mut installer, _) = Installer::try_new_for_chain(
+            ctx.coincube_directory.clone(),
+            crate::chain::ChainId::Regtest,
+            None,
+            UserFlow::CreateWallet,
+            true,
+            Some(cube),
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        ctx.mcp_proposal = None;
+        installer.context = ctx;
+        let session = Arc::try_unwrap(session).ok().unwrap();
+        let _ = installer.use_mcp_proposal(crate::app::local_mcp::Settings::default(), session);
+        let proposal = installer.context.mcp_proposal.as_ref().unwrap().clone();
+        proposal.revoke();
+        assert!(!proposal.active());
+        assert!(
+            !installer.proposal_locked,
+            "handoff remains visible until lock tick"
+        );
+
+        let focus = iced::advanced::widget::Id::new("proposal-handoff-return");
+        let _ = installer.update(Message::FocusAction(focus));
+        assert!(installer.navigation_error.is_none());
+        assert_eq!(installer.current, 0);
+        let _ = installer.update(Message::Next);
+        assert!(
+            installer.navigation_error.is_some(),
+            "navigation remains blocked"
+        );
     }
 }
 
