@@ -41,11 +41,11 @@ impl Step for ProposalHandoff {
         let handoff = card::simple(
             column![
                 caption(if active { "PROPOSAL PREPARED · WAITING FOR YOU" } else { "PROPOSAL ACCESS ENDED" }),
-                h3(if active { "Continue setup in Tenshu" } else { "Return to the Cube" }),
+                h3(if active { "Continue setup in Tenshu" } else { "Setup ended" }),
                 text(if active {
                     "A paired client prepared a policy proposal. No Vault has been created. You will select the real keys and review the compiled descriptor in Tenshu before creation."
                 } else {
-                    "This proposal can no longer continue. Return to the Cube and prepare a fresh proposal after unlocking."
+                    "This proposal can no longer continue. Return to the launcher, unlock this Cube, and ask the paired client to prepare a fresh proposal."
                 }),
             ]
             .spacing(12),
@@ -94,11 +94,11 @@ impl Step for ProposalHandoff {
             text("This opt-in handoff is available only for an empty Regtest Cube. Tenshu keeps creation approval with you."),
             handoff,
             row![plan, checks].spacing(16).width(Length::Fill),
-            caption("Creating the Vault does not grant the paired client read access. Ending this setup keeps its existing pairing until you revoke it."),
+            caption("No read access is granted. Ending setup locks this Cube and discards this proposal; pairing remains until revoked."),
             row![
                 button::primary_action("proposal-handoff-continue", None, "Continue to key selection", Message::FocusAction)
                     .on_press_maybe(active.then_some(Message::Next)),
-                button::secondary_action("proposal-handoff-return", None, "Return to Cube", Message::FocusAction)
+                button::secondary_action("proposal-handoff-return", None, if active { "End setup" } else { "Return to launcher" }, Message::FocusAction)
                     .on_press(if active { Message::Previous } else { Message::BackToApp(coincube_core::miniscript::bitcoin::Network::Regtest) }),
             ]
             .spacing(12),
@@ -121,7 +121,8 @@ mod tests {
             renderer::Headless,
             widget::{operation, operation::Focusable, Id, Operation},
         },
-        mouse, Rectangle, Size,
+        keyboard::{self, key},
+        mouse, Point, Rectangle, Size,
     };
     use iced_runtime::user_interface::{Cache, UserInterface};
 
@@ -129,6 +130,7 @@ mod tests {
     struct Probe {
         labels: Vec<String>,
         focus: Vec<Id>,
+        focus_bounds: Vec<(Id, Rectangle)>,
     }
     impl Operation for Probe {
         fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
@@ -137,9 +139,10 @@ mod tests {
         fn text(&mut self, _: Option<&Id>, _: Rectangle, value: &str) {
             self.labels.push(value.to_owned());
         }
-        fn focusable(&mut self, id: Option<&Id>, _: Rectangle, _: &mut dyn Focusable) {
+        fn focusable(&mut self, id: Option<&Id>, bounds: Rectangle, _: &mut dyn Focusable) {
             if let Some(id) = id {
                 self.focus.push(id.clone());
+                self.focus_bounds.push((id.clone(), bounds));
             }
         }
     }
@@ -195,6 +198,11 @@ mod tests {
                 .labels
                 .iter()
                 .any(|s| s == "Recovery test · not verified"));
+            assert!(probe.labels.iter().any(|s| s == "End setup"));
+            assert!(probe
+                .labels
+                .iter()
+                .any(|s| s.contains("locks this Cube and discards this proposal")));
             assert!(probe.focus.contains(&Id::new("proposal-handoff-continue")));
             assert!(probe.focus.contains(&Id::new("proposal-handoff-return")));
             let mut messages = Vec::new();
@@ -229,6 +237,60 @@ mod tests {
                 )
                 .unwrap();
             }
+            if name == "dark" {
+                let return_bounds = probe
+                    .focus_bounds
+                    .iter()
+                    .find(|(id, _)| *id == Id::new("proposal-handoff-return"))
+                    .unwrap()
+                    .1;
+                let cursor = mouse::Cursor::Available(Point::new(
+                    return_bounds.x + return_bounds.width / 2.0,
+                    return_bounds.y + return_bounds.height / 2.0,
+                ));
+                let mut messages = Vec::new();
+                ui.update(
+                    &[iced::Event::Mouse(mouse::Event::ButtonPressed(
+                        mouse::Button::Left,
+                    ))],
+                    cursor,
+                    &mut renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut messages,
+                );
+                assert!(matches!(
+                    messages.as_slice(),
+                    [Message::FocusAction(id)] if *id == Id::new("proposal-handoff-return")
+                ));
+                messages.clear();
+                ui.update(
+                    &[iced::Event::Mouse(mouse::Event::ButtonReleased(
+                        mouse::Button::Left,
+                    ))],
+                    cursor,
+                    &mut renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut messages,
+                );
+                assert!(matches!(messages.as_slice(), [Message::Previous]));
+                messages.clear();
+                ui.update(
+                    &[iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                        key: keyboard::Key::Named(key::Named::Enter),
+                        modified_key: keyboard::Key::Named(key::Named::Enter),
+                        physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+                        location: keyboard::Location::Standard,
+                        modifiers: keyboard::Modifiers::empty(),
+                        text: None,
+                        repeat: false,
+                    })],
+                    mouse::Cursor::Unavailable,
+                    &mut renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut messages,
+                );
+                assert!(matches!(messages.as_slice(), [Message::Previous]));
+            }
         }
         session.revoke();
         assert!(!step.apply(&mut ctx));
@@ -241,7 +303,67 @@ mod tests {
         let mut probe = Probe::default();
         ui.operate(&renderer, &mut operation::black_box(&mut probe));
         assert!(probe.labels.iter().any(|s| s == "PROPOSAL ACCESS ENDED"));
+        assert!(probe.labels.iter().any(|s| s == "Setup ended"));
+        assert!(probe.labels.iter().any(|s| s == "Return to launcher"));
         assert!(!probe.focus.contains(&Id::new("proposal-handoff-continue")));
         assert!(probe.focus.contains(&Id::new("proposal-handoff-return")));
+        let return_bounds = probe
+            .focus_bounds
+            .iter()
+            .find(|(id, _)| *id == Id::new("proposal-handoff-return"))
+            .unwrap()
+            .1;
+        let cursor = mouse::Cursor::Available(Point::new(
+            return_bounds.x + return_bounds.width / 2.0,
+            return_bounds.y + return_bounds.height / 2.0,
+        ));
+        let mut messages = Vec::new();
+        ui.update(
+            &[iced::Event::Mouse(mouse::Event::ButtonPressed(
+                mouse::Button::Left,
+            ))],
+            cursor,
+            &mut renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut messages,
+        );
+        assert!(matches!(
+            messages.as_slice(),
+            [Message::FocusAction(id)] if *id == Id::new("proposal-handoff-return")
+        ));
+        messages.clear();
+        ui.update(
+            &[iced::Event::Mouse(mouse::Event::ButtonReleased(
+                mouse::Button::Left,
+            ))],
+            cursor,
+            &mut renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut messages,
+        );
+        assert!(matches!(
+            messages.as_slice(),
+            [Message::BackToApp(Network::Regtest)]
+        ));
+        messages.clear();
+        ui.update(
+            &[iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                key: keyboard::Key::Named(key::Named::Enter),
+                modified_key: keyboard::Key::Named(key::Named::Enter),
+                physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::empty(),
+                text: None,
+                repeat: false,
+            })],
+            mouse::Cursor::Unavailable,
+            &mut renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut messages,
+        );
+        assert!(matches!(
+            messages.as_slice(),
+            [Message::BackToApp(Network::Regtest)]
+        ));
     }
 }

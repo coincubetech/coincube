@@ -525,11 +525,7 @@ impl PasskeyUnlock {
             .padding([2.0, 4.0])
             .style(face::face_link_style)
             .on_press(Message::Back);
-        face::unlock_face_body(
-            fields.into(),
-            "Network checks run after your passkey is accepted.",
-            cancel.into(),
-        )
+        face::unlock_face_body(fields.into(), cancel.into())
     }
 }
 

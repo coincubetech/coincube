@@ -446,6 +446,17 @@ impl std::fmt::Debug for BorderWalletReconMessage {
     }
 }
 
+/// A successful Re-register, tagged with the sign-in it was started from.
+/// The App adopts `device_id` into the live stream only while that stream
+/// still runs as `email` on `replaces`, so a result landing after an account
+/// switch, or after a newer sign-in registered its own id, changes nothing.
+#[derive(Debug, Clone)]
+pub struct ReregisteredDevice {
+    pub email: String,
+    pub replaces: String,
+    pub device_id: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum SettingsMessage {
     DataExportsSection,
@@ -478,11 +489,11 @@ pub enum SettingsMessage {
     /// is suspect (compromise, machine swap) or the row went stale on
     /// the API and signing started 404'ing.
     ReregisterConnectDevice,
-    /// Settled result of the re-registration RPC. Payload is the new
-    /// device_id on success, or a user-facing error string. Routed
-    /// straight to the About settings state so it can refresh its
-    /// banner without going through the catchall update path.
-    ConnectDeviceReregistered(Result<String, String>),
+    /// Settled result of the re-registration RPC: the new registration on
+    /// success, or a user-facing error string. Routed straight to the About
+    /// settings state so it can refresh its banner without going through the
+    /// catchall update path.
+    ConnectDeviceReregistered(Result<ReregisteredDevice, String>),
     RegisterWallet,
     FingerprintAliasEdited(Fingerprint, String),
     WalletAliasEdited(String),

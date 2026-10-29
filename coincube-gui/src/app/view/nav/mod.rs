@@ -232,7 +232,9 @@ fn connect_status_dot<'a>(status: &'a crate::app::ConnectionStatus) -> Element<'
     let dot_color = match status {
         crate::app::ConnectionStatus::Connected => color::GREEN,
         crate::app::ConnectionStatus::Connecting => color::ORANGE,
-        crate::app::ConnectionStatus::Error(_) => color::RED,
+        crate::app::ConnectionStatus::Error(_) | crate::app::ConnectionStatus::DeviceRejected => {
+            color::RED
+        }
         // Unreachable due to the early-return above, but keep the
         // match exhaustive so adding a new variant produces a compile
         // error instead of a silent default.

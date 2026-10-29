@@ -480,6 +480,77 @@ fn signed_in_connect_chip_opens_account_sheet_intent() {
     ));
 }
 
+/// A rejected device's only fix is the Re-register button on Cube Settings →
+/// About. The red chip must be a reachable control that routes there; a
+/// healthy or merely connecting chip stays a plain label.
+#[test]
+fn rejected_device_chip_routes_to_reregistration() {
+    load_fonts();
+    let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+        coincube_ui::font::REGULAR,
+        14.into(),
+        Some("tiny-skia"),
+    ))
+    .unwrap();
+    static REJECTED: ConnectionStatus = ConnectionStatus::DeviceRejected;
+    static CONNECTING: ConnectionStatus = ConnectionStatus::Connecting;
+    let size = Size::new(1024.0, 768.0);
+    // Focus after brand and account chip: the third shell control.
+    let third_focus = |status: &'static ConnectionStatus| {
+        let mut ctx = fixture_context();
+        ctx.connect_authenticated = true;
+        ctx.connect_email = Some("shell@example.invalid");
+        ctx.connect_stream_status = status;
+        let mut element = shell_tree(&ctx, ShellState::default());
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        for _ in 0..3 {
+            operate(
+                &mut element,
+                &mut tree,
+                &node,
+                &renderer,
+                focusable::focus_next::<()>(),
+            );
+        }
+        let focused = operate(
+            &mut element,
+            &mut tree,
+            &node,
+            &renderer,
+            focusable::find_focused(),
+        );
+        let sent = send(
+            &mut element,
+            &mut tree,
+            &node,
+            &renderer,
+            key(keyboard::key::Named::Enter, false, true),
+            mouse::Cursor::Unavailable,
+            size,
+        );
+        (focused, sent)
+    };
+
+    let (focused, sent) = third_focus(&REJECTED);
+    assert_eq!(focused, Some(Id::new(CONNECT_REREGISTER_ID)));
+    assert!(matches!(
+        sent.as_slice(),
+        [Message::Menu(to)] if to == &DEVICE_REJECTED_ROUTE
+    ));
+    assert_eq!(
+        DEVICE_REJECTED_ROUTE,
+        Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::About))
+    );
+
+    let (focused, _) = third_focus(&CONNECTING);
+    assert_ne!(focused, Some(Id::new(CONNECT_REREGISTER_ID)));
+}
+
 #[test]
 fn shell_escape_prefers_review_then_switcher() {
     let all = ShellState {
