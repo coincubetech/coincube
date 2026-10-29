@@ -958,8 +958,7 @@ pub(super) fn unlock_svg(network: ChainId, light: bool, name: &str, passkey: boo
     }
     let _ = write!(
         svg,
-        "<text x=\"28\" y=\"353\" font-size=\"13\" fill=\"{muted}\">Network checks run after your {} is accepted.</text><text x=\"32\" y=\"381\" font-size=\"14\" fill=\"{ink}\">Cancel</text><rect x=\"32\" y=\"388.5\" width=\"42\" height=\"1\" fill=\"{accent}\"/></svg>",
-        if passkey { "passkey" } else { "PIN" }
+        "<text x=\"32\" y=\"381\" font-size=\"14\" fill=\"{ink}\">Cancel</text><rect x=\"32\" y=\"388.5\" width=\"42\" height=\"1\" fill=\"{accent}\"/></svg>"
     );
     svg
 }
