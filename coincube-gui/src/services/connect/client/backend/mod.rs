@@ -41,7 +41,7 @@ use self::api::{UTXOKind, DEFAULT_OUTPOINTS_LIMIT};
 
 use super::{
     auth::{self, AccessTokenResponse, AuthError},
-    cache::update_connect_cache,
+    cache::{update_connect_cache, CacheAccountAction},
 };
 
 impl From<Error> for DaemonError {
@@ -572,8 +572,8 @@ impl Daemon for BackendWalletClient {
                         &network_dir,
                         &old,
                         &self.inner.auth_client,
-                        true,  // refresh the token
-                        false, // preserve the foreground account selection
+                        true, // refresh the token
+                        CacheAccountAction::PreserveSelection,
                     )
                     .await
                     .map_err(|e| {

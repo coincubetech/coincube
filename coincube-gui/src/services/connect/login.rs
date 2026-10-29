@@ -26,7 +26,7 @@ use crate::{
 use super::client::{
     auth::{AuthClient, AuthError},
     backend::{api, BackendClient, BackendWalletClient},
-    cache::{self, update_connect_cache, ConnectCacheError},
+    cache::{self, update_connect_cache, CacheAccountAction, ConnectCacheError},
 };
 use super::grpc::bootstrap::ensure_device_registered_best_effort;
 
@@ -525,7 +525,14 @@ pub async fn connect(
     let client =
         BackendClient::connect(auth.clone(), backend_api_url, access.clone(), network).await?;
 
-    update_connect_cache(&network_dir, &access, &auth, false, true).await?;
+    update_connect_cache(
+        &network_dir,
+        &access,
+        &auth,
+        false,
+        CacheAccountAction::NewLogin,
+    )
+    .await?;
 
     register_signer_device_best_effort(grpc_url.as_deref(), &client, &network_dir, &auth.email)
         .await;
@@ -568,7 +575,14 @@ pub async fn connect_with_credentials(
         .tokens;
 
     let refresh = tokens.expires_at < chrono::Utc::now().timestamp();
-    tokens = cache::update_connect_cache(network_dir, &tokens, &auth, refresh, true).await?;
+    tokens = cache::update_connect_cache(
+        network_dir,
+        &tokens,
+        &auth,
+        refresh,
+        CacheAccountAction::Activate,
+    )
+    .await?;
 
     let client = BackendClient::connect(auth.clone(), backend_api_url, tokens, network).await?;
 
