@@ -223,8 +223,14 @@ impl RecoveryKitRestoreStep {
         let client = self.client.clone();
         let network = self.network_filter.clone();
         let preselect_uuid = self.preselect_uuid.clone();
+        let entered_email = self.email.value.clone();
         Task::perform(
             async move {
+                // A Home-launched restore inherits a verified Connect token
+                // and skips this step's email form. Resolve that token's
+                // account before showing a picker that asks the user to
+                // confirm the account and network.
+                let account_email = account_email_for_picker(&client, entered_email).await?;
                 let all = client.list_cubes().await.map_err(|e| e.to_string())?;
                 // Filter to cubes on the requested network. We don't
                 // filter by `has_recovery_kit` at list time because the
@@ -280,9 +286,9 @@ impl RecoveryKitRestoreStep {
                         status,
                     });
                 }
-                Ok(out)
+                Ok((out, account_email))
             },
-            |res: Result<Vec<RestoreCubeCandidate>, String>| {
+            |res: Result<(Vec<RestoreCubeCandidate>, String), String>| {
                 Message::RecoveryKitRestore(RecoveryKitRestoreMsg::CubesLoaded(res))
             },
         )
@@ -528,6 +534,26 @@ fn cube_passes_filter(
     cube_network == network && preselect_uuid.is_none_or(|uuid| cube_uuid == uuid)
 }
 
+/// Use the verified in-step email, or resolve the account represented by an
+/// inherited Home token before showing the picker.
+async fn account_email_for_picker(
+    client: &CoincubeClient,
+    entered_email: String,
+) -> Result<String, String> {
+    if !entered_email.is_empty() {
+        return Ok(entered_email);
+    }
+    let user = client
+        .get_user()
+        .await
+        .map_err(|e| format!("Couldn't identify Connect account: {e}"))?;
+    let email = user.email.trim();
+    if !email_address::EmailAddress::is_valid(email) {
+        return Err("Connect account has no valid email to confirm.".into());
+    }
+    Ok(email.to_string())
+}
+
 /// Does `c` carry the specific encrypted half this restore flow
 /// needs? `has_recovery_kit` alone isn't enough — a cube can have
 /// a seed-only kit (mnemonic cube without a Vault when the backup
@@ -730,7 +756,11 @@ impl Step for RecoveryKitRestoreStep {
             }
             RecoveryKitRestoreMsg::CubesLoaded(res) => {
                 match res {
-                    Ok(cubes) => self.set_phase(phase_after_cubes_loaded(self.scope, cubes)),
+                    Ok((cubes, account_email)) => {
+                        self.email.value = account_email;
+                        self.email.valid = true;
+                        self.set_phase(phase_after_cubes_loaded(self.scope, cubes));
+                    }
                     Err(e) => {
                         self.set_phase(Phase::Error {
                             message: format!("Couldn't load cubes: {}", e),
@@ -777,7 +807,7 @@ impl Step for RecoveryKitRestoreStep {
                 Task::none()
             }
             RecoveryKitRestoreMsg::SubmitPassword => {
-                if self.processing {
+                if self.processing || self.password.is_empty() {
                     return Task::none();
                 }
                 // Do NOT enforce `MIN_PASSWORD_LEN` here. That floor
@@ -788,9 +818,8 @@ impl Step for RecoveryKitRestoreStep {
                 // different rules). A hardcoded gate here silently
                 // blocks a correct password from ever reaching the
                 // AES-GCM tag check, which is the only authoritative
-                // validator of "is this the right password". The
-                // view disables Submit when the input is empty, so
-                // no input-required guard is needed here either.
+                // validator of "is this the right password".
+                // A nonempty input is still required before decrypting.
                 let Phase::PasswordEntry { selected, attempts } = &self.phase else {
                     return Task::none();
                 };
@@ -1162,6 +1191,90 @@ mod tests {
                 owner_self: None,
             },
         }
+    }
+
+    #[tokio::test]
+    async fn inherited_connect_session_resolves_account_email() {
+        use httpmock::{Method, MockServer};
+
+        let server = MockServer::start();
+        let user = server.mock(|when, then| {
+            when.method(Method::GET).path("/api/v1/user");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"id":7,"email":"session@example.com","emailVerified":true}"#);
+        });
+        let mut client = CoincubeClient::for_test(server.base_url());
+        client.set_token("synthetic-token");
+
+        assert_eq!(
+            account_email_for_picker(&client, String::new()).await,
+            Ok("session@example.com".to_string())
+        );
+        user.assert_hits(1);
+    }
+
+    #[tokio::test]
+    async fn entered_email_does_not_request_account_again() {
+        use httpmock::{Method, MockServer};
+
+        let server = MockServer::start();
+        let user = server.mock(|when, then| {
+            when.method(Method::GET).path("/api/v1/user");
+            then.status(500);
+        });
+        let client = CoincubeClient::for_test(server.base_url());
+
+        assert_eq!(
+            account_email_for_picker(&client, "entered@example.com".into()).await,
+            Ok("entered@example.com".to_string())
+        );
+        user.assert_hits(0);
+    }
+
+    #[tokio::test]
+    async fn inherited_session_with_invalid_account_email_stops_before_picker() {
+        use httpmock::{Method, MockServer};
+
+        let server = MockServer::start();
+        let user = server.mock(|when, then| {
+            when.method(Method::GET).path("/api/v1/user");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"id":7,"email":" ","emailVerified":true}"#);
+        });
+        let client = CoincubeClient::for_test(server.base_url());
+
+        assert!(account_email_for_picker(&client, String::new())
+            .await
+            .is_err());
+        user.assert_hits(1);
+    }
+
+    #[test]
+    fn loaded_cubes_bind_resolved_account_to_picker() {
+        let mut step = RecoveryKitRestoreStep::new(RestoreScope::Full, "mainnet".into(), None);
+        step.phase = Phase::LoadingCubes;
+        let mut hws = HardwareWallets::new(
+            crate::dir::CoincubeDirectory::new("/synthetic/recovery-account".into()),
+            Network::Bitcoin,
+        );
+
+        let _ = step.update(
+            &mut hws,
+            Message::RecoveryKitRestore(RecoveryKitRestoreMsg::CubesLoaded(Ok((
+                vec![candidate("My Cube", true)],
+                "session@example.com".into(),
+            )))),
+        );
+        assert_eq!(step.email.value, "session@example.com");
+        assert!(matches!(
+            step.phase,
+            Phase::CubePicker {
+                selected: Some(1),
+                ..
+            }
+        ));
     }
 
     // --- `cube_passes_filter`: the network × preselect matrix that
@@ -1576,6 +1689,27 @@ mod tests {
         assert!(
             matches!(&step.phase, Phase::Ready { selected: ready, .. } if ready.uuid == selected.uuid)
         );
+    }
+
+    #[test]
+    fn empty_password_message_does_not_start_decrypt() {
+        let mut step = RecoveryKitRestoreStep::new(RestoreScope::Full, "mainnet".into(), None);
+        step.phase = Phase::PasswordEntry {
+            selected: candidate("Recovered Cube", true),
+            attempts: 0,
+        };
+        let mut hws = HardwareWallets::new(
+            crate::dir::CoincubeDirectory::new("/synthetic/recovery-empty-password".into()),
+            Network::Bitcoin,
+        );
+
+        let task = step.update(
+            &mut hws,
+            Message::RecoveryKitRestore(RecoveryKitRestoreMsg::SubmitPassword),
+        );
+        assert!(iced_runtime::task::into_stream(task).is_none());
+        assert!(matches!(step.phase, Phase::PasswordEntry { .. }));
+        assert!(!step.processing);
     }
 
     #[test]
