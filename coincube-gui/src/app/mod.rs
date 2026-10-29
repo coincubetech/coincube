@@ -4367,12 +4367,17 @@ impl App {
     }
 
     /// Refresh positive, session-bound recovery display evidence after sync.
+    /// Ineligibility withdraws the current notice; a refresh keeps it until
+    /// its callback replaces it, so each sync tick does not blank the line.
+    /// Display stays gated by [`unswept_notice::Notice::visible`].
     fn unswept_notice_task(&mut self) -> Task<Message> {
-        self.cache.unswept_notice = None;
-        if self.cache.chain() != crate::chain::ChainId::Bitcoin
-            || !self.cache.btcb2_server_enabled
-            || self.unswept_in_flight.is_some()
+        let previous = self.cache.unswept_notice.take();
+        if self.cache.chain() != crate::chain::ChainId::Bitcoin || !self.cache.btcb2_server_enabled
         {
+            return Task::none();
+        }
+        if self.unswept_in_flight.is_some() {
+            self.cache.unswept_notice = previous;
             return Task::none();
         }
         let Some(wallet) = self.wallet.as_ref() else {
@@ -4393,6 +4398,7 @@ impl App {
         let live = self.panels.claim_generation.subscribe();
         self.unswept_in_flight = Some(generation);
         self.unswept_session = Some(session);
+        self.cache.unswept_notice = previous;
         let app = self.cache.app_generation;
         Task::perform(
             crate::services::foreign_scan::known::known_unspent(client, outputs, generation, live),
