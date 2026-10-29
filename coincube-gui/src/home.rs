@@ -1621,6 +1621,11 @@ impl Home {
             self.network = ChainId::Bitcoin;
             self.error = None;
             self.server_cube_limit = None;
+            // The selected chain has changed under an in-progress Create
+            // journey. Its confirmed step and pending row selection belong to
+            // the old chain, so the post-probe view must start at Network.
+            self.create_network_confirmed = false;
+            self.create_network_selection_pending = false;
             self.state = State::Unchecked;
             return probe_network_datadir(
                 self.network,
@@ -2196,12 +2201,14 @@ impl Home {
                         return Task::done(Message::View(ViewMessage::CreateWallet));
                     }
                     self.create_network_confirmed = true;
+                    return create_journey_focus_task(Id::new(CREATE_BACK_TO_NETWORKS_ID));
                 }
                 Task::none()
             }
             Message::View(ViewMessage::BackToCreateNetwork) => {
                 if !self.creating_cube && self.showing_create_form() {
                     self.create_network_confirmed = false;
+                    return create_journey_focus_task(create_network_row_id(self.network));
                 }
                 Task::none()
             }
@@ -5876,7 +5883,7 @@ impl Home {
                     .on_press_maybe((!backing_up).then_some(ViewMessage::OpenAppPreferences)),
                 ),
         )
-        .height(Length::Fixed(64.0))
+        .center_y(Length::Fixed(64.0))
         .padding([0, 24])
         .width(Length::Fill)
         .style(theme::container::shell_rail);
@@ -5937,10 +5944,7 @@ impl Home {
                         }
                     }
                 };
-                let id = Id::from(format!(
-                    "tenshu.create:network:{}",
-                    settings::network_to_api_string(chain)
-                ));
+                let id = create_network_row_id(chain);
                 let mut name = Row::new()
                     .spacing(8)
                     .align_y(Alignment::Center)
@@ -6118,8 +6122,11 @@ impl Home {
                     .width(Length::Fill),
             )
             .push(divider());
-        if launcher_coin::is_test_network(self.network) {
-            region = region
+        // Keep this child slot present for live and test networks. Inserting
+        // it only for test chains rebuilds the following scrollable by index,
+        // discarding its focused row and scroll offset during a switch.
+        let test_strip: Element<ViewMessage> = if launcher_coin::is_test_network(self.network) {
+            Column::new()
                 .push(
                     Container::new(
                         Container::new(
@@ -6143,8 +6150,12 @@ impl Home {
                     .padding([0, 1])
                     .width(Length::Fill),
                 )
-                .push(divider());
-        }
+                .push(divider())
+                .into()
+        } else {
+            Space::new().height(Length::Fixed(0.0)).into()
+        };
+        region = region.push(test_strip);
         let region = region.push(
             scrollable(Container::new(body).padding(28).width(Length::Fill))
                 .id(Id::new(CREATE_BODY_SCROLL_ID))
@@ -6178,7 +6189,7 @@ impl Home {
                         .align_y(Alignment::Center)
                         .push(
                             button::secondary_action(
-                                "tenshu.create:back-to-networks",
+                                CREATE_BACK_TO_NETWORKS_ID,
                                 Some(icon::previous_icon()),
                                 "Back",
                                 create_journey_focus,
@@ -6240,7 +6251,9 @@ impl Home {
     /// Home's frame for every screen except the visible Launcher List: the
     /// 190px sidebar beside the scrolling section body.
     fn legacy_frame(&self, mask_amounts: bool) -> Element<Message> {
-        if matches!(self.state, State::Unchecked) {
+        if matches!(self.state, State::Unchecked)
+            && matches!(self.active_section, HomeSection::Cubes)
+        {
             // A fresh launch and a network probe have not established whether
             // any Cubes exist yet. Keep creation actions out of this frame.
             return Container::new(
@@ -6553,9 +6566,21 @@ fn global_settings_view(home: &Home) -> Element<Message> {
 const LEGACY_CONNECT_SIGN_IN_ID: &str = "tenshu.launcher.legacy:connect:sign-in";
 const LEGACY_CONNECT_ENTRY_ID: &str = "tenshu.launcher.legacy:connect:entry";
 pub(crate) const CREATE_BODY_SCROLL_ID: &str = "tenshu.create:body";
+const CREATE_BACK_TO_NETWORKS_ID: &str = "tenshu.create:back-to-networks";
 
 fn create_journey_focus(id: Id) -> ViewMessage {
     ViewMessage::Catalog(launcher_catalog::CatalogMessage::Focus(id))
+}
+
+fn create_journey_focus_task(id: Id) -> Task<Message> {
+    Task::done(Message::View(create_journey_focus(id)))
+}
+
+fn create_network_row_id(chain: ChainId) -> Id {
+    Id::from(format!(
+        "tenshu.create:network:{}",
+        settings::network_to_api_string(chain)
+    ))
 }
 
 fn create_network_row_action(
@@ -8696,6 +8721,28 @@ mod tests {
     }
 
     #[test]
+    fn create_step_navigation_restores_focus_to_mounted_action() {
+        let mut home = home();
+        home.state = State::NoCube { create_cube: true };
+        let continue_messages =
+            drain(home.update(Message::View(ViewMessage::ConfirmCreateNetwork)));
+        assert!(home.create_network_confirmed);
+        assert!(matches!(
+            continue_messages.as_slice(),
+            [Message::View(ViewMessage::Catalog(launcher_catalog::CatalogMessage::Focus(id)))]
+                if id == &Id::new(CREATE_BACK_TO_NETWORKS_ID)
+        ));
+
+        let back_messages = drain(home.update(Message::View(ViewMessage::BackToCreateNetwork)));
+        assert!(!home.create_network_confirmed);
+        assert!(matches!(
+            back_messages.as_slice(),
+            [Message::View(ViewMessage::Catalog(launcher_catalog::CatalogMessage::Focus(id)))]
+                if id == &create_network_row_id(ChainId::Bitcoin)
+        ));
+    }
+
+    #[test]
     fn selected_create_network_remains_keyboard_actionable_without_reprobing() {
         let id = Id::new("tenshu.create:network:mainnet");
         assert!(matches!(
@@ -8715,6 +8762,7 @@ mod tests {
         use iced::advanced::{
             layout,
             renderer::Headless,
+            widget::operation::{self, focusable, Outcome},
             widget::{Operation, Tree},
             Layout,
         };
@@ -8754,6 +8802,8 @@ mod tests {
 
         let mut home = home();
         home.state = State::NoCube { create_cube: true };
+        home.developer_mode = true;
+        home.refresh_displayed_networks();
         let mut element = home.create_journey_view();
         let renderer = <iced::Renderer as Headless>::new(
             coincube_ui::font::REGULAR,
@@ -8776,6 +8826,48 @@ mod tests {
             .actions
             .contains(&Id::new("tenshu.create:network:mainnet")));
         assert!(focusables.scrolls.contains(&Id::new(CREATE_BODY_SCROLL_ID)));
+
+        let focused_id = create_network_row_id(ChainId::Bitcoin);
+        let mut focus: Box<dyn Operation<()>> = Box::new(focusable::focus(focused_id.clone()));
+        loop {
+            element.as_widget_mut().operate(
+                &mut tree,
+                Layout::new(&node),
+                &renderer,
+                &mut operation::black_box(focus.as_mut()),
+            );
+            match focus.finish() {
+                Outcome::Chain(next) => focus = next,
+                Outcome::None | Outcome::Some(()) => break,
+            }
+        }
+        drop(element);
+
+        // A switch across live/test groups adds a visible strip, but the
+        // Create body stays at the same tree index and retains row focus.
+        home.network = ChainId::Testnet4;
+        let mut element = home.create_journey_view();
+        tree.diff(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(iced::Size::ZERO, iced::Size::new(1024.0, 768.0)),
+        );
+        let mut find: Box<dyn Operation<Id>> = Box::new(focusable::find_focused());
+        let restored = loop {
+            element.as_widget_mut().operate(
+                &mut tree,
+                Layout::new(&node),
+                &renderer,
+                &mut operation::black_box(find.as_mut()),
+            );
+            match find.finish() {
+                Outcome::None => break None,
+                Outcome::Some(id) => break Some(id),
+                Outcome::Chain(next) => find = next,
+            }
+        };
+        assert_eq!(restored, Some(focused_id));
     }
 
     #[test]
@@ -8834,6 +8926,22 @@ mod tests {
             .0
             .iter()
             .any(|label| label == "Create Cube" || label == "Create a new Cube"));
+
+        drop(element);
+        home.active_section = HomeSection::Settings;
+        let mut settings = home.view();
+        let mut tree = Tree::new(settings.as_widget());
+        let node = settings.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(iced::Size::ZERO, iced::Size::new(1024.0, 768.0)),
+        );
+        let mut labels = Labels::default();
+        settings
+            .as_widget_mut()
+            .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
+        assert!(labels.0.iter().any(|label| label == "Global Settings"));
+        assert!(!labels.0.iter().any(|label| label == "Checking for Cubes"));
     }
 
     #[test]
@@ -13906,8 +14014,19 @@ mod chain_identity_open_tests {
         home.recovery_words[0] = "synthetic".into();
         home.state = State::CreationBackup(CreationBackupStep::Choice);
         home.creating_cube = true;
+        home.create_network_confirmed = true;
+        home.create_network_selection_pending = true;
         drop(home.reload_global_settings());
         assert_eq!(home.network, ChainId::Bitcoin);
+        assert!(!home.create_network_confirmed);
+        assert!(!home.create_network_selection_pending);
+        assert!(matches!(home.state, State::Unchecked));
+        drop(home.update(Message::Checked {
+            for_chain: ChainId::Bitcoin,
+            res: Ok(State::NoCube { create_cube: false }),
+        }));
+        assert!(home.showing_create_journey());
+        assert!(!home.create_network_confirmed);
         assert!(home.creation_backup_words.is_none());
         assert!(home.recovery_words.iter().all(String::is_empty));
         assert!(!home.creating_cube);
