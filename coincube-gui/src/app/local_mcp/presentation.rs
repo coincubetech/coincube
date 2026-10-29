@@ -4,6 +4,8 @@
 
 use super::{pairings, Message, Settings};
 use crate::app::view;
+#[cfg(feature = "mcp-transactions")]
+use coincube_mcp::transaction::Prepared;
 use coincube_ui::font;
 use coincube_ui::theme::{self, tenshu::Tone};
 use coincube_ui::widget::{action::Action, Element};
@@ -293,9 +295,7 @@ fn client_controls<'a>(
         .and_then(|runtime| runtime.transactions.as_ref())
     {
         for draft in service.summaries() {
-            body = body
-                .push(muted(format!("Unsigned transaction: {} sats to {} recipient(s), fee {} sats. Review every address and amount before signing.", draft.amount_sats, draft.recipients.len(), draft.fee_sats)))
-                .push(action(iced::advanced::widget::Id::from(format!("tenshu.ai-access.client.{}.transaction.{}", client.id, draft.draft_id)), "Review prepared transaction in Tenshu", Some(message(Message::ReviewTransaction { client_id: client.id.clone(), draft_id: draft.draft_id })), theme::tenshu::button::ActionKind::Secondary));
+            body = body.push(transaction_card(&client.id, draft));
         }
     }
     #[cfg(feature = "mcp-proposals")]
@@ -347,6 +347,135 @@ fn client_controls<'a>(
             .into()]))
         .push(page::rule())
         .into()
+}
+
+/// The only live transaction state is an unsigned Regtest construction. Keep
+/// the artboard's review rhythm while deriving every value from the MCP result.
+#[cfg(feature = "mcp-transactions")]
+fn transaction_card(client_id: &str, draft: Prepared) -> Ui<'static> {
+    use crate::app::view::settings::page;
+
+    let ready = draft.network == "regtest"
+        && draft.status == "unsigned_ready_for_native_review"
+        && draft.signing_required;
+    let total = draft.amount_sats.checked_add(draft.fee_sats);
+    let mut details: Column<'static, view::Message, theme::Theme> = Column::new()
+        .spacing(0)
+        .width(Length::Fill)
+        .push(transaction_field(
+            "From",
+            "Active Vault · Bitcoin Regtest",
+            false,
+        ));
+    for (index, recipient) in draft.recipients.iter().enumerate() {
+        let label = if draft.recipients.len() == 1 {
+            "Recipient".to_owned()
+        } else {
+            format!("Recipient {}", index + 1)
+        };
+        details = details.push(transaction_field(
+            label,
+            format!(
+                "{} · {} sats · Regtest address",
+                recipient.address, recipient.amount_sats
+            ),
+            true,
+        ));
+    }
+    details = details
+        .push(transaction_field(
+            "Payment total",
+            format!("{} sats · exact amount requested", draft.amount_sats),
+            true,
+        ))
+        .push(transaction_field(
+            "Miner fee",
+            format!(
+                "{} sats · {} sat/vB · added on top",
+                draft.fee_sats, draft.fee_rate_sat_vb
+            ),
+            true,
+        ))
+        .push(transaction_field(
+            "Total leaving Vault",
+            total.map_or_else(|| "Unavailable".to_owned(), |sats| format!("{sats} sats")),
+            true,
+        ))
+        .push(transaction_field(
+            "Change",
+            format!("{} sats returned to this Vault", draft.change_sats),
+            true,
+        ))
+        .push(transaction_field(
+            "Inputs",
+            format!("{} selected by Tenshu", draft.input_count),
+            false,
+        ))
+        .push(transaction_field(
+            "Signatures",
+            "None collected · native signing required",
+            false,
+        ));
+
+    let review = ready && total.is_some();
+    let action_id = iced::advanced::widget::Id::from(format!(
+        "tenshu.ai-access.client.{}.transaction.{}",
+        client_id, draft.draft_id
+    ));
+    let review_message = review.then(|| {
+        message(Message::ReviewTransaction {
+            client_id: client_id.to_owned(),
+            draft_id: draft.draft_id,
+        })
+    });
+    let content = Column::new()
+        .spacing(12)
+        .width(Length::Fill)
+        .push(
+            row![heading("Prepared transaction"), page::scope_tag("TODAY"), page::scope_tag("REGTEST")]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+        )
+        .push(muted("Prepared by this paired client with Tenshu's coin selection and fee engine. Preparing does not send bitcoin; inspect the full recipient and amounts before signing."))
+        .push(page::status(
+            if review { page::Status::Ok } else { page::Status::Warn },
+            if review { "Ready for native review · unsigned" } else { "Draft unavailable for native review" },
+        ))
+        .push(details)
+        .push(action(
+            action_id,
+            "Review and sign in Tenshu",
+            review_message,
+            theme::tenshu::button::ActionKind::Primary,
+        ))
+        .push(muted("Fiat conversion, quote refresh, signer availability, and signed or broadcast status are planned. This experimental tool accepts exact satoshi amounts only. The native Send flow owns signing and broadcast."));
+    card(content)
+}
+
+#[cfg(feature = "mcp-transactions")]
+fn transaction_field(
+    label: impl Into<String>,
+    value: impl Into<String>,
+    mono: bool,
+) -> Ui<'static> {
+    use crate::app::view::settings::page;
+    let value = text(value.into()).size(13).width(Length::Fill);
+    let value = if mono {
+        value.font(font::MONO_REGULAR)
+    } else {
+        value
+    };
+    column![
+        page::rule(),
+        container(
+            row![muted(label.into()).width(Length::Fixed(142.0)), value,]
+                .spacing(12)
+                .width(Length::Fill),
+        )
+        .padding([9, 0]),
+    ]
+    .width(Length::Fill)
+    .into()
 }
 
 pub(super) fn revoke_confirmation<'a>(client_name: &str, id: &str) -> Ui<'a> {
