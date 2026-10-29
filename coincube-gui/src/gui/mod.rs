@@ -2772,6 +2772,9 @@ impl GUI {
                 let focus = focus.chain(action::reveal_focused(
                     crate::installer::step::descriptor::editor::border_wallet_wizard::BORDER_WALLET_GRID_SCROLL_ID,
                 ));
+                // The Create form scrolls inside its card while its footer stays
+                // fixed. Reveal keyboard focus for controls below that viewport.
+                let focus = focus.chain(action::reveal_focused(crate::home::CREATE_BODY_SCROLL_ID));
                 #[cfg(feature = "mcp-proposals")]
                 let focus = focus.chain(action::reveal_focused(
                     crate::installer::proposal_handoff::SCROLL_ID,

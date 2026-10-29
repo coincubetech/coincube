@@ -5953,7 +5953,7 @@ impl Home {
                     name = name.push(create_journey_tag(chain.label(), false));
                 }
                 let row = FocusableAction::new(
-                    id,
+                    id.clone(),
                     Row::new()
                         .spacing(12)
                         .align_y(Alignment::Center)
@@ -5973,8 +5973,8 @@ impl Home {
                 .width(Length::Fill)
                 .padding([12, 8])
                 .style(move |theme, status| {
-                    // A selected option has no action, but it is not an
-                    // unavailable network. Keep its label at normal contrast.
+                    // A selected option stays at normal contrast even though
+                    // activating it only preserves focus.
                     let mut style = theme::button::transparent(
                         theme,
                         if selected {
@@ -5990,10 +5990,8 @@ impl Home {
                     }
                     style
                 });
-                row.on_press_maybe(
-                    (available && !selected).then_some(ViewMessage::SelectNetwork(chain)),
-                )
-                .into()
+                row.on_press_maybe(create_network_row_action(chain, available, selected, id))
+                    .into()
             };
             let network_rule = || -> Element<ViewMessage> {
                 Container::new(Space::new())
@@ -6149,7 +6147,7 @@ impl Home {
         }
         let region = region.push(
             scrollable(Container::new(body).padding(28).width(Length::Fill))
-                .id(Id::new("tenshu.create:body"))
+                .id(Id::new(CREATE_BODY_SCROLL_ID))
                 .height(Length::Fill),
         );
         let region = if selecting_network {
@@ -6554,9 +6552,27 @@ fn global_settings_view(home: &Home) -> Element<Message> {
 
 const LEGACY_CONNECT_SIGN_IN_ID: &str = "tenshu.launcher.legacy:connect:sign-in";
 const LEGACY_CONNECT_ENTRY_ID: &str = "tenshu.launcher.legacy:connect:entry";
+pub(crate) const CREATE_BODY_SCROLL_ID: &str = "tenshu.create:body";
 
 fn create_journey_focus(id: Id) -> ViewMessage {
     ViewMessage::Catalog(launcher_catalog::CatalogMessage::Focus(id))
+}
+
+fn create_network_row_action(
+    chain: ChainId,
+    available: bool,
+    selected: bool,
+    id: Id,
+) -> Option<ViewMessage> {
+    if !available {
+        None
+    } else if selected {
+        // An enabled no-op focus action keeps the current row in Tab order
+        // without restarting a network probe or changing creation state.
+        Some(create_journey_focus(id))
+    } else {
+        Some(ViewMessage::SelectNetwork(chain))
+    }
 }
 
 /// The same supplied coin art used by the Launcher, including the dashed and
@@ -8680,6 +8696,89 @@ mod tests {
     }
 
     #[test]
+    fn selected_create_network_remains_keyboard_actionable_without_reprobing() {
+        let id = Id::new("tenshu.create:network:mainnet");
+        assert!(matches!(
+            create_network_row_action(ChainId::Bitcoin, true, true, id.clone()),
+            Some(ViewMessage::Catalog(launcher_catalog::CatalogMessage::Focus(target)))
+                if target == id
+        ));
+        assert!(matches!(
+            create_network_row_action(ChainId::Signet, true, false, id.clone()),
+            Some(ViewMessage::SelectNetwork(ChainId::Signet))
+        ));
+        assert!(create_network_row_action(ChainId::Bitcoin, false, true, id).is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn selected_create_network_is_in_rendered_tab_order() {
+        use iced::advanced::{
+            layout,
+            renderer::Headless,
+            widget::{Operation, Tree},
+            Layout,
+        };
+
+        #[derive(Default)]
+        struct Focusables {
+            actions: Vec<Id>,
+            scrolls: Vec<Id>,
+        }
+        impl Operation for Focusables {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn focusable(
+                &mut self,
+                id: Option<&Id>,
+                _: iced::Rectangle,
+                _: &mut dyn iced::advanced::widget::operation::Focusable,
+            ) {
+                if let Some(id) = id {
+                    self.actions.push(id.clone());
+                }
+            }
+            fn scrollable(
+                &mut self,
+                id: Option<&Id>,
+                _: iced::Rectangle,
+                _: iced::Rectangle,
+                _: iced::Vector,
+                _: &mut dyn iced::advanced::widget::operation::Scrollable,
+            ) {
+                if let Some(id) = id {
+                    self.scrolls.push(id.clone());
+                }
+            }
+        }
+
+        let mut home = home();
+        home.state = State::NoCube { create_cube: true };
+        let mut element = home.create_journey_view();
+        let renderer = <iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(14.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer");
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(iced::Size::ZERO, iced::Size::new(1024.0, 768.0)),
+        );
+        let mut focusables = Focusables::default();
+        element
+            .as_widget_mut()
+            .operate(&mut tree, Layout::new(&node), &renderer, &mut focusables);
+        assert!(focusables
+            .actions
+            .contains(&Id::new("tenshu.create:network:mainnet")));
+        assert!(focusables.scrolls.contains(&Id::new(CREATE_BODY_SCROLL_ID)));
+    }
+
+    #[test]
     fn unchecked_home_waits_for_probe_before_showing_create_journey() {
         let mut home = home();
         assert!(matches!(home.state, State::Unchecked));
@@ -8864,7 +8963,7 @@ mod tests {
                 );
                 if bottom {
                     let mut snap = iced::advanced::widget::operation::scrollable::snap_to(
-                        Id::new("tenshu.create:body"),
+                        Id::new(CREATE_BODY_SCROLL_ID),
                         iced::widget::scrollable::RelativeOffset {
                             x: None,
                             y: Some(1.0),
