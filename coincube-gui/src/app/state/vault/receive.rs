@@ -26,22 +26,39 @@ use crate::{
         message::Message,
         state::{coins_summary, vault::label::LabelsEdited, State},
         view,
-        wallet::Wallet,
+        wallet::{sync_status, SyncStatus, Wallet},
     },
     hw::{HardwareWallet, HardwareWallets},
 };
 
 use crate::daemon::{
     model::{LabelItem, Labelled},
-    Daemon,
+    Daemon, DaemonBackend,
 };
 
 const PREV_ADDRESSES_PAGE_SIZE: usize = 20;
 
-fn balance_label(balance: Amount, unit: BitcoinDisplayUnit, masked: bool) -> String {
+fn vault_display_name(wallet: &Wallet) -> &str {
+    wallet
+        .alias
+        .as_deref()
+        .filter(|alias| !alias.trim().is_empty())
+        .unwrap_or("Unnamed")
+}
+
+fn zero_balance_known(status: &SyncStatus, rescan_pending: bool) -> bool {
+    status.is_synced() && !rescan_pending
+}
+
+fn balance_label(
+    balance: Amount,
+    unit: BitcoinDisplayUnit,
+    masked: bool,
+    zero_known: bool,
+) -> String {
     if masked {
         "••••••".to_string()
-    } else if balance.to_sat() > 0 {
+    } else if balance.to_sat() > 0 || zero_known {
         format!(
             "{} {}",
             balance.to_formatted_string_with_unit(unit),
@@ -86,6 +103,7 @@ impl Labelled for Addresses {
 pub struct VaultReceivePanel {
     data_dir: CoincubeDirectory,
     wallet: Arc<Wallet>,
+    daemon_backend: Option<DaemonBackend>,
     addresses: Addresses,
     current_qr: Option<qr_code::Data>,
     prev_addresses: Addresses,
@@ -105,6 +123,7 @@ impl VaultReceivePanel {
         Self {
             data_dir,
             wallet,
+            daemon_backend: None,
             addresses: Addresses::default(),
             current_qr: None,
             prev_addresses: Addresses::default(),
@@ -147,25 +166,42 @@ impl VaultReceivePanel {
 
 impl State for VaultReceivePanel {
     fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
-        // Reuse Overview's coin accounting. A zero in the coin cache can
-        // also mean a restored Vault has not scanned its history yet; this
-        // panel does not own Overview's rescan-date state, so avoid showing
-        // a confident zero here.
+        // Reuse Overview's coin accounting and sync classifier. A zero is
+        // authoritative only after sync and any restore rescan are complete.
         let (confirmed, unconfirmed, _, _) = coins_summary(
             cache.coins(),
             cache.blockheight().max(0) as u32,
             self.wallet.recovery_timelock(),
         );
         let balance = confirmed + unconfirmed;
-        let balance_display =
-            balance_label(balance, cache.bitcoin_unit, cache.balance_amounts_masked());
+        let masked = cache.balance_amounts_masked();
+        let zero_known = balance == Amount::ZERO
+            && !masked
+            && self.daemon_backend.as_ref().is_some_and(|backend| {
+                let status = sync_status(
+                    backend.clone(),
+                    cache.blockheight(),
+                    cache.sync_progress(),
+                    cache.last_poll_timestamp(),
+                    cache.last_poll_at_startup,
+                    cache.history_sync(),
+                );
+                // Receive is not sent UpdatePanelCache; check the persisted
+                // restore obligation afresh only for a visible, synced zero.
+                // A cached "no obligation" could briefly expose a false zero
+                // if a new restore rescan is scheduled while this page is open.
+                zero_balance_known(&status, cache.rescan_progress().is_some())
+                    && crate::app::pending_rescan(&self.data_dir, cache.chain(), &self.wallet)
+                        .is_none()
+            });
+        let balance_display = balance_label(balance, cache.bitcoin_unit, masked, zero_known);
         let content = view::dashboard(
             menu,
             cache,
             view::vault::receive::receive(
                 &self.addresses.list,
                 self.current_qr.as_ref(),
-                &cache.cube_name,
+                vault_display_name(&self.wallet),
                 balance_display,
                 &self.addresses.labels,
                 &self.prev_addresses.list,
@@ -424,6 +460,7 @@ impl State for VaultReceivePanel {
         // `Self::new` already starts in the loading state, so the fetch
         // below is covered from the first frame after navigation.
         *self = Self::new(data_dir, wallet);
+        self.daemon_backend = Some(daemon.backend());
         Task::perform(
             async move {
                 let res = daemon
@@ -587,6 +624,7 @@ async fn verify_address(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::settings::{self, PendingRescan, WalletSettings};
     use crate::{
         app::{cache::Cache, view::Message as viewMessage, Message},
         daemon::{
@@ -606,17 +644,89 @@ mod tests {
     fn receive_aside_masks_a_known_balance_and_avoids_an_unverified_zero() {
         let balance = Amount::from_sat(250_000);
         assert_eq!(
-            balance_label(balance, BitcoinDisplayUnit::Sats, false),
+            balance_label(balance, BitcoinDisplayUnit::Sats, false, false),
             "250,000 SATS"
         );
         assert_eq!(
-            balance_label(balance, BitcoinDisplayUnit::Sats, true),
+            balance_label(balance, BitcoinDisplayUnit::Sats, true, true),
             "••••••"
         );
         assert_eq!(
-            balance_label(Amount::ZERO, BitcoinDisplayUnit::Sats, false),
+            balance_label(Amount::ZERO, BitcoinDisplayUnit::Sats, false, false),
             "Check balance on Vault Overview"
         );
+        assert_eq!(
+            balance_label(Amount::ZERO, BitcoinDisplayUnit::Sats, false, true),
+            "0 SATS"
+        );
+    }
+
+    #[test]
+    fn receive_zero_is_known_only_after_sync_and_restore_rescan() {
+        assert!(zero_balance_known(&SyncStatus::Synced, false));
+        assert!(!zero_balance_known(&SyncStatus::Synced, true));
+        assert!(!zero_balance_known(
+            &SyncStatus::WalletFullScan {
+                progress: Some(0.5)
+            },
+            false
+        ));
+        assert!(!zero_balance_known(&SyncStatus::LatestWalletSync, false));
+    }
+
+    #[test]
+    fn receive_aside_uses_vault_alias_not_cube_name() {
+        let wallet = Wallet::new(CoincubeDescriptor::from_str(DESC).unwrap())
+            .with_name("Family Cube".to_string())
+            .with_alias(Some("Family Vault".to_string()));
+        assert_eq!(vault_display_name(&wallet), "Family Vault");
+        assert_ne!(vault_display_name(&wallet), wallet.name);
+
+        let unnamed = wallet.with_alias(Some("  ".to_string()));
+        assert_eq!(vault_display_name(&unnamed), "Unnamed");
+    }
+
+    #[test]
+    fn receive_rechecks_the_restore_marker_before_calling_zero_known() {
+        let root = std::env::temp_dir().join(format!("receive-rescan-{}", uuid::Uuid::new_v4()));
+        let data_dir = CoincubeDirectory::new(root.clone());
+        let wallet = Wallet::new(CoincubeDescriptor::from_str(DESC).unwrap());
+        let network_dir = data_dir.network_directory(wallet.chain);
+        std::fs::create_dir_all(network_dir.path()).unwrap();
+        let mut settings = settings::Settings {
+            wallets: vec![WalletSettings {
+                name: wallet.name.clone(),
+                alias: None,
+                descriptor_checksum: wallet.descriptor_checksum.clone(),
+                pinned_at: None,
+                keys: Vec::new(),
+                hardware_wallets: Vec::new(),
+                remote_backend_auth: None,
+                start_internal_bitcoind: None,
+                pending_rescan: Some(PendingRescan::DateUnknown),
+                keychain_keys_recorded: false,
+            }],
+            ..Default::default()
+        };
+        let path = network_dir.path().join(settings::SETTINGS_FILE_NAME);
+        let write = |settings: &settings::Settings| {
+            std::fs::write(&path, serde_json::to_vec(settings).unwrap()).unwrap();
+        };
+        let known = || {
+            zero_balance_known(
+                &SyncStatus::Synced,
+                crate::app::pending_rescan(&data_dir, wallet.chain, &wallet).is_some(),
+            )
+        };
+        write(&settings);
+        assert!(!known(), "pending restore is not a known zero");
+        settings.wallets[0].pending_rescan = None;
+        write(&settings);
+        assert!(known(), "retired marker permits a synced zero");
+        settings.wallets[0].pending_rescan = Some(PendingRescan::DateUnknown);
+        write(&settings);
+        assert!(!known(), "a new marker must hide the zero immediately");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

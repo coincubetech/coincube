@@ -29,7 +29,7 @@ use coincube_ui::{
 
 use crate::{
     app::{
-        menu::{Menu, VaultSubMenu},
+        menu::{CubeSubMenu, Menu},
         view::{
             loading_placeholder,
             message::VaultReceiveMessage,
@@ -569,7 +569,7 @@ fn gap_above<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
 pub fn receive<'a>(
     addresses: &'a [bitcoin::Address],
     current_qr: Option<&'a qr_code::Data>,
-    cube_name: &'a str,
+    vault_name: &'a str,
     balance_display: String,
     labels: &'a HashMap<String, String>,
     prev_addresses: &'a [bitcoin::Address],
@@ -751,7 +751,7 @@ pub fn receive<'a>(
     let aside = Column::new()
         .spacing(8)
         .push(p2_regular("Receiving into").style(theme::text::secondary))
-        .push(p1_bold(format!("Vault · {cube_name}")))
+        .push(p1_bold(format!("Vault · {vault_name}")))
         .push(p2_bold(balance_display))
         .push(iced::widget::rule::horizontal(1))
         .push(
@@ -762,7 +762,7 @@ pub fn receive<'a>(
             control_id("activity"),
             "See all in Activity",
             None,
-            Some(Message::Menu(Menu::Vault(VaultSubMenu::Transactions(None)))),
+            Some(Message::Menu(Menu::Cube(CubeSubMenu::Activity))),
             landing_subtle_button_style,
         ));
 
@@ -978,7 +978,7 @@ mod tests {
             receive(
                 &self.addresses,
                 self.current_qr.as_ref(),
-                "Family savings",
+                "Family Vault",
                 "250,000 SATS".to_string(),
                 &self.labels,
                 &self.prev,
@@ -1056,7 +1056,8 @@ mod tests {
                 let ready = inspect("vault-receive-generated-previous-expanded", &f);
                 assert!(ready.contains("Payment details"));
                 assert!(ready.contains("Receiving into"));
-                assert!(ready.contains("Vault · Family savings"));
+                assert!(ready.contains("Vault · Family Vault"));
+                assert!(!ready.contains("Vault · Family Cube"));
                 assert!(ready.contains("250,000 SATS"));
                 assert!(ready.contains("On-chain deposits appear after the Vault syncs."));
                 assert!(ready.has_focus(control_id("activity")));
@@ -1218,7 +1219,7 @@ mod tests {
             ));
             assert!(matches!(
                 activate_once(f.view(), control_id("activity"), pointer),
-                Message::Menu(Menu::Vault(VaultSubMenu::Transactions(None)))
+                Message::Menu(Menu::Cube(CubeSubMenu::Activity))
             ));
 
             // The first previous address is row 3 + 0.
