@@ -608,4 +608,73 @@ pub(crate) mod tests {
         assert_eq!(Anchor::decode(&revoked.encode().unwrap()).unwrap(), revoked);
         assert_ne!(pending.encode().unwrap(), revoked.encode().unwrap());
     }
+
+    #[test]
+    fn transitions_advance_once_and_revocation_is_terminal() {
+        let scope = scope();
+        let old = Anchor {
+            scope: scope.clone(),
+            state: State::Committed {
+                generation: 4,
+                digest: [1; 32],
+                cleanup_txn: None,
+                retire_files: vec![],
+            },
+        };
+        create(&old).unwrap();
+        let txn = Uuid::new_v4();
+        let pending = Anchor {
+            scope: scope.clone(),
+            state: State::Pending {
+                old_generation: 4,
+                old_digest: [1; 32],
+                next_digest: [2; 32],
+                txn_id: txn,
+                retire_files: vec![],
+            },
+        };
+        update(&old, &pending).unwrap();
+        assert!(update(&old, &pending).is_err());
+        assert_eq!(load(&scope).unwrap(), Some(pending.clone()));
+
+        let committed = Anchor {
+            scope: scope.clone(),
+            state: State::Committed {
+                generation: 5,
+                digest: [2; 32],
+                cleanup_txn: Some(txn),
+                retire_files: vec![],
+            },
+        };
+        let rollback = Anchor {
+            scope: scope.clone(),
+            state: old.state.clone(),
+        };
+        assert!(update(&pending, &rollback).is_err());
+        update(&pending, &committed).unwrap();
+        assert!(update(&pending, &committed).is_err());
+
+        let cleared = Anchor {
+            scope: scope.clone(),
+            state: State::Committed {
+                generation: 5,
+                digest: [2; 32],
+                cleanup_txn: None,
+                retire_files: vec![],
+            },
+        };
+        update(&committed, &cleared).unwrap();
+        assert!(update(&cleared, &old).is_err());
+        let revoked = Anchor {
+            scope: scope.clone(),
+            state: State::Revoked {
+                generation: 5,
+                digest: [2; 32],
+                txn_id: Uuid::new_v4(),
+            },
+        };
+        update(&cleared, &revoked).unwrap();
+        assert!(update(&revoked, &cleared).is_err());
+        assert_eq!(load(&scope).unwrap(), Some(revoked));
+    }
 }

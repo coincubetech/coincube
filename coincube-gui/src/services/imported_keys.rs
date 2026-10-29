@@ -1581,6 +1581,20 @@ mod tests {
     }
 
     #[test]
+    fn manifest_rejects_noncanonical_raw_json_even_when_semantically_equal() {
+        let fixture = Fixture::new();
+        let repository = fixture.repository();
+        let mut bytes = read_manifest_bytes(&repository.root().join(MANIFEST)).unwrap();
+        bytes.push(b'\n');
+        write_replace(&repository.root().join(MANIFEST), &bytes).unwrap();
+        let _guard = repository.lock().unwrap();
+        assert!(repository
+            .read_manifest_file(&repository.root().join(MANIFEST), &[], false)
+            .is_err());
+        assert!(repository.read_manifest().is_err());
+    }
+
+    #[test]
     fn admission_replacement_stale_revision_and_cancel_preserve_sibling() {
         let fixture = Fixture::new();
         let repository = fixture.repository();
@@ -1741,6 +1755,149 @@ mod tests {
                 "old manifest replay must fail"
             );
         }
+    }
+
+    #[test]
+    fn restart_before_pending_refuses_unanchored_transaction_files() {
+        let fixture = Fixture::new();
+        let repository = fixture.repository();
+        let old = anchor::load(&repository.anchor_scope()).unwrap().unwrap();
+        let old_bytes = read_manifest_bytes(&repository.root().join(MANIFEST)).unwrap();
+        let txn = Uuid::new_v4();
+        write_new(&repository.prior(txn), &old_bytes).unwrap();
+        write_new(&repository.prepared(txn), &old_bytes).unwrap();
+
+        let reopened = fixture.repository();
+        let _guard = reopened.lock().unwrap();
+        assert!(reopened.read_manifest().is_err());
+        assert_eq!(anchor::load(&reopened.anchor_scope()).unwrap(), Some(old));
+        assert_eq!(
+            read_manifest_bytes(&reopened.root().join(MANIFEST)).unwrap(),
+            old_bytes
+        );
+        assert!(reopened.prior(txn).exists());
+        assert!(reopened.prepared(txn).exists());
+    }
+
+    #[test]
+    fn restart_after_committed_finishes_only_anchored_cleanup() {
+        let fixture = Fixture::new();
+        let repository = fixture.repository();
+        let device = Zeroizing::new([11u8; 32]);
+        let record = repository
+            .admit_locked(
+                repository.read_manifest().unwrap(),
+                &fixture.accounts[0],
+                ImportedKeySecret::new(
+                    Zeroizing::new(fixture.phrases[0].clone()),
+                    Zeroizing::new(String::new()),
+                )
+                .unwrap(),
+                None,
+                "synthetic unlock",
+                &device,
+                || true,
+            )
+            .unwrap();
+        let old_bytes = read_manifest_bytes(&repository.root().join(MANIFEST)).unwrap();
+        let next_bytes = serde_json::to_vec(&repository.manifest(vec![])).unwrap();
+        let old = anchor::load(&repository.anchor_scope()).unwrap().unwrap();
+        let AnchorState::Committed {
+            generation, digest, ..
+        } = &old.state
+        else {
+            panic!("expected committed inventory");
+        };
+        let (generation, digest) = (*generation, *digest);
+        let txn = Uuid::new_v4();
+        write_new(&repository.prior(txn), &old_bytes).unwrap();
+        write_new(&repository.prepared(txn), &next_bytes).unwrap();
+        let pending = Anchor {
+            scope: old.scope.clone(),
+            state: AnchorState::Pending {
+                old_generation: generation,
+                old_digest: digest,
+                next_digest: anchor::digest(&next_bytes),
+                txn_id: txn,
+                retire_files: vec![record.file_name()],
+            },
+        };
+        anchor::update(&old, &pending).unwrap();
+        fs::rename(repository.prepared(txn), repository.root().join(MANIFEST)).unwrap();
+        sync_parent(&repository.root().join(MANIFEST)).unwrap();
+        let committed = repository
+            .recover_pending_with(pending, "synthetic unlock", &device)
+            .unwrap();
+        assert!(matches!(
+            committed.state,
+            AnchorState::Committed {
+                cleanup_txn: Some(_),
+                ..
+            }
+        ));
+        assert!(repository.root().join(record.file_name()).exists());
+        assert!(repository.prior(txn).exists());
+
+        let reopened = fixture.repository();
+        let _guard = reopened.lock().unwrap();
+        assert!(reopened.read_manifest().unwrap().records.is_empty());
+        assert!(!reopened.root().join(record.file_name()).exists());
+        assert!(!reopened.prior(txn).exists());
+        assert!(matches!(
+            anchor::load(&reopened.anchor_scope()).unwrap().unwrap().state,
+            AnchorState::Committed {
+                generation: next_generation,
+                cleanup_txn: None,
+                ..
+            } if next_generation == generation + 1
+        ));
+        write_replace(&reopened.root().join(MANIFEST), &old_bytes).unwrap();
+        assert!(reopened.read_manifest().is_err());
+    }
+
+    #[test]
+    fn repository_lock_excludes_another_process() {
+        const CHILD_PATH: &str = "COINCUBE_TEST_IMPORTED_ANCHOR_LOCK_CHILD";
+        const CHILD_EXPECT_BLOCKED: &str = "COINCUBE_TEST_IMPORTED_ANCHOR_LOCK_BLOCKED";
+        if let Some(path) = std::env::var_os(CHILD_PATH) {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .unwrap();
+            let acquired = file.try_lock_exclusive().is_ok();
+            assert_eq!(acquired, std::env::var_os(CHILD_EXPECT_BLOCKED).is_none());
+            return;
+        }
+
+        let fixture = Fixture::new();
+        let repository = fixture.repository();
+        let guard = repository.lock().unwrap();
+        let lock_path = repository
+            .directory
+            .path()
+            .join(format!("{LOCK_PREFIX}{}", repository.operation_id));
+        let check_child = |blocked| {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .arg("--exact")
+                .arg("services::imported_keys::tests::repository_lock_excludes_another_process")
+                .env(CHILD_PATH, &lock_path);
+            if blocked {
+                child.env(CHILD_EXPECT_BLOCKED, "1");
+            }
+            let output = child.output().unwrap();
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "child lock check failed: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        check_child(true);
+        drop(guard);
+        check_child(false);
     }
 
     #[test]
