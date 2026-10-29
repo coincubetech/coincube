@@ -212,7 +212,7 @@ fn scopes(enabled: bool) -> Element<'static, Msg> {
             segment("scope-cube", 0u8, "Cube · Everyday").icon(icon::cube_icon()),
             segment("scope-device", 1, "This device").icon(icon::display_icon()),
             segment("scope-vault", 2, "Vault · Family savings").icon(icon::shield_icon()),
-            segment("scope-spark", 3, "Spark · Daily spending").icon(icon::lightning_icon()),
+            segment("scope-spark", 3, "Spark · Daily spending").icon(icon::spark_icon()),
         ],
         Some(0),
         Msg::Focus,

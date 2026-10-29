@@ -42,6 +42,7 @@ pub fn connect_stream(
             let mut attempt: u64 = 0;
 
             loop {
+                let mut rejected = false;
                 match super::create_channel(&config.grpc_url).await {
                     Ok(grpc_channel) => {
                         let access_token = config.tokens.read().await.access_token.clone();
@@ -211,6 +212,12 @@ pub fn connect_stream(
                                                 );
                                                 return;
                                             }
+                                            if is_device_rejection(&e) {
+                                                // Revoked mid-stream.
+                                                reject_device(&mut channel, &e).await;
+                                                rejected = true;
+                                                break;
+                                            }
                                             log::error!("[CONNECT GRPC] Stream error: {}", e);
                                             break;
                                         }
@@ -226,32 +233,37 @@ pub fn connect_stream(
                                     );
                                     return;
                                 }
-                                // Distinguish auth failures so the App
-                                // can prompt re-login rather than
-                                // tight-looping reconnects against the
-                                // same expired bearer. The shared
-                                // `Arc<RwLock<AccessTokenResponse>>`
-                                // gets refreshed automatically by the
-                                // REST `BackendClient` on its next
-                                // call — but if that path doesn't fire
-                                // soon enough, the stream stays stuck
-                                // in this branch.
-                                let msg = if e.code() == tonic::Code::Unauthenticated {
-                                    format!(
-                                        "Connect session expired. Sign in again to resume \
-                                         real-time updates ({}).",
-                                        e.message(),
-                                    )
+                                if is_device_rejection(&e) {
+                                    reject_device(&mut channel, &e).await;
+                                    rejected = true;
                                 } else {
-                                    e.to_string()
-                                };
-                                if let Err(send_err) =
-                                    channel.send(ConnectStreamMessage::Error(msg)).await
-                                {
-                                    log::warn!(
-                                        "[CONNECT GRPC] Failed to forward connect Error: {}",
-                                        send_err
-                                    );
+                                    // Distinguish auth failures so the App
+                                    // can prompt re-login rather than
+                                    // tight-looping reconnects against the
+                                    // same expired bearer. The shared
+                                    // `Arc<RwLock<AccessTokenResponse>>`
+                                    // gets refreshed automatically by the
+                                    // REST `BackendClient` on its next
+                                    // call — but if that path doesn't fire
+                                    // soon enough, the stream stays stuck
+                                    // in this branch.
+                                    let msg = if e.code() == tonic::Code::Unauthenticated {
+                                        format!(
+                                            "Connect session expired. Sign in again to resume \
+                                         real-time updates ({}).",
+                                            e.message(),
+                                        )
+                                    } else {
+                                        e.to_string()
+                                    };
+                                    if let Err(send_err) =
+                                        channel.send(ConnectStreamMessage::Error(msg)).await
+                                    {
+                                        log::warn!(
+                                            "[CONNECT GRPC] Failed to forward connect Error: {}",
+                                            send_err
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -267,6 +279,16 @@ pub fn connect_stream(
                             );
                         }
                     }
+                }
+
+                if rejected {
+                    // No `Disconnected`: the status stays on the rejection.
+                    // Re-check the same id slowly rather than stopping: the
+                    // API maps any device-lookup error (a DB blip included)
+                    // to PERMISSION_DENIED, and such a blip must still heal
+                    // without minting a new device id.
+                    tokio::time::sleep(REJECTED_RECHECK).await;
+                    continue;
                 }
 
                 // Disconnected — reconnect with exponential backoff + jitter.
@@ -313,6 +335,42 @@ pub fn connect_stream(
     )
 }
 
+/// How often a rejected device id is re-checked. Long enough not to load the
+/// API with ids that are really gone, short enough that a server-side blip
+/// misread as "not found" heals on its own.
+const REJECTED_RECHECK: Duration = Duration::from_secs(5 * 60);
+
+/// True when the server refused the device itself rather than the
+/// connection. The API answers `PERMISSION_DENIED` for a device id that is
+/// missing, owned by another account, or revoked (`realtime_server.go`).
+/// It also maps a failed device lookup to the same code, so this is a strong
+/// signal rather than proof; the loop keeps re-checking slowly.
+fn is_device_rejection(status: &tonic::Status) -> bool {
+    status.code() == tonic::Code::PermissionDenied
+}
+
+/// Report a device rejection. The caller sends no `Disconnected` after it,
+/// so the status stays on the rejection instead of flipping back to
+/// "reconnecting", and waits `REJECTED_RECHECK` before trying again.
+async fn reject_device(
+    channel: &mut iced::futures::channel::mpsc::Sender<ConnectStreamMessage>,
+    status: &tonic::Status,
+) {
+    log::warn!(
+        "[CONNECT GRPC] Device rejected ({}); re-checking in {:?} unless it is re-registered",
+        status,
+        REJECTED_RECHECK
+    );
+    if let Err(e) = channel
+        .send(ConnectStreamMessage::DeviceRejected(
+            status.message().to_string(),
+        ))
+        .await
+    {
+        log::warn!("[CONNECT GRPC] Failed to forward DeviceRejected: {}", e);
+    }
+}
+
 /// Pure jitter helper exposed for unit testing the backoff math. Given
 /// a nominal backoff `d` returns a value in `[d/2, d)` — never longer
 /// than `d`, so callers can rely on the configured cap as a true upper
@@ -326,6 +384,26 @@ fn jittered(d: Duration) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_permission_denied_is_a_device_rejection() {
+        assert!(is_device_rejection(&tonic::Status::permission_denied(
+            "device not found or not owned by user"
+        )));
+        assert!(is_device_rejection(&tonic::Status::permission_denied(
+            "device revoked"
+        )));
+        // Transient or session-level failures keep the reconnect loop.
+        for status in [
+            tonic::Status::unavailable("upstream down"),
+            tonic::Status::unauthenticated("token expired"),
+            tonic::Status::aborted("connection superseded"),
+            tonic::Status::internal("failed to register connection"),
+            tonic::Status::invalid_argument("invalid device_id"),
+        ] {
+            assert!(!is_device_rejection(&status), "{:?}", status.code());
+        }
+    }
 
     #[test]
     fn jitter_stays_within_half_open_window() {

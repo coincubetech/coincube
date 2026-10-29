@@ -48,6 +48,9 @@ const IMPORT: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24
 const KEY: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4"/><path d="M11 12l8-8M16 7l2 2M14 9l2 2"/></svg>"##;
 const SHIELD: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linejoin="round"><path d="M12 3l7 3v5.5c0 4.3-3 7.6-7 9.5-4-1.9-7-5.2-7-9.5V6z"/></svg>"##;
 const IMPORTED: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M10 7.5v9m0-9h3c2.4 0 2.4 4 0 4h-3m0 0h3.6c2.6 0 2.6 4.5 0 4.5H10M11.5 6v1.5m0 9V18"/></svg>"##;
+/// Spark's asterisk from `coincube-ui`'s `spark_badge.svg`, filled and fitted
+/// to the 24-unit grid like the face mark.
+const SPARK: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path transform="translate(3 3.4) scale(0.2675)" fill="#fff" fill-rule="evenodd" d="M39.7159 25.248L40.8727 0.570312H26.4219L27.5787 25.2483L4.46555 16.5221L0 30.2656L23.8282 36.7915L8.38717 56.0763L20.0781 64.5703L33.6483 43.9245L47.2179 64.5695L58.9089 56.0755L43.4679 36.7909L67.2937 30.2657L62.8281 16.5221L39.7159 25.248Z"/></svg>"##;
 const LOCK: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 11h10v9H7zM9 11V8a3 3 0 0 1 6 0v3"/></svg>"##;
 const PASSKEY: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5a4 4 0 1 0 0 8a4 4 0 1 0 0-8M12 11.5l7 7m-3-3 2.5-2.5m-.5 5 2.5-2.5"/></svg>"##;
 const CHEVRON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 10l5 5 5-5"/></svg>"##;
@@ -615,15 +618,13 @@ pub(super) fn dock<'a>(
                 ViewMessage::GoToSection(HomeSection::RecoverVault),
             )
         });
-    let limit = at_limit.then(|| {
-        text(limit_text(projection))
-            .size(12)
-            .style(|theme: &theme::Theme| text::Style {
-                color: Some(theme.colors.shell.muted),
-            })
-            .wrapping(text::Wrapping::WordOrGlyph)
-            .width(Length::Fill)
-    });
+    let quota = text(quota_text(projection))
+        .size(12)
+        .style(|theme: &theme::Theme| text::Style {
+            color: Some(theme.colors.shell.muted),
+        })
+        .wrapping(text::Wrapping::WordOrGlyph)
+        .width(Length::Fill);
     let key = (projection.filtered_total > 0).then(|| key_button(home.catalog.key_open()));
     let target = dock_target(home, projection)
         .map(|caption| words(caption, 12.0, font::REGULAR, Ink::Muted));
@@ -637,8 +638,7 @@ pub(super) fn dock<'a>(
             .push(target)
             .push(recover)
             .push(Space::new().width(Length::Fixed(16.0)))
-            .push(limit)
-            .push((!at_limit).then(|| Space::new().width(Length::Fill)))
+            .push(quota)
             .push(activity_button(home))
             .push(key),
     )
@@ -990,6 +990,7 @@ pub(super) fn key_card<'a>(home: &Home) -> Element<'a, ViewMessage> {
                 vec![
                     glyph(SHIELD, 16.0, Ink::Body),
                     glyph(IMPORTED, 16.0, Ink::Body),
+                    glyph(SPARK, 16.0, Ink::Body),
                 ],
                 "Left: wallets",
             ))
@@ -1234,7 +1235,8 @@ pub(crate) struct ChromeSnapshot {
     links: Vec<&'static str>,
     /// The dock's "New Cubes: <network>" caption, when it shows.
     pub(super) target: Option<String>,
-    limit: Option<String>,
+    /// The dock's per-network plan usage line.
+    pub(super) quota: String,
     key: bool,
 }
 
@@ -1267,7 +1269,6 @@ pub(super) fn snapshot(home: &Home, projection: &Projection<'_>) -> ChromeSnapsh
         connect.push(dot());
         connect.push(("Sign in".to_string(), Ink::Accent, 13.0, true));
     }
-    let at_limit = projection.at_limit();
     let mut links = Vec::new();
     if account.is_authenticated()
         && !home.network.is_blake2b()
@@ -1292,7 +1293,7 @@ pub(super) fn snapshot(home: &Home, projection: &Projection<'_>) -> ChromeSnapsh
         connect,
         links,
         target: dock_target(home, projection),
-        limit: at_limit.then(|| limit_text(projection)),
+        quota: quota_text(projection),
         key: projection.filtered_total > 0,
     }
 }
@@ -1312,17 +1313,47 @@ fn count_text(shown: usize, total: usize) -> String {
     }
 }
 
-fn limit_text(projection: &Projection<'_>) -> String {
-    if projection.has_local_list {
+/// The plan's per-network limit and each network's use of it. Cubes that are
+/// registered in Connect but not on this device are called out, because they
+/// fill a slot without appearing in any list here.
+fn quota_text(projection: &Projection<'_>) -> String {
+    let limit = projection.cube_limit;
+    let networks = projection
+        .usage
+        .iter()
+        .map(|usage| {
+            let name = network_name(usage.chain);
+            let Some(total) = usage.total() else {
+                // This device's share is unknown: say what Connect holds
+                // rather than print a ratio that may be short.
+                return if usage.remote > 0 {
+                    format!(
+                        "{name} {} in Connect, this device not counted",
+                        usage.remote
+                    )
+                } else {
+                    format!("{name} not counted")
+                };
+            };
+            let mut entry = format!("{name} {total}/{limit}");
+            if total >= limit {
+                entry.push_str(" full");
+            }
+            if usage.remote > 0 {
+                entry.push_str(&format!(" ({} only in Connect)", usage.remote));
+            }
+            entry
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let plan = format!("{} plan: {limit} per network · {networks}", projection.tier);
+    if projection.at_limit() {
         format!(
-            "Cube limit reached ({}/{}) on the {} plan. Upgrade your Connect account to create more.",
-            projection.total_count, projection.cube_limit, projection.tier,
+            "{plan}. Upgrade, or delete a {} Cube, to add one.",
+            network_name(projection.network),
         )
     } else {
-        format!(
-            "Cube limit reached ({}/{}) on the {} plan. Upgrade your Connect account or delete a remote Cube to create one here.",
-            projection.total_count, projection.cube_limit, projection.tier,
-        )
+        plan
     }
 }
 
@@ -1464,18 +1495,15 @@ pub(crate) fn quiet_dock<'a, M: 'a>(chrome: &ChromeSnapshot) -> Element<'a, M> {
         );
     }
     row = row.push(Space::new().width(Length::Fixed(16.0)));
-    row = match &chrome.limit {
-        Some(limit) => row.push(
-            text(limit.clone())
-                .size(12)
-                .style(|theme: &theme::Theme| text::Style {
-                    color: Some(theme.colors.shell.muted),
-                })
-                .wrapping(text::Wrapping::WordOrGlyph)
-                .width(Length::Fill),
-        ),
-        None => row.push(Space::new().width(Length::Fill)),
-    };
+    row = row.push(
+        text(chrome.quota.clone())
+            .size(12)
+            .style(|theme: &theme::Theme| text::Style {
+                color: Some(theme.colors.shell.muted),
+            })
+            .wrapping(text::Wrapping::WordOrGlyph)
+            .width(Length::Fill),
+    );
     // `.keybtn` is outside `.quiet`'s selectors, so it keeps its ink.
     let key = chrome.key.then(|| {
         resting(

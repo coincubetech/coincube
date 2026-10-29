@@ -858,7 +858,7 @@ fn signed_amount(entry: &Entry, masked: bool) -> String {
 fn wallet_glyph(wallet: WalletFilter) -> Option<&'static str> {
     match wallet {
         WalletFilter::Vault => Some(glyph::SHIELD),
-        WalletFilter::Spark => Some(glyph::BOLT),
+        WalletFilter::Spark => Some(glyph::SPARK),
         WalletFilter::Liquid => Some(glyph::DROPLET),
         WalletFilter::All => None,
     }

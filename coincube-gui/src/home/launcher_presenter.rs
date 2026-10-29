@@ -666,15 +666,12 @@ pub(crate) fn face_button_label<'a, M: 'a>(label: &'static str) -> Element<'a, M
 /// Cancel link pinned to the bottom, as the prototype's unlock `.fc`.
 pub(crate) fn unlock_face_body<'a, M: 'a>(
     top: Element<'a, M>,
-    note: &'static str,
     cancel: Element<'a, M>,
 ) -> Element<'a, M> {
     Column::new()
         .height(Length::Fill)
         .push(top)
         .push(Space::new().height(Length::Fill))
-        .push(face_words(note, 13.0, coincube_ui::font::REGULAR, true))
-        .push(Space::new().height(Length::Fixed(8.0)))
         .push(cancel)
         .into()
 }
@@ -2700,11 +2697,11 @@ mod tests {
             "PIN",
             "Enter this Cube's PIN.",
             "Unlock",
-            "Network checks run after your PIN is accepted.",
             "Cancel",
         ] {
             assert!(pin.contains(text), "missing {:?}", text);
         }
+        assert!(!pin.contains("Network checks"));
         // The old full-screen controls are gone from the face.
         assert!(!pin.contains("Submit"));
         assert!(!pin.contains("Enter PIN for"));
@@ -2995,6 +2992,17 @@ mod tests {
         assert!(light.contains("NEXT HALVING"));
         assert!(dock.contains("Block 968,412 · COINCUBE | Connect"));
         assert!(!dock.contains("Turn off in App preferences"));
+        // The narrowest window still fits the selector beside the limit text.
+        let narrow = capture::inspect_filled(
+            "launcher-activity-dock-narrow",
+            super::super::launcher_catalog::launcher_view(&home),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+            (1024, 768),
+        );
+        assert!(narrow.contains("Block 968,412 · COINCUBE | Connect"));
+        assert!(narrow.contains("Key"));
         let _ = home.update_catalog(CatalogMessage::Activity(ActivityMessage::Menu(true)));
         let menu = launcher(&home, "launcher-activity-menu");
         for item in [
@@ -3397,7 +3405,7 @@ mod tests {
             total_count: 5,
             cube_limit: 10,
             tier: "Free",
-            has_local_list: true,
+            usage: Vec::new(),
             hidden: 0,
             filtered_total: 3,
             unread: Vec::new(),

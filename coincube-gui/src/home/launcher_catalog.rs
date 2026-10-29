@@ -1298,9 +1298,6 @@ pub(super) struct Projection<'a> {
     pub(super) total_count: usize,
     pub(super) cube_limit: usize,
     pub(super) tier: &'static str,
-    /// Whether the screen lists local Cubes (`State::Cubes`) or only the
-    /// remote ones (`State::NoCube`); their limit copy differs.
-    pub(super) has_local_list: bool,
     /// Local Cubes the network filter hides (after any search).
     pub(super) hidden: usize,
     /// Local Cubes the network filter shows, before any search: what the
@@ -1310,7 +1307,31 @@ pub(super) struct Projection<'a> {
     pub(super) unread: Vec<ChainId>,
     /// Every listed network with its local Cube count, in the canvas order.
     pub(super) network_counts: Vec<(ChainId, usize)>,
+    /// Each network's use of the plan's per-network Cube limit, in the canvas
+    /// order: the current network always, others only when they hold a Cube
+    /// here or in Connect, listed or not.
+    pub(super) usage: Vec<NetworkUsage>,
     pub(super) filter: NetworkFilter,
+}
+
+/// One network's share of the plan's Cube limit. The limit is per network and
+/// counts every Cube registered in Connect, so Cubes on another device use a
+/// slot here even though this device's lists never show them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct NetworkUsage {
+    pub(super) chain: ChainId,
+    /// Cubes on this device; `None` when this device's list for the network
+    /// cannot be counted (see `Home::cube_usage`).
+    pub(super) local: Option<usize>,
+    /// Cubes registered in Connect with no copy on this device.
+    pub(super) remote: usize,
+}
+
+impl NetworkUsage {
+    /// The slots in use, when this device's share is known.
+    pub(super) fn total(&self) -> Option<usize> {
+        self.local.map(|local| local + self.remote)
+    }
 }
 
 impl Projection<'_> {
@@ -1345,9 +1366,9 @@ pub(super) fn project(home: &Home) -> Projection<'_> {
     let network = home.network;
     let signed_in = home.connect_account.authenticated_client().is_some();
     let query = home.catalog.query.clone();
-    let (checked, has_local_list): (Option<(&[CubeSettings], ChainId)>, bool) = match &home.state {
-        State::Cubes { cubes, source, .. } => (Some((cubes.as_slice(), *source)), true),
-        _ => (None, false),
+    let checked: Option<(&[CubeSettings], ChainId)> = match &home.state {
+        State::Cubes { cubes, source, .. } => Some((cubes.as_slice(), *source)),
+        _ => None,
     };
     let open_cube = crate::app::session::current_cube_id();
     let filter = home.effective_filter();
@@ -1410,6 +1431,27 @@ pub(super) fn project(home: &Home) -> Projection<'_> {
             });
         }
     }
+    // Every network with a Cube, local or only in Connect, whatever the
+    // filter shows and whether or not the network is listed here (Developer
+    // mode off lists Bitcoin alone, yet Connect may hold a Testnet4 Cube).
+    // Counts come from `Home::cube_usage`, the same source as the Create gate,
+    // so the dock never marks a network full that the gate does not, or the
+    // reverse.
+    let mut usage: Vec<NetworkUsage> = Vec::new();
+    for chain in home.ordered_networks().into_iter().chain(ChainId::LAUNCHER) {
+        if usage.iter().any(|u| u.chain == chain) {
+            continue;
+        }
+        let (local, remote) = home.cube_usage(chain);
+        if chain == network || local.unwrap_or(0) + remote > 0 {
+            usage.push(NetworkUsage {
+                chain,
+                local,
+                remote,
+            });
+        }
+    }
+    usage.sort_by_key(|u| network_rank(u.chain));
     let network_str = settings::network_to_api_string(network);
     let all_remotes: Vec<&RemoteCube> = home
         .remote_cubes
@@ -1437,6 +1479,7 @@ pub(super) fn project(home: &Home) -> Projection<'_> {
         filtered_total,
         hidden,
         network_counts,
+        usage,
         unread: home.network_catalog_unread.clone(),
         filter,
         remote_total,
@@ -1448,7 +1491,6 @@ pub(super) fn project(home: &Home) -> Projection<'_> {
         total_count: home.total_cube_count(),
         cube_limit: home.cube_limit(),
         tier: home.account_tier.display_name(),
-        has_local_list,
     }
 }
 
@@ -3110,6 +3152,150 @@ mod tests {
         }
     }
 
+    /// The limit is per network and counts Cubes registered from other
+    /// devices: five here plus two only in Connect fill a 7-Cube Bitcoin
+    /// mainnet, while Testnet4's three stay well under it. The dock names
+    /// every network's count instead of one bare ratio.
+    #[test]
+    fn plan_usage_is_shown_per_network_and_counts_remote_cubes() {
+        let mut home = home_with(&[
+            ("a", "Alpha"),
+            ("b", "Beta"),
+            ("c", "Gamma"),
+            ("d", "Delta"),
+            ("e", "Epsilon"),
+        ]);
+        home.account_tier = crate::app::settings::global::AccountTier::Estate;
+        home.server_cube_limit = Some(7);
+        home.displayed_networks = vec![ChainId::Bitcoin, ChainId::Testnet4, ChainId::Signet];
+        let cube = |id: &str| {
+            CubeSettings::new_with_raw_id(id.to_string(), id.to_string(), ChainId::Testnet4)
+        };
+        home.network_catalog = vec![
+            (ChainId::Testnet4, vec![cube("t1"), cube("t2"), cube("t3")]),
+            (ChainId::Signet, Vec::new()),
+        ];
+        home.remote_cubes = vec![
+            remote("r1", "Elsewhere", true, true, false, false),
+            remote("r2", "Laptop", true, true, false, false),
+        ];
+
+        let projection = project(&home);
+        assert_eq!(
+            projection.usage,
+            vec![
+                NetworkUsage {
+                    chain: ChainId::Bitcoin,
+                    local: Some(5),
+                    remote: 2,
+                },
+                NetworkUsage {
+                    chain: ChainId::Testnet4,
+                    local: Some(3),
+                    remote: 0,
+                },
+            ],
+            "Signet holds no Cube, so it is left out"
+        );
+        assert!(projection.at_limit());
+        // The narrowest window the app allows, with every dock control the
+        // multi-network state brings (the "New Cubes" caption among them).
+        for (scenario, window) in [("plan-usage", WIDE), ("plan-usage-1024", (1024, 768))] {
+            let tree = home_tree(scenario, &home, window, "dark", theme::Theme::dark());
+            assert!(tree.contains("Estate plan: 7 per network"));
+            assert!(tree.contains("Bitcoin mainnet 7/7 full (2 only in Connect)"));
+            assert!(tree
+                .contains("Testnet4 3/7. Upgrade, or delete a Bitcoin mainnet Cube, to add one."));
+            assert!(tree.contains("New Cubes: Bitcoin mainnet"));
+            assert!(!tree.has(&create_id()));
+        }
+
+        // Developer mode off lists Bitcoin alone, but a Signet Cube held only
+        // in Connect still uses a Signet slot and is named. This device's
+        // Signet list is not read, so no ratio is claimed for it.
+        home.displayed_networks = vec![ChainId::Bitcoin];
+        home.network_catalog.clear();
+        let mut signet = remote("s1", "Lab", true, true, false, false);
+        signet.network = settings::network_to_api_string(ChainId::Signet);
+        home.remote_cubes.push(signet);
+        let projection = project(&home);
+        assert!(projection.usage.contains(&NetworkUsage {
+            chain: ChainId::Signet,
+            local: None,
+            remote: 1,
+        }));
+        let tree = home_tree(
+            "plan-usage-hidden",
+            &home,
+            WIDE,
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(tree.contains("Signet 1 in Connect, this device not counted"));
+        assert!(!tree.contains("Signet 1/7"));
+        home.remote_cubes.pop();
+
+        // A Cube going elsewhere frees the slot; the line stays as a quota.
+        home.remote_cubes.pop();
+        let projection = project(&home);
+        assert!(!projection.at_limit());
+        let tree = home_tree("plan-usage-free", &home, WIDE, "dark", theme::Theme::dark());
+        assert!(!tree.contains("full"));
+        assert!(tree.contains("Bitcoin mainnet 6/7 (1 only in Connect)"));
+        assert!(tree.has(&create_id()));
+    }
+
+    /// Switching network makes it current before its list is read (and keeps
+    /// it so if the read fails), while the checked list is still the old
+    /// network's. Those Cubes are not the new network's: the gate, the dock
+    /// and the summary must neither count them there nor tell the user to
+    /// delete a Cube on a network they show as empty.
+    #[test]
+    fn a_pending_network_switch_does_not_count_the_old_networks_cubes() {
+        let mut home = home_with(&[
+            ("a", "A"),
+            ("b", "B"),
+            ("c", "C"),
+            ("d", "D"),
+            ("e", "E"),
+            ("f", "F"),
+            ("g", "G"),
+        ]);
+        home.server_cube_limit = Some(7);
+        home.displayed_networks = vec![ChainId::Bitcoin, ChainId::Testnet4];
+        home.network = ChainId::Testnet4;
+        assert!(matches!(
+            home.state,
+            State::Cubes {
+                source: ChainId::Bitcoin,
+                ..
+            }
+        ));
+
+        assert_eq!(home.cube_usage(ChainId::Testnet4), (None, 0));
+        assert_eq!(home.cube_usage(ChainId::Bitcoin), (Some(7), 0));
+        let projection = project(&home);
+        assert!(!projection.at_limit());
+        let current = projection
+            .usage
+            .iter()
+            .find(|u| u.chain == ChainId::Testnet4)
+            .expect("the current network is always listed");
+        assert_eq!(current.local, None);
+        let tree = home_tree("pending-switch", &home, WIDE, "dark", theme::Theme::dark());
+        assert!(tree.contains("Testnet4 not counted"));
+        assert!(tree.contains("Bitcoin mainnet 7/7 full"));
+        assert!(!tree.contains("delete a Bitcoin Testnet4 Cube"));
+        assert!(!tree.contains("Upgrade, or delete"));
+        let summary = home.cube_limit_summary(ChainId::Testnet4);
+        assert!(!summary.contains("7/7"), "{}", summary);
+        assert!(summary.contains("could not be counted"), "{}", summary);
+
+        // Once the new network's list is in, its own count applies.
+        home.network_catalog = vec![(ChainId::Testnet4, Vec::new())];
+        assert_eq!(home.cube_usage(ChainId::Testnet4), (Some(0), 0));
+    }
+
     #[test]
     fn plan_limit_disables_creation_with_the_existing_explanation() {
         let mut home = home_with(&[("a", "Alpha"), ("b", "Beta")]);
@@ -3123,8 +3309,8 @@ mod tests {
         );
         assert!(!tree.has(&create_id()));
         assert!(!tree.has(&import_id()));
-        assert!(tree.contains("Cube limit reached (2/2)"));
-        assert!(tree.contains("Upgrade your Connect account to create more."));
+        assert!(tree.contains("Bitcoin mainnet 2/2 full"));
+        assert!(tree.contains("Upgrade, or delete a Bitcoin mainnet Cube, to add one."));
 
         // Import is offered only where the flow exists.
         let mut testnet = home_with(&[("a", "Alpha")]);
@@ -3189,7 +3375,6 @@ mod tests {
         fresh.remote_cubes = vec![remote("r1", "Remote", true, true, false, false)];
         assert!(shows_catalog(&fresh));
         let remote_only = project(&fresh);
-        assert!(!remote_only.has_local_list);
         assert_eq!(remote_only.remotes.len(), 1);
 
         fresh.state = State::RecoveryInput;
@@ -5040,7 +5225,7 @@ mod tests {
             let (mut limited, theme) = themed(rows(2), appearance);
             limited.server_cube_limit = Some(2);
             let tree = home_tree("r05b-plan-limit", &limited, compact, appearance, theme);
-            assert!(tree.contains("Cube limit reached (2/2)"));
+            assert!(tree.contains("Bitcoin mainnet 2/2 full"));
             assert!(!tree.has(&create_id()));
 
             let (mut refused, theme) = themed(rows(3), appearance);
