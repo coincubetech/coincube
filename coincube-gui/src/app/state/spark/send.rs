@@ -45,9 +45,7 @@ use crate::app::cache::Cache;
 use crate::app::menu::{Menu, SparkSubMenu};
 use crate::app::message::Message;
 use crate::app::state::{redirect, State};
-use crate::app::view::spark::SparkRecentTransaction;
 use crate::app::view::spark::SparkSendView;
-use crate::app::view::FiatAmountConverter;
 use crate::app::wallets::SparkBackend;
 use crate::services::branta::{self, LookupRequest, LookupResult, LookupTicket, RecipientIdentity};
 
@@ -449,9 +447,6 @@ pub struct SparkSend {
     /// Quote and image handle for the celebration screen.
     sent_quote: coincube_ui::component::quote_display::Quote,
     sent_image_handle: iced::widget::image::Handle,
-    /// Last few payments fetched from the bridge, rendered under the
-    /// send form. Populated on reload and after each successful send.
-    recent_transactions: Vec<SparkRecentTransaction>,
     /// The cross-chain destination + routes, when the current send is one.
     /// Outlives the phases that read it so a failed send can be re-prepared —
     /// see [`CrossChainContext`].
@@ -523,7 +518,6 @@ impl SparkSend {
             sent_image_handle: coincube_ui::component::quote_display::image_handle_for_context(
                 "lightning-send",
             ),
-            recent_transactions: Vec::new(),
             cross_chain: None,
             slippage_input: String::new(),
             advanced_open: false,
@@ -857,7 +851,6 @@ impl State for SparkSend {
                 sent_celebration_context: &self.sent_celebration_context,
                 sent_quote: &self.sent_quote,
                 sent_image_handle: &self.sent_image_handle,
-                recent_transactions: &self.recent_transactions,
                 balance_sats: self.balance_sats,
                 usdb_conversion_hint: usdb_conversion_hint(
                     self.invoice_amount_sat.or_else(|| {
@@ -878,7 +871,6 @@ impl State for SparkSend {
                 ),
                 bitcoin_unit: cache.bitcoin_unit,
                 reference_btc_usd_price: super::reference_btc_usd_price(cache),
-                show_direction_badges: cache.show_direction_badges,
                 cross_chain_ctx: self.cross_chain.as_ref(),
                 slippage_input: &self.slippage_input,
                 advanced_open: self.advanced_open,
@@ -911,10 +903,7 @@ impl State for SparkSend {
         _daemon: Option<Arc<dyn crate::daemon::Daemon + Sync + Send>>,
         _wallet: Option<Arc<crate::app::wallet::Wallet>>,
     ) -> Task<Message> {
-        Task::batch(vec![
-            fetch_payments_task(self.backend.clone()),
-            fetch_balance_task(self.backend.clone()),
-        ])
+        fetch_balance_task(self.backend.clone())
     }
 
     fn subscription(&self) -> iced::Subscription<Message> {
@@ -1302,9 +1291,6 @@ impl State for SparkSend {
                 self.cross_chain_prepare = None;
                 self.quote_countdown = None;
                 self.cross_chain = None;
-                // Refresh the Last Transactions list so the new payment
-                // appears under the send form once the user returns.
-                let refresh = fetch_payments_task(self.backend.clone());
                 // Pick celebration image based on send method.
                 // `last_send_method` mirrors the
                 // `breez_sdk_spark::SendPaymentMethod` variant names
@@ -1324,7 +1310,7 @@ impl State for SparkSend {
                 self.sent_quote = coincube_ui::component::quote_display::random_quote(context);
                 self.sent_image_handle =
                     coincube_ui::component::quote_display::image_handle_for_context(context);
-                refresh
+                Task::none()
             }
             SparkSendMessage::SendFailed(err) => {
                 // A definite rejection: the bridge answered. The payment did
@@ -1410,9 +1396,7 @@ impl State for SparkSend {
                         };
                     }
                 }
-                // Refresh the visible history either way — the user is being
-                // told to check it.
-                fetch_payments_task(self.backend.clone())
+                Task::none()
             }
             SparkSendMessage::ResendAfterUnknownRequested => {
                 // Only from a reconciliation that found no trace, and only on a
@@ -1476,38 +1460,6 @@ impl State for SparkSend {
                     });
                 }
                 Task::none()
-            }
-            SparkSendMessage::PaymentsLoaded(payments) => {
-                let fiat_converter: Option<FiatAmountConverter> =
-                    cache.fiat_price.as_ref().and_then(|p| p.try_into().ok());
-                self.recent_transactions = payments
-                    .iter()
-                    .take(5)
-                    .map(|p| {
-                        crate::app::state::spark::overview::payment_summary_to_recent_tx(
-                            p,
-                            fiat_converter.as_ref(),
-                        )
-                    })
-                    .collect();
-                Task::none()
-            }
-            SparkSendMessage::PaymentsFailed(err) => {
-                tracing::warn!("spark send list_payments failed: {}", err);
-                self.recent_transactions.clear();
-                Task::none()
-            }
-            SparkSendMessage::SelectTransaction(idx) => {
-                if let Some(payment) = self.recent_transactions.get(idx).cloned() {
-                    Task::batch(vec![
-                        redirect(Menu::Spark(SparkSubMenu::Transactions(None))),
-                        Task::done(Message::View(crate::app::view::Message::SparkTransactions(
-                            crate::app::view::SparkTransactionsMessage::Preselect(payment),
-                        ))),
-                    ])
-                } else {
-                    Task::none()
-                }
             }
             SparkSendMessage::History => redirect(Menu::Spark(SparkSubMenu::Transactions(None))),
         }
@@ -1930,25 +1882,6 @@ fn cross_chain_family_label(family: &str) -> &'static str {
         "evm" => "an EVM (Ethereum) address",
         _ => "a cross-chain address",
     }
-}
-
-/// Panel-local thin wrapper around the shared
-/// [`super::fetch_payments_task`] helper — only the message variants
-/// differ between the Send and Receive panels.
-fn fetch_payments_task(backend: Option<Arc<SparkBackend>>) -> Task<Message> {
-    super::fetch_payments_task(
-        backend,
-        |payments| {
-            Message::View(crate::app::view::Message::SparkSend(
-                crate::app::view::SparkSendMessage::PaymentsLoaded(payments),
-            ))
-        },
-        |err| {
-            Message::View(crate::app::view::Message::SparkSend(
-                crate::app::view::SparkSendMessage::PaymentsFailed(err),
-            ))
-        },
-    )
 }
 
 /// Spark-Send-flavoured wrapper around [`super::fetch_balance_task`].

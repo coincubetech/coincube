@@ -21,7 +21,6 @@
 //! land in Phase 4d.
 
 use std::collections::HashMap;
-use std::convert::TryInto;
 use std::sync::Arc;
 
 use coincube_spark_protocol::{DepositInfo, ReceivePaymentOk};
@@ -29,12 +28,10 @@ use coincube_ui::widget::Element;
 use iced::{widget::qr_code, Subscription, Task};
 
 use crate::app::cache::Cache;
-use crate::app::menu::{Menu, SparkSubMenu};
+use crate::app::menu::Menu;
 use crate::app::message::Message;
-use crate::app::state::{redirect, State};
+use crate::app::state::State;
 use crate::app::view::spark::SparkReceiveView;
-use crate::app::view::spark::SparkRecentTransaction;
-use crate::app::view::FiatAmountConverter;
 use crate::app::wallets::SparkBackend;
 
 use super::sideshift_receive::SparkSideshiftReceiveFlow;
@@ -139,9 +136,6 @@ pub struct SparkReceive {
     /// Quote and image handle for the celebration screen.
     received_quote: coincube_ui::component::quote_display::Quote,
     received_image_handle: iced::widget::image::Handle,
-    /// Last few payments fetched from the bridge, rendered under the
-    /// receive form. Populated on reload and after an incoming payment.
-    recent_transactions: Vec<SparkRecentTransaction>,
 }
 
 impl SparkReceive {
@@ -169,7 +163,6 @@ impl SparkReceive {
             received_image_handle: coincube_ui::component::quote_display::image_handle_for_context(
                 "lightning-receive",
             ),
-            recent_transactions: Vec::new(),
         }
     }
 
@@ -234,10 +227,8 @@ impl State for SparkReceive {
                 received_celebration_context: &self.received_celebration_context,
                 received_quote: &self.received_quote,
                 received_image_handle: &self.received_image_handle,
-                recent_transactions: &self.recent_transactions,
                 balance_sats: self.balance_sats,
                 bitcoin_unit: cache.bitcoin_unit,
-                show_direction_badges: cache.show_direction_badges,
                 sideshift_body,
                 cross_network_selected,
             }
@@ -269,11 +260,9 @@ impl State for SparkReceive {
     ) -> Task<Message> {
         // Refresh the pending-deposits list whenever the panel
         // becomes active. Errors degrade silently — the rest of the
-        // panel still works. Also fetch the recent-payments list so
-        // the "Last transactions" section under the form is fresh.
+        // panel still works.
         Task::batch(vec![
             fetch_deposits_task(self.backend.clone()),
-            fetch_payments_task(self.backend.clone()),
             fetch_balance_task(self.backend.clone()),
         ])
     }
@@ -603,9 +592,7 @@ impl State for SparkReceive {
                     amount_sat: running_total,
                     count,
                 };
-                // Surface the just-received payment in the Last
-                // Transactions list the moment it arrives.
-                fetch_payments_task(self.backend.clone())
+                Task::none()
             }
             SparkReceiveMessage::PendingDepositsLoaded(deposits) => {
                 self.pending_deposits = deposits;
@@ -683,15 +670,8 @@ impl State for SparkReceive {
             SparkReceiveMessage::ClaimDepositSucceeded(ok) => {
                 self.claiming = None;
                 self.claim_error = None;
-                let mut tasks = vec![
-                    // Drop the claimed row from the pending-deposits list.
-                    fetch_deposits_task(self.backend.clone()),
-                    // Refresh "Last transactions" so the just-claimed deposit
-                    // shows without navigating away and back — a claim fires only
-                    // `DepositsChanged`, not a payment event, so nothing else
-                    // repopulates the payments list here.
-                    fetch_payments_task(self.backend.clone()),
-                ];
+                // Drop the claimed row from the pending-deposits list.
+                let mut tasks = vec![fetch_deposits_task(self.backend.clone())];
                 // The bitcoin just landed in the spendable balance — fire the
                 // global "received" splash, same as an auto-claimed swap. A
                 // pre-maturity claim (SDK 0.25.0+) settles asynchronously and
@@ -710,13 +690,7 @@ impl State for SparkReceive {
                 self.claim_error = Some(err);
                 Task::none()
             }
-            SparkReceiveMessage::DepositsChanged => Task::batch(vec![
-                fetch_deposits_task(self.backend.clone()),
-                // Also refresh Last transactions: a claim (or any deposit landing)
-                // surfaces a new payment, and the panel won't otherwise repopulate
-                // the list until the next navigation.
-                fetch_payments_task(self.backend.clone()),
-            ]),
+            SparkReceiveMessage::DepositsChanged => fetch_deposits_task(self.backend.clone()),
             SparkReceiveMessage::Reset => {
                 self.qr_data = None;
                 self.displayed_invoice = None;
@@ -730,39 +704,6 @@ impl State for SparkReceive {
                 }
                 Task::none()
             }
-            SparkReceiveMessage::PaymentsLoaded(payments) => {
-                let fiat_converter: Option<FiatAmountConverter> =
-                    cache.fiat_price.as_ref().and_then(|p| p.try_into().ok());
-                self.recent_transactions = payments
-                    .iter()
-                    .take(5)
-                    .map(|p| {
-                        crate::app::state::spark::overview::payment_summary_to_recent_tx(
-                            p,
-                            fiat_converter.as_ref(),
-                        )
-                    })
-                    .collect();
-                Task::none()
-            }
-            SparkReceiveMessage::PaymentsFailed(err) => {
-                tracing::warn!("spark receive list_payments failed: {}", err);
-                self.recent_transactions.clear();
-                Task::none()
-            }
-            SparkReceiveMessage::SelectTransaction(idx) => {
-                if let Some(payment) = self.recent_transactions.get(idx).cloned() {
-                    Task::batch(vec![
-                        redirect(Menu::Spark(SparkSubMenu::Transactions(None))),
-                        Task::done(Message::View(crate::app::view::Message::SparkTransactions(
-                            crate::app::view::SparkTransactionsMessage::Preselect(payment),
-                        ))),
-                    ])
-                } else {
-                    Task::none()
-                }
-            }
-            SparkReceiveMessage::History => redirect(Menu::Spark(SparkSubMenu::Transactions(None))),
             SparkReceiveMessage::CopyPaymentRequest(text) => {
                 // Pair the clipboard write with the global toast overlay so
                 // the button gives the same feedback as every other Copy in
@@ -785,25 +726,6 @@ impl State for SparkReceive {
             }
         }
     }
-}
-
-/// Panel-local thin wrapper around the shared
-/// [`super::fetch_payments_task`] helper — only the message variants
-/// differ between the Send and Receive panels.
-fn fetch_payments_task(backend: Option<Arc<SparkBackend>>) -> Task<Message> {
-    super::fetch_payments_task(
-        backend,
-        |payments| {
-            Message::View(crate::app::view::Message::SparkReceive(
-                crate::app::view::SparkReceiveMessage::PaymentsLoaded(payments),
-            ))
-        },
-        |err| {
-            Message::View(crate::app::view::Message::SparkReceive(
-                crate::app::view::SparkReceiveMessage::PaymentsFailed(err),
-            ))
-        },
-    )
 }
 
 /// Spark-Receive-flavoured wrapper around [`super::fetch_balance_task`].
@@ -873,7 +795,7 @@ mod tests {
     use crate::app::state::State;
     use crate::app::view::{Message as ViewMessage, SparkReceiveMessage};
     use coincube_core::miniscript::bitcoin::Network;
-    use coincube_spark_protocol::{PaymentSummary, StableBalanceSnapshot};
+    use coincube_spark_protocol::StableBalanceSnapshot;
 
     fn receive_ok(payment_request: &str) -> ReceivePaymentOk {
         ReceivePaymentOk {
@@ -889,22 +811,6 @@ mod tests {
             amount_sat: 12_345,
             is_mature,
             claim_error: None,
-        }
-    }
-
-    fn payment(id: &str, amount_sat: i64) -> PaymentSummary {
-        PaymentSummary {
-            id: id.to_string(),
-            amount_sat,
-            fees_sat: 12,
-            token_amount: None,
-            token_decimals: None,
-            token_ticker: None,
-            timestamp: 1_700_000_000,
-            status: "completed".to_string(),
-            direction: "receive".to_string(),
-            method: "spark".to_string(),
-            description: None,
         }
     }
 
@@ -951,7 +857,6 @@ mod tests {
         assert!(panel.qr_data.is_none());
         assert!(panel.displayed_invoice.is_none());
         assert!(panel.pending_deposits.is_empty());
-        assert!(panel.recent_transactions.is_empty());
     }
 
     #[test]
@@ -1346,46 +1251,6 @@ mod tests {
         );
 
         assert_eq!(panel.balance_sats, 5_123);
-    }
-
-    #[test]
-    fn payments_loaded_keeps_only_five_recent_rows() {
-        let mut panel = SparkReceive::new(None);
-        let payments: Vec<_> = (0..7)
-            .map(|i| payment(&format!("payment-{i}"), 1_000 + i))
-            .collect();
-
-        update(&mut panel, SparkReceiveMessage::PaymentsLoaded(payments));
-
-        assert_eq!(panel.recent_transactions.len(), 5);
-        assert_eq!(panel.recent_transactions[0].id, "payment-0");
-        assert_eq!(panel.recent_transactions[4].id, "payment-4");
-        assert_eq!(panel.recent_transactions[4].amount.to_sat(), 1_004);
-    }
-
-    #[test]
-    fn payments_failed_clears_recent_transactions() {
-        let mut panel = SparkReceive::new(None);
-        panel.recent_transactions.push(SparkRecentTransaction {
-            id: "id".to_string(),
-            description: "test payment".to_string(),
-            time_ago: "just now".to_string(),
-            timestamp: 1,
-            amount: coincube_core::miniscript::bitcoin::Amount::from_sat(1),
-            fees_sat: coincube_core::miniscript::bitcoin::Amount::from_sat(0),
-            fiat_amount: None,
-            is_incoming: true,
-            status: crate::app::wallets::DomainPaymentStatus::Complete,
-            method: crate::app::view::spark::SparkPaymentMethod::Spark,
-            token_display: None,
-        });
-
-        update(
-            &mut panel,
-            SparkReceiveMessage::PaymentsFailed("bridge down".to_string()),
-        );
-
-        assert!(panel.recent_transactions.is_empty());
     }
 
     #[test]

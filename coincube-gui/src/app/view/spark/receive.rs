@@ -26,7 +26,6 @@ use crate::app::state::spark::cross_chain::supported_on;
 use crate::app::state::spark::esplora::DEPOSIT_MATURITY_CONFIRMATIONS;
 use crate::app::state::spark::receive::{SparkReceiveMethod, SparkReceivePhase};
 use crate::app::view::shared::picker::picker_modal_card;
-use crate::app::view::spark::{last_tx::last_transactions_section, SparkRecentTransaction};
 use crate::app::view::{Message, SparkReceiveMessage};
 use crate::services::sideshift::{deposit_options, DepositOption};
 
@@ -57,11 +56,9 @@ pub struct SparkReceiveView<'a> {
     pub received_celebration_context: &'a str,
     pub received_quote: &'a coincube_ui::component::quote_display::Quote,
     pub received_image_handle: &'a iced::widget::image::Handle,
-    pub recent_transactions: &'a [SparkRecentTransaction],
     /// Unified balance (sats: BTC + Stable Balance), shown on the YOU RECEIVE card.
     pub balance_sats: u64,
     pub bitcoin_unit: BitcoinDisplayUnit,
-    pub show_direction_badges: bool,
     /// When the cross-network (SideShift) flow is active, its inline body —
     /// rendered below the two cards in place of the Bitcoin rail form.
     pub sideshift_body: Option<Element<'a, Message>>,
@@ -210,15 +207,6 @@ impl<'a> SparkReceiveView<'a> {
                 self.network,
             ));
         }
-
-        // ── Last transactions ─────────────────────────────────────────
-        content = content.push(last_transactions_section(
-            self.recent_transactions,
-            self.bitcoin_unit,
-            self.show_direction_badges,
-            |idx| Message::SparkReceive(SparkReceiveMessage::SelectTransaction(idx)),
-            Message::SparkReceive(SparkReceiveMessage::History),
-        ));
 
         content.into()
     }

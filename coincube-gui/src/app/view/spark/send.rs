@@ -28,7 +28,6 @@ use crate::app::breez_spark::assets::stable_token_as_sats;
 use crate::app::state::spark::cross_chain::{self, supported_on};
 use crate::app::state::spark::send::{CrossChainContext, SparkSendPhase, SparkSendTarget};
 use crate::app::view::shared::picker::{picker_modal_card, picker_row};
-use crate::app::view::spark::{last_tx::last_transactions_section, SparkRecentTransaction};
 use crate::app::view::{Message, SparkSendMessage};
 
 pub struct SparkSendView<'a> {
@@ -48,7 +47,6 @@ pub struct SparkSendView<'a> {
     pub sent_celebration_context: &'a str,
     pub sent_quote: &'a coincube_ui::component::quote_display::Quote,
     pub sent_image_handle: &'a iced::widget::image::Handle,
-    pub recent_transactions: &'a [SparkRecentTransaction],
     /// Unified balance (sats: BTC + Stable Balance), shown on the YOU SEND card.
     pub balance_sats: u64,
     /// Line under the Amount field when the entered amount exceeds the
@@ -59,7 +57,6 @@ pub struct SparkSendView<'a> {
     /// BTC/USD reference price for the cross-chain conversion-fee sats estimate.
     /// `None` when no price is known — the fee then shows in the asset only.
     pub reference_btc_usd_price: Option<f64>,
-    pub show_direction_badges: bool,
     /// The "THEY RECEIVE" selection — drives the two-card selector and the
     /// destination placeholder.
     pub receive_target: SparkSendTarget,
@@ -176,15 +173,6 @@ impl<'a> SparkSendView<'a> {
 
         // ── Phase-specific body ───────────────────────────────────────
         content = content.push(phase_body(&self));
-
-        // ── Last transactions ─────────────────────────────────────────
-        content = content.push(last_transactions_section(
-            self.recent_transactions,
-            self.bitcoin_unit,
-            self.show_direction_badges,
-            |idx| Message::SparkSend(SparkSendMessage::SelectTransaction(idx)),
-            Message::SparkSend(SparkSendMessage::History),
-        ));
 
         content.into()
     }
