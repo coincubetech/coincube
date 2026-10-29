@@ -275,6 +275,15 @@ pub struct Cache {
         coincube_core::miniscript::bitcoin::Txid,
         crate::services::entangled::CachedEntanglement,
     >,
+    /// Ancestry check results for Vault coins, keyed by outpoint: what the
+    /// Chains column calls *verified* or *couldn't verify*. Display only;
+    /// loaded from and saved to the Vault's data directory
+    /// ([`crate::services::chain_status::store`]). Every batch enters through
+    /// [`Self::chain_proofs_landed`].
+    pub chain_proofs: std::collections::HashMap<
+        coincube_core::miniscript::bitcoin::OutPoint,
+        crate::services::chain_status::ProofEntry,
+    >,
     /// Current theme mode (dark/light) — used for theme-aware widget rendering
     pub theme_mode: coincube_ui::theme::palette::ThemeMode,
     /// Presentation input for the shared top-bar balance eye. `None` until the
@@ -439,6 +448,7 @@ impl std::default::Default for Cache {
             btcb2_claim_resume: false,
             liquid_gate: crate::app::features::LiquidGate::HIDDEN,
             entangled: std::collections::HashMap::new(),
+            chain_proofs: std::collections::HashMap::new(),
             split_deposit: None,
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
             balance_privacy: None,
@@ -588,6 +598,68 @@ impl Cache {
             }
         }
         self.accept_entanglement(origin, chain, answers)
+    }
+
+    /// The facts the Chains column has about one Vault coin.
+    pub fn chain_evidence(
+        &self,
+        outpoint: &coincube_core::miniscript::bitcoin::OutPoint,
+    ) -> crate::services::chain_status::CoinEvidence {
+        crate::services::chain_status::CoinEvidence {
+            entanglement: self
+                .entangled
+                .get(&outpoint.txid)
+                .map(|cached| cached.answer),
+            proof: self
+                .chain_proofs
+                .get(outpoint)
+                .and_then(|entry| entry.outcome()),
+            ..Default::default()
+        }
+    }
+
+    /// The Chains column status of one Vault coin.
+    pub fn chain_status(
+        &self,
+        outpoint: &coincube_core::miniscript::bitcoin::OutPoint,
+    ) -> crate::services::chain_status::ChainStatus {
+        crate::services::chain_status::classify(self.chain_evidence(outpoint))
+    }
+
+    /// An ancestry check batch landed. Like [`Self::entangled_batch_landed`],
+    /// a batch issued by this `App` instance releases its whole claim first.
+    /// Unlike entanglement, a result is about one Vault's coin, so a batch
+    /// from a predecessor instance is dropped whole. A verified path is never
+    /// replaced by a later miss or failure. Returns whether the cache changed.
+    pub fn chain_proofs_landed(
+        &mut self,
+        in_flight: &mut std::collections::HashSet<coincube_core::miniscript::bitcoin::OutPoint>,
+        origin: LookupOrigin,
+        claimed: &[coincube_core::miniscript::bitcoin::OutPoint],
+        results: Vec<(
+            coincube_core::miniscript::bitcoin::OutPoint,
+            crate::services::chain_status::ProofEntry,
+        )>,
+    ) -> bool {
+        use crate::services::chain_status::ProofEntry;
+        if !self.issued_here(origin) {
+            return false;
+        }
+        for outpoint in claimed {
+            in_flight.remove(outpoint);
+        }
+        let mut changed = false;
+        for (outpoint, entry) in results {
+            if matches!(
+                self.chain_proofs.get(&outpoint),
+                Some(ProofEntry::Verified(_))
+            ) {
+                continue;
+            }
+            self.chain_proofs.insert(outpoint, entry);
+            changed = true;
+        }
+        changed
     }
 
     pub fn blockheight(&self) -> i32 {
@@ -868,6 +940,45 @@ mod entangled_cache_tests {
         assert!(cache.record_entanglement(txid, Entanglement::Entangled, older));
         assert_eq!(cache.entanglement_of(&txid), Entanglement::Entangled);
         assert_eq!(cache.entangled[&txid].resolved_at, older);
+    }
+
+    /// A Chains-column ancestry batch: one from another `App` instance is
+    /// dropped whole and releases nothing; this instance's own batch releases
+    /// its claim and records its results.
+    #[test]
+    fn chain_proof_batches_are_scoped_to_their_app_instance() {
+        use crate::services::chain_status::{ChainStatus, ProofEntry};
+        use coincube_core::miniscript::bitcoin::OutPoint;
+        let a = Cache::default();
+        let mut b = Cache::default();
+        let outpoint = OutPoint::new(txid(4), 0);
+        let mut in_flight: std::collections::HashSet<OutPoint> = [outpoint].into();
+        let checked = ProofEntry::NoQualifyingAncestry {
+            checked_at: std::time::SystemTime::now(),
+        };
+        let from = |cache: &Cache| LookupOrigin {
+            app: cache.app_generation,
+            chain: ChainId::Bitcoin,
+        };
+        assert!(!b.chain_proofs_landed(
+            &mut in_flight,
+            from(&a),
+            &[outpoint],
+            vec![(outpoint, checked.clone())],
+        ));
+        assert!(in_flight.contains(&outpoint));
+        assert!(b.chain_proofs.is_empty());
+
+        b.record_entanglement(outpoint.txid, Entanglement::NotEntangled, Instant::now());
+        assert_eq!(b.chain_status(&outpoint), ChainStatus::NotSeen);
+        assert!(b.chain_proofs_landed(
+            &mut in_flight,
+            from(&b),
+            &[outpoint],
+            vec![(outpoint, checked)],
+        ));
+        assert!(in_flight.is_empty());
+        assert_eq!(b.chain_status(&outpoint), ChainStatus::CouldntVerify);
     }
 
     /// `#393`: a reply issued by App instance A, arriving after the tab has

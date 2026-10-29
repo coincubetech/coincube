@@ -1,0 +1,290 @@
+//! The Vault's ancestry check results, kept next to its daemon data so the
+//! Chains column does not fall back to *checking* on every launch.
+//!
+//! Only display state lives here. Each verified path is decoded against the
+//! outpoint it is filed under and structurally re-verified on load; a record
+//! that fails either check is dropped, never trusted. A failed check is not
+//! kept, so a restart retries it.
+
+use std::{
+    collections::HashMap,
+    io,
+    path::{Path, PathBuf},
+    time::{Duration, UNIX_EPOCH},
+};
+
+use coincube_core::{claim_ancestry::retained::RetainedPath, miniscript::bitcoin::OutPoint};
+use serde::{Deserialize, Serialize};
+
+use super::ProofEntry;
+
+const FILE: &str = "chain-proofs.json";
+const VERSION: u32 = 1;
+/// A Vault would need thousands of maximal paths to reach this.
+const MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+#[derive(Serialize, Deserialize, Default)]
+struct Record {
+    version: u32,
+    #[serde(default)]
+    verified: Vec<VerifiedRecord>,
+    #[serde(default)]
+    no_path: Vec<NoPathRecord>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct VerifiedRecord {
+    outpoint: OutPoint,
+    /// [`RetainedPath::encode`], hex.
+    path: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct NoPathRecord {
+    outpoint: OutPoint,
+    /// Unix seconds.
+    checked_at: u64,
+}
+
+pub fn path(data_dir: &Path) -> PathBuf {
+    data_dir.join(FILE)
+}
+
+/// Load what a previous run recorded. A missing, oversized or unreadable
+/// file is an empty store.
+pub fn load(data_dir: &Path) -> HashMap<OutPoint, ProofEntry> {
+    let file = path(data_dir);
+    let Ok(metadata) = std::fs::metadata(&file) else {
+        return HashMap::new();
+    };
+    if metadata.len() > MAX_BYTES {
+        tracing::warn!("ignoring oversized {}", file.display());
+        return HashMap::new();
+    }
+    let record: Record = match std::fs::read(&file)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+    {
+        Some(record) => record,
+        None => {
+            tracing::warn!("ignoring unreadable {}", file.display());
+            return HashMap::new();
+        }
+    };
+    if record.version != VERSION {
+        return HashMap::new();
+    }
+    let mut proofs = HashMap::new();
+    for entry in record.no_path {
+        proofs.insert(
+            entry.outpoint,
+            ProofEntry::NoQualifyingAncestry {
+                checked_at: UNIX_EPOCH + Duration::from_secs(entry.checked_at),
+            },
+        );
+    }
+    for entry in record.verified {
+        let decoded = hex::decode(&entry.path)
+            .ok()
+            .and_then(|bytes| RetainedPath::decode(entry.outpoint, &bytes).ok());
+        match decoded {
+            Some(path) => {
+                proofs.insert(entry.outpoint, ProofEntry::Verified(path));
+            }
+            None => tracing::warn!("dropping an invalid ancestry record for {}", entry.outpoint),
+        }
+    }
+    proofs
+}
+
+/// Replace the file with what `proofs` holds now, for the coins still in the
+/// Vault (`keep`). Failed checks are not written.
+pub fn save(
+    data_dir: &Path,
+    proofs: &HashMap<OutPoint, ProofEntry>,
+    keep: impl Fn(&OutPoint) -> bool,
+) -> io::Result<()> {
+    let mut record = Record {
+        version: VERSION,
+        ..Default::default()
+    };
+    for (outpoint, entry) in proofs.iter().filter(|(outpoint, _)| keep(outpoint)) {
+        match entry {
+            ProofEntry::Verified(path) => record.verified.push(VerifiedRecord {
+                outpoint: *outpoint,
+                path: hex::encode(path.encode()),
+            }),
+            ProofEntry::NoQualifyingAncestry { checked_at } => record.no_path.push(NoPathRecord {
+                outpoint: *outpoint,
+                checked_at: checked_at
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |age| age.as_secs()),
+            }),
+            ProofEntry::Failed { .. } => {}
+        }
+    }
+    record.verified.sort_by_key(|entry| entry.outpoint);
+    record.no_path.sort_by_key(|entry| entry.outpoint);
+    let bytes = serde_json::to_vec(&record).map_err(io::Error::other)?;
+    write_atomically(&path(data_dir), &bytes)
+}
+
+/// Write through a sibling temp file, owner-only, and fsync the directory so
+/// the rename survives a crash.
+fn write_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+
+    let tmp = path.with_extension("tmp");
+    {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use coincube_core::{
+        claim_ancestry::search::OwnedLink,
+        miniscript::bitcoin::{
+            absolute, consensus::serialize, script::Builder, transaction, Amount, ScriptBuf,
+            Sequence, Transaction, TxIn, TxOut, Witness,
+        },
+    };
+    use std::time::SystemTime;
+
+    fn temp_dir() -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("coincube-chain-proofs-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        dir
+    }
+
+    /// A coinbase and one spend of it: the spend's output 0 has a one-link
+    /// path to the coinbase.
+    fn verified_path() -> (OutPoint, RetainedPath) {
+        let coinbase = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: Builder::new().push_int(962_000).push_int(1).into_script(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        };
+        let spend = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::new(coinbase.compute_txid(), 0),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(40_000),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        };
+        let selected = OutPoint::new(spend.compute_txid(), 0);
+        let path = RetainedPath::new(
+            selected,
+            vec![
+                OwnedLink {
+                    transaction: serialize(&spend),
+                    parent_input: Some(0),
+                },
+                OwnedLink {
+                    transaction: serialize(&coinbase),
+                    parent_input: None,
+                },
+            ],
+        )
+        .unwrap();
+        (selected, path)
+    }
+
+    #[test]
+    fn round_trips_verified_and_no_path_entries() {
+        let dir = temp_dir();
+        let (selected, retained) = verified_path();
+        let other = OutPoint::new(selected.txid, 7);
+        let checked_at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut proofs = HashMap::new();
+        proofs.insert(selected, ProofEntry::Verified(retained));
+        proofs.insert(other, ProofEntry::NoQualifyingAncestry { checked_at });
+        proofs.insert(
+            OutPoint::new(selected.txid, 9),
+            ProofEntry::Failed {
+                failed_at: SystemTime::now(),
+            },
+        );
+        save(&dir, &proofs, |_| true).unwrap();
+        let loaded = load(&dir);
+        assert_eq!(loaded.len(), 2, "failed checks are not kept");
+        assert!(
+            matches!(loaded.get(&selected), Some(ProofEntry::Verified(p)) if p.selected() == selected)
+        );
+        assert!(matches!(
+            loaded.get(&other),
+            Some(ProofEntry::NoQualifyingAncestry { checked_at: at }) if *at == checked_at
+        ));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(path(&dir)).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_path_filed_under_another_outpoint_is_dropped() {
+        let dir = temp_dir();
+        let (selected, retained) = verified_path();
+        let wrong = OutPoint::new(selected.txid, 1);
+        let record = Record {
+            version: VERSION,
+            verified: vec![VerifiedRecord {
+                outpoint: wrong,
+                path: hex::encode(retained.encode()),
+            }],
+            no_path: vec![],
+        };
+        std::fs::write(path(&dir), serde_json::to_vec(&record).unwrap()).unwrap();
+        assert!(load(&dir).is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn spent_coins_are_not_written_and_junk_is_empty() {
+        let dir = temp_dir();
+        let (selected, retained) = verified_path();
+        let mut proofs = HashMap::new();
+        proofs.insert(selected, ProofEntry::Verified(retained));
+        save(&dir, &proofs, |_| false).unwrap();
+        assert!(load(&dir).is_empty());
+        std::fs::write(path(&dir), b"not json").unwrap();
+        assert!(load(&dir).is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

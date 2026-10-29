@@ -344,6 +344,17 @@ pub enum Message {
         claimed: Vec<coincube_core::miniscript::bitcoin::Txid>,
         answers: Vec<crate::services::entangled::LookupAnswer>,
     },
+    /// A sync-driven ancestry check batch for the Chains column finished
+    /// ([`crate::services::chain_status::check_ancestry`]). `claimed` is the
+    /// batch's single-flight claim; see [`crate::app::cache::Cache::chain_proofs_landed`].
+    ChainProofs {
+        origin: crate::app::cache::LookupOrigin,
+        claimed: Vec<coincube_core::miniscript::bitcoin::OutPoint>,
+        results: Vec<(
+            coincube_core::miniscript::bitcoin::OutPoint,
+            crate::services::chain_status::ProofEntry,
+        )>,
+    },
     /// The spend screen re-checked the entanglement of a replayable spend's
     /// inputs at the moment it matters (`#276` I13). Every resolved answer is
     /// cached by the app — each under its own observation instant, so a
