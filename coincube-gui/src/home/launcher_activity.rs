@@ -120,7 +120,8 @@ pub(super) struct ActivityState {
     /// The last result, for the network and source it was read for.
     pub(super) shown: Option<Shown>,
     request: u64,
-    in_flight: Option<u64>,
+    /// The read under way: its request id, network and source.
+    in_flight: Option<(u64, ChainId, NetworkActivitySource)>,
     read_at: Option<Instant>,
     /// When the shown tip advanced; the rail slides for [`ARRIVAL`].
     pub(super) arrived: Option<Instant>,
@@ -176,12 +177,62 @@ impl ActivityState {
             .map(|shown| &shown.result)
     }
 
+    /// Whether to read `chain` now. A read under way for another network or
+    /// source does not hold up the one wanted: starting it supersedes that
+    /// read, whose reply is then dropped.
     fn due(&self, chain: ChainId, now: Instant) -> bool {
-        self.in_flight.is_none()
+        self.in_flight
+            .is_none_or(|(_, busy, source)| busy != chain || source != self.source)
             && (self.current(chain).is_none()
                 || self
                     .read_at
                     .is_none_or(|at| now.saturating_duration_since(at) >= REFRESH))
+    }
+
+    /// Starts a read of `chain` under the current source; its request id.
+    fn start(&mut self, chain: ChainId) -> u64 {
+        self.request = self.request.wrapping_add(1);
+        self.in_flight = Some((self.request, chain, self.source));
+        self.request
+    }
+
+    /// Takes a reply. Only the latest read counts, and only while its network
+    /// and source are still the ones wanted: a reply for a network the user
+    /// has left would replace what is shown for the one they are on.
+    fn finish(
+        &mut self,
+        request: u64,
+        wanted: ChainId,
+        result: Result<Snapshot, Unavailable>,
+        now: Instant,
+    ) {
+        let Some((latest, chain, source)) = self.in_flight else {
+            return;
+        };
+        if latest != request {
+            return;
+        }
+        self.in_flight = None;
+        if chain != wanted || source != self.source {
+            return;
+        }
+        self.read_at = Some(now);
+        let previous_tip = self
+            .shown
+            .as_ref()
+            .filter(|shown| shown.chain == chain)
+            .and_then(|shown| shown.result.as_ref().ok())
+            .map(|snapshot| snapshot.tip);
+        if let (Some(before), Ok(snapshot)) = (previous_tip, &result) {
+            if snapshot.tip > before {
+                self.arrived = Some(now);
+            }
+        }
+        self.shown = Some(Shown {
+            chain,
+            source,
+            result,
+        });
     }
 }
 
@@ -195,8 +246,8 @@ pub(super) fn chain_for(filter: NetworkFilter) -> ChainId {
     }
 }
 
-/// Blocks between halvings. Bitcoin Blake2b is taken to keep Bitcoin's
-/// subsidy schedule; regtest halves every 150 blocks.
+/// Blocks between halvings. Bitcoin Blake2b keeps Bitcoin's subsidy
+/// schedule and ten-minute blocks; regtest halves every 150 blocks.
 pub(super) fn halving_interval(chain: ChainId) -> u32 {
     if chain == ChainId::Regtest {
         150
@@ -309,6 +360,18 @@ pub(super) async fn read(
 
 fn http() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+/// The client for the managed node. Its requests carry the node's cookie, so
+/// they never go through a proxy from the environment: `NO_PROXY` alone
+/// decides whether loopback is bypassed, and it rarely lists 127.0.0.1.
+fn node_http(builder: reqwest::ClientBuilder) -> Result<reqwest::Client, String> {
+    builder
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(REQUEST_TIMEOUT)
         .build()
@@ -458,7 +521,7 @@ async fn local(root: &CoincubeDirectory, chain: ChainId) -> Result<Snapshot, Str
         .split_once(':')
         .ok_or("Unreadable node cookie")?;
     let rpc = NodeRpc {
-        client: http()?,
+        client: node_http(reqwest::Client::builder())?,
         url: format!("http://127.0.0.1:{port}/"),
         user: user.to_string(),
         pass: pass.to_string(),
@@ -507,7 +570,9 @@ pub(super) fn from_node(info: &Value, mempool: &Value, fee: &Value) -> Result<Sn
     }
     let tip = info["blocks"].as_u64().ok_or("No block height")? as u32;
     let difficulty = info["difficulty"].as_f64().ok_or("No difficulty")?;
-    // `bytes` is the sum of virtual sizes. `feerate` is BTC/kvB.
+    // `bytes` is the sum of virtual sizes. `feerate` is BTC/kvB; Bitcoin Core
+    // answers a one-block target with its two-block estimate, the closest it
+    // gives to "the next block".
     let mempool_vsize = mempool["bytes"].as_u64().unwrap_or(0);
     let next_block_fee = fee["feerate"].as_f64().map(|rate| rate * 100_000.0);
     Ok(Snapshot {
@@ -542,9 +607,7 @@ impl Home {
                     return Task::none();
                 }
                 let activity = &mut self.catalog.activity;
-                activity.request = activity.request.wrapping_add(1);
-                activity.in_flight = Some(activity.request);
-                let request = activity.request;
+                let request = activity.start(chain);
                 let source = activity.source;
                 Task::perform(
                     read(self.datadir_path.clone(), chain, source),
@@ -561,33 +624,12 @@ impl Home {
                 )
             }
             ActivityMessage::Loaded {
-                request,
-                chain,
-                source,
-                result,
+                request, result, ..
             } => {
-                let activity = &mut self.catalog.activity;
-                if activity.in_flight != Some(request) {
-                    return Task::none();
-                }
-                activity.in_flight = None;
-                activity.read_at = Some(Instant::now());
-                let previous_tip = activity
-                    .shown
-                    .as_ref()
-                    .filter(|shown| shown.chain == chain)
-                    .and_then(|shown| shown.result.as_ref().ok())
-                    .map(|snapshot| snapshot.tip);
-                if let (Some(before), Ok(snapshot)) = (previous_tip, &result) {
-                    if snapshot.tip > before {
-                        activity.arrived = Some(Instant::now());
-                    }
-                }
-                activity.shown = Some(Shown {
-                    chain,
-                    source,
-                    result,
-                });
+                let wanted = self.activity_chain();
+                self.catalog
+                    .activity
+                    .finish(request, wanted, result, Instant::now());
                 Task::none()
             }
             ActivityMessage::Frame(now) => {
@@ -627,6 +669,8 @@ impl Home {
         tick
     }
 
+    /// Reduced motion normally shows the List, where there is no activity;
+    /// this keeps the slide off should the floor ever show under it.
     fn activity_reduces_motion(&self) -> bool {
         self.system_reduces_motion == Some(true)
     }
@@ -695,8 +739,10 @@ pub(super) fn facts(chain: ChainId, snapshot: &Snapshot, today: chrono::NaiveDat
             note: "to make the next block".into(),
         });
     }
-    // Signet blocks are signed, not mined: a difficulty says nothing there.
-    if chain != ChainId::Signet {
+    // Only the main chains have a difficulty that says what is mining them.
+    // Signet blocks are signed, regtest's cost nothing to mine, and testnet's
+    // 20-minute rule often leaves the tip at the minimum difficulty.
+    if matches!(chain, ChainId::Bitcoin | ChainId::BitcoinBlake2b) {
         facts.push(Fact {
             label: "HASHRATE",
             value: hashrate(snapshot.difficulty),
@@ -1037,9 +1083,25 @@ mod tests {
     }
 
     #[test]
-    fn signet_has_no_hashrate_and_regtest_names_the_halving_block() {
-        let signet = facts(ChainId::Signet, &snapshot(281_044), today());
-        assert!(signet.iter().all(|f| f.label != "HASHRATE"));
+    fn only_main_chains_show_a_hashrate_and_regtest_names_the_halving_block() {
+        for chain in [
+            ChainId::Signet,
+            ChainId::Testnet4,
+            ChainId::Testnet,
+            ChainId::Regtest,
+            ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            let shown = facts(chain, &snapshot(281_044), today());
+            assert!(
+                shown.iter().all(|f| f.label != "HASHRATE"),
+                "{:?} shows a hashrate",
+                chain
+            );
+        }
+        for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+            let shown = facts(chain, &snapshot(281_044), today());
+            assert!(shown.iter().any(|f| f.label == "HASHRATE"));
+        }
         let regtest = facts(ChainId::Regtest, &snapshot(412), today());
         assert_eq!(regtest.last().unwrap().value, "block 450");
         assert_eq!(regtest.last().unwrap().note, "in 38 blocks");
@@ -1084,8 +1146,62 @@ mod tests {
         state.source = NetworkActivitySource::Connect;
         assert!(state.due(ChainId::Bitcoin, now));
         assert!(state.current(ChainId::Bitcoin).is_none());
-        state.in_flight = Some(1);
+        state.start(ChainId::Bitcoin);
         assert!(!state.due(ChainId::Bitcoin, now));
+    }
+
+    #[test]
+    fn a_new_network_supersedes_the_read_under_way() {
+        let now = Instant::now();
+        let mut state = ActivityState::default();
+        // Bitcoin is shown; a Blake2b read starts and the user goes back.
+        let first = state.start(ChainId::Bitcoin);
+        state.finish(first, ChainId::Bitcoin, Ok(snapshot(1)), now);
+        let blake = state.start(ChainId::BitcoinBlake2b);
+        assert!(state.due(ChainId::Testnet4, now));
+        assert!(!state.due(ChainId::BitcoinBlake2b, now));
+        state.finish(blake, ChainId::Bitcoin, Ok(snapshot(9)), now);
+        assert_eq!(
+            state.current(ChainId::Bitcoin),
+            Some(&Ok(snapshot(1))),
+            "a reply for a network the user left must not replace the shown one"
+        );
+        assert!(state.in_flight.is_none());
+
+        // A slow read is superseded by a new network; its late reply is dropped.
+        let slow = state.start(ChainId::Bitcoin);
+        let testnet = state.start(ChainId::Testnet4);
+        state.finish(slow, ChainId::Testnet4, Ok(snapshot(5)), now);
+        assert!(state.current(ChainId::Testnet4).is_none());
+        state.finish(testnet, ChainId::Testnet4, Ok(snapshot(7)), now);
+        assert_eq!(state.current(ChainId::Testnet4), Some(&Ok(snapshot(7))));
+    }
+
+    #[tokio::test]
+    async fn the_node_client_ignores_proxies() {
+        // A listener stands in for a proxy the environment would name. The
+        // request goes to a closed loopback port, never to the listener.
+        let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        proxy.set_nonblocking(true).unwrap();
+        let address = format!("http://{}", proxy.local_addr().unwrap());
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = closed.local_addr().unwrap().port();
+        drop(closed);
+        let builder = reqwest::Client::builder().proxy(reqwest::Proxy::all(&address).unwrap());
+        let rpc = NodeRpc {
+            client: node_http(builder).unwrap(),
+            url: format!("http://127.0.0.1:{}/", port),
+            user: "__cookie__".into(),
+            pass: "secret".into(),
+        };
+        assert!(rpc
+            .batch(&[("getblockchaininfo", json!([]))])
+            .await
+            .is_err());
+        assert!(
+            proxy.accept().is_err(),
+            "the node's cookie must never reach a proxy"
+        );
     }
 
     #[test]
