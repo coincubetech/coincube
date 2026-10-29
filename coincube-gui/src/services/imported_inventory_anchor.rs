@@ -478,7 +478,7 @@ impl Reader<'_> {
 pub(crate) mod tests {
     use super::*;
     use std::{
-        collections::HashMap,
+        collections::{HashMap, HashSet},
         sync::{Mutex, OnceLock},
     };
 
@@ -487,7 +487,38 @@ pub(crate) mod tests {
         STORE.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
+    #[derive(Clone, Copy)]
+    pub(crate) enum UpdateFault {
+        BeforeWrite,
+        AfterWrite,
+        AfterWriteReadbackError,
+    }
+
+    fn update_faults() -> &'static Mutex<HashMap<String, UpdateFault>> {
+        static FAULTS: OnceLock<Mutex<HashMap<String, UpdateFault>>> = OnceLock::new();
+        FAULTS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    pub(in crate::services) fn inject_update_fault(scope: &Scope, fault: UpdateFault) {
+        update_faults()
+            .lock()
+            .unwrap()
+            .insert(account(scope).unwrap(), fault);
+    }
+
+    fn load_faults() -> &'static Mutex<HashSet<String>> {
+        static FAULTS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+        FAULTS.get_or_init(|| Mutex::new(HashSet::new()))
+    }
+
     pub(crate) fn store_load(account: &str) -> Result<Option<Vec<u8>>, String> {
+        if load_faults()
+            .lock()
+            .map_err(|_| "Mock anchor load faults are poisoned.")?
+            .remove(account)
+        {
+            return Err("Injected anchor readback failure.".into());
+        }
         Ok(store()
             .lock()
             .map_err(|_| "Mock anchor store is poisoned.")?
@@ -516,7 +547,26 @@ pub(crate) mod tests {
         {
             return Err("Mock anchor changed before update.".into());
         }
+        let fault = update_faults()
+            .lock()
+            .map_err(|_| "Mock anchor faults are poisoned.")?
+            .remove(account);
+        if matches!(fault, Some(UpdateFault::BeforeWrite)) {
+            return Err("Injected anchor update failure before write.".into());
+        }
         store.insert(account.into(), next.into());
+        if matches!(fault, Some(UpdateFault::AfterWriteReadbackError)) {
+            load_faults()
+                .lock()
+                .map_err(|_| "Mock anchor load faults are poisoned.")?
+                .insert(account.into());
+        }
+        if matches!(
+            fault,
+            Some(UpdateFault::AfterWrite | UpdateFault::AfterWriteReadbackError)
+        ) {
+            return Err("Injected anchor update failure after write.".into());
+        }
         Ok(())
     }
 
@@ -581,7 +631,8 @@ pub(crate) mod tests {
         assert!(wrong_suffix.encode().is_err());
 
         let mut forged = encoded;
-        forged[forged.len() - 4..].copy_from_slice(b".bak");
+        let suffix_start = forged.len() - 4;
+        forged[suffix_start..].copy_from_slice(b".bak");
         assert!(Anchor::decode(&forged).is_err());
     }
 

@@ -17,8 +17,8 @@ pub mod foreign_wallet_source;
 // The signer API is staged behind the external inventory anchor/recovery gate.
 // Only owner-verified import removal calls it in production at this head.
 #[allow(dead_code)]
-pub(crate) mod imported_keys;
 pub(crate) mod imported_inventory_anchor;
+pub(crate) mod imported_keys;
 #[cfg(test)]
 pub(crate) mod imported_signer;
 pub mod psbt_file;

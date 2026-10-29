@@ -327,8 +327,7 @@ impl<'a> LocalKeyRepository<'a> {
             .open(&path)
             .map_err(|_| "Cannot open imported key lock.")?;
         reject_non_file(&path)?;
-        file.lock_exclusive()
-            .map_err(|_| "Cannot lock imported key repository.")?;
+        FileExt::lock_exclusive(&file).map_err(|_| "Cannot lock imported key repository.")?;
         if !allow_removed && self.is_removed()? {
             return Err("This imported key operation was removed.".into());
         }
@@ -361,8 +360,7 @@ impl<'a> LocalKeyRepository<'a> {
             return Err("Anchored imported key manifest is missing.".into());
         }
         self.check_transaction_files(cleanup)?;
-        let manifest =
-            self.read_manifest_file(&self.root().join(MANIFEST), &retire_files, false)?;
+        let manifest = self.read_manifest_file(&self.root().join(MANIFEST), retire_files, false)?;
         let admitted: HashSet<_> = manifest
             .records
             .iter()
@@ -389,6 +387,37 @@ impl<'a> LocalKeyRepository<'a> {
 
     fn prior(&self, txn_id: Uuid) -> PathBuf {
         self.root().join(format!(".prior-{txn_id}.manifest"))
+    }
+
+    fn stage_manifests(
+        &self,
+        authority: &Anchor,
+        txn_id: Uuid,
+        old_bytes: &[u8],
+        next_bytes: &[u8],
+    ) -> Result<(), String> {
+        let prior = self.prior(txn_id);
+        write_new(&prior, old_bytes)?;
+        if let Err(error) = write_new(&self.prepared(txn_id), next_bytes) {
+            self.discard_before_intent(authority, txn_id, false)?;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn discard_before_intent(
+        &self,
+        authority: &Anchor,
+        txn_id: Uuid,
+        prepared_created: bool,
+    ) -> Result<(), String> {
+        if anchor::load(&authority.scope)?.as_ref() != Some(authority) {
+            return Err("Imported inventory anchor changed before staging cleanup.".into());
+        }
+        if prepared_created {
+            remove_staged(&self.prepared(txn_id))?;
+        }
+        remove_staged(&self.prior(txn_id))
     }
 
     fn check_transaction_files(&self, allowed: Option<Uuid>) -> Result<(), String> {
@@ -630,15 +659,14 @@ impl<'a> LocalKeyRepository<'a> {
             .collect();
         retire_files.sort();
         let txn_id = Uuid::new_v4();
-        let prepared = self.prepared(txn_id);
-        let prior = self.prior(txn_id);
-        write_new(&prior, &old_bytes)?;
-        write_new(&prepared, &next_bytes)?;
+        self.stage_manifests(&authority, txn_id, &old_bytes, &next_bytes)?;
         #[cfg(not(test))]
-        self.check_active()?;
+        if let Err(error) = self.check_active() {
+            self.discard_before_intent(&authority, txn_id, true)?;
+            return Err(error);
+        }
         if !is_current() {
-            remove_staged(&prepared)?;
-            remove_staged(&prior)?;
+            self.discard_before_intent(&authority, txn_id, true)?;
             return Err("Imported inventory mutation was cancelled before commit intent.".into());
         }
         let pending = Anchor {
@@ -656,8 +684,7 @@ impl<'a> LocalKeyRepository<'a> {
             // exact old item allows synchronous cleanup; uncertainty preserves
             // every file and fails closed.
             if anchor::load(&authority.scope)?.as_ref() == Some(&authority) {
-                remove_staged(&prepared)?;
-                remove_staged(&prior)?;
+                self.discard_before_intent(&authority, txn_id, true)?;
             }
             return Err(error);
         }
@@ -682,7 +709,7 @@ impl<'a> LocalKeyRepository<'a> {
         self.check_transaction_files(None)?;
         if path.exists() {
             let manifest = self.read_manifest_file(&path, &[], false)?;
-            if manifest.records.len() != 0 || read_manifest_bytes(&path)? != bytes {
+            if !manifest.records.is_empty() || read_manifest_bytes(&path)? != bytes {
                 return Err(
                     "Unanchored imported key inventory requires explicit migration.".into(),
                 );
@@ -1788,6 +1815,109 @@ mod tests {
     }
 
     #[test]
+    fn failed_prepared_stage_does_not_leave_unanchored_prior() {
+        let fixture = Fixture::new();
+        let repository = fixture.repository();
+        let old = anchor::load(&repository.anchor_scope()).unwrap().unwrap();
+        let old_bytes = read_manifest_bytes(&repository.root().join(MANIFEST)).unwrap();
+        let txn = Uuid::new_v4();
+        // Force the second create_new to fail after the prior file is durable.
+        write_new(&repository.prepared(txn), b"preexisting").unwrap();
+        assert!(repository
+            .stage_manifests(&old, txn, &old_bytes, &old_bytes)
+            .is_err());
+        assert!(!repository.prior(txn).exists());
+        assert_eq!(fs::read(repository.prepared(txn)).unwrap(), b"preexisting");
+        fs::remove_file(repository.prepared(txn)).unwrap();
+
+        let reopened = fixture.repository();
+        let _guard = reopened.lock().unwrap();
+        assert!(reopened.read_manifest().is_ok());
+        assert_eq!(anchor::load(&reopened.anchor_scope()).unwrap(), Some(old));
+    }
+
+    #[test]
+    fn failed_anchor_cas_cleans_staging_only_when_old_anchor_remains() {
+        let fixture = Fixture::new();
+        let repository = fixture.repository();
+        let old = anchor::load(&repository.anchor_scope()).unwrap().unwrap();
+        let manifest = repository.read_manifest().unwrap();
+        let device = Zeroizing::new([11u8; 32]);
+        anchor::tests::inject_update_fault(&old.scope, anchor::tests::UpdateFault::BeforeWrite);
+        assert!(repository
+            .publish_manifest(&manifest, &manifest, "synthetic unlock", &device, || true)
+            .is_err());
+        assert_eq!(anchor::load(&old.scope).unwrap(), Some(old));
+        assert!(repository.read_manifest().is_ok());
+        assert!(fs::read_dir(repository.root()).unwrap().all(|entry| {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            !name.starts_with(".prior-") && !name.starts_with(".prepared-")
+        }));
+    }
+
+    #[test]
+    fn anchor_write_with_error_recovers_pending_on_restart() {
+        let fixture = Fixture::new();
+        let repository = fixture.repository();
+        let old = anchor::load(&repository.anchor_scope()).unwrap().unwrap();
+        let manifest = repository.read_manifest().unwrap();
+        let device = Zeroizing::new([11u8; 32]);
+        anchor::tests::inject_update_fault(&old.scope, anchor::tests::UpdateFault::AfterWrite);
+        repository
+            .publish_manifest(&manifest, &manifest, "synthetic unlock", &device, || true)
+            .unwrap();
+        drop(repository);
+
+        let reopened = fixture.repository();
+        let _guard = reopened.lock().unwrap();
+        assert!(reopened.read_manifest().is_ok());
+        let current = anchor::load(&old.scope).unwrap().unwrap();
+        assert!(matches!(
+            current.state,
+            AnchorState::Committed {
+                generation: 1,
+                cleanup_txn: None,
+                ..
+            }
+        ));
+        assert!(fs::read_dir(reopened.root()).unwrap().all(|entry| {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            !name.starts_with(".prior-") && !name.starts_with(".prepared-")
+        }));
+    }
+
+    #[test]
+    fn failed_anchor_readback_preserves_pending_files_for_restart() {
+        let fixture = Fixture::new();
+        fixture.save_cube(fixture.cube.clone());
+        let repository = fixture.repository();
+        let old = anchor::load(&repository.anchor_scope()).unwrap().unwrap();
+        let manifest = repository.read_manifest().unwrap();
+        let device = Zeroizing::new([11u8; 32]);
+        anchor::tests::inject_update_fault(
+            &old.scope,
+            anchor::tests::UpdateFault::AfterWriteReadbackError,
+        );
+        assert!(repository
+            .publish_manifest(&manifest, &manifest, "synthetic unlock", &device, || true)
+            .is_err());
+        let pending = anchor::load(&old.scope).unwrap().unwrap();
+        assert!(matches!(pending.state, AnchorState::Pending { .. }));
+        drop(repository);
+
+        let directory = NetworkDirectory::new(fixture.directory.path().to_path_buf());
+        let settings = Settings::from_file(&directory).unwrap();
+        let cube = &settings.cubes[0];
+        let attachment = cube.bitcoin_import.as_ref().unwrap().attachment().unwrap();
+        let reopened = LocalKeyRepository::new(&directory, cube, attachment).unwrap();
+        let _guard = reopened.lock().unwrap();
+        reopened
+            .recover_pending_with(pending, "synthetic unlock", &device)
+            .unwrap();
+        assert!(reopened.read_manifest().is_ok());
+    }
+
+    #[test]
     fn restart_after_committed_finishes_only_anchored_cleanup() {
         let fixture = Fixture::new();
         let repository = fixture.repository();
@@ -1873,7 +2003,7 @@ mod tests {
                 .write(true)
                 .open(path)
                 .unwrap();
-            let acquired = file.try_lock_exclusive().is_ok();
+            let acquired = FileExt::try_lock_exclusive(&file).unwrap();
             assert_eq!(acquired, std::env::var_os(CHILD_EXPECT_BLOCKED).is_none());
             return;
         }
@@ -2143,7 +2273,7 @@ mod tests {
             repository.ensure_root().unwrap();
             write_new(&repository.root().join("orphan.key"), b"opaque ciphertext").unwrap();
             if corrupt_manifest {
-                write_new(&repository.root().join(MANIFEST), b"{invalid").unwrap();
+                write_replace(&repository.root().join(MANIFEST), b"{invalid").unwrap();
             }
             assert!(repository.read_manifest().is_err());
             repository.remove_operation_storage().unwrap();
