@@ -116,7 +116,7 @@ impl State for AboutSettingsState {
                             .await
                             .map(|device_id| view::ReregisteredDevice {
                                 email: email.clone(),
-                                replaces,
+                                replaces: replaces.clone(),
                                 device_id,
                             })
                             .map_err(|e| e.to_string());
