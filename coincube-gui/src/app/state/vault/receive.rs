@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::sync::Arc;
 
 use coincube_core::miniscript::bitcoin::{
@@ -24,6 +25,7 @@ use crate::{
         error::Error,
         menu::Menu,
         message::Message,
+        settings,
         state::{coins_summary, vault::label::LabelsEdited, State},
         view,
         wallet::{sync_status, SyncStatus, Wallet},
@@ -48,6 +50,38 @@ fn vault_display_name(wallet: &Wallet) -> &str {
 
 fn zero_balance_known(status: &SyncStatus, rescan_pending: bool) -> bool {
     status.is_synced() && !rescan_pending
+}
+
+/// One bounded settings read. A missing, changing, or unreadable record leaves
+/// an empty Vault balance unknown; the normal settings reader retries with
+/// sleeps and must not run from Iced's render path.
+fn no_pending_restore_rescan(data_dir: &CoincubeDirectory, wallet: &Wallet) -> bool {
+    const MAX_SETTINGS_BYTES: u64 = 8 * 1024 * 1024;
+    let path = data_dir
+        .network_directory(wallet.chain)
+        .path()
+        .join(settings::SETTINGS_FILE_NAME);
+    let Some(settings) = (|| {
+        let file = std::fs::File::open(path).ok()?;
+        if !file.metadata().ok()?.is_file() {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_SETTINGS_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() as u64 > MAX_SETTINGS_BYTES {
+            return None;
+        }
+        serde_json::from_slice::<settings::Settings>(&bytes).ok()
+    })() else {
+        return false;
+    };
+    settings
+        .wallets
+        .iter()
+        .find(|record| record.descriptor_checksum == wallet.descriptor_checksum)
+        .is_some_and(|record| record.pending_rescan.is_none())
 }
 
 fn balance_label(
@@ -191,8 +225,7 @@ impl State for VaultReceivePanel {
                 // A cached "no obligation" could briefly expose a false zero
                 // if a new restore rescan is scheduled while this page is open.
                 zero_balance_known(&status, cache.rescan_progress().is_some())
-                    && crate::app::pending_rescan(&self.data_dir, cache.chain(), &self.wallet)
-                        .is_none()
+                    && no_pending_restore_rescan(&self.data_dir, &self.wallet)
             });
         let balance_display = balance_label(balance, cache.bitcoin_unit, masked, zero_known);
         let content = view::dashboard(
@@ -715,17 +748,27 @@ mod tests {
         let known = || {
             zero_balance_known(
                 &SyncStatus::Synced,
-                crate::app::pending_rescan(&data_dir, wallet.chain, &wallet).is_some(),
+                !no_pending_restore_rescan(&data_dir, &wallet),
             )
         };
+        assert!(!known(), "missing settings cannot prove a zero");
         write(&settings);
         assert!(!known(), "pending restore is not a known zero");
         settings.wallets[0].pending_rescan = None;
         write(&settings);
         assert!(known(), "retired marker permits a synced zero");
+        let record = settings.wallets.pop().unwrap();
+        write(&settings);
+        assert!(!known(), "missing wallet record cannot prove a zero");
+        settings.wallets.push(record);
         settings.wallets[0].pending_rescan = Some(PendingRescan::DateUnknown);
         write(&settings);
         assert!(!known(), "a new marker must hide the zero immediately");
+        std::fs::write(&path, b"{broken").unwrap();
+        assert!(!known(), "corrupt settings cannot prove a zero");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(!known(), "unreadable endpoint cannot prove a zero");
         std::fs::remove_dir_all(root).unwrap();
     }
 
