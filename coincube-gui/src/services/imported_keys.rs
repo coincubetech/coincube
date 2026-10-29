@@ -876,12 +876,10 @@ impl<'a> LocalKeyRepository<'a> {
             },
         };
         if let Err(error) = self.resolve_update(&authority, &pending) {
-            // The update may have persisted despite its error. Only a fresh
-            // exact old item allows synchronous cleanup; uncertainty preserves
-            // every file and fails closed.
-            if anchor::load(&authority.scope)?.as_ref() == Some(&authority) {
-                self.discard_before_intent(&authority, txn_id, true)?;
-            }
+            // A read immediately after a failed Keychain update can report a
+            // stale old value even if Pending persisted. Preserve every file;
+            // a later locked read may discard the candidate only after it
+            // proves the unchanged committed anchor and authenticates keys.
             return Err(error);
         }
         let committed = self.recover_pending_with(pending, credential, device)?;
@@ -902,6 +900,7 @@ impl<'a> LocalKeyRepository<'a> {
         let empty = self.manifest(vec![]);
         let bytes = serde_json::to_vec(&empty).map_err(|_| "Cannot encode key manifest.")?;
         let path = self.root().join(MANIFEST);
+        self.discard_proven_empty_provision_tmp(&path, &bytes)?;
         self.check_transaction_files(None)?;
         if path.exists() {
             let manifest = self.read_manifest_file(&path, &[], false)?;
@@ -926,6 +925,45 @@ impl<'a> LocalKeyRepository<'a> {
             },
         };
         anchor::create(&authority)
+    }
+
+    /// A crash during the first empty manifest write can leave its synced
+    /// temporary file behind before any anchor exists. Remove only the exact
+    /// canonical empty bytes when the temporary file is the entire inventory.
+    fn discard_proven_empty_provision_tmp(
+        &self,
+        published: &Path,
+        empty_bytes: &[u8],
+    ) -> Result<(), String> {
+        if published.exists() {
+            return Ok(());
+        }
+        let mut candidate = None;
+        for entry in
+            fs::read_dir(self.root()).map_err(|_| "Cannot inspect imported key storage.")?
+        {
+            let entry = entry.map_err(|_| "Cannot inspect imported key storage.")?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let valid_tmp = name
+                .strip_prefix(".manifest-")
+                .and_then(|rest| rest.strip_suffix(".tmp"))
+                .and_then(|raw| Uuid::parse_str(raw).ok().map(|id| (raw, id)))
+                .is_some_and(|(raw, id)| !id.is_nil() && raw == id.to_string());
+            if !valid_tmp || candidate.is_some() {
+                return Ok(());
+            }
+            candidate = Some(entry.path());
+        }
+        let Some(candidate) = candidate else {
+            return Ok(());
+        };
+        if read_manifest_bytes(&candidate)? != empty_bytes {
+            return Ok(());
+        }
+        if anchor::load(&self.anchor_scope())?.is_some() {
+            return Err("Imported inventory anchor appeared during provision cleanup.".into());
+        }
+        remove_staged(&candidate)
     }
 
     fn read_manifest_file(
@@ -1629,7 +1667,7 @@ pub fn native_probe_phase(phase: &str, run_id: Uuid, root: &Path) -> Result<(), 
             }
         };
         let assert_no_stage = || -> Result<(), String> { repository.check_transaction_files(None) };
-        let stage_synthetic_key = || -> Result<(Manifest, PathBuf), String> {
+        let stage_synthetic_key = || -> Result<Manifest, String> {
             let record = LocalKeyRecord::from_account(&account, Uuid::new_v4(), Uuid::new_v4());
             let secret = ImportedKeySecret::new(
                 Zeroizing::new(phrases[0].clone()),
@@ -1645,17 +1683,16 @@ pub fn native_probe_phase(phase: &str, run_id: Uuid, root: &Path) -> Result<(), 
             .map_err(|_| "Cannot encrypt synthetic native probe key.")?;
             let staged = repository.root().join(record.file_name());
             write_new(&staged, &ciphertext)?;
-            Ok((repository.manifest(vec![record]), staged))
+            Ok(repository.manifest(vec![record]))
         };
         match phase {
             "update-fails" | "update-error" | "readback-fails" => {
                 let old = repository.read_manifest()?;
                 let before = anchor::load(&scope)?;
-                let (next, staged) = if phase == "readback-fails" {
-                    (repository.manifest(vec![]), None)
+                let next = if phase == "readback-fails" {
+                    repository.manifest(vec![])
                 } else {
-                    let (next, staged) = stage_synthetic_key()?;
-                    (next, Some(staged))
+                    stage_synthetic_key()?
                 };
                 let fault = match phase {
                     "update-fails" => anchor::NativeProbeFault::UpdateQueryError,
@@ -1676,9 +1713,13 @@ pub fn native_probe_phase(phase: &str, run_id: Uuid, root: &Path) -> Result<(), 
                         if result.is_ok() {
                             return Err("Faulted native update unexpectedly succeeded.".into());
                         }
-                        if anchor::load(&scope)? == before {
-                            remove_staged(staged.as_ref().expect("staged synthetic key"))?;
+                        if anchor::load(&scope)? != before {
+                            return Err("Faulted native update changed the old anchor.".into());
                         }
+                        repository.discard_proven_uncommitted_stage_with(
+                            || Ok(Zeroizing::new("synthetic unlock".into())),
+                            || Ok(Zeroizing::new([11u8; 32])),
+                        )?;
                         assert_committed(0)?;
                         assert_no_stage()
                     }
@@ -2484,7 +2525,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_anchor_cas_cleans_staging_only_when_old_anchor_remains() {
+    fn failed_anchor_cas_recovers_staging_only_after_old_anchor_proof() {
         let fixture = Fixture::new();
         let repository = fixture.repository();
         let old = anchor::load(&repository.anchor_scope()).unwrap().unwrap();
@@ -2495,11 +2536,46 @@ mod tests {
             .publish_manifest(&manifest, &manifest, "synthetic unlock", &device, || true)
             .is_err());
         assert_eq!(anchor::load(&old.scope).unwrap(), Some(old));
+        assert!(repository.read_manifest().is_err());
+        repository
+            .discard_proven_uncommitted_stage_with(
+                || panic!("empty candidate needs no credential"),
+                || panic!("empty candidate needs no device secret"),
+            )
+            .unwrap();
         assert!(repository.read_manifest().is_ok());
         assert!(fs::read_dir(repository.root()).unwrap().all(|entry| {
             let name = entry.unwrap().file_name().to_string_lossy().into_owned();
             !name.starts_with(".prior-") && !name.starts_with(".prepared-")
         }));
+    }
+
+    #[test]
+    fn stale_old_read_after_persisted_pending_preserves_recovery_files() {
+        let fixture = Fixture::new();
+        let repository = fixture.repository();
+        let old = anchor::load(&repository.anchor_scope()).unwrap().unwrap();
+        let manifest = repository.read_manifest().unwrap();
+        let device = Zeroizing::new([11u8; 32]);
+        anchor::tests::inject_update_fault(
+            &old.scope,
+            anchor::tests::UpdateFault::AfterWriteStaleOldRead,
+        );
+        assert!(repository
+            .publish_manifest(&manifest, &manifest, "synthetic unlock", &device, || true)
+            .is_err());
+        let pending = anchor::load(&old.scope).unwrap().unwrap();
+        let AnchorState::Pending { txn_id, .. } = pending.state else {
+            panic!("persisted pending anchor was lost");
+        };
+        assert!(repository.intent(txn_id).exists());
+        assert!(repository.prior(txn_id).exists());
+        assert!(repository.prepared(txn_id).exists());
+        let pending = anchor::load(&old.scope).unwrap().unwrap();
+        repository
+            .recover_pending_with(pending, "synthetic unlock", &device)
+            .unwrap();
+        assert!(repository.read_manifest().is_ok());
     }
 
     #[test]
@@ -2830,6 +2906,40 @@ mod tests {
         .unwrap();
         assert!(repository.provision_empty().is_err());
         assert!(anchor::load(&repository.anchor_scope()).unwrap().is_none());
+    }
+
+    #[test]
+    fn first_provision_discards_only_exact_empty_orphan_tmp() {
+        for (exact_empty, unknown_key) in [(true, false), (false, false), (true, true)] {
+            let fixture = Fixture::new();
+            let repository = fixture.repository();
+            let account = anchor::account(&repository.anchor_scope()).unwrap();
+            anchor::tests::store_remove(&account);
+            fs::remove_file(repository.root().join(MANIFEST)).unwrap();
+            let tmp = repository
+                .root()
+                .join(format!(".manifest-{}.tmp", Uuid::new_v4()));
+            let bytes = serde_json::to_vec(&repository.manifest(vec![])).unwrap();
+            write_new(
+                &tmp,
+                if exact_empty {
+                    bytes.as_slice()
+                } else {
+                    b"{invalid"
+                },
+            )
+            .unwrap();
+            if unknown_key {
+                write_new(&repository.root().join("unidentified.key"), b"opaque").unwrap();
+            }
+            let result = repository.provision_empty();
+            assert_eq!(result.is_ok(), exact_empty && !unknown_key);
+            assert_eq!(tmp.exists(), !exact_empty || unknown_key);
+            assert_eq!(
+                anchor::load(&repository.anchor_scope()).unwrap().is_some(),
+                exact_empty && !unknown_key
+            );
+        }
     }
 
     #[test]

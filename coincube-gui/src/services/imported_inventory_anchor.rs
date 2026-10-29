@@ -548,6 +548,7 @@ pub(crate) mod tests {
         BeforeWriteTwoReadErrors,
         AfterWrite,
         AfterWriteReadbackError,
+        AfterWriteStaleOldRead,
     }
 
     fn update_faults() -> &'static Mutex<HashMap<String, UpdateFault>> {
@@ -567,7 +568,19 @@ pub(crate) mod tests {
         FAULTS.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
+    fn stale_loads() -> &'static Mutex<HashMap<String, Vec<u8>>> {
+        static STALE: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::new();
+        STALE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
     pub(crate) fn store_load(account: &str) -> Result<Option<Vec<u8>>, String> {
+        if let Some(stale) = stale_loads()
+            .lock()
+            .map_err(|_| "Mock anchor stale reads are poisoned.")?
+            .remove(account)
+        {
+            return Ok(Some(stale));
+        }
         {
             let mut faults = load_faults()
                 .lock()
@@ -625,6 +638,12 @@ pub(crate) mod tests {
             return Err("Injected anchor update failure before write.".into());
         }
         store.insert(account.into(), next.into());
+        if matches!(fault, Some(UpdateFault::AfterWriteStaleOldRead)) {
+            stale_loads()
+                .lock()
+                .map_err(|_| "Mock anchor stale reads are poisoned.")?
+                .insert(account.into(), old.into());
+        }
         if matches!(fault, Some(UpdateFault::AfterWriteReadbackError)) {
             load_faults()
                 .lock()
@@ -633,7 +652,11 @@ pub(crate) mod tests {
         }
         if matches!(
             fault,
-            Some(UpdateFault::AfterWrite | UpdateFault::AfterWriteReadbackError)
+            Some(
+                UpdateFault::AfterWrite
+                    | UpdateFault::AfterWriteReadbackError
+                    | UpdateFault::AfterWriteStaleOldRead
+            )
         ) {
             return Err("Injected anchor update failure after write.".into());
         }
