@@ -71,14 +71,31 @@ impl MotionPreference {
 }
 
 /// Whole-interface zoom, applied as Iced's scale factor. Saved as a percent;
-/// any other saved number snaps to the nearest step.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(from = "u16", into = "u16")]
+/// any other saved number snaps to the nearest step, and a saved value that
+/// is not a number reads as 100% rather than failing the whole settings file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(into = "u16")]
 pub struct Zoom(u16);
 
+impl<'de> Deserialize<'de> for Zoom {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Saved {
+            Percent(f64),
+            Other(serde::de::IgnoredAny),
+        }
+        Ok(match Saved::deserialize(deserializer)? {
+            // `as` saturates: negatives read as 0 and huge values as u16::MAX.
+            Saved::Percent(percent) => Zoom::from(percent.round() as u16),
+            Saved::Other(_) => Zoom::default(),
+        })
+    }
+}
+
 impl Zoom {
-    /// The steps ⌘+ and ⌘− move between. 150% keeps a 1440px laptop window
-    /// near the 1024px minimum layout width.
+    /// The steps ⌘+ and ⌘− move between. At 150% a 1440px window lays out at
+    /// 960 points and the 1024 x 768 minimum window at about 683 x 512.
     pub const STEPS: [Zoom; 6] = [
         Zoom(80),
         Zoom(90),
@@ -235,6 +252,17 @@ mod tests {
         assert_eq!(Zoom::from(400).percent(), 150);
         assert_eq!(serde_json::from_str::<Zoom>("112").unwrap().percent(), 110);
         assert_eq!(serde_json::to_string(&Zoom::from(125)).unwrap(), "125");
+    }
+
+    #[test]
+    fn a_saved_zoom_that_is_not_a_step_never_fails_the_settings_file() {
+        let read = |json: &str| serde_json::from_str::<Zoom>(json).unwrap().percent();
+        assert_eq!(read("112.5"), 110);
+        assert_eq!(read("1.25"), 80);
+        assert_eq!(read("-20"), 80);
+        assert_eq!(read("70000"), 150);
+        assert_eq!(read("\"125\""), 100);
+        assert_eq!(read("null"), 100);
     }
 
     #[test]
