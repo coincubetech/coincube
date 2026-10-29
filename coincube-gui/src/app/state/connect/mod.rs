@@ -191,6 +191,7 @@ impl ConnectPanel {
         cube_has_vault: bool,
     ) -> Self {
         let mut account = ConnectAccountPanel::new();
+        account.defer_auth_cache_commit();
         // W12 §2.7 tweak #1 / W14: propagate the active cube's network
         // into ContactsState so the invite-form + add-to-cube dialogs
         // can filter their candidate-cube lists.

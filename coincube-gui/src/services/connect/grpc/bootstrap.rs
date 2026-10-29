@@ -169,7 +169,8 @@ async fn register_device(
         });
 
     let channel = create_channel(grpc_url).await?;
-    let access_token = tokens.read().await.access_token.clone();
+    let current_tokens = tokens.read().await.clone();
+    let access_token = current_tokens.access_token;
     let mut device = GrpcDeviceClient::new(channel, AuthInterceptor::new(&access_token));
 
     let resp = device
@@ -192,8 +193,16 @@ async fn register_device(
             return Err(BootstrapError::Superseded);
         }
     } else {
-        if !cache::set_device_id_for_email(network_dir, email, Some(&resp.device_id)).await? {
-            // A claim may have started while this RPC was in flight.
+        if !persist_registered_device_for_current_session(
+            &tokens,
+            network_dir,
+            email,
+            &resp.device_id,
+        )
+        .await?
+        {
+            // A claim or newer authentication may have started while this
+            // RPC was in flight.
             return Err(BootstrapError::Superseded);
         }
     }
@@ -203,6 +212,26 @@ async fn register_device(
         resp.device_id,
     );
     Ok(resp.device_id)
+}
+
+async fn persist_registered_device_for_current_session(
+    tokens: &Arc<RwLock<AccessTokenResponse>>,
+    network_dir: &NetworkDirectory,
+    email: &str,
+    device_id: &str,
+) -> Result<bool, ConnectCacheError> {
+    // Refresh may rotate this same session while the RPC is in flight.
+    // Hold the Arc read guard through the cache commit so the token and
+    // file checks see one ordering. A later login uses another Arc and
+    // still fails the active-cache token check.
+    let current_tokens = tokens.read().await;
+    cache::set_device_id_for_email_if_token(
+        network_dir,
+        email,
+        device_id,
+        &current_tokens.refresh_token,
+    )
+    .await
 }
 
 /// Best-effort wrapper around `ensure_device_registered` that swallows
@@ -234,5 +263,60 @@ pub async fn ensure_device_registered_best_effort(
             tracing::warn!("Best-effort SignerDevice registration failed: {}", e);
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::connect::client::cache::{
+        persist_refreshed_tokens, CONNECT_CACHE_FILENAME,
+    };
+
+    #[tokio::test]
+    async fn same_session_refresh_during_rpc_can_commit_device_id() {
+        let path =
+            std::env::temp_dir().join(format!("connect-register-refresh-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        let dir = NetworkDirectory::new(path.clone());
+        let email = "alice@example.com";
+        let old = AccessTokenResponse {
+            access_token: "old-access".into(),
+            refresh_token: "old-refresh".into(),
+            expires_at: 100,
+        };
+        let new = AccessTokenResponse {
+            access_token: "new-access".into(),
+            refresh_token: "new-refresh".into(),
+            expires_at: 200,
+        };
+        std::fs::write(
+            path.join(CONNECT_CACHE_FILENAME),
+            serde_json::to_vec(&serde_json::json!({
+                "active_email": email,
+                "accounts": [{ "email": email, "tokens": old }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let shared = Arc::new(RwLock::new(old));
+        persist_refreshed_tokens(&dir, email, "old-refresh", &new)
+            .await
+            .unwrap();
+        *shared.write().await = new;
+        assert!(
+            persist_registered_device_for_current_session(&shared, &dir, email, "device-a")
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            Account::from_cache(&dir, email)
+                .unwrap()
+                .unwrap()
+                .device_id
+                .as_deref(),
+            Some("device-a")
+        );
+        let _ = std::fs::remove_dir_all(path);
     }
 }

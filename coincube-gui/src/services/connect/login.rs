@@ -26,7 +26,7 @@ use crate::{
 use super::client::{
     auth::{AuthClient, AuthError},
     backend::{api, BackendClient, BackendWalletClient},
-    cache::{self, update_connect_cache, CacheAccountAction, ConnectCacheError},
+    cache::{self, CacheAccountAction, ConnectCacheError},
 };
 use super::grpc::bootstrap::ensure_device_registered_best_effort;
 
@@ -521,18 +521,12 @@ pub async fn connect(
     coincube_directory: CoincubeDirectory,
 ) -> Result<BackendState, Error> {
     let network_dir = coincube_directory.network_directory(network);
+    let login_started_from = cache::ConnectCache::from_file(&network_dir).unwrap_or_default();
     let access = auth.verify_otp(token.trim_end()).await?;
     let client =
         BackendClient::connect(auth.clone(), backend_api_url, access.clone(), network).await?;
-
-    update_connect_cache(
-        &network_dir,
-        &access,
-        &auth,
-        false,
-        CacheAccountAction::NewLogin,
-    )
-    .await?;
+    cache::update_connect_cache_for_login(&network_dir, &access, &auth, &login_started_from)
+        .await?;
 
     register_signer_device_best_effort(grpc_url.as_deref(), &client, &network_dir, &auth.email)
         .await;

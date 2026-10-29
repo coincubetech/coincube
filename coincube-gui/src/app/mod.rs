@@ -1243,6 +1243,8 @@ pub struct App {
     /// fires `Message::ConnectStreamReady`, or permanently `None` if the
     /// service config returned no `grpc_url`.
     connect_stream_config: Option<crate::services::connect::grpc::stream::ConnectStreamConfig>,
+    /// Cache state before this App panel sent its one pending OTP verification.
+    in_app_otp_cache_snapshot: Option<crate::services::connect::client::cache::ConnectCache>,
 }
 
 enum SplitHandoff {
@@ -4067,6 +4069,7 @@ impl App {
             connect_auth: connect_auth_arc,
             connect_email,
             connect_stream_config: None,
+            in_app_otp_cache_snapshot: None,
         };
         app.imported_kit_metadata
             .reload(&app.datadir, &app.cube_settings);
@@ -4310,6 +4313,7 @@ impl App {
                 connect_auth: None,
                 connect_email: None,
                 connect_stream_config: None,
+                in_app_otp_cache_snapshot: None,
             },
             cmd,
         ))
@@ -7658,6 +7662,8 @@ impl App {
             && matches!(
                 &message,
                 Message::InAppConnectLoginCompleted { .. }
+                    | Message::InAppConnectAuthReady { .. }
+                    | Message::InAppConnectAuthPersisted { .. }
                     | Message::EnsureConnectReady
                     | Message::TriggerConnectStreamReady { .. }
                     | Message::ConnectStreamReady(_)
@@ -8032,21 +8038,147 @@ impl App {
             Message::ConnectStream(event) => {
                 return self.handle_connect_stream(event);
             }
+            Message::InAppConnectAuthReady {
+                login,
+                epoch,
+                previous_refresh_token,
+            } => {
+                if epoch != self.panels.connect.account.auth_epoch() {
+                    return Task::none();
+                }
+                if previous_refresh_token.is_some()
+                    && self
+                        .connect_email
+                        .as_deref()
+                        .is_some_and(|email| email != login.user.email.as_str())
+                {
+                    return Task::done(Message::View(view::Message::ConnectAccount(
+                        view::ConnectAccountMessage::AuthCommitRejected { epoch },
+                    )));
+                }
+                let snapshot = if previous_refresh_token.is_none() {
+                    self.in_app_otp_cache_snapshot.take()
+                } else {
+                    None
+                };
+                let current_auth = previous_refresh_token
+                    .as_ref()
+                    .and_then(|_| self.connect_auth.clone());
+                let datadir = self.cache.datadir_path.clone();
+                let network = self.cache.network;
+                return Task::perform(
+                    async move {
+                        use crate::services::connect::client::auth::{
+                            AccessTokenResponse, AuthClient,
+                        };
+                        use crate::services::connect::client::cache;
+                        let tokens = AccessTokenResponse {
+                            access_token: login.token.clone(),
+                            refresh_token: login.refresh_token.clone(),
+                            expires_at: chrono::Utc::now().timestamp() + 30 * 24 * 60 * 60,
+                        };
+                        let network_dir = datadir.network_directory(network);
+                        let persisted = if let Err(error) =
+                            tokio::fs::create_dir_all(network_dir.path()).await
+                        {
+                            Err(cache::ConnectCacheError::WritingFile(error.to_string()))
+                        } else if let Some(previous) = previous_refresh_token.as_deref() {
+                            if let Some(current_auth) = current_auth {
+                                let mut current = current_auth.write().await;
+                                if current.refresh_token != previous {
+                                    Err(cache::ConnectCacheError::Unexpected(
+                                        "Connect refresh was superseded in memory".into(),
+                                    ))
+                                } else {
+                                    let result = cache::persist_refreshed_tokens(
+                                        &network_dir,
+                                        &login.user.email,
+                                        previous,
+                                        &tokens,
+                                    )
+                                    .await;
+                                    if let Ok(accepted) = &result {
+                                        *current = accepted.clone();
+                                    }
+                                    result
+                                }
+                            } else {
+                                cache::persist_refreshed_tokens(
+                                    &network_dir,
+                                    &login.user.email,
+                                    previous,
+                                    &tokens,
+                                )
+                                .await
+                            }
+                        } else if let Some(snapshot) = snapshot.as_ref() {
+                            let auth = AuthClient::new(
+                                String::new(),
+                                String::new(),
+                                login.user.email.clone(),
+                            );
+                            cache::update_connect_cache_for_login(
+                                &network_dir,
+                                &tokens,
+                                &auth,
+                                snapshot,
+                            )
+                            .await
+                        } else {
+                            Err(cache::ConnectCacheError::Unexpected(
+                                "OTP cache snapshot unavailable".into(),
+                            ))
+                        };
+                        if let Err(error) = &persisted {
+                            tracing::warn!("In-app Connect auth cache commit rejected: {error}");
+                        }
+                        Message::InAppConnectAuthPersisted {
+                            login,
+                            epoch,
+                            previous_refresh_token,
+                            tokens: persisted.ok(),
+                        }
+                    },
+                    |message| message,
+                );
+            }
+            Message::InAppConnectAuthPersisted {
+                login,
+                epoch,
+                previous_refresh_token,
+                tokens,
+            } => {
+                if epoch != self.panels.connect.account.auth_epoch() {
+                    return Task::none();
+                }
+                let Some(tokens) = tokens else {
+                    return Task::done(Message::View(view::Message::ConnectAccount(
+                        view::ConnectAccountMessage::AuthCommitRejected { epoch },
+                    )));
+                };
+                let _ = tokens;
+                return Task::done(Message::View(view::Message::ConnectAccount(
+                    view::ConnectAccountMessage::AuthCommitAccepted {
+                        login,
+                        epoch,
+                        refreshed: previous_refresh_token.is_some(),
+                    },
+                )));
+            }
             Message::InAppConnectLoginCompleted {
                 token,
                 refresh_token,
                 email,
+                epoch,
             } => {
-                // Bridge the in-app Connect login → realtime stream
-                // bootstrap that the home path gets at App init.
-                // Persists JWTs to `connect.json`, registers a signer
-                // device via gRPC, and re-fires
-                // `connect_stream_ready_task` to populate
-                // `cache.connect_grpc_url` / `connect_tokens` /
-                // `connect_device_id`. Without this hop "Sign via
-                // Keychain" stays unreachable until a full app
-                // restart. See `account.rs::post_login_tasks` and
-                // PLAN comment near `mod.rs:2374`.
+                if epoch != self.panels.connect.account.auth_epoch()
+                    || self.panels.connect.account.client.token() != Some(token.as_str())
+                {
+                    return Task::none();
+                }
+                // The OTP cache commit happened before panel/keyring
+                // adoption. Only device registration and stream bootstrap
+                // remain, both bound to that accepted token.
                 self.connect_email = Some(email.clone());
                 self.cache.connect_email = Some(email.clone());
                 self.cache.has_connect_session = true;
@@ -8065,12 +8197,7 @@ impl App {
                 return Task::perform(
                     async move {
                         use crate::services::connect::client::auth::AccessTokenResponse;
-                        use crate::services::connect::client::cache::ConnectCache;
                         use crate::services::connect::grpc::bootstrap::ensure_device_registered_best_effort;
-                        use async_fd_lock::LockWrite;
-                        use std::io::SeekFrom;
-                        use tokio::fs::OpenOptions;
-                        use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
                         // Coincube backend issues 30-day JWTs (see
                         // `CLAUDE.md`); we approximate expires_at as
@@ -8086,89 +8213,18 @@ impl App {
                             expires_at: now + 30 * 24 * 60 * 60,
                         };
 
-                        // Persist to `<network_dir>/connect.json` so
-                        // the next `connect_stream_ready_task` invocation
-                        // (this one, plus future app launches) can read
-                        // the device_id back. We write the file
-                        // directly instead of going through
-                        // `update_connect_cache` because the latter
-                        // requires an `AuthClient` we don't have here.
                         let network_dir = datadir.network_directory(network);
-                        let mut path = network_dir.path().to_path_buf();
-                        path.push("connect.json");
-                        if let Some(parent) = path.parent() {
-                            let _ = tokio::fs::create_dir_all(parent).await;
-                        }
-
-                        let write_result: Result<(), String> = async {
-                            let file = OpenOptions::new()
-                                .read(true)
-                                .write(true)
-                                .create(true)
-                                .truncate(false)
-                                .open(&path)
-                                .await
-                                .map_err(|e| format!("open connect.json: {e}"))?;
-                            let mut guard = file
-                                .lock_write()
-                                .await
-                                .map_err(|e| format!("lock connect.json: {e:?}"))?;
-                            let mut buf = Vec::new();
-                            guard
-                                .read_to_end(&mut buf)
-                                .await
-                                .map_err(|e| format!("read connect.json: {e}"))?;
-                            let mut cache: ConnectCache = if buf.is_empty() {
-                                ConnectCache::default()
-                            } else {
-                                serde_json::from_slice(&buf)
-                                    .map_err(|e| format!("parse connect.json: {e}"))?
-                            };
-                            if let Some(acct) = cache
-                                .accounts
-                                .iter_mut()
-                                .find(|a| a.email == email_for_task)
-                            {
-                                acct.tokens = tokens.clone();
-                                if acct.reregister_claim.is_some() {
-                                    acct.device_id = None;
-                                }
-                                acct.reregister_claim = None;
-                            } else {
-                                cache.accounts.push(
-                                    crate::services::connect::client::cache::Account {
-                                        email: email_for_task.clone(),
-                                        tokens: tokens.clone(),
-                                        device_id: None,
-                                        last_seen_event_seq: None,
-                                        reregister_claim: None,
-                                    },
-                                );
-                            }
-                            cache.active_email = Some(email_for_task.clone());
-                            let serialized = serde_json::to_vec_pretty(&cache)
-                                .map_err(|e| format!("serialize: {e}"))?;
-                            guard
-                                .seek(SeekFrom::Start(0))
-                                .await
-                                .map_err(|e| format!("seek: {e}"))?;
-                            guard
-                                .write_all(&serialized)
-                                .await
-                                .map_err(|e| format!("write: {e}"))?;
-                            guard
-                                .inner_mut()
-                                .set_len(serialized.len() as u64)
-                                .await
-                                .map_err(|e| format!("truncate: {e}"))?;
-                            Ok(())
-                        }
-                        .await;
-
-                        if let Err(e) = write_result {
-                            tracing::warn!(
-                                "InAppConnectLoginCompleted: failed to persist tokens: {e}"
-                            );
+                        let owns_cached_session =
+                            crate::services::connect::client::cache::ConnectCache::from_file(
+                                &network_dir,
+                            )
+                            .ok()
+                            .and_then(|cache| cache.active_account().cloned())
+                            .is_some_and(|account| {
+                                account.email == email_for_task
+                                    && account.tokens.refresh_token == tokens.refresh_token
+                            });
+                        if !owns_cached_session {
                             return (network, datadir, None, email_for_task, cube_uuid);
                         }
 
@@ -10001,6 +10057,31 @@ impl App {
             }
             msg @ Message::View(view::Message::ConnectAccount(_))
             | msg @ Message::View(view::Message::ConnectCube(_)) => {
+                if let Message::View(view::Message::ConnectAccount(
+                    view::ConnectAccountMessage::AuthCommitAccepted { login, epoch, .. },
+                )) = &msg
+                {
+                    let network_dir = self
+                        .cache
+                        .datadir_path
+                        .network_directory(self.cache.network);
+                    let still_current =
+                        crate::services::connect::client::cache::ConnectCache::from_file(
+                            &network_dir,
+                        )
+                        .ok()
+                        .and_then(|cache| cache.active_account().cloned())
+                        .is_some_and(|account| {
+                            account.email == login.user.email
+                                && account.tokens.access_token == login.token
+                                && account.tokens.refresh_token == login.refresh_token
+                        });
+                    if !still_current {
+                        return Task::done(Message::View(view::Message::ConnectAccount(
+                            view::ConnectAccountMessage::AuthCommitRejected { epoch: *epoch },
+                        )));
+                    }
+                }
                 if self.cache.chain().is_blake2b() && !self.requires_connect() {
                     self.panels.connect.account.use_local_backend();
                 }
@@ -10022,6 +10103,7 @@ impl App {
                 let session_epoch = match &msg {
                     Message::View(view::Message::ConnectAccount(
                         view::ConnectAccountMessage::SetSession(_, epoch)
+                        | view::ConnectAccountMessage::AuthCommitAccepted { epoch, .. }
                         | view::ConnectAccountMessage::SessionLoaded { epoch, .. },
                     )) => Some(*epoch),
                     _ => None,
@@ -10046,6 +10128,29 @@ impl App {
                         )
                 );
                 let previous_claim_session = self.claim_connect_session();
+                if matches!(
+                    &msg,
+                    Message::View(view::Message::ConnectAccount(
+                        view::ConnectAccountMessage::VerifyOtp
+                    ))
+                ) && self.panels.connect.account.can_begin_verify_otp()
+                {
+                    use crate::services::connect::client::cache::{
+                        ConnectCache, ConnectCacheError,
+                    };
+                    let network_dir = self
+                        .cache
+                        .datadir_path
+                        .network_directory(self.cache.network);
+                    self.in_app_otp_cache_snapshot = match ConnectCache::from_file(&network_dir) {
+                        Ok(cache) => Some(cache),
+                        Err(ConnectCacheError::NotFound) => Some(ConnectCache::default()),
+                        Err(error) => {
+                            tracing::warn!("Cannot capture Connect OTP cache state: {error}");
+                            None
+                        }
+                    };
+                }
                 let task = self
                     .panels
                     .connect
@@ -16123,6 +16228,7 @@ pub(crate) mod tests {
                     token: "legacy-fixture".into(),
                     refresh_token: "legacy-refresh".into(),
                     email: "other@example.invalid".into(),
+                    epoch: 0,
                 },
                 Message::EnsureConnectReady,
                 Message::TriggerConnectStreamReady {
@@ -17673,6 +17779,280 @@ pub(crate) mod claim_step1_tests {
             .unwrap(),
         );
         (app, wallet)
+    }
+
+    #[test]
+    fn app_otp_waits_for_cache_commit_before_broadcasting_sign_in() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = rt.enter();
+                let root = std::env::temp_dir()
+                    .join(format!("app-otp-broadcast-{}", uuid::Uuid::new_v4()));
+                let (mut first, _) = bitcoin_app(&root);
+                let (mut second, _) = bitcoin_app(&root);
+                first.cache.datadir_path = CoincubeDirectory::new(root.clone());
+                second.cache.datadir_path = CoincubeDirectory::new(root.clone());
+                first.panels.connect.account.step =
+                    state::connect::account::ConnectFlowStep::OtpVerification {
+                        email: "first@example.invalid".into(),
+                        otp: "123456".into(),
+                        sending: true,
+                        is_signup: false,
+                        cooldown: 0,
+                    };
+                second.panels.connect.account.user = Some(crate::services::coincube::User {
+                    id: 99,
+                    email: "second@example.invalid".into(),
+                    email_verified: Some(true),
+                });
+                let mut gui = crate::gui::GUI::reviewer_claim_gui(first, second);
+                let login = crate::services::coincube::LoginResponse {
+                    requires_2fa: false,
+                    token: "first-token".into(),
+                    refresh_token: "first-refresh".into(),
+                    user: crate::services::coincube::User {
+                        id: 7,
+                        email: "first@example.invalid".into(),
+                        email_verified: Some(true),
+                    },
+                };
+                let task = gui.reviewer_account(
+                    1,
+                    view::ConnectAccountMessage::OtpVerified(login.clone(), 0, 0),
+                );
+                assert!(!gui.reviewer_app_mut(1).claim_session_invalidated);
+                assert_eq!(
+                    gui.reviewer_app_mut(0)
+                        .panels
+                        .connect
+                        .account
+                        .client
+                        .token(),
+                    None
+                );
+                drop(task);
+                // Another process supersedes the cache between persistence and
+                // this App's adoption. The GUI must not broadcast the raw
+                // AuthCommitAccepted completion to the sibling first.
+                let network_dir = {
+                    let app = gui.reviewer_app_mut(0);
+                    app.cache.datadir_path.network_directory(app.cache.network)
+                };
+                std::fs::create_dir_all(network_dir.path()).unwrap();
+                std::fs::write(
+                    network_dir
+                        .path()
+                        .join(crate::services::connect::client::cache::CONNECT_CACHE_FILENAME),
+                    serde_json::to_vec(&serde_json::json!({
+                        "active_email": "first@example.invalid",
+                        "accounts": [{
+                            "email": "first@example.invalid",
+                            "tokens": {
+                                "access_token": "newer-token",
+                                "refresh_token": "newer-refresh",
+                                "expires_at": 1000
+                            }
+                        }]
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+                drop(gui.reviewer_account(
+                    1,
+                    view::ConnectAccountMessage::AuthCommitAccepted {
+                        login,
+                        epoch: 0,
+                        refreshed: false,
+                    },
+                ));
+                assert!(!gui.reviewer_app_mut(1).claim_session_invalidated);
+                assert_eq!(
+                    gui.reviewer_app_mut(0)
+                        .panels
+                        .connect
+                        .account
+                        .client
+                        .token(),
+                    None
+                );
+                let _ = std::fs::remove_dir_all(root);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejected_refresh_does_not_touch_stream_auth_or_register_device() {
+        let root = std::env::temp_dir().join(format!("refresh-rejected-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = bitcoin_app(&root);
+        let original = crate::services::connect::client::auth::AccessTokenResponse {
+            access_token: "current-access".into(),
+            refresh_token: "current-refresh".into(),
+            expires_at: 300,
+        };
+        let shared = Arc::new(tokio::sync::RwLock::new(original.clone()));
+        app.connect_auth = Some(shared.clone());
+        app.connect_email = Some("alice@example.com".into());
+        app.cache.connect_tokens = Some(shared.clone());
+        let mut login = home_login();
+        login.user.email = "alice@example.com".into();
+        let task = app.update(Message::InAppConnectAuthPersisted {
+            login,
+            epoch: app.panels.connect.account.auth_epoch(),
+            previous_refresh_token: Some("stale-refresh".into()),
+            tokens: None, // cache CAS rejected this completion
+        });
+        use iced::futures::StreamExt;
+        let mut stream = iced_runtime::task::into_stream(task).unwrap();
+        assert!(matches!(
+            stream.next().await,
+            Some(iced_runtime::Action::Output(Message::View(
+                view::Message::ConnectAccount(
+                    view::ConnectAccountMessage::AuthCommitRejected { .. }
+                )
+            )))
+        ));
+        assert!(stream.next().await.is_none());
+        assert_eq!(shared.read().await.access_token, original.access_token);
+        assert_eq!(shared.read().await.refresh_token, original.refresh_token);
+        assert!(app.connect_stream_config.is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn superseded_cache_refuses_auth_adoption_after_persisted_completion() {
+        let root =
+            std::env::temp_dir().join(format!("auth-adoption-superseded-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = bitcoin_app(&root);
+        app.cache.datadir_path = CoincubeDirectory::new(root.clone());
+        let mut login = home_login();
+        login.user.email = "alice@example.com".into();
+        let network_dir = app.cache.datadir_path.network_directory(app.cache.network);
+        std::fs::create_dir_all(network_dir.path()).unwrap();
+        std::fs::write(
+            network_dir
+                .path()
+                .join(crate::services::connect::client::cache::CONNECT_CACHE_FILENAME),
+            serde_json::to_vec(&serde_json::json!({
+                "active_email": "alice@example.com",
+                "accounts": [{
+                    "email": "alice@example.com",
+                    "tokens": {
+                        "access_token": "newer-access",
+                        "refresh_token": "newer-refresh",
+                        "expires_at": 1000
+                    },
+                    "device_id": "newer-device",
+                    "reregister_claim": "newer-claim"
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let epoch = app.panels.connect.account.auth_epoch();
+        let task = app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::AuthCommitAccepted {
+                login,
+                epoch,
+                refreshed: false,
+            },
+        )));
+        let mut stream = iced_runtime::task::into_stream(task).unwrap();
+        assert!(matches!(
+            stream.next().await,
+            Some(iced_runtime::Action::Output(Message::View(
+                view::Message::ConnectAccount(
+                    view::ConnectAccountMessage::AuthCommitRejected { .. }
+                )
+            )))
+        ));
+        assert!(stream.next().await.is_none());
+        assert_eq!(app.panels.connect.account.client.token(), None);
+        let cached =
+            crate::services::connect::client::cache::ConnectCache::from_file(&network_dir).unwrap();
+        assert_eq!(
+            cached.active_account().unwrap().device_id.as_deref(),
+            Some("newer-device")
+        );
+        assert!(serde_json::to_string(&cached)
+            .unwrap()
+            .contains("newer-claim"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn changed_in_memory_refresh_refuses_disk_commit() {
+        let root =
+            std::env::temp_dir().join(format!("auth-refresh-in-memory-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = bitcoin_app(&root);
+        app.cache.datadir_path = CoincubeDirectory::new(root.clone());
+        let network_dir = app.cache.datadir_path.network_directory(app.cache.network);
+        std::fs::create_dir_all(network_dir.path()).unwrap();
+        std::fs::write(
+            network_dir
+                .path()
+                .join(crate::services::connect::client::cache::CONNECT_CACHE_FILENAME),
+            serde_json::to_vec(&serde_json::json!({
+                "active_email": "alice@example.com",
+                "accounts": [{
+                    "email": "alice@example.com",
+                    "tokens": {
+                        "access_token": "old-access",
+                        "refresh_token": "old-refresh",
+                        "expires_at": 1000
+                    },
+                    "device_id": "old-device",
+                    "reregister_claim": "live-claim"
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let current = Arc::new(tokio::sync::RwLock::new(
+            crate::services::connect::client::auth::AccessTokenResponse {
+                access_token: "newer-access".into(),
+                refresh_token: "newer-refresh".into(),
+                expires_at: 2000,
+            },
+        ));
+        app.connect_auth = Some(current.clone());
+        app.connect_email = Some("alice@example.com".into());
+        let mut login = home_login();
+        login.user.email = "alice@example.com".into();
+        let epoch = app.panels.connect.account.auth_epoch();
+        let task = app.update(Message::InAppConnectAuthReady {
+            login,
+            epoch,
+            previous_refresh_token: Some("old-refresh".into()),
+        });
+        let mut stream = iced_runtime::task::into_stream(task).unwrap();
+        assert!(matches!(
+            stream.next().await,
+            Some(iced_runtime::Action::Output(
+                Message::InAppConnectAuthPersisted { tokens: None, .. }
+            ))
+        ));
+        let cached =
+            crate::services::connect::client::cache::ConnectCache::from_file(&network_dir).unwrap();
+        assert_eq!(
+            cached.active_account().unwrap().tokens.refresh_token,
+            "old-refresh"
+        );
+        assert_eq!(
+            cached.active_account().unwrap().device_id.as_deref(),
+            Some("old-device")
+        );
+        assert!(serde_json::to_string(&cached)
+            .unwrap()
+            .contains("live-claim"));
+        assert_eq!(current.read().await.refresh_token, "newer-refresh");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     pub(crate) fn signed_in_connect_for_shell(app: &mut App) {

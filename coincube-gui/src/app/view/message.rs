@@ -1695,11 +1695,25 @@ pub enum ConnectAccountMessage {
     RefreshSession {
         refresh_token: String,
     },
-    /// A login or refresh result. The number is the panel's authentication
+    /// A new OTP login result. The number is the panel's authentication
     /// epoch when the operation that produced it was spawned: a completion
     /// of an operation begun before a global auth invalidation carries an
     /// older epoch than one begun after, whatever order they arrive in.
     SetSession(crate::services::coincube::LoginResponse, u64),
+    OtpVerified(crate::services::coincube::LoginResponse, u64, u64),
+    OtpVerifyFailed(crate::user_error::UserError, u64, u64),
+    /// A keyring session refresh updates the stored bearer without starting
+    /// the new-login device registration and stream bootstrap.
+    RefreshedSession(crate::services::coincube::LoginResponse, u64, String),
+    /// Result persisted to connect.json before the App panel adopts it.
+    AuthCommitAccepted {
+        login: crate::services::coincube::LoginResponse,
+        epoch: u64,
+        refreshed: bool,
+    },
+    AuthCommitRejected {
+        epoch: u64,
+    },
     SessionLoaded {
         user: crate::services::coincube::User,
         plan: Option<crate::services::coincube::ConnectPlan>,

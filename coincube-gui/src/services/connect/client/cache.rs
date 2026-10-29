@@ -2,6 +2,7 @@ use crate::dir::NetworkDirectory;
 use async_fd_lock::LockWrite;
 use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::io::SeekFrom;
 use tokio::fs::OpenOptions;
@@ -11,10 +12,22 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use super::auth::{AccessTokenResponse, AuthClient, AuthError};
 
 pub const CONNECT_CACHE_FILENAME: &str = "connect.json";
-const REREGISTER_LOCK_FILENAME: &str = "connect-reregister.lock";
+const REREGISTER_LOCK_FILENAME_PREFIX: &str = "connect-reregister-";
 
-fn open_reregister_lock(network_dir: &NetworkDirectory) -> std::io::Result<std::fs::File> {
-    let path = network_dir.path().join(REREGISTER_LOCK_FILENAME);
+fn reregister_lock_path(network_dir: &NetworkDirectory, email: &str) -> std::path::PathBuf {
+    let normalized = email.trim().to_ascii_lowercase();
+    let digest = Sha256::digest(normalized.as_bytes());
+    let suffix: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    network_dir
+        .path()
+        .join(format!("{REREGISTER_LOCK_FILENAME_PREFIX}{suffix}.lock"))
+}
+
+fn open_reregister_lock(
+    network_dir: &NetworkDirectory,
+    email: &str,
+) -> std::io::Result<std::fs::File> {
+    let path = reregister_lock_path(network_dir, email);
     let mut options = std::fs::OpenOptions::new();
     options.read(true).write(true).create(true);
     #[cfg(unix)]
@@ -38,10 +51,11 @@ pub(crate) fn has_live_reregister_claim_for_account(
     if account.reregister_claim.is_none() {
         return false;
     }
-    // The About task holds this lock until its RPC and cache commit finish.
+    // The About task holds this account's lock until its RPC and cache commit
+    // finish. Another account's live request cannot revive a crashed claim.
     // A crash releases the OS lock even if the PID is reused. On any I/O
     // uncertainty, preserve the claim rather than replacing a live request.
-    match open_reregister_lock(network_dir).and_then(|file| {
+    match open_reregister_lock(network_dir, &account.email).and_then(|file| {
         let free = file.try_lock_exclusive()?;
         if free {
             file.unlock()?;
@@ -54,7 +68,7 @@ pub(crate) fn has_live_reregister_claim_for_account(
             // a persistent fail-safe block diagnosable.
             tracing::warn!(
                 "Cannot check Connect re-registration lock at {:?}: {e}",
-                network_dir.path().join(REREGISTER_LOCK_FILENAME)
+                reregister_lock_path(network_dir, &account.email)
             );
             true
         }
@@ -222,6 +236,61 @@ pub async fn update_connect_cache(
     refresh: bool,
     action: CacheAccountAction,
 ) -> Result<AccessTokenResponse, ConnectCacheError> {
+    update_connect_cache_inner(network_dir, current_tokens, client, refresh, action, None).await
+}
+
+enum CacheUpdateGuard<'a> {
+    LoginSnapshot(&'a ConnectCache),
+    RefreshToken(&'a str),
+}
+
+/// Persist an in-app refresh only if the cache still has the bearer that was
+/// refreshed. This preserves account selection, device ID and any About claim.
+pub async fn persist_refreshed_tokens(
+    network_dir: &NetworkDirectory,
+    email: &str,
+    previous_refresh_token: &str,
+    tokens: &AccessTokenResponse,
+) -> Result<AccessTokenResponse, ConnectCacheError> {
+    let auth = AuthClient::new(String::new(), String::new(), email.to_string());
+    update_connect_cache_inner(
+        network_dir,
+        tokens,
+        &auth,
+        false,
+        CacheAccountAction::PreserveSelection,
+        Some(CacheUpdateGuard::RefreshToken(previous_refresh_token)),
+    )
+    .await
+}
+
+/// A foreground OTP login may complete after another login. Its snapshot is
+/// taken before OTP verification and checked under the cache write lock.
+pub async fn update_connect_cache_for_login(
+    network_dir: &NetworkDirectory,
+    tokens: &AccessTokenResponse,
+    client: &AuthClient,
+    started_from: &ConnectCache,
+) -> Result<AccessTokenResponse, ConnectCacheError> {
+    update_connect_cache_inner(
+        network_dir,
+        tokens,
+        client,
+        false,
+        CacheAccountAction::NewLogin,
+        Some(CacheUpdateGuard::LoginSnapshot(started_from)),
+    )
+    .await
+}
+
+async fn update_connect_cache_inner(
+    network_dir: &NetworkDirectory,
+    current_tokens: &AccessTokenResponse,
+    client: &AuthClient,
+    refresh: bool,
+    action: CacheAccountAction,
+    guard: Option<CacheUpdateGuard<'_>>,
+) -> Result<AccessTokenResponse, ConnectCacheError> {
     let email = &client.email;
     let mut path = network_dir.path().to_path_buf();
     path.push(CONNECT_CACHE_FILENAME);
@@ -253,11 +322,49 @@ pub async fn update_connect_cache(
         ConnectCache::default()
     };
 
+    let guarded = guard.is_some();
+    match guard {
+        Some(CacheUpdateGuard::LoginSnapshot(started_from)) => {
+            let before = started_from.accounts.iter().find(|a| a.email == *email);
+            let now = cache.accounts.iter().find(|a| a.email == *email);
+            if cache.active_email != started_from.active_email
+                || now.map(|a| {
+                    (
+                        &a.tokens.access_token,
+                        &a.tokens.refresh_token,
+                        a.tokens.expires_at,
+                    )
+                }) != before.map(|a| {
+                    (
+                        &a.tokens.access_token,
+                        &a.tokens.refresh_token,
+                        a.tokens.expires_at,
+                    )
+                })
+            {
+                return Err(ConnectCacheError::Unexpected(
+                    "Connect login was superseded while OTP verification was pending".into(),
+                ));
+            }
+        }
+        Some(CacheUpdateGuard::RefreshToken(previous)) => {
+            let current = cache.accounts.iter().find(|a| a.email == *email);
+            if !cache.active_email_matches(email)
+                || current.map(|a| a.tokens.refresh_token.as_str()) != Some(previous)
+            {
+                return Err(ConnectCacheError::Unexpected(
+                    "Connect refresh was superseded by another session".into(),
+                ));
+            }
+        }
+        None => {}
+    }
+
     let newer_cached_tokens = cache
         .accounts
         .iter()
         .find(|cred| cred.email == *email)
-        .filter(|account| current_tokens.expires_at < account.tokens.expires_at)
+        .filter(|account| !guarded && current_tokens.expires_at < account.tokens.expires_at)
         .map(|account| account.tokens.clone());
 
     let tokens = if let Some(tokens) = newer_cached_tokens {
@@ -314,6 +421,27 @@ pub async fn set_device_id_for_email(
         DeviceRegistrationUpdate::Set {
             device_id,
             claim: None,
+            expected_refresh_token: None,
+        },
+    )
+    .await
+}
+
+/// Commit a plain registration only for the same active bearer that started
+/// its RPC. A later login cannot inherit an earlier RPC's device ID.
+pub async fn set_device_id_for_email_if_token(
+    network_dir: &NetworkDirectory,
+    email: &str,
+    device_id: &str,
+    expected_refresh_token: &str,
+) -> Result<bool, ConnectCacheError> {
+    mutate_device_registration(
+        network_dir,
+        email,
+        DeviceRegistrationUpdate::Set {
+            device_id: Some(device_id),
+            claim: None,
+            expected_refresh_token: Some(expected_refresh_token),
         },
     )
     .await
@@ -327,7 +455,7 @@ pub async fn begin_device_reregistration(
     email: &str,
     expected_id: &str,
 ) -> Result<Option<DeviceReregistrationClaim>, ConnectCacheError> {
-    let lock = open_reregister_lock(network_dir)
+    let lock = open_reregister_lock(network_dir, email)
         .map_err(|e| ConnectCacheError::ReadingFile(format!("Opening registration lock: {e}")))?;
     if !lock
         .try_lock_exclusive()
@@ -362,6 +490,7 @@ pub async fn finish_device_reregistration(
         DeviceRegistrationUpdate::Set {
             device_id,
             claim: Some(claim),
+            expected_refresh_token: None,
         },
     )
     .await
@@ -375,6 +504,7 @@ enum DeviceRegistrationUpdate<'a> {
     Set {
         device_id: Option<&'a str>,
         claim: Option<&'a str>,
+        expected_refresh_token: Option<&'a str>,
     },
 }
 
@@ -419,6 +549,7 @@ async fn mutate_device_registration(
     let Some(account) = cache.accounts.iter_mut().find(|a| a.email == email) else {
         return Ok(false);
     };
+    let mut accepted = true;
     let changed = match update {
         DeviceRegistrationUpdate::Begin { expected_id, claim } => {
             if !is_active || account.device_id.as_deref() != Some(expected_id) {
@@ -427,15 +558,31 @@ async fn mutate_device_registration(
             account.reregister_claim = Some(claim.to_string());
             true
         }
-        DeviceRegistrationUpdate::Set { device_id, claim } => {
+        DeviceRegistrationUpdate::Set {
+            device_id,
+            claim,
+            expected_refresh_token,
+        } => {
             if let Some(claim) = claim {
-                if !is_active || account.reregister_claim.as_deref() != Some(claim) {
+                if account.reregister_claim.as_deref() != Some(claim) {
                     return Ok(false);
                 }
-                account.device_id = device_id.map(str::to_string);
+                // The account lost selection while its RPC was in flight.
+                // Retire only this request's claim; keep its previous device
+                // id and never install the late RPC result.
+                if is_active {
+                    account.device_id = device_id.map(str::to_string);
+                } else {
+                    accepted = false;
+                }
                 account.reregister_claim = None;
                 true
             } else {
+                if expected_refresh_token
+                    .is_some_and(|expected| !is_active || account.tokens.refresh_token != expected)
+                {
+                    return Ok(false);
+                }
                 if has_live_reregister_claim_for_account(network_dir, account) {
                     return Ok(false);
                 }
@@ -468,7 +615,7 @@ async fn mutate_device_registration(
         .set_len(content.len() as u64)
         .await
         .map_err(|e| ConnectCacheError::WritingFile(format!("Failed to truncate file: {}", e)))?;
-    Ok(true)
+    Ok(accepted)
 }
 
 /// Persist the highest event_seq observed on the realtime stream for the
@@ -622,8 +769,9 @@ impl std::fmt::Display for ConnectCacheError {
 #[cfg(test)]
 mod tests {
     use super::{
-        begin_device_reregistration, finish_device_reregistration, set_device_id_for_email,
-        update_connect_cache, AccessTokenResponse, CacheAccountAction, ConnectCache,
+        begin_device_reregistration, finish_device_reregistration, persist_refreshed_tokens,
+        set_device_id_for_email, set_device_id_for_email_if_token, update_connect_cache,
+        update_connect_cache_for_login, AccessTokenResponse, CacheAccountAction, ConnectCache,
         CONNECT_CACHE_FILENAME,
     };
     use crate::dir::NetworkDirectory;
@@ -690,6 +838,256 @@ mod tests {
             Some("device-b")
         );
         drop(claim);
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn slower_login_cannot_supersede_newer_tokens_and_claim() {
+        let dir = test_network_dir();
+        let path = dir.path().join(CONNECT_CACHE_FILENAME);
+        let email = "alice@example.com";
+        let mut cache = ConnectCache::default();
+        cache.upsert_credential(email, tokens("original"), CacheAccountAction::NewLogin);
+        cache.accounts[0].device_id = Some("device-a".into());
+        std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
+        let stale_login_snapshot = ConnectCache::from_file(&dir).unwrap();
+
+        let mut newer = tokens("newer");
+        newer.expires_at = 300;
+        update_connect_cache_for_login(
+            &dir,
+            &newer,
+            &super::AuthClient::new("http://unused".into(), String::new(), email.into()),
+            &stale_login_snapshot,
+        )
+        .await
+        .unwrap();
+
+        let claim = begin_device_reregistration(&dir, email, "device-a")
+            .await
+            .unwrap()
+            .unwrap();
+        let auth = super::AuthClient::new("http://unused".into(), String::new(), email.into());
+        assert!(update_connect_cache_for_login(
+            &dir,
+            &tokens("slower"),
+            &auth,
+            &stale_login_snapshot,
+        )
+        .await
+        .is_err());
+        let restored = ConnectCache::from_file(&dir).unwrap();
+        assert_eq!(restored.active_email.as_deref(), Some(email));
+        assert_eq!(restored.accounts[0].tokens.access_token, newer.access_token);
+        assert_eq!(restored.accounts[0].device_id.as_deref(), Some("device-a"));
+        assert_eq!(
+            restored.accounts[0].reregister_claim.as_deref(),
+            Some(claim.as_str())
+        );
+        let mut switched = restored;
+        switched.upsert_credential("bob@example.com", tokens("b"), CacheAccountAction::NewLogin);
+        std::fs::write(&path, serde_json::to_vec(&switched).unwrap()).unwrap();
+        assert!(update_connect_cache_for_login(
+            &dir,
+            &tokens("slower"),
+            &auth,
+            &stale_login_snapshot,
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            ConnectCache::from_file(&dir)
+                .unwrap()
+                .active_email
+                .as_deref(),
+            Some("bob@example.com")
+        );
+        drop(claim);
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn deliberate_login_supersedes_claim_even_with_shorter_token_lifetime() {
+        let dir = test_network_dir();
+        let path = dir.path().join(CONNECT_CACHE_FILENAME);
+        let email = "alice@example.com";
+        let mut cache = ConnectCache::default();
+        let mut old = tokens("old");
+        old.expires_at = 300;
+        cache.upsert_credential(email, old, CacheAccountAction::NewLogin);
+        cache.accounts[0].device_id = Some("device-a".into());
+        std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
+        let snapshot = ConnectCache::from_file(&dir).unwrap();
+        let claim = begin_device_reregistration(&dir, email, "device-a")
+            .await
+            .unwrap()
+            .unwrap();
+        let auth = super::AuthClient::new("http://unused".into(), String::new(), email.into());
+        let returned = update_connect_cache_for_login(&dir, &tokens("new"), &auth, &snapshot)
+            .await
+            .unwrap();
+        assert_eq!(returned.access_token, "new-access");
+        let restored = ConnectCache::from_file(&dir).unwrap();
+        assert!(restored.accounts[0].reregister_claim.is_none());
+        assert!(restored.accounts[0].device_id.is_none());
+        drop(claim);
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn refresh_updates_tokens_without_disturbing_live_claim() {
+        let dir = test_network_dir();
+        let path = dir.path().join(CONNECT_CACHE_FILENAME);
+        let email = "alice@example.com";
+        let mut cache = ConnectCache::default();
+        cache.upsert_credential(email, tokens("old"), CacheAccountAction::NewLogin);
+        cache.accounts[0].device_id = Some("device-a".into());
+        std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
+        let claim = begin_device_reregistration(&dir, email, "device-a")
+            .await
+            .unwrap()
+            .unwrap();
+
+        persist_refreshed_tokens(&dir, email, "old-refresh", &tokens("refreshed"))
+            .await
+            .unwrap();
+        let updated = ConnectCache::from_file(&dir).unwrap();
+        assert_eq!(updated.accounts[0].tokens.access_token, "refreshed-access");
+        assert_eq!(updated.accounts[0].device_id.as_deref(), Some("device-a"));
+        assert_eq!(
+            updated.accounts[0].reregister_claim.as_deref(),
+            Some(claim.as_str())
+        );
+        assert!(
+            persist_refreshed_tokens(&dir, email, "old-refresh", &tokens("late"))
+                .await
+                .is_err()
+        );
+        let unchanged = ConnectCache::from_file(&dir).unwrap();
+        assert_eq!(
+            unchanged.accounts[0].tokens.access_token,
+            "refreshed-access"
+        );
+        assert_eq!(
+            unchanged.accounts[0].reregister_claim.as_deref(),
+            Some(claim.as_str())
+        );
+        drop(claim);
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn late_plain_registration_cannot_write_into_new_login() {
+        let dir = test_network_dir();
+        let path = dir.path().join(CONNECT_CACHE_FILENAME);
+        let email = "alice@example.com";
+        let mut cache = ConnectCache::default();
+        cache.upsert_credential(email, tokens("old"), CacheAccountAction::NewLogin);
+        std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
+        let snapshot = ConnectCache::from_file(&dir).unwrap();
+        let auth = super::AuthClient::new("http://unused".into(), String::new(), email.into());
+        update_connect_cache_for_login(&dir, &tokens("new"), &auth, &snapshot)
+            .await
+            .unwrap();
+
+        assert!(
+            !set_device_id_for_email_if_token(&dir, email, "late-device", "old-refresh")
+                .await
+                .unwrap()
+        );
+        let current = ConnectCache::from_file(&dir).unwrap();
+        assert_eq!(current.accounts[0].tokens.access_token, "new-access");
+        assert!(current.accounts[0].device_id.is_none());
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn inactive_exact_claim_is_retired_without_committing_late_device() {
+        let dir = test_network_dir();
+        let path = dir.path().join(CONNECT_CACHE_FILENAME);
+        let email = "alice@example.com";
+        let mut cache = ConnectCache::default();
+        cache.upsert_credential(email, tokens("a"), CacheAccountAction::NewLogin);
+        cache.accounts[0].device_id = Some("device-a".into());
+        std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
+        let claim = begin_device_reregistration(&dir, email, "device-a")
+            .await
+            .unwrap()
+            .unwrap();
+
+        let mut switched = ConnectCache::from_file(&dir).unwrap();
+        switched.upsert_credential("bob@example.com", tokens("b"), CacheAccountAction::NewLogin);
+        switched.accounts[1].device_id = Some("device-b".into());
+        std::fs::write(&path, serde_json::to_vec(&switched).unwrap()).unwrap();
+        assert!(
+            !finish_device_reregistration(&dir, email, &claim, Some("late-device"))
+                .await
+                .unwrap()
+        );
+        let restored = ConnectCache::from_file(&dir).unwrap();
+        assert_eq!(restored.active_email.as_deref(), Some("bob@example.com"));
+        assert_eq!(restored.accounts[0].device_id.as_deref(), Some("device-a"));
+        assert!(restored.accounts[0].reregister_claim.is_none());
+        assert!(
+            !finish_device_reregistration(&dir, email, &claim, Some("later-device"))
+                .await
+                .unwrap()
+        );
+        drop(claim);
+        let b_claim = begin_device_reregistration(&dir, "bob@example.com", "device-b")
+            .await
+            .unwrap()
+            .unwrap();
+        let while_b_owns_lock = ConnectCache::from_file(&dir).unwrap();
+        assert!(!super::has_live_reregister_claim_for_account(
+            &dir,
+            &while_b_owns_lock.accounts[0]
+        ));
+        assert!(super::has_live_reregister_claim_for_account(
+            &dir,
+            &while_b_owns_lock.accounts[1]
+        ));
+        drop(b_claim);
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn another_accounts_lock_does_not_revive_abandoned_claim() {
+        let dir = test_network_dir();
+        let path = dir.path().join(CONNECT_CACHE_FILENAME);
+        let mut cache = ConnectCache::default();
+        cache.upsert_credential(
+            "alice@example.com",
+            tokens("a"),
+            CacheAccountAction::NewLogin,
+        );
+        cache.accounts[0].device_id = Some("device-a".into());
+        std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
+        let a_claim = begin_device_reregistration(&dir, "alice@example.com", "device-a")
+            .await
+            .unwrap()
+            .unwrap();
+        drop(a_claim); // Alice's process exited without finishing.
+
+        let mut switched = ConnectCache::from_file(&dir).unwrap();
+        switched.upsert_credential("bob@example.com", tokens("b"), CacheAccountAction::NewLogin);
+        switched.accounts[1].device_id = Some("device-b".into());
+        std::fs::write(&path, serde_json::to_vec(&switched).unwrap()).unwrap();
+        let b_claim = begin_device_reregistration(&dir, "bob@example.com", "device-b")
+            .await
+            .unwrap()
+            .unwrap();
+        let current = ConnectCache::from_file(&dir).unwrap();
+        assert!(current.accounts[0].reregister_claim.is_some());
+        assert!(!super::has_live_reregister_claim_for_account(
+            &dir,
+            &current.accounts[0]
+        ));
+        assert!(super::has_live_reregister_claim_for_account(
+            &dir,
+            &current.accounts[1]
+        ));
+        drop(b_claim);
         std::fs::remove_dir_all(dir.path()).unwrap();
     }
 
@@ -954,7 +1352,7 @@ mod tests {
             return;
         };
         let dir = NetworkDirectory::new(path.into());
-        let lock = super::open_reregister_lock(&dir).unwrap();
+        let lock = super::open_reregister_lock(&dir, "alice@example.com").unwrap();
         fs4::fs_std::FileExt::lock_exclusive(&lock).unwrap();
         println!("REREGISTER_LOCK_READY");
         std::io::stdout().flush().unwrap();

@@ -389,6 +389,21 @@ pub enum Message {
         token: String,
         refresh_token: String,
         email: String,
+        epoch: u64,
+    },
+    /// Commit a verified App-panel OTP or refresh to connect.json before the
+    /// panel/keyring can adopt the bearer.
+    InAppConnectAuthReady {
+        login: crate::services::coincube::LoginResponse,
+        epoch: u64,
+        /// None for OTP login, Some for a keyring refresh.
+        previous_refresh_token: Option<String>,
+    },
+    InAppConnectAuthPersisted {
+        login: crate::services::coincube::LoginResponse,
+        epoch: u64,
+        previous_refresh_token: Option<String>,
+        tokens: Option<crate::services::connect::client::auth::AccessTokenResponse>,
     },
     /// Internal: chains from `InAppConnectLoginCompleted` once
     /// tokens have been persisted and a device_id registered. The
