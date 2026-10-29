@@ -1077,7 +1077,7 @@ fn link_action<'a>(
 /// user may persist an explicit choice only when the shared balance controls
 /// are interactive and no load or save is in flight.
 /// Neither button is a fallback default.
-/// The keys `gui::zoom_key` reads, named for this platform.
+/// The keys `gui::ignored_shell_key` reads, named for this platform.
 fn zoom_shortcuts() -> &'static str {
     if cfg!(target_os = "macos") {
         "Cmd + and Cmd − change it from any screen; Cmd 0 returns to 100%."
