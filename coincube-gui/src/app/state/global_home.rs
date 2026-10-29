@@ -213,6 +213,40 @@ pub(crate) fn effective_transfer_min_sat(
     }
 }
 
+/// Lays the transfer dialog over `content`: as its own modal, or, beneath
+/// an upper modal (QR card, signer), in the base, because Iced draws only the
+/// root widget's overlay. The upper modal already blocks the base's input.
+fn with_transfer_dialog<'a>(
+    content: Element<'a, view::Message>,
+    dialog: Option<Element<'a, view::Message>>,
+    upper_modal: bool,
+    dismiss: Option<view::Message>,
+) -> Element<'a, view::Message> {
+    match dialog {
+        Some(dialog) if upper_modal => iced::widget::Stack::new()
+            .push(content)
+            .push(
+                iced::widget::Container::new(dialog)
+                    .width(iced::Length::Fill)
+                    .height(iced::Length::Fill)
+                    .center_x(iced::Length::Fill)
+                    .center_y(iced::Length::Fill)
+                    .style(|_| iced::widget::container::Style {
+                        background: Some(iced::Background::Color(iced::Color {
+                            a: 0.80,
+                            ..iced::Color::BLACK
+                        })),
+                        ..Default::default()
+                    }),
+            )
+            .into(),
+        Some(dialog) => coincube_ui::widget::modal::Modal::new(content, dialog)
+            .on_blur(dismiss)
+            .into(),
+        None => content,
+    }
+}
+
 fn transfer_denomination(
     unit: BitcoinDisplayUnit,
 ) -> coincube_core::miniscript::bitcoin::Denomination {
@@ -797,19 +831,21 @@ impl State for GlobalHome {
             },
         });
         let content = view::dashboard(menu, cache, overview);
+        // A QR card or the signer can open over Review. Iced draws only the
+        // root widget's overlay, so beneath one of those the transfer dialog
+        // is laid out in the base instead (the upper modal already blocks the
+        // base's input); otherwise it is its own modal.
+        let upper_modal = match &self.modal {
+            Modal::ShowQrCode(_) => true,
+            Modal::Sign(_) => self.transfer_spend_tx.is_some(),
+            Modal::None => false,
+        };
         // The transfer steps are a dialog over the Overview. Clicking outside
         // or Escape cancels the flow, except on the review step: a signed or
         // in-flight transfer there is left only through its own controls.
-        let content = match transfer {
-            Some(dialog) => {
-                let dismiss = (self.current_view.step != 2)
-                    .then_some(view::Message::Home(HomeMessage::BackToHome));
-                coincube_ui::widget::modal::Modal::new(content, dialog)
-                    .on_blur(dismiss)
-                    .into()
-            }
-            None => content,
-        };
+        let dismiss =
+            (self.current_view.step != 2).then_some(view::Message::Home(HomeMessage::BackToHome));
+        let content = with_transfer_dialog(content, transfer, upper_modal, dismiss);
 
         let overlay = match &self.modal {
             Modal::ShowQrCode(m) => m.view(),
@@ -3396,10 +3432,14 @@ impl State for GlobalHome {
                 Task::none()
             }
             Message::View(view::Message::Close) => {
+                // Only leaving the signer abandons the spend. Closing the
+                // QR card over Review keeps a signed transfer signed.
+                if matches!(self.modal, Modal::Sign(_)) {
+                    self.transfer_spend_tx = None;
+                    self.transfer_psbt_ready_for = None;
+                    self.transfer_signed = false;
+                }
                 self.modal = Modal::None;
-                self.transfer_spend_tx = None;
-                self.transfer_psbt_ready_for = None;
-                self.transfer_signed = false;
                 Task::none()
             }
             Message::Updated(result) => {
@@ -5722,6 +5762,56 @@ mod tests {
                 HomeMessage::SetTransferUnit(BitcoinDisplayUnit::Sats),
             );
             assert_eq!(home.entered_amount.value, "100000");
+        }
+
+        #[test]
+        fn closing_the_review_qr_keeps_a_signed_transfer_signed() {
+            let (mut home, _wallet) = home_on_transfer_screen();
+            let cache = transfer_cache();
+            home.transfer_signed = true;
+            home.transfer_psbt_ready_for = Some((1, 0, TransferDirection::VaultToLiquid));
+            home.modal = Modal::ShowQrCode(
+                ShowQrCodeModal::new(
+                    &Address::from_str(MAINNET_ADDR).unwrap().assume_checked(),
+                    ChildNumber::from(0),
+                )
+                .unwrap(),
+            );
+            drain(home.update(None, &cache, Message::View(view::Message::Close)));
+            assert!(matches!(home.modal, Modal::None));
+            assert!(home.transfer_signed, "Confirm & Broadcast stays available");
+            assert!(home.transfer_psbt_ready_for.is_some());
+        }
+
+        /// Iced draws only the root overlay. Beneath the QR card or signer the
+        /// dialog must be in the base (a nested modal's overlay is never
+        /// drawn); alone it is a modal overlay. The capture probe walks the
+        /// widget tree, which a modal hides from it below its base.
+        #[test]
+        fn review_is_in_the_base_beneath_an_upper_modal() {
+            use crate::app::view::shared::landing::capture;
+            let review = || -> Element<'static, view::Message> {
+                coincube_ui::component::text::text("Review and confirm").into()
+            };
+            let base = || -> Element<'static, view::Message> {
+                coincube_ui::component::text::text("Overview").into()
+            };
+            let inspect = |element| {
+                capture::inspect(
+                    "transfer-layering",
+                    element,
+                    (1440, 900),
+                    "dark",
+                    coincube_ui::theme::Theme::dark(),
+                )
+            };
+            let under = inspect(with_transfer_dialog(base(), Some(review()), true, None));
+            assert!(under.contains("Overview") && under.contains("Review and confirm"));
+            let alone = inspect(with_transfer_dialog(base(), Some(review()), false, None));
+            assert!(
+                !alone.contains("Review and confirm"),
+                "a modal overlay alone"
+            );
         }
     }
 }
