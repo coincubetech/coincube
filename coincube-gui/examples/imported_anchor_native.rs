@@ -16,7 +16,7 @@ fn main() {
         delete(run_id);
     } else {
         coincube_gui::services::imported_keys::native_probe_phase(&phase, run_id, &root)
-            .unwrap_or_else(|error| panic!("native imported anchor {phase}: {error}"));
+            .unwrap_or_else(|error| panic!("native imported anchor {}: {}", phase, error));
     }
     println!("imported anchor native phase {phase}: ok");
 }
@@ -68,7 +68,8 @@ fn delete(run_id: uuid::Uuid) {
     let status = unsafe { SecItemDelete(query.as_concrete_TypeRef()) };
     assert!(
         status == 0 || status == errSecItemNotFound,
-        "synthetic imported anchor Keychain deletion failed: {status}"
+        "synthetic imported anchor Keychain deletion failed: {}",
+        status
     );
     let verify = CFDictionary::from_CFType_pairs(&[
         (

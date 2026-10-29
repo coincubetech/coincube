@@ -220,7 +220,9 @@ pub(super) fn create(service: &str, account: &str, value: &[u8]) -> Result<(), S
 }
 
 pub(super) fn update(service: &str, account: &str, value: &[u8]) -> Result<(), String> {
-    let mut identity = identity(service, account);
+    let identity = identity(service, account);
+    #[cfg(all(debug_assertions, feature = "native-anchor-probe"))]
+    let mut identity = identity;
     #[cfg(all(debug_assertions, feature = "native-anchor-probe"))]
     let injected = if service.starts_with("io.coincube.tenshu.native-imported-anchor-probe.") {
         probe_fault::take_update()
