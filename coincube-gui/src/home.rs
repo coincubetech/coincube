@@ -6153,7 +6153,9 @@ impl Home {
                 .push(divider())
                 .into()
         } else {
-            Space::new().height(Length::Fixed(0.0)).into()
+            // Shrink lays out at zero height while remaining non-void to
+            // Column::push; Fixed(0) would make Column omit this child.
+            Space::new().width(Length::Fill).into()
         };
         region = region.push(test_strip);
         let region = region.push(
@@ -8841,6 +8843,21 @@ mod tests {
                 Outcome::None | Outcome::Some(()) => break,
             }
         }
+        let mut before: Box<dyn Operation<Id>> = Box::new(focusable::find_focused());
+        let initially_focused = loop {
+            element.as_widget_mut().operate(
+                &mut tree,
+                Layout::new(&node),
+                &renderer,
+                &mut operation::black_box(before.as_mut()),
+            );
+            match before.finish() {
+                Outcome::None => break None,
+                Outcome::Some(id) => break Some(id),
+                Outcome::Chain(next) => before = next,
+            }
+        };
+        assert_eq!(initially_focused, Some(focused_id.clone()));
         drop(element);
 
         // A switch across live/test groups adds a visible strip, but the
@@ -8853,6 +8870,14 @@ mod tests {
             &renderer,
             &layout::Limits::new(iced::Size::ZERO, iced::Size::new(1024.0, 768.0)),
         );
+        let mut after_focusables = Focusables::default();
+        element.as_widget_mut().operate(
+            &mut tree,
+            Layout::new(&node),
+            &renderer,
+            &mut after_focusables,
+        );
+        assert!(after_focusables.actions.contains(&focused_id));
         let mut find: Box<dyn Operation<Id>> = Box::new(focusable::find_focused());
         let restored = loop {
             element.as_widget_mut().operate(
