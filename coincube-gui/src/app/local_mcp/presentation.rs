@@ -436,7 +436,7 @@ fn transaction_card(client_id: &str, draft: Prepared) -> Ui<'static> {
         .spacing(12)
         .width(Length::Fill)
         .push(
-            row![heading("Prepared transaction"), page::scope_tag("TODAY"), page::scope_tag("REGTEST")]
+            row![heading("Prepared transaction"), page::scope_tag("REGTEST")]
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
         )
@@ -463,7 +463,10 @@ fn transaction_field(
     mono: bool,
 ) -> Ui<'static> {
     use crate::app::view::settings::page;
-    let value = text(value.into()).size(13).width(Length::Fill);
+    let value = text(value.into())
+        .size(13)
+        .width(Length::Fill)
+        .wrapping(iced::widget::text::Wrapping::WordOrGlyph);
     let value = if mono {
         value.font(font::MONO_REGULAR)
     } else {
@@ -480,6 +483,385 @@ fn transaction_field(
     ]
     .width(Length::Fill)
     .into()
+}
+
+#[cfg(all(test, feature = "mcp-transactions"))]
+mod transaction_presentation_tests {
+    use super::*;
+    use crate::app::view::shared::landing::capture;
+    use coincube_core::miniscript::bitcoin::{
+        hashes::Hash, Address, Network, ScriptBuf, WScriptHash,
+    };
+    use coincube_mcp::transaction::Recipient;
+    use coincube_ui::widget::Renderer;
+    use iced::advanced::{
+        layout,
+        renderer::Headless,
+        widget::{operation, operation::focusable, operation::Scrollable, Operation, Tree},
+        Layout,
+    };
+    use iced::{Rectangle, Size, Vector};
+
+    const SCROLL_ID: &str = "r25.transaction.qa-scroll";
+    const REVIEW_ID: &str = "tenshu.ai-access.client.synthetic-client.transaction.synthetic-draft";
+
+    #[derive(Default)]
+    struct Probe {
+        scroll: Option<(Rectangle, Rectangle, Vector)>,
+        focus: Vec<(iced::advanced::widget::Id, Rectangle, bool)>,
+    }
+
+    impl Operation for Probe {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+
+        fn scrollable(
+            &mut self,
+            id: Option<&iced::advanced::widget::Id>,
+            bounds: Rectangle,
+            content: Rectangle,
+            translation: Vector,
+            _state: &mut dyn Scrollable,
+        ) {
+            if id == Some(&iced::advanced::widget::Id::from(SCROLL_ID)) {
+                self.scroll = Some((bounds, content, translation));
+            }
+        }
+
+        fn focusable(
+            &mut self,
+            id: Option<&iced::advanced::widget::Id>,
+            bounds: Rectangle,
+            state: &mut dyn operation::Focusable,
+        ) {
+            if let Some(id) = id {
+                self.focus.push((id.clone(), bounds, state.is_focused()));
+            }
+        }
+    }
+
+    fn probe(
+        element: &mut Ui<'_>,
+        tree: &mut Tree,
+        node: &layout::Node,
+        renderer: &Renderer,
+    ) -> Probe {
+        let mut probe = Probe::default();
+        element
+            .as_widget_mut()
+            .operate(tree, Layout::new(node), renderer, &mut probe);
+        probe
+    }
+
+    fn operate(
+        element: &mut Ui<'_>,
+        tree: &mut Tree,
+        node: &layout::Node,
+        renderer: &Renderer,
+        operation: impl Operation<()> + 'static,
+    ) {
+        let mut operation: Box<dyn Operation<()>> = Box::new(operation);
+        loop {
+            element.as_widget_mut().operate(
+                tree,
+                Layout::new(node),
+                renderer,
+                &mut operation::black_box(operation.as_mut()),
+            );
+            match operation.finish() {
+                operation::Outcome::Chain(next) => operation = next,
+                _ => break,
+            }
+        }
+    }
+
+    // Address-valid display fixture. Fee, rate and input count are independent
+    // presentation values, not an output of the native construction engine.
+    fn address_valid_display_draft() -> Prepared {
+        Prepared {
+            wallet_id: "synthetic-wallet".into(),
+            draft_id: "synthetic-draft".into(),
+            network: "regtest".into(),
+            status: "unsigned_ready_for_native_review".into(),
+            recipients: (1..=8)
+                .map(|index| {
+                    let script = ScriptBuf::new_p2wsh(&WScriptHash::from_byte_array([index; 32]));
+                    Recipient {
+                        address: Address::from_script(&script, Network::Regtest)
+                            .unwrap()
+                            .to_string(),
+                        amount_sats: 10_000,
+                    }
+                })
+                .collect(),
+            amount_sats: 80_000,
+            fee_sats: 500,
+            fee_rate_sat_vb: 42,
+            change_sats: 50_000,
+            input_count: 12,
+            signing_required: true,
+        }
+    }
+
+    fn schema_boundary_draft() -> Prepared {
+        // PrepareInput accepts this 90-character ASCII boundary, but native
+        // address validation rejects it. This fixture stresses layout only.
+        let address = format!("bcrt1{}", "q".repeat(85));
+        assert_eq!(address.len(), 90);
+        let mut draft = address_valid_display_draft();
+        draft.recipients[0].address = address;
+        draft.recipients[0].amount_sats = 123_456_789;
+        draft.amount_sats = 123_526_789;
+        draft.fee_sats = 12_345;
+        draft.change_sats = 2_100_000_000_000;
+        draft
+    }
+
+    #[test]
+    #[ignore = "synthetic content-only runtime capture; set R06A_CAPTURE_DIR for PNGs"]
+    fn transaction_card_boundary_capture_and_keyboard() {
+        let draft = address_valid_display_draft();
+        let review_id = iced::advanced::widget::Id::from(REVIEW_ID);
+        for (appearance, palette) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            let inspection = capture::inspect(
+                "r25-eight-address-valid-display-only",
+                transaction_card("synthetic-client", draft.clone()),
+                (1024, 768),
+                appearance,
+                palette,
+            );
+            assert!(inspection.contains("Recipient 8"));
+            assert!(inspection.contains("80000 sats"));
+            assert!(inspection.contains("80500 sats"));
+            assert!(inspection.contains("50000 sats"));
+            assert!(inspection.has_focus(review_id.clone()));
+            let schema = capture::inspect(
+                "r25-90-char-schema-layout-only",
+                transaction_card("synthetic-client", schema_boundary_draft()),
+                (1024, 768),
+                appearance,
+                if appearance == "dark" {
+                    theme::Theme::dark()
+                } else {
+                    theme::Theme::light()
+                },
+            );
+            assert!(schema.contains("123526789 sats"));
+            assert!(schema.contains("123539134 sats"));
+            assert!(schema.contains("2100000000000 sats"));
+        }
+        for key in [
+            iced::keyboard::key::Named::Enter,
+            iced::keyboard::key::Named::Space,
+        ] {
+            let emitted = capture::activate_with_key(
+                transaction_card("synthetic-client", draft.clone()),
+                review_id.clone(),
+                (1024, 768),
+                false,
+                key,
+            );
+            assert!(emitted.iter().any(|intent| matches!(intent,
+                view::Message::LocalMcp(Message::ReviewTransaction { client_id, draft_id })
+                    if client_id == "synthetic-client" && draft_id == "synthetic-draft"
+            )));
+        }
+        let mut unavailable = draft;
+        unavailable.change_sats = 0;
+        let no_change = capture::inspect(
+            "r25-zero-change",
+            transaction_card("synthetic-client", unavailable.clone()),
+            (1024, 768),
+            "light",
+            theme::Theme::light(),
+        );
+        assert!(no_change.contains("No change output"));
+        unavailable.network = "mainnet".into();
+        let inspection = capture::inspect(
+            "r25-mainnet-gated",
+            transaction_card("synthetic-client", unavailable.clone()),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(inspection.contains("Draft unavailable for native review"));
+        assert!(!inspection.has_focus(review_id));
+    }
+
+    #[test]
+    fn transaction_card_tab_order_and_scroll_viewport() {
+        for bytes in font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(bytes);
+        }
+        let mut renderer = iced::futures::executor::block_on(<Renderer as Headless>::new(
+            font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        // The 1024px shell leaves a 652px content column and a 668px viewport.
+        let size = Size::new(652.0, 668.0);
+        let content = iced::widget::column![
+            action(
+                "r25.transaction.previous",
+                "Previous control",
+                Some(message(Message::TogglePairing)),
+                theme::tenshu::button::ActionKind::Secondary,
+            ),
+            transaction_card("synthetic-client", address_valid_display_draft()),
+        ];
+        let mut element: Ui<'_> = iced::widget::scrollable(content)
+            .id(SCROLL_ID)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        let initial = probe(&mut element, &mut tree, &node, &renderer);
+        let (viewport, content, _) = initial.scroll.expect("mounted scrollable");
+        assert!(
+            content.height > viewport.height,
+            "eight recipients need vertical scroll"
+        );
+        let review = iced::advanced::widget::Id::from(REVIEW_ID);
+        let review_bounds = initial
+            .focus
+            .iter()
+            .find(|(id, _, _)| id == &review)
+            .expect("native review CTA in Tab order")
+            .1;
+        assert!(review_bounds.y > viewport.y + viewport.height);
+
+        operate(
+            &mut element,
+            &mut tree,
+            &node,
+            &renderer,
+            focusable::focus_next::<()>(),
+        );
+        assert!(probe(&mut element, &mut tree, &node, &renderer)
+            .focus
+            .iter()
+            .any(|(id, _, focused)| id
+                == &iced::advanced::widget::Id::from("r25.transaction.previous")
+                && *focused));
+        operate(
+            &mut element,
+            &mut tree,
+            &node,
+            &renderer,
+            focusable::focus_next::<()>(),
+        );
+        assert!(probe(&mut element, &mut tree, &node, &renderer)
+            .focus
+            .iter()
+            .any(|(id, _, focused)| id == &review && *focused));
+        operate(
+            &mut element,
+            &mut tree,
+            &node,
+            &renderer,
+            focusable::focus_previous::<()>(),
+        );
+        assert!(probe(&mut element, &mut tree, &node, &renderer)
+            .focus
+            .iter()
+            .any(|(id, _, focused)| id
+                == &iced::advanced::widget::Id::from("r25.transaction.previous")
+                && *focused));
+
+        let offset = review_bounds.y - viewport.y - viewport.height + review_bounds.height + 12.0;
+        operate(
+            &mut element,
+            &mut tree,
+            &node,
+            &renderer,
+            operation::scrollable::scroll_to::<()>(
+                iced::advanced::widget::Id::from(SCROLL_ID),
+                operation::scrollable::AbsoluteOffset {
+                    x: None,
+                    y: Some(offset),
+                },
+            ),
+        );
+        let scrolled = probe(&mut element, &mut tree, &node, &renderer);
+        let (viewport, _, translation) = scrolled.scroll.expect("scroll still mounted");
+        assert!(translation.y > 0.0, "scroll offset must move");
+        let cta = scrolled
+            .focus
+            .iter()
+            .find(|(id, _, _)| id == &review)
+            .expect("review CTA after scroll")
+            .1;
+        let visible_y = cta.y - translation.y;
+        assert!(
+            visible_y >= viewport.y && visible_y + cta.height <= viewport.y + viewport.height,
+            "CTA {:?}, viewport {:?}, translation {:?}",
+            cta,
+            viewport,
+            translation
+        );
+        if let Ok(directory) = std::env::var("R06A_CAPTURE_DIR") {
+            std::fs::create_dir_all(&directory).unwrap();
+            // Iced Button computes Active/Disabled on RedrawRequested. Drawing
+            // the initial tree directly would falsely show every Action faded.
+            let mut messages = Vec::new();
+            element.as_widget_mut().update(
+                &mut tree,
+                &iced::Event::Window(iced::window::Event::RedrawRequested(
+                    std::time::Instant::now(),
+                )),
+                Layout::new(&node),
+                iced::mouse::Cursor::Unavailable,
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut iced::advanced::Shell::new(&mut messages),
+                &Rectangle::with_size(size),
+            );
+            for (appearance, palette) in [
+                ("dark", theme::Theme::dark()),
+                ("light", theme::Theme::light()),
+            ] {
+                element.as_widget().draw(
+                    &tree,
+                    &mut renderer,
+                    &palette,
+                    &iced::advanced::renderer::Style {
+                        text_color: palette.colors.shell.ink,
+                    },
+                    Layout::new(&node),
+                    iced::mouse::Cursor::Unavailable,
+                    &Rectangle::with_size(size),
+                );
+                let pixels = renderer.screenshot(
+                    Size::new(size.width as u32, size.height as u32),
+                    1.0,
+                    palette.colors.general.background,
+                );
+                image::save_buffer(
+                    std::path::Path::new(&directory).join(format!(
+                        "r25-eight-address-valid-display-only-scrolled-{appearance}-1024x768-content-only-synthetic.png"
+                    )),
+                    &pixels,
+                    size.width as u32,
+                    size.height as u32,
+                    image::ColorType::Rgba8,
+                )
+                .unwrap();
+            }
+        }
+    }
 }
 
 pub(super) fn revoke_confirmation<'a>(client_name: &str, id: &str) -> Ui<'a> {
