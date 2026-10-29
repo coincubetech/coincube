@@ -8,8 +8,8 @@ use coincube_ui::{
     icon::{
         arrow_down_up_icon, arrow_right, check_circle_icon, check_icon, clipboard_icon, clock_icon,
         cross_icon, cube_outline_icon, dash_circle_icon, droplet_fill_icon,
-        exclamation_circle_icon, key_icon, lock_icon, question_circle_icon, spark_icon, usd_icon,
-        vault_icon, warning_icon, x_circle_icon,
+        exclamation_circle_icon, eye_icon, eye_slash_icon, key_icon, lock_icon,
+        question_circle_icon, spark_icon, usd_icon, vault_icon, warning_icon, x_circle_icon,
     },
     theme,
     widget::{action::Action, *},
@@ -145,6 +145,7 @@ fn wallet_card<'a>(
     // pending indicators that would otherwise read alongside a
     // not-yet-authoritative value.
     loaded: bool,
+    vault_alias: Option<&str>,
 ) -> Element<'a, Message> {
     let fiat_balance = fiat_converter.as_ref().map(|c| c.convert(*balance));
 
@@ -442,16 +443,31 @@ fn wallet_card<'a>(
                     .into()
             };
 
+            let title_label = if matches!(wallet_type, WalletType::Vault) {
+                vault_alias
+                    .filter(|alias| !alias.trim().is_empty())
+                    .map(|alias| format!("Vault · {alias}"))
+                    .unwrap_or_else(|| title.to_owned())
+            } else {
+                title.to_owned()
+            };
+            let title_action = Action::new(
+                landing_control_id(cube_id, title, "open"),
+                Container::new(
+                    Row::new()
+                        .spacing(10)
+                        .align_y(Alignment::Center)
+                        .push(icon.size(16))
+                        .push(text(title_label).font(MEDIUM)),
+                )
+                .padding(5),
+                Message::FocusAction,
+            )
+            .style(theme::button::transparent)
+            .on_press(overview_action);
             let content = Column::new()
                 .spacing(12)
-                .push(landing_button(
-                    landing_control_id(cube_id, title, "open"),
-                    title,
-                    Some(icon.size(16)),
-                    Message::FocusAction,
-                    Some(overview_action),
-                    theme::button::transparent,
-                ))
+                .push(title_action)
                 .push(header)
                 .push(btc_row);
 
@@ -801,6 +817,54 @@ fn network_coin<'a>(chain: ChainId, light: bool) -> Element<'a, Message> {
 
 fn network_name(chain: ChainId) -> &'static str {
     crate::app::view::nav::shell::network_label(chain)
+}
+
+/// The persisted top-bar preference is the privacy floor for both Overview sections.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OverviewMasks {
+    total: bool,
+    wallets: bool,
+}
+
+impl OverviewMasks {
+    fn new(global: bool, total: bool, wallets: bool) -> Self {
+        Self {
+            total: global || total,
+            wallets: global || wallets,
+        }
+    }
+}
+
+fn overview_eye<'a>(
+    cube_id: &str,
+    section: &'static str,
+    masked: bool,
+    global_hidden: bool,
+    toggle: HomeMessage,
+) -> Element<'a, Message> {
+    let glyph = if masked { eye_slash_icon() } else { eye_icon() };
+    let label = if global_hidden {
+        "Global Hide is on"
+    } else if masked {
+        "Show balance"
+    } else {
+        "Hide balance"
+    };
+    iced::widget::tooltip(
+        Action::new(
+            landing_control_id(cube_id, section, "balance-privacy"),
+            glyph.size(16),
+            Message::FocusAction,
+        )
+        .padding([7, 9])
+        .style(theme::button::shell_nav)
+        .on_press_maybe((!global_hidden).then_some(Message::Home(toggle))),
+        Container::new(text(label).size(P2_SIZE))
+            .padding([6, 10])
+            .style(theme::container::shell_menu),
+        iced::widget::tooltip::Position::Bottom,
+    )
+    .into()
 }
 
 /// P-Transfer's `.stepper`: one row of numbered steps above a rule. The
@@ -2318,7 +2382,9 @@ pub struct GlobalViewConfig<'a> {
     pub imported_installed: bool,
     pub fiat_converter: Option<FiatAmountConverter>,
     pub balance_masked: bool,
-    /// Only an accepted, interactive global preference receipt enables either eye.
+    /// Session-local Overview section choices; global Hide overrides both.
+    pub overview_total_hidden: bool,
+    pub overview_wallets_hidden: bool,
     /// True until every applicable wallet has reported its first balance
     /// (or its first error). Drives the Total Balance loading placeholder
     /// so the aggregate doesn't briefly read as a misleadingly low partial.
@@ -2398,8 +2464,9 @@ pub struct GlobalViewConfig<'a> {
     pub pending_vault_incoming: Option<PendingTransfer>,
     /// BTC price in USD for accurate USDt→sats conversion regardless of user's fiat currency.
     pub btc_usd_price: Option<f64>,
-    /// This Cube's name and chain, for the transfer dialog's Cube line.
+    /// This Cube's name and chain, for Overview and the transfer dialog.
     pub cube_name: &'a str,
+    pub vault_alias: Option<&'a str>,
     pub chain: ChainId,
     pub light_theme: bool,
     /// Which page step 1 of the transfer shows.
@@ -2455,6 +2522,8 @@ pub fn global_home_view<'a>(
         imported_installed,
         fiat_converter,
         balance_masked,
+        overview_total_hidden,
+        overview_wallets_hidden,
         total_balance_loading,
         spark_balance_loaded,
         liquid_balance_loaded,
@@ -2493,12 +2562,21 @@ pub fn global_home_view<'a>(
         pending_spark_incoming,
         btc_usd_price,
         cube_name,
+        vault_alias,
         chain,
         light_theme,
         transfer_page,
         transfer_unit,
         other_cube,
     } = config;
+
+    let overview_masks = OverviewMasks::new(
+        balance_masked,
+        overview_total_hidden,
+        overview_wallets_hidden,
+    );
+    let wallet_balance_masked = overview_masks.wallets;
+    let total_balance_masked = overview_masks.total;
 
     // Step machine:
     //   0 — overview (wallet cards + page-level Transfer button)
@@ -2660,7 +2738,7 @@ pub fn global_home_view<'a>(
                         .bold()
                         .width(Length::Fixed(60.0)),
                 )
-                .push(if balance_masked {
+                .push(if wallet_balance_masked {
                     Row::new().push(text("********").size(P1_SIZE))
                 } else if liquid_balance_error {
                     Row::new().push(text("Balance unavailable").size(P1_SIZE).color(color::RED))
@@ -2675,7 +2753,7 @@ pub fn global_home_view<'a>(
                     amount_with_size_and_unit(&liquid_balance, P1_SIZE, bitcoin_unit)
                 })
                 .push_maybe(
-                    (!balance_masked && liquid_balance_loaded && !liquid_balance_error)
+                    (!wallet_balance_masked && liquid_balance_loaded && !liquid_balance_error)
                         .then(|| {
                             lbtc_fiat
                                 .map(|f| f.to_text().size(P2_SIZE).style(theme::text::secondary))
@@ -2705,7 +2783,7 @@ pub fn global_home_view<'a>(
                 )),
         )
         .push_maybe(
-            (!balance_masked
+            (!wallet_balance_masked
                 && liquid_balance_loaded
                 && !liquid_balance_error
                 && pending_liquid_send_sats > 0)
@@ -2724,7 +2802,7 @@ pub fn global_home_view<'a>(
                 }),
         )
         .push_maybe(
-            (!balance_masked
+            (!wallet_balance_masked
                 && liquid_balance_loaded
                 && !liquid_balance_error
                 && pending_liquid_receive_sats > 0)
@@ -2754,7 +2832,7 @@ pub fn global_home_view<'a>(
                     "usdt", "liquid", 32.0,
                 ))
                 .push(text("USDt").size(P1_SIZE).bold().width(Length::Fixed(60.0)))
-                .push(if balance_masked {
+                .push(if wallet_balance_masked {
                     Row::new().push(text("********").size(P1_SIZE))
                 } else if usdt_balance_error {
                     Row::new().push(text("Balance unavailable").size(P1_SIZE).color(color::RED))
@@ -2795,7 +2873,7 @@ pub fn global_home_view<'a>(
                 )),
         )
         .push_maybe(
-            (!balance_masked
+            (!wallet_balance_masked
                 && usdt_balance_loaded
                 && !usdt_balance_error
                 && pending_usdt_send_sats > 0)
@@ -2815,7 +2893,7 @@ pub fn global_home_view<'a>(
                 }),
         )
         .push_maybe(
-            (!balance_masked
+            (!wallet_balance_masked
                 && usdt_balance_loaded
                 && !usdt_balance_error
                 && pending_usdt_receive_sats > 0)
@@ -2854,7 +2932,7 @@ pub fn global_home_view<'a>(
             WalletHeaderProps::new(
                 total_amount,
                 total_fiat,
-                balance_masked,
+                wallet_balance_masked,
                 bitcoin_unit,
                 HeaderVariant::Card,
                 display_mode,
@@ -2927,7 +3005,7 @@ pub fn global_home_view<'a>(
                 "btc", "spark", 32.0,
             ))
             .push(text("BTC").size(P1_SIZE).bold().width(Length::Fixed(60.0)))
-            .push(if balance_masked {
+            .push(if wallet_balance_masked {
                 Row::new().push(text(AmountCell::masked().primary).size(P1_SIZE))
             } else if spark_balance_error && !spark_balance_loaded {
                 Row::new().push(
@@ -2950,7 +3028,7 @@ pub fn global_home_view<'a>(
                 amount_with_size_and_unit(&spark_btc_balance, P1_SIZE, bitcoin_unit)
             })
             .push_maybe(
-                (!balance_masked && spark_balance_loaded)
+                (!wallet_balance_masked && spark_balance_loaded)
                     .then(|| {
                         spark_btc_fiat
                             .as_ref()
@@ -2988,7 +3066,7 @@ pub fn global_home_view<'a>(
             )
         } else if spark_balance_loaded && spark_valuation_partial {
             amount_cell::<Message>(
-                if balance_masked {
+                if wallet_balance_masked {
                     AmountCell::masked()
                 } else {
                     AmountCell::unavailable("Combined BTC and USDB valuation needs a BTC/USD quote")
@@ -3000,7 +3078,7 @@ pub fn global_home_view<'a>(
                 WalletHeaderProps::new(
                     spark_display_balance,
                     spark_fiat,
-                    balance_masked,
+                    wallet_balance_masked,
                     bitcoin_unit,
                     HeaderVariant::Card,
                     display_mode,
@@ -3062,7 +3140,7 @@ pub fn global_home_view<'a>(
                             .width(Length::Fixed(60.0)),
                     )
                     .push(amount_cell::<Message>(
-                        if balance_masked {
+                        if wallet_balance_masked {
                             AmountCell::masked()
                         } else if spark_balance_error && !spark_balance_loaded {
                             AmountCell::unavailable("Spark bridge has not returned a balance")
@@ -3081,7 +3159,7 @@ pub fn global_home_view<'a>(
             }))
             .push_maybe(pending_spark_incoming.and_then(|pt| {
                 (pt.stage != TransferStage::Completed)
-                    .then(|| pending_deposit_card(pt, bitcoin_unit, balance_masked))
+                    .then(|| pending_deposit_card(pt, bitcoin_unit, wallet_balance_masked))
             }));
 
         let spark_card: Element<'a, Message> = Container::new(spark_card_content)
@@ -3098,7 +3176,7 @@ pub fn global_home_view<'a>(
             cube_id,
             &display_vault_balance,
             fiat_converter,
-            balance_masked,
+            wallet_balance_masked,
             has_vault || (has_imported_bitcoin && imported_installed),
             has_vault,
             has_imported_bitcoin && !imported_installed,
@@ -3112,6 +3190,7 @@ pub fn global_home_view<'a>(
             } else {
                 vault_loaded
             },
+            vault_alias,
         )
     };
 
@@ -3126,9 +3205,16 @@ pub fn global_home_view<'a>(
         || imported_balance_loaded
         || (has_vault && !has_imported_bitcoin && vault_loaded);
     let total_balance_label_row = Row::new()
-        .spacing(0)
+        .spacing(8)
         .align_y(Alignment::Center)
         .push(h3("Total Balance").bold())
+        .push(overview_eye(
+            cube_id,
+            "Total Balance",
+            overview_masks.total,
+            balance_masked,
+            HomeMessage::ToggleTotalBalance,
+        ))
         .push_maybe(
             (total_partial && !total_balance_loading)
                 .then(|| warning_icon().size(12).style(theme::text::secondary)),
@@ -3152,7 +3238,7 @@ pub fn global_home_view<'a>(
             .into()
     } else if !any_known_balance {
         amount_cell::<Message>(
-            if balance_masked {
+            if total_balance_masked {
                 AmountCell::masked()
             } else {
                 AmountCell::unavailable("No wallet balance has loaded successfully")
@@ -3164,7 +3250,7 @@ pub fn global_home_view<'a>(
             WalletHeaderProps::new(
                 global_total_amount,
                 global_total_fiat,
-                balance_masked,
+                total_balance_masked,
                 bitcoin_unit,
                 HeaderVariant::Jumbo,
                 display_mode,
@@ -3181,9 +3267,20 @@ pub fn global_home_view<'a>(
     let total_balance_block = Column::new()
         .spacing(6)
         .push(total_balance_label_row)
+        .push(
+            Row::new()
+                .spacing(6)
+                .align_y(Alignment::Center)
+                .push(network_coin(chain, light_theme))
+                .push(
+                    text(format!("{cube_name} · {}", network_name(chain)))
+                        .size(P2_SIZE)
+                        .style(theme::text::secondary),
+                ),
+        )
         .push(total_balance_value)
         .push_maybe(
-            (total_partial && !total_balance_loading && !balance_masked).then(|| {
+            (total_partial && !total_balance_loading && !total_balance_masked).then(|| {
                 text("Partial total · one or more wallet amounts or USD valuations are unavailable")
                     .size(P2_SIZE)
                     .style(theme::text::warning)
@@ -3197,9 +3294,16 @@ pub fn global_home_view<'a>(
             .push(Space::new().height(Length::Fixed(20.0)))
             .push(
                 Row::new()
-                    .spacing(0)
+                    .spacing(8)
                     .width(Length::Fill)
                     .push(h3("Wallets").bold())
+                    .push(overview_eye(
+                        cube_id,
+                        "Wallets",
+                        overview_masks.wallets,
+                        balance_masked,
+                        HomeMessage::ToggleWalletBalances,
+                    ))
                     .align_y(Alignment::Center),
             )
             .push_maybe(spark_card)
@@ -3409,6 +3513,8 @@ mod tests {
                 imported_installed: false,
                 fiat_converter: Some(self.fiat_converter),
                 balance_masked: false,
+                overview_total_hidden: false,
+                overview_wallets_hidden: false,
                 total_balance_loading: false,
                 spark_balance_loaded: true,
                 liquid_balance_loaded: true,
@@ -3453,6 +3559,7 @@ mod tests {
                 }),
                 btc_usd_price: Some(50_000.0),
                 cube_name: "Everyday",
+                vault_alias: Some("Family savings"),
                 chain: ChainId::Bitcoin,
                 light_theme: false,
                 transfer_page: TransferPage::Wallets,
@@ -4271,6 +4378,72 @@ mod tests {
 
         view.reset();
         assert_eq!(view.step, 0);
+    }
+
+    #[test]
+    fn overview_section_masks_never_override_global_hide() {
+        assert_eq!(
+            OverviewMasks::new(false, false, false),
+            OverviewMasks {
+                total: false,
+                wallets: false
+            }
+        );
+        assert_eq!(
+            OverviewMasks::new(false, true, false),
+            OverviewMasks {
+                total: true,
+                wallets: false
+            }
+        );
+        assert_eq!(
+            OverviewMasks::new(false, false, true),
+            OverviewMasks {
+                total: false,
+                wallets: true
+            }
+        );
+        for total in [false, true] {
+            for wallets in [false, true] {
+                assert_eq!(
+                    OverviewMasks::new(true, total, wallets),
+                    OverviewMasks {
+                        total: true,
+                        wallets: true
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn overview_context_alias_and_section_controls_render() {
+        use crate::app::view::shared::landing::capture;
+        let fixture = ViewFixture::new();
+        let shown = capture::inspect(
+            "overview-context",
+            overview(fixture.config(0, None, None)),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(shown.contains("Everyday · Bitcoin"));
+        assert!(shown.contains("Vault · Family savings"));
+        for section in ["Total Balance", "Wallets"] {
+            assert!(shown.has_focus(landing_control_id("test-cube", section, "balance-privacy")));
+        }
+
+        let mut global_hidden = fixture.config(0, None, None);
+        global_hidden.balance_masked = true;
+        let hidden = capture::inspect(
+            "overview-global-hide",
+            overview(global_hidden),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(!hidden.contains("250,000"));
+        assert!(!hidden.contains("31,000"));
     }
 
     #[test]

@@ -383,6 +383,9 @@ pub struct GlobalHome {
     wallet: Option<Arc<Wallet>>,
     /// Retained only for the legacy Cube settings constructor; device privacy owns display.
     _legacy_balance_masked: bool,
+    /// Session-only Overview controls. A true global Hide overrides both.
+    overview_total_hidden: bool,
+    overview_wallets_hidden: bool,
     /// Cached derivation of `(transfer_from, transfer_to)` via
     /// `TransferDirection::try_from_pair`. `None` when either side is unset or
     /// both sides point at the same wallet.
@@ -531,6 +534,8 @@ impl GlobalHome {
             breez_client: breez_client.into(),
             spark_backend,
             _legacy_balance_masked: balance_masked,
+            overview_total_hidden: false,
+            overview_wallets_hidden: false,
             transfer_direction: None,
             transfer_from: None,
             transfer_to: None,
@@ -619,6 +624,8 @@ impl GlobalHome {
             breez_client: breez_client.into(),
             spark_backend,
             _legacy_balance_masked: balance_masked,
+            overview_total_hidden: false,
+            overview_wallets_hidden: false,
             transfer_direction: None,
             transfer_from: None,
             transfer_to: None,
@@ -759,6 +766,8 @@ impl State for GlobalHome {
             imported_installed: self.imported_installed,
             fiat_converter,
             balance_masked: cache.balance_amounts_masked(),
+            overview_total_hidden: self.overview_total_hidden,
+            overview_wallets_hidden: self.overview_wallets_hidden,
             total_balance_loading,
             spark_balance_loaded: self.spark_balance_loaded,
             liquid_balance_loaded: self.liquid_balance_loaded,
@@ -813,6 +822,10 @@ impl State for GlobalHome {
             pending_vault_incoming: self.pending_vault_incoming,
             btc_usd_price: cache.btc_usd_price,
             cube_name: &cache.cube_name,
+            vault_alias: self
+                .wallet
+                .as_ref()
+                .and_then(|wallet| wallet.alias.as_deref()),
             chain: cache.chain(),
             light_theme: matches!(
                 cache.theme_mode,
@@ -920,6 +933,14 @@ impl State for GlobalHome {
         match message {
             Message::View(view::Message::Home(msg)) => {
                 match msg {
+                    HomeMessage::ToggleTotalBalance => {
+                        self.overview_total_hidden = !self.overview_total_hidden;
+                        Task::none()
+                    }
+                    HomeMessage::ToggleWalletBalances => {
+                        self.overview_wallets_hidden = !self.overview_wallets_hidden;
+                        Task::none()
+                    }
                     HomeMessage::SendAsset(asset) => {
                         use crate::app::menu::LiquidSubMenu;
                         Task::batch(vec![
