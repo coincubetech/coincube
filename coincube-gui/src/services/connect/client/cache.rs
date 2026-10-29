@@ -70,9 +70,15 @@ impl ConnectCache {
                 tokens,
                 device_id: None,
                 last_seen_event_seq: None,
+                reregister_claim: None,
             })
         }
         if activate_account {
+            // A new foreground login, including a login for the same email,
+            // supersedes any re-registration started by the prior session.
+            if let Some(account) = self.accounts.iter_mut().find(|a| a.email == email) {
+                account.reregister_claim = None;
+            }
             self.active_email = Some(email.to_string());
         }
     }
@@ -102,6 +108,8 @@ pub struct Account {
     pub device_id: Option<String>,
     #[serde(default)]
     pub last_seen_event_seq: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reregister_claim: Option<String>,
 }
 
 impl Account {
@@ -208,6 +216,73 @@ pub async fn set_device_id_for_email(
     email: &str,
     device_id: Option<&str>,
 ) -> Result<(), ConnectCacheError> {
+    mutate_device_registration(
+        network_dir,
+        email,
+        DeviceRegistrationUpdate::Set {
+            device_id,
+            claim: None,
+        },
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Atomically clear the current id and claim the replacement for this login.
+/// A subsequent foreground login invalidates the claim, even for the same email.
+pub async fn begin_device_reregistration(
+    network_dir: &NetworkDirectory,
+    email: &str,
+    expected_id: &str,
+) -> Result<Option<String>, ConnectCacheError> {
+    let claim = uuid::Uuid::new_v4().to_string();
+    let applied = mutate_device_registration(
+        network_dir,
+        email,
+        DeviceRegistrationUpdate::Begin {
+            expected_id,
+            claim: &claim,
+        },
+    )
+    .await?;
+    Ok(applied.then_some(claim))
+}
+
+/// Commit or roll back only while the exact re-registration claim still owns
+/// the cache. A stale RPC cannot write into a newer login's account record.
+pub async fn finish_device_reregistration(
+    network_dir: &NetworkDirectory,
+    email: &str,
+    claim: &str,
+    device_id: Option<&str>,
+) -> Result<bool, ConnectCacheError> {
+    mutate_device_registration(
+        network_dir,
+        email,
+        DeviceRegistrationUpdate::Set {
+            device_id,
+            claim: Some(claim),
+        },
+    )
+    .await
+}
+
+enum DeviceRegistrationUpdate<'a> {
+    Begin {
+        expected_id: &'a str,
+        claim: &'a str,
+    },
+    Set {
+        device_id: Option<&'a str>,
+        claim: Option<&'a str>,
+    },
+}
+
+async fn mutate_device_registration(
+    network_dir: &NetworkDirectory,
+    email: &str,
+    update: DeviceRegistrationUpdate<'_>,
+) -> Result<bool, ConnectCacheError> {
     let mut path = network_dir.path().to_path_buf();
     path.push(CONNECT_CACHE_FILENAME);
 
@@ -241,12 +316,46 @@ pub async fn set_device_id_for_email(
     };
 
     let Some(account) = cache.accounts.iter_mut().find(|a| a.email == email) else {
-        return Ok(());
+        return Ok(false);
     };
-    if account.device_id.as_deref() == device_id {
-        return Ok(());
+    let changed = match update {
+        DeviceRegistrationUpdate::Begin { expected_id, claim } => {
+            if cache.active_email.as_deref() != Some(email)
+                || account.device_id.as_deref() != Some(expected_id)
+                || account.reregister_claim.is_some()
+            {
+                return Ok(false);
+            }
+            account.device_id = None;
+            account.reregister_claim = Some(claim.to_string());
+            true
+        }
+        DeviceRegistrationUpdate::Set { device_id, claim } => {
+            if let Some(claim) = claim {
+                if cache.active_email.as_deref() != Some(email)
+                    || account.reregister_claim.as_deref() != Some(claim)
+                    || account.device_id.is_some()
+                {
+                    return Ok(false);
+                }
+                account.device_id = device_id.map(str::to_string);
+                account.reregister_claim = None;
+                true
+            } else {
+                if account.device_id.as_deref() == device_id && account.reregister_claim.is_none() {
+                    return Ok(true);
+                }
+                account.device_id = device_id.map(str::to_string);
+                // Normal bootstrap can recover an abandoned claim after a
+                // crash; its registration supersedes the in-flight request.
+                account.reregister_claim = None;
+                true
+            }
+        }
+    };
+    if !changed {
+        return Ok(false);
     }
-    account.device_id = device_id.map(str::to_string);
 
     let content = serde_json::to_vec_pretty(&cache)
         .map_err(|e| ConnectCacheError::WritingFile(format!("Failed to serialize cache: {}", e)))?;
@@ -262,7 +371,7 @@ pub async fn set_device_id_for_email(
         .set_len(content.len() as u64)
         .await
         .map_err(|e| ConnectCacheError::WritingFile(format!("Failed to truncate file: {}", e)))?;
-    Ok(())
+    Ok(true)
 }
 
 /// Persist the highest event_seq observed on the realtime stream for the
@@ -415,7 +524,133 @@ impl std::fmt::Display for ConnectCacheError {
 
 #[cfg(test)]
 mod tests {
-    use super::{AccessTokenResponse, ConnectCache};
+    use super::{
+        begin_device_reregistration, finish_device_reregistration, set_device_id_for_email,
+        AccessTokenResponse, ConnectCache, CONNECT_CACHE_FILENAME,
+    };
+    use crate::dir::NetworkDirectory;
+
+    fn tokens(label: &str) -> AccessTokenResponse {
+        AccessTokenResponse {
+            access_token: format!("{label}-access"),
+            refresh_token: format!("{label}-refresh"),
+            expires_at: 123,
+        }
+    }
+
+    fn test_network_dir() -> NetworkDirectory {
+        let path = std::env::temp_dir().join(format!(
+            "connect-registration-cache-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        NetworkDirectory::new(path)
+    }
+
+    #[tokio::test]
+    async fn stale_reregistration_cannot_overwrite_same_email_login_or_rollback() {
+        let dir = test_network_dir();
+        let path = dir.path().join(CONNECT_CACHE_FILENAME);
+        let email = "alice@example.com";
+        let mut cache = ConnectCache::default();
+        cache.upsert_credential(email, tokens("a"), true);
+        cache.accounts[0].device_id = Some("device-a".into());
+        std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
+
+        let claim = begin_device_reregistration(&dir, email, "device-a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            ConnectCache::from_file(&dir)
+                .unwrap()
+                .active_account()
+                .unwrap()
+                .device_id,
+            None
+        );
+
+        // B signs in to the same email before A's RegisterDevice RPC returns.
+        let mut b_cache = ConnectCache::from_file(&dir).unwrap();
+        b_cache.upsert_credential(email, tokens("b"), true);
+        std::fs::write(&path, serde_json::to_vec(&b_cache).unwrap()).unwrap();
+        assert!(
+            !finish_device_reregistration(&dir, email, &claim, Some("late-a"))
+                .await
+                .unwrap()
+        );
+        set_device_id_for_email(&dir, email, Some("device-b"))
+            .await
+            .unwrap();
+        assert!(
+            !finish_device_reregistration(&dir, email, &claim, Some("device-a"))
+                .await
+                .unwrap()
+        );
+
+        // A fresh launch reads B's id from the actual cache file.
+        let restored = ConnectCache::from_file(&dir).unwrap();
+        assert_eq!(
+            restored.active_account().unwrap().device_id.as_deref(),
+            Some("device-b")
+        );
+        assert_eq!(
+            restored.active_account().unwrap().tokens.access_token,
+            "b-access"
+        );
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_clear_does_not_claim_or_report_registration_ready() {
+        let dir = test_network_dir();
+        // A directory at the cache path deterministically prevents opening it
+        // as a writable file, independent of the test user's permissions.
+        let path = dir.path().join(CONNECT_CACHE_FILENAME);
+        std::fs::create_dir(&path).unwrap();
+        assert!(
+            begin_device_reregistration(&dir, "alice@example.com", "device-a")
+                .await
+                .is_err()
+        );
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_rpc_restores_old_id_only_for_own_claim() {
+        let dir = test_network_dir();
+        let path = dir.path().join(CONNECT_CACHE_FILENAME);
+        let email = "alice@example.com";
+        let mut cache = ConnectCache::default();
+        cache.upsert_credential(email, tokens("a"), true);
+        cache.accounts[0].device_id = Some("device-a".into());
+        std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
+
+        let claim = begin_device_reregistration(&dir, email, "device-a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            finish_device_reregistration(&dir, email, &claim, Some("device-a"))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !finish_device_reregistration(&dir, email, &claim, Some("late-a"))
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            ConnectCache::from_file(&dir)
+                .unwrap()
+                .active_account()
+                .unwrap()
+                .device_id
+                .as_deref(),
+            Some("device-a")
+        );
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
 
     fn cache_from_json(json: &str) -> ConnectCache {
         serde_json::from_str(json).expect("valid Connect cache")

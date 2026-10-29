@@ -24,6 +24,7 @@ pub enum BootstrapError {
     Cache(ConnectCacheError),
     Channel(CreateChannelError),
     Rpc(tonic::Status),
+    Superseded,
 }
 
 impl std::fmt::Display for BootstrapError {
@@ -32,6 +33,9 @@ impl std::fmt::Display for BootstrapError {
             Self::Cache(e) => write!(f, "Connect cache error: {}", e),
             Self::Channel(e) => write!(f, "gRPC channel error: {}", e),
             Self::Rpc(s) => write!(f, "RegisterDevice RPC error: {}", s),
+            Self::Superseded => {
+                write!(f, "Re-registration was superseded by a newer Connect login")
+            }
         }
     }
 }
@@ -75,18 +79,73 @@ pub async fn ensure_device_registered(
     app_version: String,
     os_version: String,
 ) -> Result<String, BootstrapError> {
-    if let Some(existing) = Account::from_cache(network_dir, email)
-        .ok()
-        .flatten()
-        .and_then(|a| a.device_id)
-        .filter(|id| !id.trim().is_empty())
-    {
-        tracing::debug!(
-            "SignerDevice already registered for {} (device_id={})",
-            email,
-            existing,
-        );
-        return Ok(existing);
+    register_device(
+        network_dir,
+        email,
+        grpc_url,
+        tokens,
+        device_name,
+        app_version,
+        os_version,
+        None,
+    )
+    .await
+}
+
+pub async fn register_device_for_claim(
+    grpc_url: &str,
+    tokens: Arc<RwLock<AccessTokenResponse>>,
+    network_dir: &NetworkDirectory,
+    email: &str,
+    device_name: String,
+    app_version: String,
+    os_version: String,
+    claim: &str,
+) -> Result<String, BootstrapError> {
+    register_device(
+        network_dir,
+        email,
+        grpc_url,
+        tokens,
+        device_name,
+        app_version,
+        os_version,
+        Some(claim),
+    )
+    .await
+}
+
+async fn register_device(
+    network_dir: &NetworkDirectory,
+    email: &str,
+    grpc_url: &str,
+    tokens: Arc<RwLock<AccessTokenResponse>>,
+    device_name: String,
+    app_version: String,
+    os_version: String,
+    claim: Option<&str>,
+) -> Result<String, BootstrapError> {
+    if let Some(claim) = claim {
+        let owns_claim = Account::from_cache(network_dir, email)?
+            .is_some_and(|account| account.reregister_claim.as_deref() == Some(claim));
+        if !owns_claim {
+            return Err(BootstrapError::Superseded);
+        }
+    }
+    if claim.is_none() {
+        if let Some(existing) = Account::from_cache(network_dir, email)
+            .ok()
+            .flatten()
+            .and_then(|a| a.device_id)
+            .filter(|id| !id.trim().is_empty())
+        {
+            tracing::debug!(
+                "SignerDevice already registered for {} (device_id={})",
+                email,
+                existing
+            );
+            return Ok(existing);
+        }
     }
 
     // Mint (or load) this device's ECIES transport key before registering, so
@@ -120,7 +179,15 @@ pub async fn ensure_device_registered(
         )));
     }
 
-    cache::set_device_id_for_email(network_dir, email, Some(&resp.device_id)).await?;
+    if let Some(claim) = claim {
+        if !cache::finish_device_reregistration(network_dir, email, claim, Some(&resp.device_id))
+            .await?
+        {
+            return Err(BootstrapError::Superseded);
+        }
+    } else {
+        cache::set_device_id_for_email(network_dir, email, Some(&resp.device_id)).await?;
+    }
     tracing::info!(
         "Registered SignerDevice for {} (device_id={})",
         email,
