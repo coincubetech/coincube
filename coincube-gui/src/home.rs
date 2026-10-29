@@ -2171,6 +2171,12 @@ impl Home {
                     && self.pending_bitcoin_import.is_none()
                     && self.chain_availability(self.network).is_available()
                 {
+                    // Bitcoin Blake2b's PIN is collected by the first
+                    // RestorePinSetupStep in the existing Vault installer.
+                    // Continue straight there; Home has no PIN form to show.
+                    if self.network.is_blake2b() {
+                        return Task::done(Message::View(ViewMessage::CreateWallet));
+                    }
                     self.create_network_confirmed = true;
                 }
                 Task::none()
@@ -6074,7 +6080,7 @@ impl Home {
                 .into()
         };
 
-        let region = Column::new()
+        let mut region = Column::new()
             .width(Length::Fill)
             .height(Length::Fill)
             .push(Container::new(header).padding([16, 28]).width(Length::Fill))
@@ -6084,11 +6090,33 @@ impl Home {
                     .padding([14, 28])
                     .width(Length::Fill),
             )
-            .push(divider())
-            .push(
-                scrollable(Container::new(body).padding(28).width(Length::Fill))
-                    .height(Length::Fill),
-            );
+            .push(divider());
+        if launcher_coin::is_test_network(self.network) {
+            region = region
+                .push(
+                    Container::new(
+                        Row::new()
+                            .spacing(8)
+                            .align_y(Alignment::Center)
+                            .push(create_journey_tag(self.network.label(), false))
+                            .push(p2_regular("Test network")),
+                    )
+                    .padding([8, 28])
+                    .width(Length::Fill)
+                    .style(|theme: &theme::Theme| {
+                        iced::widget::container::Style {
+                            background: Some(iced::Background::Color(
+                                theme.colors.shell.background,
+                            )),
+                            ..Default::default()
+                        }
+                    }),
+                )
+                .push(divider());
+        }
+        let region = region.push(
+            scrollable(Container::new(body).padding(28).width(Length::Fill)).height(Length::Fill),
+        );
         let region = if selecting_network {
             region.push(divider()).push(
                 Container::new(
@@ -6096,7 +6124,7 @@ impl Home {
                         button::primary_action(
                             "tenshu.create:network-continue",
                             None,
-                            "Continue",
+                            if blake2b { "Create Vault" } else { "Continue" },
                             create_journey_focus,
                         )
                         .on_press_maybe(
@@ -8472,12 +8500,18 @@ mod tests {
         home.network = ChainId::BitcoinBlake2b;
         home.state = State::NoCube { create_cube: true };
 
-        drop(home.update(Message::View(ViewMessage::ConfirmCreateNetwork)));
-        assert!(home.create_network_confirmed);
-        assert!(home.error.is_none());
-        drop(home.update(Message::View(ViewMessage::BackToCreateNetwork)));
+        let next = drain(home.update(Message::View(ViewMessage::ConfirmCreateNetwork)));
+        assert!(next
+            .iter()
+            .any(|message| matches!(message, Message::View(ViewMessage::CreateWallet))));
         assert!(!home.create_network_confirmed);
         assert!(home.error.is_none());
+        assert!(drain(home.update(Message::View(ViewMessage::CreateWallet)))
+            .iter()
+            .any(|message| matches!(
+                message,
+                Message::Install(_, ChainId::BitcoinBlake2b, UserFlow::CreateWallet, _)
+            )));
 
         // The new stage controls cannot enable the seed-only Cube route.
         assert!(drain(home.update(Message::View(ViewMessage::CreateCube)))
