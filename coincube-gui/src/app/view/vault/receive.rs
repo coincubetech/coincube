@@ -289,6 +289,14 @@ fn generate_style(
     }
 }
 
+fn activity_link_style(theme: &theme::Theme, status: iced_button::Status) -> iced_button::Style {
+    let mut style = theme::button::link(theme, status);
+    // The shared link's idle grey misses P-Receive's orange text-link cue.
+    // accent_ink keeps that cue readable in both dark and light themes.
+    style.text_color = theme.colors.shell.accent_ink;
+    style
+}
+
 fn truncate_middle(address: &str) -> String {
     let len = address.chars().count();
     if len > 2 * NUM_ADDR_CHARS {
@@ -763,7 +771,7 @@ pub fn receive<'a>(
             "See all in Activity",
             None,
             Some(Message::Menu(Menu::Cube(CubeSubMenu::Activity))),
-            landing_subtle_button_style,
+            activity_link_style,
         ));
 
     Column::new()
@@ -1006,6 +1014,19 @@ mod tests {
             ("dark", theme::Theme::dark()),
             ("light", theme::Theme::light()),
         ]
+    }
+
+    #[test]
+    fn activity_link_uses_the_readable_accent_without_a_button_box() {
+        for (_, theme) in themes() {
+            let style = activity_link_style(&theme, iced_button::Status::Active);
+            assert_eq!(style.text_color, theme.colors.shell.accent_ink);
+            assert_eq!(style.border.color.a, 0.0);
+            assert!(matches!(
+                style.background,
+                Some(iced::Background::Color(color)) if color.a == 0.0
+            ));
+        }
     }
 
     /// The single non-focus message from activating `target` on the real
@@ -1474,6 +1495,7 @@ mod tests {
         for (named, target) in [
             (keyboard::key::Named::Space, generate_id()),
             (keyboard::key::Named::Enter, previous(Control::Copy, 11)),
+            (keyboard::key::Named::Space, control_id("activity")),
         ] {
             operate(
                 &mut element,
@@ -1497,6 +1519,8 @@ mod tests {
                     keyboard::key::Named::Enter,
                     Message::VaultReceive(VaultReceiveMessage::Copy(a)),
                 ) if a == &addr(11).to_string() => {}
+                (keyboard::key::Named::Space, Message::Menu(Menu::Cube(CubeSubMenu::Activity))) => {
+                }
                 other => panic!("unexpected activation {:?}", other),
             }
         }
