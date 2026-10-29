@@ -2356,6 +2356,32 @@ pub enum HomeMessage {
     SelectWalletInPicker(WalletKind),
     /// Choose a source or destination directly from the Transfer form.
     SelectTransferWallet(PickerSide, WalletKind),
+    /// The To list's "Another Cube…" row (Vault source only).
+    SelectAnotherCube,
+    /// Wallets page → Amount, or → Other Cube for "Another Cube…".
+    ContinueFromWallets,
+    /// Other Cube page: choose a row of the local catalog by Cube id.
+    SelectOtherCube(String),
+    /// Other Cube page → Unlock.
+    ContinueWithCube,
+    OtherCubePinEdited(String),
+    /// Check the entered PIN against the chosen Cube.
+    UnlockOtherCube,
+    /// Start the chosen Cube's passkey ceremony (macOS).
+    UnlockOtherCubePasskey,
+    /// Poll the passkey ceremony on the UI thread.
+    OtherCubePasskeyPoll,
+    OtherCubePinChecked(crate::app::transfer_destination_loader::PinCheck),
+    OtherCubeBackendBound(crate::app::transfer_destination_loader::BackendReply),
+    OtherCubeAddress(crate::app::transfer_destination_loader::AddressReply),
+    /// Unlock page → Amount, once every check passed.
+    ContinueFromUnlock,
+    /// Switch the transfer amount between sats and BTC.
+    SetTransferUnit(crate::app::settings::unit::BitcoinDisplayUnit),
+    /// Done page: close the dialog and open Activity.
+    OpenTransferActivity,
+    /// Done page: start another transfer.
+    RestartTransfer,
     AmountEdited(String),
     NextStep,
     PreviousStep,
