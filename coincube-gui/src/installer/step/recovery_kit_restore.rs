@@ -126,7 +126,7 @@ pub struct RecoveryKitRestoreStep {
     network_filter: String,
     /// When set (W13 launched from a home "Your Cubes" row), the cube
     /// list is filtered to just this uuid so `phase_after_cubes_loaded`
-    /// auto-selects it and the picker is skipped entirely.
+    /// shows the matching Cube already selected for confirmation.
     preselect_uuid: Option<String>,
     client: CoincubeClient,
     phase: Phase,
@@ -234,7 +234,7 @@ impl RecoveryKitRestoreStep {
                 // When a specific cube was preselected (home restore
                 // row), narrow to just that uuid so the loaded list has
                 // a single entry and `phase_after_cubes_loaded`
-                // auto-selects it, skipping the picker.
+                // shows that Cube selected in the picker.
                 let matches: Vec<CubeResponse> = all
                     .into_iter()
                     .filter(|c| {
@@ -516,7 +516,7 @@ pub(crate) fn stage_restore(
 /// specific cube was preselected from a home "Your Cubes" row — only
 /// the row with that uuid. Both conditions must hold; a preselected
 /// uuid that lives on a different network is still excluded, so the
-/// caller never probes (or auto-selects) a cross-network cube.
+/// caller never probes or displays a cross-network cube.
 /// Extracted as a pure fn so the network×preselect matrix is
 /// unit-testable without standing up the async task.
 fn cube_passes_filter(
@@ -548,12 +548,12 @@ fn has_required_half(scope: RestoreScope, c: &RestoreCubeCandidate) -> bool {
 
 /// Transition function called after `list_cubes` + per-cube status
 /// probes resolve. Extracted as a pure function over the Phase enum
-/// so the auto-select vs picker vs error decision is unit-testable
+/// so the picker vs error decision is unit-testable
 /// without standing up the whole installer step.
 ///
 /// Branches:
-/// - Exactly one cube with the required half → auto-select it
-///   (common restore path)
+/// - Exactly one cube with the required half → show it selected in the picker
+///   so the account, network and kit availability are visible before Next
 /// - Exactly one cube **without** the required half → `Phase::Error`
 ///   with a specific message naming the missing half; the picker's
 ///   disabled-row affordance doesn't help when there's only one row
@@ -566,9 +566,9 @@ fn phase_after_cubes_loaded(scope: RestoreScope, cubes: Vec<RestoreCubeCandidate
         // without moving; handle with `match` on length-1 form.
         let c = cubes.into_iter().next().expect("len == 1");
         if has_required_half(scope, &c) {
-            Phase::PasswordEntry {
-                selected: c,
-                attempts: 0,
+            Phase::CubePicker {
+                selected: Some(c.id),
+                cubes: vec![c],
             }
         } else {
             let (needed, hint) = match scope {
@@ -1090,7 +1090,7 @@ mod tests {
     /// A server-side Bitcoin Blake2b Cube never passes a Bitcoin-family
     /// network filter, and vice versa: the Connect strings differ on purpose
     /// (`ChainId::api_str`), so a restore flow installing for mainnet can
-    /// neither list nor auto-select the BTCB2 twin — its identity is not
+    /// neither list nor select the BTCB2 twin — its identity is not
     /// collapsed to "mainnet" at this boundary. (BTCB2 plan PR 2.)
     #[test]
     fn a_blake2b_server_cube_never_passes_a_bitcoin_family_filter() {
@@ -1181,7 +1181,7 @@ mod tests {
     #[test]
     fn filter_drops_mismatched_uuid_when_preselected() {
         // Right network, wrong uuid → excluded so only the clicked cube
-        // survives to auto-select.
+        // survives to the picker.
         assert!(!cube_passes_filter(
             "mainnet",
             "cube-b",
@@ -1216,39 +1216,34 @@ mod tests {
     }
 
     #[test]
-    fn preselect_then_auto_select_advances_to_password() {
-        // End-to-end of the home restore path: after the filter narrows
-        // to the single preselected cube, `phase_after_cubes_loaded`
-        // auto-selects it (no picker). Model the survivor as a
-        // restorable candidate and confirm the auto-select branch.
-        let survivors: Vec<RestoreCubeCandidate> =
-            vec![candidate("Preselected", true), candidate("Other", true)]
-                .into_iter()
-                .filter(|c| cube_passes_filter(&c.network, "uuid", "mainnet", Some("uuid")))
-                .collect();
-        // Both share the test uuid "uuid"; the point exercised here is
-        // the auto-select on a single-entry list.
-        let phase = phase_after_cubes_loaded(RestoreScope::Full, vec![survivors[0].clone()]);
+    fn home_preselection_still_waits_for_picker_confirmation() {
+        let mut other = candidate("Other", true);
+        other.uuid = "other-uuid".into();
+        let survivors: Vec<RestoreCubeCandidate> = vec![candidate("Preselected", true), other]
+            .into_iter()
+            .filter(|c| cube_passes_filter(&c.network, &c.uuid, "mainnet", Some("uuid")))
+            .collect();
+        assert_eq!(survivors.len(), 1);
+        let phase = phase_after_cubes_loaded(RestoreScope::Full, survivors);
         assert!(
-            matches!(phase, Phase::PasswordEntry { .. }),
-            "single preselected restorable cube should auto-advance to PasswordEntry"
+            matches!(phase, Phase::CubePicker { cubes, selected: Some(1) } if cubes.len() == 1 && cubes[0].name == "Preselected")
         );
     }
 
-    // Regression tests for the auto-select-skips-kit-check bug. Before
+    // Regression tests for the single-cube-skips-kit-check bug. Before
     // this fix, a single cube without a kit would land the user on
     // the password screen, which would then 404 at decrypt time —
     // a worse UX than a direct "no kit yet" message up front.
 
     #[test]
-    fn single_cube_with_kit_auto_advances_to_password() {
+    fn single_cube_with_kit_waits_for_picker_confirmation() {
         let phase = phase_after_cubes_loaded(RestoreScope::Full, vec![candidate("My Cube", true)]);
         match phase {
-            Phase::PasswordEntry { selected, attempts } => {
-                assert_eq!(selected.name, "My Cube");
-                assert_eq!(attempts, 0);
+            Phase::CubePicker { cubes, selected } => {
+                assert_eq!(cubes[0].name, "My Cube");
+                assert_eq!(selected, Some(cubes[0].id));
             }
-            other => panic!("expected PasswordEntry, got {:?}", other),
+            other => panic!("expected CubePicker, got {:?}", other),
         }
     }
 
