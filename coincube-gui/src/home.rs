@@ -1168,9 +1168,16 @@ impl Home {
     }
 
     fn showing_create_journey(&self) -> bool {
-        matches!(self.active_section, HomeSection::Cubes)
+        !matches!(self.state, State::Unchecked)
+            && matches!(self.active_section, HomeSection::Cubes)
             && (matches!(self.state, State::CreationBackup(_))
                 || (self.showing_create_form() && self.pending_bitcoin_import.is_none()))
+    }
+
+    fn can_leave_create_journey(&self) -> bool {
+        self.has_cube_list()
+            && !matches!(self.state, State::CreationBackup(_))
+            && !self.creating_cube
     }
 
     pub fn stop(&mut self) {}
@@ -2130,6 +2137,11 @@ impl Home {
                 Task::none()
             }
             Message::View(ViewMessage::ShowCreateCube(show)) => {
+                // A queued navigation event must not clear the name while a
+                // passkey ceremony or PIN creation task is using it.
+                if !show && self.creating_cube {
+                    return Task::none();
+                }
                 self.catalog.dismiss_popovers();
                 if show {
                     self.pending_bitcoin_import = None;
@@ -5795,7 +5807,7 @@ impl Home {
             },
         );
 
-        let leave = self.has_cube_list() && !backing_up;
+        let leave = self.can_leave_create_journey();
         let brand = FocusableAction::new(
             Id::new("tenshu.create:brand"),
             Row::new()
@@ -8649,6 +8661,44 @@ mod tests {
         ));
         // The Action widget owns Enter/Space and disabled-action behavior;
         // its keyboard tests exercise those semantics in coincube-ui.
+    }
+
+    #[test]
+    fn unchecked_home_waits_for_probe_before_showing_create_journey() {
+        let mut home = home();
+        assert!(matches!(home.state, State::Unchecked));
+        assert!(!home.showing_create_journey());
+
+        home.state = State::NoCube { create_cube: false };
+        assert!(home.showing_create_journey());
+    }
+
+    #[test]
+    fn in_flight_create_cannot_leave_and_clear_its_name() {
+        let mut home = home();
+        home.state = State::Cubes {
+            cubes: vec![CubeSettings::new("Existing".into(), ChainId::Bitcoin)],
+            create_cube: true,
+            source: ChainId::Bitcoin,
+        };
+        home.create_network_confirmed = true;
+        home.create_cube_name.value = "Travel".into();
+        home.creating_cube = true;
+        assert!(!home.can_leave_create_journey());
+
+        drop(home.update(Message::View(ViewMessage::ShowCreateCube(false))));
+        assert!(matches!(
+            home.state,
+            State::Cubes {
+                create_cube: true,
+                ..
+            }
+        ));
+        assert_eq!(home.create_cube_name.value, "Travel");
+        assert!(home.create_network_confirmed);
+
+        home.creating_cube = false;
+        assert!(home.can_leave_create_journey());
     }
 
     #[test]
