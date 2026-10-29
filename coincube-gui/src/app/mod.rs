@@ -8130,6 +8130,10 @@ impl App {
                                 .find(|a| a.email == email_for_task)
                             {
                                 acct.tokens = tokens.clone();
+                                if acct.reregister_claim.is_some() {
+                                    acct.device_id = None;
+                                }
+                                acct.reregister_claim = None;
                             } else {
                                 cache.accounts.push(
                                     crate::services::connect::client::cache::Account {
@@ -8137,6 +8141,7 @@ impl App {
                                         tokens: tokens.clone(),
                                         device_id: None,
                                         last_seen_event_seq: None,
+                                        reregister_claim: None,
                                     },
                                 );
                             }
