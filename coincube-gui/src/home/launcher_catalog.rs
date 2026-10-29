@@ -2585,11 +2585,15 @@ mod tests {
         use crate::gui::{pane, tab};
         use std::hash::Hasher as _;
 
-        fn one_recipe_hash(subscription: iced::Subscription<pane::Message>) -> u64 {
-            let mut recipes = iced::advanced::subscription::into_recipes(subscription);
-            assert_eq!(recipes.len(), 1);
+        // The floor listener and the network activity check: both belong
+        // to the visible tab only.
+        fn recipes_hash(subscription: iced::Subscription<pane::Message>) -> u64 {
+            let recipes = iced::advanced::subscription::into_recipes(subscription);
+            assert_eq!(recipes.len(), 2);
             let mut hasher = iced::advanced::subscription::Hasher::default();
-            recipes.remove(0).hash(&mut hasher);
+            for recipe in recipes {
+                recipe.hash(&mut hasher);
+            }
             hasher.finish()
         }
         let mut first = rows(9);
@@ -2599,14 +2603,14 @@ mod tests {
         let mut pane = pane::Pane::new_with_tab(tab::State::Home(first));
         pane.tabs.push(tab::Tab::new(2, tab::State::Home(second)));
 
-        let first_hash = one_recipe_hash(pane.subscription(true));
+        let first_hash = recipes_hash(pane.subscription(true));
         assert_eq!(
             iced::advanced::subscription::into_recipes(pane.subscription(false)).len(),
             0,
             "a hidden pane has no floor listener"
         );
         pane.focused_tab = 1;
-        let second_hash = one_recipe_hash(pane.subscription(true));
+        let second_hash = recipes_hash(pane.subscription(true));
         assert_ne!(first_hash, second_hash, "switching tabs moves the listener");
     }
 
