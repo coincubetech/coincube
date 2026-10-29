@@ -774,6 +774,7 @@ mod tests {
             restored.active_account().unwrap().tokens.access_token,
             "b-access"
         );
+        drop(claim);
         std::fs::remove_dir_all(dir.path()).unwrap();
     }
 
@@ -825,6 +826,7 @@ mod tests {
                 .as_deref(),
             Some("device-a")
         );
+        drop(claim);
         std::fs::remove_dir_all(dir.path()).unwrap();
     }
 
@@ -891,6 +893,7 @@ mod tests {
                 .as_deref(),
             Some("device-a-new")
         );
+        drop(claim);
         std::fs::remove_dir_all(dir.path()).unwrap();
     }
 
@@ -1039,6 +1042,7 @@ mod tests {
                 .await
                 .unwrap()
         );
+        drop(new_claim);
         std::fs::remove_dir_all(dir.path()).unwrap();
     }
 
@@ -1068,6 +1072,7 @@ mod tests {
             restored.active_account().unwrap().device_id.as_deref(),
             Some("device-b")
         );
+        drop(claim);
         std::fs::remove_dir_all(dir.path()).unwrap();
     }
 
