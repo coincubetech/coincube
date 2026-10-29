@@ -364,7 +364,11 @@ fn transaction_card(client_id: &str, draft: Prepared) -> Ui<'static> {
         .width(Length::Fill)
         .push(transaction_field(
             "From",
-            "Active Vault · Bitcoin Regtest",
+            if draft.network == "regtest" {
+                "Active Vault · Bitcoin Regtest"
+            } else {
+                "Unsupported network"
+            },
             false,
         ));
     for (index, recipient) in draft.recipients.iter().enumerate() {
@@ -373,32 +377,40 @@ fn transaction_card(client_id: &str, draft: Prepared) -> Ui<'static> {
         } else {
             format!("Recipient {}", index + 1)
         };
-        details = details.push(transaction_field(
-            label,
-            format!(
-                "{} · {} sats · Regtest address",
-                recipient.address, recipient.amount_sats
-            ),
-            true,
-        ));
+        let amount_label = if draft.recipients.len() == 1 {
+            "Amount".to_owned()
+        } else {
+            format!("Amount {}", index + 1)
+        };
+        details = details
+            .push(transaction_field(label, recipient.address.clone(), true))
+            .push(transaction_field(
+                amount_label,
+                transaction_sats(recipient.amount_sats),
+                true,
+            ));
     }
     details = details
         .push(transaction_field(
             "Payment total",
-            format!("{} sats · exact amount requested", draft.amount_sats),
+            format!(
+                "{} · exact amount requested",
+                transaction_sats(draft.amount_sats)
+            ),
             true,
         ))
         .push(transaction_field(
             "Miner fee",
             format!(
-                "{} sats · estimated {} sat/vB · added on top",
-                draft.fee_sats, draft.fee_rate_sat_vb
+                "{} · estimated {} sat/vB · added on top",
+                transaction_sats(draft.fee_sats),
+                draft.fee_rate_sat_vb
             ),
             true,
         ))
         .push(transaction_field(
             "Total leaving Vault",
-            total.map_or_else(|| "Unavailable".to_owned(), |sats| format!("{sats} sats")),
+            total.map_or_else(|| "Unavailable".to_owned(), transaction_sats),
             true,
         ))
         .push(transaction_field(
@@ -406,7 +418,10 @@ fn transaction_card(client_id: &str, draft: Prepared) -> Ui<'static> {
             if draft.change_sats == 0 {
                 "No change output".to_owned()
             } else {
-                format!("{} sats returned to this Vault", draft.change_sats)
+                format!(
+                    "{} returned to this Vault",
+                    transaction_sats(draft.change_sats)
+                )
             },
             true,
         ))
@@ -417,7 +432,7 @@ fn transaction_card(client_id: &str, draft: Prepared) -> Ui<'static> {
         ))
         .push(transaction_field(
             "Signatures",
-            "None collected · native signing required",
+            "None at preparation · current signing status is not shown here",
             false,
         ));
 
@@ -436,14 +451,17 @@ fn transaction_card(client_id: &str, draft: Prepared) -> Ui<'static> {
         .spacing(12)
         .width(Length::Fill)
         .push(
-            row![heading("Prepared transaction"), page::scope_tag("REGTEST")]
+            row![
+                heading("Prepared transaction"),
+                page::scope_tag(if draft.network == "regtest" { "REGTEST" } else { "UNSUPPORTED" })
+            ]
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
         )
-        .push(muted("Prepared by this paired client with Tenshu's coin selection and fee engine. Preparing does not send bitcoin; inspect the full recipient and amounts before signing."))
+        .push(muted("Prepared by this paired client with Tenshu's coin selection and fee engine. Preparing does not send bitcoin; check every recipient address and amount before signing. The assistant cannot spend."))
         .push(page::status(
             if review { page::Status::Ok } else { page::Status::Warn },
-            if review { "Ready for native review · unsigned" } else { "Draft unavailable for native review" },
+            if review { "Unsigned when prepared · current status is not tracked here" } else { "Draft unavailable for native review" },
         ))
         .push(details)
         .push(action(
@@ -452,8 +470,21 @@ fn transaction_card(client_id: &str, draft: Prepared) -> Ui<'static> {
             review_message,
             theme::tenshu::button::ActionKind::Primary,
         ))
-        .push(muted("Fiat conversion, quote refresh, signer availability, and signed or broadcast status are planned. This experimental tool accepts exact satoshi amounts only. The native Send flow owns signing and broadcast."));
+        .push(muted("This card does not update after native review. Fiat conversion, quote refresh, and signer availability are planned. This experimental tool accepts exact satoshi amounts only. The native Send flow owns signing and broadcast."));
     card(content)
+}
+
+#[cfg(feature = "mcp-transactions")]
+fn transaction_sats(value: u64) -> String {
+    let digits = value.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    format!("{grouped} SATS")
 }
 
 #[cfg(feature = "mcp-transactions")]
@@ -486,7 +517,7 @@ fn transaction_field(
 }
 
 #[cfg(all(test, feature = "mcp-transactions"))]
-mod transaction_presentation_tests {
+mod mcp_transaction_presentation_tests {
     use super::*;
     use crate::app::view::shared::landing::capture;
     use coincube_core::miniscript::bitcoin::{
@@ -619,7 +650,6 @@ mod transaction_presentation_tests {
     }
 
     #[test]
-    #[ignore = "synthetic content-only runtime capture; set R06A_CAPTURE_DIR for PNGs"]
     fn transaction_card_boundary_capture_and_keyboard() {
         let draft = address_valid_display_draft();
         let review_id = iced::advanced::widget::Id::from(REVIEW_ID);
@@ -635,9 +665,10 @@ mod transaction_presentation_tests {
                 palette,
             );
             assert!(inspection.contains("Recipient 8"));
-            assert!(inspection.contains("80000 sats"));
-            assert!(inspection.contains("80500 sats"));
-            assert!(inspection.contains("50000 sats"));
+            assert!(inspection.contains("Amount 8"));
+            assert!(inspection.contains("80,000 SATS"));
+            assert!(inspection.contains("80,500 SATS"));
+            assert!(inspection.contains("50,000 SATS"));
             assert!(inspection.has_focus(review_id.clone()));
             let schema = capture::inspect(
                 "r25-90-char-schema-layout-only",
@@ -650,9 +681,9 @@ mod transaction_presentation_tests {
                     theme::Theme::light()
                 },
             );
-            assert!(schema.contains("123526789 sats"));
-            assert!(schema.contains("123539134 sats"));
-            assert!(schema.contains("2100000000000 sats"));
+            assert!(schema.contains("123,526,789 SATS"));
+            assert!(schema.contains("123,539,134 SATS"));
+            assert!(schema.contains("2,100,000,000,000 SATS"));
         }
         for key in [
             iced::keyboard::key::Named::Enter,
