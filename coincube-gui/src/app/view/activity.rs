@@ -821,7 +821,7 @@ const ACTIVITY_DETAIL_SCROLL_ID: &str = "tenshu.activity.detail.scroll";
 const ROW_HEIGHT: f32 = 56.0;
 
 fn detail_beside_list(width: f32) -> bool {
-    width >= MIN_ACTIVITY_ROWS_WIDTH + 2.0 * list_inset(width) + SELECTED_DETAIL_WIDTH
+    width >= MIN_ACTIVITY_ROWS_WIDTH + 2.0 * list_inset(width) + DETAIL_SPAN
 }
 
 /// The pane and the rule before it.
@@ -2548,6 +2548,12 @@ mod tests {
             );
             previous = frame;
         }
+        // From the first width the pane sits beside, its rows get their minimum.
+        let first = (1000..=2600)
+            .map(|width| width as f32)
+            .find(|width| detail_beside_list(*width))
+            .unwrap();
+        assert!(column_frame(first, true).column + 2.0 * ROW_INSET >= MIN_ACTIVITY_ROWS_WIDTH);
     }
 
     #[test]
