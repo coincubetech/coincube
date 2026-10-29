@@ -7,7 +7,7 @@ use iced::{
 
 use coincube_core::{bip39, miniscript::bitcoin::Network};
 use coincube_ui::{
-    component::{button, card, notification, text::*},
+    component::{button, card, notification, spinner, text::*},
     icon, image, theme,
     widget::{
         action::Action as FocusableAction, modal::Modal, CheckBox, Column, Container, Element, Row,
@@ -5476,7 +5476,7 @@ impl Home {
         )
     }
 
-    fn creation_form(&self) -> Element<ViewMessage> {
+    fn creation_form(&self, submit_in_form: bool) -> Element<ViewMessage> {
         if self.network.is_blake2b() {
             return Column::new().spacing(16)
                 .push(text("Create a Bitcoin Blake2b Vault. Other wallet and recovery flows are unavailable."))
@@ -5494,6 +5494,7 @@ impl Home {
                 signed_in: self.connect_account.authenticated_client().is_some(),
                 importing_bitcoin: self.pending_bitcoin_import.is_some(),
                 can_import_bitcoin: self.network == ChainId::Bitcoin,
+                submit_in_form,
             },
         )
     }
@@ -6065,7 +6066,7 @@ impl Home {
             .max_width(640)
             .into()
         } else {
-            self.creation_form()
+            self.creation_form(false)
         };
 
         let divider = || -> Element<ViewMessage> {
@@ -6301,7 +6302,7 @@ impl Home {
                                 ),
                                 State::Cubes { create_cube, .. } => {
                                     if *create_cube {
-                                        self.creation_form()
+                                        self.creation_form(true)
                                     } else {
                                         launcher_catalog::catalog_view(self)
                                     }
@@ -6344,7 +6345,7 @@ impl Home {
                                                 .max_width(500),
                                             );
                                         } else {
-                                            col = col.push(self.creation_form());
+                                            col = col.push(self.creation_form(true));
                                         }
                                         col.into()
                                     } else {
@@ -6760,6 +6761,7 @@ struct CreateCubeFormOptions {
     signed_in: bool,
     importing_bitcoin: bool,
     can_import_bitcoin: bool,
+    submit_in_form: bool,
 }
 
 fn create_cube_can_submit(
@@ -6789,6 +6791,7 @@ fn create_cube_form<'a>(
         signed_in,
         importing_bitcoin,
         can_import_bitcoin,
+        submit_in_form,
     } = options;
 
     let mut column = Column::new()
@@ -6948,7 +6951,48 @@ fn create_cube_form<'a>(
     }
 
     // The Create journey keeps its submit action in a fixed footer so PIN
-    // fields remain scrollable at the minimum window height.
+    // fields remain scrollable at the minimum window height. The legacy
+    // Bitcoin import form still renders its own submit action here.
+    if submit_in_form {
+        let submit_button = if creating_cube {
+            iced::widget::button(
+                Container::new(
+                    Row::new()
+                        .spacing(5)
+                        .align_y(Alignment::Center)
+                        .push(text("Creating"))
+                        .push(
+                            Container::new(spinner::typing_text_carousel(
+                                "...",
+                                true,
+                                std::time::Duration::from_millis(500),
+                                text,
+                            ))
+                            .width(Length::Fixed(20.0)),
+                        ),
+                )
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
+            )
+            .width(Length::Fixed(200.0))
+            .height(Length::Fixed(44.0))
+            .style(theme::button::primary)
+        } else {
+            button::primary(None, "Create Cube")
+                .width(Length::Fixed(200.0))
+                .on_press_maybe(
+                    create_cube_can_submit(
+                        cube_name,
+                        pin,
+                        pin_confirm,
+                        passkey_mode,
+                        creating_cube,
+                    )
+                    .then_some(ViewMessage::CreateCube),
+                )
+        };
+        column = column.push(submit_button);
+    }
     if !importing_bitcoin && can_import_bitcoin {
         column = column.push(
             button::secondary(None, "Import Bitcoin wallet")
@@ -8767,6 +8811,55 @@ mod tests {
         let _ = home.update(Message::View(ViewMessage::ShowCreateCube(false)));
         assert!(home.pending_bitcoin_import.is_none());
         assert!(matches!(home.state, State::NoCube { create_cube: false }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bitcoin_import_legacy_form_keeps_its_create_submit() {
+        use iced::advanced::{
+            layout,
+            renderer::Headless,
+            widget::{Id, Operation, Tree},
+            Layout,
+        };
+
+        #[derive(Default)]
+        struct Labels(Vec<String>);
+        impl Operation for Labels {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn text(&mut self, _: Option<&Id>, _: iced::Rectangle, text: &str) {
+                self.0.push(text.to_owned());
+            }
+        }
+
+        let mut home = home();
+        home.state = State::NoCube { create_cube: false };
+        let _ = home.update(Message::View(ViewMessage::ShowImportBitcoin));
+        assert!(home.pending_bitcoin_import.is_some());
+        let mut element = home.creation_form(true);
+        let renderer = <iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(14.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer");
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(iced::Size::ZERO, iced::Size::new(1024.0, 1800.0)),
+        );
+        let mut labels = Labels::default();
+        element
+            .as_widget_mut()
+            .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
+        assert!(
+            labels.0.iter().any(|label| label == "Create Cube"),
+            "rendered labels: {:?}",
+            labels.0
+        );
     }
 
     #[test]
@@ -10994,6 +11087,7 @@ mod tests {
                 signed_in: true,
                 importing_bitcoin: false,
                 can_import_bitcoin: true,
+                submit_in_form: true,
             },
         );
         let _ = create_cube_form(
@@ -11007,6 +11101,7 @@ mod tests {
                 signed_in: false,
                 importing_bitcoin: true,
                 can_import_bitcoin: true,
+                submit_in_form: true,
             },
         );
 
