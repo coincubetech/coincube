@@ -24,6 +24,7 @@ use crate::{
         cache::{FiatPrice, FiatPriceRequest},
         message::{FiatMessage as AppFiatMessage, Message as AppMessage},
         settings::global::{GlobalSettings, PreferencesReceipt, WindowConfig},
+        settings::preferences::Zoom,
         state::preferences::{
             BalancePrivacyChrome, BeginSaveError, Operation, PreferencesNotice, PreferencesOwner,
             PreferencesPageState, SaveOutcome, SaveRequest,
@@ -944,6 +945,32 @@ mod balance_privacy_eye_origin_tests {
     }
 }
 
+/// "Zoom 125%", centred in the top bar's empty middle. Not interactive, so
+/// the stack still hands every click and hover to the screen beneath.
+fn zoom_pill<'a>(zoom: Zoom) -> Element<'a, Message> {
+    use coincube_ui::{component::text, theme};
+    let top_bar = crate::app::view::nav::shell::TOP_BAR_HEIGHT;
+    iced::widget::container(
+        iced::widget::container(text::p2_regular(format!("Zoom {}%", zoom.percent())))
+            .padding([6, 14])
+            .style(|theme: &theme::Theme| iced::widget::container::Style {
+                background: Some(iced::Background::Color(theme.colors.shell.panel)),
+                text_color: Some(theme.colors.shell.ink),
+                border: iced::Border {
+                    color: theme.colors.shell.line,
+                    width: 1.0,
+                    radius: 999.0.into(),
+                },
+                ..Default::default()
+            }),
+    )
+    .width(iced::Length::Fill)
+    .height(iced::Length::Fixed(top_bar))
+    .center_x(iced::Length::Fill)
+    .center_y(iced::Length::Fixed(top_bar))
+    .into()
+}
+
 /// Exact provider/account context to revalidate on the next local PIN attempt.
 /// Holding this candidate grants neither seed access nor daemon authority.
 #[derive(Clone)]
@@ -967,12 +994,43 @@ pub struct GUI {
     preferences_sheet: Option<PreferencesSheet>,
     connect_sheet: Option<ConnectSheet>,
     preferences: PreferencesOwner,
+    zoom: ZoomState,
+}
+
+/// How long the zoom pill stays up after a shortcut. The 1 Hz tick clears
+/// it, so it shows for one to two seconds.
+const ZOOM_NOTICE: Duration = Duration::from_secs(1);
+
+/// Zoom applied ahead of its save. The preferences lane refuses work while
+/// it is busy, and pressing Cmd + twice quickly must still land on the
+/// second step, so the GUI holds the newest choice until a save confirms it.
+#[derive(Debug, Default)]
+struct ZoomState {
+    pending: Option<Zoom>,
+    notice_until: Option<Instant>,
+    /// The window's screen width in points at 100%, once iced reports it.
+    /// Caps the zoom at [`Zoom::largest_for_screen`].
+    screen_width: Option<f32>,
+    /// The zoom the window's minimum size was last set for.
+    min_size_for: Option<Zoom>,
+}
+
+/// The minimum window height, in screen points, set in `main.rs`. Only the
+/// width grows with the zoom: a shorter layout scrolls, a narrower one breaks.
+const MIN_WINDOW_HEIGHT: f32 = 768.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZoomStep {
+    In,
+    Out,
+    ActualSize,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Key {
     Tab(bool),
     Escape,
+    Zoom(ZoomStep),
 }
 
 #[derive(Debug)]
@@ -989,6 +1047,10 @@ pub enum Message {
     Resized(pane_grid::ResizeEvent),
     Window(Option<Id>),
     WindowSize(Size),
+    /// The window's screen size in zoomed units, and the zoom it was asked at.
+    ScreenSize(Option<Size>, Zoom),
+    /// The window moved, maybe to another screen.
+    WindowMoved,
 
     Fiat(FiatMessage),
     ToggleTheme,
@@ -1063,6 +1125,17 @@ fn ignored_shell_key(event: &Event, status: event::Status) -> Option<Key> {
             repeat: false,
             ..
         }) => Some(Key::Escape),
+        Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Character(key),
+            modifiers,
+            ..
+        }) if modifiers.command() && !modifiers.alt() => match key.as_str() {
+            // Shift turns = into + on most layouts; both zoom in.
+            "=" | "+" => Some(Key::Zoom(ZoomStep::In)),
+            "-" | "_" => Some(Key::Zoom(ZoomStep::Out)),
+            "0" => Some(Key::Zoom(ZoomStep::ActualSize)),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -1458,6 +1531,7 @@ impl GUI {
                 preferences_sheet: None,
                 connect_sheet: None,
                 preferences,
+                zoom: ZoomState::default(),
             },
             Task::batch(cmds),
         )
@@ -1565,6 +1639,7 @@ impl GUI {
                 .then_some("Please try again."),
             diagnostics: preferences_view::Diagnostics::default(),
             about: preferences_view::About::default(),
+            max_zoom: self.zoom.screen_width.map(Zoom::largest_for_screen),
         }
     }
 
@@ -2005,6 +2080,14 @@ impl GUI {
         &mut self,
         change: crate::app::settings::preferences::PreferenceChange,
     ) -> Task<Message> {
+        if let crate::app::settings::preferences::PreferenceChange::Zoom(zoom) = change {
+            // The row disables steps over the cap; refuse one that arrives anyway.
+            if zoom > self.max_zoom() {
+                return Task::none();
+            }
+            self.zoom.pending = Some(zoom);
+            return self.save_pending_zoom();
+        }
         match self.preferences.begin_save(change) {
             Ok(request) => {
                 self.publish_balance_privacy();
@@ -2013,6 +2096,98 @@ impl GUI {
             Err(BeginSaveError::Queued) => {
                 self.publish_balance_privacy();
                 Task::none()
+            }
+            Err(_) => Task::none(),
+        }
+    }
+
+    /// The zoom in effect: the newest unsaved choice, else the saved one,
+    /// capped at what this screen holds. A 150% saved on a large monitor reads
+    /// as 125% on a laptop, and returns on the monitor without a new save.
+    fn current_zoom(&self) -> Zoom {
+        self.zoom
+            .pending
+            .or_else(|| {
+                self.preferences
+                    .accepted()
+                    .map(|accepted| accepted.preferences.zoom)
+            })
+            .unwrap_or_default()
+            .min(self.max_zoom())
+    }
+
+    /// The largest zoom this window's screen can lay out at full width.
+    /// Uncapped until iced reports the screen.
+    fn max_zoom(&self) -> Zoom {
+        self.zoom
+            .screen_width
+            .map_or(Zoom::LARGEST, Zoom::largest_for_screen)
+    }
+
+    /// Asks iced for the window's screen, tagged with the zoom its answer is
+    /// scaled by.
+    fn query_screen_size(&self) -> Task<Message> {
+        let Some(id) = self.window_id else {
+            return Task::none();
+        };
+        let zoom = self.current_zoom();
+        window::monitor_size(id).map(move |size| Message::ScreenSize(size, zoom))
+    }
+
+    /// Keeps the minimum window at [`Zoom::LAYOUT_MIN_WIDTH`] laid-out points
+    /// wide, so a capped zoom never lays a page out narrower than its design.
+    /// Waits for the screen size: before it, the zoom is not yet capped and
+    /// `main.rs`'s minimum stands.
+    fn sync_min_window_size(&mut self) -> Task<Message> {
+        let (Some(id), Some(_)) = (self.window_id, self.zoom.screen_width) else {
+            return Task::none();
+        };
+        let zoom = self.current_zoom();
+        if self.zoom.min_size_for == Some(zoom) {
+            return Task::none();
+        }
+        self.zoom.min_size_for = Some(zoom);
+        window::set_min_size(id, Some(Self::min_window_size(zoom)))
+    }
+
+    /// The minimum window in iced's zoomed units: never under 1024 x 768
+    /// screen points, and at least 1024 laid-out points wide above 100%.
+    fn min_window_size(zoom: Zoom) -> Size {
+        Size::new(
+            Zoom::LAYOUT_MIN_WIDTH * zoom.max(Zoom::ACTUAL_SIZE).factor(),
+            MIN_WINDOW_HEIGHT,
+        ) * (1.0 / zoom.factor())
+    }
+
+    /// A size at 100% in the zoomed units iced's window actions take.
+    fn zoomed(&self, size: Size) -> Size {
+        size * (1.0 / self.current_zoom().factor())
+    }
+
+    /// Saves the pending zoom once the lane is free. Called again after every
+    /// preferences completion, so a refused request is retried, not dropped.
+    fn save_pending_zoom(&mut self) -> Task<Message> {
+        use crate::app::settings::preferences::PreferenceChange;
+        let Some(zoom) = self.zoom.pending else {
+            return Task::none();
+        };
+        if self
+            .preferences
+            .accepted()
+            .is_some_and(|accepted| accepted.preferences.zoom == zoom)
+        {
+            self.zoom.pending = None;
+            return Task::none();
+        }
+        if self.preferences.is_busy() || self.preferences.has_queued_changes() {
+            return Task::none();
+        }
+        match self.preferences.begin_save(PreferenceChange::Zoom(zoom)) {
+            Ok(request) => {
+                // The lane is now held: the balance toggle must show it busy,
+                // or a Hide clicked during this save is refused unseen.
+                self.publish_balance_privacy();
+                self.run_preferences(request)
             }
             Err(_) => Task::none(),
         }
@@ -2542,6 +2717,7 @@ impl GUI {
 
         self.refresh_claim_deposit_display();
         self.refresh_sidebar_session_status();
+        auth_tasks.push(self.sync_min_window_size());
         Task::batch(auth_tasks)
     }
 
@@ -2672,26 +2848,47 @@ impl GUI {
             // we get this message only once at startup
             Message::Window(id) => {
                 self.window_id = id;
+                let screen = self.query_screen_size();
                 // Common case: if there is an already saved screen size we reuse it
-                if let (Some(id), Some(WindowConfig { width, height })) = (id, &self.window_config)
+                let size = if let (Some(id), Some(WindowConfig { width, height })) =
+                    (id, &self.window_config)
                 {
                     window::resize(
                         id,
-                        Size {
+                        self.zoomed(Size {
                             width: *width,
                             height: *height,
-                        },
+                        }),
                     )
                 // Initial startup: we maximize the screen in order to know the max usable screen area
                 } else if let Some(id) = &self.window_id {
                     window::maximize(*id, true)
                 } else {
                     Task::none()
+                };
+                Task::batch([screen, size])
+            }
+            Message::ScreenSize(size, zoom) => {
+                // Iced measures the answer at the zoom in effect when it runs
+                // the query, after the rest of its batch. If the zoom changed
+                // since it was asked, the tag no longer scales it: ask again.
+                if zoom != self.current_zoom() {
+                    return self.query_screen_size();
                 }
+                if let Some(size) = size {
+                    // Rounded: f32 scaling puts a 1536-point screen at 1535.9999.
+                    self.zoom.screen_width = Some((size.width * zoom.factor()).round());
+                }
+                Task::none()
             }
             Message::WindowSize(monitor_size) => {
+                // Iced reports the size in zoomed units; record it at 100% so
+                // a zoom change between launches keeps the window's size.
+                let monitor_size = monitor_size * self.current_zoom().factor();
+                // A resize can come from a move to another screen.
+                let screen = self.query_screen_size();
                 let cloned_cfg = self.window_config.clone();
-                match (cloned_cfg, &self.window_init, &self.window_id) {
+                let resized = match (cloned_cfg, &self.window_init, &self.window_id) {
                     // no previous screen size recorded && window maximized
                     (None, Some(false), Some(id)) => {
                         self.window_init = Some(true);
@@ -2701,10 +2898,13 @@ impl GUI {
                                 width: 1200.0,
                                 height: 950.0,
                             };
-                            batch.push(window::resize(*id, size));
+                            batch.push(window::resize(*id, self.zoomed(size)));
                             size
                         } else {
-                            batch.push(window::resize(*id, iced::window::Settings::default().size));
+                            batch.push(window::resize(
+                                *id,
+                                self.zoomed(iced::window::Settings::default().size),
+                            ));
                             iced::window::Settings::default().size
                         };
                         self.window_config = Some(WindowConfig {
@@ -2731,8 +2931,10 @@ impl GUI {
                         }
                         Task::none()
                     }
-                }
+                };
+                Task::batch([screen, resized])
             }
+            Message::WindowMoved => self.query_screen_size(),
             Message::CtrlC
             | Message::Event(iced::Event::Window(iced::window::Event::CloseRequested)) => {
                 for (_, pane) in self.panes.iter_mut() {
@@ -2772,6 +2974,9 @@ impl GUI {
                 let focus = focus.chain(action::reveal_focused(
                     crate::installer::step::descriptor::editor::border_wallet_wizard::BORDER_WALLET_GRID_SCROLL_ID,
                 ));
+                // The Create form scrolls inside its card while its footer stays
+                // fixed. Reveal keyboard focus for controls below that viewport.
+                let focus = focus.chain(action::reveal_focused(crate::home::CREATE_BODY_SCROLL_ID));
                 #[cfg(feature = "mcp-proposals")]
                 let focus = focus.chain(action::reveal_focused(
                     crate::installer::proposal_handoff::SCROLL_ID,
@@ -2781,6 +2986,24 @@ impl GUI {
                 focus.chain(action::reveal_focused(
                     crate::app::view::vault::transactions::RBF_DESCENDANTS_SCROLL_ID,
                 ))
+            }
+            Message::KeyPressed(Key::Zoom(step)) => {
+                let current = self.current_zoom();
+                let next = match step {
+                    ZoomStep::In => current.zoomed_in().filter(|next| *next <= self.max_zoom()),
+                    ZoomStep::Out => current.zoomed_out(),
+                    ZoomStep::ActualSize => Some(Zoom::ACTUAL_SIZE),
+                };
+                // The pill also shows at the first and last step, so a press
+                // that changes nothing still says where the zoom is.
+                self.zoom.notice_until = Some(Instant::now() + ZOOM_NOTICE);
+                match next.filter(|next| *next != current) {
+                    Some(next) => {
+                        self.zoom.pending = Some(next);
+                        self.save_pending_zoom()
+                    }
+                    None => Task::none(),
+                }
             }
             Message::KeyPressed(Key::Escape) => {
                 if self.preferences_sheet.is_some() {
@@ -4030,10 +4253,9 @@ impl GUI {
                     .preferences
                     .accepted()
                     .map(|accepted| accepted.preferences);
-                let applied = matches!(
-                    self.preferences.complete(&request, result),
-                    SaveOutcome::Applied(_)
-                );
+                let outcome = self.preferences.complete(&request, result);
+                let applied = matches!(outcome, SaveOutcome::Applied(_));
+                let failed = matches!(outcome, SaveOutcome::Failed(_));
                 self.publish_balance_privacy();
                 let mut tasks = Vec::new();
                 if applied {
@@ -4055,6 +4277,18 @@ impl GUI {
                     self.publish_balance_privacy();
                     tasks.push(self.run_preferences(next));
                 }
+                // A zoom that failed to save goes back to the saved one, like
+                // every other choice ("Your previous settings remain active").
+                // A newer step pressed during the save is kept and saved next.
+                if let Operation::Save(crate::app::settings::preferences::PreferenceChange::Zoom(
+                    zoom,
+                )) = request.operation
+                {
+                    if failed && self.zoom.pending == Some(zoom) {
+                        self.zoom.pending = None;
+                    }
+                }
+                tasks.push(self.save_pending_zoom());
                 Task::batch(tasks)
             }
             Message::ToggleTheme => {
@@ -4078,6 +4312,13 @@ impl GUI {
             Message::PreferencesSheet(message) => self.preferences_sheet_message(message),
             Message::ConnectSheet(message) => self.connect_sheet_message(message),
             Message::Tick => {
+                if self
+                    .zoom
+                    .notice_until
+                    .is_some_and(|until| Instant::now() >= until)
+                {
+                    self.zoom.notice_until = None;
+                }
                 let system_reduces_motion =
                     crate::app::settings::system_accessibility::reduces_motion();
                 self.system_reduces_motion = system_reduces_motion;
@@ -4237,6 +4478,9 @@ impl GUI {
                     (iced::Event::Window(iced::window::Event::Resized(size)), _) => {
                         Some(Message::WindowSize(*size))
                     }
+                    (iced::Event::Window(iced::window::Event::Moved(_)), _) => {
+                        Some(Message::WindowMoved)
+                    }
                     _ => None,
                 }
             }),
@@ -4257,7 +4501,17 @@ impl GUI {
         Subscription::batch(vec)
     }
 
+    /// The screen with the zoom pill layered on top. The stack is always
+    /// there, pill or not, so showing the pill keeps every widget's state.
     pub fn view(&self) -> Element<Message> {
+        let pill: Element<Message> = match self.zoom.notice_until {
+            Some(until) if Instant::now() < until => zoom_pill(self.current_zoom()),
+            _ => iced::widget::Space::new().into(),
+        };
+        iced::widget::stack![self.screen(), pill].into()
+    }
+
+    fn screen(&self) -> Element<Message> {
         if privacy_render_needs_cover(
             &self.preferences,
             &GlobalSettings::path(&self.config.coincube_directory),
@@ -4306,7 +4560,7 @@ impl GUI {
     }
 
     pub fn scale_factor(&self) -> f32 {
-        1.0
+        self.current_zoom().factor()
     }
 
     pub fn theme(&self) -> coincube_ui::theme::Theme {
@@ -4558,6 +4812,7 @@ mod app_preferences_sheet_tests {
                     preferences_sheet: None,
                     connect_sheet: None,
                     preferences: unresolved_test_preferences(),
+                    zoom: ZoomState::default(),
                 };
                 let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
                 drop(gui.update(Message::Pane(
@@ -4606,6 +4861,7 @@ mod app_preferences_sheet_tests {
             preferences_sheet: None,
             connect_sheet: None,
             preferences: PreferencesOwner::new(GlobalSettings::path(root), &receipt),
+            zoom: ZoomState::default(),
         }
     }
 
@@ -5087,6 +5343,371 @@ mod app_preferences_sheet_tests {
         std::fs::remove_dir_all(path).ok();
     }
 
+    fn zoom_key(character: &str, modifiers: keyboard::Modifiers) -> Event {
+        let key = keyboard::Key::Character(character.into());
+        Event::Keyboard(keyboard::Event::KeyPressed {
+            key: key.clone(),
+            modified_key: key,
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Equal),
+            location: keyboard::Location::Standard,
+            modifiers,
+            text: None,
+            repeat: false,
+        })
+    }
+
+    #[test]
+    fn command_plus_minus_and_zero_are_zoom_shortcuts() {
+        let command = keyboard::Modifiers::COMMAND;
+        for (character, step) in [
+            ("=", ZoomStep::In),
+            ("+", ZoomStep::In),
+            ("-", ZoomStep::Out),
+            ("0", ZoomStep::ActualSize),
+        ] {
+            assert_eq!(
+                ignored_shell_key(&zoom_key(character, command), event::Status::Ignored),
+                Some(Key::Zoom(step)),
+                "{character}"
+            );
+        }
+        // Plain typing and a focused widget's own keys are not shortcuts.
+        assert_eq!(
+            ignored_shell_key(
+                &zoom_key("=", keyboard::Modifiers::empty()),
+                event::Status::Ignored
+            ),
+            None
+        );
+        assert_eq!(
+            ignored_shell_key(&zoom_key("=", command), event::Status::Captured),
+            None
+        );
+    }
+
+    #[test]
+    fn zoom_applies_at_once_and_saves_the_last_step_once_the_lane_is_free() {
+        let _guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path = std::env::temp_dir().join(format!("tenshu-zoom-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        let root = CoincubeDirectory::new(path.clone());
+        let mut gui = launcher_gui(&root);
+        assert_eq!(gui.scale_factor(), 1.0);
+
+        // Another save holds the lane, so the shortcut cannot save yet.
+        let busy = gui
+            .preferences
+            .begin_save(PreferenceChange::LauncherStyle(LauncherStyle::List))
+            .unwrap();
+        drop(gui.update(Message::KeyPressed(Key::Zoom(ZoomStep::In))));
+        drop(gui.update(Message::KeyPressed(Key::Zoom(ZoomStep::In))));
+        assert_eq!(gui.scale_factor(), 1.25, "both steps apply before any save");
+        assert!(gui.zoom.notice_until.is_some(), "the pill shows");
+        assert_eq!(
+            gui.preferences.pending_operation(),
+            Some(Operation::Save(PreferenceChange::LauncherStyle(
+                LauncherStyle::List
+            )))
+        );
+
+        // When that save lands, the newest zoom is saved, not the first step.
+        let receipt = GlobalSettings::save_preference(
+            &busy.root,
+            PreferenceChange::LauncherStyle(LauncherStyle::List),
+        )
+        .unwrap();
+        drop(gui.update(Message::Preferences(busy, Ok(receipt))));
+        assert_eq!(
+            gui.preferences.pending_operation(),
+            Some(Operation::Save(PreferenceChange::Zoom(Zoom::from(125))))
+        );
+        assert_eq!(gui.scale_factor(), 1.25);
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn a_zoom_save_shows_the_balance_toggle_busy() {
+        let _guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path = std::env::temp_dir().join(format!("tenshu-zoom-busy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        let root = CoincubeDirectory::new(path.clone());
+        let mut gui = launcher_gui(&root);
+        let launcher_chrome = |gui: &GUI| {
+            let pane = gui.panes.get(gui.focus.unwrap()).unwrap();
+            let tab::State::Home(home) = &pane.tabs[0].state else {
+                panic!("the launcher starts as Home");
+            };
+            home.balance_privacy
+                .expect("the shell publishes privacy chrome")
+        };
+        gui.publish_balance_privacy();
+        assert!(launcher_chrome(&gui).interactive);
+
+        drop(gui.update(Message::KeyPressed(Key::Zoom(ZoomStep::In))));
+        assert_eq!(
+            gui.preferences.pending_operation(),
+            Some(Operation::Save(PreferenceChange::Zoom(Zoom::from(110))))
+        );
+        let chrome = launcher_chrome(&gui);
+        assert!(chrome.busy, "the zoom save holds the lane");
+        assert!(!chrome.interactive, "a Hide click cannot be refused unseen");
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn a_failed_zoom_save_reverts_only_the_step_it_was_saving() {
+        let _guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path =
+            std::env::temp_dir().join(format!("tenshu-zoom-failed-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        let root = CoincubeDirectory::new(path.clone());
+        let mut gui = launcher_gui(&root);
+        let save_110 = |gui: &mut GUI| {
+            gui.zoom.pending = Some(Zoom::from(110));
+            gui.preferences
+                .begin_save(PreferenceChange::Zoom(Zoom::from(110)))
+                .unwrap()
+        };
+
+        // The step being saved fails: the zoom goes back to the saved 100%.
+        let request = save_110(&mut gui);
+        drop(gui.update(Message::Preferences(request, Err("disk full".to_string()))));
+        assert_eq!(gui.zoom.pending, None);
+        assert_eq!(gui.scale_factor(), 1.0);
+
+        // A newer step pressed during the failed save stays and is saved next.
+        let request = save_110(&mut gui);
+        drop(gui.update(Message::KeyPressed(Key::Zoom(ZoomStep::In))));
+        assert_eq!(gui.scale_factor(), 1.25);
+        drop(gui.update(Message::Preferences(request, Err("disk full".to_string()))));
+        assert_eq!(gui.scale_factor(), 1.25);
+        assert_eq!(
+            gui.preferences.pending_operation(),
+            Some(Operation::Save(PreferenceChange::Zoom(Zoom::from(125))))
+        );
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn the_saved_window_size_is_recorded_at_actual_size() {
+        let _guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path =
+            std::env::temp_dir().join(format!("tenshu-zoom-window-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        let root = CoincubeDirectory::new(path.clone());
+        let mut gui = launcher_gui(&root);
+        gui.window_config = Some(WindowConfig {
+            width: 1440.0,
+            height: 900.0,
+        });
+        gui.zoom.pending = Some(Zoom::from(125));
+
+        // At 125% iced reports a 1440 x 900 window as 1152 x 720.
+        drop(gui.update(Message::WindowSize(Size::new(1152.0, 720.0))));
+        let saved = gui.window_config.clone().unwrap();
+        assert_eq!((saved.width, saved.height), (1440.0, 900.0));
+        // Restoring it asks iced for the same window in zoomed units.
+        assert_eq!(
+            gui.zoomed(Size::new(saved.width, saved.height)),
+            Size::new(1152.0, 720.0)
+        );
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn zoom_stops_at_the_first_and_last_step() {
+        let _guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path = std::env::temp_dir().join(format!("tenshu-zoom-ends-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        let root = CoincubeDirectory::new(path.clone());
+        let mut gui = launcher_gui(&root);
+        for _ in 0..10 {
+            drop(gui.update(Message::KeyPressed(Key::Zoom(ZoomStep::Out))));
+        }
+        assert_eq!(gui.scale_factor(), 0.8);
+        for _ in 0..10 {
+            drop(gui.update(Message::KeyPressed(Key::Zoom(ZoomStep::In))));
+        }
+        assert_eq!(gui.scale_factor(), 1.5);
+        drop(gui.update(Message::KeyPressed(Key::Zoom(ZoomStep::ActualSize))));
+        assert_eq!(gui.scale_factor(), 1.0);
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn a_laptop_screen_caps_the_zoom_at_what_it_lays_out_at_full_width() {
+        let _guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path = std::env::temp_dir().join(format!("tenshu-zoom-cap-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        let root = CoincubeDirectory::new(path.clone());
+        let mut gui = launcher_gui(&root);
+        // A 1440-point laptop, reported at 100%.
+        drop(gui.update(Message::ScreenSize(
+            Some(Size::new(1440.0, 900.0)),
+            Zoom::ACTUAL_SIZE,
+        )));
+        assert_eq!(gui.zoom.screen_width, Some(1440.0));
+        for _ in 0..10 {
+            drop(gui.update(Message::KeyPressed(Key::Zoom(ZoomStep::In))));
+        }
+        assert_eq!(gui.scale_factor(), 1.25, "150% would leave 960 points");
+        // The Zoom row cannot pick it either.
+        drop(gui.change_preference(PreferenceChange::Zoom(Zoom::LARGEST)));
+        assert_eq!(gui.current_zoom(), Zoom::from(125));
+        assert_eq!(gui.preferences_view_model().max_zoom, Some(Zoom::from(125)));
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn a_zoom_saved_on_a_larger_screen_reads_as_the_largest_that_fits() {
+        let _guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path =
+            std::env::temp_dir().join(format!("tenshu-zoom-saved-cap-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        let root = CoincubeDirectory::new(path.clone());
+        let mut gui = launcher_gui(&root);
+        gui.zoom.pending = Some(Zoom::LARGEST);
+        assert_eq!(
+            gui.scale_factor(),
+            1.5,
+            "uncapped until the screen is known"
+        );
+        gui.zoom.screen_width = Some(1440.0);
+        assert_eq!(gui.scale_factor(), 1.25);
+        gui.zoom.screen_width = Some(2560.0);
+        assert_eq!(gui.scale_factor(), 1.5, "back on the monitor, unchanged");
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn a_screen_size_asked_at_another_zoom_is_asked_again() {
+        let _guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path = std::env::temp_dir().join(format!("tenshu-zoom-stale-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        let root = CoincubeDirectory::new(path.clone());
+        let mut gui = launcher_gui(&root);
+        gui.window_id = Some(Id::unique());
+        gui.zoom.pending = Some(Zoom::from(125));
+        // Asked at 110%, measured at 125% on a 1440-point laptop: 1152 x 1.1
+        // would read as 1267 points and cap the zoom at 110%.
+        drop(gui.update(Message::ScreenSize(
+            Some(Size::new(1152.0, 720.0)),
+            Zoom::from(110),
+        )));
+        assert_eq!(gui.zoom.screen_width, None);
+        assert_eq!(gui.current_zoom(), Zoom::from(125));
+        // f32 scaling leaves a 1536-point screen a hair short of 150%.
+        gui.zoom.pending = Some(Zoom::from(90));
+        drop(gui.update(Message::ScreenSize(
+            Some(Size::new(1706.6665, 960.0)),
+            Zoom::from(90),
+        )));
+        assert_eq!(gui.zoom.screen_width, Some(1536.0));
+        assert_eq!(gui.max_zoom(), Zoom::LARGEST);
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn the_minimum_window_lays_pages_out_at_least_1024_points_wide() {
+        for percent in [80, 90, 100, 110, 125, 150] {
+            let zoom = Zoom::from(percent);
+            let laid_out = GUI::min_window_size(zoom);
+            let screen = laid_out * zoom.factor();
+            assert!(
+                laid_out.width >= Zoom::LAYOUT_MIN_WIDTH - 0.01,
+                "{}%: {:?}",
+                percent,
+                laid_out
+            );
+            // Never smaller on screen than the 1024 x 768 window of 100%.
+            assert!(
+                screen.width >= 1024.0 - 0.01 && (screen.height - 768.0).abs() < 0.01,
+                "{}%: {:?}",
+                percent,
+                screen
+            );
+        }
+        assert_eq!(
+            GUI::min_window_size(Zoom::from(125)) * 1.25,
+            Size::new(1280.0, 768.0)
+        );
+    }
+
+    #[test]
+    fn the_minimum_window_follows_the_zoom_once_the_screen_is_known() {
+        let _guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path =
+            std::env::temp_dir().join(format!("tenshu-zoom-min-size-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        let root = CoincubeDirectory::new(path.clone());
+        let mut gui = launcher_gui(&root);
+        gui.window_id = Some(Id::unique());
+        drop(gui.update(Message::KeyPressed(Key::Zoom(ZoomStep::In))));
+        assert_eq!(gui.zoom.min_size_for, None, "main.rs's minimum stands");
+        drop(gui.update(Message::ScreenSize(
+            Some(Size::new(1309.0, 818.0)),
+            Zoom::from(110),
+        )));
+        assert_eq!(gui.zoom.min_size_for, Some(Zoom::from(110)));
+        drop(gui.update(Message::KeyPressed(Key::Zoom(ZoomStep::In))));
+        assert_eq!(gui.zoom.min_size_for, Some(Zoom::from(125)));
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
     #[test]
     fn ordinary_refresh_and_display_edits_preserve_home_split_flow() {
         // GUI updates reach teardown paths that close the process-global session.
@@ -5234,6 +5855,7 @@ mod fork_auth_dispatch_tests {
             preferences_sheet: None,
             connect_sheet: None,
             preferences: unresolved_test_preferences(),
+            zoom: ZoomState::default(),
         };
         drop(gui.update(Message::Pane(
             pane_id,
@@ -5314,6 +5936,7 @@ mod fork_auth_dispatch_tests {
                     preferences_sheet: None,
                     connect_sheet: None,
                     preferences: unresolved_test_preferences(),
+                    zoom: ZoomState::default(),
                 };
                 drop(gui.update(Message::Pane(
                     pane_id,
@@ -5660,6 +6283,7 @@ mod fork_auth_dispatch_tests {
             preferences_sheet: None,
             connect_sheet: None,
             preferences: unresolved_test_preferences(),
+            zoom: ZoomState::default(),
                     };
                     let mut cube = crate::app::settings::CubeSettings::new(
                         "Cold fork".into(),
@@ -5793,6 +6417,7 @@ mod fork_auth_dispatch_tests {
                     preferences_sheet: None,
                     connect_sheet: None,
                     preferences: unresolved_test_preferences(),
+                    zoom: ZoomState::default(),
                 };
                 let account = |message| {
                     Message::Pane(
@@ -5972,6 +6597,7 @@ mod fork_auth_dispatch_tests {
                 preferences_sheet: None,
                 connect_sheet: None,
                 preferences: unresolved_test_preferences(),
+                zoom: ZoomState::default(),
             };
             let task = gui.update(Message::Pane(
                 source,
@@ -6199,6 +6825,7 @@ mod fork_auth_revocation_tests {
                 preferences_sheet: None,
                 connect_sheet: None,
                 preferences: unresolved_test_preferences(),
+                zoom: ZoomState::default(),
             };
             let (home, home_startup) =
                 home::Home::new_for_chain(gui.config.coincube_directory.clone(), None);
@@ -6376,6 +7003,7 @@ mod shared_adoption_generation_tests {
                 preferences_sheet: None,
                 connect_sheet: None,
                 preferences: unresolved_test_preferences(),
+                zoom: ZoomState::default(),
             };
             let init = || {
                 Message::Pane(
@@ -6578,6 +7206,7 @@ mod shell_escape_dispatch_tests {
                     preferences_sheet: None,
                     connect_sheet: None,
                     preferences: unresolved_test_preferences(),
+                    zoom: ZoomState::default(),
                 };
                 let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
                 drop(gui.view());
@@ -6666,6 +7295,7 @@ mod shell_escape_dispatch_tests {
             preferences_sheet: None,
             connect_sheet: None,
             preferences: unresolved_test_preferences(),
+            zoom: ZoomState::default(),
         };
         let route = |intent| {
             Message::Pane(
@@ -6804,6 +7434,7 @@ mod lock_cube_dispatch_tests {
             preferences_sheet: None,
             connect_sheet: None,
             preferences: unresolved_test_preferences(),
+            zoom: ZoomState::default(),
         };
         crate::app::session::open("orphaned", zeroize::Zeroizing::new("2468".into()));
         let destination = crate::app::settings::CubeSettings::new_with_raw_id(
@@ -6973,6 +7604,7 @@ mod lock_cube_dispatch_tests {
             preferences_sheet: None,
             connect_sheet: None,
             preferences: unresolved_test_preferences(),
+            zoom: ZoomState::default(),
         };
         let destination = crate::app::settings::CubeSettings::new_with_raw_id(
             "other".into(),
@@ -7079,6 +7711,7 @@ mod lock_cube_dispatch_tests {
             preferences_sheet: None,
             connect_sheet: None,
             preferences: unresolved_test_preferences(),
+            zoom: ZoomState::default(),
         };
         crate::app::session::open(same_cube_id.clone(), zeroize::Zeroizing::new("2468".into()));
         assert_eq!(crate::app::session::current_cube_id(), Some(same_cube_id));
@@ -7164,6 +7797,7 @@ mod lock_cube_dispatch_tests {
             preferences_sheet: None,
             connect_sheet: None,
             preferences: unresolved_test_preferences(),
+            zoom: ZoomState::default(),
         };
         let resources = tab::ClaimResources {
             intent,
@@ -7360,6 +7994,7 @@ impl GUI {
             preferences_sheet: None,
             connect_sheet: None,
             preferences: unresolved_test_preferences(),
+            zoom: ZoomState::default(),
         }
     }
     /// An already-open Bitcoin Cube (tab 1) beside a Home tab (tab 2), in one pane.
@@ -7382,6 +8017,7 @@ impl GUI {
             preferences_sheet: None,
             connect_sheet: None,
             preferences: unresolved_test_preferences(),
+            zoom: ZoomState::default(),
         }
     }
     /// As [`Self::reviewer_app_home_gui`], with the Cube moved to its own
@@ -7866,6 +8502,7 @@ mod claim_return_routing_tests {
                     preferences_sheet: None,
                     connect_sheet: None,
                     preferences: unresolved_test_preferences(),
+                    zoom: ZoomState::default(),
                 };
                 let source_id = match &gui.panes.get(target).unwrap().tabs[index].state {
                     tab::State::App(app) => app.cube_settings().id.clone(),
@@ -8488,6 +9125,7 @@ mod single_open_lifecycle_tests {
             preferences_sheet: None,
             connect_sheet: None,
             preferences: unresolved_test_preferences(),
+            zoom: ZoomState::default(),
                     };
                     if connect {
                         // Return from an accepted ordinary Split prerequisite

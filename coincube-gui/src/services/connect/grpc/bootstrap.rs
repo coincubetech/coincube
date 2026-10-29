@@ -24,6 +24,7 @@ pub enum BootstrapError {
     Cache(ConnectCacheError),
     Channel(CreateChannelError),
     Rpc(tonic::Status),
+    Superseded,
 }
 
 impl std::fmt::Display for BootstrapError {
@@ -32,6 +33,9 @@ impl std::fmt::Display for BootstrapError {
             Self::Cache(e) => write!(f, "Connect cache error: {}", e),
             Self::Channel(e) => write!(f, "gRPC channel error: {}", e),
             Self::Rpc(s) => write!(f, "RegisterDevice RPC error: {}", s),
+            Self::Superseded => {
+                write!(f, "Re-registration was superseded by a newer Connect login")
+            }
         }
     }
 }
@@ -75,18 +79,79 @@ pub async fn ensure_device_registered(
     app_version: String,
     os_version: String,
 ) -> Result<String, BootstrapError> {
-    if let Some(existing) = Account::from_cache(network_dir, email)
-        .ok()
-        .flatten()
-        .and_then(|a| a.device_id)
-        .filter(|id| !id.trim().is_empty())
-    {
-        tracing::debug!(
-            "SignerDevice already registered for {} (device_id={})",
+    register_device(
+        DeviceRegistration {
+            grpc_url,
+            tokens,
+            network_dir,
             email,
-            existing,
-        );
-        return Ok(existing);
+            device_name,
+            app_version,
+            os_version,
+        },
+        None,
+    )
+    .await
+}
+
+pub struct DeviceRegistration<'a> {
+    pub grpc_url: &'a str,
+    pub tokens: Arc<RwLock<AccessTokenResponse>>,
+    pub network_dir: &'a NetworkDirectory,
+    pub email: &'a str,
+    pub device_name: String,
+    pub app_version: String,
+    pub os_version: String,
+}
+
+pub async fn register_device_for_claim(
+    registration: DeviceRegistration<'_>,
+    claim: &str,
+) -> Result<String, BootstrapError> {
+    register_device(registration, Some(claim)).await
+}
+
+async fn register_device(
+    registration: DeviceRegistration<'_>,
+    claim: Option<&str>,
+) -> Result<String, BootstrapError> {
+    let DeviceRegistration {
+        grpc_url,
+        tokens,
+        network_dir,
+        email,
+        device_name,
+        app_version,
+        os_version,
+    } = registration;
+    if let Some(claim) = claim {
+        let owns_claim = Account::from_cache(network_dir, email)?
+            .is_some_and(|account| account.reregister_claim.as_deref() == Some(claim));
+        if !owns_claim {
+            return Err(BootstrapError::Superseded);
+        }
+    }
+    if claim.is_none() {
+        let cached = Account::from_cache(network_dir, email).ok().flatten();
+        if cached.as_ref().is_some_and(|account| {
+            cache::has_live_reregister_claim_for_account(network_dir, account)
+        }) {
+            // A live About request owns this registration, including one in
+            // another Tenshu process sharing the cache. Exited owners can be
+            // superseded without touching a live request.
+            return Err(BootstrapError::Superseded);
+        }
+        if let Some(existing) = cached
+            .and_then(|account| account.device_id)
+            .filter(|id| !id.trim().is_empty())
+        {
+            tracing::debug!(
+                "SignerDevice already registered for {} (device_id={})",
+                email,
+                existing
+            );
+            return Ok(existing);
+        }
     }
 
     // Mint (or load) this device's ECIES transport key before registering, so
@@ -120,7 +185,18 @@ pub async fn ensure_device_registered(
         )));
     }
 
-    cache::set_device_id_for_email(network_dir, email, Some(&resp.device_id)).await?;
+    if let Some(claim) = claim {
+        if !cache::finish_device_reregistration(network_dir, email, claim, Some(&resp.device_id))
+            .await?
+        {
+            return Err(BootstrapError::Superseded);
+        }
+    } else {
+        if !cache::set_device_id_for_email(network_dir, email, Some(&resp.device_id)).await? {
+            // A claim may have started while this RPC was in flight.
+            return Err(BootstrapError::Superseded);
+        }
+    }
     tracing::info!(
         "Registered SignerDevice for {} (device_id={})",
         email,

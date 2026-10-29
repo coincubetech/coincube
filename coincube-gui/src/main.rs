@@ -157,6 +157,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else {
         iced::window::Settings::default().size
     };
+    // The saved size is at 100%, and iced opens the window at size × zoom.
+    let zoom = GlobalSettings::load_preferences(&global_config_path)
+        .map(|preferences| preferences.zoom)
+        .unwrap_or_default();
+    let initial_size = initial_size * (1.0 / zoom.factor());
 
     let window_settings = window_settings(initial_size);
 

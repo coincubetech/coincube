@@ -1,11 +1,12 @@
 //! Tenshu page container (`.pg`): one layout for every Cube screen.
 //!
-//! The page is anchored to the left: its content starts one gutter from the
-//! side menu, and only its right edge moves as the window grows. Reading
-//! pages stop at [`PAGE_MAX`]; wide pages (Activity) take the whole width.
+//! Every page, Activity included, is one column at most [`PAGE_MAX`] wide,
+//! centred in the content pane and never closer than one gutter to either
+//! side. Below `PAGE_MAX` plus two gutters it fills the pane between the
+//! gutters, so small windows look as they did when the page was left-anchored.
 //! The rule is written up in `design-review/HANDOFF.md`, "Page layout".
 //!
-//! A flex row cannot express "gutter, then at most N, then nothing", because
+//! A flex row cannot express "at least a gutter, at most N, centred", because
 //! it hands out proportional width before a child's `max_width` applies. This
 //! widget places its child during layout instead.
 
@@ -21,8 +22,9 @@ use iced::{
 use crate::theme::Theme;
 use crate::widget::{Element, Renderer};
 
-/// Widest a reading page's content gets, in logical pixels.
-pub const PAGE_MAX: f32 = 1120.0;
+/// Widest a page's content gets, in logical pixels. Send and Receive need
+/// 960 to keep their 680px form and 240px step column side by side.
+pub const PAGE_MAX: f32 = 960.0;
 /// Space above the page title.
 pub const PAGE_TOP: f32 = 28.0;
 /// Space below the last element.
@@ -40,20 +42,22 @@ pub fn gutter_for_window(window_width: f32) -> f32 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageWidth {
-    /// Content up to [`PAGE_MAX`] wide. Every Cube page except Activity.
+    /// Content up to [`PAGE_MAX`] wide, centred. Every Cube page.
     Reading,
-    /// No maximum. Activity's table and detail panel use the full width.
-    Wide,
 }
 
-/// The content's left offset and width inside a pane `pane_width` wide.
+/// The content's left offset and width inside a pane `pane_width` wide. An
+/// unbounded pane (a page inside a horizontal scroller) has no centre, so its
+/// content sits one gutter in, as it did before pages were centred.
 pub fn content_frame(pane_width: f32, width: PageWidth, gutter: f32) -> (f32, f32) {
     let available = (pane_width - 2.0 * gutter).max(0.0);
     let content = match width {
         PageWidth::Reading => available.min(PAGE_MAX),
-        PageWidth::Wide => available,
     };
-    (gutter, content)
+    if !pane_width.is_finite() {
+        return (gutter, content);
+    }
+    (gutter.max((pane_width - content) / 2.0), content)
 }
 
 /// Wraps `content` in the page container. `gutter` maps the width the page is
@@ -252,25 +256,35 @@ mod tests {
     }
 
     #[test]
-    fn reading_pages_start_at_the_gutter_and_stop_at_page_max() {
-        // Narrow: the content fills between the gutters.
+    fn pages_fill_between_the_gutters_until_page_max() {
         assert_eq!(
             content_frame(900.0, PageWidth::Reading, 30.0),
             (30.0, 840.0)
         );
-        // Wide window: still left-anchored, the spare width goes to the right.
+        // Exactly PAGE_MAX plus two gutters: still on the gutter.
         assert_eq!(
-            content_frame(2312.0, PageWidth::Reading, 48.0),
+            content_frame(PAGE_MAX + 96.0, PageWidth::Reading, 48.0),
             (48.0, PAGE_MAX)
         );
     }
 
     #[test]
-    fn wide_pages_share_the_gutter_but_have_no_maximum() {
-        assert_eq!(content_frame(2312.0, PageWidth::Wide, 48.0), (48.0, 2216.0));
-        let (reading_x, _) = content_frame(2312.0, PageWidth::Reading, 48.0);
-        let (wide_x, _) = content_frame(2312.0, PageWidth::Wide, 48.0);
-        assert_eq!(reading_x, wide_x, "titles line up across page widths");
+    fn wider_panes_centre_the_page() {
+        // A 2560px window less the 248px side menu.
+        assert_eq!(
+            content_frame(2312.0, PageWidth::Reading, 48.0),
+            (676.0, PAGE_MAX)
+        );
+        let (x, width) = content_frame(1500.0, PageWidth::Reading, 48.0);
+        assert_eq!(x, 1500.0 - x - width, "equal margins on both sides");
+    }
+
+    #[test]
+    fn an_unbounded_pane_keeps_the_page_one_gutter_in() {
+        assert_eq!(
+            content_frame(f32::INFINITY, PageWidth::Reading, 48.0),
+            (48.0, PAGE_MAX)
+        );
     }
 
     fn renderer() -> Renderer {

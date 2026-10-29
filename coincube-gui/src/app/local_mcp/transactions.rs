@@ -450,7 +450,7 @@ mod tests {
     };
     use wire::Reader;
 
-    fn fixture() -> (std::path::PathBuf, Service) {
+    async fn fixture() -> (std::path::PathBuf, Service) {
         let owner = DescriptorPublicKey::from_str("[aabbccdd]xpub68JJTXc1MWK8KLW4HGLXZBJknja7kDUJuFHnM424LbziEXsfkh1WQCiEjjHw4zLqSUm4rvhgyGkkuRowE9tCJSgt3TQB5J3SKAbZ2SdcKST/<0;1>/*").unwrap();
         let recovery = DescriptorPublicKey::from_str("[aabbccdd]xpub68JJTXc1MWK8PEQozKsRatrUHXKFNkD1Cb1BuQU9Xr5moCv87anqGyXLyUd4KpnDyZgo3gz4aN1r3NiaoweFW8UutBsBbgKHzaD5HkTkifK/<0;1>/*").unwrap();
         // Re-encode the existing public fixture accounts for the Regtest chain.
@@ -478,10 +478,27 @@ mod tests {
             coincubed::mcp_test_fixture::regtest_wallet(&root, descriptor.clone());
         let daemon =
             Arc::new(crate::daemon::embedded::EmbeddedDaemon::from_regtest_handle(config, handle));
-        (
-            root,
-            Service::new(descriptor, daemon, "wallet".into(), None),
-        )
+        let service = Service::new(descriptor, daemon, "wallet".into(), None);
+        // The poller updates its sync-progress cache after DaemonHandle::start.
+        // Wait for the same complete readiness state required by MCP requests.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let info = service.daemon.get_info().await.unwrap();
+            if service.ready(&info) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "fixture not synced: height={} progress={} last_poll={:?} history_scan={} rescan={:?}",
+                info.block_height,
+                info.sync,
+                info.last_poll_timestamp,
+                info.history_sync.full_scan_in_progress,
+                info.rescan_progress
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        (root, service)
     }
     fn input() -> PrepareInput {
         let script = ScriptBuf::new_p2wsh(&WScriptHash::all_zeros());
@@ -499,27 +516,6 @@ mod tests {
         }
     }
     async fn prepared(service: &Service, input: PrepareInput) -> Prepared {
-        let info = service.daemon.get_info().await.unwrap();
-        assert_eq!(info.chain_id, Some(ChainId::Regtest));
-        assert_eq!(info.network, Network::Regtest);
-        assert!(info.descriptors.main.as_vault() == Some(&service.descriptor));
-        assert!(
-            matches!(
-                crate::app::wallet::sync_status(
-                    service.daemon.backend(),
-                    info.block_height,
-                    info.sync,
-                    info.last_poll_timestamp,
-                    None,
-                    &info.history_sync
-                ),
-                SyncStatus::Synced
-            ),
-            "fixture not synced: height={} progress={} last_poll={:?}",
-            info.block_height,
-            info.sync,
-            info.last_poll_timestamp
-        );
         match service
             .read(wire::Request::PrepareTransaction(input))
             .await
@@ -537,7 +533,7 @@ mod tests {
     #[test]
     fn mcp_transaction_real_engine_retry_conflict_scope_and_no_saved_spend() {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
-            let (root, service) = fixture();
+            let (root, service) = fixture().await;
             let first = prepared(&service, input()).await;
             assert_eq!(first.amount_sats,10_000); assert_eq!(first.network,"regtest");
             assert!(first.fee_sats > 0 && first.fee_sats <= 1_000 && first.signing_required);
@@ -562,7 +558,7 @@ mod tests {
     #[test]
     fn mcp_transaction_engine_refuses_bad_network_dust_duplicates_insufficiency_and_fee_cap() {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
-            let (root,service)=fixture();
+            let (root,service) = fixture().await;
             let mut cases=Vec::new();
             let mut bad=input();bad.recipients[0].address=Address::from_script(&ScriptBuf::new_p2wsh(&WScriptHash::all_zeros()),Network::Bitcoin).unwrap().to_string();cases.push((bad,wire::Error::InvalidInput));
             let mut dust=input();dust.recipients[0].amount_sats=1;cases.push((dust,wire::Error::InvalidInput));
@@ -580,7 +576,7 @@ mod tests {
     #[test]
     fn mcp_transaction_construction_checks_reject_changed_outputs_signatures_inputs_and_fee() {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
-            let (root, service) = fixture();
+            let (root, service) = fixture().await;
             let summary = prepared(&service, input()).await;
             let native = service.native(&summary.draft_id).unwrap();
             assert_eq!(
@@ -701,7 +697,7 @@ mod tests {
             operation.0
         };
         tokio::runtime::Runtime::new().unwrap().block_on(async {
-            let (root, service) = fixture();
+            let (root, service) = fixture().await;
             let summary = prepared(&service, input()).await;
             let native = service.native(&summary.draft_id).unwrap();
             let tx = crate::daemon::model::SpendTx::new(
@@ -761,7 +757,7 @@ mod tests {
     #[test]
     fn mcp_transaction_startup_baseline_regression() {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
-            let (root, mut service) = fixture();
+            let (root, mut service) = fixture().await;
             let mut info = service.daemon.get_info().await.unwrap();
             service.last_poll_at_startup = Some(100);
             info.last_poll_timestamp = Some(100);
@@ -778,7 +774,7 @@ mod tests {
     #[test]
     fn mcp_transaction_rejected_constructions_are_cached_and_bounded_regression() {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
-            let (root, service) = fixture();
+            let (root, service) = fixture().await;
             let mut request = input();
             request.max_fee_sats = 1;
             let call = |v| wire::Request::PrepareTransaction(v);
@@ -842,7 +838,7 @@ mod tests {
     #[test]
     fn mcp_transaction_chain_sync_and_reorg_guards_fail_closed() {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
-            let (root, service) = fixture();
+            let (root, service) = fixture().await;
             let info = service.daemon.get_info().await.unwrap();
             assert!(service.ready(&info));
             let mut cases = Vec::new();
@@ -885,7 +881,7 @@ mod tests {
         use crate::app::{session, wallet::Wallet};
         let _guard = session::test_guard();
         tokio::runtime::Runtime::new().unwrap().block_on(async {
-            let (root, service) = fixture();
+            let (root, service) = fixture().await;
             let wallet =
                 Arc::new(Wallet::new(service.descriptor.clone()).with_chain(ChainId::Regtest));
             std::fs::create_dir_all(root.join("regtest")).unwrap();
