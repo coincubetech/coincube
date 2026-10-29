@@ -46,12 +46,17 @@ pub enum PageWidth {
     Reading,
 }
 
-/// The content's left offset and width inside a pane `pane_width` wide.
+/// The content's left offset and width inside a pane `pane_width` wide. An
+/// unbounded pane (a page inside a horizontal scroller) has no centre, so its
+/// content sits one gutter in, as it did before pages were centred.
 pub fn content_frame(pane_width: f32, width: PageWidth, gutter: f32) -> (f32, f32) {
     let available = (pane_width - 2.0 * gutter).max(0.0);
     let content = match width {
         PageWidth::Reading => available.min(PAGE_MAX),
     };
+    if !pane_width.is_finite() {
+        return (gutter, content);
+    }
     (gutter.max((pane_width - content) / 2.0), content)
 }
 
@@ -272,6 +277,14 @@ mod tests {
         );
         let (x, width) = content_frame(1500.0, PageWidth::Reading, 48.0);
         assert_eq!(x, 1500.0 - x - width, "equal margins on both sides");
+    }
+
+    #[test]
+    fn an_unbounded_pane_keeps_the_page_one_gutter_in() {
+        assert_eq!(
+            content_frame(f32::INFINITY, PageWidth::Reading, 48.0),
+            (48.0, PAGE_MAX)
+        );
     }
 
     fn renderer() -> Renderer {
