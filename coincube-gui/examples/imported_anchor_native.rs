@@ -118,7 +118,8 @@ fn delete(account: &str) {
     let status = unsafe { SecItemDelete(query.as_concrete_TypeRef()) };
     assert!(
         status == 0 || status == errSecItemNotFound,
-        "Keychain deletion failed: {status}"
+        "Keychain deletion failed: {}",
+        status
     );
     assert_eq!(apple::load(SERVICE, account).unwrap(), None);
 }
