@@ -4,6 +4,8 @@
 //! manifest that it authenticates. This module defines the wire contract before
 //! the repository transaction and platform adapter consume it.
 
+use std::convert::TryInto;
+
 use coincube_core::miniscript::bitcoin::hashes::{sha256, Hash};
 use uuid::Uuid;
 
@@ -270,7 +272,7 @@ fn valid_retire(files: &[String]) -> bool {
                 && Uuid::parse_str(&name[..36]).is_ok_and(|id| !id.is_nil())
                 && Uuid::parse_str(&name[37..73]).is_ok_and(|id| !id.is_nil())
                 && &name[73..] == ".key"
-                && name == name.to_ascii_lowercase()
+                && bytes.iter().all(|byte| !byte.is_ascii_uppercase())
         })
 }
 
