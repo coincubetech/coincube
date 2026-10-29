@@ -1,9 +1,9 @@
 use crate::dir::NetworkDirectory;
 use async_fd_lock::LockWrite;
+use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::io::SeekFrom;
-use std::sync::OnceLock;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncSeekExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -11,51 +11,73 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use super::auth::{AccessTokenResponse, AuthClient, AuthError};
 
 pub const CONNECT_CACHE_FILENAME: &str = "connect.json";
+const REREGISTER_LOCK_FILENAME: &str = "connect-reregister.lock";
 
-fn process_claim_prefix() -> &'static str {
-    static PREFIX: OnceLock<String> = OnceLock::new();
-    PREFIX.get_or_init(|| format!("{}:{}:", std::process::id(), uuid::Uuid::new_v4()))
-}
-
-fn claim_owner_alive(claim: &str) -> bool {
-    if claim.starts_with(process_claim_prefix()) {
-        return true;
-    }
-    let Some(pid) = claim
-        .split(':')
-        .next()
-        .and_then(|part| part.parse::<u32>().ok())
-    else {
-        // Unknown claims are not proof that their owner exited.
-        return true;
-    };
+fn open_reregister_lock(network_dir: &NetworkDirectory) -> std::io::Result<std::fs::File> {
+    let path = network_dir.path().join(REREGISTER_LOCK_FILENAME);
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true);
     #[cfg(unix)]
     {
-        if pid > i32::MAX as u32 {
-            return true;
-        }
-        // `kill(pid, 0)` checks existence without sending a signal. An
-        // inaccessible process is conservatively treated as alive.
-        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
-        result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
-    #[cfg(windows)]
+    let file = options.open(path)?;
+    #[cfg(unix)]
     {
-        use windows::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER};
-        use windows::Win32::System::Threading::{
-            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-        };
-        // Access denial is inconclusive and must preserve the live claim.
-        let handle = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
-            Ok(handle) => handle,
-            Err(e) => {
-                return e.code() != windows::core::HRESULT::from_win32(ERROR_INVALID_PARAMETER.0);
-            }
-        };
-        let mut exit_code = 0u32;
-        let status = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
-        let _ = unsafe { CloseHandle(handle) };
-        status.is_err() || exit_code == 259 // STILL_ACTIVE
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(file)
+}
+
+pub(crate) fn has_live_reregister_claim_for_account(
+    network_dir: &NetworkDirectory,
+    account: &Account,
+) -> bool {
+    if account.reregister_claim.is_none() {
+        return false;
+    }
+    // The About task holds this lock until its RPC and cache commit finish.
+    // A crash releases the OS lock even if the PID is reused. On any I/O
+    // uncertainty, preserve the claim rather than replacing a live request.
+    match open_reregister_lock(network_dir).and_then(|file| {
+        let free = file.try_lock_exclusive()?;
+        if free {
+            file.unlock()?;
+        }
+        Ok(!free)
+    }) {
+        Ok(live) => live,
+        Err(e) => {
+            tracing::warn!("Cannot check Connect re-registration lock: {e}");
+            true
+        }
+    }
+}
+
+pub struct DeviceReregistrationClaim {
+    id: String,
+    lock: std::fs::File,
+}
+
+impl DeviceReregistrationClaim {
+    pub fn as_str(&self) -> &str {
+        &self.id
+    }
+}
+
+impl std::ops::Deref for DeviceReregistrationClaim {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.id
+    }
+}
+
+impl Drop for DeviceReregistrationClaim {
+    fn drop(&mut self) {
+        let _ = self.lock.unlock();
     }
 }
 
@@ -169,12 +191,6 @@ pub struct Account {
 }
 
 impl Account {
-    pub(crate) fn has_live_reregister_claim(&self) -> bool {
-        self.reregister_claim
-            .as_deref()
-            .is_some_and(claim_owner_alive)
-    }
-
     pub fn from_cache(
         network_dir: &NetworkDirectory,
         email: &str,
@@ -295,8 +311,16 @@ pub async fn begin_device_reregistration(
     network_dir: &NetworkDirectory,
     email: &str,
     expected_id: &str,
-) -> Result<Option<String>, ConnectCacheError> {
-    let claim = format!("{}{}", process_claim_prefix(), uuid::Uuid::new_v4());
+) -> Result<Option<DeviceReregistrationClaim>, ConnectCacheError> {
+    let lock = open_reregister_lock(network_dir)
+        .map_err(|e| ConnectCacheError::ReadingFile(format!("Opening registration lock: {e}")))?;
+    if !lock
+        .try_lock_exclusive()
+        .map_err(|e| ConnectCacheError::ReadingFile(format!("Locking registration claim: {e}")))?
+    {
+        return Ok(None);
+    }
+    let claim = uuid::Uuid::new_v4().to_string();
     let applied = mutate_device_registration(
         network_dir,
         email,
@@ -306,7 +330,7 @@ pub async fn begin_device_reregistration(
         },
     )
     .await?;
-    Ok(applied.then_some(claim))
+    Ok(applied.then_some(DeviceReregistrationClaim { id: claim, lock }))
 }
 
 /// Commit or roll back only while the exact re-registration claim still owns
@@ -382,10 +406,7 @@ async fn mutate_device_registration(
     };
     let changed = match update {
         DeviceRegistrationUpdate::Begin { expected_id, claim } => {
-            if !is_active
-                || account.device_id.as_deref() != Some(expected_id)
-                || account.has_live_reregister_claim()
-            {
+            if !is_active || account.device_id.as_deref() != Some(expected_id) {
                 return Ok(false);
             }
             account.reregister_claim = Some(claim.to_string());
@@ -400,7 +421,7 @@ async fn mutate_device_registration(
                 account.reregister_claim = None;
                 true
             } else {
-                if account.has_live_reregister_claim() {
+                if has_live_reregister_claim_for_account(network_dir, account) {
                     return Ok(false);
                 }
                 if account.device_id.as_deref() == device_id && account.reregister_claim.is_none() {
@@ -781,27 +802,24 @@ mod tests {
         std::fs::remove_dir_all(dir.path()).unwrap();
     }
 
-    #[cfg(unix)]
     #[tokio::test]
-    async fn abandoned_process_claim_recovers_without_accepting_late_completion() {
-        let mut prior_process = std::process::Command::new("/bin/sleep")
-            .arg("30")
-            .spawn()
-            .unwrap();
-        let prior_pid = prior_process.id();
-        prior_process.kill().unwrap();
-        prior_process.wait().unwrap();
+    async fn reused_pid_does_not_keep_abandoned_claim_alive() {
         let dir = test_network_dir();
         let path = dir.path().join(CONNECT_CACHE_FILENAME);
         let email = "alice@example.com";
         let mut cache = ConnectCache::default();
         cache.upsert_credential(email, tokens("a"), true);
         cache.accounts[0].device_id = Some("device-a".into());
-        let prior_claim = format!("{prior_pid}:prior-nonce:claim-a");
+        // The numeric PID is alive (this test process), but it is not the
+        // original owner. The released OS lock is authoritative.
+        let prior_claim = format!("{}:prior-nonce:claim-a", std::process::id());
         cache.accounts[0].reregister_claim = Some(prior_claim.clone());
         std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
 
-        assert!(!cache.accounts[0].has_live_reregister_claim());
+        assert!(!super::has_live_reregister_claim_for_account(
+            &dir,
+            &cache.accounts[0]
+        ));
         assert_eq!(
             ConnectCache::from_file(&dir)
                 .unwrap()
@@ -834,26 +852,54 @@ mod tests {
         std::fs::remove_dir_all(dir.path()).unwrap();
     }
 
-    #[cfg(unix)]
+    #[test]
+    fn hold_reregister_lock_child() {
+        use std::io::{Read, Write};
+        let Ok(path) = std::env::var("COINCUBE_TEST_REREGISTER_LOCK_DIR") else {
+            return;
+        };
+        let dir = NetworkDirectory::new(path.into());
+        let lock = super::open_reregister_lock(&dir).unwrap();
+        fs4::fs_std::FileExt::lock_exclusive(&lock).unwrap();
+        println!("REREGISTER_LOCK_READY");
+        std::io::stdout().flush().unwrap();
+        let _ = std::io::stdin().read(&mut [0u8; 1]);
+        fs4::fs_std::FileExt::unlock(&lock).unwrap();
+    }
+
     #[tokio::test]
     async fn second_live_process_cannot_take_over_about_claim() {
+        use std::io::BufRead;
         use std::sync::Arc;
 
-        let mut owner = std::process::Command::new("/bin/sleep")
-            .arg("30")
+        let dir = test_network_dir();
+        let mut owner = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "services::connect::client::cache::tests::hold_reregister_lock_child",
+                "--nocapture",
+            ])
+            .env("COINCUBE_TEST_REREGISTER_LOCK_DIR", dir.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap();
-        let dir = test_network_dir();
+        let output = owner.stdout.take().unwrap();
+        let mut lines = std::io::BufReader::new(output).lines();
+        assert!(lines.any(|line| line.unwrap().contains("REREGISTER_LOCK_READY")));
         let path = dir.path().join(CONNECT_CACHE_FILENAME);
         let email = "alice@example.com";
-        let claim = format!("{}:other-process:claim-a", owner.id());
+        let claim = "other-process:claim-a".to_string();
         let mut cache = ConnectCache::default();
         cache.upsert_credential(email, tokens("a"), true);
         cache.accounts[0].device_id = Some("device-a".into());
         cache.accounts[0].reregister_claim = Some(claim.clone());
         std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
 
-        assert!(cache.accounts[0].has_live_reregister_claim());
+        assert!(super::has_live_reregister_claim_for_account(
+            &dir,
+            &cache.accounts[0]
+        ));
         assert!(begin_device_reregistration(&dir, email, "device-a")
             .await
             .unwrap()
@@ -895,7 +941,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_ne!(new_claim, claim);
+        assert_ne!(new_claim.as_str(), claim.as_str());
         assert!(
             finish_device_reregistration(&dir, email, &new_claim, Some("device-b"))
                 .await

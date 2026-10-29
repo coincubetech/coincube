@@ -134,10 +134,9 @@ async fn register_device(
     }
     if claim.is_none() {
         let cached = Account::from_cache(network_dir, email).ok().flatten();
-        if cached
-            .as_ref()
-            .is_some_and(Account::has_live_reregister_claim)
-        {
+        if cached.as_ref().is_some_and(|account| {
+            cache::has_live_reregister_claim_for_account(network_dir, account)
+        }) {
             // A live About request owns this registration, including one in
             // another Tenshu process sharing the cache. Exited owners can be
             // superseded without touching a live request.
