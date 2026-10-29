@@ -133,10 +133,17 @@ async fn register_device(
         }
     }
     if claim.is_none() {
-        if let Some(existing) = Account::from_cache(network_dir, email)
-            .ok()
-            .flatten()
-            .and_then(|a| a.device_id)
+        let cached = Account::from_cache(network_dir, email).ok().flatten();
+        if cached
+            .as_ref()
+            .is_some_and(|account| account.reregister_claim.is_some())
+        {
+            // About owns this registration. Foreground cache activation clears
+            // abandoned claims on the next launch before bootstrap runs.
+            return Err(BootstrapError::Superseded);
+        }
+        if let Some(existing) = cached
+            .and_then(|account| account.device_id)
             .filter(|id| !id.trim().is_empty())
         {
             tracing::debug!(
@@ -186,7 +193,10 @@ async fn register_device(
             return Err(BootstrapError::Superseded);
         }
     } else {
-        cache::set_device_id_for_email(network_dir, email, Some(&resp.device_id)).await?;
+        if !cache::set_device_id_for_email(network_dir, email, Some(&resp.device_id)).await? {
+            // A claim may have started while this RPC was in flight.
+            return Err(BootstrapError::Superseded);
+        }
     }
     tracing::info!(
         "Registered SignerDevice for {} (device_id={})",

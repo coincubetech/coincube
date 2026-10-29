@@ -208,14 +208,13 @@ pub async fn update_connect_cache(
 /// short-circuiting on a stale entry.
 ///
 /// Acquires a write lock on the cache file so the update is atomic against
-/// concurrent `update_connect_cache` calls. If the account is not present
-/// in the cache (caller never logged in, or the cache was cleared), this
-/// is a silent no-op — `ensure_device_registered` retries next launch.
+/// concurrent `update_connect_cache` calls. Returns false when the account
+/// is absent or an About re-registration owns the cache claim.
 pub async fn set_device_id_for_email(
     network_dir: &NetworkDirectory,
     email: &str,
     device_id: Option<&str>,
-) -> Result<(), ConnectCacheError> {
+) -> Result<bool, ConnectCacheError> {
     mutate_device_registration(
         network_dir,
         email,
@@ -225,7 +224,6 @@ pub async fn set_device_id_for_email(
         },
     )
     .await
-    .map(|_| ())
 }
 
 /// Atomically clear the current id and claim the replacement for this login.
@@ -342,13 +340,13 @@ async fn mutate_device_registration(
                 account.reregister_claim = None;
                 true
             } else {
-                if account.device_id.as_deref() == device_id && account.reregister_claim.is_none() {
+                if account.reregister_claim.is_some() {
+                    return Ok(false);
+                }
+                if account.device_id.as_deref() == device_id {
                     return Ok(true);
                 }
                 account.device_id = device_id.map(str::to_string);
-                // Normal bootstrap can recover an abandoned claim after a
-                // crash; its registration supersedes the in-flight request.
-                account.reregister_claim = None;
                 true
             }
         }
@@ -648,6 +646,69 @@ mod tests {
                 .device_id
                 .as_deref(),
             Some("device-a")
+        );
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn background_bootstrap_cannot_supersede_live_about_claim() {
+        use std::sync::Arc;
+
+        let dir = test_network_dir();
+        let path = dir.path().join(CONNECT_CACHE_FILENAME);
+        let email = "alice@example.com";
+        let mut cache = ConnectCache::default();
+        cache.upsert_credential(email, tokens("a"), true);
+        cache.accounts[0].device_id = Some("device-a".into());
+        std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
+
+        let claim = begin_device_reregistration(&dir, email, "device-a")
+            .await
+            .unwrap()
+            .unwrap();
+        let result = crate::services::connect::grpc::bootstrap::ensure_device_registered(
+            "invalid://must-not-reach-network",
+            Arc::new(tokio::sync::RwLock::new(tokens("a"))),
+            &dir,
+            email,
+            "test desktop".into(),
+            "test".into(),
+            "test".into(),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(crate::services::connect::grpc::bootstrap::BootstrapError::Superseded)
+        ));
+        assert!(
+            !set_device_id_for_email(&dir, email, Some("background-device"))
+                .await
+                .unwrap()
+        );
+        let claimed = ConnectCache::from_file(&dir).unwrap();
+        assert!(claimed.active_account().unwrap().device_id.is_none());
+        assert_eq!(
+            claimed
+                .active_account()
+                .unwrap()
+                .reregister_claim
+                .as_deref(),
+            Some(claim.as_str())
+        );
+
+        assert!(
+            finish_device_reregistration(&dir, email, &claim, Some("device-a-new"))
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            ConnectCache::from_file(&dir)
+                .unwrap()
+                .active_account()
+                .unwrap()
+                .device_id
+                .as_deref(),
+            Some("device-a-new")
         );
         std::fs::remove_dir_all(dir.path()).unwrap();
     }
