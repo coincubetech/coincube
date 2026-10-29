@@ -6,6 +6,12 @@ use iced::futures::StreamExt;
 fn launcher_gui(root: &CoincubeDirectory) -> GUI {
     let (mut home, startup) = home::Home::new_for_chain(root.clone(), None);
     drop(startup);
+    // These focus-return cases exercise a mounted Launcher control after the
+    // initial local Cube probe. Unchecked now renders only a neutral loader.
+    drop(home.update(home::Message::Checked {
+        for_chain: crate::chain::ChainId::Bitcoin,
+        res: Ok(home::State::NoCube { create_cube: false }),
+    }));
     // A fresh install's mandatory advisory modal owns focus until dismissed.
     // Connect is reachable only after that queue has been acknowledged.
     for _ in crate::hw_advisory::ADVISORIES {
