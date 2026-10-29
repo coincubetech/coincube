@@ -52,6 +52,27 @@ fn zero_balance_known(status: &SyncStatus, rescan_pending: bool) -> bool {
     status.is_synced() && !rescan_pending
 }
 
+fn zero_balance_eligible(
+    balance: Amount,
+    masked: bool,
+    backend: Option<&DaemonBackend>,
+    cache: &Cache,
+) -> bool {
+    balance == Amount::ZERO
+        && !masked
+        && backend.is_some_and(|backend| {
+            let status = sync_status(
+                backend.clone(),
+                cache.blockheight(),
+                cache.sync_progress(),
+                cache.last_poll_timestamp(),
+                cache.last_poll_at_startup,
+                cache.history_sync(),
+            );
+            zero_balance_known(&status, cache.rescan_progress().is_some())
+        })
+}
+
 /// One bounded settings read. A missing, changing, or unreadable record leaves
 /// an empty Vault balance unknown; the normal settings reader retries with
 /// sleeps and must not run from Iced's render path.
@@ -180,8 +201,26 @@ impl VaultReceivePanel {
         }
     }
 
-    fn refresh_restore_rescan(&mut self) {
-        self.restore_rescan_clear = no_pending_restore_rescan(&self.data_dir, &self.wallet);
+    fn refresh_restore_rescan(&mut self, cache: &Cache) {
+        self.refresh_restore_rescan_with(cache, no_pending_restore_rescan);
+    }
+
+    fn refresh_restore_rescan_with(
+        &mut self,
+        cache: &Cache,
+        read: impl FnOnce(&CoincubeDirectory, &Wallet) -> bool,
+    ) {
+        let (confirmed, unconfirmed, _, _) = coins_summary(
+            cache.coins(),
+            cache.blockheight().max(0) as u32,
+            self.wallet.recovery_timelock(),
+        );
+        self.restore_rescan_clear = zero_balance_eligible(
+            confirmed + unconfirmed,
+            cache.balance_amounts_masked(),
+            self.daemon_backend.as_ref(),
+            cache,
+        ) && read(&self.data_dir, &self.wallet);
     }
 
     pub fn address(&self, i: usize) -> Option<&Address> {
@@ -216,20 +255,9 @@ impl State for VaultReceivePanel {
         );
         let balance = confirmed + unconfirmed;
         let masked = cache.balance_amounts_masked();
-        let zero_known = balance == Amount::ZERO
-            && !masked
-            && self.daemon_backend.as_ref().is_some_and(|backend| {
-                let status = sync_status(
-                    backend.clone(),
-                    cache.blockheight(),
-                    cache.sync_progress(),
-                    cache.last_poll_timestamp(),
-                    cache.last_poll_at_startup,
-                    cache.history_sync(),
-                );
-                zero_balance_known(&status, cache.rescan_progress().is_some())
-                    && self.restore_rescan_clear
-            });
+        let zero_known =
+            zero_balance_eligible(balance, masked, self.daemon_backend.as_ref(), cache)
+                && self.restore_rescan_clear;
         let balance_display = balance_label(balance, cache.bitcoin_unit, masked, zero_known);
         let content = view::dashboard(
             menu,
@@ -282,7 +310,7 @@ impl State for VaultReceivePanel {
         // redraws and interactive actions. A new restore obligation written
         // while Receive is open revokes a known zero on the next tick.
         if matches!(message, Message::Tick | Message::UpdatePanelCache(_)) {
-            self.refresh_restore_rescan();
+            self.refresh_restore_rescan(cache);
         }
         match message {
             Message::View(view::Message::VaultReceive(msg)) => match msg {
@@ -502,7 +530,6 @@ impl State for VaultReceivePanel {
         // `Self::new` already starts in the loading state, so the fetch
         // below is covered from the first frame after navigation.
         *self = Self::new(data_dir, wallet);
-        self.refresh_restore_rescan();
         self.daemon_backend = Some(daemon.backend());
         Task::perform(
             async move {
@@ -668,6 +695,7 @@ async fn verify_address(
 mod tests {
     use super::*;
     use crate::app::settings::{self, PendingRescan, WalletSettings};
+    use crate::app::state::preferences::{BalancePrivacy, BalancePrivacyChrome};
     use crate::{
         app::{cache::Cache, view::Message as viewMessage, Message},
         daemon::{
@@ -809,13 +837,22 @@ mod tests {
             std::fs::write(&path, serde_json::to_vec(settings).unwrap()).unwrap();
         };
         let daemon = Arc::new(Coincubed::new(Daemon::new(vec![]).run()));
-        let cache = Cache::default();
+        let mut cache = Cache::default();
+        cache.daemon_cache.blockheight = 1;
+        cache.balance_privacy = Some(BalancePrivacyChrome {
+            privacy: BalancePrivacy::Shown,
+            busy: false,
+            interactive: false,
+        });
         let mut panel = VaultReceivePanel::new(data_dir, wallet.clone());
         assert!(!panel.restore_rescan_clear, "first render must fail closed");
 
         write(&settings);
         drop(panel.reload(Some(daemon.clone()), Some(wallet)));
-        assert!(!panel.restore_rescan_clear, "reload sees pending restore");
+        assert!(!panel.restore_rescan_clear, "reload must start unknown");
+        panel.daemon_backend = Some(DaemonBackend::RemoteBackend);
+        drop(panel.update(Some(daemon.clone()), &cache, Message::Tick));
+        assert!(!panel.restore_rescan_clear, "tick sees pending restore");
 
         settings.wallets[0].pending_rescan = None;
         write(&settings);
@@ -823,6 +860,47 @@ mod tests {
         assert!(
             panel.restore_rescan_clear,
             "retired marker permits known zero"
+        );
+
+        cache.balance_privacy = Some(BalancePrivacyChrome {
+            privacy: BalancePrivacy::Hidden,
+            busy: false,
+            interactive: false,
+        });
+        panel.refresh_restore_rescan_with(&cache, |_, _| panic!("hidden balance read settings"));
+        assert!(!panel.restore_rescan_clear, "Hide revokes known zero");
+        cache.balance_privacy.as_mut().unwrap().privacy = BalancePrivacy::Shown;
+        let txid = coincube_core::miniscript::bitcoin::Txid::from_str(&"00".repeat(32)).unwrap();
+        let address =
+            Address::from_str("tb1qkldgvljmjpxrjq2ev5qxe8dvhn0dph9q85pwtfkjeanmwdue2akqj4twxj")
+                .unwrap()
+                .assume_checked();
+        cache.daemon_cache.coins.push(Coin {
+            outpoint: coincube_core::miniscript::bitcoin::OutPoint::new(txid, 0),
+            amount: Amount::from_sat(1),
+            address,
+            derivation_index: ChildNumber::from_normal_idx(0).unwrap(),
+            block_height: None,
+            is_immature: false,
+            is_change: false,
+            is_from_self: false,
+            spend_info: None,
+        });
+        panel.refresh_restore_rescan_with(&cache, |_, _| panic!("nonzero balance read settings"));
+        assert!(!panel.restore_rescan_clear, "nonzero needs no marker read");
+        cache.daemon_cache.coins.clear();
+        cache.daemon_cache.sync_progress = 0.5;
+        panel.refresh_restore_rescan_with(&cache, |_, _| panic!("unsynced balance read settings"));
+        assert!(!panel.restore_rescan_clear, "unsynced zero stays unknown");
+        cache.daemon_cache.sync_progress = 1.0;
+        cache.daemon_cache.rescan_progress = Some(0.5);
+        panel.refresh_restore_rescan_with(&cache, |_, _| panic!("active rescan read settings"));
+        assert!(!panel.restore_rescan_clear, "active rescan stays unknown");
+        cache.daemon_cache.rescan_progress = None;
+        drop(panel.update(Some(daemon.clone()), &cache, Message::Tick));
+        assert!(
+            panel.restore_rescan_clear,
+            "re-entry must refresh the marker"
         );
 
         settings.wallets[0].pending_rescan = Some(PendingRescan::DateUnknown);
