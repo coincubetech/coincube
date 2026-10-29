@@ -1322,6 +1322,7 @@ fn stage_height(available: f32) -> f32 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn floor_layout<'a>(
     projection: &Projection<'_>,
     page: usize,
@@ -1330,6 +1331,7 @@ fn floor_layout<'a>(
     light: bool,
     motion: Option<&launcher_scene::Motion>,
     hover: &[launcher_catalog::FloorHover],
+    activity: Option<&super::launcher_activity::Band>,
 ) -> Element<'a, ViewMessage> {
     debug_assert!(!projection.locals.is_empty());
     let hover = |key: &CubeCatalogKey, now| {
@@ -1400,6 +1402,19 @@ fn floor_layout<'a>(
             .width(Length::Fill)
             .center_x(Length::Fill),
         );
+
+    // Network activity fills the sky above a browsing floor. An open face
+    // rises into that sky, so a selection or a turn clears it.
+    if let Some(band) = activity.filter(|_| selected.is_none() && motion.is_none()) {
+        let (_, sky, _, _) = launcher_scene::bounds(
+            &layout,
+            layout.rest_center(0, count),
+            launcher_scene::Pose::REST,
+        );
+        // A hovered Cube bobs up into the sky.
+        let sky = sky - launcher_scene::BOB_HEIGHT * layout.scale;
+        stage = stage.push(super::launcher_activity::band_layer(band, sky, now));
+    }
 
     // `.cb.lead` and `.cb.prev` paint over their neighbours' labels.
     let covers: Vec<_> = visible
@@ -1531,6 +1546,7 @@ pub(super) fn floor_body_in(home: &Home, available: f32) -> Element<'_, ViewMess
     );
     let motion = home.catalog.motion.clone();
     let hover = home.catalog.hover.clone();
+    let activity = home.activity_band(light);
     let scene = project_catalog(&projection);
     let floor = responsive(move |size: Size| {
         if size.width < 840.0 {
@@ -1544,6 +1560,7 @@ pub(super) fn floor_body_in(home: &Home, available: f32) -> Element<'_, ViewMess
                 light,
                 motion.as_ref(),
                 &hover,
+                activity.as_ref(),
             )
         }
     })
@@ -2921,6 +2938,118 @@ mod tests {
         assert_eq!(home.catalog.page_size(), 4);
         let _ = home.update_catalog(CatalogMessage::Page(2));
         assert_eq!(home.catalog.page, 2);
+    }
+
+    #[test]
+    fn network_activity_fills_the_sky_of_a_browsing_floor_only() {
+        use super::super::launcher_activity::{sample_snapshot, ActivityMessage, Unavailable};
+        let mut home = home_with_floor(4);
+        home.catalog
+            .activity
+            .show_for_test(ChainId::Bitcoin, Ok(sample_snapshot()));
+        let inspect = |home: &Home, name: &str| {
+            capture::inspect_full_window(
+                name,
+                floor_body_in(home, 1100.0),
+                (1440, 1250),
+                "dark",
+                theme::Theme::dark(),
+            )
+        };
+        let browsing = inspect(&home, "launcher-activity-browse");
+        for fact in [
+            "BLOCK",
+            "#968,412",
+            "worth of txs waiting to confirm",
+            "to make the next block",
+            "HASHRATE",
+            "NEXT HALVING",
+            "in 81,588 blocks",
+        ] {
+            assert!(browsing.contains(fact), "missing {:?}", fact);
+        }
+        // The dock names the block and its source; its menu offers the others.
+        let launcher = |home: &Home, name: &str| {
+            capture::inspect_filled(
+                name,
+                super::super::launcher_catalog::launcher_view(home),
+                (1440, 900),
+                "dark",
+                theme::Theme::dark(),
+                (1440, 900),
+            )
+        };
+        let dock = launcher(&home, "launcher-activity-dock");
+        // The light theme reads the same facts.
+        let light = capture::inspect_filled(
+            "launcher-activity-light",
+            super::super::launcher_catalog::launcher_view(&home),
+            (1440, 900),
+            "light",
+            theme::Theme::light(),
+            (1440, 900),
+        );
+        assert!(light.contains("NEXT HALVING"));
+        assert!(dock.contains("Block 968,412 · COINCUBE | Connect"));
+        assert!(!dock.contains("Turn off in App preferences"));
+        // The narrowest window still fits the selector beside the limit text.
+        let narrow = capture::inspect_filled(
+            "launcher-activity-dock-narrow",
+            super::super::launcher_catalog::launcher_view(&home),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+            (1024, 768),
+        );
+        assert!(narrow.contains("Block 968,412 · COINCUBE | Connect"));
+        assert!(narrow.contains("Key"));
+        let _ = home.update_catalog(CatalogMessage::Activity(ActivityMessage::Menu(true)));
+        let menu = launcher(&home, "launcher-activity-menu");
+        for item in [
+            "Network activity · Bitcoin mainnet",
+            "Automatic",
+            "Local node",
+            "Turn off in App preferences",
+        ] {
+            assert!(menu.contains(item), "missing {:?}", item);
+        }
+        // An opened face rises into the sky, so a selection clears it.
+        let _ = home.update_catalog(CatalogMessage::SelectFloor(floor_key(0)));
+        assert!(!inspect(&home, "launcher-activity-selected").contains("NEXT HALVING"));
+        let _ = home.update_catalog(CatalogMessage::ClearSelection);
+        home.catalog.motion = None;
+        // A source that cannot answer leaves the sky empty and says why.
+        home.catalog
+            .activity
+            .show_for_test(ChainId::Bitcoin, Err(Unavailable::LocalNodeNotRunning));
+        assert!(!inspect(&home, "launcher-activity-unavailable").contains("NEXT HALVING"));
+        assert!(launcher(&home, "launcher-activity-why").contains("Local node isn't running"));
+        // Turned off in App preferences: no band and no dock control.
+        home.catalog
+            .activity
+            .show_for_test(ChainId::Bitcoin, Ok(sample_snapshot()));
+        home.catalog.activity.enabled = false;
+        assert!(!inspect(&home, "launcher-activity-off").contains("NEXT HALVING"));
+        assert!(!launcher(&home, "launcher-activity-off-dock").contains("COINCUBE | Connect"));
+    }
+
+    #[test]
+    fn network_activity_follows_the_network_filter() {
+        use super::super::launcher_activity::sample_snapshot;
+        let mut home = home_with_floor(4);
+        // Bitcoin's read does not stand in for another network's.
+        home.catalog
+            .activity
+            .show_for_test(ChainId::Bitcoin, Ok(sample_snapshot()));
+        home.catalog.filter =
+            super::super::launcher_catalog::NetworkFilter::Network(ChainId::BitcoinBlake2b);
+        assert_eq!(home.activity_chain(), ChainId::BitcoinBlake2b);
+        assert!(home
+            .catalog
+            .activity
+            .current(ChainId::BitcoinBlake2b)
+            .is_none());
+        assert!(home.catalog.activity.current(ChainId::Bitcoin).is_some());
     }
 
     #[test]

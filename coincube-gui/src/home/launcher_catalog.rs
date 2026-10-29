@@ -282,6 +282,8 @@ pub(super) struct CatalogState {
     pub(super) stage_width: Option<f32>,
     /// Resting Cubes under the pointer, or settling after it left.
     pub(super) hover: Vec<FloorHover>,
+    /// Network activity in the sky above the Cubes, and its dock menu.
+    pub(super) activity: super::launcher_activity::ActivityState,
 }
 
 /// A resting Cube floats while the pointer is over it (see
@@ -591,6 +593,8 @@ pub enum CatalogMessage {
     CubeHover(CubeCatalogKey, bool),
     /// A shared Action's pointer-down request: apply whole-tree focus.
     Focus(Id),
+    /// Network activity reads, its arrival frames and the dock's source menu.
+    Activity(super::launcher_activity::ActivityMessage),
 }
 
 impl Home {
@@ -729,6 +733,7 @@ impl Home {
 
     pub(super) fn update_catalog(&mut self, message: CatalogMessage) -> Task<Message> {
         match message {
+            CatalogMessage::Activity(message) => self.update_activity(message),
             CatalogMessage::Select(key) => {
                 if let Some(task) = self.select_on_other_network(&key, PendingIntent::Select) {
                     return task;
@@ -1968,6 +1973,7 @@ pub(super) fn launcher_view(home: &Home) -> Element<'_, ViewMessage> {
             .height(Length::Fill)
             .push(screen)
             .push(super::launcher_chrome::key_layer(home))
+            .push(super::launcher_chrome::activity_layer(home))
             .push(super::launcher_chrome::network_layer(home, &projection)),
     )
     .width(Length::Fill)
@@ -2621,11 +2627,15 @@ mod tests {
         use crate::gui::{pane, tab};
         use std::hash::Hasher as _;
 
-        fn one_recipe_hash(subscription: iced::Subscription<pane::Message>) -> u64 {
-            let mut recipes = iced::advanced::subscription::into_recipes(subscription);
-            assert_eq!(recipes.len(), 1);
+        // The floor listener and the network activity check: both belong
+        // to the visible tab only.
+        fn recipes_hash(subscription: iced::Subscription<pane::Message>) -> u64 {
+            let recipes = iced::advanced::subscription::into_recipes(subscription);
+            assert_eq!(recipes.len(), 2);
             let mut hasher = iced::advanced::subscription::Hasher::default();
-            recipes.remove(0).hash(&mut hasher);
+            for recipe in recipes {
+                recipe.hash(&mut hasher);
+            }
             hasher.finish()
         }
         let mut first = rows(9);
@@ -2635,14 +2645,14 @@ mod tests {
         let mut pane = pane::Pane::new_with_tab(tab::State::Home(first));
         pane.tabs.push(tab::Tab::new(2, tab::State::Home(second)));
 
-        let first_hash = one_recipe_hash(pane.subscription(true));
+        let first_hash = recipes_hash(pane.subscription(true));
         assert_eq!(
             iced::advanced::subscription::into_recipes(pane.subscription(false)).len(),
             0,
             "a hidden pane has no floor listener"
         );
         pane.focused_tab = 1;
-        let second_hash = one_recipe_hash(pane.subscription(true));
+        let second_hash = recipes_hash(pane.subscription(true));
         assert_ne!(first_hash, second_hash, "switching tabs moves the listener");
     }
 
