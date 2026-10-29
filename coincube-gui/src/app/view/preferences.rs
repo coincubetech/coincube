@@ -23,7 +23,7 @@ use iced::{advanced::widget::Id, widget::container, Alignment, Length};
 use crate::app::{
     settings::preferences::{
         DevicePreferences, EffectivePreferences, LauncherStyle, MotionPreference,
-        NetworkActivitySource, PreferenceChange, ThemePreference,
+        NetworkActivitySource, PreferenceChange, ThemePreference, Zoom,
     },
     state::preferences::{BalancePrivacy, PreferencesPageState, Section},
 };
@@ -97,6 +97,8 @@ pub struct ViewModel<'a> {
     pub save_error: Option<&'a str>,
     pub diagnostics: Diagnostics<'a>,
     pub about: About<'a>,
+    /// The largest zoom this window's screen holds; None until it is known.
+    pub max_zoom: Option<Zoom>,
 }
 
 pub const CONTENT_SCROLL_ID: &str = "tenshu.preferences.content-scroll";
@@ -355,6 +357,36 @@ fn section_content<'a>(
                 .trailing_tag()
                 .description("Colors for the Launcher and every Cube on this device.")
                 .note(current, Tone::Muted)
+                .into(),
+            );
+            let max_zoom = model.max_zoom.unwrap_or(Zoom::LARGEST);
+            let (zoom_selected, zoom_note) = zoom_choice(saved.zoom, max_zoom);
+            rows.push(
+                setting_row(
+                    "Zoom",
+                    segmented(
+                        Zoom::STEPS.map(|zoom| {
+                            segment(
+                                format!("tenshu.preferences.zoom.{}", zoom.percent()),
+                                zoom,
+                                format!("{}%", zoom.percent()),
+                            )
+                            .enabled(zoom <= max_zoom)
+                        }),
+                        Some(zoom_selected),
+                        Message::FocusAction,
+                    )
+                    .size(SegmentSize::Compact)
+                    .on_select_maybe(
+                        enabled.then_some(|value: Zoom| {
+                            Message::Change(PreferenceChange::Zoom(value))
+                        }),
+                    ),
+                )
+                .tag(SCOPE)
+                .trailing_tag()
+                .description("Text and controls in every window on this device.")
+                .note(zoom_note, Tone::Muted)
                 .into(),
             );
         }
@@ -1046,6 +1078,30 @@ fn link_action<'a>(
     .into()
 }
 
+/// The step the Zoom row shows selected and its note. A saved step over the
+/// screen's cap is shown as the one in use, and the note says why.
+fn zoom_choice(saved: Zoom, max_zoom: Zoom) -> (Zoom, String) {
+    let note = if max_zoom < Zoom::LARGEST {
+        format!(
+            "{} This screen fits up to {}%.",
+            zoom_shortcuts(),
+            max_zoom.percent()
+        )
+    } else {
+        zoom_shortcuts().to_string()
+    };
+    (saved.min(max_zoom), note)
+}
+
+/// The keys `gui::ignored_shell_key` reads, named for this platform.
+fn zoom_shortcuts() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Cmd + and Cmd − change it from any screen; Cmd 0 returns to 100%."
+    } else {
+        "Ctrl + and Ctrl − change it from any screen; Ctrl 0 returns to 100%."
+    }
+}
+
 /// Shown while no accepted privacy choice exists: amounts are masked, and the
 /// user may persist an explicit choice only when the shared balance controls
 /// are interactive and no load or save is in flight.
@@ -1262,6 +1318,43 @@ mod tests {
                 modifiers,
             })
         }
+    }
+
+    #[test]
+    fn a_saved_zoom_over_the_cap_shows_the_step_in_use_and_why() {
+        let (selected, note) = zoom_choice(Zoom::LARGEST, Zoom::from(125));
+        assert_eq!(selected, Zoom::from(125));
+        assert!(note.ends_with("This screen fits up to 125%."), "{}", note);
+        let (selected, note) = zoom_choice(Zoom::from(110), Zoom::LARGEST);
+        assert_eq!(selected, Zoom::from(110));
+        assert_eq!(note, zoom_shortcuts());
+    }
+
+    #[test]
+    fn zoom_steps_over_the_screen_cap_cannot_be_picked() {
+        let model = || ViewModel {
+            saved: Some(DevicePreferences::default()),
+            max_zoom: Some(Zoom::from(125)),
+            ..Default::default()
+        };
+        let (_, messages) = activate(
+            model(),
+            Section::Appearance,
+            "tenshu.preferences.zoom.150",
+            keyboard::key::Named::Enter,
+        );
+        assert!(messages.is_empty(), "{:?}", messages);
+        let (focused, messages) = activate(
+            model(),
+            Section::Appearance,
+            "tenshu.preferences.zoom.125",
+            keyboard::key::Named::Enter,
+        );
+        assert!(focused);
+        assert_eq!(
+            messages,
+            vec![Message::Change(PreferenceChange::Zoom(Zoom::from(125)))]
+        );
     }
 
     fn activate(
