@@ -21,7 +21,10 @@
 //! audited in one place.
 
 use crate::installer::context::RestoreSource;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 use coincube_core::{
     descriptors::CoincubeDescriptor, miniscript::bitcoin::Network, signer::MasterSigner,
@@ -113,7 +116,10 @@ pub struct RestoreCubeCandidate {
 }
 
 /// The step itself — self-contained with its own internal state.
+static NEXT_RESTORE_UI_INSTANCE: AtomicU64 = AtomicU64::new(1);
+
 pub struct RecoveryKitRestoreStep {
+    ui_instance: u64,
     scope: RestoreScope,
     /// Network filter applied to the cube picker. The user can only
     /// restore into the same network they're installing for.
@@ -148,6 +154,7 @@ impl RecoveryKitRestoreStep {
         preselect_uuid: Option<String>,
     ) -> Self {
         Self {
+            ui_instance: NEXT_RESTORE_UI_INSTANCE.fetch_add(1, Ordering::Relaxed),
             scope,
             network_filter,
             preselect_uuid,
@@ -841,10 +848,9 @@ impl Step for RecoveryKitRestoreStep {
                             seed,
                             descriptor,
                         });
-                        // Auto-advance — the user clicked Submit and the
-                        // decrypt succeeded; no reason to make them
-                        // click Next again.
-                        Task::done(Message::Next)
+                        // Let the user review the matched Cube and network
+                        // before the installer's Next action applies the kit.
+                        Task::none()
                     }
                     Err(e) => {
                         if is_retryable_on_password_screen(&e) {
@@ -1047,13 +1053,11 @@ impl Step for RecoveryKitRestoreStep {
         progress: (usize, usize),
         _email: Option<&'a str>,
     ) -> Element<'a, Message> {
-        // Placeholder view — re-uses existing installer text layout.
-        // A polished design pass is a follow-up; what matters here is
-        // that each Phase has a reachable interaction so the flow
-        // progresses.
         view::recovery_kit_restore(
             progress,
+            self.ui_instance,
             self.scope,
+            &self.network_filter,
             &self.phase,
             &self.email,
             &self.otp,
@@ -1551,6 +1555,32 @@ mod tests {
             Message::RecoveryKitRestore(RecoveryKitRestoreMsg::ConfirmCube),
         );
         assert!(matches!(&step.phase, Phase::PasswordEntry { selected, .. } if selected.id == 7));
+    }
+
+    #[test]
+    fn successful_decrypt_waits_on_ready_without_advancing() {
+        let selected = candidate("Recovered Cube", true);
+        let seed = seed_blob_for(&selected.uuid, &selected.network);
+        let mut step = RecoveryKitRestoreStep::new(RestoreScope::Full, "mainnet".into(), None);
+        step.phase = Phase::Decrypting {
+            selected: selected.clone(),
+        };
+        let mut hws = HardwareWallets::new(
+            crate::dir::CoincubeDirectory::new("/synthetic/recovery-ready".into()),
+            Network::Bitcoin,
+        );
+
+        let task = step.update(
+            &mut hws,
+            Message::RecoveryKitRestore(RecoveryKitRestoreMsg::DecryptResult(Ok((
+                Some(seed),
+                None,
+            )))),
+        );
+        assert!(iced_runtime::task::into_stream(task).is_none());
+        assert!(
+            matches!(&step.phase, Phase::Ready { selected: ready, .. } if ready.uuid == selected.uuid)
+        );
     }
 
     #[test]
