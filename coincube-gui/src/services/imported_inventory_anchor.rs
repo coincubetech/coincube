@@ -97,7 +97,7 @@ pub(super) fn load(scope: &Scope) -> Result<Option<Anchor>, String> {
         if anchor.as_ref().is_some_and(|anchor| &anchor.scope != scope) {
             return Err("Imported inventory anchor belongs to another wallet.".into());
         }
-        return Ok(anchor);
+        Ok(anchor)
     }
     #[cfg(all(not(test), target_os = "macos"))]
     {
@@ -121,7 +121,7 @@ pub(super) fn create(anchor: &Anchor) -> Result<(), String> {
     #[cfg(test)]
     {
         tests::store_create(&account, &value)?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(all(not(test), target_os = "macos"))]
     {
@@ -227,7 +227,7 @@ pub(super) fn update(old: &Anchor, next: &Anchor) -> Result<(), String> {
     #[cfg(test)]
     {
         tests::store_update(&account, &old.encode()?, &value)?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(all(not(test), target_os = "macos"))]
     {

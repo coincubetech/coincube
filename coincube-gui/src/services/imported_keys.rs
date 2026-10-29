@@ -7,6 +7,9 @@
 //! No mnemonic enters Cube Settings. Keys, ordinary Send, and Recovery Kit are
 //! separate integrations and do not consume this repository yet.
 
+// Admission and signing are staged until the external inventory release gate.
+#![allow(dead_code)]
+
 use std::{
     collections::HashSet,
     fs::{self, File, OpenOptions},
@@ -1772,7 +1775,6 @@ mod tests {
                 fs::rename(repository.prepared(txn), repository.root().join(MANIFEST)).unwrap();
                 sync_parent(&repository.root().join(MANIFEST)).unwrap();
             }
-            drop(repository);
             let directory = NetworkDirectory::new(fixture.directory.path().to_path_buf());
             let settings = Settings::from_file(&directory).unwrap();
             let cube = &settings.cubes[0];
@@ -1866,7 +1868,6 @@ mod tests {
         repository
             .publish_manifest(&manifest, &manifest, "synthetic unlock", &device, || true)
             .unwrap();
-        drop(repository);
 
         let reopened = fixture.repository();
         let _guard = reopened.lock().unwrap();
@@ -1903,7 +1904,6 @@ mod tests {
             .is_err());
         let pending = anchor::load(&old.scope).unwrap().unwrap();
         assert!(matches!(pending.state, AnchorState::Pending { .. }));
-        drop(repository);
 
         let directory = NetworkDirectory::new(fixture.directory.path().to_path_buf());
         let settings = Settings::from_file(&directory).unwrap();
@@ -2250,7 +2250,6 @@ mod tests {
         fs::remove_file(repository.tombstone()).unwrap();
         repository.ensure_root().unwrap();
         write_replace(&repository.root().join(MANIFEST), &old_bytes).unwrap();
-        drop(repository);
         let directory = NetworkDirectory::new(fixture.directory.path().to_path_buf());
         let settings = Settings::from_file(&directory).unwrap();
         let cube = &settings.cubes[0];
