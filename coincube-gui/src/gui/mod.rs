@@ -2532,7 +2532,22 @@ impl GUI {
                         crate::app::view::ConnectAccountMessage::LogOut => {
                             Some((tab::AuthChange::LogOut, *pane_id, *tab_id))
                         }
-                        crate::app::view::ConnectAccountMessage::SetSession(login, epoch) => {
+                        crate::app::view::ConnectAccountMessage::SetSession(login, epoch)
+                        | crate::app::view::ConnectAccountMessage::OtpVerified(login, epoch, _)
+                        | crate::app::view::ConnectAccountMessage::AuthCommitAccepted {
+                            login,
+                            epoch,
+                            refreshed: false,
+                        } => {
+                            let origin_is_home = self
+                                .panes
+                                .get(*pane_id)
+                                .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == *tab_id))
+                                .is_some_and(|tab| matches!(&tab.state, tab::State::Home(_)));
+                            let eligible = !matches!(
+                                msg,
+                                crate::app::view::ConnectAccountMessage::OtpVerified(..)
+                            ) || origin_is_home;
                             let origin_epoch = self
                                 .panes
                                 .get(*pane_id)
@@ -2552,14 +2567,18 @@ impl GUI {
                             matches!(&tab.state, tab::State::App(app) if app.matches_admitted_connect_session(login))
                         });
                             match origin_epoch {
-                                Some(current) if *epoch >= current && !same_fork_session => Some((
-                                    tab::AuthChange::SignIn {
-                                        user_id: login.user.id,
-                                        token: zeroize::Zeroizing::new(login.token.clone()),
-                                    },
-                                    *pane_id,
-                                    *tab_id,
-                                )),
+                                Some(current)
+                                    if *epoch >= current && !same_fork_session && eligible =>
+                                {
+                                    Some((
+                                        tab::AuthChange::SignIn {
+                                            user_id: login.user.id,
+                                            token: zeroize::Zeroizing::new(login.token.clone()),
+                                        },
+                                        *pane_id,
+                                        *tab_id,
+                                    ))
+                                }
                                 // Stale for its own tab (dropped there on dispatch), or
                                 // no account panel to judge it: not a sign-in.
                                 _ => None,
@@ -2586,37 +2605,34 @@ impl GUI {
         } else {
             false
         };
-        let mut auth_tasks = Vec::new();
-        if let Some((change, origin_pane, origin_tab)) = auth_change {
-            let completed_login = match &message {
-                Message::Pane(_, pane::Message::Tab(_, inner)) => {
-                    match connect_account_message(inner) {
-                        Some(crate::app::view::ConnectAccountMessage::SetSession(login, _)) => {
-                            Some(login)
-                        }
-                        _ => None,
-                    }
-                }
-                _ => None,
-            };
-            for (&pane_id, pane) in self.panes.iter_mut() {
-                for tab in &mut pane.tabs {
-                    if completed_login.is_some_and(|login| {
-                        matches!(&tab.state, tab::State::App(app) if app.matches_admitted_connect_session(login))
-                    }) {
-                        continue;
-                    }
-                    let tab_id = tab.id;
-                    let originated = pane_id == origin_pane && tab_id == origin_tab;
-                    auth_tasks.push(
-                        tab.invalidate_fork_session(change.clone(), originated)
-                            .map(move |msg| {
-                                Message::Pane(pane_id, pane::Message::tab(tab_id, msg))
-                            }),
-                    );
+        let completed_login = match &message {
+            Message::Pane(_, pane::Message::Tab(_, inner)) => {
+                match connect_account_message(inner) {
+                    Some(crate::app::view::ConnectAccountMessage::SetSession(login, _))
+                    | Some(crate::app::view::ConnectAccountMessage::OtpVerified(login, _, _))
+                    | Some(crate::app::view::ConnectAccountMessage::AuthCommitAccepted {
+                        login,
+                        refreshed: false,
+                        ..
+                    }) => Some(login.clone()),
+                    _ => None,
                 }
             }
-        }
+            _ => None,
+        };
+        let accepted_before = auth_change.as_ref().and_then(|(_, pane_id, tab_id)| {
+            self.panes
+                .get(*pane_id)
+                .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == *tab_id))
+                .and_then(|tab| match &tab.state {
+                    tab::State::App(app) => {
+                        Some(app.connect_sheet_account().accepted_auth_revision())
+                    }
+                    tab::State::Home(home) => Some(home.connect_account.accepted_auth_revision()),
+                    _ => None,
+                })
+        });
+        let mut auth_tasks = Vec::new();
         // The old fork App is gone. Apply its auth operation to the replacement
         // Home so logout clears saved login state instead of being discarded.
         let message = if auth_from_fork_app {
@@ -2684,6 +2700,44 @@ impl GUI {
         // Keep those returns inside the helper so invalidation tasks always run.
         let routed = self.update_message(message);
         self.reconcile_connect_sheet_duress();
+        if let Some((change, origin_pane, origin_tab)) = auth_change {
+            let accepted = match &change {
+                tab::AuthChange::SignIn { .. } => accepted_before.is_some_and(|before| {
+                    self.panes
+                        .get(origin_pane)
+                        .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == origin_tab))
+                        .and_then(|tab| match &tab.state {
+                            tab::State::App(app) => {
+                                Some(app.connect_sheet_account().accepted_auth_revision())
+                            }
+                            tab::State::Home(home) => {
+                                Some(home.connect_account.accepted_auth_revision())
+                            }
+                            _ => None,
+                        })
+                        .is_some_and(|after| after != before)
+                }),
+                tab::AuthChange::LogOut => true,
+            };
+            if accepted {
+                for (&pane_id, pane) in self.panes.iter_mut() {
+                    for tab in &mut pane.tabs {
+                        if completed_login.as_ref().is_some_and(|login| {
+                            matches!(&tab.state, tab::State::App(app) if app.matches_admitted_connect_session(login))
+                        }) {
+                            continue;
+                        }
+                        let tab_id = tab.id;
+                        let originated = pane_id == origin_pane && tab_id == origin_tab;
+                        auth_tasks.push(
+                            tab.invalidate_fork_session(change.clone(), originated).map(
+                                move |msg| Message::Pane(pane_id, pane::Message::tab(tab_id, msg)),
+                            ),
+                        );
+                    }
+                }
+            }
+        }
         if let Some((pane_id, tab_id)) = unlock_duress_target {
             self.seal_verified_seed_export_duress_surface(pane_id, tab_id);
         }
@@ -5902,6 +5956,14 @@ mod fork_auth_dispatch_tests {
                     crate::services::coincube::CoincubeClient::for_test("http://127.0.0.1:1");
                 client.set_token("old-session");
                 home.connect_account.client = client.clone();
+                home.connect_account.step =
+                    crate::app::state::connect::account::ConnectFlowStep::OtpVerification {
+                        email: "fixture@example.invalid".into(),
+                        otp: "123456".into(),
+                        sending: true,
+                        is_signup: false,
+                        cooldown: 0,
+                    };
                 let pin = crate::pin_entry::PinEntry::new(
                     crate::app::settings::CubeSettings::new(
                         "Pending fork".into(),
@@ -5938,25 +6000,49 @@ mod fork_auth_dispatch_tests {
                     preferences: unresolved_test_preferences(),
                     zoom: ZoomState::default(),
                 };
+                let login = LoginResponse {
+                    requires_2fa: false,
+                    token: "new-session".into(),
+                    refresh_token: "new-refresh".into(),
+                    user: User {
+                        id: 42,
+                        email: "fixture@example.invalid".into(),
+                        email_verified: Some(true),
+                    },
+                };
                 drop(gui.update(Message::Pane(
                     pane_id,
                     pane::Message::tab(
                         1,
                         tab::Message::Launch(home::Message::View(
                             home::ViewMessage::ConnectAccount(
-                                crate::app::view::ConnectAccountMessage::SetSession(
-                                    LoginResponse {
-                                        requires_2fa: false,
-                                        token: "new-session".into(),
-                                        refresh_token: "new-refresh".into(),
-                                        user: User {
-                                            id: 42,
-                                            email: "fixture@example.invalid".into(),
-                                            email_verified: Some(true),
-                                        },
-                                    },
+                                crate::app::view::ConnectAccountMessage::OtpVerified(
+                                    login.clone(),
                                     0,
+                                    99, // old OTP attempt, same auth epoch
                                 ),
+                            ),
+                        )),
+                    ),
+                )));
+                let tab::State::PinEntry(pin) = &gui.panes.get(pane_id).unwrap().tabs[1].state
+                else {
+                    unreachable!()
+                };
+                let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } =
+                    &pin.on_success;
+                assert_eq!(
+                    connect_client.as_ref().and_then(|client| client.token()),
+                    Some("old-session"),
+                    "rejected OTP attempt must not broadcast SignIn to the PIN tab"
+                );
+                drop(gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::tab(
+                        1,
+                        tab::Message::Launch(home::Message::View(
+                            home::ViewMessage::ConnectAccount(
+                                crate::app::view::ConnectAccountMessage::OtpVerified(login, 0, 0),
                             ),
                         )),
                     ),
@@ -6569,8 +6655,9 @@ mod fork_auth_dispatch_tests {
             root.network_directory(ChainId::BitcoinBlake2b)
                 .init()
                 .unwrap();
-            // Inject the App message at the GUI seam. A Home source ignores
-            // Run, isolating dispatch from account storage and network calls.
+            // A sign-in must be accepted by its Home origin before GUI
+            // broadcasts it; the logout case still exercises a stale App
+            // message after the old fork App was replaced by Home.
             let (home, _) = home::Home::new_for_chain(root.clone(), Some(ChainId::BitcoinBlake2b));
             let mut pane = pane::Pane::new_with_tab(tab::State::Home(home));
             pane.tabs.push(tab::Tab::new(2, installer_state(&root)));
@@ -6599,14 +6686,16 @@ mod fork_auth_dispatch_tests {
                 preferences: unresolved_test_preferences(),
                 zoom: ZoomState::default(),
             };
+            let account_message = if matches!(&auth, ConnectAccountMessage::SetSession(..)) {
+                tab::Message::Launch(home::Message::View(home::ViewMessage::ConnectAccount(auth)))
+            } else {
+                tab::Message::Run(AppMessage::View(crate::app::view::Message::ConnectAccount(
+                    auth,
+                )))
+            };
             let task = gui.update(Message::Pane(
                 source,
-                pane::Message::tab(
-                    1,
-                    tab::Message::Run(AppMessage::View(crate::app::view::Message::ConnectAccount(
-                        auth,
-                    ))),
-                ),
+                pane::Message::tab(1, account_message),
             ));
             let mut checked = HashSet::new();
             if let Some(mut stream) = iced_runtime::task::into_stream(task) {
@@ -6852,7 +6941,13 @@ mod fork_auth_revocation_tests {
                 unreachable!()
             };
             assert_eq!(home.connect_account.client.token(), Some("synthetic-login"));
-            gui.panes.get_mut(pane_id).unwrap().tabs.pop();
+            // The sibling above adopted the App's bearer and intentionally
+            // refuses an unsolicited SetSession. Use a fresh Home panel as
+            // the origin of the replacement login under test.
+            let (fresh_home, startup) =
+                home::Home::new_for_chain(gui.config.coincube_directory.clone(), None);
+            drop(startup);
+            gui.panes.get_mut(pane_id).unwrap().tabs[1].state = tab::State::Home(fresh_home);
             app::session::open(cube_id.clone(), zeroize::Zeroizing::new("2468".into()));
             let select = || {
                 tab::Message::Run(AppMessage::View(view::Message::Spend(
@@ -6864,6 +6959,10 @@ mod fork_auth_revocation_tests {
             assert!(signed.iter().any(|msg| matches!(msg,
                 tab::Message::ForkAsync(_, inner) if matches!(inner.as_ref(), tab::Message::Run(AppMessage::Signed(_, Ok(_)))))));
             let pending = tab.update(select());
+            let auth_epoch = match &gui.panes.get(pane_id).unwrap().tabs[1].state {
+                tab::State::Home(home) => home.connect_account.auth_epoch(),
+                _ => unreachable!(),
+            };
             let auth = if replace {
                 ConnectAccountMessage::SetSession(
                     serde_json::from_value(serde_json::json!({
@@ -6871,7 +6970,7 @@ mod fork_auth_revocation_tests {
                         "user":{"id":8,"email":"fixture@example.invalid","email_verified":true}
                     }))
                     .unwrap(),
-                    0,
+                    auth_epoch,
                 )
             } else {
                 ConnectAccountMessage::LogOut
@@ -6880,13 +6979,19 @@ mod fork_auth_revocation_tests {
             drop(gui.update(Message::Pane(
                 pane_id,
                 pane::Message::tab(
-                    1,
-                    tab::Message::Run(AppMessage::View(view::Message::ConnectAccount(auth))),
+                    2,
+                    tab::Message::Launch(home::Message::View(home::ViewMessage::ConnectAccount(
+                        auth,
+                    ))),
                 ),
             )));
-            assert!(outputs(pending).await.is_empty());
             let tab = &mut gui.panes.get_mut(pane_id).unwrap().tabs[0];
-            assert!(matches!(tab.state, tab::State::Home(_)));
+            assert!(
+                matches!(tab.state, tab::State::Home(_)),
+                "replace={}",
+                replace
+            );
+            assert!(outputs(pending).await.is_empty());
             if replace {
                 let tab::State::Home(home) = &tab.state else {
                     unreachable!()
@@ -8086,6 +8191,9 @@ impl GUI {
     /// Account traffic of any tab plus the Home sign-in bubble and its pane
     /// rebroadcast: the messages that carry a sign-in to other open Cubes.
     pub(crate) fn reviewer_is_session_propagation(message: &Message) -> bool {
+        if Self::reviewer_is_auth_commit(message) {
+            return true;
+        }
         match message {
             Message::Pane(_, pane::Message::View(pane::ViewMessage::ConnectSignedIn)) => true,
             Message::Pane(_, pane::Message::Tab(_, inner)) => matches!(
@@ -8139,14 +8247,16 @@ impl GUI {
             if matches!(Self::reviewer_unwrap_guarded_message(inner), tab::Message::Run(AppMessage::View(
                 crate::app::view::Message::ConnectAccount(_)))))
     }
-    /// Whether a GUI message is a tab's `SetSession` completion — what a
+    /// Whether a GUI message is a tab's auth completion — what a
     /// real refresh or login operation hands back — so a test can route the
     /// real completion through the real broadcaster.
     pub(crate) fn reviewer_is_set_session(message: &Message) -> bool {
         matches!(message, Message::Pane(_, pane::Message::Tab(_, inner))
             if matches!(Self::reviewer_unwrap_guarded_message(inner), tab::Message::Run(AppMessage::View(
                 crate::app::view::Message::ConnectAccount(
-                    crate::app::view::ConnectAccountMessage::SetSession(..))))))
+                    crate::app::view::ConnectAccountMessage::SetSession(..)
+                    | crate::app::view::ConnectAccountMessage::OtpVerified(..)
+                    | crate::app::view::ConnectAccountMessage::RefreshedSession(..))))))
     }
 
     #[cfg(test)]
@@ -8156,6 +8266,17 @@ impl GUI {
                 tab::Message::Run(AppMessage::Claim(_)
                     | AppMessage::View(crate::app::view::Message::ConnectAccount(
                         crate::app::view::ConnectAccountMessage::SessionLoaded { .. })))))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reviewer_is_auth_commit(message: &Message) -> bool {
+        matches!(message, Message::Pane(_, pane::Message::Tab(_, inner))
+            if matches!(Self::reviewer_unwrap_guarded_message(inner),
+                tab::Message::Run(AppMessage::InAppConnectAuthReady { .. }
+                    | AppMessage::InAppConnectAuthPersisted { .. }
+                    | AppMessage::View(crate::app::view::Message::ConnectAccount(
+                        crate::app::view::ConnectAccountMessage::AuthCommitAccepted { .. }
+                        | crate::app::view::ConnectAccountMessage::AuthCommitRejected { .. })))))
     }
 
     #[cfg(test)]

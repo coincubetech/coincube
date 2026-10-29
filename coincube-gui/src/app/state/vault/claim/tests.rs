@@ -5103,15 +5103,67 @@ mod flow {
         let _ = std::fs::remove_dir_all(&f.root);
     }
 
+    fn seed_refresh_cache(app: &mut crate::app::App) {
+        use crate::services::connect::client::{
+            auth::AccessTokenResponse,
+            cache::{Account, ConnectCache, CONNECT_CACHE_FILENAME},
+        };
+        app.cache.datadir_path = app.datadir.clone();
+        let dir = app.cache.datadir_path.network_directory(app.cache.network);
+        std::fs::create_dir_all(dir.path()).unwrap();
+        let cache = ConnectCache {
+            active_email: Some("fixture@example.invalid".into()),
+            accounts: vec![Account {
+                email: "fixture@example.invalid".into(),
+                tokens: AccessTokenResponse {
+                    access_token: "flow-token".into(),
+                    refresh_token: "fixture-refresh".into(),
+                    expires_at: unix_now() + 3600,
+                },
+                device_id: None,
+                last_seen_event_seq: None,
+                reregister_claim: None,
+            }],
+        };
+        std::fs::write(
+            dir.path().join(CONNECT_CACHE_FILENAME),
+            serde_json::to_vec(&cache).unwrap(),
+        )
+        .unwrap();
+    }
+
+    async fn apply_auth_cache_commit(
+        app: &mut crate::app::App,
+        completion: Message,
+    ) -> Vec<Message> {
+        let mut pending = std::collections::VecDeque::from(outputs(app.update(completion)).await);
+        let mut settled = Vec::new();
+        while let Some(message) = pending.pop_front() {
+            match message {
+                Message::InAppConnectAuthReady { .. }
+                | Message::InAppConnectAuthPersisted { .. }
+                | Message::View(view::Message::ConnectAccount(
+                    view::ConnectAccountMessage::AuthCommitAccepted { .. },
+                )) => pending.extend(outputs(app.update(message)).await),
+                Message::View(view::Message::ConnectAccount(
+                    view::ConnectAccountMessage::AuthCommitRejected { .. },
+                )) => panic!("fixture refresh was rejected by the cache CAS"),
+                other => settled.push(other),
+            }
+        }
+        settled
+    }
+
     /// A real sign-in in this tab: the account panel's `RefreshSession`
     /// against an HTTP fixture answering the refresh for `user_id`; its
-    /// `SetSession` completion (carrying the epoch of an operation begun
+    /// `RefreshedSession` completion (carrying the epoch of an operation begun
     /// now) is applied; the queued `SessionLoaded` it produced is applied;
     /// the real post-sign-in duress gate reveals the dashboard, and that
     /// account message runs the hook, which re-binds a revoked claim. Every
     /// claim completion is driven. The fresh session's positive feature
     /// response is applied; unrelated plan follow-ups are dropped.
     async fn sign_in_here_by_refresh(app: &mut crate::app::App, f: &Flow, user_id: u32) {
+        seed_refresh_cache(app);
         f._server
             .mock_async(|when, then| {
                 when.method(POST).path("/api/v1/auth/token/refresh");
@@ -5133,16 +5185,16 @@ mod flow {
                 matches!(
                     m,
                     Message::View(view::Message::ConnectAccount(
-                        view::ConnectAccountMessage::SetSession(..)
+                        view::ConnectAccountMessage::RefreshedSession(..)
                     ))
                 )
             })
-            .expect("the real refresh produces SetSession");
-        // The hook on `SetSession` may already re-bind (the account panel is
+            .expect("the real refresh produces RefreshedSession");
+        // The hook on `RefreshedSession` may already re-bind (the account panel is
         // still at Dashboard); every claim completion is driven, as iced
         // would deliver it, and the queued `SessionLoaded` is applied after.
         let mut session_loaded = None;
-        for message in outputs(app.update(set_session)).await {
+        for message in apply_auth_cache_commit(app, set_session).await {
             match message {
                 Message::View(view::Message::ConnectAccount(
                     view::ConnectAccountMessage::SessionLoaded { .. },
@@ -5154,7 +5206,7 @@ mod flow {
                 _ => {}
             }
         }
-        let session_loaded = session_loaded.expect("a real SetSession queues SessionLoaded");
+        let session_loaded = session_loaded.expect("accepted refresh queues SessionLoaded");
         let loaded = app.update(session_loaded);
         drive_claim_messages(app, loaded).await;
         let generation = app.panels.connect.account.session_generation();
@@ -5449,9 +5501,9 @@ mod flow {
 
     #[cfg(any(unix, windows))]
     #[test]
-    fn reviewer_originating_setsession_lifts_hold_after_gui_broadcast() {
+    fn reviewer_originating_refresh_commit_lifts_hold_after_gui_broadcast() {
         reviewer_gui_flow_on_bounded_stack(
-            "reviewer_originating_setsession_lifts_hold_after_gui_broadcast",
+            "reviewer_originating_refresh_commit_lifts_hold_after_gui_broadcast",
             || async {
                 let first = reviewer_blank_app();
                 let mut second = reviewer_blank_app();
@@ -5461,6 +5513,7 @@ mod flow {
                 let mut gui = crate::gui::GUI::reviewer_claim_gui(first, second);
                 gui.reviewer_app_mut(0).invalidate_claim_session();
                 assert!(gui.reviewer_app_mut(0).claim_session_invalidated);
+                seed_refresh_cache(gui.reviewer_app_mut(0));
                 // A real operation begun in the held tab after the hold: its refresh
                 // against the HTTP fixture, whose SetSession completion is then
                 // routed through the real GUI broadcaster.
@@ -5483,10 +5536,17 @@ mod flow {
                 for message in gui_outputs(refresh).await {
                     if crate::gui::GUI::reviewer_is_set_session(&message) {
                         routed += 1;
-                        drop(gui.update(message));
+                        let mut pending = std::collections::VecDeque::from(
+                            gui_outputs(gui.update(message)).await,
+                        );
+                        while let Some(follow) = pending.pop_front() {
+                            if crate::gui::GUI::reviewer_is_auth_commit(&follow) {
+                                pending.extend(gui_outputs(gui.update(follow)).await);
+                            }
+                        }
                     }
                 }
-                assert_eq!(routed, 1, "the real refresh handed back one SetSession");
+                assert_eq!(routed, 1, "the real refresh handed back one completion");
                 assert!(
                     !gui.reviewer_app_mut(0).claim_session_invalidated,
                     "same-tab hook must run AFTER broadcast so it lifts that tab's hold"
@@ -5769,6 +5829,7 @@ mod flow {
     // given the fixture's client, as production's URL is the same server
     // before and after.
     async fn round4_sign_in_with_distinct_token(app: &mut crate::app::App, f: &Flow, user_id: u32) {
+        seed_refresh_cache(app);
         f._server
             .mock_async(|when, then| {
                 when.method(POST).path("/api/v1/auth/token/refresh");
@@ -5790,13 +5851,13 @@ mod flow {
                 matches!(
                     m,
                     Message::View(view::Message::ConnectAccount(
-                        view::ConnectAccountMessage::SetSession(..)
+                        view::ConnectAccountMessage::RefreshedSession(..)
                     ))
                 )
             })
-            .expect("the real refresh produces SetSession");
+            .expect("the real refresh produces RefreshedSession");
         let mut session_loaded = None;
-        for message in outputs(app.update(set_session)).await {
+        for message in apply_auth_cache_commit(app, set_session).await {
             match message {
                 Message::View(view::Message::ConnectAccount(
                     view::ConnectAccountMessage::SessionLoaded { .. },
@@ -5808,7 +5869,7 @@ mod flow {
                 _ => {}
             }
         }
-        let session_loaded = session_loaded.expect("a real SetSession queues SessionLoaded");
+        let session_loaded = session_loaded.expect("accepted refresh queues SessionLoaded");
         let loaded = app.update(session_loaded);
         drive_claim_messages(app, loaded).await;
         let generation = app.panels.connect.account.session_generation();
@@ -6088,6 +6149,7 @@ mod flow {
                     let mut f = reach_review().await;
                     let first = reviewer_app(&mut f, first);
                     let mut gui = crate::gui::GUI::reviewer_claim_gui(first, second);
+                    seed_refresh_cache(gui.reviewer_app_mut(0));
                     f._server
                         .mock_async(|when, then| {
                             when.method(POST).path(if otp {
@@ -6184,7 +6246,9 @@ mod flow {
                                 gui_outputs(gui.update(message)).await,
                             );
                             while let Some(follow) = queue.pop_front() {
-                                if crate::gui::GUI::reviewer_is_claim_or_session_loaded(&follow) {
+                                if crate::gui::GUI::reviewer_is_claim_or_session_loaded(&follow)
+                                    || crate::gui::GUI::reviewer_is_auth_commit(&follow)
+                                {
                                     queue.extend(gui_outputs(gui.update(follow)).await);
                                 }
                             }

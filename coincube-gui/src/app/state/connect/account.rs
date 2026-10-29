@@ -901,6 +901,9 @@ pub struct ConnectAccountPanel {
     pub error: Option<PanelError>,
     /// Incremented on each login/logout so stale async completions can be discarded.
     session_generation: u64,
+    /// Increments only after this panel accepts a login completion and
+    /// installs its bearer. GUI uses it to broadcast after acceptance.
+    accepted_auth_revision: u64,
     /// Per-tab authentication epoch. Every authentication operation this
     /// panel spawns — a keyring refresh, an OTP verification, the
     /// admitted-user load — captures it, and the completion it produces
@@ -915,6 +918,10 @@ pub struct ConnectAccountPanel {
     /// token, no user — and a refresh failure from such an operation logs
     /// nothing out (`stale_completion`).
     auth_epoch: u64,
+    /// App panels persist an auth result before adopting it locally. Home
+    /// panels retain their existing keyring-only completion path.
+    defer_auth_cache_commit: bool,
+    auth_commit_pending: bool,
     /// Invalidates delayed cooldown ticks and resend completions when the
     /// user leaves token entry or begins another OTP attempt.
     otp_attempt_generation: u64,
@@ -1004,7 +1011,10 @@ impl ConnectAccountPanel {
             contacts_state: ContactsState::new(),
             error: None,
             session_generation: 0,
+            accepted_auth_revision: 0,
             auth_epoch: 0,
+            defer_auth_cache_commit: false,
+            auth_commit_pending: false,
             otp_attempt_generation: 0,
             features: None,
             selected_billing_cycle: BillingCycle::Monthly,
@@ -1026,6 +1036,18 @@ impl ConnectAccountPanel {
             register_campaign_code: String::new(),
             pending_campaign_code: None,
         }
+    }
+
+    pub(crate) fn defer_auth_cache_commit(&mut self) {
+        self.defer_auth_cache_commit = true;
+    }
+
+    pub(crate) fn can_begin_verify_otp(&self) -> bool {
+        matches!(
+            self.step,
+            ConnectFlowStep::OtpVerification { sending: false, .. }
+        ) && !self.admitted_client
+            && !self.admitted_reopen_required
     }
 
     /// True when duress mode is enrolled — either armed on this device or
@@ -1308,6 +1330,10 @@ impl ConnectAccountPanel {
         self.session_generation
     }
 
+    pub(crate) fn accepted_auth_revision(&self) -> u64 {
+        self.accepted_auth_revision
+    }
+
     /// See the `auth_epoch` field.
     pub fn auth_epoch(&self) -> u64 {
         self.auth_epoch
@@ -1318,6 +1344,7 @@ impl ConnectAccountPanel {
     /// Connect auth invalidation.
     pub fn invalidate_auth(&mut self) -> u64 {
         self.auth_epoch = self.auth_epoch.wrapping_add(1);
+        self.auth_commit_pending = false;
         self.auth_epoch
     }
 
@@ -1463,30 +1490,37 @@ impl ConnectAccountPanel {
 
     /// `epoch` is the one the `SetSession` that produced this session
     /// carried; the `SessionLoaded` it queues inherits it.
-    fn post_login_tasks(&mut self, session: StoredSession, epoch: u64) -> iced::Task<Message> {
+    fn post_login_tasks(
+        &mut self,
+        session: StoredSession,
+        epoch: u64,
+        new_login: bool,
+    ) -> iced::Task<Message> {
         self.save_session_to_keyring(&session);
         self.client.set_token(&session.login.token);
+        self.accepted_auth_revision = self.accepted_auth_revision.wrapping_add(1);
 
         let user = session.login.user.clone();
-        // Fire two messages: the in-panel state transition + the
-        // app-level bootstrap that persists JWTs to `connect.json`,
-        // registers the signer device via gRPC, and starts the
-        // realtime stream. The home login path does this at
-        // app-init via `register_signer_device_best_effort`; the
-        // in-app login path previously skipped it, which left
-        // "Sign via Keychain" unreachable until a full app restart.
+        // A true login bootstraps the signer device and realtime stream.
+        // Refresh only persists the bearer for the existing session; it
+        // must leave an About registration claim and device ID untouched.
+        let loaded = iced::Task::done(Message::View(view::Message::ConnectAccount(
+            ConnectAccountMessage::SessionLoaded {
+                user,
+                plan: None,
+                epoch,
+            },
+        )));
+        if !new_login {
+            return loaded;
+        }
         iced::Task::batch([
-            iced::Task::done(Message::View(view::Message::ConnectAccount(
-                ConnectAccountMessage::SessionLoaded {
-                    user,
-                    plan: None,
-                    epoch,
-                },
-            ))),
+            loaded,
             iced::Task::done(Message::InAppConnectLoginCompleted {
                 token: session.login.token.clone(),
                 refresh_token: session.login.refresh_token.clone(),
                 email: session.login.user.email.clone(),
+                epoch,
             }),
         ])
     }
@@ -1505,6 +1539,10 @@ impl ConnectAccountPanel {
                 &msg,
                 ConnectAccountMessage::RefreshSession { .. }
                     | ConnectAccountMessage::SetSession(..)
+                    | ConnectAccountMessage::OtpVerified(..)
+                    | ConnectAccountMessage::RefreshedSession(..)
+                    | ConnectAccountMessage::AuthCommitAccepted { .. }
+                    | ConnectAccountMessage::AuthCommitRejected { .. }
                     | ConnectAccountMessage::SessionLoaded { .. }
                     | ConnectAccountMessage::EmailChanged(_)
                     | ConnectAccountMessage::SubmitLogin
@@ -1521,6 +1559,10 @@ impl ConnectAccountPanel {
             // must never revoke that newer session (or replace its token).
             let completion_epoch = match &msg {
                 ConnectAccountMessage::SetSession(_, epoch)
+                | ConnectAccountMessage::OtpVerified(_, epoch, _)
+                | ConnectAccountMessage::RefreshedSession(_, epoch, _)
+                | ConnectAccountMessage::AuthCommitAccepted { epoch, .. }
+                | ConnectAccountMessage::AuthCommitRejected { epoch }
                 | ConnectAccountMessage::SessionLoaded { epoch, .. } => Some(*epoch),
                 _ => None,
             };
@@ -1657,11 +1699,16 @@ impl ConnectAccountPanel {
             ConnectAccountMessage::RefreshSession { refresh_token } => {
                 let client = self.client.clone();
                 let epoch = self.auth_epoch;
+                let previous_refresh_token = refresh_token.clone();
                 return iced::Task::perform(
                     async move { client.refresh_login(&refresh_token).await },
                     move |res| match res {
                         Ok(login) => Message::View(view::Message::ConnectAccount(
-                            ConnectAccountMessage::SetSession(login, epoch),
+                            ConnectAccountMessage::RefreshedSession(
+                                login,
+                                epoch,
+                                previous_refresh_token,
+                            ),
                         )),
                         Err(e) => {
                             if e.is_auth_error() {
@@ -1710,7 +1757,97 @@ impl ConnectAccountPanel {
                     return iced::Task::none();
                 }
                 let session = StoredSession { login };
-                return self.post_login_tasks(session, epoch);
+                return self.post_login_tasks(session, epoch, true);
+            }
+
+            ConnectAccountMessage::OtpVerified(login, epoch, attempt) => {
+                if self.stale_completion(epoch, "OtpVerified")
+                    || attempt != self.otp_attempt_generation
+                    || !matches!(
+                        self.step,
+                        ConnectFlowStep::OtpVerification { sending: true, .. }
+                    )
+                {
+                    return iced::Task::none();
+                }
+                if self.defer_auth_cache_commit {
+                    if self.auth_commit_pending {
+                        return iced::Task::none();
+                    }
+                    self.auth_commit_pending = true;
+                    return iced::Task::done(Message::InAppConnectAuthReady {
+                        login,
+                        epoch,
+                        previous_refresh_token: None,
+                    });
+                }
+                return self.post_login_tasks(StoredSession { login }, epoch, true);
+            }
+
+            ConnectAccountMessage::OtpVerifyFailed(error, epoch, attempt) => {
+                if self.stale_completion(epoch, "OtpVerifyFailed")
+                    || attempt != self.otp_attempt_generation
+                    || !matches!(self.step, ConnectFlowStep::OtpVerification { .. })
+                {
+                    return iced::Task::none();
+                }
+                return self.update_message(ConnectAccountMessage::Error(error));
+            }
+
+            ConnectAccountMessage::RefreshedSession(login, epoch, previous_refresh_token) => {
+                if self.stale_completion(epoch, "RefreshedSession") {
+                    return iced::Task::none();
+                }
+                if self.defer_auth_cache_commit {
+                    if self.auth_commit_pending {
+                        return iced::Task::none();
+                    }
+                    self.auth_commit_pending = true;
+                    return iced::Task::done(Message::InAppConnectAuthReady {
+                        login,
+                        epoch,
+                        previous_refresh_token: Some(previous_refresh_token),
+                    });
+                }
+                return self.post_login_tasks(StoredSession { login }, epoch, false);
+            }
+
+            ConnectAccountMessage::AuthCommitAccepted {
+                login,
+                epoch,
+                refreshed,
+            } => {
+                if self.stale_completion(epoch, "AuthCommitAccepted") {
+                    return iced::Task::none();
+                }
+                if !self.auth_commit_pending {
+                    return iced::Task::none();
+                }
+                self.auth_commit_pending = false;
+                return self.post_login_tasks(StoredSession { login }, epoch, !refreshed);
+            }
+
+            ConnectAccountMessage::AuthCommitRejected { epoch } => {
+                if self.stale_completion(epoch, "AuthCommitRejected") {
+                    return iced::Task::none();
+                }
+                if !self.auth_commit_pending {
+                    return iced::Task::none();
+                }
+                self.auth_commit_pending = false;
+                self.error = Some(PanelError::retryable(
+                    UserError::new(
+                        "Connect session changed",
+                        "Sign in again to use the current account.",
+                        crate::user_error::CC_API_BADRESP,
+                        true,
+                    ),
+                    RetryAction::Session,
+                ));
+                self.step = ConnectFlowStep::Login {
+                    email: String::new(),
+                    loading: false,
+                };
             }
 
             // A completion of an operation begun before the last invalidation
@@ -2087,7 +2224,12 @@ impl ConnectAccountPanel {
                 else {
                     return iced::Task::none();
                 };
+                if *sending {
+                    return iced::Task::none();
+                }
                 *sending = true;
+                self.otp_attempt_generation = self.otp_attempt_generation.wrapping_add(1);
+                let attempt = self.otp_attempt_generation;
                 let req = OtpVerifyRequest {
                     email: email.clone(),
                     otp: otp.clone(),
@@ -2105,10 +2247,10 @@ impl ConnectAccountPanel {
                     },
                     move |res| match res {
                         Ok(login) => Message::View(view::Message::ConnectAccount(
-                            ConnectAccountMessage::SetSession(login, epoch),
+                            ConnectAccountMessage::OtpVerified(login, epoch, attempt),
                         )),
                         Err(e) => Message::View(view::Message::ConnectAccount(
-                            ConnectAccountMessage::Error((&e).into()),
+                            ConnectAccountMessage::OtpVerifyFailed((&e).into(), epoch, attempt),
                         )),
                     },
                 );
@@ -2926,6 +3068,7 @@ impl ConnectAccountPanel {
     /// error screen, etc.). Shared by `LogOut` and the duress-gate 401 path so
     /// a rejected session can't leave stale state behind for the next `Init`.
     fn clear_session(&mut self) {
+        self.auth_commit_pending = false;
         let owns_saved_session = !self.admitted_client;
         self.session_generation += 1;
         self.user = None;
@@ -8576,6 +8719,62 @@ mod admitted_session_tests {
                 email_verified: Some(true),
             },
         }
+    }
+
+    #[tokio::test]
+    async fn app_refresh_waits_for_cache_commit_before_adoption() {
+        use iced::futures::StreamExt;
+
+        let mut panel = ConnectAccountPanel::new();
+        panel.defer_auth_cache_commit();
+        let keyring_before = read_connect_secret(CONNECT_KEYRING_USER);
+        let task = panel.update_message(ConnectAccountMessage::RefreshedSession(
+            fixture_login("refreshed-bearer"),
+            panel.auth_epoch(),
+            "previous-refresh".into(),
+        ));
+        assert_eq!(panel.client.token(), None);
+        let mut stream = iced_runtime::task::into_stream(task).unwrap();
+        assert!(matches!(
+            stream.next().await,
+            Some(iced_runtime::Action::Output(
+                Message::InAppConnectAuthReady {
+                    previous_refresh_token: Some(_),
+                    ..
+                }
+            ))
+        ));
+        assert!(stream.next().await.is_none());
+        assert_eq!(panel.client.token(), None);
+        assert_eq!(read_connect_secret(CONNECT_KEYRING_USER), keyring_before);
+    }
+
+    #[test]
+    fn duplicate_otp_and_old_attempt_cannot_start_two_commits() {
+        let mut panel = ConnectAccountPanel::new();
+        panel.defer_auth_cache_commit();
+        panel.step = ConnectFlowStep::OtpVerification {
+            email: "fixture@example.invalid".into(),
+            otp: "123456".into(),
+            sending: false,
+            is_signup: false,
+            cooldown: 0,
+        };
+        let first = panel.update_message(ConnectAccountMessage::VerifyOtp);
+        assert!(iced_runtime::task::into_stream(first).is_some());
+        let first_attempt = panel.otp_attempt_generation;
+        let duplicate = panel.update_message(ConnectAccountMessage::VerifyOtp);
+        assert!(iced_runtime::task::into_stream(duplicate).is_none());
+        assert_eq!(panel.otp_attempt_generation, first_attempt);
+
+        let _ = panel.update_message(ConnectAccountMessage::BackToEmail);
+        let stale = panel.update_message(ConnectAccountMessage::OtpVerified(
+            fixture_login("stale-otp"),
+            panel.auth_epoch(),
+            first_attempt,
+        ));
+        assert!(iced_runtime::task::into_stream(stale).is_none());
+        assert_eq!(panel.client.token(), None);
     }
 
     #[test]
