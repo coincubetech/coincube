@@ -66,8 +66,19 @@ def main():
         {name: (UPM, getattr(glyphs[name], "xMin", 0)) for name in order}
     )
     builder.setupHorizontalHeader(ascent=UPM, descent=0)
-    builder.setupOS2(sTypoAscender=UPM, sTypoDescender=0, usWinAscent=327, usWinDescent=29)
-    builder.setupNameTable({"familyName": "coincube-icons", "styleName": "Regular"})
+    # fsSelection bit 6: REGULAR.
+    builder.setupOS2(
+        sTypoAscender=UPM, sTypoDescender=0, usWinAscent=327, usWinDescent=29, fsSelection=0x40
+    )
+    # fontdb (iced's font database) skips a font without a PostScript name.
+    builder.setupNameTable(
+        {
+            "familyName": "coincube-icons",
+            "styleName": "Regular",
+            "fullName": "coincube-icons",
+            "psName": "coincube-icons",
+        }
+    )
     builder.setupPost()
     builder.save(str(Path(__file__).with_name("coincube-icons.ttf")))
 
