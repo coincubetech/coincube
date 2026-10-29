@@ -9,11 +9,25 @@ PROFILE="$REPO_ROOT/contrib/release/macos/embedded.provisionprofile"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/imported-anchor-native.XXXXXX")"
 BUNDLE="$WORK/Probe.app"
 RUN_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+MAY_HAVE_ITEM=0
 cleanup() {
-    if [ -x "$BUNDLE/Contents/MacOS/Probe" ]; then
-        "$BUNDLE/Contents/MacOS/Probe" delete "$RUN_ID" || true
+    local phase_status=$?
+    trap - EXIT
+    if [ "$MAY_HAVE_ITEM" -eq 1 ]; then
+        if ! "$BUNDLE/Contents/MacOS/Probe" delete "$RUN_ID"; then
+            echo "failed to remove the synthetic imported-anchor Keychain item" >&2
+            if [ "$phase_status" -eq 0 ]; then
+                phase_status=1
+            fi
+        fi
     fi
-    rm -rf "$WORK"
+    if ! rm -rf "$WORK"; then
+        echo "failed to remove imported-anchor probe bundle" >&2
+        if [ "$phase_status" -eq 0 ]; then
+            phase_status=1
+        fi
+    fi
+    exit "$phase_status"
 }
 trap cleanup EXIT
 
@@ -50,5 +64,6 @@ codesign -d --entitlements - "$BUNDLE" 2>&1 | grep -q '8UVR249AD5.io.coincube.te
 # Every invocation is a fresh process. Stopping after each durable transition
 # probes read-back and restart; sudden power loss still needs a separate test.
 for phase in create pending commit clear verify; do
+    MAY_HAVE_ITEM=1
     "$BUNDLE/Contents/MacOS/Probe" "$phase" "$RUN_ID"
 done
