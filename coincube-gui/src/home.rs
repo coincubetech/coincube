@@ -7254,9 +7254,7 @@ fn focus_local_delete_opener(home: &Home, key: &CubeCatalogKey) -> Task<Message>
         .locals
         .iter()
         .position(|row| row.key == *key && row.actionable);
-    let mounted = row.is_some_and(|index| {
-        !projection.floor_eligible(home.catalog.mode) || projection.selected == Some(index)
-    });
+    let mounted = row.is_some_and(|index| projection.selected == Some(index));
     if mounted {
         iced::widget::operation::focus(launcher_catalog::delete_id(key))
     } else {
@@ -10588,6 +10586,11 @@ mod tests {
             source: ChainId::Bitcoin,
         };
         home.catalog.mode = launcher_catalog::LauncherMode::List;
+        let local_key = CubeCatalogKey {
+            chain: ChainId::Bitcoin,
+            cube_id: local_cube.id.clone(),
+        };
+        home.catalog.selected = Some(local_key.clone());
         home.delete_cube_modal = Some(DeleteCubeModal::new(
             local_cube.clone(),
             home.datadir_path.network_directory(Network::Bitcoin),
@@ -10601,10 +10604,10 @@ mod tests {
         ))));
         assert!(home.delete_cube_modal.is_none());
 
-        let local_key = CubeCatalogKey {
-            chain: ChainId::Bitcoin,
-            cube_id: local_cube.id.clone(),
-        };
+        home.catalog.selected = None;
+        assert!(!has_focus_operation(focus_local_delete_opener(
+            &home, &local_key
+        )));
         home.catalog.mode = launcher_catalog::LauncherMode::Cubes;
         home.catalog.selected = Some(local_key.clone());
         assert!(has_focus_operation(focus_local_delete_opener(
