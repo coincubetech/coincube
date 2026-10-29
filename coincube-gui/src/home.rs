@@ -10603,7 +10603,7 @@ mod tests {
 
         let local_key = CubeCatalogKey {
             chain: ChainId::Bitcoin,
-            cube_id: local_cube.id,
+            cube_id: local_cube.id.clone(),
         };
         home.catalog.mode = launcher_catalog::LauncherMode::Cubes;
         home.catalog.selected = Some(local_key.clone());
@@ -10620,6 +10620,19 @@ mod tests {
             &home, &local_key
         )));
         home.catalog.query.clear();
+        home.state = State::Cubes {
+            cubes: vec![],
+            create_cube: false,
+            source: ChainId::Bitcoin,
+        };
+        assert!(!has_focus_operation(focus_local_delete_opener(
+            &home, &local_key
+        )));
+        home.state = State::Cubes {
+            cubes: vec![local_cube],
+            create_cube: false,
+            source: ChainId::Bitcoin,
+        };
 
         let remote_cube = remote_cube("remote-a", "Remote A", Network::Bitcoin);
         home.remote_cubes = vec![remote_cube.clone()];
@@ -10634,6 +10647,12 @@ mod tests {
         assert!(home.delete_remote_cube_modal.is_none());
 
         home.catalog.mode = launcher_catalog::LauncherMode::Cubes;
+        assert!(!has_focus_operation(focus_remote_delete_opener(
+            &home,
+            &remote_cube.uuid
+        )));
+        home.catalog.query.clear();
+        home.remote_cubes.clear();
         assert!(!has_focus_operation(focus_remote_delete_opener(
             &home,
             &remote_cube.uuid
