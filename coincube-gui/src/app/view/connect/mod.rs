@@ -712,8 +712,8 @@ fn sheet_action<'a>(
     .into()
 }
 
-/// Account-wide presentation for the sheet; the legacy Home panel keeps its
-/// own detailed overview, while this route follows the Connect artboard.
+/// Account-wide presentation shared by the sheet and the older Home panel.
+/// Plan, counts, and Recovery services stay in their own destinations.
 fn sheet_account_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMessage> {
     let email = state
         .user
@@ -737,7 +737,7 @@ fn sheet_account_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAc
         },
         ..Default::default()
     });
-    let mut column = Column::new()
+    let column = Column::new()
         .push(sheet_title("Account"))
         .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
         .push(
@@ -745,23 +745,20 @@ fn sheet_account_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAc
                 .push(avatar)
                 .push(
                     Column::new()
-                        .push(tenshu_text::section(email))
-                        .push(lead("Signed in on this device")),
+                        .push(tenshu_text::section(email).width(Length::Fill))
+                        .push(lead("Signed in on this device"))
+                        .width(Length::Fill),
                 )
                 .spacing(16)
-                .align_y(Alignment::Center),
+                .align_y(Alignment::Center)
+                .width(Length::Fill),
         )
         .push(iced::widget::Space::new().height(Length::Fixed(24.0)))
         .push(ruled_list([key_value_row(
             "Sign-in method",
             tenshu_text::body("Email · one-time code").into(),
         )]));
-    if let Some(banner) = renewal_banner(state) {
-        column = column
-            .push(iced::widget::Space::new().height(Length::Fixed(24.0)))
-            .push(banner);
-    }
-    column = column
+    let mut column = column
         .push(iced::widget::Space::new().height(Length::Fixed(32.0)))
         .push(group_title("What Connect provides"))
         .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
@@ -1246,176 +1243,7 @@ fn otp_ux<'a>(
 }
 
 fn overview_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMessage> {
-    let email = state.user.as_ref().map(|u| u.email.as_str()).unwrap_or("—");
-    let plan_label = state
-        .plan
-        .as_ref()
-        .map(|p| p.tier().to_string())
-        .unwrap_or_else(|| "Free".to_string());
-
-    let mut col = Column::new()
-        .push(text::h4_bold("Account").style(theme::text::primary))
-        .push(iced::widget::Space::new().height(Length::Fixed(15.0)));
-
-    // Pre-expiry renewal reminder (D1) / expired prompt (D3).
-    if let Some(banner) = renewal_banner(state) {
-        col = col
-            .push(banner)
-            .push(iced::widget::Space::new().height(Length::Fixed(12.0)));
-    }
-
-    // Build the rows incrementally so the optional renewal/usage lines
-    // only appear when their data is present. Each row is a label on the
-    // left, value pushed to the right edge.
-    let gap = || iced::widget::Space::new().height(Length::Fixed(8.0));
-    let mut card = Column::new()
-        .push(overview_info_row(
-            "Email",
-            text::p1_regular(email).style(theme::text::primary).into(),
-        ))
-        .push(gap())
-        .push(overview_info_row(
-            "Sign-in method",
-            text::p1_regular("Email · one-time code")
-                .style(theme::text::primary)
-                .into(),
-        ))
-        .push(gap())
-        .push(overview_info_row(
-            "Plan",
-            text::p1_bold(plan_label).color(color::ORANGE).into(),
-        ));
-
-    if let Some(plan) = state.plan.as_ref() {
-        let status = match plan.status {
-            PlanStatus::Active => "Active",
-            PlanStatus::PastDue => "Past due",
-            PlanStatus::Canceled => "Cancelled",
-        };
-        card = card.push(gap()).push(overview_info_row(
-            "Plan status",
-            text::p1_regular(status).style(theme::text::primary).into(),
-        ));
-    }
-
-    // Renewal / access date — only meaningful on a paid plan with a
-    // server-provided date (Free tier omits it). A canceled plan keeps
-    // access until the date, so the label reflects that. A past-due plan
-    // reads as Expired (the renewal banner above already states "Your
-    // plan expired on …"); a "Renews" row carrying the same lapsed date
-    // would contradict it, so skip the row entirely in that state.
-    if let Some(plan) = state
-        .plan
-        .as_ref()
-        .filter(|_| !matches!(state.plan_lifecycle(), PlanLifecycle::Expired))
-    {
-        if let Some(date) = plan.renewal_at.as_deref().map(format_date) {
-            let label = match plan.status {
-                PlanStatus::Active => "Paid through",
-                PlanStatus::PastDue => "Payment due",
-                PlanStatus::Canceled => "Access until",
-            };
-            let value = match plan.billing_cycle {
-                Some(cycle) => format!("{date} · {cycle}"),
-                None => date,
-            };
-            card = card.push(gap()).push(overview_info_row(
-                label,
-                text::p1_regular(value).style(theme::text::primary).into(),
-            ));
-        }
-    }
-
-    // Summary counts — fetched on entering the tab; each row hides until
-    // (and unless) its count lands.
-    if let Some(n) = state.overview_contact_count {
-        card = card.push(gap()).push(overview_info_row(
-            "Contacts",
-            text::p1_regular(n.to_string())
-                .style(theme::text::primary)
-                .into(),
-        ));
-    }
-    if let Some(n) = state.overview_cube_count {
-        card = card.push(gap()).push(overview_info_row(
-            "Cubes",
-            text::p1_regular(n.to_string())
-                .style(theme::text::primary)
-                .into(),
-        ));
-    }
-
-    let card = card
-        .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
-        .push(
-            button::secondary(None, "Plan & billing")
-                .on_press(ConnectAccountMessage::OpenPlanBilling),
-        )
-        .padding(20)
-        .spacing(2);
-
-    col = col.push(
-        container(card)
-            .style(|t| container::Style {
-                background: Some(iced::Background::Color(t.colors.cards.simple.background)),
-                border: iced::Border {
-                    color: color::ORANGE,
-                    width: 0.2,
-                    radius: 20.0.into(),
-                },
-                ..Default::default()
-            })
-            .width(Length::Fill),
-    );
-
-    col = col
-        .push(iced::widget::Space::new().height(Length::Fixed(24.0)))
-        .push(text::p1_bold("What Connect provides").style(theme::text::primary))
-        .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
-        .push(connect_benefits(false))
-        .push(iced::widget::Space::new().height(Length::Fixed(24.0)))
-        .push(recovery_services_ux(state))
-        .push(iced::widget::Space::new().height(Length::Fixed(24.0)));
-
-    let consequence = "Cubes stay on this device; Connect services pause until you sign in again.";
-    if state.review_sign_out {
-        col = col.push(
-            container(
-                Column::new()
-                    .push(
-                        text::p1_bold(format!("Sign out {email} on this device?"))
-                            .style(theme::text::primary),
-                    )
-                    .push(text::p2_regular(consequence).style(theme::text::secondary))
-                    .push(
-                        Row::new()
-                            .push(
-                                button::primary(None, "Sign out")
-                                    .on_press(ConnectAccountMessage::LogOut),
-                            )
-                            .push(
-                                button::secondary(None, "Cancel")
-                                    .on_press(ConnectAccountMessage::ReviewSignOut(false)),
-                            )
-                            .spacing(8),
-                    )
-                    .spacing(10)
-                    .padding(16),
-            )
-            .style(card_style)
-            .width(Length::Fill),
-        );
-    } else {
-        col = col
-            .push(
-                button::secondary(None, "Sign out…")
-                    .on_press(ConnectAccountMessage::ReviewSignOut(true)),
-            )
-            .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
-            .push(text::p2_regular(consequence).style(theme::text::secondary));
-    }
-
-    col.spacing(0).width(Length::Fill).into()
+    sheet_account_ux(state)
 }
 
 /// Source-backed Recovery services table. R03 can call this from its own
@@ -1531,20 +1359,6 @@ fn network_label(network: &str) -> String {
         "regtest" => "Bitcoin regtest".to_string(),
         other => other.to_string(),
     }
-}
-
-/// One label/value line in the Account Overview card: muted label on the
-/// left, value pushed to the right edge.
-fn overview_info_row<'a>(
-    label: &'a str,
-    value: Element<'a, ConnectAccountMessage>,
-) -> Element<'a, ConnectAccountMessage> {
-    Row::new()
-        .push(text::p1_medium(label).color(color::GREY_3))
-        .push(iced::widget::Space::new().width(Length::Fill))
-        .push(value)
-        .align_y(Alignment::Center)
-        .into()
 }
 
 fn plan_tier_color(tier: &PlanTier) -> iced::Color {
@@ -5076,6 +4890,7 @@ mod renewal_banner_tests {
                 "sign-up",
                 "token",
                 "account",
+                "account-long-email",
                 "account-review",
                 "plan",
                 "plan-promo-success",
@@ -5115,6 +4930,9 @@ mod renewal_banner_tests {
                     section => {
                         panel.step = ConnectFlowStep::Dashboard;
                         panel.user = Some(user());
+                        if section == "account-long-email" {
+                            panel.user.as_mut().unwrap().email = "morgan.with-a-long-household-recovery-address@family-office.example.test".into();
+                        }
                         panel.plan = Some(plan(
                             PlanTier::Pro,
                             PlanStatus::Active,
@@ -5286,6 +5104,246 @@ mod renewal_banner_tests {
                         image::ColorType::Rgba8,
                     )
                     .expect("save Connect preview");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn signed_in_overview_shows_identity_and_benefits_without_other_sections() {
+        use iced::advanced::renderer::Headless;
+
+        let renderer = <iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer");
+        let mut account = dashboard_panel();
+        account.overview_contact_count = Some(42);
+        account.overview_cube_count = Some(84);
+        account.recovery_services = RecoveryServicesState::Ready(Vec::new());
+        let labels = visible_labels(overview_ux(&account), &renderer);
+
+        for expected in [
+            "Account",
+            "Signed in on this device",
+            "Sign-in method",
+            "What Connect provides",
+            "Sign out…",
+            "Coming soon",
+        ] {
+            assert!(
+                labels.iter().any(|label| label == expected),
+                "{}: {:?}",
+                expected,
+                labels
+            );
+        }
+        for excluded in [
+            "Plan",
+            "Plan status",
+            "Contacts",
+            "Cubes",
+            "Recovery services",
+            "42",
+            "84",
+        ] {
+            assert!(
+                !labels.iter().any(|label| label == excluded),
+                "{}: {:?}",
+                excluded,
+                labels
+            );
+        }
+        assert_eq!(connect_benefit_rows().len(), 7);
+
+        account.review_sign_out = true;
+        let review = visible_labels(overview_ux(&account), &renderer);
+        assert!(review.iter().any(|label| label == "Sign out"));
+        assert!(review.iter().any(|label| label == "Cancel"));
+    }
+
+    /// Lay out the real sheet at the minimum and reference window sizes.
+    /// Child bounds catch broad geometry regressions; emitted PNGs must be
+    /// visually checked for glyph clipping, scroll visibility, and overlap.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn signed_in_account_sheet_layout_and_captures() {
+        use iced::advanced::{
+            layout,
+            renderer::Headless,
+            widget::{Operation, Tree},
+            Layout,
+        };
+
+        #[derive(Default)]
+        struct TextBounds(Vec<(String, iced::Rectangle)>);
+        impl Operation for TextBounds {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+
+            fn text(&mut self, _: Option<&Id>, bounds: iced::Rectangle, value: &str) {
+                self.0.push((value.to_owned(), bounds));
+            }
+        }
+
+        for bytes in [
+            coincube_ui::font::REGULAR_BYTES,
+            coincube_ui::font::MEDIUM_BYTES,
+            coincube_ui::font::BOLD_BYTES,
+            coincube_ui::font::BOOTSTRAP_ICONS_BYTE,
+        ] {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(std::borrow::Cow::Borrowed(bytes));
+        }
+
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            for (width, height) in [(1024_u32, 768_u32), (1440, 900)] {
+                for (long_email, review_sign_out) in
+                    [(false, false), (true, false), (false, true), (true, true)]
+                {
+                    let mut account = dashboard_panel();
+                    account.review_sign_out = review_sign_out;
+                    if long_email {
+                        account.user.as_mut().unwrap().email = "morgan.with-a-long-household-recovery-address@family-office.example.test".into();
+                    }
+                    let mut renderer = <iced::Renderer as Headless>::new(
+                        coincube_ui::font::REGULAR,
+                        iced::Pixels(16.0),
+                        Some("tiny-skia"),
+                    )
+                    .await
+                    .expect("software renderer");
+                    let mut element = connect_sheet(
+                        &account,
+                        ConnectSheetPage::Sections(ConnectSheetSection::Account),
+                    );
+                    let mut tree = Tree::new(element.as_widget());
+                    let size = iced::Size::new(width as f32, height as f32);
+                    let node = element.as_widget_mut().layout(
+                        &mut tree,
+                        &renderer,
+                        &layout::Limits::new(iced::Size::ZERO, size),
+                    );
+                    assert!(node.size().width <= size.width);
+                    assert!(node.size().height <= size.height);
+                    let mut bounds = TextBounds::default();
+                    element.as_widget_mut().operate(
+                        &mut tree,
+                        Layout::new(&node),
+                        &renderer,
+                        &mut bounds,
+                    );
+                    let action_label = if review_sign_out {
+                        "Sign out"
+                    } else {
+                        "Sign out…"
+                    };
+                    for label in ["Close", action_label, "Signed in on this device"] {
+                        let rect = bounds
+                            .0
+                            .iter()
+                            .find(|(value, _)| value == label)
+                            .map(|(_, rect)| rect)
+                            .unwrap_or_else(|| panic!("missing {} at {}x{}", label, width, height));
+                        assert!(
+                            rect.x >= 0.0 && rect.x + rect.width <= size.width,
+                            "{} clipped horizontally at {}x{}: {:?}",
+                            label,
+                            width,
+                            height,
+                            rect
+                        );
+                        if label == "Close" {
+                            assert!(
+                                rect.y >= 0.0 && rect.y + rect.height <= size.height,
+                                "Close below viewport at {}x{}: {:?}",
+                                width,
+                                height,
+                                rect
+                            );
+                        }
+                    }
+                    if review_sign_out {
+                        assert!(bounds.0.iter().any(|(value, _)| value == "Cancel"));
+                    }
+                    if long_email {
+                        let email = account.user.as_ref().unwrap().email.as_str();
+                        let email_bounds: Vec<_> = bounds
+                            .0
+                            .iter()
+                            .filter(|(value, _)| value == email)
+                            .map(|(_, rect)| rect)
+                            .collect();
+                        assert!(
+                            email_bounds.len() >= 2,
+                            "email missing from header or identity"
+                        );
+                        assert!(
+                            email_bounds
+                                .iter()
+                                .all(|rect| rect.x + rect.width <= size.width),
+                            "long email clipped horizontally at {}x{}: {:?}",
+                            width,
+                            height,
+                            email_bounds
+                        );
+                    }
+
+                    if let Ok(directory) = std::env::var("CONNECT_PREVIEW_DIR") {
+                        let viewport = iced::Rectangle::with_size(size);
+                        element.as_widget_mut().update(
+                            &mut tree,
+                            &iced::Event::Window(iced::window::Event::RedrawRequested(
+                                std::time::Instant::now(),
+                            )),
+                            Layout::new(&node),
+                            iced::mouse::Cursor::Unavailable,
+                            &renderer,
+                            &mut iced::advanced::clipboard::Null,
+                            &mut iced::advanced::Shell::new(&mut Vec::new()),
+                            &viewport,
+                        );
+                        element.as_widget().draw(
+                            &tree,
+                            &mut renderer,
+                            &theme,
+                            &iced::advanced::renderer::Style {
+                                text_color: theme.colors.text.primary,
+                            },
+                            Layout::new(&node),
+                            iced::mouse::Cursor::Unavailable,
+                            &viewport,
+                        );
+                        let pixels = renderer.screenshot(
+                            iced::Size::new(width, height),
+                            1.0,
+                            theme.colors.general.background,
+                        );
+                        let suffix = match (long_email, review_sign_out) {
+                            (false, false) => "",
+                            (true, false) => "-long-email",
+                            (false, true) => "-review",
+                            (true, true) => "-long-email-review",
+                        };
+                        image::save_buffer(
+                            std::path::Path::new(&directory).join(format!(
+                                "connect-account-{appearance}-{width}x{height}{suffix}.png"
+                            )),
+                            &pixels,
+                            width,
+                            height,
+                            image::ColorType::Rgba8,
+                        )
+                        .expect("save Connect account preview");
+                    }
                 }
             }
         }
