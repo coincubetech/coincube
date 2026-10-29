@@ -355,16 +355,16 @@ fn client_controls<'a>(
 fn transaction_card(client_id: &str, draft: Prepared) -> Ui<'static> {
     use crate::app::view::settings::page;
 
-    let ready = draft.network == "regtest"
-        && draft.status == "unsigned_ready_for_native_review"
-        && draft.signing_required;
+    let is_regtest = draft.network == "regtest";
+    let ready =
+        is_regtest && draft.status == "unsigned_ready_for_native_review" && draft.signing_required;
     let total = draft.amount_sats.checked_add(draft.fee_sats);
     let mut details: Column<'static, view::Message, theme::Theme> = Column::new()
         .spacing(0)
         .width(Length::Fill)
         .push(transaction_field(
             "From",
-            if draft.network == "regtest" {
+            if is_regtest {
                 "Active Vault · Bitcoin Regtest"
             } else {
                 "Unsupported network"
@@ -453,7 +453,7 @@ fn transaction_card(client_id: &str, draft: Prepared) -> Ui<'static> {
         .push(
             row![
                 heading("Prepared transaction"),
-                page::scope_tag(if draft.network == "regtest" { "REGTEST" } else { "UNSUPPORTED" })
+                page::scope_tag(if is_regtest { "REGTEST" } else { "UNSUPPORTED" })
             ]
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
