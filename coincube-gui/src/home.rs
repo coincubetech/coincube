@@ -5685,74 +5685,265 @@ impl Home {
     fn create_journey_view(&self) -> Element<Message> {
         let backing_up = matches!(self.state, State::CreationBackup(_));
         let selecting_network = !backing_up && !self.create_network_confirmed;
-        let step_label = |number: u8, label: &'static str, current: bool| {
-            let label = format!("{number}  {label}");
-            if current {
-                p2_regular(label).style(theme::text::primary)
-            } else {
-                p2_regular(label).style(theme::text::secondary)
-            }
+        let blake2b = self.network.is_blake2b();
+        // Match the prototype's route through the installer without claiming
+        // that Home owns its later steps. The fork has its own ordered path.
+        let steps: &[&str] = if blake2b {
+            &[
+                "Network", "PIN", "Vault", "Policy", "Keys", "Seed", "Connect", "Node", "Name",
+                "Done",
+            ]
+        } else if self.passkey_mode {
+            &[
+                "Network", "Cube", "Passkey", "Backup", "Connect", "Vault", "Policy", "Keys",
+                "Node", "Done",
+            ]
+        } else {
+            &[
+                "Network", "Cube", "Backup", "Connect", "Vault", "Policy", "Keys", "Node", "Done",
+            ]
         };
+        let active_step = if selecting_network {
+            0
+        } else if backing_up {
+            if blake2b {
+                5
+            } else if self.passkey_mode {
+                3
+            } else {
+                2
+            }
+        } else if self.passkey_mode && self.creating_cube {
+            2
+        } else {
+            1
+        };
+        let progress = steps.iter().enumerate().fold(
+            Row::new().spacing(8).align_y(Alignment::Center),
+            |row, (index, label)| {
+                let current = index == active_step;
+                let done = index < active_step;
+                let number = Container::new(p2_regular((index + 1).to_string()).size(12))
+                    .width(Length::Fixed(22.0))
+                    .height(Length::Fixed(22.0))
+                    .center_x(Length::Fixed(22.0))
+                    .center_y(Length::Fixed(22.0))
+                    .style(move |theme: &theme::Theme| iced::widget::container::Style {
+                        background: current
+                            .then_some(iced::Background::Color(theme.colors.shell.selected)),
+                        border: iced::Border {
+                            color: if current {
+                                theme.colors.shell.accent
+                            } else if done {
+                                theme.colors.shell.good
+                            } else {
+                                theme.colors.shell.line
+                            },
+                            width: 1.0,
+                            radius: 11.0.into(),
+                        },
+                        ..Default::default()
+                    });
+                row.push(
+                    Row::new()
+                        .spacing(5)
+                        .align_y(Alignment::Center)
+                        .push(number)
+                        .push(p2_regular(*label).size(12).style(move |theme| {
+                            if current || done {
+                                theme::text::primary(theme)
+                            } else {
+                                theme::text::secondary(theme)
+                            }
+                        })),
+                )
+            },
+        );
 
-        let progress = Row::new()
-            .spacing(24)
-            .push(step_label(1, "Network", selecting_network))
-            .push(step_label(2, "Cube", !selecting_network && !backing_up))
-            .push(step_label(3, "Backup", backing_up));
+        let leave = self.has_cube_list() && !backing_up;
+        let brand = FocusableAction::new(
+            Id::new("tenshu.create:brand"),
+            Row::new()
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .push(icon::cube_outline_icon())
+                .push(p2_regular("Tenshu")),
+            create_journey_focus,
+        )
+        .style(theme::button::transparent)
+        .on_press_maybe(leave.then_some(ViewMessage::ShowCreateCube(false)));
+        let connect_label = if self.connect_account.is_authenticated() {
+            "Signed in"
+        } else if self.connect_account.is_checking_session() {
+            "Checking…"
+        } else {
+            "Sign in"
+        };
+        let connect = FocusableAction::new(
+            Id::new("tenshu.create:connect"),
+            Row::new()
+                .spacing(6)
+                .align_y(Alignment::Center)
+                .push(icon::person_icon())
+                .push(p2_regular("Connect"))
+                .push(p2_regular(connect_label).style(theme::text::secondary)),
+            create_journey_focus,
+        )
+        .style(theme::button::transparent)
+        .on_press_maybe(
+            (!backing_up && !self.connect_account.is_checking_session()).then_some(
+                ViewMessage::GoToSection(HomeSection::Connect(app::menu::ConnectSubMenu::Overview)),
+            ),
+        );
+        let top_bar = Container::new(
+            Row::new()
+                .spacing(16)
+                .align_y(Alignment::Center)
+                .push(brand)
+                .push(
+                    button::secondary_action(
+                        "tenshu.create:top-back-to-list",
+                        Some(icon::previous_icon()),
+                        "Back to Cube list",
+                        create_journey_focus,
+                    )
+                    .on_press_maybe(leave.then_some(ViewMessage::ShowCreateCube(false))),
+                )
+                .push(Space::new().width(Length::Fill))
+                .push(connect)
+                .push(
+                    button::secondary_action(
+                        "tenshu.create:top-app-preferences",
+                        Some(icon::settings_icon()),
+                        "App preferences",
+                        create_journey_focus,
+                    )
+                    .on_press_maybe((!backing_up).then_some(ViewMessage::OpenAppPreferences)),
+                ),
+        )
+        .height(Length::Fixed(64.0))
+        .padding([0, 24])
+        .width(Length::Fill)
+        .style(theme::container::shell_rail);
 
-        let mut header = Row::new()
+        let header = Row::new()
             .align_y(Alignment::Center)
             .spacing(16)
-            .push(h4_bold("Create Cube"))
+            .push(p2_regular("Create Cube"))
+            .push(p2_regular(
+                if self.create_cube_name.value.trim().is_empty() {
+                    "New Cube"
+                } else {
+                    self.create_cube_name.value.trim()
+                },
+            ))
             .push(p2_regular(self.network.label()).style(theme::text::secondary))
             .push(Space::new().width(Length::Fill));
-        if !backing_up && self.has_cube_list() {
-            header = header.push(
-                button::secondary_action(
-                    "tenshu.create:back-to-list",
-                    None,
-                    "Back to Cube list",
-                    create_journey_focus,
-                )
-                .on_press(ViewMessage::ShowCreateCube(false)),
-            );
-        }
 
         let body: Element<ViewMessage> = if selecting_network {
-            let network_rows = self.displayed_networks.iter().copied().fold(
-                Column::new().spacing(10),
-                |rows, chain| {
-                    let available = self.chain_availability(chain).is_available();
-                    let label = if chain == self.network {
-                        format!("{}  ·  Selected", chain.label())
-                    } else {
-                        chain.label().to_string()
-                    };
-                    let id = Id::new(format!(
-                        "tenshu.create:network:{}",
-                        settings::network_to_api_string(chain)
-                    ));
-                    let row = FocusableAction::new(id, text(label), create_journey_focus)
-                        .width(Length::Fill);
-                    let row = if chain == self.network {
-                        row.style(theme::button::menu_pressed)
-                    } else {
-                        row.style(theme::button::secondary)
-                    };
-                    rows.push(
-                        row.on_press_maybe(
-                            (available && chain != self.network)
-                                .then_some(ViewMessage::SelectNetwork(chain)),
+            let network_row = |chain: ChainId| -> Element<ViewMessage> {
+                let available = self.chain_availability(chain).is_available();
+                let selected = chain == self.network;
+                let subtitle = match chain {
+                    ChainId::Bitcoin => "Spark · Liquid · Vault",
+                    ChainId::Regtest => "Spark · Vault. Liquid isn't available on Regtest.",
+                    ChainId::BitcoinBlake2b | ChainId::BitcoinBlake2bTestnet4 => {
+                        "Bitcoin Blake2b supports Vault creation only"
+                    }
+                    ChainId::Testnet => "Vault only. Spark and Liquid aren't available on Testnet.",
+                    ChainId::Testnet4 => {
+                        "Vault only. Spark and Liquid aren't available on Testnet4."
+                    }
+                    ChainId::Signet => "Vault only. Spark and Liquid aren't available on Signet.",
+                };
+                let id = Id::new(format!(
+                    "tenshu.create:network:{}",
+                    settings::network_to_api_string(chain)
+                ));
+                let mut name = Row::new()
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .push(icon::bitcoin_icon())
+                    .push(p2_regular(chain.label()));
+                if chain.is_blake2b() {
+                    name = name.push(p2_regular("Blake2b").style(theme::text::secondary));
+                }
+                let row = FocusableAction::new(
+                    id,
+                    Row::new()
+                        .spacing(12)
+                        .align_y(Alignment::Center)
+                        .push(if selected {
+                            icon::check_icon()
+                        } else {
+                            icon::dot_icon()
+                        })
+                        .push(
+                            Column::new()
+                                .spacing(3)
+                                .push(name)
+                                .push(p2_regular(subtitle).style(theme::text::secondary)),
                         ),
-                    )
-                },
-            );
+                    create_journey_focus,
+                )
+                .width(Length::Fill)
+                .padding([12, 8])
+                .style(move |theme, status| {
+                    let mut style = theme::button::transparent(theme, status);
+                    if selected {
+                        style.background =
+                            Some(iced::Background::Color(theme.colors.shell.selected));
+                    }
+                    style
+                });
+                row.on_press_maybe(
+                    (available && !selected).then_some(ViewMessage::SelectNetwork(chain)),
+                )
+                .into()
+            };
+            let network_rule = || -> Element<ViewMessage> {
+                Container::new(Space::new())
+                    .width(Length::Fill)
+                    .height(Length::Fixed(1.0))
+                    .style(|theme: &theme::Theme| iced::widget::container::Style {
+                        background: Some(iced::Background::Color(theme.colors.shell.line)),
+                        ..Default::default()
+                    })
+                    .into()
+            };
+            let live = self
+                .displayed_networks
+                .iter()
+                .copied()
+                .filter(|chain| matches!(chain, ChainId::Bitcoin | ChainId::BitcoinBlake2b))
+                .collect::<Vec<_>>();
+            let test = self
+                .displayed_networks
+                .iter()
+                .copied()
+                .filter(|chain| !matches!(chain, ChainId::Bitcoin | ChainId::BitcoinBlake2b))
+                .collect::<Vec<_>>();
             let mut content = Column::new()
-                .spacing(18)
-                .max_width(640)
-                .push(h4_bold("Network"))
-                .push(p2_regular("Choose the network for this Cube.").style(theme::text::secondary))
-                .push(network_rows);
+                .spacing(16)
+                .max_width(680)
+                .push(h4_bold("Network"));
+            if live.len() > 1 {
+                content = content.push(p2_regular("Live networks"));
+            }
+            let mut live_rows = Column::new().spacing(0);
+            for chain in live {
+                live_rows = live_rows.push(network_rule()).push(network_row(chain));
+            }
+            content = content
+                .push(live_rows.push(network_rule()))
+                .push(p2_regular("Test networks"));
+            if self.developer_mode {
+                let mut test_rows = Column::new().spacing(0);
+                for chain in test {
+                    test_rows = test_rows.push(network_rule()).push(network_row(chain));
+                }
+                content = content.push(test_rows.push(network_rule()));
+            }
             if let Some(error) = &self.error {
                 content = content.push(p2_regular(error).style(theme::text::error));
             }
@@ -5782,22 +5973,9 @@ impl Home {
                         .style(theme::text::secondary),
                 );
             }
-            content = content.push(
-                button::primary_action(
-                    "tenshu.create:network-continue",
-                    None,
-                    "Continue",
-                    create_journey_focus,
-                )
-                .on_press_maybe(
-                    self.chain_availability(self.network)
-                        .is_available()
-                        .then_some(ViewMessage::ConfirmCreateNetwork),
-                ),
-            );
             content.into()
         } else if let State::CreationBackup(step) = &self.state {
-            creation_backup_view(
+            Container::new(creation_backup_view(
                 step,
                 self.creation_backup_words.as_ref().map(|w| w.as_slice()),
                 self.creating_cube,
@@ -5807,7 +5985,9 @@ impl Home {
                 self.creation_kit_acknowledged,
                 self.creation_kit_error.as_deref(),
                 self.can_create_recovery_kit(),
-            )
+            ))
+            .max_width(640)
+            .into()
         } else {
             Column::new()
                 .spacing(16)
@@ -5826,26 +6006,70 @@ impl Home {
                 .into()
         };
 
+        let divider = || -> Element<ViewMessage> {
+            Container::new(Space::new())
+                .width(Length::Fill)
+                .height(Length::Fixed(1.0))
+                .style(|theme: &theme::Theme| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(theme.colors.shell.line)),
+                    ..Default::default()
+                })
+                .into()
+        };
+
         let region = Column::new()
             .width(Length::Fill)
             .height(Length::Fill)
-            .push(Container::new(header).padding(20).width(Length::Fill))
-            .push(Container::new(progress).padding(20).width(Length::Fill))
+            .push(Container::new(header).padding([16, 28]).width(Length::Fill))
+            .push(divider())
             .push(
-                scrollable(Container::new(body).padding(24).width(Length::Fill))
+                Container::new(progress)
+                    .padding([14, 28])
+                    .width(Length::Fill),
+            )
+            .push(divider())
+            .push(
+                scrollable(Container::new(body).padding(28).width(Length::Fill))
                     .height(Length::Fill),
             );
-        let frame: Element<ViewMessage> = Container::new(
+        let region = if selecting_network {
+            region.push(divider()).push(
+                Container::new(
+                    Row::new().push(Space::new().width(Length::Fill)).push(
+                        button::primary_action(
+                            "tenshu.create:network-continue",
+                            None,
+                            "Continue",
+                            create_journey_focus,
+                        )
+                        .on_press_maybe(
+                            self.chain_availability(self.network)
+                                .is_available()
+                                .then_some(ViewMessage::ConfirmCreateNetwork),
+                        ),
+                    ),
+                )
+                .padding([14, 28])
+                .width(Length::Fill),
+            )
+        } else {
+            region
+        };
+        let stage = Container::new(
             Container::new(region)
                 .style(theme::card::simple)
                 .width(Length::Fill)
                 .max_width(940),
         )
-        .padding(24)
+        .padding([28, 24])
         .center_x(Length::Fill)
-        .height(Length::Fill)
-        .style(theme::container::background)
-        .into();
+        .height(Length::Fill);
+        let frame: Element<ViewMessage> =
+            Container::new(Column::new().height(Length::Fill).push(top_bar).push(stage))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(theme::container::background)
+                .into();
         frame.map(Message::View)
     }
 
@@ -6700,7 +6924,7 @@ fn creation_backup_view<'a>(
 
     let with_bypass = |inner: Element<'a, ViewMessage>| -> Element<'a, ViewMessage> {
         Column::new()
-            .align_x(Alignment::Center)
+            .align_x(Alignment::Start)
             .spacing(20)
             .push(inner)
             .push(bypass_link())
@@ -6709,7 +6933,7 @@ fn creation_backup_view<'a>(
 
     match step {
         CreationBackupStep::Intro(checked) => Column::new()
-            .align_x(Alignment::Center)
+            .align_x(Alignment::Start)
             .spacing(20)
             .push(backup::intro_view(*checked, ViewMessage::CreationBackup))
             .push(
@@ -6758,7 +6982,7 @@ fn creation_backup_view<'a>(
         }
         CreationBackupStep::KitUploading => Container::new(
             Column::new()
-                .align_x(Alignment::Center)
+                .align_x(Alignment::Start)
                 .spacing(20)
                 .push(text("Saving your Recovery Kit…").size(24).bold())
                 .push(
@@ -6773,7 +6997,7 @@ fn creation_backup_view<'a>(
                     .max_width(500),
                 ),
         )
-        .center_x(Length::Fill)
+        .width(Length::Fill)
         .into(),
     }
 }
@@ -6797,7 +7021,7 @@ fn creation_choice_view(
     is_passkey: bool,
     kit_available: bool,
 ) -> Element<'static, ViewMessage> {
-    let mut options = Column::new().align_x(Alignment::Center).spacing(12).push(
+    let mut options = Column::new().align_x(Alignment::Start).spacing(12).push(
         button::primary(None, "Write down my recovery phrase")
             .on_press_maybe(
                 (!saving).then_some(ViewMessage::CreationBackup(BackupWalletMessage::NextStep)),
@@ -6814,7 +7038,7 @@ fn creation_choice_view(
     }
 
     let mut content = Column::new()
-        .align_x(Alignment::Center)
+        .align_x(Alignment::Start)
         .spacing(20)
         .push(text("Back up this Cube").size(24).bold())
         .push(
@@ -6861,7 +7085,7 @@ fn creation_choice_view(
             )
             .push(button::transparent(None, "Cancel").on_press(ViewMessage::CancelCreationBackup)),
     )
-    .center_x(Length::Fill)
+    .width(Length::Fill)
     .into()
 }
 
@@ -6878,7 +7102,7 @@ fn creation_backup_bypass_view(
 ) -> Element<'static, ViewMessage> {
     Container::new(
         Column::new()
-            .align_x(Alignment::Center)
+            .align_x(Alignment::Start)
             .spacing(20)
             .push(text("Create this Cube without a backup?").size(24).bold())
             .push(
@@ -6916,7 +7140,7 @@ fn creation_backup_bypass_view(
             )
             .push(button::transparent(None, "Cancel").on_press(ViewMessage::CancelCreationBackup)),
     )
-    .center_x(Length::Fill)
+    .width(Length::Fill)
     .into()
 }
 
