@@ -1078,10 +1078,6 @@ fn link_action<'a>(
     .into()
 }
 
-/// Shown while no accepted privacy choice exists: amounts are masked, and the
-/// user may persist an explicit choice only when the shared balance controls
-/// are interactive and no load or save is in flight.
-/// Neither button is a fallback default.
 /// The step the Zoom row shows selected and its note. A saved step over the
 /// screen's cap is shown as the one in use, and the note says why.
 fn zoom_choice(saved: Zoom, max_zoom: Zoom) -> (Zoom, String) {
@@ -1106,6 +1102,10 @@ fn zoom_shortcuts() -> &'static str {
     }
 }
 
+/// Shown while no accepted privacy choice exists: amounts are masked, and the
+/// user may persist an explicit choice only when the shared balance controls
+/// are interactive and no load or save is in flight.
+/// Neither button is a fallback default.
 fn explicit_privacy_choice(enabled: bool) -> Element<'static, Message> {
     Column::new()
         .spacing(6)
