@@ -7231,6 +7231,15 @@ fn delete_modal_focus(id: Id) -> ViewMessage {
     ViewMessage::Catalog(launcher_catalog::CatalogMessage::Focus(id))
 }
 
+fn delete_modal_card(theme: &theme::Theme) -> iced::widget::container::Style {
+    let mut style = theme::card::modal(theme);
+    style.background = Some(iced::Background::Color(theme.colors.shell.panel));
+    style.border.color = theme.colors.shell.line;
+    style.border.width = 1.0;
+    style.border.radius = 12.0.into();
+    style
+}
+
 const DELETE_LOCAL_CANCEL_ID: &str = "tenshu.delete-cube:cancel";
 const DELETE_LOCAL_CONFIRM_ID: &str = "tenshu.delete-cube:confirm";
 const DELETE_REMOTE_CANCEL_ID: &str = "tenshu.delete-remote-cube:cancel";
@@ -7304,11 +7313,7 @@ impl DeleteRemoteCubeModal {
             Container::new(col)
                 .padding([28.0, 32.0])
                 .width(Length::Fixed(700.0))
-                .style(|theme| {
-                    let mut style = theme::card::modal(theme);
-                    style.border.radius = 12.0.into();
-                    style
-                }),
+                .style(delete_modal_card),
         )
         .map(Message::View)
     }
@@ -7688,11 +7693,7 @@ impl DeleteCubeModal {
             Container::new(col)
                 .padding([28.0, 32.0])
                 .width(Length::Fixed(700.0))
-                .style(|theme| {
-                    let mut style = theme::card::modal(theme);
-                    style.border.radius = 12.0.into();
-                    style
-                }),
+                .style(delete_modal_card),
         )
         .map(Message::View)
     }
@@ -10336,7 +10337,7 @@ mod tests {
             deleting,
             error: None,
         };
-        let size = (1200, 800);
+        let size = (1024, 768);
         let local_cancel = Id::new(DELETE_LOCAL_CANCEL_ID);
         let local_confirm = Id::new(DELETE_LOCAL_CONFIRM_ID);
         let remote_cancel = Id::new(DELETE_REMOTE_CANCEL_ID);
@@ -10381,6 +10382,25 @@ mod tests {
                     .iter()
                     .position(|(id, _)| id == &remote_confirm)
         );
+
+        let local_light = capture::inspect_full_window(
+            "delete-cube-keyboard",
+            local().view(),
+            size,
+            "light",
+            theme::Theme::light(),
+        );
+        assert!(local_light.has_focus(local_cancel.clone()));
+        assert!(local_light.has_focus(local_confirm.clone()));
+        let remote_dark = capture::inspect_full_window(
+            "delete-remote-cube-keyboard",
+            remote(false).view(),
+            size,
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(remote_dark.has_focus(remote_cancel.clone()));
+        assert!(remote_dark.has_focus(remote_confirm.clone()));
 
         for key in [Named::Enter, Named::Space] {
             assert!(matches!(
