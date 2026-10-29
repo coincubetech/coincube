@@ -121,26 +121,30 @@ Reduced motion: every transition and the 3D floor spin are off under
 
 ### Page layout (Cube screens)
 
-Every screen inside the Cube shell uses one page container. The left edge is
-fixed; only the right edge varies by page width.
+Every screen inside the Cube shell uses one page container: one column, the
+same width on every page, centred in the content area. Robert chose this on
+2026-10-28 over the earlier left-anchored layout, which left large monitors
+empty on the right.
 
 | Rule | Value |
 | --- | --- |
-| Anchor | Left. The content starts one gutter from the side menu. Never center the page column (`margin: 0 auto`, `justify-content: center`). |
+| Anchor | Centred. Below the page width plus two gutters the column fills the space between the gutters, so it starts one gutter from the side menu as before. |
 | Gutter | `clamp(24px, 3vw, 48px)` on both sides (30.7px at the 1024 minimum window, 43.2px at 1440, 48px from 1600). In the app: `(0.03 × window width).clamp(24, 48)`. |
 | Top padding | 28px above the page title on every page; 48px bottom padding. |
-| Reading width | Content is at most 1120px wide, so the container is at most 1120px plus two gutters. Applies to Overview, wallet pages, Send, Receive, Transfer, Tools, Split, Claim, Signing, Settings, Members, Marketplace, AI access and the gap screens. |
-| Wide width | Activity only: no maximum. The filter row, the table and the detail panel use the full width. The title, filters and first table column still start at the gutter. |
+| Page width | Content is at most 960px wide on every page, Activity included. 960 is what Send and Receive need for their 680px form and 240px step column side by side. |
+| Activity | The title, filters and table sit on the page column. The detail panel (420px) sits at the content area's right edge; the column stays where it is when the panel fits in the right margin, else it centres in the space left of the panel. |
 | Page header | The same on every page: title, then the Cube and network line. A right-side item (Overview's network line, Activity's result count) sits at the container's right edge. |
 
 Inner layouts sit inside this container and start at its left edge. For example,
-Send and Receive keep their 680px form and 240px step column, with no centering.
+Send and Receive keep their 680px form and 240px step column, with no centering
+of their own.
 In the artboards the rule is the "page shell" block at the end of each
 `<helmet><style>`: `--gutter` and `--page-max` on `.tenshu`, applied to `.main .pg`
 (Activity: `.phd`, `.filters`, `.lst`). In the app this is `coincube_ui::component::tenshu::page`, wrapped by the
-Cube shell (`coincube-gui/src/app/view/mod.rs`: `dashboard` reads,
-`dashboard_activity` is wide). Do not give a screen its own side padding, page
-`max_width` or centering.
+Cube shell (`coincube-gui/src/app/view/mod.rs`: `dashboard`, and
+`dashboard_activity`, which applies the same column in `view::activity`). Do not
+give a screen its own side padding, page `max_width` or centering. The artboards
+still show the left-anchored, 1120px rule.
 
 ## 5. Sequencing · one draft PR per step
 
@@ -193,8 +197,8 @@ review doc section in parentheses.
 - Keep both themes and reduced motion working on every screen you touch.
 - Window minimum 1024×768 (the compact-layout boards are in
   `archive/explorations/`).
-- Every Cube screen uses the shared page container (§4, "Page layout"): left-anchored,
-  one gutter, reading or wide width. No screen centers its own column.
+- Every Cube screen uses the shared page container (§4, "Page layout"): one
+  centred 960px column. No screen centers or pads its own column.
 - Bitcoin Blake2b is a per-device toggle (App preferences › Developer). With it
   off, no Blake2b network, Cube, tab, card, copy or badge appears anywhere: not in
   the Launcher's network menu or Cube list, not in Create's network step, not in

@@ -140,9 +140,9 @@ pub fn dashboard<'a, T: Into<Element<'a, Message>>>(
     )
 }
 
-/// Activity is the one wide page. It fills the content area edge to edge
-/// (`.main`) so its header and filters stay put while the list and the detail
-/// pane scroll on their own; `view::activity` insets them by [`page_gutter`].
+/// Activity fills the content area edge to edge (`.main`) so its header and
+/// filters stay put while the list and the detail pane scroll on their own;
+/// `view::activity` puts them on the same centred page column as [`page`].
 pub fn dashboard_activity<'a, T: Into<Element<'a, Message>>>(
     menu: &'a Menu,
     cache: &'a Cache,
@@ -206,8 +206,8 @@ pub fn page_gutter(pane_width: f32) -> f32 {
     gutter_for_window(window)
 }
 
-/// Every Cube screen's page container (HANDOFF "Page layout"): left-anchored
-/// at [`page_gutter`], reading or wide.
+/// Every Cube screen's page container (HANDOFF "Page layout"): one column at
+/// most `PAGE_MAX` wide, centred, at least [`page_gutter`] from each side.
 pub fn page<'a, T: Into<Element<'a, Message>>>(
     content: T,
     width: PageWidth,

@@ -5,7 +5,7 @@
 use chrono::{DateTime, Local, NaiveDate, Utc};
 use coincube_spark_protocol::PaymentSummary;
 use coincube_ui::{
-    component::tenshu::{self, FieldSize},
+    component::tenshu::{self, FieldSize, PageWidth},
     font, theme,
     widget::{action::Action, Column, Element, Row},
 };
@@ -824,6 +824,40 @@ fn detail_beside_list(width: f32) -> bool {
     width >= MIN_ACTIVITY_ROWS_WIDTH + 2.0 * list_inset(width) + SELECTED_DETAIL_WIDTH
 }
 
+/// The pane and the rule before it.
+const DETAIL_SPAN: f32 = SELECTED_DETAIL_WIDTH + 1.0;
+
+/// Where Activity's page column sits in a pane `width` wide: `left` and
+/// `right` are its distances from the pane's edges.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Frame {
+    left: f32,
+    column: f32,
+    right: f32,
+}
+
+/// Activity's header, filters and rows share the page column every Cube page
+/// uses (`tenshu::page`), centred. A detail pane beside the list sits at the
+/// pane's right edge; the column keeps its place when the pane fits in the
+/// right margin, else it is centred in the space left of the pane.
+fn column_frame(width: f32, detail_beside: bool) -> Frame {
+    let gutter = super::page_gutter(width);
+    let frame = |space: f32| {
+        let (left, column) = tenshu::content_frame(space, PageWidth::Reading, gutter);
+        Frame {
+            left,
+            column,
+            right: width - left - column,
+        }
+    };
+    let centred = frame(width);
+    if !detail_beside || centred.right >= DETAIL_SPAN + gutter {
+        centred
+    } else {
+        frame(width - DETAIL_SPAN)
+    }
+}
+
 /// `.day`: a relative name, then the date in the muted ink.
 fn day_heading(day: Option<NaiveDate>, today: NaiveDate) -> (String, String) {
     let Some(day) = day else {
@@ -1079,7 +1113,7 @@ fn link_button<'a>(
     .into()
 }
 
-fn filters_bar<'a>(activity: &'a Activity, width: f32) -> Element<'a, Message> {
+fn filters_bar<'a>(activity: &'a Activity, frame: Frame) -> Element<'a, Message> {
     let wallet = tenshu::select(
         "tenshu.activity.filter.wallet",
         "Wallet",
@@ -1155,7 +1189,7 @@ fn filters_bar<'a>(activity: &'a Activity, width: f32) -> Element<'a, Message> {
     .width(Length::Fill)
     .max_width(280);
     // `.filters`: one row when it fits, else selects over the text fields.
-    let controls: Element<'a, Message> = if width < 1000.0 {
+    let controls: Element<'a, Message> = if frame.column < 920.0 {
         column![
             row![wallet, direction, status].spacing(12),
             row![dates, search].spacing(12)
@@ -1170,7 +1204,12 @@ fn filters_bar<'a>(activity: &'a Activity, width: f32) -> Element<'a, Message> {
     };
     column![
         container(controls)
-            .padding([16.0, super::page_gutter(width)])
+            .padding(iced::Padding {
+                top: 16.0,
+                right: frame.right,
+                bottom: 16.0,
+                left: frame.left,
+            })
             .width(Length::Fill),
         rule::horizontal(1)
     ]
@@ -1182,7 +1221,7 @@ fn header<'a>(
     cache: &'a Cache,
     shown: usize,
     loaded: usize,
-    width: f32,
+    frame: Frame,
 ) -> Element<'a, Message> {
     let count = activity.filters.count();
     let title = column![
@@ -1238,21 +1277,20 @@ fn header<'a>(
         font::REGULAR,
         glyph::muted,
     ));
-    let body: Element<'a, Message> = if width < 720.0 {
+    let body: Element<'a, Message> = if frame.column < 660.0 {
         column![title, actions].spacing(8).into()
     } else {
         row![title, Space::new().width(Length::Fill), actions]
             .align_y(Alignment::End)
             .into()
     };
-    // `.phd`: the page's 28px top and gutter, as on every Cube page.
-    let gutter = super::page_gutter(width);
+    // `.phd`: the page's 28px top, on the page column like every Cube page.
     container(body)
         .padding(iced::Padding {
             top: 28.0,
-            right: gutter,
+            right: frame.right,
             bottom: 0.0,
-            left: gutter,
+            left: frame.left,
         })
         .into()
 }
@@ -2004,6 +2042,7 @@ fn render_at_width<'a>(
         .as_ref()
         .and_then(|id| visible.iter().copied().find(|entry| &entry.id == id));
     let beside = detail_beside_list(width);
+    let frame = column_frame(width, beside && selected.is_some());
     let shown = visible.len();
     let loading = activity.vault_loading
         || activity.psbt_loading
@@ -2178,12 +2217,18 @@ fn render_at_width<'a>(
         }
         list = list.push(container(more).padding([16, 12]));
     }
-    // `.lst`: gutter-aligned side insets and 24px below the last row.
+    // `.lst`: row text on the page column and 24px below the last row. The
+    // list ends where the detail pane starts, so its right inset loses it.
+    let pane = if beside && selected_detail.is_some() {
+        DETAIL_SPAN
+    } else {
+        0.0
+    };
     let list = scrollable(container(list).padding(iced::Padding {
         top: 0.0,
-        right: list_inset(width),
+        right: (frame.right - pane - ROW_INSET).max(0.0),
         bottom: 24.0,
-        left: list_inset(width),
+        left: frame.left - ROW_INSET,
     }))
     .id(Id::from(ACTIVITY_LIST_SCROLL_ID))
     .width(Length::Fill)
@@ -2207,8 +2252,8 @@ fn render_at_width<'a>(
         );
     }
     column![
-        header(activity, cache, shown, loaded, width),
-        filters_bar(activity, width),
+        header(activity, cache, shown, loaded, frame),
+        filters_bar(activity, frame),
         split
     ]
     .width(Length::Fill)
@@ -2452,13 +2497,30 @@ mod tests {
     }
 
     #[test]
-    fn activity_rows_start_on_the_page_gutter() {
+    fn activity_sits_on_the_same_column_as_every_page() {
         for pane in [816.0, 952.0, 1192.0, 2312.0] {
+            let (left, column) =
+                tenshu::content_frame(pane, PageWidth::Reading, super::super::page_gutter(pane));
             assert_eq!(
-                list_inset(pane) + ROW_INSET,
-                super::super::page_gutter(pane)
+                column_frame(pane, false),
+                Frame {
+                    left,
+                    column,
+                    right: pane - left - column
+                }
             );
         }
+    }
+
+    #[test]
+    fn the_detail_pane_moves_the_column_only_when_it_would_cover_it() {
+        // A 2560px window: the 421px pane fits in the right margin.
+        assert_eq!(column_frame(2312.0, true), column_frame(2312.0, false));
+        // 1440px: the column centres in what the pane leaves.
+        let beside = column_frame(1192.0, true);
+        assert!(beside.left < column_frame(1192.0, false).left);
+        assert_eq!(beside.left + beside.column + beside.right, 1192.0);
+        assert!(beside.right >= DETAIL_SPAN);
     }
 
     #[test]
