@@ -241,6 +241,7 @@ pub async fn update_connect_cache(
 
 enum CacheUpdateGuard<'a> {
     LoginSnapshot(&'a ConnectCache),
+    RestoreSnapshot(&'a ConnectCache),
     RefreshToken(&'a str),
 }
 
@@ -260,6 +261,27 @@ pub async fn persist_refreshed_tokens(
         false,
         CacheAccountAction::PreserveSelection,
         Some(CacheUpdateGuard::RefreshToken(previous_refresh_token)),
+    )
+    .await
+}
+
+/// Adopt a keyring session on this network only while the cache selection and
+/// bearer seen before the restore RPC are unchanged. A Home refresh can rotate
+/// the global keyring independently of this network's connect.json.
+pub async fn persist_restored_tokens(
+    network_dir: &NetworkDirectory,
+    email: &str,
+    tokens: &AccessTokenResponse,
+    started_from: &ConnectCache,
+) -> Result<AccessTokenResponse, ConnectCacheError> {
+    let auth = AuthClient::new(String::new(), String::new(), email.to_string());
+    update_connect_cache_inner(
+        network_dir,
+        tokens,
+        &auth,
+        false,
+        CacheAccountAction::Activate,
+        Some(CacheUpdateGuard::RestoreSnapshot(started_from)),
     )
     .await
 }
@@ -295,8 +317,6 @@ async fn update_connect_cache_inner(
     let mut path = network_dir.path().to_path_buf();
     path.push(CONNECT_CACHE_FILENAME);
 
-    let file_exists = tokio::fs::try_exists(&path).await.unwrap_or(false);
-
     let mut file = open_owner_cache(&path)
         .await
         .map_err(|e| ConnectCacheError::ReadingFile(format!("Opening file: {}", e)))?
@@ -304,22 +324,27 @@ async fn update_connect_cache_inner(
         .await
         .map_err(|e| ConnectCacheError::ReadingFile(format!("Locking file: {:?}", e)))?;
 
-    let mut cache = if file_exists {
-        let mut file_content = Vec::new();
-        file.read_to_end(&mut file_content)
-            .await
-            .map_err(|e| ConnectCacheError::ReadingFile(format!("Reading file content: {}", e)))?;
+    let mut file_content = Vec::new();
+    file.read_to_end(&mut file_content)
+        .await
+        .map_err(|e| ConnectCacheError::ReadingFile(format!("Reading file content: {}", e)))?;
 
+    let mut cache = if file_content.is_empty() {
+        ConnectCache::default()
+    } else {
         match serde_json::from_slice::<ConnectCache>(&file_content) {
             Ok(cache) => cache,
             Err(e) => {
+                if guard.is_some() {
+                    return Err(ConnectCacheError::ReadingFile(format!(
+                        "Parsing guarded Connect cache: {e}"
+                    )));
+                }
                 tracing::warn!("Something wrong with Liana-Connect cache file: {:?}", e);
                 tracing::warn!("Liana-Connect cache file is reset");
                 ConnectCache::default()
             }
         }
-    } else {
-        ConnectCache::default()
     };
 
     let guarded = guard.is_some();
@@ -344,6 +369,33 @@ async fn update_connect_cache_inner(
             {
                 return Err(ConnectCacheError::Unexpected(
                     "Connect login was superseded while OTP verification was pending".into(),
+                ));
+            }
+        }
+        Some(CacheUpdateGuard::RestoreSnapshot(started_from)) => {
+            fn account_tokens<'a>(
+                state: &'a ConnectCache,
+                email: &str,
+            ) -> Option<(&'a str, &'a str, i64)> {
+                state.accounts.iter().find(|a| a.email == email).map(|a| {
+                    (
+                        a.tokens.access_token.as_str(),
+                        a.tokens.refresh_token.as_str(),
+                        a.tokens.expires_at,
+                    )
+                })
+            }
+            let active_before = started_from.active_account().map(|a| a.email.as_str());
+            let active_now = cache.active_account().map(|a| a.email.as_str());
+            if cache.active_email != started_from.active_email
+                || active_now != active_before
+                || account_tokens(&cache, email) != account_tokens(started_from, email)
+                || active_before.is_some_and(|active| {
+                    account_tokens(&cache, active) != account_tokens(started_from, active)
+                })
+            {
+                return Err(ConnectCacheError::Unexpected(
+                    "Connect restore was superseded while refresh was pending".into(),
                 ));
             }
         }
@@ -770,9 +822,9 @@ impl std::fmt::Display for ConnectCacheError {
 mod tests {
     use super::{
         begin_device_reregistration, finish_device_reregistration, persist_refreshed_tokens,
-        set_device_id_for_email, set_device_id_for_email_if_token, update_connect_cache,
-        update_connect_cache_for_login, AccessTokenResponse, CacheAccountAction, ConnectCache,
-        CONNECT_CACHE_FILENAME,
+        persist_restored_tokens, set_device_id_for_email, set_device_id_for_email_if_token,
+        update_connect_cache, update_connect_cache_for_login, AccessTokenResponse,
+        CacheAccountAction, ConnectCache, CONNECT_CACHE_FILENAME,
     };
     use crate::dir::NetworkDirectory;
 
@@ -931,6 +983,116 @@ mod tests {
         assert!(restored.accounts[0].reregister_claim.is_none());
         assert!(restored.accounts[0].device_id.is_none());
         drop(claim);
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn restore_adopts_rotated_keyring_token_preserving_claim_and_rejects_replacement() {
+        let dir = test_network_dir();
+        let path = dir.path().join(CONNECT_CACHE_FILENAME);
+        let email = "alice@example.com";
+        let mut cache = ConnectCache::default();
+        cache.upsert_credential(email, tokens("cached"), CacheAccountAction::NewLogin);
+        cache.accounts[0].device_id = Some("device-a".into());
+        std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
+        let claim = begin_device_reregistration(&dir, email, "device-a")
+            .await
+            .unwrap()
+            .unwrap();
+        let snapshot = ConnectCache::from_file(&dir).unwrap();
+        persist_restored_tokens(&dir, email, &tokens("keyring-refreshed"), &snapshot)
+            .await
+            .unwrap();
+        let restored = ConnectCache::from_file(&dir).unwrap();
+        assert_eq!(
+            restored.active_account().unwrap().tokens.refresh_token,
+            "keyring-refreshed-refresh"
+        );
+        assert_eq!(
+            restored.active_account().unwrap().device_id.as_deref(),
+            Some("device-a")
+        );
+        assert_eq!(
+            restored
+                .active_account()
+                .unwrap()
+                .reregister_claim
+                .as_deref(),
+            Some(claim.as_str())
+        );
+        assert!(
+            persist_restored_tokens(&dir, email, &tokens("late"), &snapshot)
+                .await
+                .is_err()
+        );
+        drop(claim);
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn restore_admits_empty_network_cache_but_rejects_concurrent_new_login() {
+        let dir = test_network_dir();
+        let path = dir.path().join(CONNECT_CACHE_FILENAME);
+        let empty = ConnectCache::default();
+        persist_restored_tokens(&dir, "alice@example.com", &tokens("alice"), &empty)
+            .await
+            .unwrap();
+        assert_eq!(
+            ConnectCache::from_file(&dir)
+                .unwrap()
+                .active_email
+                .as_deref(),
+            Some("alice@example.com")
+        );
+        std::fs::remove_file(&path).unwrap();
+        let mut concurrent = ConnectCache::default();
+        concurrent.upsert_credential(
+            "bob@example.com",
+            tokens("bob"),
+            CacheAccountAction::NewLogin,
+        );
+        std::fs::write(&path, serde_json::to_vec(&concurrent).unwrap()).unwrap();
+        assert!(
+            persist_restored_tokens(&dir, "alice@example.com", &tokens("late-alice"), &empty)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            ConnectCache::from_file(&dir)
+                .unwrap()
+                .active_email
+                .as_deref(),
+            Some("bob@example.com")
+        );
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn restore_selects_keyring_account_without_erasing_other_account_claim() {
+        let dir = test_network_dir();
+        let path = dir.path().join(CONNECT_CACHE_FILENAME);
+        let mut cache = ConnectCache::default();
+        cache.upsert_credential(
+            "bob@example.com",
+            tokens("bob"),
+            CacheAccountAction::NewLogin,
+        );
+        cache.accounts[0].device_id = Some("bob-device".into());
+        cache.accounts[0].reregister_claim = Some("bob-claim".into());
+        std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
+        let snapshot = ConnectCache::from_file(&dir).unwrap();
+        persist_restored_tokens(&dir, "alice@example.com", &tokens("alice"), &snapshot)
+            .await
+            .unwrap();
+        let restored = ConnectCache::from_file(&dir).unwrap();
+        assert_eq!(restored.active_email.as_deref(), Some("alice@example.com"));
+        let bob = restored
+            .accounts
+            .iter()
+            .find(|a| a.email == "bob@example.com")
+            .unwrap();
+        assert_eq!(bob.device_id.as_deref(), Some("bob-device"));
+        assert_eq!(bob.reregister_claim.as_deref(), Some("bob-claim"));
         std::fs::remove_dir_all(dir.path()).unwrap();
     }
 
