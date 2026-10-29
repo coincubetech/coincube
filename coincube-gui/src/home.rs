@@ -5830,6 +5830,7 @@ impl Home {
                         "Back to Cube list",
                         create_journey_focus,
                     )
+                    .width(Length::Shrink)
                     .on_press_maybe(leave.then_some(ViewMessage::ShowCreateCube(false))),
                 )
                 .push(Space::new().width(Length::Fill))
@@ -5841,6 +5842,7 @@ impl Home {
                         "App preferences",
                         create_journey_focus,
                     )
+                    .width(Length::Shrink)
                     .on_press_maybe((!backing_up).then_some(ViewMessage::OpenAppPreferences)),
                 ),
         )
@@ -5905,7 +5907,7 @@ impl Home {
                         }
                     }
                 };
-                let id = Id::new(format!(
+                let id = Id::from(format!(
                     "tenshu.create:network:{}",
                     settings::network_to_api_string(chain)
                 ));
@@ -5941,10 +5943,20 @@ impl Home {
                 .width(Length::Fill)
                 .padding([12, 8])
                 .style(move |theme, status| {
-                    let mut style = theme::button::transparent(theme, status);
+                    // A selected option has no action, but it is not an
+                    // unavailable network. Keep its label at normal contrast.
+                    let mut style = theme::button::transparent(
+                        theme,
+                        if selected {
+                            iced::widget::button::Status::Active
+                        } else {
+                            status
+                        },
+                    );
                     if selected {
                         style.background =
                             Some(iced::Background::Color(theme.colors.shell.selected));
+                        style.text_color = theme.colors.shell.ink;
                     }
                     style
                 });
@@ -6026,6 +6038,7 @@ impl Home {
                                 "App preferences",
                                 create_journey_focus,
                             )
+                            .width(Length::Shrink)
                             .on_press(ViewMessage::OpenAppPreferences),
                         ),
                 );
@@ -6061,6 +6074,7 @@ impl Home {
                         "Back to networks",
                         create_journey_focus,
                     )
+                    .width(Length::Shrink)
                     .on_press_maybe(
                         (!self.creating_cube).then_some(ViewMessage::BackToCreateNetwork),
                     ),
@@ -6095,22 +6109,26 @@ impl Home {
             region = region
                 .push(
                     Container::new(
-                        Row::new()
-                            .spacing(8)
-                            .align_y(Alignment::Center)
-                            .push(create_journey_tag(self.network.label(), false))
-                            .push(p2_regular("Test network")),
+                        Container::new(
+                            Row::new()
+                                .spacing(8)
+                                .align_y(Alignment::Center)
+                                .push(create_journey_tag(self.network.label(), false))
+                                .push(p2_regular("Test network")),
+                        )
+                        .padding([8, 27])
+                        .width(Length::Fill)
+                        .style(|theme: &theme::Theme| {
+                            iced::widget::container::Style {
+                                background: Some(iced::Background::Color(
+                                    theme.colors.shell.background,
+                                )),
+                                ..Default::default()
+                            }
+                        }),
                     )
-                    .padding([8, 28])
-                    .width(Length::Fill)
-                    .style(|theme: &theme::Theme| {
-                        iced::widget::container::Style {
-                            background: Some(iced::Background::Color(
-                                theme.colors.shell.background,
-                            )),
-                            ..Default::default()
-                        }
-                    }),
+                    .padding([0, 1])
+                    .width(Length::Fill),
                 )
                 .push(divider());
         }
@@ -6127,6 +6145,7 @@ impl Home {
                             if blake2b { "Create Vault" } else { "Continue" },
                             create_journey_focus,
                         )
+                        .width(Length::Shrink)
                         .on_press_maybe(
                             self.chain_availability(self.network)
                                 .is_available()
@@ -8569,6 +8588,110 @@ mod tests {
         ));
         // The Action widget owns Enter/Space and disabled-action behavior;
         // its keyboard tests exercise those semantics in coincube-ui.
+    }
+
+    /// Synthetic Create frames for comparing the minimum window with P-Create.
+    #[test]
+    #[ignore = "writes PNG frames; needs a headless renderer"]
+    fn create_journey_capture_1024() {
+        use iced::advanced::{
+            layout, mouse, renderer::Headless, widget::Tree, Layout, Renderer as _, Shell,
+        };
+
+        let Ok(directory) = std::env::var("CREATE_CAPTURE_DIR") else {
+            return;
+        };
+        std::fs::create_dir_all(&directory).unwrap();
+        for bytes in coincube_ui::font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(bytes);
+        }
+        let mut renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(14.0),
+            Some("wgpu"),
+        ))
+        .expect("headless renderer");
+        let size = iced::Size::new(1024.0, 768.0);
+
+        for light in [false, true] {
+            let appearance = if light { "light" } else { "dark" };
+            let palette = if light {
+                theme::Theme::light()
+            } else {
+                theme::Theme::dark()
+            };
+            let mut home = home();
+            home.state = State::NoCube { create_cube: true };
+            home.developer_mode = true;
+            home.displayed_networks = vec![
+                ChainId::Bitcoin,
+                ChainId::Testnet4,
+                ChainId::Signet,
+                ChainId::Regtest,
+            ];
+            home.theme_mode = if light {
+                coincube_ui::theme::palette::ThemeMode::Light
+            } else {
+                coincube_ui::theme::palette::ThemeMode::Dark
+            };
+            for (name, chain, confirmed) in [
+                ("network", ChainId::Bitcoin, false),
+                ("cube", ChainId::Bitcoin, true),
+                ("test-network", ChainId::Testnet4, false),
+            ] {
+                home.network = chain;
+                home.create_network_confirmed = confirmed;
+                let mut element = home.create_journey_view();
+                let mut tree = Tree::new(element.as_widget());
+                let node = element.as_widget_mut().layout(
+                    &mut tree,
+                    &renderer,
+                    &layout::Limits::new(iced::Size::ZERO, size),
+                );
+                let viewport = iced::Rectangle::with_size(size);
+                renderer.reset(viewport);
+                let mut messages = Vec::new();
+                element.as_widget_mut().update(
+                    &mut tree,
+                    &iced::Event::Window(iced::window::Event::RedrawRequested(
+                        std::time::Instant::now(),
+                    )),
+                    Layout::new(&node),
+                    mouse::Cursor::Unavailable,
+                    &renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut Shell::new(&mut messages),
+                    &viewport,
+                );
+                element.as_widget().draw(
+                    &tree,
+                    &mut renderer,
+                    &palette,
+                    &iced::advanced::renderer::Style {
+                        text_color: palette.colors.shell.ink,
+                    },
+                    Layout::new(&node),
+                    mouse::Cursor::Unavailable,
+                    &viewport,
+                );
+                let pixels = renderer.screenshot(
+                    iced::Size::new(1024, 768),
+                    1.0,
+                    palette.colors.shell.background,
+                );
+                ::image::save_buffer(
+                    format!("{directory}/{appearance}-{name}-1024x768.png"),
+                    &pixels,
+                    1024,
+                    768,
+                    ::image::ColorType::Rgba8,
+                )
+                .unwrap();
+            }
+        }
     }
 
     #[test]
