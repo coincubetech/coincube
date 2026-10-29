@@ -9,12 +9,13 @@ PROFILE="$REPO_ROOT/contrib/release/macos/embedded.provisionprofile"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/imported-anchor-native.XXXXXX")"
 BUNDLE="$WORK/Probe.app"
 RUN_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+REPOSITORY="$WORK/repository"
 MAY_HAVE_ITEM=0
 cleanup() {
     local phase_status=$?
     trap - EXIT
     if [ "$MAY_HAVE_ITEM" -eq 1 ]; then
-        if ! "$BUNDLE/Contents/MacOS/Probe" delete "$RUN_ID"; then
+        if ! "$BUNDLE/Contents/MacOS/Probe" delete "$RUN_ID" "$REPOSITORY"; then
             echo "failed to remove the synthetic imported-anchor Keychain item" >&2
             if [ "$phase_status" -eq 0 ]; then
                 phase_status=1
@@ -39,7 +40,7 @@ test -n "${SIGN_IDENTITY:-}" || { echo "set SIGN_IDENTITY to the profile-authori
     "$PROFILE" --identity "$SIGN_IDENTITY"
 
 cd "$REPO_ROOT"
-cargo build -p coincube-gui --example imported_anchor_native --locked
+cargo build -p coincube-gui --example imported_anchor_native --features native-anchor-probe --locked
 mkdir -p "$BUNDLE/Contents/MacOS"
 BUILD_TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
 cp "$BUILD_TARGET_DIR/debug/examples/imported_anchor_native" "$BUNDLE/Contents/MacOS/Probe"
@@ -61,9 +62,10 @@ codesign --verify --strict "$BUNDLE"
     "$PROFILE" --signed-bundle "$BUNDLE"
 codesign -d --entitlements - "$BUNDLE" 2>&1 | grep -q '8UVR249AD5.io.coincube.tenshu'
 
-# Every invocation is a fresh process. Stopping after each durable transition
-# probes read-back and restart; sudden power loss still needs a separate test.
-for phase in create pending commit clear verify; do
+# Each phase is a fresh signed process against one disposable empty repository.
+# The fault seam changes only synthetic Security.framework queries in this
+# debug-only build. It cannot demonstrate sudden-power-loss durability.
+for phase in setup update-fails verify-old update-error verify-committed readback-fails verify-pending-closed recover verify; do
     MAY_HAVE_ITEM=1
-    "$BUNDLE/Contents/MacOS/Probe" "$phase" "$RUN_ID"
+    "$BUNDLE/Contents/MacOS/Probe" "$phase" "$RUN_ID" "$REPOSITORY"
 done

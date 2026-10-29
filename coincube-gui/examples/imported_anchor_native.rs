@@ -1,98 +1,48 @@
-//! Signed macOS probe for the production imported-inventory Keychain adapter.
-//!
-//! Each phase is a separate process and uses a dedicated synthetic service.
-//! The normal unit tests exercise the anchor codec with an in-memory store.
+//! Signed, disposable macOS probe for native imported-inventory transactions.
+//! Every phase is a fresh process and uses a per-run synthetic Keychain service.
 
-#[cfg(target_os = "macos")]
-#[path = "../src/services/imported_inventory_anchor/apple.rs"]
-mod apple;
-
-#[cfg(target_os = "macos")]
-const SERVICE: &str = "io.coincube.tenshu.native-imported-anchor-probe.v1";
-
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", debug_assertions, feature = "native-anchor-probe"))]
 fn main() {
+    use std::path::PathBuf;
     use uuid::Uuid;
 
     let mut args = std::env::args().skip(1);
     let phase = args.next().expect("phase is required");
-    let account = Uuid::parse_str(&args.next().expect("run UUID is required"))
-        .unwrap()
-        .to_string();
+    let run_id = Uuid::parse_str(&args.next().expect("run UUID is required")).unwrap();
+    assert!(!run_id.is_nil(), "nil run UUID is forbidden");
+    let root = PathBuf::from(args.next().expect("disposable repository root is required"));
     assert!(args.next().is_none(), "unexpected argument");
-    let old = b"synthetic committed generation 0".as_slice();
-    let pending = b"synthetic pending generation 1".as_slice();
-    let committed = b"synthetic committed generation 1 cleanup".as_slice();
-    let clear = b"synthetic committed generation 1 clear".as_slice();
-    match phase.as_str() {
-        "create" => {
-            assert_eq!(apple::load(SERVICE, &account).unwrap(), None);
-            apple::create(SERVICE, &account, old).unwrap();
-            assert_eq!(
-                apple::load(SERVICE, &account).unwrap().as_deref(),
-                Some(old)
-            );
-        }
-        "pending" => {
-            assert_eq!(
-                apple::load(SERVICE, &account).unwrap().as_deref(),
-                Some(old)
-            );
-            apple::update(SERVICE, &account, pending).unwrap();
-            assert_eq!(
-                apple::load(SERVICE, &account).unwrap().as_deref(),
-                Some(pending)
-            );
-        }
-        "commit" => {
-            assert_eq!(
-                apple::load(SERVICE, &account).unwrap().as_deref(),
-                Some(pending)
-            );
-            apple::update(SERVICE, &account, committed).unwrap();
-            assert_eq!(
-                apple::load(SERVICE, &account).unwrap().as_deref(),
-                Some(committed)
-            );
-        }
-        "clear" => {
-            assert_eq!(
-                apple::load(SERVICE, &account).unwrap().as_deref(),
-                Some(committed)
-            );
-            apple::update(SERVICE, &account, clear).unwrap();
-            assert_eq!(
-                apple::load(SERVICE, &account).unwrap().as_deref(),
-                Some(clear)
-            );
-        }
-        "verify" => {
-            assert_eq!(
-                apple::load(SERVICE, &account).unwrap().as_deref(),
-                Some(clear)
-            );
-        }
-        "delete" => delete(&account),
-        _ => panic!("unknown phase"),
+    if phase == "delete" {
+        delete(run_id);
+    } else {
+        coincube_gui::services::imported_keys::native_probe_phase(&phase, run_id, &root)
+            .unwrap_or_else(|error| panic!("native imported anchor {phase}: {error}"));
     }
     println!("imported anchor native phase {phase}: ok");
 }
 
-#[cfg(target_os = "macos")]
-fn delete(account: &str) {
+#[cfg(all(target_os = "macos", debug_assertions, feature = "native-anchor-probe"))]
+fn delete(run_id: uuid::Uuid) {
     use core_foundation::{base::TCFType, dictionary::CFDictionary, string::CFString};
     use security_framework_sys::{
         base::errSecItemNotFound,
         item::{
             kSecAttrAccessGroup, kSecAttrAccount, kSecAttrService, kSecClass,
-            kSecClassGenericPassword,
+            kSecClassGenericPassword, kSecReturnData,
         },
-        keychain_item::SecItemDelete,
+        keychain_item::{SecItemCopyMatching, SecItemDelete},
     };
     extern "C" {
         static kSecUseDataProtectionKeychain: core_foundation::string::CFStringRef;
     }
     let key = |value| unsafe { CFString::wrap_under_get_rule(value) };
+    let service = format!("io.coincube.tenshu.native-imported-anchor-probe.{run_id}");
+    let account = format!(
+        "{}:{}:{}",
+        hex::encode(format!("native-anchor-probe-{run_id}")),
+        hex::encode("regtest"),
+        run_id
+    );
     let query = CFDictionary::from_CFType_pairs(&[
         (
             key(unsafe { kSecUseDataProtectionKeychain }),
@@ -104,11 +54,11 @@ fn delete(account: &str) {
         ),
         (
             key(unsafe { kSecAttrService }),
-            CFString::new(SERVICE).into_CFType(),
+            CFString::new(&service).into_CFType(),
         ),
         (
             key(unsafe { kSecAttrAccount }),
-            CFString::new(account).into_CFType(),
+            CFString::new(&account).into_CFType(),
         ),
         (
             key(unsafe { kSecAttrAccessGroup }),
@@ -118,13 +68,43 @@ fn delete(account: &str) {
     let status = unsafe { SecItemDelete(query.as_concrete_TypeRef()) };
     assert!(
         status == 0 || status == errSecItemNotFound,
-        "Keychain deletion failed: {}",
-        status
+        "synthetic imported anchor Keychain deletion failed: {status}"
     );
-    assert_eq!(apple::load(SERVICE, account).unwrap(), None);
+    let verify = CFDictionary::from_CFType_pairs(&[
+        (
+            key(unsafe { kSecUseDataProtectionKeychain }),
+            core_foundation::boolean::CFBoolean::from(true).into_CFType(),
+        ),
+        (
+            key(unsafe { kSecClass }),
+            key(unsafe { kSecClassGenericPassword }).into_CFType(),
+        ),
+        (
+            key(unsafe { kSecAttrService }),
+            CFString::new(&service).into_CFType(),
+        ),
+        (
+            key(unsafe { kSecAttrAccount }),
+            CFString::new(&account).into_CFType(),
+        ),
+        (
+            key(unsafe { kSecAttrAccessGroup }),
+            CFString::new("8UVR249AD5.io.coincube.tenshu").into_CFType(),
+        ),
+        (
+            key(unsafe { kSecReturnData }),
+            core_foundation::boolean::CFBoolean::from(true).into_CFType(),
+        ),
+    ]);
+    let mut output: core_foundation_sys::base::CFTypeRef = std::ptr::null();
+    let remaining = unsafe { SecItemCopyMatching(verify.as_concrete_TypeRef(), &mut output) };
+    assert_eq!(
+        remaining, errSecItemNotFound,
+        "synthetic Keychain item remained after deletion"
+    );
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(all(target_os = "macos", debug_assertions, feature = "native-anchor-probe")))]
 fn main() {
-    panic!("the native imported-anchor probe requires macOS");
+    panic!("native imported anchor probe requires a debug macOS build with native-anchor-probe");
 }

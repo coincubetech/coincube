@@ -22,6 +22,61 @@ const MAX_RETIRE: usize = 32;
 #[cfg(all(not(test), target_os = "macos"))]
 const SERVICE: &str = "io.coincube.tenshu.imported-inventory-anchor.v1";
 
+#[cfg(all(target_os = "macos", debug_assertions, feature = "native-anchor-probe"))]
+mod native_probe_service {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static SERVICE: RefCell<Option<String>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn current() -> Option<String> {
+        SERVICE.with(|slot| slot.borrow().clone())
+    }
+
+    pub(super) fn with<T>(run_id: uuid::Uuid, action: impl FnOnce() -> T) -> T {
+        let service = format!("io.coincube.tenshu.native-imported-anchor-probe.{run_id}");
+        SERVICE.with(|slot| {
+            assert!(slot.borrow().is_none(), "nested native anchor probe");
+            *slot.borrow_mut() = Some(service);
+        });
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                SERVICE.with(|slot| *slot.borrow_mut() = None);
+            }
+        }
+        let _reset = Reset;
+        action()
+    }
+}
+
+#[cfg(all(target_os = "macos", debug_assertions, feature = "native-anchor-probe"))]
+pub(in crate::services) fn with_native_probe_service<T>(
+    run_id: Uuid,
+    action: impl FnOnce() -> T,
+) -> T {
+    native_probe_service::with(run_id, action)
+}
+
+#[cfg(all(target_os = "macos", debug_assertions, feature = "native-anchor-probe"))]
+pub(in crate::services) use apple::ProbeFault as NativeProbeFault;
+
+#[cfg(all(target_os = "macos", debug_assertions, feature = "native-anchor-probe"))]
+pub(in crate::services) fn arm_native_probe_fault(fault: NativeProbeFault) {
+    let synthetic = native_probe_service::current().expect("native probe service is not active");
+    apple::arm_probe_fault(&synthetic, fault);
+}
+
+#[cfg(all(not(test), target_os = "macos"))]
+fn service() -> String {
+    #[cfg(all(debug_assertions, feature = "native-anchor-probe"))]
+    if let Some(synthetic) = native_probe_service::current() {
+        return synthetic;
+    }
+    SERVICE.to_owned()
+}
+
 pub(super) const fn supported() -> bool {
     cfg!(any(test, target_os = "macos"))
 }
@@ -101,7 +156,7 @@ pub(super) fn load(scope: &Scope) -> Result<Option<Anchor>, String> {
     }
     #[cfg(all(not(test), target_os = "macos"))]
     {
-        let bytes = apple::load(SERVICE, &account)?;
+        let bytes = apple::load(&service(), &account)?;
         let anchor = bytes.map(|bytes| Anchor::decode(&bytes)).transpose()?;
         if anchor.as_ref().is_some_and(|anchor| &anchor.scope != scope) {
             return Err("Imported inventory anchor belongs to another wallet.".into());
@@ -125,7 +180,7 @@ pub(super) fn create(anchor: &Anchor) -> Result<(), String> {
     }
     #[cfg(all(not(test), target_os = "macos"))]
     {
-        let add = apple::create(SERVICE, &account, &value);
+        let add = apple::create(&service(), &account, &value);
         if load(&anchor.scope)?.as_ref() == Some(anchor) {
             return Ok(());
         }
@@ -236,7 +291,7 @@ pub(super) fn update(old: &Anchor, next: &Anchor) -> Result<(), String> {
         if load(&old.scope)?.as_ref() != Some(old) {
             return Err("Imported inventory anchor changed before update.".into());
         }
-        apple::update(SERVICE, &account, &value)?;
+        apple::update(&service(), &account, &value)?;
         if load(&next.scope)?.as_ref() != Some(next) {
             return Err("Imported inventory anchor update was not confirmed.".into());
         }
@@ -478,7 +533,7 @@ impl Reader<'_> {
 pub(crate) mod tests {
     use super::*;
     use std::{
-        collections::{HashMap, HashSet},
+        collections::HashMap,
         sync::{Mutex, OnceLock},
     };
 
@@ -490,6 +545,7 @@ pub(crate) mod tests {
     #[derive(Clone, Copy)]
     pub(crate) enum UpdateFault {
         BeforeWrite,
+        BeforeWriteTwoReadErrors,
         AfterWrite,
         AfterWriteReadbackError,
     }
@@ -506,18 +562,23 @@ pub(crate) mod tests {
             .insert(account(scope).unwrap(), fault);
     }
 
-    fn load_faults() -> &'static Mutex<HashSet<String>> {
-        static FAULTS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-        FAULTS.get_or_init(|| Mutex::new(HashSet::new()))
+    fn load_faults() -> &'static Mutex<HashMap<String, u8>> {
+        static FAULTS: OnceLock<Mutex<HashMap<String, u8>>> = OnceLock::new();
+        FAULTS.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
     pub(crate) fn store_load(account: &str) -> Result<Option<Vec<u8>>, String> {
-        if load_faults()
-            .lock()
-            .map_err(|_| "Mock anchor load faults are poisoned.")?
-            .remove(account)
         {
-            return Err("Injected anchor readback failure.".into());
+            let mut faults = load_faults()
+                .lock()
+                .map_err(|_| "Mock anchor load faults are poisoned.")?;
+            if let Some(count) = faults.get_mut(account) {
+                *count -= 1;
+                if *count == 0 {
+                    faults.remove(account);
+                }
+                return Err("Injected anchor readback failure.".into());
+            }
         }
         Ok(store()
             .lock()
@@ -551,7 +612,16 @@ pub(crate) mod tests {
             .lock()
             .map_err(|_| "Mock anchor faults are poisoned.")?
             .remove(account);
-        if matches!(fault, Some(UpdateFault::BeforeWrite)) {
+        if matches!(fault, Some(UpdateFault::BeforeWriteTwoReadErrors)) {
+            load_faults()
+                .lock()
+                .map_err(|_| "Mock anchor load faults are poisoned.")?
+                .insert(account.into(), 2);
+        }
+        if matches!(
+            fault,
+            Some(UpdateFault::BeforeWrite | UpdateFault::BeforeWriteTwoReadErrors)
+        ) {
             return Err("Injected anchor update failure before write.".into());
         }
         store.insert(account.into(), next.into());
@@ -559,7 +629,7 @@ pub(crate) mod tests {
             load_faults()
                 .lock()
                 .map_err(|_| "Mock anchor load faults are poisoned.")?
-                .insert(account.into());
+                .insert(account.into(), 1);
         }
         if matches!(
             fault,

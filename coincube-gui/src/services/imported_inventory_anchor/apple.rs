@@ -25,6 +25,60 @@ extern "C" {
 
 const ACCESS_GROUP: &str = "8UVR249AD5.io.coincube.tenshu";
 
+#[cfg(all(debug_assertions, feature = "native-anchor-probe"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::services) enum ProbeFault {
+    UpdateQueryError,
+    UpdateThenError,
+    UpdateThenReadbackError,
+}
+
+#[cfg(all(debug_assertions, feature = "native-anchor-probe"))]
+mod probe_fault {
+    use super::ProbeFault;
+    use std::cell::Cell;
+
+    thread_local! {
+        static UPDATE: Cell<Option<ProbeFault>> = const { Cell::new(None) };
+        static READBACK: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(super) fn arm(fault: ProbeFault) {
+        UPDATE.with(|slot| {
+            assert!(slot.get().is_none(), "native anchor fault already armed");
+            slot.set(Some(fault));
+        });
+    }
+
+    pub(super) fn take_update() -> Option<ProbeFault> {
+        UPDATE.with(|slot| slot.take())
+    }
+
+    pub(super) fn arm_readback() {
+        READBACK.with(|slot| slot.set(true));
+    }
+
+    pub(super) fn take_readback() -> bool {
+        READBACK.with(|slot| slot.replace(false))
+    }
+}
+
+#[cfg(all(debug_assertions, feature = "native-anchor-probe"))]
+pub(in crate::services) fn arm_probe_fault(service: &str, fault: ProbeFault) {
+    assert!(
+        service.starts_with("io.coincube.tenshu.native-imported-anchor-probe."),
+        "fault injection requires a synthetic service"
+    );
+    probe_fault::arm(fault);
+}
+
+#[cfg(all(debug_assertions, feature = "native-anchor-probe"))]
+fn malformed_class(query: &mut Vec<(CFString, CFType)>) {
+    let class = cfstr(unsafe { kSecClass });
+    query.retain(|(key, _)| key != &class);
+    query.push((class, CFData::from_buffer(b"invalid-class").into_CFType()));
+}
+
 fn cfstr(value: CFStringRef) -> CFString {
     unsafe { CFString::wrap_under_get_rule(value) }
 }
@@ -99,6 +153,13 @@ fn verify_attributes(service: &str, account: &str) -> Result<(), String> {
 
 pub(super) fn load(service: &str, account: &str) -> Result<Option<Vec<u8>>, String> {
     let mut query = identity(service, account);
+    #[cfg(all(debug_assertions, feature = "native-anchor-probe"))]
+    let injected_readback = service.starts_with("io.coincube.tenshu.native-imported-anchor-probe.")
+        && probe_fault::take_readback();
+    #[cfg(all(debug_assertions, feature = "native-anchor-probe"))]
+    if injected_readback {
+        malformed_class(&mut query);
+    }
     query.push((
         cfstr(unsafe { kSecReturnData }),
         CFBoolean::from(true).into_CFType(),
@@ -106,6 +167,16 @@ pub(super) fn load(service: &str, account: &str) -> Result<Option<Vec<u8>>, Stri
     let params = CFDictionary::from_CFType_pairs(&query);
     let mut output: core_foundation_sys::base::CFTypeRef = std::ptr::null();
     let status = unsafe { SecItemCopyMatching(params.as_concrete_TypeRef(), &mut output) };
+    #[cfg(all(debug_assertions, feature = "native-anchor-probe"))]
+    if injected_readback {
+        assert_ne!(
+            status, 0,
+            "synthetic malformed readback query unexpectedly succeeded"
+        );
+        return Err(format!(
+            "Synthetic imported anchor readback query failed (OSStatus {status})."
+        ));
+    }
     if status == errSecItemNotFound {
         return Ok(None);
     }
@@ -149,7 +220,18 @@ pub(super) fn create(service: &str, account: &str, value: &[u8]) -> Result<(), S
 }
 
 pub(super) fn update(service: &str, account: &str, value: &[u8]) -> Result<(), String> {
-    let query = CFDictionary::from_CFType_pairs(&identity(service, account));
+    let mut identity = identity(service, account);
+    #[cfg(all(debug_assertions, feature = "native-anchor-probe"))]
+    let injected = if service.starts_with("io.coincube.tenshu.native-imported-anchor-probe.") {
+        probe_fault::take_update()
+    } else {
+        None
+    };
+    #[cfg(all(debug_assertions, feature = "native-anchor-probe"))]
+    if injected == Some(ProbeFault::UpdateQueryError) {
+        malformed_class(&mut identity);
+    }
+    let query = CFDictionary::from_CFType_pairs(&identity);
     let attributes = CFDictionary::from_CFType_pairs(&[(
         cfstr(unsafe { kSecValueData }),
         CFData::from_buffer(value).into_CFType(),
@@ -160,10 +242,29 @@ pub(super) fn update(service: &str, account: &str, value: &[u8]) -> Result<(), S
             attributes.as_concrete_TypeRef(),
         )
     };
+    #[cfg(all(debug_assertions, feature = "native-anchor-probe"))]
+    if injected == Some(ProbeFault::UpdateQueryError) {
+        assert_ne!(
+            status, 0,
+            "synthetic malformed update query unexpectedly succeeded"
+        );
+        return Err(format!(
+            "Synthetic imported anchor update query failed (OSStatus {status})."
+        ));
+    }
     if status != 0 {
         return Err(format!(
             "Cannot update imported inventory anchor (OSStatus {status})."
         ));
+    }
+    #[cfg(all(debug_assertions, feature = "native-anchor-probe"))]
+    if injected == Some(ProbeFault::UpdateThenReadbackError) {
+        probe_fault::arm_readback();
+        return Err("Synthetic imported anchor update completed before readback failure.".into());
+    }
+    #[cfg(all(debug_assertions, feature = "native-anchor-probe"))]
+    if injected == Some(ProbeFault::UpdateThenError) {
+        return Err("Synthetic imported anchor update completed before reported error.".into());
     }
     verify_attributes(service, account)
 }

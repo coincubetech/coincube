@@ -261,6 +261,8 @@ regtest-harness = ["coincubed/regtest-harness"]
 # `cargo test` matrix so PR CI stays hermetic; enabled by the nightly
 # job that targets the dev environment.
 integration-tests = []
+# Debug-only signed macOS fault probe. Release builds reject its entry point.
+native-anchor-probe = []
 
 [build-dependencies]
 dotenvy = "0.15.7"
