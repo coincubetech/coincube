@@ -7643,9 +7643,18 @@ impl DeleteCubeModal {
                     Row::new()
                         .spacing(10)
                         .push(
-                            button::secondary(None, "Cancel")
-                                .width(Length::Fixed(120.0))
-                                .on_press(ViewMessage::DeleteCube(DeleteCubeMessage::CloseModal)),
+                            button::secondary_action(
+                                "tenshu.delete-cube:cancel",
+                                None,
+                                "Cancel",
+                                |id| {
+                                    ViewMessage::Catalog(launcher_catalog::CatalogMessage::Focus(
+                                        id,
+                                    ))
+                                },
+                            )
+                            .width(Length::Fixed(120.0))
+                            .on_press(ViewMessage::DeleteCube(DeleteCubeMessage::CloseModal)),
                         )
                         .push(confirm_button)
                 } else {
