@@ -1986,6 +1986,8 @@ impl Home {
                     ViewMessage::CreateCube
                         | ViewMessage::CreateWallet
                         | ViewMessage::ShowCreateCube(_)
+                        | ViewMessage::ConfirmCreateNetwork
+                        | ViewMessage::BackToCreateNetwork
                         | ViewMessage::SelectNetwork(_)
                         | ViewMessage::Check
                         | ViewMessage::Run(_)
@@ -5706,8 +5708,13 @@ impl Home {
             .push(Space::new().width(Length::Fill));
         if !backing_up && self.has_cube_list() {
             header = header.push(
-                button::secondary(None, "Back to Cube list")
-                    .on_press(ViewMessage::ShowCreateCube(false)),
+                button::secondary_action(
+                    "tenshu.create:back-to-list",
+                    None,
+                    "Back to Cube list",
+                    create_journey_focus,
+                )
+                .on_press(ViewMessage::ShowCreateCube(false)),
             );
         }
 
@@ -5721,7 +5728,12 @@ impl Home {
                     } else {
                         chain.label().to_string()
                     };
-                    let row = coincube_ui::widget::Button::new(text(label)).width(Length::Fill);
+                    let id = Id::new(format!(
+                        "tenshu.create:network:{}",
+                        settings::network_to_api_string(chain)
+                    ));
+                    let row = FocusableAction::new(id, text(label), create_journey_focus)
+                        .width(Length::Fill);
                     let row = if chain == self.network {
                         row.style(theme::button::menu_pressed)
                     } else {
@@ -5754,8 +5766,13 @@ impl Home {
                                 .style(theme::text::secondary),
                         )
                         .push(
-                            button::transparent(None, "App preferences")
-                                .on_press(ViewMessage::OpenAppPreferences),
+                            button::secondary_action(
+                                "tenshu.create:app-preferences",
+                                None,
+                                "App preferences",
+                                create_journey_focus,
+                            )
+                            .on_press(ViewMessage::OpenAppPreferences),
                         ),
                 );
             }
@@ -5766,7 +5783,13 @@ impl Home {
                 );
             }
             content = content.push(
-                button::primary(None, "Continue").on_press_maybe(
+                button::primary_action(
+                    "tenshu.create:network-continue",
+                    None,
+                    "Continue",
+                    create_journey_focus,
+                )
+                .on_press_maybe(
                     self.chain_availability(self.network)
                         .is_available()
                         .then_some(ViewMessage::ConfirmCreateNetwork),
@@ -5789,10 +5812,15 @@ impl Home {
             Column::new()
                 .spacing(16)
                 .push(
-                    button::transparent(Some(icon::previous_icon()), "Back to networks")
-                        .on_press_maybe(
-                            (!self.creating_cube).then_some(ViewMessage::BackToCreateNetwork),
-                        ),
+                    button::secondary_action(
+                        "tenshu.create:back-to-networks",
+                        Some(icon::previous_icon()),
+                        "Back to networks",
+                        create_journey_focus,
+                    )
+                    .on_press_maybe(
+                        (!self.creating_cube).then_some(ViewMessage::BackToCreateNetwork),
+                    ),
                 )
                 .push(self.creation_form())
                 .into()
@@ -6120,6 +6148,10 @@ fn global_settings_view(home: &Home) -> Element<Message> {
 
 const LEGACY_CONNECT_SIGN_IN_ID: &str = "tenshu.launcher.legacy:connect:sign-in";
 const LEGACY_CONNECT_ENTRY_ID: &str = "tenshu.launcher.legacy:connect:entry";
+
+fn create_journey_focus(id: Id) -> ViewMessage {
+    ViewMessage::Catalog(launcher_catalog::CatalogMessage::Focus(id))
+}
 
 fn legacy_connect_focus(id: Id) -> Message {
     Message::View(ViewMessage::Catalog(
@@ -8120,6 +8152,78 @@ mod tests {
 
     fn home() -> Home {
         Home::new(test_datadir(), Some(Network::Bitcoin)).0
+    }
+
+    #[test]
+    fn blake2b_create_navigation_keeps_the_vault_gate() {
+        let mut home = home();
+        enable_btcb2(&mut home);
+        home.network = ChainId::BitcoinBlake2b;
+        home.state = State::NoCube { create_cube: true };
+
+        drop(home.update(Message::View(ViewMessage::ConfirmCreateNetwork)));
+        assert!(home.create_network_confirmed);
+        assert!(home.error.is_none());
+        drop(home.update(Message::View(ViewMessage::BackToCreateNetwork)));
+        assert!(!home.create_network_confirmed);
+        assert!(home.error.is_none());
+
+        // The new stage controls cannot enable the seed-only Cube route.
+        assert!(drain(home.update(Message::View(ViewMessage::CreateCube)))
+            .iter()
+            .any(|message| matches!(
+                message,
+                Message::Install(_, ChainId::BitcoinBlake2b, UserFlow::CreateWallet, _)
+            )));
+    }
+
+    #[test]
+    fn create_network_probe_keeps_the_form_after_stale_result() {
+        let mut home = home();
+        home.developer_mode = true;
+        home.state = State::Cubes {
+            cubes: vec![CubeSettings::new("Existing".into(), ChainId::Bitcoin)],
+            create_cube: true,
+            source: ChainId::Bitcoin,
+        };
+        drop(home.update(Message::View(ViewMessage::SelectNetwork(ChainId::Signet))));
+        assert_eq!(home.network, ChainId::Signet);
+        assert!(home.create_network_selection_pending);
+
+        drop(home.update(Message::Checked {
+            for_chain: ChainId::Bitcoin,
+            res: Ok(State::NoCube { create_cube: false }),
+        }));
+        assert!(home.create_network_selection_pending);
+
+        drop(home.update(Message::Checked {
+            for_chain: ChainId::Signet,
+            res: Ok(State::Cubes {
+                cubes: vec![CubeSettings::new("Signet cube".into(), ChainId::Signet)],
+                create_cube: false,
+                source: ChainId::Signet,
+            }),
+        }));
+        assert!(matches!(
+            home.state,
+            State::Cubes {
+                create_cube: true,
+                source: ChainId::Signet,
+                ..
+            }
+        ));
+        assert!(!home.create_network_selection_pending);
+    }
+
+    #[test]
+    fn create_journey_actions_route_focus_through_catalog() {
+        let id = Id::new("tenshu.create:network-continue");
+        assert!(matches!(
+            create_journey_focus(id.clone()),
+            ViewMessage::Catalog(launcher_catalog::CatalogMessage::Focus(target)) if target == id
+        ));
+        // The Action widget owns Enter/Space and disabled-action behavior;
+        // its keyboard tests exercise those semantics in coincube-ui.
     }
 
     #[test]
