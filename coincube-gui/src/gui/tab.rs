@@ -8103,6 +8103,38 @@ mod seed_export_duress_routing_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// A duress PIN for the other Cube of a cross-Cube Transfer is minted
+    /// with the open Cube as its origin, so the hosting tab activates it.
+    #[test]
+    fn other_cube_transfer_duress_activates_from_the_open_cubes_app() {
+        let _guard = app::session::test_guard();
+        app::session::close();
+        let root =
+            std::env::temp_dir().join(format!("transfer-duress-tab-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (home, startup) = home::Home::new_for_chain(CoincubeDirectory::new(root.clone()), None);
+        drop(startup);
+        let mut tab = Tab::new(1, State::Home(home));
+        let app_generation = app::cache::AppGeneration::next();
+        tab.seed_export_origins.push((
+            app_generation,
+            root.clone(),
+            "open-cube".into(),
+            crate::chain::ChainId::Bitcoin,
+        ));
+        let proof = crate::services::unlock::throttle::destination_unlock_duress(
+            &root,
+            "open-cube",
+            crate::chain::ChainId::Bitcoin,
+            app_generation,
+        );
+        drop(tab.update(Message::Run(app::Message::View(
+            app::view::Message::DuressActivateLocal(proof),
+        ))));
+        assert!(matches!(tab.state, State::DuressActive(_)));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn unrelated_or_replayed_proof_cannot_activate_or_clear_another_session() {
         let _guard = app::session::test_guard();
