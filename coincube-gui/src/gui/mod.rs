@@ -2095,6 +2095,11 @@ impl GUI {
             .unwrap_or_default()
     }
 
+    /// A size at 100% in the zoomed units iced's window actions take.
+    fn zoomed(&self, size: Size) -> Size {
+        size * (1.0 / self.current_zoom().factor())
+    }
+
     /// Saves the pending zoom once the lane is free. Called again after every
     /// preferences completion, so a refused request is retried, not dropped.
     fn save_pending_zoom(&mut self) -> Task<Message> {
@@ -2114,7 +2119,12 @@ impl GUI {
             return Task::none();
         }
         match self.preferences.begin_save(PreferenceChange::Zoom(zoom)) {
-            Ok(request) => self.run_preferences(request),
+            Ok(request) => {
+                // The lane is now held: the balance toggle must show it busy,
+                // or a Hide clicked during this save is refused unseen.
+                self.publish_balance_privacy();
+                self.run_preferences(request)
+            }
             Err(_) => Task::none(),
         }
     }
@@ -2778,10 +2788,10 @@ impl GUI {
                 {
                     window::resize(
                         id,
-                        Size {
+                        self.zoomed(Size {
                             width: *width,
                             height: *height,
-                        },
+                        }),
                     )
                 // Initial startup: we maximize the screen in order to know the max usable screen area
                 } else if let Some(id) = &self.window_id {
@@ -2791,6 +2801,9 @@ impl GUI {
                 }
             }
             Message::WindowSize(monitor_size) => {
+                // Iced reports the size in zoomed units; record it at 100% so
+                // a zoom change between launches keeps the window's size.
+                let monitor_size = monitor_size * self.current_zoom().factor();
                 let cloned_cfg = self.window_config.clone();
                 match (cloned_cfg, &self.window_init, &self.window_id) {
                     // no previous screen size recorded && window maximized
@@ -2802,10 +2815,13 @@ impl GUI {
                                 width: 1200.0,
                                 height: 950.0,
                             };
-                            batch.push(window::resize(*id, size));
+                            batch.push(window::resize(*id, self.zoomed(size)));
                             size
                         } else {
-                            batch.push(window::resize(*id, iced::window::Settings::default().size));
+                            batch.push(window::resize(
+                                *id,
+                                self.zoomed(iced::window::Settings::default().size),
+                            ));
                             iced::window::Settings::default().size
                         };
                         self.window_config = Some(WindowConfig {
@@ -4149,10 +4165,9 @@ impl GUI {
                     .preferences
                     .accepted()
                     .map(|accepted| accepted.preferences);
-                let applied = matches!(
-                    self.preferences.complete(&request, result),
-                    SaveOutcome::Applied(_)
-                );
+                let outcome = self.preferences.complete(&request, result);
+                let applied = matches!(outcome, SaveOutcome::Applied(_));
+                let failed = matches!(outcome, SaveOutcome::Failed(_));
                 self.publish_balance_privacy();
                 let mut tasks = Vec::new();
                 if applied {
@@ -4176,15 +4191,14 @@ impl GUI {
                 }
                 // A zoom that failed to save goes back to the saved one, like
                 // every other choice ("Your previous settings remain active").
-                if !applied
-                    && matches!(
-                        request.operation,
-                        Operation::Save(crate::app::settings::preferences::PreferenceChange::Zoom(
-                            _
-                        ))
-                    )
+                // A newer step pressed during the save is kept and saved next.
+                if let Operation::Save(crate::app::settings::preferences::PreferenceChange::Zoom(
+                    zoom,
+                )) = request.operation
                 {
-                    self.zoom.pending = None;
+                    if failed && self.zoom.pending == Some(zoom) {
+                        self.zoom.pending = None;
+                    }
                 }
                 tasks.push(self.save_pending_zoom());
                 Task::batch(tasks)
@@ -5322,6 +5336,113 @@ mod app_preferences_sheet_tests {
             Some(Operation::Save(PreferenceChange::Zoom(Zoom::from(125))))
         );
         assert_eq!(gui.scale_factor(), 1.25);
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn a_zoom_save_shows_the_balance_toggle_busy() {
+        let _guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path = std::env::temp_dir().join(format!("tenshu-zoom-busy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        let root = CoincubeDirectory::new(path.clone());
+        let mut gui = launcher_gui(&root);
+        let launcher_chrome = |gui: &GUI| {
+            let pane = gui.panes.get(gui.focus.unwrap()).unwrap();
+            let tab::State::Home(home) = &pane.tabs[0].state else {
+                panic!("the launcher starts as Home");
+            };
+            home.balance_privacy
+                .expect("the shell publishes privacy chrome")
+        };
+        gui.publish_balance_privacy();
+        assert!(launcher_chrome(&gui).interactive);
+
+        drop(gui.update(Message::KeyPressed(Key::Zoom(ZoomStep::In))));
+        assert_eq!(
+            gui.preferences.pending_operation(),
+            Some(Operation::Save(PreferenceChange::Zoom(Zoom::from(110))))
+        );
+        let chrome = launcher_chrome(&gui);
+        assert!(chrome.busy, "the zoom save holds the lane");
+        assert!(!chrome.interactive, "a Hide click cannot be refused unseen");
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn a_failed_zoom_save_reverts_only_the_step_it_was_saving() {
+        let _guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path =
+            std::env::temp_dir().join(format!("tenshu-zoom-failed-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        let root = CoincubeDirectory::new(path.clone());
+        let mut gui = launcher_gui(&root);
+        let save_110 = |gui: &mut GUI| {
+            gui.zoom.pending = Some(Zoom::from(110));
+            gui.preferences
+                .begin_save(PreferenceChange::Zoom(Zoom::from(110)))
+                .unwrap()
+        };
+
+        // The step being saved fails: the zoom goes back to the saved 100%.
+        let request = save_110(&mut gui);
+        drop(gui.update(Message::Preferences(request, Err("disk full".to_string()))));
+        assert_eq!(gui.zoom.pending, None);
+        assert_eq!(gui.scale_factor(), 1.0);
+
+        // A newer step pressed during the failed save stays and is saved next.
+        let request = save_110(&mut gui);
+        drop(gui.update(Message::KeyPressed(Key::Zoom(ZoomStep::In))));
+        assert_eq!(gui.scale_factor(), 1.25);
+        drop(gui.update(Message::Preferences(request, Err("disk full".to_string()))));
+        assert_eq!(gui.scale_factor(), 1.25);
+        assert_eq!(
+            gui.preferences.pending_operation(),
+            Some(Operation::Save(PreferenceChange::Zoom(Zoom::from(125))))
+        );
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn the_saved_window_size_is_recorded_at_actual_size() {
+        let _guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path =
+            std::env::temp_dir().join(format!("tenshu-zoom-window-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        let root = CoincubeDirectory::new(path.clone());
+        let mut gui = launcher_gui(&root);
+        gui.window_config = Some(WindowConfig {
+            width: 1440.0,
+            height: 900.0,
+        });
+        gui.zoom.pending = Some(Zoom::from(125));
+
+        // At 125% iced reports a 1440 x 900 window as 1152 x 720.
+        drop(gui.update(Message::WindowSize(Size::new(1152.0, 720.0))));
+        let saved = gui.window_config.clone().unwrap();
+        assert_eq!((saved.width, saved.height), (1440.0, 900.0));
+        // Restoring it asks iced for the same window in zoomed units.
+        assert_eq!(
+            gui.zoomed(Size::new(saved.width, saved.height)),
+            Size::new(1152.0, 720.0)
+        );
         drop(gui);
         std::fs::remove_dir_all(path).ok();
     }
