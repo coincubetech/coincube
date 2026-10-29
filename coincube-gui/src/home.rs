@@ -7227,6 +7227,15 @@ struct DeleteRemoteCubeModal {
     error: Option<String>,
 }
 
+fn delete_modal_focus(id: Id) -> ViewMessage {
+    ViewMessage::Catalog(launcher_catalog::CatalogMessage::Focus(id))
+}
+
+const DELETE_LOCAL_CANCEL_ID: &str = "tenshu.delete-cube:cancel";
+const DELETE_LOCAL_CONFIRM_ID: &str = "tenshu.delete-cube:confirm";
+const DELETE_REMOTE_CANCEL_ID: &str = "tenshu.delete-remote-cube:cancel";
+const DELETE_REMOTE_CONFIRM_ID: &str = "tenshu.delete-remote-cube:confirm";
+
 impl DeleteRemoteCubeModal {
     fn view(&self) -> Element<Message> {
         let display_name = catalog_display_name(&self.cube.name);
@@ -7259,16 +7268,23 @@ impl DeleteRemoteCubeModal {
                 .push(notification::warning(err.to_string(), err.to_string()).width(Length::Fill));
         }
 
-        let mut delete_btn = button::secondary(None, "Delete Remote Cube")
-            .width(Length::Fixed(250.0))
-            .style(theme::button::destructive);
+        let mut delete_btn = button::secondary_action(
+            DELETE_REMOTE_CONFIRM_ID,
+            None,
+            "Delete Remote Cube",
+            delete_modal_focus,
+        )
+        .width(Length::Fixed(250.0))
+        .style(theme::button::destructive);
         if !self.deleting {
             delete_btn = delete_btn.on_press(ViewMessage::DeleteCube(
                 DeleteCubeMessage::ConfirmRemoteDelete(self.cube.uuid.clone()),
             ));
         }
 
-        let mut cancel_btn = button::secondary(None, "Cancel").width(Length::Fixed(120.0));
+        let mut cancel_btn =
+            button::secondary_action(DELETE_REMOTE_CANCEL_ID, None, "Cancel", delete_modal_focus)
+                .width(Length::Fixed(120.0));
         if !self.deleting {
             cancel_btn =
                 cancel_btn.on_press(ViewMessage::DeleteCube(DeleteCubeMessage::CloseRemoteModal));
@@ -7537,9 +7553,14 @@ impl DeleteCubeModal {
         let pin_ready = !self.cube.has_pin(&self.datadir_root) || self.pin_input.is_complete();
         let can_delete = pin_ready && self.warning.is_none();
         let display_name = catalog_display_name(&self.cube.name);
-        let mut confirm_button = button::secondary(None, "Delete Cube")
-            .width(Length::Fixed(200.0))
-            .style(theme::button::destructive);
+        let mut confirm_button = button::secondary_action(
+            DELETE_LOCAL_CONFIRM_ID,
+            None,
+            "Delete Cube",
+            delete_modal_focus,
+        )
+        .width(Length::Fixed(200.0))
+        .style(theme::button::destructive);
         if can_delete {
             confirm_button = confirm_button.on_press(ViewMessage::DeleteCube(
                 DeleteCubeMessage::Confirm(self.cube.id.clone()),
@@ -7644,14 +7665,10 @@ impl DeleteCubeModal {
                         .spacing(10)
                         .push(
                             button::secondary_action(
-                                "tenshu.delete-cube:cancel",
+                                DELETE_LOCAL_CANCEL_ID,
                                 None,
                                 "Cancel",
-                                |id| {
-                                    ViewMessage::Catalog(launcher_catalog::CatalogMessage::Focus(
-                                        id,
-                                    ))
-                                },
+                                delete_modal_focus,
                             )
                             .width(Length::Fixed(120.0))
                             .on_press(ViewMessage::DeleteCube(DeleteCubeMessage::CloseModal)),
@@ -10296,6 +10313,131 @@ mod tests {
             cube: remote_cube("remote-c", "Remote C", Network::Bitcoin),
         });
         home.view();
+    }
+
+    #[test]
+    fn delete_cube_modals_focus_and_activate_their_actions() {
+        use crate::app::view::shared::landing::capture;
+        use iced::keyboard::key::Named;
+
+        let datadir = test_datadir();
+        let local = || {
+            DeleteCubeModal::new(
+                cube("local-a", "Local A", Network::Bitcoin),
+                datadir.network_directory(Network::Bitcoin),
+                datadir.path().to_path_buf(),
+                None,
+                Some(true),
+                true,
+            )
+        };
+        let remote = |deleting| DeleteRemoteCubeModal {
+            cube: remote_cube("remote-a", "Remote A", Network::Bitcoin),
+            deleting,
+            error: None,
+        };
+        let size = (1200, 800);
+        let local_cancel = Id::new(DELETE_LOCAL_CANCEL_ID);
+        let local_confirm = Id::new(DELETE_LOCAL_CONFIRM_ID);
+        let remote_cancel = Id::new(DELETE_REMOTE_CANCEL_ID);
+        let remote_confirm = Id::new(DELETE_REMOTE_CONFIRM_ID);
+
+        let local_view = capture::inspect_full_window(
+            "delete-cube-keyboard",
+            local().view(),
+            size,
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(local_view.has_focus(local_cancel.clone()));
+        assert!(local_view.has_focus(local_confirm.clone()));
+        assert!(
+            local_view
+                .focus
+                .iter()
+                .position(|(id, _)| id == &local_cancel)
+                < local_view
+                    .focus
+                    .iter()
+                    .position(|(id, _)| id == &local_confirm)
+        );
+
+        let remote_view = capture::inspect_full_window(
+            "delete-remote-cube-keyboard",
+            remote(false).view(),
+            size,
+            "light",
+            theme::Theme::light(),
+        );
+        assert!(remote_view.has_focus(remote_cancel.clone()));
+        assert!(remote_view.has_focus(remote_confirm.clone()));
+        assert!(
+            remote_view
+                .focus
+                .iter()
+                .position(|(id, _)| id == &remote_cancel)
+                < remote_view
+                    .focus
+                    .iter()
+                    .position(|(id, _)| id == &remote_confirm)
+        );
+
+        for key in [Named::Enter, Named::Space] {
+            assert!(matches!(
+                capture::activate_with_key(local().view(), local_cancel.clone(), size, false, key)
+                    .as_slice(),
+                [Message::View(ViewMessage::DeleteCube(
+                    DeleteCubeMessage::CloseModal
+                ))]
+            ));
+            assert!(matches!(
+                capture::activate_with_key(local().view(), local_confirm.clone(), size, false, key)
+                    .as_slice(),
+                [Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::Confirm(id)))]
+                    if id == "local-a"
+            ));
+            assert!(matches!(
+                capture::activate_with_key(
+                    remote(false).view(),
+                    remote_cancel.clone(),
+                    size,
+                    false,
+                    key
+                )
+                .as_slice(),
+                [Message::View(ViewMessage::DeleteCube(
+                    DeleteCubeMessage::CloseRemoteModal
+                ))]
+            ));
+            assert!(matches!(
+                capture::activate_with_key(remote(false).view(), remote_confirm.clone(), size, false, key)
+                    .as_slice(),
+                [Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::ConfirmRemoteDelete(id)))]
+                    if id == "remote-a"
+            ));
+        }
+
+        let mut blocked_local = local();
+        blocked_local.warning = Some(DeleteError::Connect("blocked".into()));
+        let blocked_view = capture::inspect_full_window(
+            "delete-cube-blocked-keyboard",
+            blocked_local.view(),
+            size,
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(blocked_view.has_focus(local_cancel));
+        assert!(!blocked_view.has_focus(local_confirm));
+
+        let deleting_view = capture::inspect_full_window(
+            "delete-remote-cube-deleting-keyboard",
+            remote(true).view(),
+            size,
+            "light",
+            theme::Theme::light(),
+        );
+        assert!(!deleting_view.has_focus(remote_cancel));
+        assert!(!deleting_view.has_focus(remote_confirm));
     }
 
     #[tokio::test(flavor = "multi_thread")]
