@@ -23,7 +23,7 @@ use iced::{advanced::widget::Id, widget::container, Alignment, Length};
 use crate::app::{
     settings::preferences::{
         DevicePreferences, EffectivePreferences, LauncherStyle, MotionPreference, PreferenceChange,
-        ThemePreference,
+        ThemePreference, Zoom,
     },
     state::preferences::{BalancePrivacy, PreferencesPageState, Section},
 };
@@ -355,6 +355,33 @@ fn section_content<'a>(
                 .trailing_tag()
                 .description("Colors for the Launcher and every Cube on this device.")
                 .note(current, Tone::Muted)
+                .into(),
+            );
+            rows.push(
+                setting_row(
+                    "Zoom",
+                    segmented(
+                        Zoom::STEPS.map(|zoom| {
+                            segment(
+                                format!("tenshu.preferences.zoom.{}", zoom.percent()),
+                                zoom,
+                                format!("{}%", zoom.percent()),
+                            )
+                        }),
+                        Some(saved.zoom),
+                        Message::FocusAction,
+                    )
+                    .size(SegmentSize::Compact)
+                    .on_select_maybe(
+                        enabled.then_some(|value: Zoom| {
+                            Message::Change(PreferenceChange::Zoom(value))
+                        }),
+                    ),
+                )
+                .tag(SCOPE)
+                .trailing_tag()
+                .description("Text and controls in every window on this device.")
+                .note(zoom_shortcuts(), Tone::Muted)
                 .into(),
             );
         }
@@ -987,6 +1014,15 @@ fn link_action<'a>(
 /// user may persist an explicit choice only when the shared balance controls
 /// are interactive and no load or save is in flight.
 /// Neither button is a fallback default.
+/// The keys `gui::zoom_key` reads, named for this platform.
+fn zoom_shortcuts() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Cmd + and Cmd − change it from any screen; Cmd 0 returns to 100%."
+    } else {
+        "Ctrl + and Ctrl − change it from any screen; Ctrl 0 returns to 100%."
+    }
+}
+
 fn explicit_privacy_choice(enabled: bool) -> Element<'static, Message> {
     Column::new()
         .spacing(6)

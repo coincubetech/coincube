@@ -29,6 +29,7 @@ fn launcher_gui(root: &CoincubeDirectory) -> GUI {
         preferences_sheet: None,
         connect_sheet: None,
         preferences: unresolved_test_preferences(),
+        zoom: ZoomState::default(),
     }
 }
 
@@ -740,6 +741,7 @@ fn cube_auth_changes_return_focus_to_mounted_control() {
                     preferences_sheet: None,
                     connect_sheet: None,
                     preferences: unresolved_test_preferences(),
+                    zoom: ZoomState::default(),
                 };
                 let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
                 drop(gui.update(Message::Pane(
@@ -904,6 +906,7 @@ fn probe_p4_signed_out_cube_chip_overlays_cube() {
             preferences_sheet: None,
             connect_sheet: None,
             preferences: unresolved_test_preferences(),
+            zoom: ZoomState::default(),
         };
         let cube_tab = gui.panes.get(pane_id).unwrap().tabs[0].id;
         drop(gui.view());
@@ -1000,6 +1003,7 @@ fn view_plans_sheet_returns_focus_to_cube_settings() {
             preferences_sheet: None,
             connect_sheet: None,
             preferences: unresolved_test_preferences(),
+            zoom: ZoomState::default(),
         };
         let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
         for id in [
@@ -1161,6 +1165,7 @@ fn probe_p5_capture_compact_composed_sheet() {
             preferences_sheet: None,
             connect_sheet: None,
             preferences: unresolved_test_preferences(),
+            zoom: ZoomState::default(),
         };
         let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
         capture(&gui, "cube-before-sheet");

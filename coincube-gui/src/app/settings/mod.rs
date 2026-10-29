@@ -1826,7 +1826,7 @@ impl std::fmt::Display for SettingsError {
 #[allow(unstable_name_collisions)]
 pub mod global {
     use super::preferences::{
-        DevicePreferences, LauncherStyle, MotionPreference, PreferenceChange, ThemePreference,
+        DevicePreferences, LauncherStyle, MotionPreference, PreferenceChange, ThemePreference, Zoom,
     };
     use crate::dir::CoincubeDirectory;
     use async_hwi::bitbox::{ConfigError, NoiseConfig, NoiseConfigData};
@@ -1913,6 +1913,8 @@ pub mod global {
         balance_privacy_initialized: bool,
         #[serde(default)]
         pub motion_preference: MotionPreference,
+        #[serde(default)]
+        pub zoom: Zoom,
         #[serde(default = "default_true")]
         pub show_direction_badges: bool,
         /// Local installation privacy preference; never part of a Cube/account record.
@@ -1958,6 +1960,7 @@ pub mod global {
                 // A missing file can coexist with legacy Cubes: never resolved by default.
                 balance_privacy_initialized: false,
                 motion_preference: MotionPreference::default(),
+                zoom: Zoom::default(),
                 // Preserve the pre-existing Rust Default for this unrelated field.
                 show_direction_badges: false,
                 recipient_identity_checks: true,
@@ -1974,6 +1977,7 @@ pub mod global {
                 launcher_style: self.launcher_style,
                 hide_balances: self.hide_balances,
                 motion: self.motion_preference,
+                zoom: self.zoom,
                 developer_mode: self.developer_mode,
                 bitcoin_blake2b_beta: self.bitcoin_blake2b_beta,
             }
@@ -1994,6 +1998,7 @@ pub mod global {
                     self.balance_privacy_initialized = true;
                 }
                 PreferenceChange::Motion(motion) => self.motion_preference = motion,
+                PreferenceChange::Zoom(zoom) => self.zoom = zoom,
                 PreferenceChange::DeveloperMode(enabled) => self.developer_mode = enabled,
                 PreferenceChange::BitcoinBlake2bBeta(enabled) => {
                     self.bitcoin_blake2b_beta = enabled;

@@ -58,12 +58,77 @@ impl MotionPreference {
     }
 }
 
+/// Whole-interface zoom, applied as Iced's scale factor. Saved as a percent;
+/// any other saved number snaps to the nearest step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "u16", into = "u16")]
+pub struct Zoom(u16);
+
+impl Zoom {
+    /// The steps ⌘+ and ⌘− move between. 150% keeps a 1440px laptop window
+    /// near the 1024px minimum layout width.
+    pub const STEPS: [Zoom; 6] = [
+        Zoom(80),
+        Zoom(90),
+        Zoom(100),
+        Zoom(110),
+        Zoom(125),
+        Zoom(150),
+    ];
+    pub const ACTUAL_SIZE: Zoom = Zoom(100);
+
+    pub fn percent(self) -> u16 {
+        self.0
+    }
+
+    pub fn factor(self) -> f32 {
+        f32::from(self.0) / 100.0
+    }
+
+    /// The next step up, or `None` at the largest.
+    pub fn zoomed_in(self) -> Option<Zoom> {
+        Self::STEPS.iter().copied().find(|step| step.0 > self.0)
+    }
+
+    /// The next step down, or `None` at the smallest.
+    pub fn zoomed_out(self) -> Option<Zoom> {
+        Self::STEPS
+            .iter()
+            .copied()
+            .rev()
+            .find(|step| step.0 < self.0)
+    }
+}
+
+impl Default for Zoom {
+    fn default() -> Self {
+        Self::ACTUAL_SIZE
+    }
+}
+
+impl From<u16> for Zoom {
+    fn from(percent: u16) -> Self {
+        Self::STEPS
+            .iter()
+            .copied()
+            .min_by_key(|step| step.0.abs_diff(percent))
+            .unwrap_or_default()
+    }
+}
+
+impl From<Zoom> for u16 {
+    fn from(zoom: Zoom) -> Self {
+        zoom.0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DevicePreferences {
     pub theme: ThemePreference,
     pub launcher_style: LauncherStyle,
     pub hide_balances: bool,
     pub motion: MotionPreference,
+    pub zoom: Zoom,
     pub developer_mode: bool,
     pub bitcoin_blake2b_beta: bool,
 }
@@ -75,6 +140,7 @@ impl Default for DevicePreferences {
             launcher_style: LauncherStyle::Cubes,
             hide_balances: false,
             motion: MotionPreference::FollowSystem,
+            zoom: Zoom::ACTUAL_SIZE,
             developer_mode: false,
             bitcoin_blake2b_beta: false,
         }
@@ -119,6 +185,7 @@ pub enum PreferenceChange {
     LauncherStyle(LauncherStyle),
     HideBalances(bool),
     Motion(MotionPreference),
+    Zoom(Zoom),
     DeveloperMode(bool),
     BitcoinBlake2bBeta(bool),
 }
@@ -126,6 +193,30 @@ pub enum PreferenceChange {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zoom_steps_stop_at_both_ends() {
+        let mut zoom = Zoom::ACTUAL_SIZE;
+        let mut seen = vec![zoom.percent()];
+        while let Some(next) = zoom.zoomed_in() {
+            zoom = next;
+            seen.push(zoom.percent());
+        }
+        assert_eq!(seen, [100, 110, 125, 150]);
+        while let Some(next) = zoom.zoomed_out() {
+            zoom = next;
+        }
+        assert_eq!(zoom.percent(), 80);
+    }
+
+    #[test]
+    fn a_saved_zoom_off_the_steps_snaps_to_the_nearest() {
+        assert_eq!(Zoom::from(118).percent(), 125);
+        assert_eq!(Zoom::from(0).percent(), 80);
+        assert_eq!(Zoom::from(400).percent(), 150);
+        assert_eq!(serde_json::from_str::<Zoom>("112").unwrap().percent(), 110);
+        assert_eq!(serde_json::to_string(&Zoom::from(125)).unwrap(), "125");
+    }
 
     #[test]
     fn theme_resolves_system_and_explicit_overrides() {

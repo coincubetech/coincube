@@ -24,6 +24,7 @@ use crate::{
         cache::{FiatPrice, FiatPriceRequest},
         message::{FiatMessage as AppFiatMessage, Message as AppMessage},
         settings::global::{GlobalSettings, PreferencesReceipt, WindowConfig},
+        settings::preferences::Zoom,
         state::preferences::{
             BalancePrivacyChrome, BeginSaveError, Operation, PreferencesNotice, PreferencesOwner,
             PreferencesPageState, SaveOutcome, SaveRequest,
@@ -941,6 +942,32 @@ mod balance_privacy_eye_origin_tests {
     }
 }
 
+/// "Zoom 125%", centred in the top bar's empty middle. Not interactive, so
+/// the stack still hands every click and hover to the screen beneath.
+fn zoom_pill<'a>(zoom: Zoom) -> Element<'a, Message> {
+    use coincube_ui::{component::text, theme};
+    let top_bar = crate::app::view::nav::shell::TOP_BAR_HEIGHT;
+    iced::widget::container(
+        iced::widget::container(text::p2_regular(format!("Zoom {}%", zoom.percent())))
+            .padding([6, 14])
+            .style(|theme: &theme::Theme| iced::widget::container::Style {
+                background: Some(iced::Background::Color(theme.colors.shell.panel)),
+                text_color: Some(theme.colors.shell.ink),
+                border: iced::Border {
+                    color: theme.colors.shell.line,
+                    width: 1.0,
+                    radius: 999.0.into(),
+                },
+                ..Default::default()
+            }),
+    )
+    .width(iced::Length::Fill)
+    .height(iced::Length::Fixed(top_bar))
+    .center_x(iced::Length::Fill)
+    .center_y(iced::Length::Fixed(top_bar))
+    .into()
+}
+
 /// Exact provider/account context to revalidate on the next local PIN attempt.
 /// Holding this candidate grants neither seed access nor daemon authority.
 #[derive(Clone)]
@@ -964,12 +991,34 @@ pub struct GUI {
     preferences_sheet: Option<PreferencesSheet>,
     connect_sheet: Option<ConnectSheet>,
     preferences: PreferencesOwner,
+    zoom: ZoomState,
+}
+
+/// How long the zoom pill stays up after a shortcut. The 1 Hz tick clears
+/// it, so it shows for one to two seconds.
+const ZOOM_NOTICE: Duration = Duration::from_secs(1);
+
+/// Zoom applied ahead of its save. The preferences lane refuses work while
+/// it is busy, and pressing Cmd + twice quickly must still land on the
+/// second step, so the GUI holds the newest choice until a save confirms it.
+#[derive(Debug, Default)]
+struct ZoomState {
+    pending: Option<Zoom>,
+    notice_until: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZoomStep {
+    In,
+    Out,
+    ActualSize,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Key {
     Tab(bool),
     Escape,
+    Zoom(ZoomStep),
 }
 
 #[derive(Debug)]
@@ -1060,6 +1109,17 @@ fn ignored_shell_key(event: &Event, status: event::Status) -> Option<Key> {
             repeat: false,
             ..
         }) => Some(Key::Escape),
+        Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Character(key),
+            modifiers,
+            ..
+        }) if modifiers.command() && !modifiers.alt() => match key.as_str() {
+            // Shift turns = into + on most layouts; both zoom in.
+            "=" | "+" => Some(Key::Zoom(ZoomStep::In)),
+            "-" | "_" => Some(Key::Zoom(ZoomStep::Out)),
+            "0" => Some(Key::Zoom(ZoomStep::ActualSize)),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -1455,6 +1515,7 @@ impl GUI {
                 preferences_sheet: None,
                 connect_sheet: None,
                 preferences,
+                zoom: ZoomState::default(),
             },
             Task::batch(cmds),
         )
@@ -2002,6 +2063,10 @@ impl GUI {
         &mut self,
         change: crate::app::settings::preferences::PreferenceChange,
     ) -> Task<Message> {
+        if let crate::app::settings::preferences::PreferenceChange::Zoom(zoom) = change {
+            self.zoom.pending = Some(zoom);
+            return self.save_pending_zoom();
+        }
         match self.preferences.begin_save(change) {
             Ok(request) => {
                 self.publish_balance_privacy();
@@ -2011,6 +2076,42 @@ impl GUI {
                 self.publish_balance_privacy();
                 Task::none()
             }
+            Err(_) => Task::none(),
+        }
+    }
+
+    /// The zoom in effect: the newest unsaved choice, else the saved one.
+    fn current_zoom(&self) -> Zoom {
+        self.zoom
+            .pending
+            .or_else(|| {
+                self.preferences
+                    .accepted()
+                    .map(|accepted| accepted.preferences.zoom)
+            })
+            .unwrap_or_default()
+    }
+
+    /// Saves the pending zoom once the lane is free. Called again after every
+    /// preferences completion, so a refused request is retried, not dropped.
+    fn save_pending_zoom(&mut self) -> Task<Message> {
+        use crate::app::settings::preferences::PreferenceChange;
+        let Some(zoom) = self.zoom.pending else {
+            return Task::none();
+        };
+        if self
+            .preferences
+            .accepted()
+            .is_some_and(|accepted| accepted.preferences.zoom == zoom)
+        {
+            self.zoom.pending = None;
+            return Task::none();
+        }
+        if self.preferences.is_busy() || self.preferences.has_queued_changes() {
+            return Task::none();
+        }
+        match self.preferences.begin_save(PreferenceChange::Zoom(zoom)) {
+            Ok(request) => self.run_preferences(request),
             Err(_) => Task::none(),
         }
     }
@@ -2778,6 +2879,24 @@ impl GUI {
                 focus.chain(action::reveal_focused(
                     crate::app::view::vault::transactions::RBF_DESCENDANTS_SCROLL_ID,
                 ))
+            }
+            Message::KeyPressed(Key::Zoom(step)) => {
+                let current = self.current_zoom();
+                let next = match step {
+                    ZoomStep::In => current.zoomed_in(),
+                    ZoomStep::Out => current.zoomed_out(),
+                    ZoomStep::ActualSize => Some(Zoom::ACTUAL_SIZE),
+                };
+                // The pill also shows at the first and last step, so a press
+                // that changes nothing still says where the zoom is.
+                self.zoom.notice_until = Some(Instant::now() + ZOOM_NOTICE);
+                match next.filter(|next| *next != current) {
+                    Some(next) => {
+                        self.zoom.pending = Some(next);
+                        self.save_pending_zoom()
+                    }
+                    None => Task::none(),
+                }
             }
             Message::KeyPressed(Key::Escape) => {
                 if self.preferences_sheet.is_some() {
@@ -4052,6 +4171,19 @@ impl GUI {
                     self.publish_balance_privacy();
                     tasks.push(self.run_preferences(next));
                 }
+                // A zoom that failed to save goes back to the saved one, like
+                // every other choice ("Your previous settings remain active").
+                if !applied
+                    && matches!(
+                        request.operation,
+                        Operation::Save(crate::app::settings::preferences::PreferenceChange::Zoom(
+                            _
+                        ))
+                    )
+                {
+                    self.zoom.pending = None;
+                }
+                tasks.push(self.save_pending_zoom());
                 Task::batch(tasks)
             }
             Message::ToggleTheme => {
@@ -4075,6 +4207,13 @@ impl GUI {
             Message::PreferencesSheet(message) => self.preferences_sheet_message(message),
             Message::ConnectSheet(message) => self.connect_sheet_message(message),
             Message::Tick => {
+                if self
+                    .zoom
+                    .notice_until
+                    .is_some_and(|until| Instant::now() >= until)
+                {
+                    self.zoom.notice_until = None;
+                }
                 let system_reduces_motion =
                     crate::app::settings::system_accessibility::reduces_motion();
                 self.system_reduces_motion = system_reduces_motion;
@@ -4254,7 +4393,17 @@ impl GUI {
         Subscription::batch(vec)
     }
 
+    /// The screen with the zoom pill layered on top. The stack is always
+    /// there, pill or not, so showing the pill keeps every widget's state.
     pub fn view(&self) -> Element<Message> {
+        let pill: Element<Message> = match self.zoom.notice_until {
+            Some(until) if Instant::now() < until => zoom_pill(self.current_zoom()),
+            _ => iced::widget::Space::new().into(),
+        };
+        iced::widget::stack![self.screen(), pill].into()
+    }
+
+    fn screen(&self) -> Element<Message> {
         if privacy_render_needs_cover(
             &self.preferences,
             &GlobalSettings::path(&self.config.coincube_directory),
@@ -4303,7 +4452,7 @@ impl GUI {
     }
 
     pub fn scale_factor(&self) -> f32 {
-        1.0
+        self.current_zoom().factor()
     }
 
     pub fn theme(&self) -> coincube_ui::theme::Theme {
@@ -4555,6 +4704,7 @@ mod app_preferences_sheet_tests {
                     preferences_sheet: None,
                     connect_sheet: None,
                     preferences: unresolved_test_preferences(),
+                    zoom: ZoomState::default(),
                 };
                 let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
                 drop(gui.update(Message::Pane(
@@ -4603,6 +4753,7 @@ mod app_preferences_sheet_tests {
             preferences_sheet: None,
             connect_sheet: None,
             preferences: PreferencesOwner::new(GlobalSettings::path(root), &receipt),
+            zoom: ZoomState::default(),
         }
     }
 
@@ -5084,6 +5235,120 @@ mod app_preferences_sheet_tests {
         std::fs::remove_dir_all(path).ok();
     }
 
+    fn zoom_key(character: &str, modifiers: keyboard::Modifiers) -> Event {
+        let key = keyboard::Key::Character(character.into());
+        Event::Keyboard(keyboard::Event::KeyPressed {
+            key: key.clone(),
+            modified_key: key,
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Equal),
+            location: keyboard::Location::Standard,
+            modifiers,
+            text: None,
+            repeat: false,
+        })
+    }
+
+    #[test]
+    fn command_plus_minus_and_zero_are_zoom_shortcuts() {
+        let command = keyboard::Modifiers::COMMAND;
+        for (character, step) in [
+            ("=", ZoomStep::In),
+            ("+", ZoomStep::In),
+            ("-", ZoomStep::Out),
+            ("0", ZoomStep::ActualSize),
+        ] {
+            assert_eq!(
+                ignored_shell_key(&zoom_key(character, command), event::Status::Ignored),
+                Some(Key::Zoom(step)),
+                "{character}"
+            );
+        }
+        // Plain typing and a focused widget's own keys are not shortcuts.
+        assert_eq!(
+            ignored_shell_key(
+                &zoom_key("=", keyboard::Modifiers::empty()),
+                event::Status::Ignored
+            ),
+            None
+        );
+        assert_eq!(
+            ignored_shell_key(&zoom_key("=", command), event::Status::Captured),
+            None
+        );
+    }
+
+    #[test]
+    fn zoom_applies_at_once_and_saves_the_last_step_once_the_lane_is_free() {
+        let _guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path = std::env::temp_dir().join(format!("tenshu-zoom-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        let root = CoincubeDirectory::new(path.clone());
+        let mut gui = launcher_gui(&root);
+        assert_eq!(gui.scale_factor(), 1.0);
+
+        // Another save holds the lane, so the shortcut cannot save yet.
+        let busy = gui
+            .preferences
+            .begin_save(PreferenceChange::LauncherStyle(LauncherStyle::List))
+            .unwrap();
+        drop(gui.update(Message::KeyPressed(Key::Zoom(ZoomStep::In))));
+        drop(gui.update(Message::KeyPressed(Key::Zoom(ZoomStep::In))));
+        assert_eq!(gui.scale_factor(), 1.25, "both steps apply before any save");
+        assert!(gui.zoom.notice_until.is_some(), "the pill shows");
+        assert_eq!(
+            gui.preferences.pending_operation(),
+            Some(Operation::Save(PreferenceChange::LauncherStyle(
+                LauncherStyle::List
+            )))
+        );
+
+        // When that save lands, the newest zoom is saved, not the first step.
+        let receipt = GlobalSettings::save_preference(
+            &busy.root,
+            PreferenceChange::LauncherStyle(LauncherStyle::List),
+        )
+        .unwrap();
+        drop(gui.update(Message::Preferences(busy, Ok(receipt))));
+        assert_eq!(
+            gui.preferences.pending_operation(),
+            Some(Operation::Save(PreferenceChange::Zoom(Zoom::from(125))))
+        );
+        assert_eq!(gui.scale_factor(), 1.25);
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn zoom_stops_at_the_first_and_last_step() {
+        let _guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path = std::env::temp_dir().join(format!("tenshu-zoom-ends-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        let root = CoincubeDirectory::new(path.clone());
+        let mut gui = launcher_gui(&root);
+        for _ in 0..10 {
+            drop(gui.update(Message::KeyPressed(Key::Zoom(ZoomStep::Out))));
+        }
+        assert_eq!(gui.scale_factor(), 0.8);
+        for _ in 0..10 {
+            drop(gui.update(Message::KeyPressed(Key::Zoom(ZoomStep::In))));
+        }
+        assert_eq!(gui.scale_factor(), 1.5);
+        drop(gui.update(Message::KeyPressed(Key::Zoom(ZoomStep::ActualSize))));
+        assert_eq!(gui.scale_factor(), 1.0);
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
     #[test]
     fn ordinary_refresh_and_display_edits_preserve_home_split_flow() {
         // GUI updates reach teardown paths that close the process-global session.
@@ -5231,6 +5496,7 @@ mod fork_auth_dispatch_tests {
             preferences_sheet: None,
             connect_sheet: None,
             preferences: unresolved_test_preferences(),
+            zoom: ZoomState::default(),
         };
         drop(gui.update(Message::Pane(
             pane_id,
@@ -5311,6 +5577,7 @@ mod fork_auth_dispatch_tests {
                     preferences_sheet: None,
                     connect_sheet: None,
                     preferences: unresolved_test_preferences(),
+                    zoom: ZoomState::default(),
                 };
                 drop(gui.update(Message::Pane(
                     pane_id,
@@ -5657,6 +5924,7 @@ mod fork_auth_dispatch_tests {
             preferences_sheet: None,
             connect_sheet: None,
             preferences: unresolved_test_preferences(),
+            zoom: ZoomState::default(),
                     };
                     let mut cube = crate::app::settings::CubeSettings::new(
                         "Cold fork".into(),
@@ -5790,6 +6058,7 @@ mod fork_auth_dispatch_tests {
                     preferences_sheet: None,
                     connect_sheet: None,
                     preferences: unresolved_test_preferences(),
+                    zoom: ZoomState::default(),
                 };
                 let account = |message| {
                     Message::Pane(
@@ -5969,6 +6238,7 @@ mod fork_auth_dispatch_tests {
                 preferences_sheet: None,
                 connect_sheet: None,
                 preferences: unresolved_test_preferences(),
+                zoom: ZoomState::default(),
             };
             let task = gui.update(Message::Pane(
                 source,
@@ -6196,6 +6466,7 @@ mod fork_auth_revocation_tests {
                 preferences_sheet: None,
                 connect_sheet: None,
                 preferences: unresolved_test_preferences(),
+                zoom: ZoomState::default(),
             };
             let (home, home_startup) =
                 home::Home::new_for_chain(gui.config.coincube_directory.clone(), None);
@@ -6373,6 +6644,7 @@ mod shared_adoption_generation_tests {
                 preferences_sheet: None,
                 connect_sheet: None,
                 preferences: unresolved_test_preferences(),
+                zoom: ZoomState::default(),
             };
             let init = || {
                 Message::Pane(
@@ -6575,6 +6847,7 @@ mod shell_escape_dispatch_tests {
                     preferences_sheet: None,
                     connect_sheet: None,
                     preferences: unresolved_test_preferences(),
+                    zoom: ZoomState::default(),
                 };
                 let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
                 drop(gui.view());
@@ -6663,6 +6936,7 @@ mod shell_escape_dispatch_tests {
             preferences_sheet: None,
             connect_sheet: None,
             preferences: unresolved_test_preferences(),
+            zoom: ZoomState::default(),
         };
         let route = |intent| {
             Message::Pane(
@@ -6801,6 +7075,7 @@ mod lock_cube_dispatch_tests {
             preferences_sheet: None,
             connect_sheet: None,
             preferences: unresolved_test_preferences(),
+            zoom: ZoomState::default(),
         };
         crate::app::session::open("orphaned", zeroize::Zeroizing::new("2468".into()));
         let destination = crate::app::settings::CubeSettings::new_with_raw_id(
@@ -6970,6 +7245,7 @@ mod lock_cube_dispatch_tests {
             preferences_sheet: None,
             connect_sheet: None,
             preferences: unresolved_test_preferences(),
+            zoom: ZoomState::default(),
         };
         let destination = crate::app::settings::CubeSettings::new_with_raw_id(
             "other".into(),
@@ -7076,6 +7352,7 @@ mod lock_cube_dispatch_tests {
             preferences_sheet: None,
             connect_sheet: None,
             preferences: unresolved_test_preferences(),
+            zoom: ZoomState::default(),
         };
         crate::app::session::open(same_cube_id.clone(), zeroize::Zeroizing::new("2468".into()));
         assert_eq!(crate::app::session::current_cube_id(), Some(same_cube_id));
@@ -7161,6 +7438,7 @@ mod lock_cube_dispatch_tests {
             preferences_sheet: None,
             connect_sheet: None,
             preferences: unresolved_test_preferences(),
+            zoom: ZoomState::default(),
         };
         let resources = tab::ClaimResources {
             intent,
@@ -7357,6 +7635,7 @@ impl GUI {
             preferences_sheet: None,
             connect_sheet: None,
             preferences: unresolved_test_preferences(),
+            zoom: ZoomState::default(),
         }
     }
     /// An already-open Bitcoin Cube (tab 1) beside a Home tab (tab 2), in one pane.
@@ -7379,6 +7658,7 @@ impl GUI {
             preferences_sheet: None,
             connect_sheet: None,
             preferences: unresolved_test_preferences(),
+            zoom: ZoomState::default(),
         }
     }
     /// As [`Self::reviewer_app_home_gui`], with the Cube moved to its own
@@ -7863,6 +8143,7 @@ mod claim_return_routing_tests {
                     preferences_sheet: None,
                     connect_sheet: None,
                     preferences: unresolved_test_preferences(),
+                    zoom: ZoomState::default(),
                 };
                 let source_id = match &gui.panes.get(target).unwrap().tabs[index].state {
                     tab::State::App(app) => app.cube_settings().id.clone(),
@@ -8485,6 +8766,7 @@ mod single_open_lifecycle_tests {
             preferences_sheet: None,
             connect_sheet: None,
             preferences: unresolved_test_preferences(),
+            zoom: ZoomState::default(),
                     };
                     if connect {
                         // Return from an accepted ordinary Split prerequisite
