@@ -843,12 +843,13 @@ fn overview_eye<'a>(
     toggle: HomeMessage,
 ) -> Element<'a, Message> {
     let glyph = if masked { eye_slash_icon() } else { eye_icon() };
-    let label = if global_hidden {
-        "Global Hide is on"
-    } else if masked {
-        "Show balance"
-    } else {
-        "Hide balance"
+    let label = match (section, global_hidden, masked) {
+        ("Total Balance", true, _) => "Total balance hidden by global Hide",
+        ("Wallets", true, _) => "Wallet balances hidden by global Hide",
+        ("Total Balance", false, true) => "Show total balance",
+        ("Wallets", false, true) => "Show wallet balances",
+        ("Total Balance", false, false) => "Hide total balance",
+        _ => "Hide wallet balances",
     };
     iced::widget::tooltip(
         Action::new(
@@ -3205,19 +3206,42 @@ pub fn global_home_view<'a>(
         || imported_balance_loaded
         || (has_vault && !has_imported_bitcoin && vault_loaded);
     let total_balance_label_row = Row::new()
-        .spacing(8)
+        .width(Length::Fill)
         .align_y(Alignment::Center)
-        .push(h3("Total Balance").bold())
-        .push(overview_eye(
-            cube_id,
-            "Total Balance",
-            overview_masks.total,
-            balance_masked,
-            HomeMessage::ToggleTotalBalance,
-        ))
-        .push_maybe(
-            (total_partial && !total_balance_loading)
-                .then(|| warning_icon().size(12).style(theme::text::secondary)),
+        .push(
+            Row::new()
+                .spacing(8)
+                .width(Length::FillPortion(1))
+                .align_y(Alignment::Center)
+                .push(h3("Total Balance").bold())
+                .push(overview_eye(
+                    cube_id,
+                    "Total Balance",
+                    overview_masks.total,
+                    balance_masked,
+                    HomeMessage::ToggleTotalBalance,
+                ))
+                .push_maybe(
+                    (total_partial && !total_balance_loading)
+                        .then(|| warning_icon().size(12).style(theme::text::secondary)),
+                ),
+        )
+        .push(
+            Container::new(
+                Row::new()
+                    .spacing(6)
+                    .align_y(Alignment::Center)
+                    .push(network_coin(chain, light_theme))
+                    .push(
+                        text(format!("{cube_name} · {}", network_name(chain)))
+                            .size(P2_SIZE)
+                            .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+                            .align_x(iced::alignment::Horizontal::Right)
+                            .style(theme::text::secondary),
+                    ),
+            )
+            .width(Length::FillPortion(1))
+            .align_x(iced::alignment::Horizontal::Right),
         );
 
     let total_balance_value: Element<'a, Message> = if total_balance_loading {
@@ -3267,17 +3291,6 @@ pub fn global_home_view<'a>(
     let total_balance_block = Column::new()
         .spacing(6)
         .push(total_balance_label_row)
-        .push(
-            Row::new()
-                .spacing(6)
-                .align_y(Alignment::Center)
-                .push(network_coin(chain, light_theme))
-                .push(
-                    text(format!("{cube_name} · {}", network_name(chain)))
-                        .size(P2_SIZE)
-                        .style(theme::text::secondary),
-                ),
-        )
         .push(total_balance_value)
         .push_maybe(
             (total_partial && !total_balance_loading && !total_balance_masked).then(|| {
@@ -4420,30 +4433,69 @@ mod tests {
     fn overview_context_alias_and_section_controls_render() {
         use crate::app::view::shared::landing::capture;
         let fixture = ViewFixture::new();
-        let shown = capture::inspect(
-            "overview-context",
-            overview(fixture.config(0, None, None)),
-            (1440, 900),
-            "dark",
-            theme::Theme::dark(),
-        );
-        assert!(shown.contains("Everyday · Bitcoin"));
-        assert!(shown.contains("Vault · Family savings"));
-        for section in ["Total Balance", "Wallets"] {
-            assert!(shown.has_focus(landing_control_id("test-cube", section, "balance-privacy")));
-        }
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            for outer in [(1024, 768), (1440, 900)] {
+                let shown = capture::inspect(
+                    "overview-context",
+                    overview(fixture.config(0, None, None)),
+                    outer,
+                    appearance,
+                    theme,
+                );
+                assert!(shown.contains("Everyday · Bitcoin"));
+                assert!(shown.contains("Vault · Family savings"));
+                for section in ["Total Balance", "Wallets"] {
+                    assert!(shown.has_focus(landing_control_id(
+                        "test-cube",
+                        section,
+                        "balance-privacy"
+                    )));
+                }
+                let title = shown
+                    .text
+                    .iter()
+                    .find(|(label, _)| label == "Total Balance")
+                    .expect("Total Balance title")
+                    .1;
+                let context = shown
+                    .text
+                    .iter()
+                    .find(|(label, _)| label == "Everyday · Bitcoin")
+                    .expect("Cube and network line")
+                    .1;
+                assert!(context.x > title.x, "context belongs on the right");
+                assert!(
+                    (context.y - title.y).abs() <= title.height,
+                    "context and title must share a row: {title:?} {context:?}"
+                );
 
-        let mut global_hidden = fixture.config(0, None, None);
-        global_hidden.balance_masked = true;
-        let hidden = capture::inspect(
-            "overview-global-hide",
-            overview(global_hidden),
-            (1440, 900),
-            "dark",
-            theme::Theme::dark(),
-        );
-        assert!(!hidden.contains("250,000"));
-        assert!(!hidden.contains("31,000"));
+                for (local_total, local_wallets) in [(false, false), (true, false), (false, true)] {
+                    let mut global_hidden = fixture.config(0, None, None);
+                    global_hidden.balance_masked = true;
+                    global_hidden.overview_total_hidden = local_total;
+                    global_hidden.overview_wallets_hidden = local_wallets;
+                    let hidden = capture::inspect(
+                        "overview-global-hide",
+                        overview(global_hidden),
+                        outer,
+                        appearance,
+                        theme,
+                    );
+                    assert!(!hidden.contains("250,000"));
+                    assert!(!hidden.contains("31,000"));
+                    for section in ["Total Balance", "Wallets"] {
+                        assert!(!hidden.has_focus(landing_control_id(
+                            "test-cube",
+                            section,
+                            "balance-privacy"
+                        )));
+                    }
+                }
+            }
+        }
     }
 
     #[test]
