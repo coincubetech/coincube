@@ -7284,8 +7284,17 @@ impl DeleteRemoteCubeModal {
             .width(Length::Fill),
         );
 
-        Into::<Element<ViewMessage>>::into(card::simple(col).width(Length::Fixed(700.0)))
-            .map(Message::View)
+        Into::<Element<ViewMessage>>::into(
+            Container::new(col)
+                .padding([28.0, 32.0])
+                .width(Length::Fixed(700.0))
+                .style(|theme| {
+                    let mut style = theme::card::modal(theme);
+                    style.border.radius = 12.0.into();
+                    style
+                }),
+        )
+        .map(Message::View)
     }
 }
 
@@ -7631,7 +7640,14 @@ impl DeleteCubeModal {
             )
             .push(
                 Container::new(if !self.deleted {
-                    Row::new().push(confirm_button)
+                    Row::new()
+                        .spacing(10)
+                        .push(
+                            button::secondary(None, "Cancel")
+                                .width(Length::Fixed(120.0))
+                                .on_press(ViewMessage::DeleteCube(DeleteCubeMessage::CloseModal)),
+                        )
+                        .push(confirm_button)
                 } else {
                     Row::new()
                         .spacing(10)
@@ -7642,8 +7658,17 @@ impl DeleteCubeModal {
                 .width(Length::Fill),
             );
 
-        Into::<Element<ViewMessage>>::into(card::simple(col).width(Length::Fixed(700.0)))
-            .map(Message::View)
+        Into::<Element<ViewMessage>>::into(
+            Container::new(col)
+                .padding([28.0, 32.0])
+                .width(Length::Fixed(700.0))
+                .style(|theme| {
+                    let mut style = theme::card::modal(theme);
+                    style.border.radius = 12.0.into();
+                    style
+                }),
+        )
+        .map(Message::View)
     }
 }
 
