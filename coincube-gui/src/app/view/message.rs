@@ -478,11 +478,13 @@ pub enum SettingsMessage {
     /// is suspect (compromise, machine swap) or the row went stale on
     /// the API and signing started 404'ing.
     ReregisterConnectDevice,
-    /// Settled result of the re-registration RPC. Payload is the new
-    /// device_id on success, or a user-facing error string. Routed
+    /// Settled result of the re-registration RPC. Payload is
+    /// `(account email, new device_id)` on success, or a user-facing error
+    /// string. The email lets the App drop a result that lands after an
+    /// account switch. Routed
     /// straight to the About settings state so it can refresh its
     /// banner without going through the catchall update path.
-    ConnectDeviceReregistered(Result<String, String>),
+    ConnectDeviceReregistered(Result<(String, String), String>),
     RegisterWallet,
     FingerprintAliasEdited(Fingerprint, String),
     WalletAliasEdited(String),

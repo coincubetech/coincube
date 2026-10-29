@@ -128,6 +128,7 @@ impl State for AboutSettingsState {
                                 os_version,
                             )
                             .await
+                            .map(|device_id| (email.clone(), device_id))
                             .map_err(|e| e.to_string());
                         // On failure the cache was left cleared — restore
                         // the prior id (best-effort) so a transient RPC
@@ -160,7 +161,7 @@ impl State for AboutSettingsState {
                 view::SettingsMessage::ConnectDeviceReregistered(res),
             )) => {
                 self.reregistering = false;
-                self.reregister_status = Some(res);
+                self.reregister_status = Some(res.map(|(_, device_id)| device_id));
             }
             _ => {}
         }

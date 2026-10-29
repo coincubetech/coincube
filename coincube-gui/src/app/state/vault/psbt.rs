@@ -1621,7 +1621,8 @@ fn build_keychain_if_ready(
         cache.cube_id.clone(),
         psbt.clone(),
         cache.connect_transport_key.clone(),
-    );
+    )
+    .with_stream_health(cache.connect_stream_status.clone());
     let launch = modal.launch();
     (Some(modal), launch)
 }
