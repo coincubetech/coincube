@@ -808,7 +808,10 @@ fn launcher_presentation_changed(
 ) -> bool {
     match (before, after) {
         (Some(before), Some(after)) => {
-            before.launcher_style != after.launcher_style || before.motion != after.motion
+            before.launcher_style != after.launcher_style
+                || before.motion != after.motion
+                || before.network_activity != after.network_activity
+                || before.network_activity_source != after.network_activity_source
         }
         (None, Some(_)) => true,
         _ => false,

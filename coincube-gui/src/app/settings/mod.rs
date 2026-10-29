@@ -1826,7 +1826,8 @@ impl std::fmt::Display for SettingsError {
 #[allow(unstable_name_collisions)]
 pub mod global {
     use super::preferences::{
-        DevicePreferences, LauncherStyle, MotionPreference, PreferenceChange, ThemePreference, Zoom,
+        DevicePreferences, LauncherStyle, MotionPreference, NetworkActivitySource,
+        PreferenceChange, ThemePreference, Zoom,
     };
     use crate::dir::CoincubeDirectory;
     use async_hwi::bitbox::{ConfigError, NoiseConfig, NoiseConfigData};
@@ -1930,6 +1931,11 @@ pub mod global {
         /// shown and acknowledged on this install.
         #[serde(default)]
         pub seen_advisory_notices: Vec<String>,
+        /// The Launcher's network activity behind the Cubes; on unless turned off.
+        #[serde(default = "default_true")]
+        pub network_activity: bool,
+        #[serde(default)]
+        pub network_activity_source: NetworkActivitySource,
     }
 
     fn default_true() -> bool {
@@ -1966,6 +1972,8 @@ pub mod global {
                 recipient_identity_checks: true,
                 dismissed_hw_advisories: Vec::new(),
                 seen_advisory_notices: Vec::new(),
+                network_activity: true,
+                network_activity_source: NetworkActivitySource::default(),
             }
         }
     }
@@ -1980,6 +1988,8 @@ pub mod global {
                 zoom: self.zoom,
                 developer_mode: self.developer_mode,
                 bitcoin_blake2b_beta: self.bitcoin_blake2b_beta,
+                network_activity: self.network_activity,
+                network_activity_source: self.network_activity_source,
             }
         }
 
@@ -2002,6 +2012,10 @@ pub mod global {
                 PreferenceChange::DeveloperMode(enabled) => self.developer_mode = enabled,
                 PreferenceChange::BitcoinBlake2bBeta(enabled) => {
                     self.bitcoin_blake2b_beta = enabled;
+                }
+                PreferenceChange::NetworkActivity(shown) => self.network_activity = shown,
+                PreferenceChange::NetworkActivitySource(source) => {
+                    self.network_activity_source = source;
                 }
             }
         }
@@ -4882,6 +4896,49 @@ mod test {
         GlobalSettings::update_bitcoin_blake2b_beta(&path, false).unwrap();
         assert!(!GlobalSettings::load_bitcoin_blake2b_beta(&path));
         assert!(GlobalSettings::load_developer_mode(&path));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn network_activity_defaults_on_and_automatic_and_each_edit_persists() {
+        use super::preferences::NetworkActivitySource;
+        let fresh = GlobalSettings::default();
+        assert!(fresh.network_activity);
+        assert_eq!(
+            fresh.network_activity_source,
+            NetworkActivitySource::Automatic
+        );
+        // A file written before these fields existed reads as on, Automatic.
+        let old: GlobalSettings = serde_json::from_str(RAW_GLOBAL_SETTINGS).unwrap();
+        assert!(old.network_activity);
+        assert_eq!(
+            old.network_activity_source,
+            NetworkActivitySource::Automatic
+        );
+        let dir = env::temp_dir().join(format!("coincube-activity-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("global_settings.json");
+        let saved = GlobalSettings::update_preference(
+            &path,
+            PreferenceChange::NetworkActivitySource(NetworkActivitySource::Connect),
+        )
+        .unwrap();
+        assert!(saved.network_activity);
+        assert_eq!(
+            saved.network_activity_source,
+            NetworkActivitySource::Connect
+        );
+        GlobalSettings::update_preference(&path, PreferenceChange::NetworkActivity(false)).unwrap();
+        let loaded = GlobalSettings::load_preferences(&path).unwrap();
+        assert!(!loaded.network_activity);
+        assert_eq!(
+            loaded.network_activity_source,
+            NetworkActivitySource::Connect
+        );
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(raw["network_activity"], serde_json::json!(false));
+        assert_eq!(raw["network_activity_source"], serde_json::json!("connect"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

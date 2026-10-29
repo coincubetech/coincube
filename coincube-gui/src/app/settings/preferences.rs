@@ -41,6 +41,18 @@ pub enum LauncherStyle {
     List,
 }
 
+/// Where the Launcher reads the network activity it shows behind the Cubes.
+/// It only ever reads a node that is already running; it never starts one.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkActivitySource {
+    /// The managed node when it is running, otherwise COINCUBE | Connect.
+    #[default]
+    Automatic,
+    LocalNode,
+    Connect,
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MotionPreference {
@@ -131,6 +143,9 @@ pub struct DevicePreferences {
     pub zoom: Zoom,
     pub developer_mode: bool,
     pub bitcoin_blake2b_beta: bool,
+    /// Recent blocks, mempool and chain facts behind the Launcher's Cubes.
+    pub network_activity: bool,
+    pub network_activity_source: NetworkActivitySource,
 }
 
 impl Default for DevicePreferences {
@@ -143,6 +158,8 @@ impl Default for DevicePreferences {
             zoom: Zoom::ACTUAL_SIZE,
             developer_mode: false,
             bitcoin_blake2b_beta: false,
+            network_activity: true,
+            network_activity_source: NetworkActivitySource::Automatic,
         }
     }
 }
@@ -188,6 +205,8 @@ pub enum PreferenceChange {
     Zoom(Zoom),
     DeveloperMode(bool),
     BitcoinBlake2bBeta(bool),
+    NetworkActivity(bool),
+    NetworkActivitySource(NetworkActivitySource),
 }
 
 #[cfg(test)]

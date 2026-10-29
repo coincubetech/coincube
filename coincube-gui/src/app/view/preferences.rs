@@ -22,8 +22,8 @@ use iced::{advanced::widget::Id, widget::container, Alignment, Length};
 
 use crate::app::{
     settings::preferences::{
-        DevicePreferences, EffectivePreferences, LauncherStyle, MotionPreference, PreferenceChange,
-        ThemePreference, Zoom,
+        DevicePreferences, EffectivePreferences, LauncherStyle, MotionPreference,
+        NetworkActivitySource, PreferenceChange, ThemePreference, Zoom,
     },
     state::preferences::{BalancePrivacy, PreferencesPageState, Section},
 };
@@ -438,6 +438,69 @@ fn section_content<'a>(
                 .note(status, Tone::Muted)
                 .into(),
             );
+            rows.push(
+                setting_row(
+                    "Network activity",
+                    toggle(
+                        "tenshu.preferences.launcher.network-activity",
+                        saved.network_activity,
+                        Message::FocusAction,
+                    )
+                    .switch()
+                    .on_toggle_maybe(enabled.then_some(|shown: bool| {
+                        Message::Change(PreferenceChange::NetworkActivity(shown))
+                    })),
+                )
+                .tag(SCOPE)
+                .trailing_tag()
+                .description(
+                    "Recent blocks, the mempool, fee rate, hashrate and the next halving behind \
+                     the Cubes, for the network the Launcher is filtered to.",
+                )
+                .into(),
+            );
+            if saved.network_activity {
+                rows.push(
+                    setting_row(
+                        "Activity source",
+                        segmented(
+                            [
+                                segment(
+                                    "tenshu.preferences.launcher.activity.automatic",
+                                    NetworkActivitySource::Automatic,
+                                    "Automatic",
+                                ),
+                                segment(
+                                    "tenshu.preferences.launcher.activity.local",
+                                    NetworkActivitySource::LocalNode,
+                                    "Local node",
+                                ),
+                                segment(
+                                    "tenshu.preferences.launcher.activity.connect",
+                                    NetworkActivitySource::Connect,
+                                    "Connect",
+                                ),
+                            ],
+                            Some(saved.network_activity_source),
+                            Message::FocusAction,
+                        )
+                        .size(SegmentSize::Compact)
+                        .on_select_maybe(enabled.then_some(
+                            |value: NetworkActivitySource| {
+                                Message::Change(PreferenceChange::NetworkActivitySource(value))
+                            },
+                        )),
+                    )
+                    .tag(SCOPE)
+                    .trailing_tag()
+                    .description(
+                        "Automatic reads a local node that is already running, else COINCUBE | \
+                         Connect, or mempool.space for the test networks Connect does not \
+                         serve. The Launcher never starts a node.",
+                    )
+                    .into(),
+                );
+            }
         }
         Section::BalancesAndMotion => {
             let privacy_enabled = enabled && model.balance_privacy_interactive;
