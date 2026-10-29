@@ -6242,6 +6242,22 @@ impl Home {
     /// Home's frame for every screen except the visible Launcher List: the
     /// 190px sidebar beside the scrolling section body.
     fn legacy_frame(&self, mask_amounts: bool) -> Element<Message> {
+        if matches!(self.state, State::Unchecked) {
+            // A fresh launch and a network probe have not established whether
+            // any Cubes exist yet. Keep creation actions out of this frame.
+            return Container::new(
+                Column::new()
+                    .spacing(8)
+                    .push(h4_bold("Checking for Cubes"))
+                    .push(p2_regular("Loading local Cube settings…").style(theme::text::secondary)),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .style(theme::container::background)
+            .into();
+        }
         let unavailable = self.chain_availability(self.network);
         let unavailable_content = unavailable.reason().map(|reason| {
             Column::new()
@@ -8671,6 +8687,54 @@ mod tests {
 
         home.state = State::NoCube { create_cube: false };
         assert!(home.showing_create_journey());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unchecked_home_renders_loading_without_creation_actions() {
+        use iced::advanced::{
+            layout,
+            renderer::Headless,
+            widget::{Id, Operation, Tree},
+            Layout,
+        };
+
+        #[derive(Default)]
+        struct Labels(Vec<String>);
+        impl Operation for Labels {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn text(&mut self, _: Option<&Id>, _: iced::Rectangle, text: &str) {
+                self.0.push(text.to_owned());
+            }
+        }
+
+        let mut home = home();
+        home.advisory_notice = None;
+        assert!(matches!(home.state, State::Unchecked));
+        let mut element = home.view();
+        let renderer = <iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(14.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer");
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(iced::Size::ZERO, iced::Size::new(1024.0, 768.0)),
+        );
+        let mut labels = Labels::default();
+        element
+            .as_widget_mut()
+            .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
+        assert!(labels.0.iter().any(|label| label == "Checking for Cubes"));
+        assert!(!labels
+            .0
+            .iter()
+            .any(|label| label == "Create Cube" || label == "Create a new Cube"));
     }
 
     #[test]
