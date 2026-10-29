@@ -96,10 +96,15 @@ use super::vault::psbt::SignModal;
 use super::{Cache, Menu, State};
 use crate::app::state::vault::label::LabelsEdited;
 use crate::app::state::vault::receive::ShowQrCodeModal;
-use crate::app::view::global_home::{
-    GlobalViewConfig, HomeView, PendingTransfer, PickerSide, TransferDirection, TransferError,
-    TransferStage, WalletKind,
+use crate::app::transfer_destination::{Source, WalletIdentity};
+use crate::app::transfer_destination_loader::{
+    other_cubes, CubeChoice, DestinationAddress, Refusal as ScopeRefusal, ScopedDestination,
 };
+use crate::app::view::global_home::{
+    GlobalViewConfig, HomeView, OtherCubeView, PendingTransfer, PickerSide, TransferDirection,
+    TransferError, TransferPage, TransferStage, UnlockPhase, WalletKind, UNLOCK_CHECKS,
+};
+use zeroize::Zeroizing;
 
 /// Which per-wallet balances the Total Balance aggregate is still waiting on.
 #[derive(Clone, Copy, Debug)]
@@ -200,10 +205,54 @@ pub(crate) fn effective_transfer_min_sat(
         TransferDirection::VaultToLiquid | TransferDirection::SparkToLiquid => {
             onchain_receive_limit.map(|(min, _)| MIN_TRANSFER_SATS.max(min))
         }
-        // Pure on-chain: Vault↔Spark. No swap limits apply.
-        TransferDirection::VaultToSpark | TransferDirection::SparkToVault => {
-            Some(MIN_TRANSFER_SATS)
-        }
+        // Pure on-chain: Vault↔Spark, or Vault to another Cube's Vault. No
+        // swap limits apply.
+        TransferDirection::VaultToSpark
+        | TransferDirection::SparkToVault
+        | TransferDirection::VaultToOtherCube => Some(MIN_TRANSFER_SATS),
+    }
+}
+
+/// Lays the transfer dialog over `content`: as its own modal, or, beneath
+/// an upper modal (QR card, signer), in the base, because Iced draws only the
+/// root widget's overlay. The upper modal already blocks the base's input.
+fn with_transfer_dialog<'a>(
+    content: Element<'a, view::Message>,
+    dialog: Option<Element<'a, view::Message>>,
+    upper_modal: bool,
+    dismiss: Option<view::Message>,
+) -> Element<'a, view::Message> {
+    match dialog {
+        Some(dialog) if upper_modal => iced::widget::Stack::new()
+            .push(content)
+            .push(
+                iced::widget::Container::new(dialog)
+                    .width(iced::Length::Fill)
+                    .height(iced::Length::Fill)
+                    .center_x(iced::Length::Fill)
+                    .center_y(iced::Length::Fill)
+                    .style(|_| iced::widget::container::Style {
+                        background: Some(iced::Background::Color(iced::Color {
+                            a: 0.80,
+                            ..iced::Color::BLACK
+                        })),
+                        ..Default::default()
+                    }),
+            )
+            .into(),
+        Some(dialog) => coincube_ui::widget::modal::Modal::new(content, dialog)
+            .on_blur(dismiss)
+            .into(),
+        None => content,
+    }
+}
+
+fn transfer_denomination(
+    unit: BitcoinDisplayUnit,
+) -> coincube_core::miniscript::bitcoin::Denomination {
+    match unit {
+        BitcoinDisplayUnit::BTC => coincube_core::miniscript::bitcoin::Denomination::Bitcoin,
+        BitcoinDisplayUnit::Sats => coincube_core::miniscript::bitcoin::Denomination::Satoshi,
     }
 }
 
@@ -220,7 +269,9 @@ pub(crate) fn effective_transfer_max_sat(
             onchain_receive_limit.map(|(_, max)| max)
         }
         // Pure on-chain: cap is the source balance — the caller enforces it.
-        TransferDirection::VaultToSpark | TransferDirection::SparkToVault => None,
+        TransferDirection::VaultToSpark
+        | TransferDirection::SparkToVault
+        | TransferDirection::VaultToOtherCube => None,
     }
 }
 use crate::app::view::shared::feerate_picker::FeeratePreset;
@@ -367,6 +418,23 @@ pub struct GlobalHome {
     /// While `Some`, the corresponding button renders non-pressable; the
     /// other two stay clickable so the user can swap targets mid-flight.
     transfer_feerate_loading: Option<crate::app::view::shared::feerate_picker::FeeratePreset>,
+    /// Which page step 1 of the transfer dialog shows.
+    transfer_page: TransferPage,
+    /// Unit the transfer amount is entered in, seeded from the Cube's
+    /// display unit when the dialog opens.
+    transfer_unit: BitcoinDisplayUnit,
+    /// "Another Cube…": the local catalog read when that route opens.
+    other_cubes: Vec<CubeChoice>,
+    other_cube_selected: Option<String>,
+    /// The chosen Cube, unlocked in place for this transfer only. Dropping
+    /// it revokes the unlock and stops any daemon it started.
+    other_scope: Option<ScopedDestination>,
+    other_pin: Zeroizing<String>,
+    other_phase: UnlockPhase,
+    other_error: Option<String>,
+    /// The other Vault's receive address, re-derived from its descriptor.
+    other_address: Option<DestinationAddress>,
+    other_locked_again: bool,
     pending_vault_incoming: Option<PendingTransfer>,
     pending_vault_incoming_swap_id: Option<String>,
     /// Session-level counter for non-swap inbound Vault transfers (SparkToVault).
@@ -488,6 +556,16 @@ impl GlobalHome {
             spend_tx_fees: None,
             transfer_feerate: default_transfer_feerate(),
             transfer_feerate_loading: None,
+            transfer_page: TransferPage::Wallets,
+            transfer_unit: BitcoinDisplayUnit::Sats,
+            other_cubes: Vec::new(),
+            other_cube_selected: None,
+            other_scope: None,
+            other_pin: Zeroizing::new(String::new()),
+            other_phase: UnlockPhase::default(),
+            other_error: None,
+            other_address: None,
+            other_locked_again: false,
             pending_vault_incoming: None,
             pending_vault_incoming_swap_id: None,
             pending_vault_receive_sats: 0,
@@ -566,6 +644,16 @@ impl GlobalHome {
             spend_tx_fees: None,
             transfer_feerate: default_transfer_feerate(),
             transfer_feerate_loading: None,
+            transfer_page: TransferPage::Wallets,
+            transfer_unit: BitcoinDisplayUnit::Sats,
+            other_cubes: Vec::new(),
+            other_cube_selected: None,
+            other_scope: None,
+            other_pin: Zeroizing::new(String::new()),
+            other_phase: UnlockPhase::default(),
+            other_error: None,
+            other_address: None,
+            other_locked_again: false,
             pending_vault_incoming: None,
             pending_vault_incoming_swap_id: None,
             pending_vault_receive_sats: 0,
@@ -657,78 +745,107 @@ impl State for GlobalHome {
                 vault_pending,
             });
 
-        let content = view::dashboard(
-            menu,
-            cache,
-            view::global_home::global_home_view(GlobalViewConfig {
-                cube_id: &self.cube_id,
-                liquid_balance,
-                spark_balance: self.spark_balance,
-                spark_btc_balance: self.spark_btc_balance,
-                spark_stable_balance: self.spark_stable_balance.as_ref(),
-                spark_balance_error: self.spark_balance_error,
-                usdt_balance,
-                usdt_balance_error,
-                vault_balance,
-                imported_balance: self.imported_balance,
-                imported_installed: self.imported_installed,
-                fiat_converter,
-                balance_masked: cache.balance_amounts_masked(),
-                total_balance_loading,
-                spark_balance_loaded: self.spark_balance_loaded,
-                liquid_balance_loaded: self.liquid_balance_loaded,
-                liquid_balance_error: self.liquid_balance_error,
-                usdt_balance_loaded: self.usdt_balance_loaded,
-                vault_loaded: !vault_pending,
-                display_mode: cache.display_mode,
-                has_vault: cache.has_vault,
-                has_imported_bitcoin: cache.has_imported_bitcoin,
-                has_spark,
-                has_liquid,
-                current_view: self.current_view,
-                transfer_direction: self.transfer_direction,
-                transfer_from: self.transfer_from,
-                transfer_to: self.transfer_to,
-                wallet_picker: self.wallet_picker,
-                entered_amount: &self.entered_amount,
-                receive_address: self.receive_address_info.as_ref().map(|info| &info.address),
-                destination_ready: self.destination_is_ready(),
-                transfer_action_ready: self.destination_is_ready()
-                    && self.transfer_direction.is_some_and(|direction| {
-                        match direction.from_kind() {
-                            WalletKind::Vault => true,
-                            WalletKind::Liquid => self.prepare_onchain_send_response.is_some(),
-                            WalletKind::Spark => self.spark_send_handle.is_some(),
-                        }
+        let (overview, transfer) = view::global_home::global_home_view(GlobalViewConfig {
+            cube_id: &self.cube_id,
+            liquid_balance,
+            spark_balance: self.spark_balance,
+            spark_btc_balance: self.spark_btc_balance,
+            spark_stable_balance: self.spark_stable_balance.as_ref(),
+            spark_balance_error: self.spark_balance_error,
+            usdt_balance,
+            usdt_balance_error,
+            vault_balance,
+            imported_balance: self.imported_balance,
+            imported_installed: self.imported_installed,
+            fiat_converter,
+            balance_masked: cache.balance_amounts_masked(),
+            total_balance_loading,
+            spark_balance_loaded: self.spark_balance_loaded,
+            liquid_balance_loaded: self.liquid_balance_loaded,
+            liquid_balance_error: self.liquid_balance_error,
+            usdt_balance_loaded: self.usdt_balance_loaded,
+            vault_loaded: !vault_pending,
+            display_mode: cache.display_mode,
+            has_vault: cache.has_vault,
+            has_imported_bitcoin: cache.has_imported_bitcoin,
+            has_spark,
+            has_liquid,
+            current_view: self.current_view,
+            transfer_direction: self.transfer_direction,
+            transfer_from: self.transfer_from,
+            transfer_to: self.transfer_to,
+            wallet_picker: self.wallet_picker,
+            entered_amount: &self.entered_amount,
+            receive_address: self.receive_address_info.as_ref().map(|info| &info.address),
+            destination_ready: self.destination_is_ready(),
+            transfer_action_ready: self.destination_is_ready()
+                && self
+                    .transfer_direction
+                    .is_some_and(|direction| match direction.from_kind() {
+                        WalletKind::Vault => true,
+                        WalletKind::Liquid => self.prepare_onchain_send_response.is_some(),
+                        WalletKind::Spark => self.spark_send_handle.is_some(),
                     }),
-                receive_index: self.receive_address_info.as_ref().map(|info| &info.index),
-                labels: self
-                    .receive_address_info
-                    .as_ref()
-                    .map_or(&self.empty_labels, |info| &info.labels),
-                labels_editing: self.labels_edited.cache(),
-                address_expanded: self.address_expanded,
-                bitcoin_unit: cache.bitcoin_unit,
-                onchain_send_limit: self.onchain_send_limit,
-                onchain_receive_limit: self.onchain_receive_limit,
-                is_sending: self.is_sending,
-                is_tx_signed: self.transfer_signed,
-                prepare_onchain_send_response: self.prepare_onchain_send_response.as_ref(),
-                spend_tx_fees: self.spend_tx_fees,
-                transfer_feerate: &self.transfer_feerate,
-                transfer_feerate_loading: self.transfer_feerate_loading,
-                spark_send_fee_sat: self.spark_send_fee_sat,
-                pending_spark_incoming: self.pending_spark_incoming,
-                pending_liquid_send_sats: self.pending_liquid_send_sats,
-                pending_usdt_send_sats: self.pending_usdt_send_sats,
-                pending_liquid_receive_sats: self.pending_liquid_receive_sats,
-                pending_usdt_receive_sats: self.pending_usdt_receive_sats,
-                vault_pending_send_sats,
-                vault_pending_receive_sats,
-                pending_vault_incoming: self.pending_vault_incoming,
-                btc_usd_price: cache.btc_usd_price,
-            }),
-        );
+            receive_index: self.receive_address_info.as_ref().map(|info| &info.index),
+            labels: self
+                .receive_address_info
+                .as_ref()
+                .map_or(&self.empty_labels, |info| &info.labels),
+            labels_editing: self.labels_edited.cache(),
+            address_expanded: self.address_expanded,
+            bitcoin_unit: cache.bitcoin_unit,
+            onchain_send_limit: self.onchain_send_limit,
+            onchain_receive_limit: self.onchain_receive_limit,
+            is_sending: self.is_sending,
+            is_tx_signed: self.transfer_signed,
+            prepare_onchain_send_response: self.prepare_onchain_send_response.as_ref(),
+            spend_tx_fees: self.spend_tx_fees,
+            transfer_feerate: &self.transfer_feerate,
+            transfer_feerate_loading: self.transfer_feerate_loading,
+            spark_send_fee_sat: self.spark_send_fee_sat,
+            pending_spark_incoming: self.pending_spark_incoming,
+            pending_liquid_send_sats: self.pending_liquid_send_sats,
+            pending_usdt_send_sats: self.pending_usdt_send_sats,
+            pending_liquid_receive_sats: self.pending_liquid_receive_sats,
+            pending_usdt_receive_sats: self.pending_usdt_receive_sats,
+            vault_pending_send_sats,
+            vault_pending_receive_sats,
+            pending_vault_incoming: self.pending_vault_incoming,
+            btc_usd_price: cache.btc_usd_price,
+            cube_name: &cache.cube_name,
+            chain: cache.chain(),
+            light_theme: matches!(
+                cache.theme_mode,
+                coincube_ui::theme::palette::ThemeMode::Light
+            ),
+            transfer_page: self.transfer_page,
+            transfer_unit: self.transfer_unit,
+            other_cube: OtherCubeView {
+                choices: &self.other_cubes,
+                selected: self.other_cube_selected.as_deref(),
+                pin: &self.other_pin,
+                phase: self.other_phase,
+                error: self.other_error.as_deref(),
+                unlocked: self.other_scope.is_some() && self.other_address.is_some(),
+                locked_again: self.other_locked_again,
+            },
+        });
+        let content = view::dashboard(menu, cache, overview);
+        // A QR card or the signer can open over Review. Iced draws only the
+        // root widget's overlay, so beneath one of those the transfer dialog
+        // is laid out in the base instead (the upper modal already blocks the
+        // base's input); otherwise it is its own modal.
+        let upper_modal = match &self.modal {
+            Modal::ShowQrCode(_) => true,
+            Modal::Sign(_) => self.transfer_spend_tx.is_some(),
+            Modal::None => false,
+        };
+        // The transfer steps are a dialog over the Overview. Clicking outside
+        // or Escape cancels the flow, except on the review step: a signed or
+        // in-flight transfer there is left only through its own controls.
+        let dismiss =
+            (self.current_view.step != 2).then_some(view::Message::Home(HomeMessage::BackToHome));
+        let content = with_transfer_dialog(content, transfer, upper_modal, dismiss);
 
         let overlay = match &self.modal {
             Modal::ShowQrCode(m) => m.view(),
@@ -775,6 +892,19 @@ impl State for GlobalHome {
             subscriptions.push(
                 iced::time::every(std::time::Duration::from_secs(3))
                     .map(|_| Message::View(view::Message::Home(HomeMessage::SparkLoadRetry))),
+            );
+        }
+
+        // The other Cube's passkey ceremony is polled on the UI thread.
+        if self.other_phase == (UnlockPhase::Credential { busy: true })
+            && self
+                .other_scope
+                .as_ref()
+                .is_some_and(|scope| scope.is_passkey())
+        {
+            subscriptions.push(
+                iced::time::every(std::time::Duration::from_millis(200))
+                    .map(|_| Message::View(view::Message::Home(HomeMessage::OtherCubePasskeyPoll))),
             );
         }
 
@@ -904,6 +1034,9 @@ impl State for GlobalHome {
                             // from a prior transfer doesn't leak in.
                             self.transfer_feerate = default_transfer_feerate();
                             self.transfer_feerate_loading = None;
+                            self.transfer_page = TransferPage::Wallets;
+                            self.transfer_unit = cache.bitcoin_unit;
+                            self.reset_other_cube();
                             self.current_view.next();
                             // Breez's swap limits bound only the Liquid legs
                             // (see `effective_transfer_min_sat`). Without a
@@ -940,6 +1073,10 @@ impl State for GlobalHome {
                         // Breez to prepare a pay_onchain so fees can render on
                         // the confirm screen.
                         if self.current_view.step == 1 {
+                            // Prepare lives on the Amount page only.
+                            if self.transfer_page != TransferPage::Amount {
+                                return Task::none();
+                            }
                             if self
                                 .transfer_direction
                                 .is_some_and(Self::direction_uses_vault)
@@ -951,6 +1088,21 @@ impl State for GlobalHome {
                                 return Task::none();
                             };
                             let generation = self.invalidate_transfer_destination();
+                            // Another Cube: its Vault's address was fetched and
+                            // re-derived from its descriptor during Unlock.
+                            if direction.is_other_cube() {
+                                let Some(address) = self.other_address.clone() else {
+                                    return Task::none();
+                                };
+                                self.current_view.next();
+                                return Task::done(Message::View(view::Message::Home(
+                                    HomeMessage::TransferDestinationReady {
+                                        generation,
+                                        direction,
+                                        result: Ok((address.address.to_string(), address.index)),
+                                    },
+                                )));
+                            }
                             let mut tasks = Vec::new();
                             if matches!(
                                 self.transfer_direction,
@@ -988,7 +1140,7 @@ impl State for GlobalHome {
                                 ));
                                 if let Ok(amount) = Amount::from_str_in(
                                     &self.entered_amount.value,
-                                    if matches!(cache.bitcoin_unit, BitcoinDisplayUnit::BTC) {
+                                    if matches!(self.transfer_unit, BitcoinDisplayUnit::BTC) {
                                         breez_sdk_liquid::bitcoin::Denomination::Bitcoin
                                     } else {
                                         breez_sdk_liquid::bitcoin::Denomination::Satoshi
@@ -1147,7 +1299,7 @@ impl State for GlobalHome {
                                 ));
                                 if let Ok(amount) = Amount::from_str_in(
                                     &self.entered_amount.value,
-                                    if matches!(cache.bitcoin_unit, BitcoinDisplayUnit::BTC) {
+                                    if matches!(self.transfer_unit, BitcoinDisplayUnit::BTC) {
                                         breez_sdk_liquid::bitcoin::Denomination::Bitcoin
                                     } else {
                                         breez_sdk_liquid::bitcoin::Denomination::Satoshi
@@ -1192,7 +1344,7 @@ impl State for GlobalHome {
                                 // credit L-BTC once the on-chain tx confirms.
                                 let Ok(amount) = Amount::from_str_in(
                                     &self.entered_amount.value,
-                                    if matches!(cache.bitcoin_unit, BitcoinDisplayUnit::BTC) {
+                                    if matches!(self.transfer_unit, BitcoinDisplayUnit::BTC) {
                                         coincube_core::miniscript::bitcoin::Denomination::Bitcoin
                                     } else {
                                         coincube_core::miniscript::bitcoin::Denomination::Satoshi
@@ -1265,7 +1417,7 @@ impl State for GlobalHome {
                                 // `ConfirmSparkSend`.
                                 let Ok(amount) = Amount::from_str_in(
                                     &self.entered_amount.value,
-                                    if matches!(cache.bitcoin_unit, BitcoinDisplayUnit::BTC) {
+                                    if matches!(self.transfer_unit, BitcoinDisplayUnit::BTC) {
                                         coincube_core::miniscript::bitcoin::Denomination::Bitcoin
                                     } else {
                                         coincube_core::miniscript::bitcoin::Denomination::Satoshi
@@ -1336,6 +1488,27 @@ impl State for GlobalHome {
                             return Task::batch(tasks);
                         }
                         self.current_view.next();
+                        Task::none()
+                    }
+                    HomeMessage::PreviousStep
+                        if self.current_view.step == 1
+                            && self.transfer_page != TransferPage::Wallets =>
+                    {
+                        let other = self
+                            .transfer_direction
+                            .is_some_and(|direction| direction.is_other_cube());
+                        self.transfer_page = match self.transfer_page {
+                            TransferPage::OtherCube => {
+                                self.reset_other_cube();
+                                TransferPage::Wallets
+                            }
+                            TransferPage::Unlock => {
+                                self.lock_other_cube();
+                                TransferPage::OtherCube
+                            }
+                            TransferPage::Amount if other => TransferPage::Unlock,
+                            _ => TransferPage::Wallets,
+                        };
                         Task::none()
                     }
                     HomeMessage::PreviousStep => {
@@ -1448,7 +1621,7 @@ impl State for GlobalHome {
                         };
                         let Ok(transfer_amount) = Amount::from_str_in(
                             &self.entered_amount.value,
-                            if matches!(cache.bitcoin_unit, BitcoinDisplayUnit::BTC) {
+                            if matches!(self.transfer_unit, BitcoinDisplayUnit::BTC) {
                                 coincube_core::miniscript::bitcoin::Denomination::Bitcoin
                             } else {
                                 coincube_core::miniscript::bitcoin::Denomination::Satoshi
@@ -1484,6 +1657,17 @@ impl State for GlobalHome {
                         swap_id,
                     } => {
                         self.is_sending = false;
+                        // Another Cube's Vault receives this one: nothing is
+                        // pending in this Cube. Its unlock ends here.
+                        if self
+                            .transfer_direction
+                            .is_some_and(|direction| direction.is_other_cube())
+                        {
+                            let _ = (amount_sat, destination_kind, swap_id);
+                            self.current_view.next();
+                            self.finish_other_cube();
+                            return Task::none();
+                        }
                         let pending = PendingTransfer {
                             amount: Amount::from_sat(amount_sat),
                             stage: TransferStage::PendingDeposit,
@@ -1712,6 +1896,309 @@ impl State for GlobalHome {
                         }
                         Task::none()
                     }
+                    HomeMessage::SelectAnotherCube => {
+                        if self.current_view.step != 1
+                            || self.transfer_page != TransferPage::Wallets
+                            || self.transfer_from != Some(WalletKind::Vault)
+                            || !self.legacy_vault_available(cache)
+                        {
+                            return Task::none();
+                        }
+                        if self.transfer_direction != Some(TransferDirection::VaultToOtherCube) {
+                            self.transfer_to = None;
+                            self.transfer_direction = Some(TransferDirection::VaultToOtherCube);
+                            self.invalidate_transfer_destination();
+                            self.validate_entered_amount(cache);
+                        }
+                        Task::none()
+                    }
+                    HomeMessage::ContinueFromWallets => {
+                        if self.current_view.step != 1
+                            || self.transfer_page != TransferPage::Wallets
+                        {
+                            return Task::none();
+                        }
+                        let Some(direction) = self.transfer_direction else {
+                            return Task::none();
+                        };
+                        if direction.is_other_cube() {
+                            let Some(source) = self.transfer_source(cache) else {
+                                return Task::none();
+                            };
+                            self.reset_other_cube();
+                            self.other_cubes = other_cubes(&cache.datadir_path, &source);
+                            self.other_cube_selected = self
+                                .other_cubes
+                                .iter()
+                                .find(|choice| choice.refusal.is_none())
+                                .map(|choice| choice.cube_id.clone());
+                            self.transfer_page = TransferPage::OtherCube;
+                        } else {
+                            self.transfer_page = TransferPage::Amount;
+                        }
+                        Task::none()
+                    }
+                    HomeMessage::SelectOtherCube(cube_id) => {
+                        if self.transfer_page == TransferPage::OtherCube
+                            && self
+                                .other_cubes
+                                .iter()
+                                .any(|choice| choice.cube_id == cube_id && choice.refusal.is_none())
+                        {
+                            self.other_cube_selected = Some(cube_id);
+                            self.other_error = None;
+                        }
+                        Task::none()
+                    }
+                    HomeMessage::ContinueWithCube => {
+                        if self.transfer_page != TransferPage::OtherCube {
+                            return Task::none();
+                        }
+                        let Some(source) = self.transfer_source(cache) else {
+                            return Task::none();
+                        };
+                        let Some((cube_id, wallet_id)) = self
+                            .other_cube_selected
+                            .as_ref()
+                            .and_then(|id| {
+                                self.other_cubes.iter().find(|choice| {
+                                    &choice.cube_id == id && choice.refusal.is_none()
+                                })
+                            })
+                            .and_then(|choice| {
+                                Some((choice.cube_id.clone(), choice.vault_wallet_id.clone()?))
+                            })
+                        else {
+                            return Task::none();
+                        };
+                        self.lock_other_cube();
+                        match ScopedDestination::new(
+                            cache.datadir_path.clone(),
+                            source,
+                            &cube_id,
+                            wallet_id,
+                        ) {
+                            Ok(scope) => {
+                                self.other_scope = Some(scope);
+                                self.transfer_page = TransferPage::Unlock;
+                            }
+                            Err(refusal) => self.other_error = Some(refusal.reason()),
+                        }
+                        Task::none()
+                    }
+                    HomeMessage::OtherCubePinEdited(pin) => {
+                        if self.transfer_page == TransferPage::Unlock
+                            && self.other_phase == (UnlockPhase::Credential { busy: false })
+                        {
+                            self.other_pin = Zeroizing::new(pin);
+                        }
+                        Task::none()
+                    }
+                    HomeMessage::UnlockOtherCube => {
+                        if self.transfer_page != TransferPage::Unlock
+                            || self.other_phase != (UnlockPhase::Credential { busy: false })
+                            || self.other_pin.is_empty()
+                        {
+                            return Task::none();
+                        }
+                        let Some(source) = self.transfer_source(cache) else {
+                            return Task::none();
+                        };
+                        let pin =
+                            std::mem::replace(&mut self.other_pin, Zeroizing::new(String::new()));
+                        let Some(scope) = self.other_scope.as_mut() else {
+                            return Task::none();
+                        };
+                        match scope.begin_pin(&source, pin) {
+                            Ok(request) => {
+                                self.other_phase = UnlockPhase::Credential { busy: true };
+                                self.other_error = None;
+                                Task::perform(request.run_blocking(), |check| {
+                                    Message::View(view::Message::Home(
+                                        HomeMessage::OtherCubePinChecked(check),
+                                    ))
+                                })
+                            }
+                            Err(refusal) => {
+                                self.other_error = Some(refusal.reason());
+                                Task::none()
+                            }
+                        }
+                    }
+                    HomeMessage::OtherCubePinChecked(check) => {
+                        // A duress PIN is the same emergency here as at the
+                        // Launcher, whatever changed meanwhile: lock the other
+                        // Cube, leave the flow and hand the one-use proof to
+                        // the tab, which runs the existing duress activation.
+                        if let Some(proof) = check.duress_proof() {
+                            let reset = self.update(
+                                daemon.clone(),
+                                cache,
+                                Message::View(view::Message::Home(HomeMessage::BackToHome)),
+                            );
+                            return Task::batch([
+                                reset,
+                                Task::done(Message::View(view::Message::DuressActivateLocal(
+                                    proof,
+                                ))),
+                            ]);
+                        }
+                        let Some(source) = self.transfer_source(cache) else {
+                            return Task::none();
+                        };
+                        let Some(scope) = self.other_scope.as_mut() else {
+                            return Task::none();
+                        };
+                        let result = scope.accept_pin(&source, check);
+                        self.after_other_credential(&source, result)
+                    }
+                    HomeMessage::UnlockOtherCubePasskey => {
+                        if self.transfer_page != TransferPage::Unlock
+                            || self.other_phase != (UnlockPhase::Credential { busy: false })
+                        {
+                            return Task::none();
+                        }
+                        #[cfg(target_os = "macos")]
+                        {
+                            let Some(source) = self.transfer_source(cache) else {
+                                return Task::none();
+                            };
+                            let Some(scope) = self.other_scope.as_mut() else {
+                                return Task::none();
+                            };
+                            match scope.begin_passkey(&source) {
+                                Ok(()) => {
+                                    self.other_phase = UnlockPhase::Credential { busy: true };
+                                    self.other_error = None;
+                                }
+                                Err(refusal) => self.other_error = Some(refusal.reason()),
+                            }
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            self.other_error =
+                                Some("Passkey unlock is available on macOS only.".into());
+                        }
+                        Task::none()
+                    }
+                    HomeMessage::OtherCubePasskeyPoll => {
+                        #[cfg(target_os = "macos")]
+                        {
+                            if self.other_phase != (UnlockPhase::Credential { busy: true }) {
+                                return Task::none();
+                            }
+                            let Some(source) = self.transfer_source(cache) else {
+                                return Task::none();
+                            };
+                            let Some(scope) = self.other_scope.as_mut() else {
+                                return Task::none();
+                            };
+                            if let Some(result) = scope.poll_passkey(&source) {
+                                return self.after_other_credential(&source, result);
+                            }
+                        }
+                        Task::none()
+                    }
+                    HomeMessage::OtherCubeBackendBound(reply) => {
+                        if self.other_phase != UnlockPhase::Checks(1) {
+                            return Task::none();
+                        }
+                        let Some(source) = self.transfer_source(cache) else {
+                            return Task::none();
+                        };
+                        let Some(scope) = self.other_scope.as_mut() else {
+                            return Task::none();
+                        };
+                        match scope
+                            .accept_backend_reply(&source, reply)
+                            .and_then(|()| scope.request_address(&source))
+                        {
+                            Ok(request) => {
+                                self.other_phase = UnlockPhase::Checks(2);
+                                Task::perform(request.run(), |reply| {
+                                    Message::View(view::Message::Home(
+                                        HomeMessage::OtherCubeAddress(reply),
+                                    ))
+                                })
+                            }
+                            Err(refusal) => {
+                                self.other_error = Some(refusal.reason());
+                                Task::none()
+                            }
+                        }
+                    }
+                    HomeMessage::OtherCubeAddress(reply) => {
+                        if self.other_phase != UnlockPhase::Checks(2) {
+                            return Task::none();
+                        }
+                        let Some(source) = self.transfer_source(cache) else {
+                            return Task::none();
+                        };
+                        let Some(scope) = self.other_scope.as_ref() else {
+                            return Task::none();
+                        };
+                        match scope.accept_address(&source, reply) {
+                            Ok(address) => {
+                                self.other_address = Some(address);
+                                self.other_phase = UnlockPhase::Checks(UNLOCK_CHECKS);
+                                self.other_error = None;
+                            }
+                            Err(refusal) => self.other_error = Some(refusal.reason()),
+                        }
+                        Task::none()
+                    }
+                    HomeMessage::ContinueFromUnlock => {
+                        if self.transfer_page == TransferPage::Unlock
+                            && self.other_phase == UnlockPhase::Checks(UNLOCK_CHECKS)
+                            && self.other_address.is_some()
+                        {
+                            self.transfer_page = TransferPage::Amount;
+                        }
+                        Task::none()
+                    }
+                    HomeMessage::SetTransferUnit(unit) => {
+                        if unit != self.transfer_unit {
+                            let old = transfer_denomination(self.transfer_unit);
+                            if let Ok(amount) = Amount::from_str_in(&self.entered_amount.value, old)
+                            {
+                                self.entered_amount.value = match unit {
+                                    BitcoinDisplayUnit::Sats => amount.to_sat().to_string(),
+                                    BitcoinDisplayUnit::BTC => amount.to_string_in(
+                                        coincube_core::miniscript::bitcoin::Denomination::Bitcoin,
+                                    ),
+                                };
+                            }
+                            self.transfer_unit = unit;
+                            self.validate_entered_amount(cache);
+                        }
+                        Task::none()
+                    }
+                    HomeMessage::OpenTransferActivity => {
+                        let reset = self.update(
+                            daemon.clone(),
+                            cache,
+                            Message::View(view::Message::Home(HomeMessage::BackToHome)),
+                        );
+                        Task::batch([
+                            reset,
+                            Task::done(Message::View(view::Message::Menu(Menu::Cube(
+                                crate::app::menu::CubeSubMenu::Activity,
+                            )))),
+                        ])
+                    }
+                    HomeMessage::RestartTransfer => {
+                        let reset = self.update(
+                            daemon.clone(),
+                            cache,
+                            Message::View(view::Message::Home(HomeMessage::BackToHome)),
+                        );
+                        let open = self.update(
+                            daemon.clone(),
+                            cache,
+                            Message::View(view::Message::Home(HomeMessage::NextStep)),
+                        );
+                        Task::batch([reset, open])
+                    }
                     HomeMessage::AmountEdited(amount) => {
                         self.entered_amount.value = amount;
                         self.validate_entered_amount(cache);
@@ -1732,12 +2219,14 @@ impl State for GlobalHome {
                             // from Spark's `receive_onchain` for VaultToSpark).
                             if matches!(
                                 transfer_direction,
-                                TransferDirection::VaultToLiquid | TransferDirection::VaultToSpark
+                                TransferDirection::VaultToLiquid
+                                    | TransferDirection::VaultToSpark
+                                    | TransferDirection::VaultToOtherCube
                             ) {
                                 if let Some(address_info) = self.receive_address_info.clone() {
                                     if let Some(daemon) = daemon {
                                         let denomination = if matches!(
-                                            cache.bitcoin_unit,
+                                            self.transfer_unit,
                                             crate::app::settings::unit::BitcoinDisplayUnit::BTC
                                         ) {
                                             coincube_core::miniscript::bitcoin::Denomination::Bitcoin
@@ -1875,7 +2364,7 @@ impl State for GlobalHome {
                                     {
                                         let Ok(transfer_amount) = Amount::from_str_in(
                                             &self.entered_amount.value,
-                                            if matches!(cache.bitcoin_unit, BitcoinDisplayUnit::BTC)
+                                            if matches!(self.transfer_unit, BitcoinDisplayUnit::BTC)
                                             {
                                                 breez_sdk_liquid::bitcoin::Denomination::Bitcoin
                                             } else {
@@ -1960,7 +2449,9 @@ impl State for GlobalHome {
                                 }
                             } else if matches!(
                                 transfer_direction,
-                                TransferDirection::VaultToLiquid | TransferDirection::VaultToSpark
+                                TransferDirection::VaultToLiquid
+                                    | TransferDirection::VaultToSpark
+                                    | TransferDirection::VaultToOtherCube
                             ) {
                                 // Post-sign broadcast path for both Vault-sourced
                                 // directions. The PSBT was built earlier in the same
@@ -1984,7 +2475,7 @@ impl State for GlobalHome {
                                             let Ok(amount_sat) = Amount::from_str_in(
                                                 &self.entered_amount.value,
                                                 if matches!(
-                                                    cache.bitcoin_unit,
+                                                    self.transfer_unit,
                                                     BitcoinDisplayUnit::BTC
                                                 ) {
                                                     coincube_core::miniscript::bitcoin::Denomination::Bitcoin
@@ -2052,8 +2543,9 @@ impl State for GlobalHome {
                                                                 },
                                                             ))
                                                         }
-                                                        // Vault-sourced transfers never have
-                                                        // Vault as the destination.
+                                                        // Vault to Vault is only ever
+                                                        // another Cube's Vault: nothing is
+                                                        // pending in this Cube.
                                                         WalletKind::Vault => {
                                                             Message::View(view::Message::Home(
                                                                 HomeMessage::TransferSuccessful,
@@ -2407,6 +2899,14 @@ impl State for GlobalHome {
                     HomeMessage::TransferSuccessful => {
                         self.current_view.next();
                         self.is_sending = false;
+                        // A Vault-to-Vault transfer goes to another Cube; it
+                        // locks again now that the transaction is broadcast.
+                        if self
+                            .transfer_direction
+                            .is_some_and(|direction| direction.is_other_cube())
+                        {
+                            self.finish_other_cube();
+                        }
                         Task::none()
                     }
                     HomeMessage::LiquidToVaultSubmitted { amount, swap_id } => {
@@ -2504,6 +3004,8 @@ impl State for GlobalHome {
                     }
                     HomeMessage::BackToHome => {
                         self.current_view.reset();
+                        self.transfer_page = TransferPage::Wallets;
+                        self.reset_other_cube();
                         self.transfer_direction = None;
                         self.transfer_from = None;
                         self.transfer_to = None;
@@ -2709,7 +3211,7 @@ impl State for GlobalHome {
                         // otherwise a rejected result strands Back and Sign.
                         self.active_psbt_request = None;
                         self.is_sending = false;
-                        let denomination = if matches!(cache.bitcoin_unit, BitcoinDisplayUnit::BTC)
+                        let denomination = if matches!(self.transfer_unit, BitcoinDisplayUnit::BTC)
                         {
                             coincube_core::miniscript::bitcoin::Denomination::Bitcoin
                         } else {
@@ -2930,10 +3432,14 @@ impl State for GlobalHome {
                 Task::none()
             }
             Message::View(view::Message::Close) => {
+                // Only leaving the signer abandons the spend. Closing the
+                // QR card over Review keeps a signed transfer signed.
+                if matches!(self.modal, Modal::Sign(_)) {
+                    self.transfer_spend_tx = None;
+                    self.transfer_psbt_ready_for = None;
+                    self.transfer_signed = false;
+                }
                 self.modal = Modal::None;
-                self.transfer_spend_tx = None;
-                self.transfer_psbt_ready_for = None;
-                self.transfer_signed = false;
                 Task::none()
             }
             Message::Updated(result) => {
@@ -3057,6 +3563,72 @@ impl State for GlobalHome {
 }
 
 impl GlobalHome {
+    /// This Cube's Vault as the source of a transfer to another Cube.
+    fn transfer_source(&self, cache: &Cache) -> Option<Source> {
+        let wallet = self.wallet.as_ref()?;
+        Some(Source {
+            cube_id: self.cube_id.clone(),
+            chain: cache.chain(),
+            wallet: WalletIdentity::Vault(wallet.id()),
+            app: cache.app_generation,
+        })
+    }
+
+    /// Locks the other Cube again: drops its scoped unlock (and any daemon
+    /// it started), the entered PIN and its checked address.
+    fn lock_other_cube(&mut self) {
+        if let Some(mut scope) = self.other_scope.take() {
+            scope.revoke();
+        }
+        self.other_pin = Zeroizing::new(String::new());
+        self.other_phase = UnlockPhase::default();
+        self.other_error = None;
+        self.other_address = None;
+    }
+
+    fn reset_other_cube(&mut self) {
+        self.lock_other_cube();
+        self.other_cubes.clear();
+        self.other_cube_selected = None;
+        self.other_locked_again = false;
+    }
+
+    /// The transfer was sent: the other Cube locks again and Done says so.
+    fn finish_other_cube(&mut self) {
+        let was_open = self.other_scope.is_some();
+        self.lock_other_cube();
+        self.other_locked_again = was_open;
+    }
+
+    /// The other Cube's credential was checked: on success, bind its Vault.
+    fn after_other_credential(
+        &mut self,
+        source: &Source,
+        result: Result<(), ScopeRefusal>,
+    ) -> Task<Message> {
+        if let Err(refusal) = result {
+            self.other_phase = UnlockPhase::Credential { busy: false };
+            self.other_error = Some(refusal.reason());
+            return Task::none();
+        }
+        self.other_phase = UnlockPhase::Checks(1);
+        self.other_error = None;
+        let Some(scope) = self.other_scope.as_ref() else {
+            return Task::none();
+        };
+        match scope.request_backend(source) {
+            Ok(request) => Task::perform(request.run_reply(), |reply| {
+                Message::View(view::Message::Home(HomeMessage::OtherCubeBackendBound(
+                    reply,
+                )))
+            }),
+            Err(refusal) => {
+                self.other_error = Some(refusal.reason());
+                Task::none()
+            }
+        }
+    }
+
     fn invalidate_transfer_destination(&mut self) -> u64 {
         self.transfer_request_generation = self.transfer_request_generation.wrapping_add(1);
         self.destination_ready = None;
@@ -3121,7 +3693,7 @@ impl GlobalHome {
             self.entered_amount.warning = None;
             return;
         }
-        let denomination = if matches!(cache.bitcoin_unit, BitcoinDisplayUnit::BTC) {
+        let denomination = if matches!(self.transfer_unit, BitcoinDisplayUnit::BTC) {
             coincube_core::miniscript::bitcoin::Denomination::Bitcoin
         } else {
             coincube_core::miniscript::bitcoin::Denomination::Satoshi
@@ -3259,7 +3831,9 @@ impl GlobalHome {
         };
         if !matches!(
             direction,
-            TransferDirection::VaultToLiquid | TransferDirection::VaultToSpark
+            TransferDirection::VaultToLiquid
+                | TransferDirection::VaultToSpark
+                | TransferDirection::VaultToOtherCube
         ) {
             return Task::none();
         }
@@ -3282,7 +3856,7 @@ impl GlobalHome {
         if feerate_vb == 0 {
             return Task::none();
         }
-        let denomination = if matches!(cache.bitcoin_unit, BitcoinDisplayUnit::BTC) {
+        let denomination = if matches!(self.transfer_unit, BitcoinDisplayUnit::BTC) {
             coincube_core::miniscript::bitcoin::Denomination::Bitcoin
         } else {
             coincube_core::miniscript::bitcoin::Denomination::Satoshi
@@ -5017,6 +5591,226 @@ mod tests {
             assert_eq!(
                 wallet.preview_change_address(),
                 expected.as_unchecked().clone()
+            );
+        }
+
+        fn transfer_cache() -> Cache {
+            Cache {
+                has_vault: true,
+                // Never the real datadir: the Other Cube catalog reads it.
+                datadir_path: CoincubeDirectory::new(
+                    std::env::temp_dir().join("coincube-transfer-other-cube-none"),
+                ),
+                ..Cache::default()
+            }
+        }
+
+        /// The messages a task produces, for feeding back into `update`.
+        fn collect(task: Task<Message>) -> Vec<Message> {
+            use iced_runtime::futures::futures::StreamExt;
+            let Some(stream) = iced_runtime::task::into_stream(task) else {
+                return Vec::new();
+            };
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                stream
+                    .filter_map(|action| async move {
+                        match action {
+                            iced_runtime::Action::Output(message) => Some(message),
+                            _ => None,
+                        }
+                    })
+                    .collect()
+                    .await
+            })
+        }
+
+        fn send(home: &mut GlobalHome, cache: &Cache, message: HomeMessage) {
+            drain(home.update(None, cache, Message::View(view::Message::Home(message))));
+        }
+
+        fn checked_other_address() -> DestinationAddress {
+            DestinationAddress {
+                address: Address::from_str(MAINNET_ADDR).unwrap().assume_checked(),
+                index: ChildNumber::from(3),
+            }
+        }
+
+        #[test]
+        fn another_cube_route_steps_back_and_relocks_on_every_exit() {
+            let (mut home, _wallet) = home_on_transfer_screen();
+            let cache = transfer_cache();
+            home.current_view.step = 1;
+            home.transfer_page = TransferPage::Wallets;
+
+            send(&mut home, &cache, HomeMessage::SelectAnotherCube);
+            assert_eq!(
+                home.transfer_direction,
+                Some(TransferDirection::VaultToOtherCube)
+            );
+            assert_eq!(home.transfer_to, None);
+
+            send(&mut home, &cache, HomeMessage::ContinueFromWallets);
+            assert_eq!(home.transfer_page, TransferPage::OtherCube);
+            assert!(home.other_cubes.is_empty());
+            // Nothing listed, nothing to unlock.
+            send(&mut home, &cache, HomeMessage::ContinueWithCube);
+            assert_eq!(home.transfer_page, TransferPage::OtherCube);
+            assert!(home.other_scope.is_none());
+
+            // A finished unlock, then Back from Amount keeps it…
+            home.transfer_page = TransferPage::Amount;
+            home.other_phase = UnlockPhase::Checks(UNLOCK_CHECKS);
+            home.other_address = Some(checked_other_address());
+            send(&mut home, &cache, HomeMessage::PreviousStep);
+            assert_eq!(home.transfer_page, TransferPage::Unlock);
+            assert!(home.other_address.is_some());
+            // …and leaving Unlock locks the other Cube again.
+            send(&mut home, &cache, HomeMessage::PreviousStep);
+            assert_eq!(home.transfer_page, TransferPage::OtherCube);
+            assert!(home.other_address.is_none());
+            assert_eq!(home.other_phase, UnlockPhase::default());
+            send(&mut home, &cache, HomeMessage::PreviousStep);
+            assert_eq!(home.transfer_page, TransferPage::Wallets);
+
+            // Closing from any page resets the route.
+            home.transfer_page = TransferPage::Amount;
+            home.other_address = Some(checked_other_address());
+            send(&mut home, &cache, HomeMessage::BackToHome);
+            assert_eq!(home.current_view.step, 0);
+            assert_eq!(home.transfer_page, TransferPage::Wallets);
+            assert!(home.other_address.is_none() && home.other_scope.is_none());
+        }
+
+        #[test]
+        fn prepare_and_another_cube_belong_to_their_pages() {
+            let (mut home, _wallet) = home_on_transfer_screen();
+            let cache = transfer_cache();
+            home.current_view.step = 1;
+            home.transfer_page = TransferPage::Wallets;
+            let generation = home.transfer_request_generation;
+            // Prepare is the Amount page's action only.
+            send(&mut home, &cache, HomeMessage::NextStep);
+            assert_eq!(home.current_view.step, 1);
+            assert_eq!(home.transfer_request_generation, generation);
+
+            // Only the Vault can be the source of a cross-Cube transfer.
+            home.transfer_from = Some(WalletKind::Liquid);
+            home.transfer_to = Some(WalletKind::Vault);
+            home.transfer_direction = Some(TransferDirection::LiquidToVault);
+            send(&mut home, &cache, HomeMessage::SelectAnotherCube);
+            assert_eq!(
+                home.transfer_direction,
+                Some(TransferDirection::LiquidToVault)
+            );
+
+            // The other Vault's checked address becomes the destination at
+            // Prepare, under the request generation it started.
+            home.transfer_from = Some(WalletKind::Vault);
+            home.transfer_to = None;
+            home.transfer_direction = Some(TransferDirection::VaultToOtherCube);
+            home.transfer_page = TransferPage::Amount;
+            home.other_address = Some(checked_other_address());
+            let task = home.update(
+                None,
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::NextStep)),
+            );
+            assert_eq!(home.current_view.step, 2);
+            for message in collect(task) {
+                drain(home.update(None, &cache, message));
+            }
+            assert_eq!(
+                home.receive_address_info
+                    .as_ref()
+                    .map(|info| info.address.to_string()),
+                Some(MAINNET_ADDR.to_string())
+            );
+        }
+
+        #[test]
+        fn another_cube_broadcast_is_not_this_vaults_pending_deposit() {
+            let (mut home, _wallet) = home_on_transfer_screen();
+            let cache = transfer_cache();
+            home.transfer_direction = Some(TransferDirection::VaultToOtherCube);
+            home.transfer_to = None;
+            home.other_address = Some(checked_other_address());
+            // The Vault broadcast reports a Vault destination as success.
+            send(&mut home, &cache, HomeMessage::TransferSuccessful);
+            assert_eq!(home.current_view.step, 3);
+            assert_eq!(home.pending_vault_receive_sats, 0);
+            assert!(home.other_address.is_none(), "the other Cube locked again");
+        }
+
+        #[test]
+        fn transfer_unit_switch_converts_the_entered_amount() {
+            let (mut home, _wallet) = home_on_transfer_screen();
+            let cache = transfer_cache();
+            home.transfer_unit = BitcoinDisplayUnit::Sats;
+            send(
+                &mut home,
+                &cache,
+                HomeMessage::SetTransferUnit(BitcoinDisplayUnit::BTC),
+            );
+            assert_eq!(home.entered_amount.value, "0.001");
+            send(
+                &mut home,
+                &cache,
+                HomeMessage::SetTransferUnit(BitcoinDisplayUnit::Sats),
+            );
+            assert_eq!(home.entered_amount.value, "100000");
+        }
+
+        #[test]
+        fn closing_the_review_qr_keeps_a_signed_transfer_signed() {
+            let (mut home, _wallet) = home_on_transfer_screen();
+            let cache = transfer_cache();
+            home.transfer_signed = true;
+            home.transfer_psbt_ready_for = Some((1, 0, TransferDirection::VaultToLiquid));
+            home.modal = Modal::ShowQrCode(
+                ShowQrCodeModal::new(
+                    &Address::from_str(MAINNET_ADDR).unwrap().assume_checked(),
+                    ChildNumber::from(0),
+                )
+                .unwrap(),
+            );
+            drain(home.update(None, &cache, Message::View(view::Message::Close)));
+            assert!(matches!(home.modal, Modal::None));
+            assert!(home.transfer_signed, "Confirm & Broadcast stays available");
+            assert!(home.transfer_psbt_ready_for.is_some());
+        }
+
+        /// Iced draws only the root overlay. Beneath the QR card or signer the
+        /// dialog must be in the base (a nested modal's overlay is never
+        /// drawn); alone it is a modal overlay. The capture probe walks the
+        /// widget tree, which a modal hides from it below its base.
+        #[test]
+        fn review_is_in_the_base_beneath_an_upper_modal() {
+            use crate::app::view::shared::landing::capture;
+            let review = || -> Element<'static, view::Message> {
+                coincube_ui::component::text::text("Review and confirm").into()
+            };
+            let base = || -> Element<'static, view::Message> {
+                coincube_ui::component::text::text("Overview").into()
+            };
+            let inspect = |element| {
+                capture::inspect(
+                    "transfer-layering",
+                    element,
+                    (1440, 900),
+                    "dark",
+                    coincube_ui::theme::Theme::dark(),
+                )
+            };
+            let under = inspect(with_transfer_dialog(base(), Some(review()), true, None));
+            assert!(under.contains("Overview") && under.contains("Review and confirm"));
+            let alone = inspect(with_transfer_dialog(base(), Some(review()), false, None));
+            assert!(
+                !alone.contains("Review and confirm"),
+                "a modal overlay alone"
             );
         }
     }
