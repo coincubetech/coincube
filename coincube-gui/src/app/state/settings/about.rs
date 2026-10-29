@@ -90,67 +90,52 @@ impl State for AboutSettingsState {
                 let device_name = crate::utils::device::device_label();
                 return Task::perform(
                     async move {
-                        // Remember the currently-registered id so a failed
-                        // re-register can roll back instead of permanently
-                        // discarding a working device_id.
-                        let previous_device_id =
-                            crate::services::connect::client::cache::Account::from_cache(
-                                &network_dir,
-                                &email,
-                            )
-                            .ok()
-                            .flatten()
-                            .and_then(|a| a.device_id);
-                        // Clear the cached id so `ensure_device_registered`
-                        // takes the register path instead of short-circuiting
-                        // on the existing entry.
-                        if let Err(e) =
-                            crate::services::connect::client::cache::set_device_id_for_email(
-                                &network_dir,
-                                &email,
-                                None,
-                            )
-                            .await
-                        {
-                            // Registering with the id still cached would
-                            // short-circuit to that same id and report a
-                            // success that registered nothing.
-                            tracing::warn!("Re-register: failed to clear cached device_id: {}", e,);
-                            return Err("Couldn't reset this device's registration. \
-                                 Check that Tenshu can write to its data folder, then try again."
-                                .to_string());
-                        }
+                        let claim = match crate::services::connect::client::cache::begin_device_reregistration(
+                            &network_dir, &email, &replaces,
+                        ).await {
+                            Ok(Some(claim)) => claim,
+                            Ok(None) => return Err("Connect registration changed. Refresh this page and try again.".to_string()),
+                            Err(e) => {
+                                tracing::warn!("Re-register: failed to claim cached registration: {}", e);
+                                return Err("Couldn't reset this device's registration. \
+                                    Check that Tenshu can write to its data folder, then try again."
+                                    .to_string());
+                            }
+                        };
                         let result =
-                            crate::services::connect::grpc::bootstrap::ensure_device_registered(
-                                &grpc_url,
-                                tokens,
-                                &network_dir,
-                                &email,
-                                device_name,
-                                app_version,
-                                os_version,
+                            crate::services::connect::grpc::bootstrap::register_device_for_claim(
+                                crate::services::connect::grpc::bootstrap::DeviceRegistration {
+                                    grpc_url: &grpc_url,
+                                    tokens,
+                                    network_dir: &network_dir,
+                                    email: &email,
+                                    device_name,
+                                    app_version,
+                                    os_version,
+                                },
+                                &claim,
                             )
                             .await
                             .map(|device_id| view::ReregisteredDevice {
                                 email: email.clone(),
-                                replaces,
+                                replaces: replaces.clone(),
                                 device_id,
                             })
                             .map_err(|e| e.to_string());
-                        // On failure the cache was left cleared — restore
-                        // the prior id (best-effort) so a transient RPC
-                        // error doesn't strand the user as unregistered.
+                        // Release this request's claim on failure. The old id
+                        // remained cached; a newer login keeps its own id.
                         if result.is_err() {
                             if let Err(e) =
-                                crate::services::connect::client::cache::set_device_id_for_email(
+                                crate::services::connect::client::cache::finish_device_reregistration(
                                     &network_dir,
                                     &email,
-                                    previous_device_id.as_deref(),
+                                    &claim,
+                                    Some(&replaces),
                                 )
                                 .await
                             {
                                 tracing::warn!(
-                                    "Re-register: failed to restore previous device_id: {}",
+                                    "Re-register: failed to release registration claim: {}",
                                     e,
                                 );
                             }
@@ -168,7 +153,17 @@ impl State for AboutSettingsState {
                 view::SettingsMessage::ConnectDeviceReregistered(res),
             )) => {
                 self.reregistering = false;
-                self.reregister_status = Some(res.map(|r| r.device_id));
+                self.reregister_status = match res {
+                    Ok(registered)
+                        if cache.connect_email.as_deref() == Some(registered.email.as_str())
+                            && cache.connect_device_id.as_deref()
+                                == Some(registered.device_id.as_str()) =>
+                    {
+                        Some(Ok(registered.device_id))
+                    }
+                    Ok(_) => None,
+                    Err(e) => Some(Err(e)),
+                };
             }
             _ => {}
         }

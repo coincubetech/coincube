@@ -428,9 +428,15 @@ pub async fn connect_with_existing_account(
         .tokens;
 
     let refresh = tokens.expires_at < chrono::Utc::now().timestamp();
-    tokens = cache::update_connect_cache(&network_dir, &tokens, &client, refresh, true)
-        .await
-        .map_err(|e| Error::Unexpected(format!("Failed to update cache: {}", e)))?;
+    tokens = cache::update_connect_cache(
+        &network_dir,
+        &tokens,
+        &client,
+        refresh,
+        cache::CacheAccountAction::Activate,
+    )
+    .await
+    .map_err(|e| Error::Unexpected(format!("Failed to update cache: {}", e)))?;
 
     let client = BackendClient::connect(client, config.backend_api_url, tokens, network).await?;
     Ok(RemoteBackend::WithoutWallet(client))

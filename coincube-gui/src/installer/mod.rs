@@ -191,7 +191,7 @@ use crate::{
                 api::payload::{Provider, ProviderKey},
                 BackendClient, BackendWalletClient,
             },
-            cache::update_connect_cache,
+            cache::{update_connect_cache, CacheAccountAction},
         },
     },
     signer::Signer,
@@ -1970,7 +1970,7 @@ pub async fn create_remote_wallet(
         backend.auth.read().await.deref(),
         backend.auth_client(),
         false,
-        true,
+        CacheAccountAction::Activate,
     )
     .await
     {
@@ -2064,7 +2064,7 @@ pub async fn import_remote_wallet(
         backend.auth.read().await.deref(),
         backend.auth_client(),
         false,
-        true,
+        CacheAccountAction::Activate,
     )
     .await
     {
