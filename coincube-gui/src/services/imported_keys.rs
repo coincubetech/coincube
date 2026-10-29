@@ -875,13 +875,11 @@ impl<'a> LocalKeyRepository<'a> {
                 retire_files,
             },
         };
-        if let Err(error) = self.resolve_update(&authority, &pending) {
-            // A read immediately after a failed Keychain update can report a
-            // stale old value even if Pending persisted. Preserve every file;
-            // a later locked read may discard the candidate only after it
-            // proves the unchanged committed anchor and authenticates keys.
-            return Err(error);
-        }
+        // A read immediately after a failed Keychain update can report a
+        // stale old value even if Pending persisted. Preserve every file;
+        // a later locked read may discard the candidate only after it
+        // proves the unchanged committed anchor and authenticates keys.
+        self.resolve_update(&authority, &pending)?;
         let committed = self.recover_pending_with(pending, credential, device)?;
         if let Err(error) = self.finish_cleanup(&committed) {
             log::warn!("Imported inventory committed with cleanup pending: {error}");
