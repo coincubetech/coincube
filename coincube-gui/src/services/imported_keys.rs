@@ -1691,6 +1691,7 @@ mod tests {
     fn pending_recovery_before_and_after_rename_never_readmits_retired_key() {
         for renamed in [false, true] {
             let fixture = Fixture::new();
+            fixture.save_cube(fixture.cube.clone());
             let repository = fixture.repository();
             let device = Zeroizing::new([11u8; 32]);
             let record = repository
@@ -1744,14 +1745,21 @@ mod tests {
                 fs::rename(repository.prepared(txn), repository.root().join(MANIFEST)).unwrap();
                 sync_parent(&repository.root().join(MANIFEST)).unwrap();
             }
-            repository
+            drop(repository);
+            let directory = NetworkDirectory::new(fixture.directory.path().to_path_buf());
+            let settings = Settings::from_file(&directory).unwrap();
+            let cube = &settings.cubes[0];
+            let attachment = cube.bitcoin_import.as_ref().unwrap().attachment().unwrap();
+            let reopened = LocalKeyRepository::new(&directory, cube, attachment).unwrap();
+            let _guard = reopened.lock().unwrap();
+            reopened
                 .recover_pending_with(pending, "synthetic unlock", &device)
                 .unwrap();
-            assert_eq!(repository.read_manifest().unwrap().records.len(), 0);
-            assert!(!repository.root().join(record.file_name()).exists());
-            write_replace(&repository.root().join(MANIFEST), &old_bytes).unwrap();
+            assert_eq!(reopened.read_manifest().unwrap().records.len(), 0);
+            assert!(!reopened.root().join(record.file_name()).exists());
+            write_replace(&reopened.root().join(MANIFEST), &old_bytes).unwrap();
             assert!(
-                repository.read_manifest().is_err(),
+                reopened.read_manifest().is_err(),
                 "old manifest replay must fail"
             );
         }
@@ -1901,6 +1909,60 @@ mod tests {
     }
 
     #[test]
+    fn owner_removal_waits_for_stable_lock_across_processes() {
+        const CHILD_ROOT: &str = "COINCUBE_TEST_IMPORTED_ANCHOR_REMOVE_ROOT";
+        const CHILD_MARKER: &str = "COINCUBE_TEST_IMPORTED_ANCHOR_REMOVE_MARKER";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let directory = NetworkDirectory::new(PathBuf::from(root).join("regtest"));
+            let settings = Settings::from_file(&directory).unwrap();
+            let cube = &settings.cubes[0];
+            let attachment = cube.bitcoin_import.as_ref().unwrap().attachment().unwrap();
+            let repository = LocalKeyRepository::new(&directory, cube, attachment).unwrap();
+            fs::write(std::env::var_os(CHILD_MARKER).unwrap(), b"started").unwrap();
+            repository.remove_operation_storage().unwrap();
+            return;
+        }
+
+        let fixture = Fixture::new();
+        fixture.save_cube(fixture.cube.clone());
+        let repository = fixture.repository();
+        let guard = repository.lock().unwrap();
+        let marker = fixture.root.join("remove-child-started");
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("services::imported_keys::tests::owner_removal_waits_for_stable_lock_across_processes")
+            .env(CHILD_ROOT, &fixture.root)
+            .env(CHILD_MARKER, &marker)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !marker.exists() && std::time::Instant::now() < deadline {
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "child exited before lock attempt"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(marker.exists(), "child did not reach owner removal");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(child.try_wait().unwrap().is_none());
+        assert!(repository.root().exists());
+        assert!(!repository.tombstone().exists());
+        drop(guard);
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "child removal failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(repository.is_removed().unwrap());
+        assert!(!repository.root().exists());
+    }
+
+    #[test]
     fn renamed_pending_manifest_requires_exact_authenticated_prior() {
         let fixture = Fixture::new();
         let repository = fixture.repository();
@@ -2041,6 +2103,36 @@ mod tests {
         assert!(!repository.root().exists());
         repository.remove_operation_storage().unwrap();
         assert!(repository.lock().is_err());
+    }
+
+    #[test]
+    fn reopened_revocation_rejects_restored_public_directory() {
+        let fixture = Fixture::new();
+        fixture.save_cube(fixture.cube.clone());
+        let repository = fixture.repository();
+        let old_bytes = read_manifest_bytes(&repository.root().join(MANIFEST)).unwrap();
+        repository.remove_operation_storage().unwrap();
+        let revoked = anchor::load(&repository.anchor_scope()).unwrap().unwrap();
+        assert!(matches!(&revoked.state, AnchorState::Revoked { .. }));
+
+        // Simulate restoring an old directory together with its old public
+        // manifest. The external revocation remains the authority.
+        fs::remove_file(repository.tombstone()).unwrap();
+        repository.ensure_root().unwrap();
+        write_replace(&repository.root().join(MANIFEST), &old_bytes).unwrap();
+        drop(repository);
+        let directory = NetworkDirectory::new(fixture.directory.path().to_path_buf());
+        let settings = Settings::from_file(&directory).unwrap();
+        let cube = &settings.cubes[0];
+        let attachment = cube.bitcoin_import.as_ref().unwrap().attachment().unwrap();
+        let reopened = LocalKeyRepository::new(&directory, cube, attachment).unwrap();
+        let _guard = reopened.lock().unwrap();
+        assert!(reopened.read_manifest().is_err());
+        reopened.provision_empty().unwrap();
+        assert_eq!(
+            anchor::load(&reopened.anchor_scope()).unwrap(),
+            Some(revoked)
+        );
     }
 
     #[test]
