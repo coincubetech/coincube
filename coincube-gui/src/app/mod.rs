@@ -1246,7 +1246,24 @@ pub struct App {
     /// Cache state before this App panel sent its one pending OTP verification.
     in_app_otp_cache_snapshot: Option<crate::services::connect::client::cache::ConnectCache>,
     /// Network cache observed before a keyring restore starts its refresh RPC.
-    in_app_restore_cache_snapshot: Option<crate::services::connect::client::cache::ConnectCache>,
+    in_app_restore_cache_snapshot: Option<RestoreAuthSnapshot>,
+    /// Keep stream bootstrap from replacing the shared Arc during a refresh CAS.
+    in_app_refresh_commit: Option<(
+        u64,
+        Option<
+            Arc<tokio::sync::RwLock<crate::services::connect::client::auth::AccessTokenResponse>>,
+        >,
+    )>,
+    deferred_connect_stream_triggers: Vec<Message>,
+}
+
+struct RestoreAuthSnapshot {
+    cache: crate::services::connect::client::cache::ConnectCache,
+    email: Option<String>,
+    auth: Option<(
+        Arc<tokio::sync::RwLock<crate::services::connect::client::auth::AccessTokenResponse>>,
+        crate::services::connect::client::auth::AccessTokenResponse,
+    )>,
 }
 
 enum SplitHandoff {
@@ -4106,6 +4123,8 @@ impl App {
             connect_stream_config: None,
             in_app_otp_cache_snapshot: None,
             in_app_restore_cache_snapshot: None,
+            in_app_refresh_commit: None,
+            deferred_connect_stream_triggers: Vec::new(),
         };
         app.imported_kit_metadata
             .reload(&app.datadir, &app.cube_settings);
@@ -4351,6 +4370,8 @@ impl App {
                 connect_stream_config: None,
                 in_app_otp_cache_snapshot: None,
                 in_app_restore_cache_snapshot: None,
+                in_app_refresh_commit: None,
+                deferred_connect_stream_triggers: Vec::new(),
             },
             cmd,
         ))
@@ -8135,11 +8156,26 @@ impl App {
                 if epoch != self.panels.connect.account.auth_epoch() {
                     return Task::none();
                 }
+                if previous_refresh_token.is_some() && self.in_app_refresh_commit.is_some() {
+                    return Task::none();
+                }
                 let restore_snapshot = if previous_refresh_token.is_some() {
                     self.in_app_restore_cache_snapshot.take()
                 } else {
                     None
                 };
+                if let Some(snapshot) = restore_snapshot.as_ref() {
+                    let same_arc = match (&snapshot.auth, &self.connect_auth) {
+                        (Some((captured, _)), Some(current)) => Arc::ptr_eq(captured, current),
+                        (None, None) => true,
+                        _ => false,
+                    };
+                    if snapshot.email != self.connect_email || !same_arc {
+                        return Task::done(Message::View(view::Message::ConnectAccount(
+                            view::ConnectAccountMessage::AuthCommitRejected { epoch },
+                        )));
+                    }
+                }
                 if previous_refresh_token.is_some()
                     && restore_snapshot.is_none()
                     && self
@@ -8163,6 +8199,9 @@ impl App {
                 });
                 let datadir = self.cache.datadir_path.clone();
                 let network = self.cache.network;
+                if previous_refresh_token.is_some() {
+                    self.in_app_refresh_commit = Some((epoch, self.connect_auth.clone()));
+                }
                 return Task::perform(
                     async move {
                         use crate::services::connect::client::auth::{
@@ -8182,17 +8221,17 @@ impl App {
                         } else if let Some(previous) = previous_refresh_token.as_deref() {
                             if let Some(current_auth) = current_auth {
                                 let mut current = current_auth.write().await;
-                                let expected = restore_snapshot
-                                    .as_ref()
-                                    .and_then(|snapshot| {
-                                        snapshot
-                                            .accounts
-                                            .iter()
-                                            .find(|account| account.email == login.user.email)
-                                    })
-                                    .map(|account| account.tokens.refresh_token.as_str())
-                                    .unwrap_or(previous);
-                                if current.refresh_token != expected {
+                                let unchanged = restore_snapshot.as_ref().map_or_else(
+                                    || current.refresh_token == previous,
+                                    |snapshot| {
+                                        snapshot.auth.as_ref().is_some_and(|(_, captured)| {
+                                            current.access_token == captured.access_token
+                                                && current.refresh_token == captured.refresh_token
+                                                && current.expires_at == captured.expires_at
+                                        })
+                                    },
+                                );
+                                if !unchanged {
                                     Err(cache::ConnectCacheError::Unexpected(
                                         "Connect refresh was superseded in memory".into(),
                                     ))
@@ -8202,7 +8241,7 @@ impl App {
                                             &network_dir,
                                             &login.user.email,
                                             &tokens,
-                                            snapshot,
+                                            &snapshot.cache,
                                         )
                                         .await
                                     } else {
@@ -8225,7 +8264,7 @@ impl App {
                                         &network_dir,
                                         &login.user.email,
                                         &tokens,
-                                        snapshot,
+                                        &snapshot.cache,
                                     )
                                     .await
                                 } else {
@@ -8275,22 +8314,39 @@ impl App {
                 previous_refresh_token,
                 tokens,
             } => {
-                if epoch != self.panels.connect.account.auth_epoch() {
-                    return Task::none();
-                }
-                let Some(tokens) = tokens else {
-                    return Task::done(Message::View(view::Message::ConnectAccount(
-                        view::ConnectAccountMessage::AuthCommitRejected { epoch },
-                    )));
+                let pending = self
+                    .in_app_refresh_commit
+                    .as_ref()
+                    .filter(|(id, _)| *id == epoch);
+                let same_arc = pending.is_some_and(|(_, auth)| match (auth, &self.connect_auth) {
+                    (Some(captured), Some(current)) => Arc::ptr_eq(captured, current),
+                    (None, None) => true,
+                    _ => false,
+                });
+                let deferred = if pending.is_some() {
+                    self.in_app_refresh_commit = None;
+                    std::mem::take(&mut self.deferred_connect_stream_triggers)
+                } else {
+                    Vec::new()
                 };
-                let _ = tokens;
-                return Task::done(Message::View(view::Message::ConnectAccount(
-                    view::ConnectAccountMessage::AuthCommitAccepted {
-                        login,
-                        epoch,
-                        refreshed: previous_refresh_token.is_some(),
-                    },
-                )));
+                let next = if epoch != self.panels.connect.account.auth_epoch() {
+                    Task::none()
+                } else if tokens.is_none() || (previous_refresh_token.is_some() && !same_arc) {
+                    Task::done(Message::View(view::Message::ConnectAccount(
+                        view::ConnectAccountMessage::AuthCommitRejected { epoch },
+                    )))
+                } else {
+                    Task::done(Message::View(view::Message::ConnectAccount(
+                        view::ConnectAccountMessage::AuthCommitAccepted {
+                            login,
+                            epoch,
+                            refreshed: previous_refresh_token.is_some(),
+                        },
+                    )))
+                };
+                return Task::batch(
+                    std::iter::once(next).chain(deferred.into_iter().map(Task::done)),
+                );
             }
             Message::InAppConnectLoginCompleted {
                 token,
@@ -8424,6 +8480,18 @@ impl App {
                 email,
                 cube_uuid,
             } => {
+                if self.in_app_refresh_commit.is_some() {
+                    self.deferred_connect_stream_triggers.push(
+                        Message::TriggerConnectStreamReady {
+                            network,
+                            datadir,
+                            tokens,
+                            email,
+                            cube_uuid,
+                        },
+                    );
+                    return Task::none();
+                }
                 let current = match tokens.try_read() {
                     Ok(current) => current,
                     Err(_) => {
@@ -10330,15 +10398,47 @@ impl App {
                         .cache
                         .datadir_path
                         .network_directory(self.cache.network);
-                    self.in_app_restore_cache_snapshot = match ConnectCache::from_file(&network_dir)
-                    {
-                        Ok(cache) => Some(cache),
-                        Err(ConnectCacheError::NotFound) => Some(ConnectCache::default()),
-                        Err(error) => {
-                            tracing::warn!("Cannot capture Connect restore cache state: {error}");
-                            None
-                        }
-                    };
+                    let auth = self
+                        .connect_auth
+                        .as_ref()
+                        .map(|arc| arc.try_read().map(|tokens| (arc.clone(), tokens.clone())));
+                    self.in_app_restore_cache_snapshot =
+                        match (ConnectCache::from_file(&network_dir), auth) {
+                            (Ok(cache), Some(Ok(auth))) => Some(RestoreAuthSnapshot {
+                                cache,
+                                email: self.connect_email.clone(),
+                                auth: Some(auth),
+                            }),
+                            (Ok(cache), None) => Some(RestoreAuthSnapshot {
+                                cache,
+                                email: self.connect_email.clone(),
+                                auth: None,
+                            }),
+                            (Err(ConnectCacheError::NotFound), Some(Ok(auth))) => {
+                                Some(RestoreAuthSnapshot {
+                                    cache: ConnectCache::default(),
+                                    email: self.connect_email.clone(),
+                                    auth: Some(auth),
+                                })
+                            }
+                            (Err(ConnectCacheError::NotFound), None) => Some(RestoreAuthSnapshot {
+                                cache: ConnectCache::default(),
+                                email: self.connect_email.clone(),
+                                auth: None,
+                            }),
+                            (_, Some(Err(error))) => {
+                                tracing::warn!(
+                                    "Cannot capture Connect restore auth state: {error}"
+                                );
+                                None
+                            }
+                            (Err(error), _) => {
+                                tracing::warn!(
+                                    "Cannot capture Connect restore cache state: {error}"
+                                );
+                                None
+                            }
+                        };
                 }
                 if matches!(
                     &msg,
@@ -18324,12 +18424,6 @@ pub(crate) mod claim_step1_tests {
                 }]
             })).unwrap(),
         ).unwrap();
-        drop(app.update(Message::View(view::Message::ConnectAccount(
-            view::ConnectAccountMessage::RefreshSession {
-                refresh_token: "keyring-refresh".into(),
-            },
-        ))));
-        assert!(app.in_app_restore_cache_snapshot.is_some());
         let shared = Arc::new(tokio::sync::RwLock::new(
             crate::services::connect::client::auth::AccessTokenResponse {
                 access_token: "cache-access".into(),
@@ -18339,6 +18433,12 @@ pub(crate) mod claim_step1_tests {
         ));
         app.connect_auth = Some(shared.clone());
         app.connect_email = Some("alice@example.com".into());
+        drop(app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::RefreshSession {
+                refresh_token: "keyring-refresh".into(),
+            },
+        ))));
+        assert!(app.in_app_restore_cache_snapshot.is_some());
         let mut login = home_login();
         login.user.email = "alice@example.com".into();
         let epoch = app.panels.connect.account.auth_epoch();
@@ -18372,6 +18472,197 @@ pub(crate) mod claim_step1_tests {
             Some("live-claim")
         );
         assert_eq!(shared.read().await.refresh_token, "home-refresh");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn restore_adopts_sibling_rotated_cache_when_this_tabs_arc_was_already_stale() {
+        let root =
+            std::env::temp_dir().join(format!("auth-sibling-rotation-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = bitcoin_app(&root);
+        app.cache.datadir_path = CoincubeDirectory::new(root.clone());
+        let network_dir = app.cache.datadir_path.network_directory(app.cache.network);
+        std::fs::create_dir_all(network_dir.path()).unwrap();
+        std::fs::write(
+            network_dir.path().join(crate::services::connect::client::cache::CONNECT_CACHE_FILENAME),
+            serde_json::to_vec(&serde_json::json!({
+                "active_email": "alice@example.com",
+                "accounts": [{
+                    "email": "alice@example.com",
+                    "tokens": {"access_token": "sibling-access", "refresh_token": "sibling-refresh", "expires_at": 2000},
+                    "device_id": "device-a", "reregister_claim": "live-claim"
+                }]
+            })).unwrap(),
+        ).unwrap();
+        let stale = Arc::new(tokio::sync::RwLock::new(
+            crate::services::connect::client::auth::AccessTokenResponse {
+                access_token: "stale-access".into(),
+                refresh_token: "stale-refresh".into(),
+                expires_at: 1000,
+            },
+        ));
+        app.connect_auth = Some(stale.clone());
+        app.connect_email = Some("alice@example.com".into());
+        drop(app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::RefreshSession {
+                refresh_token: "sibling-refresh".into(),
+            },
+        ))));
+        let mut login = home_login();
+        login.user.email = "alice@example.com".into();
+        let epoch = app.panels.connect.account.auth_epoch();
+        let task = app.update(Message::InAppConnectAuthReady {
+            login,
+            epoch,
+            previous_refresh_token: Some("sibling-refresh".into()),
+        });
+        let sibling = Arc::new(tokio::sync::RwLock::new(
+            crate::services::connect::client::auth::AccessTokenResponse {
+                access_token: "sibling-access".into(),
+                refresh_token: "sibling-refresh".into(),
+                expires_at: 2000,
+            },
+        ));
+        let network = app.cache.network;
+        let datadir = app.cache.datadir_path.clone();
+        drop(app.update(Message::TriggerConnectStreamReady {
+            network,
+            datadir,
+            tokens: sibling.clone(),
+            email: "alice@example.com".into(),
+            cube_uuid: None,
+        }));
+        assert!(Arc::ptr_eq(app.connect_auth.as_ref().unwrap(), &stale));
+        let mut stream = iced_runtime::task::into_stream(task).unwrap();
+        let Some(iced_runtime::Action::Output(
+            persisted @ Message::InAppConnectAuthPersisted {
+                tokens: Some(_), ..
+            },
+        )) = stream.next().await
+        else {
+            panic!("restore was not persisted")
+        };
+        let mut completion = iced_runtime::task::into_stream(app.update(persisted)).unwrap();
+        let mut saw_deferred = false;
+        while let Some(iced_runtime::Action::Output(message)) = completion.next().await {
+            if let Message::TriggerConnectStreamReady { .. } = message {
+                saw_deferred = true;
+                drop(app.update(message));
+            }
+        }
+        assert!(saw_deferred);
+        assert!(Arc::ptr_eq(app.connect_auth.as_ref().unwrap(), &stale));
+        let cached =
+            crate::services::connect::client::cache::ConnectCache::from_file(&network_dir).unwrap();
+        assert_eq!(
+            cached.active_account().unwrap().tokens.refresh_token,
+            "home-refresh"
+        );
+        assert_eq!(
+            cached.active_account().unwrap().device_id.as_deref(),
+            Some("device-a")
+        );
+        assert_eq!(
+            cached.active_account().unwrap().reregister_claim.as_deref(),
+            Some("live-claim")
+        );
+        assert_eq!(stale.read().await.refresh_token, "home-refresh");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn restore_rejects_arc_rotation_after_snapshot_without_retiring_device() {
+        let root = std::env::temp_dir().join(format!("auth-arc-rotation-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = bitcoin_app(&root);
+        app.cache.datadir_path = CoincubeDirectory::new(root.clone());
+        let network_dir = app.cache.datadir_path.network_directory(app.cache.network);
+        std::fs::create_dir_all(network_dir.path()).unwrap();
+        std::fs::write(
+            network_dir.path().join(crate::services::connect::client::cache::CONNECT_CACHE_FILENAME),
+            serde_json::to_vec(&serde_json::json!({
+                "active_email": "alice@example.com",
+                "accounts": [{
+                    "email": "alice@example.com",
+                    "tokens": {"access_token": "cache-access", "refresh_token": "cache-refresh", "expires_at": 2000},
+                    "device_id": "device-a", "reregister_claim": "live-claim"
+                }]
+            })).unwrap(),
+        ).unwrap();
+        let shared = Arc::new(tokio::sync::RwLock::new(
+            crate::services::connect::client::auth::AccessTokenResponse {
+                access_token: "stale-access".into(),
+                refresh_token: "stale-refresh".into(),
+                expires_at: 1000,
+            },
+        ));
+        app.connect_auth = Some(shared.clone());
+        app.connect_email = Some("alice@example.com".into());
+        drop(app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::RefreshSession {
+                refresh_token: "cache-refresh".into(),
+            },
+        ))));
+        shared.write().await.refresh_token = "newer-refresh".into();
+        let mut login = home_login();
+        login.user.email = "alice@example.com".into();
+        let epoch = app.panels.connect.account.auth_epoch();
+        let task = app.update(Message::InAppConnectAuthReady {
+            login,
+            epoch,
+            previous_refresh_token: Some("cache-refresh".into()),
+        });
+        let valid_stream_auth = Arc::new(tokio::sync::RwLock::new(
+            crate::services::connect::client::auth::AccessTokenResponse {
+                access_token: "cache-access".into(),
+                refresh_token: "cache-refresh".into(),
+                expires_at: 2000,
+            },
+        ));
+        let network = app.cache.network;
+        let datadir = app.cache.datadir_path.clone();
+        drop(app.update(Message::TriggerConnectStreamReady {
+            network,
+            datadir,
+            tokens: valid_stream_auth.clone(),
+            email: "alice@example.com".into(),
+            cube_uuid: None,
+        }));
+        assert!(Arc::ptr_eq(app.connect_auth.as_ref().unwrap(), &shared));
+        let mut stream = iced_runtime::task::into_stream(task).unwrap();
+        let Some(iced_runtime::Action::Output(
+            persisted @ Message::InAppConnectAuthPersisted { tokens: None, .. },
+        )) = stream.next().await
+        else {
+            panic!("superseded restore unexpectedly persisted")
+        };
+        let cached =
+            crate::services::connect::client::cache::ConnectCache::from_file(&network_dir).unwrap();
+        assert_eq!(
+            cached.active_account().unwrap().tokens.refresh_token,
+            "cache-refresh"
+        );
+        assert_eq!(
+            cached.active_account().unwrap().device_id.as_deref(),
+            Some("device-a")
+        );
+        assert_eq!(
+            cached.active_account().unwrap().reregister_claim.as_deref(),
+            Some("live-claim")
+        );
+        assert_eq!(shared.read().await.refresh_token, "newer-refresh");
+        let mut completion = iced_runtime::task::into_stream(app.update(persisted)).unwrap();
+        let mut saw_deferred = false;
+        while let Some(iced_runtime::Action::Output(message)) = completion.next().await {
+            if let Message::TriggerConnectStreamReady { .. } = message {
+                saw_deferred = true;
+                drop(app.update(message));
+            }
+        }
+        assert!(saw_deferred);
+        assert!(Arc::ptr_eq(
+            app.connect_auth.as_ref().unwrap(),
+            &valid_stream_auth
+        ));
         let _ = std::fs::remove_dir_all(root);
     }
 
