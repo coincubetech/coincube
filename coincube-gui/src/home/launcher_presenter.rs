@@ -3279,7 +3279,7 @@ mod tests {
             total_count: 5,
             cube_limit: 10,
             tier: "Free",
-            has_local_list: true,
+            usage: Vec::new(),
             hidden: 0,
             filtered_total: 3,
             unread: Vec::new(),
