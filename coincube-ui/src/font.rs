@@ -60,6 +60,8 @@ pub const MONO_MEDIUM_BYTES: &[u8] = include_bytes!("../static/fonts/IBMPlexMono
 pub const SPACE_GROTESK_BOLD_BYTES: &[u8] = include_bytes!("../static/fonts/SpaceGrotesk-Bold.ttf");
 
 pub const BOOTSTRAP_ICONS_BYTE: &[u8] = include_bytes!("../static/icons/bootstrap-icons.ttf");
+/// Marks Bootstrap Icons lacks, built by `static/icons/build_coincube_icons.py`.
+pub const COINCUBE_ICONS_BYTES: &[u8] = include_bytes!("../static/icons/coincube-icons.ttf");
 
 pub fn load() -> Vec<Cow<'static, [u8]>> {
     vec![
@@ -71,6 +73,7 @@ pub fn load() -> Vec<Cow<'static, [u8]>> {
         MONO_MEDIUM_BYTES.into(),
         SPACE_GROTESK_BOLD_BYTES.into(),
         BOOTSTRAP_ICONS_BYTE.into(),
+        COINCUBE_ICONS_BYTES.into(),
         // DatePicker navigation, cancel, and confirm use iced_aw's icon font.
         iced_aw::ICED_AW_FONT_BYTES.into(),
     ]

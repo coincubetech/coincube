@@ -28,6 +28,12 @@ icon!(
     r#"<path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/><path d="m6.5 9 1.8 1.8 3.5-3.5"/>"#
 );
 icon!(BOLT, r#"<path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/>"#);
+/// Spark's asterisk from `coincube-ui/static/logos/spark_badge.svg`. A filled
+/// brand mark, not a stroke icon, fitted to about 15px of the 18px cell.
+pub const SPARK: &str = concat!(
+    r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 18 18"><path transform="translate(1.5 1.75) scale(0.2229)" fill="#fff" fill-rule="evenodd" d="M39.7159 25.248L40.8727 0.570312H26.4219L27.5787 25.2483L4.46555 16.5221L0 30.2656L23.8282 36.7915L8.38717 56.0763L20.0781 64.5703L33.6483 43.9245L47.2179 64.5695L58.9089 56.0755L43.4679 36.7909L67.2937 30.2657L62.8281 16.5221L39.7159 25.248Z"/>"##,
+    "</svg>"
+);
 icon!(
     SHIELD,
     r#"<path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/>"#
@@ -149,5 +155,24 @@ mod tests {
             assert!(source.contains(r#"viewBox="0 0 18 18""#));
             assert!(resvg::usvg::Tree::from_str(source, &resvg::usvg::Options::default()).is_ok());
         }
+    }
+
+    #[test]
+    fn spark_is_the_badge_asterisk() {
+        let badge = include_str!("../../../../../coincube-ui/static/logos/spark_badge.svg");
+        let path = SPARK
+            .split(" d=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        assert!(
+            badge.contains(path),
+            "{}",
+            "the Spark glyph drifted from the badge"
+        );
+        assert!(SPARK.contains(r#"viewBox="0 0 18 18""#));
+        assert!(resvg::usvg::Tree::from_str(SPARK, &resvg::usvg::Options::default()).is_ok());
     }
 }

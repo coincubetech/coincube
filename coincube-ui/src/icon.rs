@@ -3,6 +3,7 @@ use crate::widget::Text;
 use iced::{alignment, Font, Length};
 
 const BOOTSTRAP_ICONS: Font = Font::with_name("bootstrap-icons");
+const COINCUBE_ICONS: Font = Font::with_name("coincube-icons");
 
 fn bootstrap_icon<'a>(unicode: char) -> Text<'a> {
     Text::new(unicode)
@@ -267,6 +268,11 @@ pub fn vault_icon<'a>() -> Text<'a> {
     bootstrap_icon('\u{F53F}')
 }
 
+/// Spark's asterisk (`static/logos/spark_badge.svg`): the Spark wallet's mark.
+pub fn spark_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{E000}').font(COINCUBE_ICONS)
+}
+
 pub fn lightning_icon<'a>() -> Text<'a> {
     bootstrap_icon('\u{F46E}')
 }
@@ -488,4 +494,22 @@ pub fn copy_icon<'a>() -> Text<'a> {
 
 pub fn list_ul_icon<'a>() -> Text<'a> {
     bootstrap_icon('\u{F478}')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coincube_icons_is_loaded_under_the_name_spark_icon_asks_for() {
+        // iced falls back to another font, without an error, when no loaded
+        // font has the family name a `Font::with_name` asks for.
+        let bytes = crate::font::COINCUBE_ICONS_BYTES;
+        let name = b"coincube-icons";
+        assert!(bytes.windows(name.len()).any(|window| window == name));
+        assert_eq!(COINCUBE_ICONS, Font::with_name("coincube-icons"));
+        assert!(crate::font::load()
+            .iter()
+            .any(|font| font.as_ref() == bytes));
+    }
 }

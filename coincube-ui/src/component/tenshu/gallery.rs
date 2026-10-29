@@ -1203,7 +1203,7 @@ fn overview(visibility: AmountVisibility) -> Element<'static, Msg> {
         ))
         .push(Container::new(wallets).padding(iced::Padding::default().top(24.0)))
         .push(wallet_card(
-            icon::lightning_icon(),
+            icon::spark_icon(),
             "Spark · Daily spending",
             known("$20.74", "25,053"),
             vec![asset(

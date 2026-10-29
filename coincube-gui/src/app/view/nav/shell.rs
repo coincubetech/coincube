@@ -628,7 +628,7 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
         let spark_reason = features::spark(ctx.network).reason().map(str::to_owned);
         middle = middle.push(nav_row(
             "Spark",
-            Some(NavIcon::Glyph(glyph::BOLT)),
+            Some(NavIcon::Glyph(glyph::SPARK)),
             matches!(menu, Menu::Spark(_)),
             spark_reason
                 .is_none()

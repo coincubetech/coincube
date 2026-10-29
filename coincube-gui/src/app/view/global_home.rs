@@ -7,7 +7,7 @@ use coincube_ui::{
     component::{amount::*, button, form, spinner, text::*},
     icon::{
         arrow_down_up_icon, arrow_right, check_circle_icon, clock_icon, droplet_fill_icon,
-        lightning_icon, usd_icon, vault_icon, warning_icon,
+        spark_icon, usd_icon, vault_icon, warning_icon,
     },
     theme,
     widget::{action::Action, *},
@@ -523,10 +523,7 @@ where
             .size(size)
             .style(theme::text::secondary)
             .into(),
-        WalletKind::Spark => lightning_icon()
-            .size(size)
-            .style(theme::text::secondary)
-            .into(),
+        WalletKind::Spark => spark_icon().size(size).style(theme::text::secondary).into(),
         WalletKind::Vault => vault_icon().size(size).style(theme::text::secondary).into(),
     }
 }
@@ -2230,7 +2227,7 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
             .push(landing_button(
                 landing_control_id(cube_id, "Spark", "open"),
                 "Spark",
-                Some(lightning_icon().size(16).style(theme::text::secondary)),
+                Some(spark_icon().size(16).style(theme::text::secondary)),
                 Message::FocusAction,
                 Some(Message::Menu(Menu::Spark(
                     crate::app::menu::SparkSubMenu::Overview,

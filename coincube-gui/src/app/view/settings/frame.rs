@@ -198,7 +198,7 @@ fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
 fn scope_icon(scope: &str) -> coincube_ui::widget::Text<'static> {
     match scope {
         "tenshu.settings.route.scope.vault" => icon::vault_icon(),
-        "tenshu.settings.route.scope.spark" => icon::lightning_outline_icon(),
+        "tenshu.settings.route.scope.spark" => icon::spark_icon(),
         _ => icon::cube_icon(),
     }
 }
