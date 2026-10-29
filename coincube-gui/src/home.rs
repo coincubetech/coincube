@@ -7,7 +7,7 @@ use iced::{
 
 use coincube_core::{bip39, miniscript::bitcoin::Network};
 use coincube_ui::{
-    component::{button, card, notification, spinner, text::*},
+    component::{button, card, notification, text::*},
     icon, image, theme,
     widget::{
         action::Action as FocusableAction, modal::Modal, CheckBox, Column, Container, Element, Row,
@@ -6065,22 +6065,7 @@ impl Home {
             .max_width(640)
             .into()
         } else {
-            Column::new()
-                .spacing(16)
-                .push(
-                    button::secondary_action(
-                        "tenshu.create:back-to-networks",
-                        Some(icon::previous_icon()),
-                        "Back to networks",
-                        create_journey_focus,
-                    )
-                    .width(Length::Shrink)
-                    .on_press_maybe(
-                        (!self.creating_cube).then_some(ViewMessage::BackToCreateNetwork),
-                    ),
-                )
-                .push(self.creation_form())
-                .into()
+            self.creation_form()
         };
 
         let divider = || -> Element<ViewMessage> {
@@ -6133,7 +6118,9 @@ impl Home {
                 .push(divider());
         }
         let region = region.push(
-            scrollable(Container::new(body).padding(28).width(Length::Fill)).height(Length::Fill),
+            scrollable(Container::new(body).padding(28).width(Length::Fill))
+                .id(Id::new("tenshu.create:body"))
+                .height(Length::Fill),
         );
         let region = if selecting_network {
             region.push(divider()).push(
@@ -6152,6 +6139,51 @@ impl Home {
                                 .then_some(ViewMessage::ConfirmCreateNetwork),
                         ),
                     ),
+                )
+                .padding([14, 28])
+                .width(Length::Fill),
+            )
+        } else if !backing_up && !blake2b {
+            region.push(divider()).push(
+                Container::new(
+                    Row::new()
+                        .align_y(Alignment::Center)
+                        .push(
+                            button::secondary_action(
+                                "tenshu.create:back-to-networks",
+                                Some(icon::previous_icon()),
+                                "Back",
+                                create_journey_focus,
+                            )
+                            .width(Length::Shrink)
+                            .on_press_maybe(
+                                (!self.creating_cube).then_some(ViewMessage::BackToCreateNetwork),
+                            ),
+                        )
+                        .push(Space::new().width(Length::Fill))
+                        .push(
+                            button::primary_action(
+                                "tenshu.create:cube-submit",
+                                None,
+                                if self.creating_cube {
+                                    "Creating…"
+                                } else {
+                                    "Create Cube"
+                                },
+                                create_journey_focus,
+                            )
+                            .width(Length::Shrink)
+                            .on_press_maybe(
+                                create_cube_can_submit(
+                                    &self.create_cube_name,
+                                    &self.create_cube_pin,
+                                    &self.create_cube_pin_confirm,
+                                    self.passkey_mode,
+                                    self.creating_cube,
+                                )
+                                .then_some(ViewMessage::CreateCube),
+                            ),
+                        ),
                 )
                 .padding([14, 28])
                 .width(Length::Fill),
@@ -6730,6 +6762,19 @@ struct CreateCubeFormOptions {
     can_import_bitcoin: bool,
 }
 
+fn create_cube_can_submit(
+    cube_name: &coincube_ui::component::form::Value<String>,
+    pin: &pin_input::PinInput,
+    pin_confirm: &pin_input::PinInput,
+    passkey_mode: bool,
+    creating_cube: bool,
+) -> bool {
+    !creating_cube
+        && cube_name.valid
+        && !cube_name.value.trim().is_empty()
+        && (passkey_mode || (pin.is_complete() && pin_confirm.is_complete()))
+}
+
 fn create_cube_form<'a>(
     cube_name: &coincube_ui::component::form::Value<String>,
     pin: &'a pin_input::PinInput,
@@ -6738,7 +6783,6 @@ fn create_cube_form<'a>(
     options: CreateCubeFormOptions,
 ) -> Element<'a, ViewMessage> {
     use coincube_ui::component::form;
-    use std::time::Duration;
     let CreateCubeFormOptions {
         creating_cube,
         passkey_mode,
@@ -6903,52 +6947,8 @@ fn create_cube_form<'a>(
         column = column.push(p1_regular(err).style(theme::text::error));
     }
 
-    column = column.push(Space::new().height(Length::Fixed(10.0)));
-    // Determine if button should be enabled
-    let can_create = if passkey_mode {
-        !creating_cube && cube_name.valid && !cube_name.value.trim().is_empty()
-    } else {
-        !creating_cube
-            && cube_name.valid
-            && !cube_name.value.trim().is_empty()
-            && pin.is_complete()
-            && pin_confirm.is_complete()
-    };
-
-    let submit_button = if creating_cube {
-        iced::widget::button(
-            Container::new(
-                Row::new()
-                    .spacing(5)
-                    .align_y(Alignment::Center)
-                    .push(text("Creating"))
-                    .push(
-                        Container::new(spinner::typing_text_carousel(
-                            "...",
-                            true,
-                            Duration::from_millis(500),
-                            text,
-                        ))
-                        .width(Length::Fixed(20.0)),
-                    ),
-            )
-            .center_x(Length::Fill)
-            .center_y(Length::Fill),
-        )
-        .width(Length::Fixed(200.0))
-        .height(Length::Fixed(44.0))
-        .style(theme::button::primary)
-    } else {
-        button::primary(None, "Create Cube")
-            .width(Length::Fixed(200.0))
-            .on_press_maybe(if can_create {
-                Some(ViewMessage::CreateCube)
-            } else {
-                None
-            })
-    };
-
-    column = column.push(submit_button);
+    // The Create journey keeps its submit action in a fixed footer so PIN
+    // fields remain scrollable at the minimum window height.
     if !importing_bitcoin && can_import_bitcoin {
         column = column.push(
             button::secondary(None, "Import Bitcoin wallet")
@@ -8590,6 +8590,41 @@ mod tests {
         // its keyboard tests exercise those semantics in coincube-ui.
     }
 
+    #[test]
+    fn create_journey_footer_preserves_name_pin_and_busy_gates() {
+        let mut home = home();
+        assert!(!create_cube_can_submit(
+            &home.create_cube_name,
+            &home.create_cube_pin,
+            &home.create_cube_pin_confirm,
+            false,
+            false,
+        ));
+        home.create_cube_name.value = "Travel".into();
+        home.create_cube_name.valid = true;
+        assert!(!create_cube_can_submit(
+            &home.create_cube_name,
+            &home.create_cube_pin,
+            &home.create_cube_pin_confirm,
+            false,
+            false,
+        ));
+        assert!(create_cube_can_submit(
+            &home.create_cube_name,
+            &home.create_cube_pin,
+            &home.create_cube_pin_confirm,
+            true,
+            false,
+        ));
+        assert!(!create_cube_can_submit(
+            &home.create_cube_name,
+            &home.create_cube_pin,
+            &home.create_cube_pin_confirm,
+            true,
+            true,
+        ));
+    }
+
     /// Synthetic Create frames for comparing the minimum window with P-Create.
     #[test]
     #[ignore = "writes PNG frames; needs a headless renderer"]
@@ -8637,10 +8672,11 @@ mod tests {
             } else {
                 coincube_ui::theme::palette::ThemeMode::Dark
             };
-            for (name, chain, confirmed) in [
-                ("network", ChainId::Bitcoin, false),
-                ("cube", ChainId::Bitcoin, true),
-                ("test-network", ChainId::Testnet4, false),
+            for (name, chain, confirmed, bottom) in [
+                ("network", ChainId::Bitcoin, false, false),
+                ("cube", ChainId::Bitcoin, true, false),
+                ("cube-bottom", ChainId::Bitcoin, true, true),
+                ("test-network", ChainId::Testnet4, false, false),
             ] {
                 home.network = chain;
                 home.create_network_confirmed = confirmed;
@@ -8651,6 +8687,21 @@ mod tests {
                     &renderer,
                     &layout::Limits::new(iced::Size::ZERO, size),
                 );
+                if bottom {
+                    let mut snap = iced::advanced::widget::operation::scrollable::snap_to(
+                        Id::new("tenshu.create:body"),
+                        iced::widget::scrollable::RelativeOffset {
+                            x: None,
+                            y: Some(1.0),
+                        },
+                    );
+                    element.as_widget_mut().operate(
+                        &mut tree,
+                        Layout::new(&node),
+                        &renderer,
+                        &mut snap,
+                    );
+                }
                 let viewport = iced::Rectangle::with_size(size);
                 renderer.reset(viewport);
                 let mut messages = Vec::new();
