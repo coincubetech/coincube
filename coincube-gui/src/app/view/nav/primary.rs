@@ -13,10 +13,7 @@ use crate::app::{
 };
 use coincube_ui::{
     color,
-    icon::{
-        cube_icon, droplet_outline_icon, lightning_outline_icon, shield_plus_icon, shop_icon,
-        vault_icon,
-    },
+    icon::{cube_icon, droplet_outline_icon, shield_plus_icon, shop_icon, spark_icon, vault_icon},
     theme,
     widget::{Button, Column, Element, Row, Text},
 };
@@ -236,7 +233,7 @@ pub(super) fn marketplace_landing_menu(ctx: &NavContext<'_>) -> Menu {
 fn icon_for<'a>(t: TopLevel) -> Text<'a> {
     match t {
         TopLevel::Cube => cube_icon(),
-        TopLevel::Spark => lightning_outline_icon(),
+        TopLevel::Spark => spark_icon(),
         TopLevel::Liquid => droplet_outline_icon(),
         TopLevel::Vault => vault_icon(),
         TopLevel::Marketplace => shop_icon(),

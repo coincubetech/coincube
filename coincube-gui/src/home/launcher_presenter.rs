@@ -666,15 +666,12 @@ pub(crate) fn face_button_label<'a, M: 'a>(label: &'static str) -> Element<'a, M
 /// Cancel link pinned to the bottom, as the prototype's unlock `.fc`.
 pub(crate) fn unlock_face_body<'a, M: 'a>(
     top: Element<'a, M>,
-    note: &'static str,
     cancel: Element<'a, M>,
 ) -> Element<'a, M> {
     Column::new()
         .height(Length::Fill)
         .push(top)
         .push(Space::new().height(Length::Fill))
-        .push(face_words(note, 13.0, coincube_ui::font::REGULAR, true))
-        .push(Space::new().height(Length::Fixed(8.0)))
         .push(cancel)
         .into()
 }
@@ -2683,11 +2680,11 @@ mod tests {
             "PIN",
             "Enter this Cube's PIN.",
             "Unlock",
-            "Network checks run after your PIN is accepted.",
             "Cancel",
         ] {
             assert!(pin.contains(text), "missing {:?}", text);
         }
+        assert!(!pin.contains("Network checks"));
         // The old full-screen controls are gone from the face.
         assert!(!pin.contains("Submit"));
         assert!(!pin.contains("Enter PIN for"));
