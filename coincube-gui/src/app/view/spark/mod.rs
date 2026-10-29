@@ -63,8 +63,7 @@ pub enum SparkTransactionsMessage {
     /// at that index in the current `recent_transactions` list.
     Select(usize),
     /// Preselect a specific payment to display in the detail pane —
-    /// used by Overview / Send / Receive to hand off a row when the
-    /// user taps there. The panel switches into detail mode without
+    /// used by Overview to hand off a row when the user taps there. The panel switches into detail mode without
     /// needing an index lookup against its own list.
     Preselect(crate::app::view::spark::SparkRecentTransaction),
     /// Empty-state navigation: "Send sats" button.
@@ -133,7 +132,8 @@ pub enum SparkSendMessage {
     /// Balance snapshot, folded into a unified total by the handler. `None` when
     /// the `get_info` fetch failed; the card keeps its last value.
     BalanceLoaded(Option<(u64, Option<coincube_spark_protocol::StableBalanceSnapshot>)>),
-    /// User tapped "View transactions" after a send.
+    /// User tapped "View transactions" (unknown outcome) or "Check
+    /// status" (failed cross-chain send): open Transactions.
     History,
 
     // ── Cross-chain stablecoin send ─────────────────────────────────────
