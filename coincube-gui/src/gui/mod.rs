@@ -1008,7 +1008,16 @@ const ZOOM_NOTICE: Duration = Duration::from_secs(1);
 struct ZoomState {
     pending: Option<Zoom>,
     notice_until: Option<Instant>,
+    /// The window's screen width in points at 100%, once iced reports it.
+    /// Caps the zoom at [`Zoom::largest_for_screen`].
+    screen_width: Option<f32>,
+    /// The zoom the window's minimum size was last set for.
+    min_size_for: Option<Zoom>,
 }
+
+/// The minimum window height, in screen points, set in `main.rs`. Only the
+/// width grows with the zoom: a shorter layout scrolls, a narrower one breaks.
+const MIN_WINDOW_HEIGHT: f32 = 768.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZoomStep {
@@ -1038,6 +1047,10 @@ pub enum Message {
     Resized(pane_grid::ResizeEvent),
     Window(Option<Id>),
     WindowSize(Size),
+    /// The window's screen size in zoomed units, and the zoom it was asked at.
+    ScreenSize(Option<Size>, Zoom),
+    /// The window moved, maybe to another screen.
+    WindowMoved,
 
     Fiat(FiatMessage),
     ToggleTheme,
@@ -1626,6 +1639,7 @@ impl GUI {
                 .then_some("Please try again."),
             diagnostics: preferences_view::Diagnostics::default(),
             about: preferences_view::About::default(),
+            max_zoom: self.zoom.screen_width.map(Zoom::largest_for_screen),
         }
     }
 
@@ -2067,6 +2081,10 @@ impl GUI {
         change: crate::app::settings::preferences::PreferenceChange,
     ) -> Task<Message> {
         if let crate::app::settings::preferences::PreferenceChange::Zoom(zoom) = change {
+            // The row disables steps over the cap; refuse one that arrives anyway.
+            if zoom > self.max_zoom() {
+                return Task::none();
+            }
             self.zoom.pending = Some(zoom);
             return self.save_pending_zoom();
         }
@@ -2083,7 +2101,9 @@ impl GUI {
         }
     }
 
-    /// The zoom in effect: the newest unsaved choice, else the saved one.
+    /// The zoom in effect: the newest unsaved choice, else the saved one,
+    /// capped at what this screen holds. A 150% saved on a large monitor reads
+    /// as 125% on a laptop, and returns on the monitor without a new save.
     fn current_zoom(&self) -> Zoom {
         self.zoom
             .pending
@@ -2093,6 +2113,50 @@ impl GUI {
                     .map(|accepted| accepted.preferences.zoom)
             })
             .unwrap_or_default()
+            .min(self.max_zoom())
+    }
+
+    /// The largest zoom this window's screen can lay out at full width.
+    /// Uncapped until iced reports the screen.
+    fn max_zoom(&self) -> Zoom {
+        self.zoom
+            .screen_width
+            .map_or(Zoom::LARGEST, Zoom::largest_for_screen)
+    }
+
+    /// Asks iced for the window's screen, tagged with the zoom its answer is
+    /// scaled by.
+    fn query_screen_size(&self) -> Task<Message> {
+        let Some(id) = self.window_id else {
+            return Task::none();
+        };
+        let zoom = self.current_zoom();
+        window::monitor_size(id).map(move |size| Message::ScreenSize(size, zoom))
+    }
+
+    /// Keeps the minimum window at [`Zoom::LAYOUT_MIN_WIDTH`] laid-out points
+    /// wide, so a capped zoom never lays a page out narrower than its design.
+    /// Waits for the screen size: before it, the zoom is not yet capped and
+    /// `main.rs`'s minimum stands.
+    fn sync_min_window_size(&mut self) -> Task<Message> {
+        let (Some(id), Some(_)) = (self.window_id, self.zoom.screen_width) else {
+            return Task::none();
+        };
+        let zoom = self.current_zoom();
+        if self.zoom.min_size_for == Some(zoom) {
+            return Task::none();
+        }
+        self.zoom.min_size_for = Some(zoom);
+        window::set_min_size(id, Some(Self::min_window_size(zoom)))
+    }
+
+    /// The minimum window in iced's zoomed units: never under 1024 x 768
+    /// screen points, and at least 1024 laid-out points wide above 100%.
+    fn min_window_size(zoom: Zoom) -> Size {
+        Size::new(
+            Zoom::LAYOUT_MIN_WIDTH * zoom.max(Zoom::ACTUAL_SIZE).factor(),
+            MIN_WINDOW_HEIGHT,
+        ) * (1.0 / zoom.factor())
     }
 
     /// A size at 100% in the zoomed units iced's window actions take.
@@ -2653,6 +2717,7 @@ impl GUI {
 
         self.refresh_claim_deposit_display();
         self.refresh_sidebar_session_status();
+        auth_tasks.push(self.sync_min_window_size());
         Task::batch(auth_tasks)
     }
 
@@ -2783,8 +2848,10 @@ impl GUI {
             // we get this message only once at startup
             Message::Window(id) => {
                 self.window_id = id;
+                let screen = self.query_screen_size();
                 // Common case: if there is an already saved screen size we reuse it
-                if let (Some(id), Some(WindowConfig { width, height })) = (id, &self.window_config)
+                let size = if let (Some(id), Some(WindowConfig { width, height })) =
+                    (id, &self.window_config)
                 {
                     window::resize(
                         id,
@@ -2798,14 +2865,23 @@ impl GUI {
                     window::maximize(*id, true)
                 } else {
                     Task::none()
+                };
+                Task::batch([screen, size])
+            }
+            Message::ScreenSize(size, zoom) => {
+                if let Some(size) = size {
+                    self.zoom.screen_width = Some(size.width * zoom.factor());
                 }
+                Task::none()
             }
             Message::WindowSize(monitor_size) => {
                 // Iced reports the size in zoomed units; record it at 100% so
                 // a zoom change between launches keeps the window's size.
                 let monitor_size = monitor_size * self.current_zoom().factor();
+                // A resize can come from a move to another screen.
+                let screen = self.query_screen_size();
                 let cloned_cfg = self.window_config.clone();
-                match (cloned_cfg, &self.window_init, &self.window_id) {
+                let resized = match (cloned_cfg, &self.window_init, &self.window_id) {
                     // no previous screen size recorded && window maximized
                     (None, Some(false), Some(id)) => {
                         self.window_init = Some(true);
@@ -2848,8 +2924,10 @@ impl GUI {
                         }
                         Task::none()
                     }
-                }
+                };
+                Task::batch([screen, resized])
             }
+            Message::WindowMoved => self.query_screen_size(),
             Message::CtrlC
             | Message::Event(iced::Event::Window(iced::window::Event::CloseRequested)) => {
                 for (_, pane) in self.panes.iter_mut() {
@@ -2902,7 +2980,7 @@ impl GUI {
             Message::KeyPressed(Key::Zoom(step)) => {
                 let current = self.current_zoom();
                 let next = match step {
-                    ZoomStep::In => current.zoomed_in(),
+                    ZoomStep::In => current.zoomed_in().filter(|next| *next <= self.max_zoom()),
                     ZoomStep::Out => current.zoomed_out(),
                     ZoomStep::ActualSize => Some(Zoom::ACTUAL_SIZE),
                 };
@@ -4390,6 +4468,9 @@ impl GUI {
                     (iced::Event::Window(iced::window::Event::Resized(size)), _) => {
                         Some(Message::WindowSize(*size))
                     }
+                    (iced::Event::Window(iced::window::Event::Moved(_)), _) => {
+                        Some(Message::WindowMoved)
+                    }
                     _ => None,
                 }
             }),
@@ -5469,6 +5550,116 @@ mod app_preferences_sheet_tests {
         assert_eq!(gui.scale_factor(), 1.5);
         drop(gui.update(Message::KeyPressed(Key::Zoom(ZoomStep::ActualSize))));
         assert_eq!(gui.scale_factor(), 1.0);
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn a_laptop_screen_caps_the_zoom_at_what_it_lays_out_at_full_width() {
+        let _guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path = std::env::temp_dir().join(format!("tenshu-zoom-cap-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        let root = CoincubeDirectory::new(path.clone());
+        let mut gui = launcher_gui(&root);
+        // A 1440-point laptop reported at 125%: 1152 zoomed units wide.
+        drop(gui.update(Message::ScreenSize(
+            Some(Size::new(1152.0, 720.0)),
+            Zoom::from(125),
+        )));
+        assert_eq!(gui.zoom.screen_width, Some(1440.0));
+        for _ in 0..10 {
+            drop(gui.update(Message::KeyPressed(Key::Zoom(ZoomStep::In))));
+        }
+        assert_eq!(gui.scale_factor(), 1.25, "150% would leave 960 points");
+        // The Zoom row cannot pick it either.
+        drop(gui.change_preference(PreferenceChange::Zoom(Zoom::LARGEST)));
+        assert_eq!(gui.current_zoom(), Zoom::from(125));
+        assert_eq!(gui.preferences_view_model().max_zoom, Some(Zoom::from(125)));
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn a_zoom_saved_on_a_larger_screen_reads_as_the_largest_that_fits() {
+        let _guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path =
+            std::env::temp_dir().join(format!("tenshu-zoom-saved-cap-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        let root = CoincubeDirectory::new(path.clone());
+        let mut gui = launcher_gui(&root);
+        gui.zoom.pending = Some(Zoom::LARGEST);
+        assert_eq!(
+            gui.scale_factor(),
+            1.5,
+            "uncapped until the screen is known"
+        );
+        gui.zoom.screen_width = Some(1440.0);
+        assert_eq!(gui.scale_factor(), 1.25);
+        gui.zoom.screen_width = Some(2560.0);
+        assert_eq!(gui.scale_factor(), 1.5, "back on the monitor, unchanged");
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn the_minimum_window_lays_pages_out_at_least_1024_points_wide() {
+        for percent in [80, 90, 100, 110, 125, 150] {
+            let zoom = Zoom::from(percent);
+            let laid_out = GUI::min_window_size(zoom);
+            let screen = laid_out * zoom.factor();
+            assert!(
+                laid_out.width >= Zoom::LAYOUT_MIN_WIDTH - 0.01,
+                "{}%: {:?}",
+                percent,
+                laid_out
+            );
+            // Never smaller on screen than the 1024 x 768 window of 100%.
+            assert!(
+                screen.width >= 1024.0 - 0.01 && (screen.height - 768.0).abs() < 0.01,
+                "{}%: {:?}",
+                percent,
+                screen
+            );
+        }
+        assert_eq!(
+            GUI::min_window_size(Zoom::from(125)) * 1.25,
+            Size::new(1280.0, 768.0)
+        );
+    }
+
+    #[test]
+    fn the_minimum_window_follows_the_zoom_once_the_screen_is_known() {
+        let _guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path =
+            std::env::temp_dir().join(format!("tenshu-zoom-min-size-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        let root = CoincubeDirectory::new(path.clone());
+        let mut gui = launcher_gui(&root);
+        gui.window_id = Some(Id::unique());
+        drop(gui.update(Message::KeyPressed(Key::Zoom(ZoomStep::In))));
+        assert_eq!(gui.zoom.min_size_for, None, "main.rs's minimum stands");
+        drop(gui.update(Message::ScreenSize(
+            Some(Size::new(1309.0, 818.0)),
+            Zoom::from(110),
+        )));
+        assert_eq!(gui.zoom.min_size_for, Some(Zoom::from(110)));
+        drop(gui.update(Message::KeyPressed(Key::Zoom(ZoomStep::In))));
+        assert_eq!(gui.zoom.min_size_for, Some(Zoom::from(125)));
         drop(gui);
         std::fs::remove_dir_all(path).ok();
     }

@@ -97,6 +97,8 @@ pub struct ViewModel<'a> {
     pub save_error: Option<&'a str>,
     pub diagnostics: Diagnostics<'a>,
     pub about: About<'a>,
+    /// The largest zoom this window's screen holds; None until it is known.
+    pub max_zoom: Option<Zoom>,
 }
 
 pub const CONTENT_SCROLL_ID: &str = "tenshu.preferences.content-scroll";
@@ -357,6 +359,16 @@ fn section_content<'a>(
                 .note(current, Tone::Muted)
                 .into(),
             );
+            let max_zoom = model.max_zoom.unwrap_or(Zoom::LARGEST);
+            let zoom_note = if max_zoom < Zoom::LARGEST {
+                format!(
+                    "{} This screen fits up to {}%.",
+                    zoom_shortcuts(),
+                    max_zoom.percent()
+                )
+            } else {
+                zoom_shortcuts().to_string()
+            };
             rows.push(
                 setting_row(
                     "Zoom",
@@ -367,8 +379,10 @@ fn section_content<'a>(
                                 zoom,
                                 format!("{}%", zoom.percent()),
                             )
+                            .enabled(zoom <= max_zoom)
                         }),
-                        Some(saved.zoom),
+                        // A saved step over the cap is shown as the one in use.
+                        Some(saved.zoom.min(max_zoom)),
                         Message::FocusAction,
                     )
                     .size(SegmentSize::Compact)
@@ -381,7 +395,7 @@ fn section_content<'a>(
                 .tag(SCOPE)
                 .trailing_tag()
                 .description("Text and controls in every window on this device.")
-                .note(zoom_shortcuts(), Tone::Muted)
+                .note(zoom_note, Tone::Muted)
                 .into(),
             );
         }
@@ -1298,6 +1312,33 @@ mod tests {
                 modifiers,
             })
         }
+    }
+
+    #[test]
+    fn zoom_steps_over_the_screen_cap_cannot_be_picked() {
+        let model = || ViewModel {
+            saved: Some(DevicePreferences::default()),
+            max_zoom: Some(Zoom::from(125)),
+            ..Default::default()
+        };
+        let (_, messages) = activate(
+            model(),
+            Section::Appearance,
+            "tenshu.preferences.zoom.150",
+            keyboard::key::Named::Enter,
+        );
+        assert!(messages.is_empty(), "{:?}", messages);
+        let (focused, messages) = activate(
+            model(),
+            Section::Appearance,
+            "tenshu.preferences.zoom.125",
+            keyboard::key::Named::Enter,
+        );
+        assert!(focused);
+        assert_eq!(
+            messages,
+            vec![Message::Change(PreferenceChange::Zoom(Zoom::from(125)))]
+        );
     }
 
     fn activate(

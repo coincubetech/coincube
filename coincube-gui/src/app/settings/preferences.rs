@@ -73,7 +73,7 @@ impl MotionPreference {
 /// Whole-interface zoom, applied as Iced's scale factor. Saved as a percent;
 /// any other saved number snaps to the nearest step, and a saved value that
 /// is not a number reads as 100% rather than failing the whole settings file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(into = "u16")]
 pub struct Zoom(u16);
 
@@ -95,7 +95,8 @@ impl<'de> Deserialize<'de> for Zoom {
 
 impl Zoom {
     /// The steps ⌘+ and ⌘− move between. At 150% a 1440px window lays out at
-    /// 960 points and the 1024 x 768 minimum window at about 683 x 512.
+    /// 960 points; the minimum window grows with the zoom, so no page is ever
+    /// laid out narrower than [`Zoom::LAYOUT_MIN_WIDTH`].
     pub const STEPS: [Zoom; 6] = [
         Zoom(80),
         Zoom(90),
@@ -105,6 +106,22 @@ impl Zoom {
         Zoom(150),
     ];
     pub const ACTUAL_SIZE: Zoom = Zoom(100);
+    pub const LARGEST: Zoom = Zoom(150);
+    /// The narrowest layout pages are designed for, in points at the zoom.
+    pub const LAYOUT_MIN_WIDTH: f32 = 1024.0;
+
+    /// The largest step a screen `screen_width` points wide can hold at
+    /// [`Zoom::LAYOUT_MIN_WIDTH`]: 125% on a 1440-point laptop, 150% from
+    /// 1536 points. Never below 100%, which works on any screen it did before.
+    pub fn largest_for_screen(screen_width: f32) -> Zoom {
+        Self::STEPS
+            .iter()
+            .copied()
+            .rev()
+            .find(|step| Self::LAYOUT_MIN_WIDTH * step.factor() <= screen_width)
+            .unwrap_or(Self::ACTUAL_SIZE)
+            .max(Self::ACTUAL_SIZE)
+    }
 
     pub fn percent(self) -> u16 {
         self.0
@@ -263,6 +280,20 @@ mod tests {
         assert_eq!(read("70000"), 150);
         assert_eq!(read("\"125\""), 100);
         assert_eq!(read("null"), 100);
+    }
+
+    #[test]
+    fn a_screen_offers_only_the_zoom_it_can_lay_out_at_full_width() {
+        let largest = |width: f32| Zoom::largest_for_screen(width).percent();
+        // A 1440 x 900 laptop: 150% would leave 960 points, under 1024.
+        assert_eq!(largest(1440.0), 125);
+        assert_eq!(largest(1280.0), 125);
+        assert_eq!(largest(1535.0), 125);
+        assert_eq!(largest(1536.0), 150);
+        assert_eq!(largest(2560.0), 150);
+        assert_eq!(largest(1200.0), 110);
+        // A screen too small for 100% keeps 100%, as before zoom existed.
+        assert_eq!(largest(800.0), 100);
     }
 
     #[test]
