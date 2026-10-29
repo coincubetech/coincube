@@ -338,6 +338,49 @@ pub struct RemoteCube {
     /// Whether the phone envelope set includes the seed (Full Cube) vs only
     /// the descriptor (Vault-only). Drives the restore scope + label.
     pub phone_full_cube: bool,
+    /// The Connect-blinding public key registered for this Cube, derived
+    /// from its seed. A recovery phrase typed for this Cube must derive the
+    /// same key before the import takes the Cube's identity.
+    pub encryption_pubkey: Option<String>,
+}
+
+/// A ghost the recovery-phrase import is restoring: Connect's record of the
+/// Cube the user picked on the floor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GhostImport {
+    pub uuid: String,
+    pub name: String,
+    pub encryption_pubkey: Option<String>,
+}
+
+/// Whether a parsed recovery phrase may take a ghost's identity: only when
+/// Connect registered a seed-derived key for it and the phrase derives the
+/// same one. Without a registered key nothing proves the phrase is this
+/// Cube's, so the import makes a new Cube instead (`Ok(None)`).
+pub(crate) fn ghost_import_identity(
+    ghost: &GhostImport,
+    network: ChainId,
+    mnemonic: &bip39::Mnemonic,
+) -> Result<Option<uuid::Uuid>, String> {
+    let Some(registered) = ghost.encryption_pubkey.as_deref() else {
+        return Ok(None);
+    };
+    let signer = MasterSigner::from_mnemonic(network.bitcoin_network(), mnemonic.clone())
+        .map_err(|e| format!("Failed to restore from mnemonic: {}", e))?;
+    let derived = crate::services::connect::crypto::CubeEncryptionKey::derive(
+        &signer,
+        network.bitcoin_network(),
+    )
+    .public_key_hex();
+    if !derived.eq_ignore_ascii_case(registered) {
+        return Err(format!(
+            "This recovery phrase doesn't belong to {}. Check the words, or create a new Cube from them.",
+            catalog_display_name(&ghost.name)
+        ));
+    }
+    uuid::Uuid::parse_str(&ghost.uuid)
+        .map(Some)
+        .map_err(|_| "This Cube's Connect record has no usable ID.".to_string())
 }
 
 /// Which section is shown in the home's main content area.
@@ -500,6 +543,8 @@ pub struct Home {
     /// UUID pre-generated on the first creation attempt and reused on retries
     /// so that each logical cube has a stable client-side identifier.
     pending_cube_id: Option<uuid::Uuid>,
+    /// The ghost a recovery-phrase import was started from, if any.
+    ghost_import: Option<GhostImport>,
     recovery_words: [String; 12],
     recovery_active_index: Option<usize>,
     /// The seed phrase of the Cube currently being created, held in memory
@@ -693,6 +738,7 @@ impl Home {
                 open_created_import_cube: None,
                 creating_cube: false,
                 pending_cube_id: None,
+                ghost_import: None,
                 recovery_words: Default::default(),
                 recovery_active_index: None,
                 creation_backup_words: None,
@@ -985,6 +1031,7 @@ impl Home {
                             has_encrypted_seed,
                             phone_recoverable,
                             phone_full_cube,
+                            encryption_pubkey: sc.encryption_pubkey,
                         }
                     }),
                 )
@@ -1285,7 +1332,7 @@ impl Home {
         {
             let projection = launcher_catalog::project(self);
             if projection.floor_eligible(self.catalog.mode)
-                && projection.locals.len() > self.catalog.page_size()
+                && projection.floor_len() > self.catalog.page_size()
             {
                 let paging = iced::event::listen_with(launcher_catalog::floor_event);
                 if self.catalog.animating() {
@@ -1618,6 +1665,7 @@ impl Home {
                 word.clear();
             }
             self.pending_cube_id = None;
+            self.ghost_import = None;
             self.network = ChainId::Bitcoin;
             self.error = None;
             self.server_cube_limit = None;
@@ -2409,6 +2457,25 @@ impl Home {
                 self.recovery_active_index = None;
                 Task::none()
             }
+            Message::View(ViewMessage::ImportGhostWithPhrase(uuid)) => {
+                let Some(ghost) = self.remote_cubes.iter().find(|cube| cube.uuid == uuid) else {
+                    return Task::none();
+                };
+                self.ghost_import = Some(GhostImport {
+                    uuid: ghost.uuid.clone(),
+                    name: ghost.name.clone(),
+                    encryption_pubkey: ghost.encryption_pubkey.clone(),
+                });
+                self.create_cube_name = coincube_ui::component::form::Value {
+                    value: catalog_display_name(&ghost.name),
+                    warning: None,
+                    valid: true,
+                };
+                self.catalog.selected = None;
+                self.catalog.motion = None;
+                self.error = None;
+                self.update(Message::StartRecovery)
+            }
             Message::View(ViewMessage::CreationBackup(msg)) => self.update_creation_backup(msg),
             Message::View(ViewMessage::CreationBackupBypassRequested) => {
                 // Not while a Kit upload is in flight: its result decides
@@ -2532,6 +2599,7 @@ impl Home {
                         // UUID was consumed successfully — reset it so the next
                         // cube creation starts with a fresh identifier.
                         self.pending_cube_id = None;
+                        self.ghost_import = None;
                         // The operation identity is now durable on this exact
                         // Cube. A fresh creation must not reuse it.
                         self.pending_bitcoin_import = None;
@@ -3526,6 +3594,27 @@ impl Home {
                         let pin = self.create_cube_pin.value();
                         let datadir_path = self.datadir_path.clone();
                         let pending_bitcoin_import = self.pending_bitcoin_import.clone();
+                        // A ghost's import takes the ghost's identity only when
+                        // the phrase proves it is that Cube's seed, so Connect's
+                        // registration is reclaimed rather than duplicated.
+                        if let Some(ghost) = &self.ghost_import {
+                            match ghost_import_identity(ghost, network, &mnemonic) {
+                                Ok(Some(id)) => self.pending_cube_id = Some(id),
+                                Ok(None) => {
+                                    if self
+                                        .pending_cube_id
+                                        .is_some_and(|id| id.to_string() == ghost.uuid)
+                                    {
+                                        self.pending_cube_id = None;
+                                    }
+                                }
+                                Err(e) => {
+                                    self.creating_cube = false;
+                                    self.error = Some(e);
+                                    return Task::none();
+                                }
+                            }
+                        }
                         // Reuse the UUID that was pre-generated when the user
                         // first clicked "Create Cube" (recovery path).
                         let cube_id = *self.pending_cube_id.get_or_insert_with(uuid::Uuid::new_v4);
@@ -3666,6 +3755,7 @@ impl Home {
                 self.create_cube_pin = pin_input::PinInput::new();
                 self.create_cube_pin_confirm = pin_input::PinInput::new();
                 self.pending_bitcoin_import = None;
+                self.ghost_import = None;
                 self.error = None;
                 self.reload()
             }
@@ -7827,6 +7917,10 @@ pub enum ViewMessage {
     /// installer preselects the cube and skips the picker. This is the
     /// password-based recovery path.
     RestoreFromRecoveryKit(String),
+    /// Import the ghost with this `uuid` from its recovery phrase: the
+    /// recovery form, prefilled with its name, reclaims its identity once the
+    /// phrase matches it (see [`ghost_import_identity`]).
+    ImportGhostWithPhrase(String),
     /// Launch the installer in passwordless owner-keychain ("phone")
     /// restore mode for a specific remote cube. `cube_id` is the numeric
     /// Connect id; `full_cube` picks Full-Cube vs Vault-only scope. Home
@@ -10021,7 +10115,90 @@ mod tests {
             has_encrypted_seed: true,
             phone_recoverable: false,
             phone_full_cube: false,
+            encryption_pubkey: None,
         }
+    }
+
+    fn abandon_phrase() -> bip39::Mnemonic {
+        bip39::Mnemonic::parse_in(
+            bip39::Language::English,
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        )
+        .unwrap()
+    }
+
+    fn registered_key(mnemonic: &bip39::Mnemonic, chain: ChainId) -> String {
+        let signer =
+            MasterSigner::from_mnemonic(chain.bitcoin_network(), mnemonic.clone()).unwrap();
+        crate::services::connect::crypto::CubeEncryptionKey::derive(
+            &signer,
+            chain.bitcoin_network(),
+        )
+        .public_key_hex()
+    }
+
+    #[test]
+    fn a_ghost_import_takes_the_ghost_identity_only_for_its_own_phrase() {
+        let uuid = "6f1c7a3e-2b4d-4c8e-9a10-3f2e1d0c9b8a";
+        let phrase = abandon_phrase();
+        let mut ghost = GhostImport {
+            uuid: uuid.into(),
+            name: "Old laptop".into(),
+            encryption_pubkey: Some(registered_key(&phrase, ChainId::Bitcoin)),
+        };
+        assert_eq!(
+            ghost_import_identity(&ghost, ChainId::Bitcoin, &phrase),
+            Ok(Some(uuid::Uuid::parse_str(uuid).unwrap()))
+        );
+        // Another Cube's phrase is refused, naming the Cube it was typed for.
+        let other = bip39::Mnemonic::parse_in(
+            bip39::Language::English,
+            "legal winner thank year wave sausage worth useful legal winner thank yellow",
+        )
+        .unwrap();
+        let refused = ghost_import_identity(&ghost, ChainId::Bitcoin, &other).unwrap_err();
+        assert!(
+            refused.contains("doesn't belong to Old laptop"),
+            "{}",
+            refused
+        );
+        // The key is per network: the same seed on Testnet4 is not this Cube.
+        assert!(ghost_import_identity(&ghost, ChainId::Testnet4, &phrase).is_err());
+        // Nothing registered proves the phrase, so it becomes a new Cube.
+        ghost.encryption_pubkey = None;
+        assert_eq!(
+            ghost_import_identity(&ghost, ChainId::Bitcoin, &phrase),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn import_with_phrase_opens_the_recovery_form_named_for_the_ghost() {
+        let mut home = home();
+        let mut ghost = remote_cube("ghost-a", "Old laptop", Network::Bitcoin);
+        ghost.encryption_pubkey = Some("02ab".into());
+        home.remote_cubes = vec![ghost];
+        let _ = home.update(Message::View(ViewMessage::ImportGhostWithPhrase(
+            "ghost-a".into(),
+        )));
+        assert!(matches!(home.state, State::RecoveryInput));
+        assert_eq!(home.create_cube_name.value, "Old laptop");
+        assert_eq!(
+            home.ghost_import,
+            Some(GhostImport {
+                uuid: "ghost-a".into(),
+                name: "Old laptop".into(),
+                encryption_pubkey: Some("02ab".into()),
+            })
+        );
+        // Cancel forgets the ghost, so a later import is a plain new Cube.
+        let _ = home.update(Message::View(ViewMessage::CancelRecovery));
+        assert_eq!(home.ghost_import, None);
+        // An unknown registration changes nothing.
+        let _ = home.update(Message::View(ViewMessage::ImportGhostWithPhrase(
+            "missing".into(),
+        )));
+        assert_eq!(home.ghost_import, None);
     }
 
     #[test]

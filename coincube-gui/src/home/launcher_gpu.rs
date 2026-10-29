@@ -26,8 +26,8 @@ use std::{
 use iced::{mouse, wgpu, widget::shader, Rectangle};
 
 use super::launcher_scene::{
-    self, border_fraction, details_svg, rest_face_svg, unlock_svg, CubeMarks, Face, FaceText,
-    Layout, Palette, Pose, ProjectedFace, SceneFrame,
+    self, border_fraction, details_svg, ghost_details_svg, rest_face_svg, unlock_svg, CubeMarks,
+    Face, FaceText, GhostText, Layout, Palette, Pose, ProjectedFace, SceneFrame,
 };
 const MSAA: u32 = 4;
 const LAYER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -137,6 +137,8 @@ pub(super) struct StageCube<'a> {
     pub pose: Pose,
     pub marks: CubeMarks,
     pub details: Option<FaceText<'a>>,
+    /// A ghost's details face, in place of `details`.
+    pub ghost_details: Option<GhostText<'a>>,
     pub unlock_name: Option<&'a str>,
 }
 
@@ -144,6 +146,8 @@ pub(super) struct StageCube<'a> {
 struct FaceDraw {
     projected: ProjectedFace,
     color: [u8; 3],
+    /// 1 for a solid face; a ghost's faint or empty fill below that.
+    alpha: f32,
     art: Option<Arc<Art>>,
 }
 
@@ -154,6 +158,8 @@ struct SceneLayer {
     edge: [u8; 4],
     dashed: bool,
     border: f32,
+    /// A ghost's dashed footprint, `.gfoot`, and its opacity.
+    footprint: Option<f32>,
 }
 
 /// Everything one frame of the stage needs, independent of the GPU.
@@ -181,39 +187,83 @@ impl StageData {
         let layers = cubes
             .into_iter()
             .map(|cube| {
-                let (frame, projected) = launcher_scene::project(layout, cube.rest, cube.pose);
+                let ghost = cube.marks.ghost;
+                let (frame, projected) =
+                    launcher_scene::project_faces(layout, cube.rest, cube.pose, ghost.is_some());
+                let spin = cube.pose.spin.clamp(0.0, 1.0);
+                // A ghost has no `.shadow`, and rests at
+                // `.cb.ghostcb:not(.dim):not(.active) .scene { opacity: .85 }`.
+                let frame = match ghost {
+                    Some(_) => SceneFrame {
+                        shadow_opacity: 0.0,
+                        opacity: frame.opacity
+                            * (1.0 - 0.15 * (1.0 - cube.pose.dim.clamp(0.0, 1.0)) * (1.0 - spin)),
+                        ..frame
+                    },
+                    None => frame,
+                };
                 let faces = projected
                     .into_iter()
                     .map(|projected| {
-                        let art = match projected.face {
-                            Face::Top | Face::Left | Face::Right => {
-                                rest_face_svg(projected.face, cube.marks, light)
-                                    .and_then(|svg| art(&svg, REST_ART_PX))
+                        // A ghost's turned-away faces show only their edges.
+                        let facing = projected.area() > 0.5;
+                        // `.cube.ghost .f.panel`: the face a ghost turns to is
+                        // solid, so its details read as on a local Cube.
+                        let panel = matches!(projected.face, Face::BackLeft | Face::BackRight)
+                            && spin > 0.0;
+                        let (color, alpha) = match ghost {
+                            Some(ghost) if !panel => {
+                                let [r, g, b, a] = launcher_scene::ghost_fill(ghost, light);
+                                ([r, g, b], a as f32 / 255.0)
                             }
-                            // The live details panel owns a square, settled face.
-                            Face::BackLeft => cube
-                                .details
-                                .filter(|_| cube.pose.spin < 1.0 || cube.pose.second > 0.0)
-                                .and_then(|text| {
-                                    art(&details_svg(cube.marks.network, light, text), PANEL_ART_PX)
-                                }),
-                            Face::BackRight => cube
-                                .unlock_name
-                                .filter(|_| cube.pose.second < 1.0)
-                                .and_then(|name| {
-                                    art(
-                                        &unlock_svg(
-                                            cube.marks.network,
-                                            light,
-                                            name,
-                                            cube.marks.passkey,
-                                        ),
-                                        PANEL_ART_PX,
-                                    )
-                                }),
+                            _ => (palette.face(projected.face), 1.0),
+                        };
+                        let art = if ghost.is_some() && !facing {
+                            None
+                        } else {
+                            match projected.face {
+                                Face::Top | Face::Left | Face::Right => {
+                                    rest_face_svg(projected.face, cube.marks, light)
+                                        .and_then(|svg| art(&svg, REST_ART_PX))
+                                }
+                                // The live details panel owns a square, settled face.
+                                Face::BackLeft if ghost.is_some() => cube
+                                    .ghost_details
+                                    .filter(|_| cube.pose.spin < 1.0)
+                                    .and_then(|text| {
+                                        art(
+                                            &ghost_details_svg(cube.marks.network, light, text),
+                                            PANEL_ART_PX,
+                                        )
+                                    }),
+                                Face::BackLeft => cube
+                                    .details
+                                    .filter(|_| cube.pose.spin < 1.0 || cube.pose.second > 0.0)
+                                    .and_then(|text| {
+                                        art(
+                                            &details_svg(cube.marks.network, light, text),
+                                            PANEL_ART_PX,
+                                        )
+                                    }),
+                                Face::BackRight => cube
+                                    .unlock_name
+                                    .filter(|_| cube.pose.second < 1.0)
+                                    .and_then(|name| {
+                                        art(
+                                            &unlock_svg(
+                                                cube.marks.network,
+                                                light,
+                                                name,
+                                                cube.marks.passkey,
+                                            ),
+                                            PANEL_ART_PX,
+                                        )
+                                    }),
+                            }
                         };
                         FaceDraw {
-                            color: palette.face(projected.face),
+                            color,
+                            alpha,
                             projected,
                             art,
                         }
@@ -222,9 +272,14 @@ impl StageData {
                 SceneLayer {
                     frame,
                     faces,
-                    edge: launcher_scene::edge(cube.marks.network, light),
+                    edge: match ghost {
+                        Some(_) => launcher_scene::ghost_edge(cube.marks.network, light),
+                        None => launcher_scene::edge(cube.marks.network, light),
+                    },
                     dashed: super::launcher_coin::is_test_network(cube.marks.network),
                     border: border_fraction(layout.size()),
+                    // `.gfoot { transition: opacity 500ms }`: gone once turned.
+                    footprint: ghost.map(|_| 1.0 - spin),
                 }
             })
             .collect();
@@ -450,6 +505,18 @@ fn erf(x: f32) -> f32 {
 @fragment
 fn fs_scene(v: VsOut) -> @location(0) vec4<f32> {
     let kind = v.p0.w;
+    if (kind > 2.5) {
+        // A 1px dashed ellipse outline: `border: 1px dashed`.
+        let r = v.p1.zw;
+        let p = v.uv;
+        let d = length(p / r);
+        let g = length(p / (r * r)) / max(d, 1e-4);
+        let sd = (d - 1.0) / max(g, 1e-4);
+        let along = atan2(p.y / r.y, p.x / r.x) / 6.2831853 + 0.5;
+        let dash = step(fract(along * v.p1.x), 0.5);
+        let a = clamp(1.0 - abs(sd), 0.0, 1.0) * dash * v.color.a;
+        return vec4<f32>(v.color.rgb * a, a);
+    }
     if (kind > 1.5) {
         // Flat color: floor plane and its top rule.
         return vec4<f32>(v.color.rgb * v.color.a, v.color.a);
@@ -465,11 +532,14 @@ fn fs_scene(v: VsOut) -> @location(0) vec4<f32> {
         let a = 0.5 * (1.0 - erf(sd / (v.p1.x * 1.4142135))) * v.color.a;
         return vec4<f32>(v.color.rgb * a, a);
     }
-    // Face: background, art over it, then the inset border, all in sRGB.
-    var c = v.color.rgb;
+    // Face: background, art over it, then the inset border, all in sRGB and
+    // premultiplied. A solid face has `color.a` 1; a ghost's is faint or 0.
+    var c = v.color.rgb * v.color.a;
+    var a = v.color.a;
     if (v.p1.y > 0.5) {
         let t = textureSample(art, art_sampler, v.uv);
         c = t.rgb + c * (1.0 - t.a);
+        a = t.a + a * (1.0 - t.a);
     }
     let du = min(v.uv.x, 1.0 - v.uv.x);
     let dv = min(v.uv.y, 1.0 - v.uv.y);
@@ -483,8 +553,8 @@ fn fs_scene(v: VsOut) -> @location(0) vec4<f32> {
         let along = select(v.uv.x, v.uv.y, du / fu > dv / fv);
         border = border * step(fract(along * v.p0.z), 0.5);
     }
-    c = mix(c, v.edge.rgb, v.edge.a * border);
-    return vec4<f32>(c, 1.0);
+    let e = v.edge.a * border;
+    return vec4<f32>(v.edge.rgb * e + c * (1.0 - e), e + a * (1.0 - e));
 }
 
 struct CompositeIn {
@@ -978,6 +1048,43 @@ impl shader::Primitive for StagePrimitive {
                     art: None,
                 });
             }
+            if let Some(opacity) = layer.footprint.filter(|o| *o > 0.0) {
+                // `.gfoot`: a dashed ellipse in `--line` where the shadow would
+                // fall, 1.3s by .5s against the shadow's 1.45s by .62s.
+                let start = v.count();
+                let (cx, cy) = frame.shadow_center;
+                let (rx, ry) = (
+                    frame.shadow_radii.0 * 0.65 / 0.725,
+                    frame.shadow_radii.1 * 0.25 / 0.31,
+                );
+                let (hx, hy) = (rx + 2.0, ry + 2.0);
+                let line = srgb(palette.line);
+                v.quad(
+                    [
+                        (cx - hx, cy - hy),
+                        (cx + hx, cy - hy),
+                        (cx + hx, cy + hy),
+                        (cx - hx, cy + hy),
+                    ],
+                    [1.0; 4],
+                    [(-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)],
+                    size,
+                    [line[0], line[1], line[2], opacity],
+                    none,
+                    kind(3.0),
+                    // About 4px dashes around the ring.
+                    [
+                        ((rx + ry) * std::f32::consts::PI / 8.0).round().max(4.0),
+                        0.0,
+                        rx,
+                        ry,
+                    ],
+                );
+                draws.push(Draw {
+                    range: start..v.count(),
+                    art: None,
+                });
+            }
             let edge = layer.edge;
             let edge = [
                 edge[0] as f32 / 255.0,
@@ -999,7 +1106,7 @@ impl shader::Primitive for StagePrimitive {
                     face.projected.w,
                     [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)],
                     size,
-                    [color[0], color[1], color[2], 1.0],
+                    [color[0], color[1], color[2], face.alpha],
                     edge,
                     [layer.border, layer.border, dashes, 0.0],
                     [dashes, if face.art.is_some() { 1.0 } else { 0.0 }, 0.0, 0.0],
@@ -1185,6 +1292,7 @@ pub(super) fn marks(cube: &crate::app::settings::CubeSettings) -> CubeMarks {
         spark: crate::app::features::spark(cube.network).is_available(),
         passkey: cube.is_passkey_cube(),
         backup: super::launcher_presenter::backup_mark(cube),
+        ghost: None,
     }
 }
 
@@ -1214,6 +1322,7 @@ mod tests {
             spark: false,
             passkey: false,
             backup: BackupMark::Confirmed,
+            ghost: None,
         };
         let svg = rest_face_svg(Face::Top, marks, false).unwrap();
         let a = art(&svg, 64).expect("coin face rasterizes");
@@ -1280,6 +1389,7 @@ mod tests {
             spark: false,
             passkey: false,
             backup: BackupMark::NotConfirmed,
+            ghost: None,
         };
         let text = FaceText {
             name: "Everyday",
@@ -1296,6 +1406,7 @@ mod tests {
                     pose: Pose::DIMMED,
                     marks,
                     details: None,
+                    ghost_details: None,
                     unlock_name: None,
                 },
                 StageCube {
@@ -1303,6 +1414,7 @@ mod tests {
                     pose,
                     marks,
                     details: Some(text),
+                    ghost_details: None,
                     unlock_name: Some("Everyday"),
                 },
             ]
@@ -1327,5 +1439,71 @@ mod tests {
         let unlocked = StageData::new(&layout, true, true, cubes(Pose::unlock(1.0)));
         assert_eq!(unlocked.visible()[1], vec![Face::BackRight]);
         assert!(!unlocked.has_art(1, Face::BackRight), "live PIN owns it");
+    }
+
+    #[test]
+    fn a_ghost_paints_every_edge_with_no_shadow_and_a_faint_rest() {
+        let layout = Layout::new(1440.0, DESIGN_STAGE_HEIGHT);
+        let local = CubeMarks {
+            network: ChainId::Bitcoin,
+            vault: false,
+            imported_bitcoin: false,
+            spark: true,
+            passkey: false,
+            backup: BackupMark::Confirmed,
+            ghost: None,
+        };
+        let ghost = CubeMarks::ghost(ChainId::Bitcoin, launcher_scene::Ghost::Unrestorable);
+        let cube = |marks: CubeMarks, index: usize| StageCube {
+            rest: layout.rest_center(index, 2),
+            pose: Pose::REST,
+            marks,
+            details: None,
+            ghost_details: None,
+            unlock_name: None,
+        };
+        let data = StageData::new(&layout, false, true, [cube(local, 0), cube(ghost, 1)]);
+        assert_eq!(data.visible()[0].len(), 3);
+        assert_eq!(data.visible()[1].len(), Face::ALL.len());
+        assert_eq!(data.opacities(), vec![1.0, 0.85]);
+        assert!(data.layers[0].frame.shadow_opacity > 0.0);
+        assert_eq!(data.layers[1].frame.shadow_opacity, 0.0);
+        assert!(data.layers[0].footprint.is_none());
+        assert_eq!(data.layers[1].footprint, Some(1.0));
+        assert!(data.layers[0].faces.iter().all(|f| f.alpha == 1.0));
+        assert!(data.layers[1].faces.iter().all(|f| f.alpha == 0.0));
+        // Far faces carry no art: only their edges show through.
+        assert!(data.layers[1]
+            .faces
+            .iter()
+            .filter(|f| f.projected.area() <= 0.5)
+            .all(|f| f.art.is_none()));
+        assert_eq!(
+            data.layers[1].edge,
+            launcher_scene::ghost_edge(ChainId::Bitcoin, false)
+        );
+
+        // Selected, it turns a solid details face to the viewer.
+        let turned = StageData::new(
+            &layout,
+            false,
+            true,
+            [StageCube {
+                pose: Pose::DETAILS,
+                ghost_details: Some(GhostText {
+                    name: "Old laptop",
+                    backup: "No Recovery Kit in Connect",
+                    restorable: false,
+                }),
+                ..cube(ghost, 1)
+            }],
+        );
+        let panel = turned.layers[0]
+            .faces
+            .iter()
+            .find(|f| f.projected.face == Face::BackLeft)
+            .unwrap();
+        assert_eq!(panel.alpha, 1.0);
+        assert_eq!(turned.layers[0].footprint, Some(0.0));
     }
 }

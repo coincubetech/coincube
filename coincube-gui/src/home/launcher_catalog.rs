@@ -689,19 +689,30 @@ impl Home {
             return None;
         }
         let peers = projection
-            .locals
-            .iter()
+            .floor_entries()
+            .into_iter()
             .skip(first)
             .take(self.catalog.page_size())
-            .map(|row| LauncherScenePeer {
-                key: row.key.clone(),
-                name: row.name.clone(),
-                status: if row.actionable {
-                    super::launcher_presenter::unlock_prompt(row.cube)
-                } else {
-                    "Unavailable on this network"
+            .map(|entry| match entry {
+                FloorEntry::Local(row) => LauncherScenePeer {
+                    key: row.key.clone(),
+                    name: row.name.clone(),
+                    status: if row.actionable {
+                        super::launcher_presenter::unlock_prompt(row.cube)
+                    } else {
+                        "Unavailable on this network"
+                    },
+                    marks: super::launcher_gpu::marks(row.cube),
                 },
-                marks: super::launcher_gpu::marks(row.cube),
+                FloorEntry::Ghost(cube) => LauncherScenePeer {
+                    key: ghost_key(cube, projection.network),
+                    name: catalog_display_name(&cube.name),
+                    status: ghost_status(cube),
+                    marks: super::launcher_scene::CubeMarks::ghost(
+                        projection.network,
+                        ghost_kind(cube),
+                    ),
+                },
             })
             .collect::<Vec<_>>();
         if peers.get(selected_slot)?.key != selected.key {
@@ -715,7 +726,7 @@ impl Home {
             connect: selected.connect.1.clone(),
             wallets: selected.wallets.clone(),
             peers,
-            pages: floor_pages(projection.locals.len(), self.catalog.page_size()),
+            pages: floor_pages(projection.floor_len(), self.catalog.page_size()),
             chrome: super::launcher_chrome::snapshot(self, &projection),
         })
     }
@@ -728,7 +739,19 @@ impl Home {
     /// A key can be selected only while the List is visible and the key names
     /// exactly one record on it.
     fn catalog_selectable(&self, key: &CubeCatalogKey) -> bool {
-        catalog_visible(self) && self.catalog_resolves(key)
+        catalog_visible(self) && (self.catalog_resolves(key) || self.ghost_resolves(key))
+    }
+
+    /// A ghost is selectable on the floor only: its key is the current
+    /// network and a Connect registration this device does not hold.
+    fn ghost_resolves(&self, key: &CubeCatalogKey) -> bool {
+        self.catalog.mode == LauncherMode::Cubes
+            && !key.cube_id.is_empty()
+            && key.chain == self.network
+            && project(self)
+                .remotes
+                .iter()
+                .any(|cube| ghost_key(cube, self.network) == *key)
     }
 
     pub(super) fn update_catalog(&mut self, message: CatalogMessage) -> Task<Message> {
@@ -741,7 +764,7 @@ impl Home {
                 self.catalog.selected = self.catalog_selectable(&key).then_some(key.clone());
                 self.catalog.motion = None;
                 self.catalog.open_from_floor = false;
-                if let Some(index) = project(self).locals.iter().position(|row| row.key == key) {
+                if let Some(index) = project(self).floor_position(&key) {
                     self.catalog.page = index / self.catalog.page_size();
                 }
                 Task::none()
@@ -761,7 +784,7 @@ impl Home {
                 {
                     self.catalog.motion = Some(super::launcher_scene::Motion::new(previous));
                 }
-                if let Some(index) = project(self).locals.iter().position(|row| row.key == key) {
+                if let Some(index) = project(self).floor_position(&key) {
                     self.catalog.page = index / self.catalog.page_size();
                 }
                 if self.catalog.selected.as_ref() == Some(&key) {
@@ -824,11 +847,10 @@ impl Home {
                 let browsing = self.catalog.selected.is_none();
                 let on_page: Vec<_> = if browsing && !self.catalog.hover.is_empty() {
                     project(self)
-                        .locals
-                        .iter()
+                        .floor_keys()
+                        .into_iter()
                         .skip(self.catalog.page * self.catalog.page_size())
                         .take(self.catalog.page_size())
-                        .map(|row| row.key.clone())
                         .collect()
                 } else {
                     Vec::new()
@@ -889,7 +911,7 @@ impl Home {
                 Task::none()
             }
             CatalogMessage::Page(page) => {
-                let pages = floor_pages(project(self).locals.len(), self.catalog.page_size());
+                let pages = floor_pages(project(self).floor_len(), self.catalog.page_size());
                 if page < pages {
                     self.catalog.page = page;
                     self.catalog.selected = None;
@@ -912,9 +934,9 @@ impl Home {
                     // Keep the selected Cube, else the page's first, on screen.
                     let projection = project(self);
                     let anchor = projection
-                        .selected
+                        .floor_selected()
                         .unwrap_or(self.catalog.page.saturating_mul(before));
-                    let page = floor_page_keeping(anchor, after, projection.locals.len());
+                    let page = floor_page_keeping(anchor, after, projection.floor_len());
                     self.catalog.page = page;
                 }
                 Task::none()
@@ -935,7 +957,7 @@ impl Home {
         if !catalog_visible(self) || !projection.floor_eligible(self.catalog.mode) {
             return Task::none();
         }
-        let pages = floor_pages(projection.locals.len(), self.catalog.page_size());
+        let pages = floor_pages(projection.floor_len(), self.catalog.page_size());
         let target = if direction < 0 {
             self.catalog.page.checked_sub(1)
         } else if direction > 0 {
@@ -1028,12 +1050,12 @@ impl Home {
         if project(self).filtered_total == 0 {
             self.catalog.key = KeyCard::default();
         }
-        let pages = floor_pages(project(self).locals.len(), self.catalog.page_size());
+        let pages = floor_pages(project(self).floor_len(), self.catalog.page_size());
         self.catalog.page = self.catalog.page.min(pages - 1);
         if let Some(key) = &self.catalog.selected {
             let hidden_on_floor = self.catalog.mode == LauncherMode::Cubes
                 && project(self)
-                    .selected
+                    .floor_selected()
                     .is_some_and(|index| index / self.catalog.page_size() != self.catalog.page);
             if !self.catalog_selectable(key) || hidden_on_floor {
                 self.catalog.selected = None;
@@ -1293,6 +1315,8 @@ pub(super) struct Projection<'a> {
     pub(super) remote_total: usize,
     /// The selected local Cube when it is listed exactly once and visible.
     pub(super) selected: Option<usize>,
+    /// The selected ghost on the floor: its index in `remotes`.
+    pub(super) selected_ghost: Option<usize>,
     pub(super) query: String,
     pub(super) network: ChainId,
     pub(super) total_count: usize,
@@ -1334,16 +1358,100 @@ impl NetworkUsage {
     }
 }
 
+/// One Cube on the floor, in floor order: the local Cubes, then the ghosts.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum FloorEntry<'p, 'a> {
+    Local(&'p LocalRow<'a>),
+    /// A Cube registered in Connect with no copy on this device.
+    Ghost(&'a RemoteCube),
+}
+
+impl<'p> FloorEntry<'p, '_> {
+    pub(super) fn key(&self, network: ChainId) -> CubeCatalogKey {
+        match self {
+            FloorEntry::Local(row) => row.key.clone(),
+            FloorEntry::Ghost(cube) => ghost_key(cube, network),
+        }
+    }
+}
+
+/// A ghost's selection key: its network and the registration's UUID. A
+/// local Cube's ID is its registration UUID, and a ghost is a registration
+/// with no local Cube, so the two never collide.
+pub(super) fn ghost_key(cube: &RemoteCube, network: ChainId) -> CubeCatalogKey {
+    CubeCatalogKey {
+        chain: network,
+        cube_id: cube.uuid.clone(),
+    }
+}
+
+/// A ghost looks restorable only when this device can restore it: a kit
+/// holding the seed, or phone recovery. A kit without its seed reads as no
+/// Recovery Kit (Robert, 2026-10-29).
+pub(super) fn ghost_kind(cube: &RemoteCube) -> super::launcher_scene::Ghost {
+    if remote_restore(cube).action.is_some() {
+        super::launcher_scene::Ghost::Restorable
+    } else {
+        super::launcher_scene::Ghost::Unrestorable
+    }
+}
+
+/// The state line under a ghost on the floor.
+pub(super) fn ghost_status(cube: &RemoteCube) -> &'static str {
+    match ghost_kind(cube) {
+        super::launcher_scene::Ghost::Restorable => "In Connect · Restore",
+        super::launcher_scene::Ghost::Unrestorable => "In Connect · No Recovery Kit",
+    }
+}
+
 impl Projection<'_> {
     /// Search belongs to the List; the floor has no query control. Use the
-    /// pre-query local count so narrowing 21 Cubes cannot silently switch a
-    /// searched List into a floor. Remote-only records also stay in the List,
-    /// where Restore is visible without a large empty stage.
+    /// pre-query counts so narrowing 21 Cubes cannot silently switch a
+    /// searched List into a floor. Cubes in Connect only stand on the floor
+    /// as ghosts after the local Cubes, and are the whole row on a new device.
     pub(super) fn floor_eligible(&self, mode: LauncherMode) -> bool {
         mode == LauncherMode::Cubes
-            && self.local_total > 0
-            && self.filtered_total <= FLOOR_MAX_CUBES
+            && self.local_total + self.remote_total > 0
+            && self.filtered_total + self.remote_total <= FLOOR_MAX_CUBES
             && self.query.is_empty()
+    }
+
+    /// Every Cube the floor stands, local Cubes first.
+    pub(super) fn floor_entries(&self) -> Vec<FloorEntry<'_, '_>> {
+        self.locals
+            .iter()
+            .map(FloorEntry::Local)
+            .chain(self.remotes.iter().copied().map(FloorEntry::Ghost))
+            .collect()
+    }
+
+    pub(super) fn floor_len(&self) -> usize {
+        self.locals.len() + self.remotes.len()
+    }
+
+    pub(super) fn floor_keys(&self) -> Vec<CubeCatalogKey> {
+        self.floor_entries()
+            .iter()
+            .map(|entry| entry.key(self.network))
+            .collect()
+    }
+
+    pub(super) fn floor_position(&self, key: &CubeCatalogKey) -> Option<usize> {
+        self.locals
+            .iter()
+            .position(|row| &row.key == key)
+            .or_else(|| {
+                self.remotes
+                    .iter()
+                    .position(|cube| ghost_key(cube, self.network) == *key)
+                    .map(|index| self.locals.len() + index)
+            })
+    }
+
+    /// The selected Cube's floor position, local or ghost.
+    pub(super) fn floor_selected(&self) -> Option<usize> {
+        self.selected
+            .or_else(|| self.selected_ghost.map(|index| self.locals.len() + index))
     }
 
     pub(super) fn at_limit(&self) -> bool {
@@ -1459,10 +1567,19 @@ pub(super) fn project(home: &Home) -> Projection<'_> {
         .filter(|rc| !network.is_blake2b() && rc.network == network_str && filter.matches(network))
         .collect();
     let remote_total = all_remotes.len();
-    let remotes = all_remotes
+    let remotes: Vec<&RemoteCube> = all_remotes
         .into_iter()
         .filter(|rc| matches_query(&catalog_display_name(&rc.name), &query))
         .collect();
+    // A ghost is selected on the floor only, where it has a details face.
+    let selected_ghost = home.catalog.selected.as_ref().and_then(|key| {
+        if !catalog_visible(home) || home.catalog.mode != LauncherMode::Cubes {
+            return None;
+        }
+        remotes
+            .iter()
+            .position(|cube| ghost_key(cube, network) == *key)
+    });
     // Effective selection: the List is visible, the key resolves to exactly
     // one record, and that very record is a visible, actionable row.
     let selected = home.catalog.selected.as_ref().and_then(|key| {
@@ -1486,6 +1603,7 @@ pub(super) fn project(home: &Home) -> Projection<'_> {
         locals,
         remotes,
         selected,
+        selected_ghost,
         query,
         network,
         total_count: home.total_cube_count(),
@@ -2159,6 +2277,7 @@ mod tests {
             has_encrypted_seed: seed,
             phone_recoverable: phone,
             phone_full_cube: full,
+            encryption_pubkey: None,
         }
     }
 
@@ -2429,7 +2548,7 @@ mod tests {
     }
 
     #[test]
-    fn floor_remote_only_cubes_mode_shows_restore_in_first_viewport() {
+    fn floor_remote_only_cubes_stand_as_ghosts_in_the_first_viewport() {
         for (appearance, palette) in [
             ("dark", theme::Theme::dark()),
             ("light", theme::Theme::light()),
@@ -2448,7 +2567,8 @@ mod tests {
             let projection = project(&home);
             assert_eq!(projection.local_total, 0);
             assert_eq!(projection.remote_total, 1);
-            assert!(!projection.floor_eligible(home.catalog.mode));
+            // A new device's floor stands the Connect-only Cube as a ghost.
+            assert!(projection.floor_eligible(home.catalog.mode));
             let tree = home_tree(
                 "v113-floor-remote-only",
                 &home,
@@ -2456,11 +2576,13 @@ mod tests {
                 appearance,
                 palette,
             );
-            let restore = tree.bounds(&restore_id("restore-me"));
+            let restore = tree.bounds(&select_id(&ghost(&home, "restore-me")));
             let (viewport, _, _) = tree.scroll(&Id::from(CATALOG_SCROLL_ID));
             assert!(restore.y >= viewport.y);
             assert!(restore.y + restore.height <= viewport.y + viewport.height);
-            assert!(tree.contains("Available in Connect"));
+            assert!(!tree.contains("Available in Connect"));
+            assert!(tree.contains("In Connect · Restore"));
+            assert!(tree.contains(super::super::launcher_presenter::GHOST_INTRO));
             assert!(!tree.contains("No Cubes on this network"));
         }
     }
@@ -3101,6 +3223,139 @@ mod tests {
             assert!(matches!(
                 activate_once(catalog_view(&home), remote_delete_id("r1"), pointer),
                 ViewMessage::DeleteCube(DeleteCubeMessage::ShowRemoteModal(uuid)) if uuid == "r1"
+            ));
+        }
+    }
+
+    fn ghost(home: &Home, uuid: &str) -> CubeCatalogKey {
+        let cube = home
+            .remote_cubes
+            .iter()
+            .find(|cube| cube.uuid == uuid)
+            .expect("fixture ghost");
+        ghost_key(cube, home.network)
+    }
+
+    #[test]
+    fn ghosts_stand_after_the_local_cubes_and_select_only_on_the_floor() {
+        let mut home = home_with(&[("a", "Alpha"), ("b", "Beta")]);
+        home.remote_cubes = vec![
+            remote("kit", "Passkey", true, true, false, false),
+            remote("nokit", "Old laptop", false, false, false, false),
+            remote("seedless", "Half kit", true, false, false, false),
+        ];
+        home.catalog.mode = LauncherMode::Cubes;
+        let projection = project(&home);
+        assert!(projection.floor_eligible(LauncherMode::Cubes));
+        assert_eq!(
+            projection.floor_keys(),
+            vec![
+                key("a"),
+                key("b"),
+                ghost(&home, "kit"),
+                ghost(&home, "nokit"),
+                ghost(&home, "seedless"),
+            ]
+        );
+        // Restorable means this device can restore it: a kit without its
+        // seed reads as no Recovery Kit.
+        let kinds: Vec<_> = home.remote_cubes.iter().map(ghost_kind).collect();
+        use super::super::launcher_scene::Ghost;
+        assert_eq!(
+            kinds,
+            [Ghost::Restorable, Ghost::Unrestorable, Ghost::Unrestorable]
+        );
+        assert_eq!(ghost_status(&home.remote_cubes[0]), "In Connect · Restore");
+        assert_eq!(
+            ghost_status(&home.remote_cubes[2]),
+            "In Connect · No Recovery Kit"
+        );
+
+        // A ghost turns to its face on the floor, and stays out of every
+        // local-Cube gate: nothing can open, rename or delete it as a Cube.
+        {
+            let key = ghost(&home, "nokit");
+            catalog(&mut home, CatalogMessage::SelectFloor(key));
+        }
+        let projection = project(&home);
+        assert_eq!(home.catalog.selected, Some(ghost(&home, "nokit")));
+        assert_eq!(projection.selected, None);
+        assert_eq!(projection.selected_ghost, Some(1));
+        assert_eq!(projection.floor_selected(), Some(3));
+        assert!(home.catalog.motion.is_some(), "the ghost turns to its face");
+        assert!(!home.catalog_resolves(&ghost(&home, "nokit")));
+        assert_eq!(home.catalog.page, 0);
+
+        // A ghost on another page moves the floor to it.
+        home.catalog.stage_width = Some(900.0);
+        assert_eq!(home.catalog.page_size(), 4);
+        {
+            let key = ghost(&home, "seedless");
+            catalog(&mut home, CatalogMessage::SelectFloor(key));
+        }
+        assert_eq!(home.catalog.page, 1);
+
+        // The List has no ghost faces; ghosts are rows with their own actions.
+        home.catalog.mode = LauncherMode::List;
+        {
+            let key = ghost(&home, "kit");
+            catalog(&mut home, CatalogMessage::Select(key));
+        }
+        assert_eq!(home.catalog.selected, None);
+        assert_eq!(project(&home).selected_ghost, None);
+
+        // Signing out takes the ghosts, and their selection, off the floor.
+        home.catalog.mode = LauncherMode::Cubes;
+        {
+            let key = ghost(&home, "kit");
+            catalog(&mut home, CatalogMessage::SelectFloor(key));
+        }
+        let key = ghost(&home, "kit");
+        home.remote_cubes.clear();
+        home.reconcile_catalog();
+        assert_eq!(home.catalog.selected, None);
+        assert!(!project(&home).floor_keys().contains(&key));
+    }
+
+    #[test]
+    fn a_ghost_face_emits_the_existing_restore_delete_and_back_messages() {
+        let mut home = home_with(&[("a", "Alpha")]);
+        home.remote_cubes = vec![
+            remote("kit", "Passkey", true, true, false, false),
+            remote("nokit", "Old laptop", false, false, false, false),
+        ];
+        home.catalog.mode = LauncherMode::Cubes;
+        for pointer in [false, true] {
+            home.catalog.selected = Some(ghost(&home, "kit"));
+            let floor = || super::super::launcher_presenter::floor_body(&home);
+            assert!(matches!(
+                activate_once(floor(), details_open_id(&ghost(&home, "kit")), pointer),
+                ViewMessage::RestoreFromRecoveryKit(uuid) if uuid == "kit"
+            ));
+            assert!(matches!(
+                activate_once(floor(), remote_delete_id("kit"), pointer),
+                ViewMessage::DeleteCube(DeleteCubeMessage::ShowRemoteModal(uuid)) if uuid == "kit"
+            ));
+            assert!(matches!(
+                activate_once(floor(), close_details_id(), pointer),
+                ViewMessage::Catalog(CatalogMessage::ClearSelection)
+            ));
+            home.catalog.selected = Some(ghost(&home, "nokit"));
+            let floor = || super::super::launcher_presenter::floor_body(&home);
+            assert!(matches!(
+                activate_once(floor(), details_open_id(&ghost(&home, "nokit")), pointer),
+                ViewMessage::ImportGhostWithPhrase(uuid) if uuid == "nokit"
+            ));
+            assert!(matches!(
+                activate_once(floor(), remote_delete_id("nokit"), pointer),
+                ViewMessage::DeleteCube(DeleteCubeMessage::ShowRemoteModal(uuid)) if uuid == "nokit"
+            ));
+            // A browsing ghost's slot selects it.
+            home.catalog.selected = None;
+            let floor = || super::super::launcher_presenter::floor_body(&home);
+            assert!(matches!(
+                activate_once(floor(), select_id(&ghost(&home, "kit")), pointer),
+                ViewMessage::Catalog(CatalogMessage::SelectFloor(k)) if k == ghost(&home, "kit")
             ));
         }
     }

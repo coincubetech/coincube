@@ -479,8 +479,9 @@ pub(super) fn top_bar<'a>(
     quiet: bool,
 ) -> Element<'a, ViewMessage> {
     let count = count_text(
-        projection.locals.len() + projection.remotes.len(),
-        projection.local_total + projection.remote_total,
+        projection.locals.len(),
+        projection.local_total,
+        projection.remotes.len(),
     );
 
     let separator = Container::new(Space::new())
@@ -1241,8 +1242,6 @@ pub(crate) struct ChromeSnapshot {
 }
 
 pub(super) fn snapshot(home: &Home, projection: &Projection<'_>) -> ChromeSnapshot {
-    let shown = projection.locals.len() + projection.remotes.len();
-    let total = projection.local_total + projection.remote_total;
     let account = &home.connect_account;
     let mut connect = vec![("Connect".to_string(), Ink::Muted, 13.0, false)];
     let dot = || ("·".to_string(), Ink::Muted, 13.0, false);
@@ -1286,7 +1285,11 @@ pub(super) fn snapshot(home: &Home, projection: &Projection<'_>) -> ChromeSnapsh
             }))
             .collect(),
         filtered: projection.filter != NetworkFilter::All,
-        count: count_text(shown, total),
+        count: count_text(
+            projection.locals.len(),
+            projection.local_total,
+            projection.remotes.len(),
+        ),
         eye: home
             .balance_privacy
             .map(|chrome| chrome.privacy.masks_amounts()),
@@ -1305,11 +1308,26 @@ fn dock_target(home: &Home, projection: &Projection<'_>) -> Option<String> {
         .then(|| format!("New Cubes: {}", network_name(home.network)))
 }
 
-fn count_text(shown: usize, total: usize) -> String {
-    if shown == total {
-        format!("{total} {}", if total == 1 { "Cube" } else { "Cubes" })
+/// P-Launcher's `countText`: this device's Cubes, then the ghosts beside
+/// them, which are Connect's and never counted as this device's.
+fn count_text(shown: usize, total: usize, in_connect: usize) -> String {
+    let connect = if in_connect > 0 {
+        format!(" · {in_connect} in Connect only")
     } else {
-        format!("{shown} of {total} Cubes · {} hidden", total - shown)
+        String::new()
+    };
+    if total == 0 && in_connect > 0 {
+        format!("No Cubes on this device{connect}")
+    } else if shown == total {
+        format!(
+            "{total} {}{connect}",
+            if total == 1 { "Cube" } else { "Cubes" }
+        )
+    } else {
+        format!(
+            "{shown} of {total} Cubes{connect} · {} hidden",
+            total - shown
+        )
     }
 }
 
@@ -1523,4 +1541,23 @@ pub(crate) fn quiet_dock<'a, M: 'a>(chrome: &ChromeSnapshot) -> Element<'a, M> {
         .width(Length::Fill)
         .style(rail)
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::count_text;
+
+    #[test]
+    fn the_count_names_this_devices_cubes_and_the_ghosts_apart() {
+        assert_eq!(count_text(2, 2, 0), "2 Cubes");
+        assert_eq!(count_text(1, 1, 2), "1 Cube · 2 in Connect only");
+        assert_eq!(
+            count_text(0, 0, 2),
+            "No Cubes on this device · 2 in Connect only"
+        );
+        assert_eq!(
+            count_text(1, 3, 1),
+            "1 of 3 Cubes · 1 in Connect only · 2 hidden"
+        );
+    }
 }
