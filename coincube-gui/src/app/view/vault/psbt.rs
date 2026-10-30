@@ -69,7 +69,9 @@ use crate::{
 /// the screen and Broadcast gates on the path threshold as before.
 #[derive(Debug, Clone)]
 pub struct ReplayPill<'a> {
-    pub review: &'a ReplayReview,
+    /// The review as of the current cache
+    /// ([`crate::app::state::vault::psbt::PsbtState::current_review`]).
+    pub review: std::borrow::Cow<'a, ReplayReview>,
     /// [`replay::entangled_inputs`] for this PSBT, from the cache.
     pub entangled: Vec<(usize, Entanglement)>,
     /// [`crate::app::state::vault::psbt::PsbtState::broadcast_ready`].
