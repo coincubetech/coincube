@@ -781,29 +781,36 @@ fn vault_settings_for_cube(
         .find(|wallet| wallet.wallet_id() == *vault_id)
 }
 
-type SecondSlotResult = Result<
-    Result<
-        (crate::services::unlock::MigrationOutcome, Option<String>),
-        crate::services::unlock::UnlockError,
-    >,
-    tokio::task::JoinError,
->;
+/// What the unlock's seed-file step did, once it has finished.
+struct UnlockMigration {
+    outcome: crate::services::unlock::MigrationOutcome,
+    /// The second slot this unlock wrote, already recorded in `settings.json`.
+    new_slot: Option<String>,
+    /// Migration replaced an enrolled duress marker, and the device's duress
+    /// state has been disarmed to match.
+    duress_disarmed: bool,
+}
+
+type UnlockMigrationResult =
+    Result<Result<UnlockMigration, crate::services::unlock::UnlockError>, tokio::task::JoinError>;
 
 /// Bring the Cube's seed files up to the current wire version, give it its
-/// second slot if it has none, and record that slot's name in
-/// `settings.json`.
+/// second slot if it has none, and make the device's settings and duress
+/// state agree with what was written.
 ///
-/// The slot and its name are one step, so the work runs in a task of its
-/// own, spawned at the call. Cancel may drop the returned future mid-way; a
-/// decoy written without its name recorded is unreachable, and the next
-/// unlock would mint another. The spawned task runs to the end regardless.
-fn migrate_and_record_second_slot(
+/// Each file write and the record that makes it reachable are one step, so
+/// the work runs in a task of its own, spawned at the call. Cancel may drop
+/// the returned future mid-way: a decoy written without its name recorded is
+/// unreachable, and the next unlock would mint another; a marker replaced
+/// without the disarm leaves an enrolment that nothing triggers. The spawned
+/// task runs to the end regardless.
+fn migrate_seed_files_on_unlock(
     root: std::path::PathBuf,
     network_dir: NetworkDirectory,
     cube: app::settings::CubeSettings,
     pin: zeroize::Zeroizing<String>,
-) -> impl std::future::Future<Output = SecondSlotResult> {
-    let task = tokio::spawn(migrate_and_record_second_slot_now(
+) -> impl std::future::Future<Output = UnlockMigrationResult> {
+    let task = tokio::spawn(migrate_seed_files_on_unlock_now(
         root,
         network_dir,
         cube,
@@ -812,15 +819,16 @@ fn migrate_and_record_second_slot(
     async move { task.await.unwrap_or_else(Err) }
 }
 
-async fn migrate_and_record_second_slot_now(
+async fn migrate_seed_files_on_unlock_now(
     root: std::path::PathBuf,
     network_dir: NetworkDirectory,
     cube: app::settings::CubeSettings,
     pin: zeroize::Zeroizing<String>,
-) -> SecondSlotResult {
+) -> UnlockMigrationResult {
     let cube_id = cube.id.clone();
+    let blocking_root = root.clone();
     let joined = tokio::task::spawn_blocking(move || {
-        let loc = crate::services::unlock::CubeLocation::new(&root, &cube);
+        let loc = crate::services::unlock::CubeLocation::new(&blocking_root, &cube);
         let outcome = crate::services::unlock::migrate_seed_files(&loc, &pin)?;
         // Give this Cube its second slot if it arrived without one — restored
         // from a Recovery Kit, or minted before unit 6b. Same blocking task:
@@ -829,10 +837,14 @@ async fn migrate_and_record_second_slot_now(
         Ok::<_, crate::services::unlock::UnlockError>((outcome, slot))
     })
     .await;
+    let (outcome, new_slot) = match joined {
+        Ok(Ok(done)) => done,
+        Ok(Err(e)) => return Ok(Err(e)),
+        Err(e) => return Err(e),
+    };
     // Persist the backfilled slot name. Without this the decoy just written
     // is unreachable and the next unlock mints another one.
-    if let Ok(Ok((_, Some(name)))) = &joined {
-        let name = name.clone();
+    if let Some(name) = new_slot.clone() {
         if let Err(e) = app::settings::update_settings_file(&network_dir, |mut s| {
             if let Some(c) = s.cubes.iter_mut().find(|c| c.id == cube_id) {
                 c.duress_slot_file = Some(name);
@@ -844,7 +856,37 @@ async fn migrate_and_record_second_slot_now(
             error!("could not record the second slot for cube {cube_id}: {e}");
         }
     }
-    joined
+    // Migration cannot re-seal a duress marker — that needs the duress PIN,
+    // and this path holds the regular one — so it replaces the slot with a
+    // decoy and the enrolment is gone. Make the device's own state agree
+    // rather than keep claiming an enrolment whose trigger no longer exists.
+    //
+    // Acceptable only because duress is feature-gated and unreleased.
+    // Revisit before it ships.
+    let mut duress_disarmed = false;
+    if outcome.duress_was_cleared() {
+        log::warn!(
+            "migration: duress enrolment on cube {cube_id} was cleared — its marker could not \
+             be carried across the upgrade. Re-enroll to arm it again."
+        );
+        if let Ok(mut st) = crate::services::duress::DuressLocalState::load(&root) {
+            // Only here, inside the enrolled check: the slot is rewritten
+            // whenever its wire version is stale, so `duress_was_cleared` is
+            // true for most Cubes and says nothing on its own about whether
+            // there was an enrolment to lose. This branch is where one
+            // demonstrably was.
+            if st.enrolled || st.arming {
+                st.disarm();
+                let _ = st.save(&root);
+                duress_disarmed = true;
+            }
+        }
+    }
+    Ok(Ok(UnlockMigration {
+        outcome,
+        new_slot,
+        duress_disarmed,
+    }))
 }
 
 /// Resolve either local Bitcoin wallet attached to this exact Cube. Imported
@@ -3719,7 +3761,7 @@ impl Tab {
                                         // Its own task: a Cancel that drops
                                         // this future cannot separate the
                                         // second slot from its recorded name.
-                                        let joined = migrate_and_record_second_slot(
+                                        let joined = migrate_seed_files_on_unlock(
                                             datadir_clone.path().to_path_buf(),
                                             datadir_clone.network_directory(network_val),
                                             cube.clone(),
@@ -3733,7 +3775,11 @@ impl Tab {
                                         // that rewrites seed files — left no
                                         // trace at all.
                                         match joined {
-                                            Ok(Ok((outcome, new_slot))) => {
+                                            Ok(Ok(UnlockMigration {
+                                                outcome,
+                                                new_slot,
+                                                duress_disarmed,
+                                            })) => {
                                                 if let Some(name) = new_slot {
                                                     cube.duress_slot_file = Some(name);
                                                 }
@@ -3750,66 +3796,18 @@ impl Tab {
                                                         cube.id
                                                     );
                                                 }
-                                                // Migration cannot re-seal a
-                                                // duress marker — that needs
-                                                // the duress PIN, and this
-                                                // path holds the regular one —
-                                                // so it replaces the slot with
-                                                // a decoy and the enrolment is
-                                                // gone. Say so, and make the
-                                                // device's own state agree
-                                                // rather than keep claiming an
-                                                // enrolment whose trigger no
-                                                // longer exists.
-                                                //
-                                                // Acceptable only because
-                                                // duress is feature-gated and
-                                                // unreleased. Revisit before
-                                                // it ships.
-                                                if outcome.duress_was_cleared() {
-                                                    log::warn!(
-                                                        "migration: duress enrolment on cube {} was \
-                                                         cleared — its marker could not be carried \
-                                                         across the upgrade. Re-enroll to arm it \
-                                                         again.",
-                                                        cube.id
+                                                // A log line is not telling the
+                                                // user: they believe a PIN still
+                                                // wipes this device, and it no
+                                                // longer does.
+                                                if duress_disarmed {
+                                                    migration_error = Some(
+                                                        "Upgrading this Cube's files turned \
+                                                         duress mode off — your duress PIN no \
+                                                         longer erases this device. Turn duress \
+                                                         mode on again to set it up."
+                                                            .to_string(),
                                                     );
-                                                    let root = datadir_clone.path().to_path_buf();
-                                                    if let Ok(mut st) =
-                                                        crate::services::duress::DuressLocalState::load(
-                                                            &root,
-                                                        )
-                                                    {
-                                                        if st.enrolled || st.arming {
-                                                            st.disarm();
-                                                            let _ = st.save(&root);
-                                                            // Only here, inside the
-                                                            // enrolled check: the slot
-                                                            // is rewritten whenever its
-                                                            // wire version is stale, so
-                                                            // `duress_was_cleared` is
-                                                            // true for most Cubes and
-                                                            // says nothing on its own
-                                                            // about whether there was an
-                                                            // enrolment to lose. This
-                                                            // branch is where one
-                                                            // demonstrably was.
-                                                            //
-                                                            // A log line is not telling
-                                                            // the user: they believe a
-                                                            // PIN still wipes this
-                                                            // device, and it no longer
-                                                            // does.
-                                                            migration_error = Some(
-                                                                "Upgrading this Cube's files \
-                                                                 turned duress mode off — your \
-                                                                 duress PIN no longer erases \
-                                                                 this device. Turn duress mode \
-                                                                 on again to set it up."
-                                                                    .to_string(),
-                                                            );
-                                                        }
-                                                    }
                                                 }
                                             }
                                             // The keystore was reachable-but-broken.
@@ -4875,9 +4873,10 @@ impl Tab {
     /// `Some(None)` keeps it but has no stage (a loader error page).
     fn opening_stage(&self) -> Option<Option<home::launcher_opening::Stage>> {
         use home::launcher_opening::Stage;
-        // The unlock routes to the Loader exactly when it carries Bitcoin
-        // wallet settings (a Vault or an imported wallet). Without them there
-        // is no daemon to start: the wallets load and the Cube is almost there.
+        // The unlock routes past its screen (to the Loader, or to Login for a
+        // remote backend) exactly when it carries Bitcoin wallet settings: a
+        // Vault or an imported wallet. Without them there is no daemon to
+        // start: the wallets load and the Cube is almost there.
         let unlocked = |on_success: &crate::pin_entry::PinEntrySuccess| {
             let crate::pin_entry::PinEntrySuccess::LoadApp {
                 wallet_settings, ..
@@ -8758,28 +8757,25 @@ mod opening_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// Cancel drops the unlock's load mid-way. If that lands after the second
-    /// slot is written but before its name is recorded, the slot is
-    /// unreachable and the next unlock mints another. The backfill's future
-    /// is polled once, so the work has started, then dropped as Cancel drops
-    /// it; the name must still reach `settings.json`, and the next unlock
-    /// must reuse that slot.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_cancel_mid_backfill_still_records_the_second_slot() {
+    /// A PIN Cube on disk (seed under "1234") and listed in `settings.json`,
+    /// with `slot` as its recorded second slot.
+    async fn cube_on_disk(
+        root: &std::path::Path,
+        slot: Option<String>,
+    ) -> (CubeSettings, crate::dir::NetworkDirectory) {
         use crate::app::settings::{update_settings_file, Settings};
         use coincube_core::miniscript::bitcoin::secp256k1::Secp256k1;
         use coincube_core::signer::{MasterSigner, MASTER_SEED_LABEL};
-        use std::future::Future;
 
-        let root = datadir();
         let secp = Secp256k1::signing_only();
         let signer = MasterSigner::generate(Network::Bitcoin).unwrap();
         let mut cube = CubeSettings::new("Everyday".into(), ChainId::Bitcoin);
         cube.created_at = 1000;
         cube.master_signer_fingerprint = Some(signer.fingerprint(&secp));
+        cube.duress_slot_file = slot;
         signer
             .store_encrypted(
-                &root,
+                root,
                 Network::Bitcoin,
                 &secp,
                 Some((format!("{}{}", MASTER_SEED_LABEL, 1000), 1000)),
@@ -8788,8 +8784,8 @@ mod opening_tests {
                 None,
             )
             .unwrap();
-        let network_dir =
-            crate::dir::CoincubeDirectory::new(root.clone()).network_directory(ChainId::Bitcoin);
+        let network_dir = crate::dir::CoincubeDirectory::new(root.to_path_buf())
+            .network_directory(ChainId::Bitcoin);
         network_dir.init().unwrap();
         let listed = cube.clone();
         update_settings_file(&network_dir, |_| {
@@ -8800,11 +8796,19 @@ mod opening_tests {
         })
         .await
         .unwrap();
-        let folder = MasterSigner::mnemonics_folder(&root, Network::Bitcoin);
-        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1);
+        (cube, network_dir)
+    }
 
-        let mut load = Box::pin(super::migrate_and_record_second_slot(
-            root.clone(),
+    /// Start the unlock's seed-file step, poll it once so the work has
+    /// begun, then drop it the way Cancel drops the unlock's load.
+    async fn start_then_cancel(
+        root: &std::path::Path,
+        network_dir: &crate::dir::NetworkDirectory,
+        cube: &CubeSettings,
+    ) {
+        use std::future::Future;
+        let mut load = Box::pin(super::migrate_seed_files_on_unlock(
+            root.to_path_buf(),
             network_dir.clone(),
             cube.clone(),
             zeroize::Zeroizing::new("1234".to_string()),
@@ -8818,32 +8822,83 @@ mod opening_tests {
         })
         .await;
         drop(load);
+    }
 
+    /// Wait for `done`, or fail with `what` after two minutes.
+    async fn eventually(what: &str, mut done: impl FnMut() -> bool) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-        let recorded = loop {
-            let settings = Settings::from_file(&network_dir).unwrap();
-            if settings.cubes[0].duress_slot_file.is_some() {
-                break settings.cubes[0].clone();
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the cancelled backfill never recorded its slot ({} files)",
-                std::fs::read_dir(&folder).unwrap().count()
-            );
+        while !done() {
+            assert!(std::time::Instant::now() < deadline, "{}", what);
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        };
+        }
+    }
+
+    /// Cancel drops the unlock's load mid-way. If that lands after the second
+    /// slot is written but before its name is recorded, the slot is
+    /// unreachable and the next unlock mints another. The name must still
+    /// reach `settings.json`, and the next unlock must reuse that slot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancel_mid_backfill_still_records_the_second_slot() {
+        use crate::app::settings::Settings;
+        use coincube_core::signer::MasterSigner;
+
+        let root = datadir();
+        let (cube, network_dir) = cube_on_disk(&root, None).await;
+        let folder = MasterSigner::mnemonics_folder(&root, Network::Bitcoin);
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1);
+
+        start_then_cancel(&root, &network_dir, &cube).await;
+        let recorded = || Settings::from_file(&network_dir).unwrap().cubes[0].clone();
+        eventually("the cancelled backfill never recorded its slot", || {
+            recorded().duress_slot_file.is_some()
+        })
+        .await;
         assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 2);
 
         // The next unlock finds the recorded slot and mints nothing.
-        let again = super::migrate_and_record_second_slot(
+        let again = super::migrate_seed_files_on_unlock(
             root.clone(),
             network_dir.clone(),
-            recorded,
+            recorded(),
             zeroize::Zeroizing::new("1234".to_string()),
         )
         .await;
-        assert!(matches!(again, Ok(Ok((_, None)))));
+        assert!(matches!(
+            again,
+            Ok(Ok(super::UnlockMigration { new_slot: None, .. }))
+        ));
         assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The same Cancel, on an enrolled Cube whose slot migration replaces.
+    /// The marker is gone once the slot is rewritten; if the disarm did not
+    /// follow, `duress.json` would keep claiming an enrolment nothing
+    /// triggers, and the next unlock, with current files, would never notice.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancel_mid_migration_still_disarms_a_replaced_duress_marker() {
+        use crate::services::duress::DuressLocalState;
+        use crate::services::unlock::marker;
+
+        let root = datadir();
+        // A slot at the wrong wire version: an ungated Cube with no device
+        // secret targets v2, so this v3 slot is rewritten as a decoy.
+        let slot = marker::new_file_name(1000);
+        let (cube, network_dir) = cube_on_disk(&root, Some(slot.clone())).await;
+        let secret: coincube_core::seed_crypt::DeviceSecret = zeroize::Zeroizing::new([0x33; 32]);
+        marker::write_decoy(&root, ChainId::Bitcoin, &cube.id, &slot, Some(&secret)).unwrap();
+        DuressLocalState {
+            enrolled: true,
+            ..Default::default()
+        }
+        .save(&root)
+        .unwrap();
+
+        start_then_cancel(&root, &network_dir, &cube).await;
+        eventually("the cancelled migration never disarmed duress", || {
+            !DuressLocalState::load(&root).unwrap().enrolled
+        })
+        .await;
         std::fs::remove_dir_all(root).unwrap();
     }
 
