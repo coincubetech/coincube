@@ -8,7 +8,7 @@ Read this file first, then the review doc, then the inventory.
 | --- | --- |
 | Live prototype (clickable, needs a signed-in claude.ai browser) | https://claude.ai/artifact/4DkSWQshpyXVu2kVrbneRz (canvas v175; the sources below were exported from it on 2026-10-30, artifact version `1793315838-41d9`) |
 | Exported screenshots of every screen, dark and light (open without a browser session) | `screens/dark/`, `screens/light/`, `screens/studies/`, index in `screens/README.md` (canvas v175) |
-| Artboard sources (canvas v175: the linked `P-*` prototype and its light twins, plus the v175 studies `H-*` page head, `G-*` ghost Cubes and `O-*` opening; plain HTML + CSS + a small script each) | `canvas/*.dc.html`, index and canvas pages in `canvas/canvas.json` |
+| Artboard sources (canvas v175: the linked `P-*` prototype and its light twins, plus the v175 studies `H-*` page head, `G-*` ghost Cubes and `O-*` opening, and the `P-*-Rail` Launcher backdrop boards; plain HTML + CSS + a small script each) | `canvas/*.dc.html`, index and canvas pages in `canvas/canvas.json` |
 | Earlier exploration boards the prototype was distilled from (superseded) | `archive/explorations/` |
 | Every decision Robert made, in order, with reasons | `tenshu-launcher-and-settings-review.md` |
 | Feature coverage matrix (88 rows: existing feature → screen) | `tenshu-feature-inventory.md` |
@@ -16,7 +16,98 @@ Read this file first, then the review doc, then the inventory.
 | Design briefs v1–v6 (history; superseded where the review doc disagrees) | `tenshu-design-brief-*.md`, `tenshu-concepts.md` |
 | Pre-canvas concept pages (superseded) | `archive/` |
 
-Precedence when sources disagree: review doc > artboard source > brief.
+Precedence when sources disagree: on a screen the v175 delta touches, the v175
+plan and Robert's decisions on it come first (see "v175 delta" below); then
+review doc > artboard source > brief.
+
+## v175 delta (2026-10-29)
+
+On 2026-10-29 Robert reviewed a page-header study and had it folded into the
+prototype across every Cube board (canvas v125 → v175). The approved plan for
+that delta is `company-brain/plans/tenshu-cube-v175/` (master plan and desktop
+plan). Delivery is tracked in #950. Where the plan touches a screen, it
+supersedes the v124 artboard and the §5 step for that screen (master §3
+decision 4). The §5 steps the delta does not touch stay as written. The `P-`
+boards are the acceptance target, in both themes at 1024×768 and 1440×900. The
+`H-*` page-header study is the reference they were built from.
+
+The v175 sources are in `canvas/` (exported on 2026-10-30, #955), and
+`screens/` has a local render of every board's default state (#957). Where a
+render disagrees with the live canvas, the canvas wins. Each board that changed
+a design decision names it in a dated `(Robert, 2026-10-29)` comment in its
+CSS. Three changed boards carry no note: `P-Light-Split` and
+`P-Light-Transfer` changed only their `<title>`, and `P-BorderWallet` only took
+the settled `--on-accent` and the 22px title. The
+renders are at canvas size (mostly 1440 px wide), so check 1024×768 against the
+source. States behind a lever, such as the Swap Review and Swapped steps or the
+auto-convert turn-off confirmation on `P-Settings`, are only in the source and
+the live canvas. `screens/studies/H-Convert-Review.png` and
+`screens/studies/H-Settings-Spark-Off.png` show their study versions.
+
+| Area | v175 rule | Boards | Plan step |
+| --- | --- | --- | --- |
+| Top bar | One bar on every screen, Launcher and Cube: 64px, rail colour, 24px side padding, a 1px rule below. On the right: the borderless 32px hide-balances eye first, then the status chips, then App preferences as a borderless sliders icon with an "App preferences" tooltip. The gear stays inside Cube Settings. On the Launcher the only chip is the Connect account entry. The Cube service chip opens Settings › Vault › Node. This replaces the 56px bar in §4. | the `P-` Launcher and Cube boards, `H-*` | L1 |
+| Page head | Pinned, as on Activity: a 22px title and the Cube · network line on the left, page actions on the right, tabs or steps on a rule across the content pane. The page scrolls under it. Send, Receive and Swap end the actions with "Back to ‹wallet›"; Transfer ends them with "Back to Overview". | `H-*` and every `P-` Cube page | L3, W4–W6 |
+| Side panel | Labels start right after the icon. Wallet rows read "Spark · ‹nickname›" and "Vault · ‹nickname›". The Spark icon is the stroked asterisk. Selection never paints a focus ring; a row reached by keyboard still does (master I9). | every `P-` Cube board | L2 |
+| Overview | Total balance, two wallet cards side by side, Transfer as a head action, and Recent activity under day headings with a wallet column. | `P-Overview`, `H-Overview` | W1 |
+| Wallet pages | Spark and Vault share one shape: Total balance, one row per asset, Recent activity. Spark's head actions are Swap BTC ⇄ USDB and Wallet settings. The Vault's are Tools and Wallet settings, and it adds a protection strip (recovery path, PSBTs waiting). | `P-Overview` (wallet pages), `H-Wallet`, `H-Vault` | W2, W3 |
+| Settings | The Cube / Vault / Spark scope switch is a segmented control right of the title, also on the Connect-account gap screens and Members. On/off settings are switches; segmented controls are for real choices. Spark tabs: Balances & conversion · Lightning address · Connections (`H-Settings-Spark*` show an earlier set with Payment checks and Advanced; `P-Settings` wins). | `P-Settings`, `H-Settings*`, `P-GapsAccount`, `P-Members` | W5 |
+| Spark USDB | A separate US Dollar (USDB) balance. Swap BTC ⇄ USDB in three steps (Details, Review, Swapped): an indicative rate, then Get quote, then the fee and the 0.5% max price change. Auto-convert lives in Spark Settings. Send has an explicit pay-from choice. Receive says payments arrive as bitcoin. | `P-Swap`, `H-Convert`, `H-Convert-Review`, `H-Settings-Spark`, `H-Settings-Spark-Off`, `H-Send-From`, `P-Receive` | S1–S4 |
+| Launcher | Ghost Cubes on the floor (see-through, dashed footprint, Recovery Kit state on the edges) with a details face. Opening on the Cube: it tumbles to its bottom face and grows to a 700px face whose edge glow brightens with each loader stage, then the Flash finale opens the Overview. | `G-Launcher`, `G-Ghost-Details`, `O-*` (Flash is `O-Finale-B`) | N1, N2 |
+
+Where the plan departs from the boards, the plan wins:
+
+- **Turning auto-convert off keeps USDB.** Robert decided this on 2026-10-30
+  (#950): existing USDB stays USDB and only future receive conversion stops,
+  as master §3 decision 5 and plan S2 say, with the confirmation "Your USDB
+  stays USDB, and new bitcoin you receive stays bitcoin." The v175 boards'
+  turn-off copy is stale. `P-Settings` asks "Turn off auto-convert?", says the
+  whole USDB balance converts back to bitcoin at the current rate, and
+  confirms with "Turn off and convert". `H-Settings-Spark-Off` is titled
+  "turning auto-convert off converts the USDB balance back", and its render
+  (`screens/studies/H-Settings-Spark-Off.png`) shows that dialog. Build
+  neither the convert-back copy nor the conversion. The board's "stays USDB"
+  status note, shown while auto-convert is off, still applies. This decision
+  also supersedes the review doc's Stable Balance placement and convert-back
+  language ("Detailed Settings layouts", 7. Spark, and the 2026-10-23
+  afternoon round): there is no Stable Balance toggle on the Spark page or in
+  Settings › Spark, auto-convert lives in Balances & conversion (plan S2, W2),
+  and "deactivation converts back" no longer holds.
+- **Liquid is hidden.** Most Cube boards still show a Liquid wallet (a side
+  panel row, an Overview card, activity rows), and `P-Liquid` is still on the
+  canvas. Build without them, for every account and Cube (master §3 decision 2,
+  plan L2). Key derivation is untouched.
+- **Swap copy.** `P-Swap` Review says "Quoted rate". Flashnet prices are not
+  locked, so the app says "estimated", and the 0.5% cap is enforced in every
+  request (master I5). Swap Review also says that conversions run through
+  Flashnet, a third-party AMM, that a failed swap is refunded and shows as its
+  own row, and that USDB is an issued token, not bitcoin (master I6). The boards
+  do not carry that disclosure.
+- **Spark nickname.** "Daily spending" on the boards is a fixture. Spark gets
+  an optional per-Cube nickname, edited in Balances & conversion; without one
+  the row reads plain "Spark" (master §3 decision 6).
+- **Page column.** The boards still declare the left-anchored 1120px column.
+  Keep the centred 960px column in §4 (master I7, #926).
+- **USDB logo.** The boards use the logo from Flashnet's token list. Confirm its
+  licence or use a COINCUBE-drawn mark (plan W2).
+
+Already in the app and not changed by the plan: the Launcher's network activity
+(canvas page "Launcher backdrop (design B)": `P-Launcher-Rail*`,
+`P-AppPrefs-Rail` and the `backdrop` lever on `P-Launcher`) is
+`home/launcher_activity.rs`. Its App preferences row ("Network activity") is in
+`app/view/preferences.rs`, saved as `NetworkActivitySource` in
+`app/settings/preferences.rs`. Connect-only Cubes
+already stand on the floor as ghosts (#943, #949); N1 is checked against the
+`G-` boards.
+
+Tokens: the §4 table is unchanged at v175. The boards add `--ghost-btc`,
+`--ghost-b2b`, `--ghost-test` and `--ghost-fill` for ghost Cubes, and settle
+`--on-accent` (`#1a1208`, text on the accent fill) and `--b2b` (`#d4a62a` dark,
+`#8a6a10` light), which v124 boards set inconsistently.
+
+Track S changes wallet behaviour by design, so the §3 rule against touching
+`coincube-spark-bridge/` does not apply to it (master invariant I1). Every other
+path in that rule stays off-limits.
 
 ## 1. How to read the prototype
 
@@ -32,10 +123,13 @@ Precedence when sources disagree: review doc > artboard source > brief.
   screenshot shows the board's default state with the device settings at their
   defaults (Dark, Developer mode off, Bitcoin Blake2b off, Launcher style Cubes);
   other states are levers in the source.
-- The canvas holds only the linked prototype, in six rows: Launcher & account;
-  Create, restore, delete; Inside a Cube; Vault tools & signing; Settings &
-  protection; Marketplace. Every link stays inside this set. The earlier
-  exploration boards live in `archive/explorations/` and are not current.
+- The canvas has six pages (`pages` in `canvas.json`): the clickable prototype,
+  its forced-light twin, the Launcher backdrop (design B), the page-header study
+  (`H-*`), Connect Cubes as ghosts (`G-*`) and Opening on the Cube (`O-*`). The
+  prototype page has seven rows: Launcher & account; Create, restore, delete;
+  Inside a Cube; Vault tools & signing; Settings & protection; Marketplace; AI
+  access. Its links stay inside the prototype. The earlier exploration boards
+  live in `archive/explorations/` and are not current.
 - Inside the live canvas, the per-screen "play" button opens that screen
   full-frame with working links. Prefer it over scrolling the canvas.
 
@@ -48,6 +142,9 @@ Implement none of these. They exist only so the prototype could be clicked throu
 | `localStorage` keys `tenshu.proto.open` and `tenshu.proto.seen` | Share "which Cube is open" across artboards | In-memory app state (`gui/tab.rs::State`, `app/session.rs`) |
 | `localStorage` key `tenshu.proto.b2b` | Share the Bitcoin Blake2b device toggle across artboards | A persisted per-device app setting (next to Developer mode in `app/view/settings/general.rs`); when off, nothing Blake2b is rendered anywhere |
 | `localStorage` key `tenshu.proto.dev` | Share the Developer-mode toggle across artboards | The existing Developer-mode device setting; when off, no test network is rendered anywhere (no Live/Test chips, "All networks" only with two or more networks listed, no test networks in the Launcher menu or Cube list, none in Create) |
+| v175 `localStorage` hand-offs `tenshu.proto.land`, `settingsScope`, `sendFrom`, `recvTo`, `openCube` and `restored`, and the `tenshu-proto` window event | Tell the next artboard where to land (wallet page, Settings scope and tab, Send/Receive wallet and asset, which Cube opened, which ghosts were restored) | Route arguments and in-memory state (`app/menu.rs::Menu`, `gui/tab.rs::State`) |
+| `localStorage` keys `tenshu.proto.theme` and `launcher`, plus `backdrop` and `chainsrc` (new in v175) | Share App preferences (Appearance, Launcher style, network activity and its source) across artboards | The existing persisted device settings |
+| `kf` focus demos and the `focusDemo` lever | Show the keyboard focus ring in a still frame | Real keyboard focus |
 | `P-Locking` / `V3-Locking` artboards | The runtime navigates on a link before the link's own handler runs | Lock Cube is one action: clear the session, return to the Launcher |
 | `P-Opening` mounting `P-Overview` after 900 ms via `dc-import` | No programmatic navigation in the runtime | Opening finishes → Overview, no timer |
 | Dashed "picker" buttons (`.pb`) and `data-props` levers | Reach lever-only states by clicking | Real state from the daemon / Connect |
@@ -74,7 +171,9 @@ navigation.
 | Send with Branta identity (P-Send) | `app/view/vault/spend/**`, `app/view/spark/send.rs`, `services/branta.rs`, `app/view/shared/**` |
 | Receive with Bitcoin / Stablecoin selectors (P-Receive) | `app/view/vault/receive.rs`, `app/view/spark/receive.rs`, `app/view/spark/sideshift_receive.rs` |
 | Activity (P-Activity) | `app/view/vault/transactions.rs`, `app/view/spark/transactions.rs`, `app/view/spark/last_tx.rs` |
-| Spark page: recent activity, Lightning Address change, Stable Balance toggle | `app/view/spark/**`, `app/state/spark/**`, `app/state/connect/cube.rs` (Lightning Address claim) |
+| Spark page (v175: the Spark page in P-Overview, H-Wallet): Total balance, one row per asset (Bitcoin, US Dollar), Recent activity, Lightning Address block; head actions Swap BTC ⇄ USDB and Wallet settings. The Stable Balance card and "Stable" badge leave the page; the control moves to Settings as auto-convert | `app/view/spark/overview.rs`, `app/state/spark/overview.rs`, `app/state/connect/cube.rs` (Lightning Address claim), `coincube-ui/src/component/tenshu/asset_row.rs`, `coincube-ui/src/image.rs` (`asset_network_logo`) and `coincube-ui/static/logos/` (the USDB logo) |
+| Swap BTC ⇄ USDB (v175: P-Swap, H-Convert, H-Convert-Review): Details, Review, Swapped | New `app/state/spark/swap.rs` and `app/view/spark/swap.rs`, with `Menu::Spark(SparkSubMenu::Swap)` in `app/menu.rs`. The bridge requests live in `coincube-spark-protocol` and `coincube-spark-bridge` (Track S) |
+| Spark Settings (v175: P-Settings, Spark scope; H-Settings-Spark, H-Settings-Spark-Off): tabs Balances & conversion · Lightning address · Connections. Balances & conversion holds the Auto-convert switch and its turn-off confirmation (USDB stays USDB; see the v175 delta), "Pay from USDB when bitcoin runs short · Always on", Max price change 0.5% (read-only), Swap by hand, and the Spark nickname (plan only, not on the boards) | `app/view/spark/settings/**`, `app/state/spark/settings.rs`, `app/view/settings/frame.rs` (scope switch and tabs), `app/settings/mod.rs` (the nickname, next to `WalletSettings.alias`) |
 | Settings = configuration (P-Settings: Wallet & signers, Node, Pair with Keychain, Connections, Data & exports; Spark scope) | `app/view/settings/**`, `app/state/settings/**`, `app/settings/mod.rs` (`CubeSettings`), `app/view/vault/settings/**`, `app/view/spark/settings/**`, `node/**` |
 | Tools = operations (P-Advanced: Coin control, PSBT proposals, Recovery path, Split coins) | `app/view/vault/coins.rs`, `psbts.rs`, `psbt.rs`, `recovery.rs`, `split.rs`, `claim.rs` |
 | Transfer to another Cube (P-Transfer) | `app/view/vault/spend/**` + Launcher unlock-in-flow |
@@ -117,7 +216,8 @@ The artboards define these on `.tenshu` (dark) and `.tenshu.light`. Map them ont
 Type: IBM Plex Sans 400/500/600 for UI, IBM Plex Mono 400/500 for addresses,
 txids, amounts in detail views. Base 14px / line-height 1.45; captions 12px;
 tabular numerals everywhere amounts appear. Radii: 6px controls, 8px inputs and
-switcher, 10px cards and menus, 16px chips. Side menu 248px; top bar 56px.
+switcher, 10px cards and menus, 8px chips (the top-bar chips are 32px tall,
+with a leading icon). Side menu 248px; top bar 56px.
 Reduced motion: every transition and the 3D floor spin are off under
 `prefers-reduced-motion` and under the app preference.
 
@@ -145,8 +245,10 @@ In the artboards the rule is the "page shell" block at the end of each
 (Activity: `.phd`, `.filters`, `.lst`). In the app this is `coincube_ui::component::tenshu::page`, wrapped by the
 Cube shell (`coincube-gui/src/app/view/mod.rs`: `dashboard`, and
 `dashboard_activity`, which applies the same column in `view::activity`). Do not
-give a screen its own side padding, page `max_width` or centering. The artboards
-still show the left-anchored, 1120px rule.
+give a screen its own side padding, page `max_width` or centering. The artboards,
+v175 included, still declare the left-anchored 1120px rule
+(`--page-max:1120px`, `.main .pg{margin:0}`); follow this section, not the
+artboards, for the column.
 
 ## 5. Sequencing · one draft PR per step
 
