@@ -211,6 +211,9 @@ impl SplitOverlay {
         let (coins, _) = self.spent();
         if self.working {
             Some("Building the transaction…")
+        } else if self.inputs.iter().all(|row| row.key) {
+            // Opened only to get a split key: nothing is on both chains yet.
+            Some("No coins to split yet")
         } else if coins == 0 {
             Some("Select at least one coin")
         } else if self.method == Method::SplitKey && !self.has_key() {
