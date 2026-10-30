@@ -295,6 +295,8 @@ fn served_at_measures_age_on_the_connect_clock() {
     assert_eq!(skewed(13600, 13601).unwrap().observed_at(), 9994);
     // 56 s old when served, plus the round trip, exceeds the 60 s bound.
     assert_eq!(skewed(13545, 13601), Err(Error::Stale));
+    // A negative wire stamp is refused rather than converted into a valid one.
+    assert_eq!(skewed(-5, 0), Err(Error::InvalidResponse));
 }
 #[test]
 fn rejection_is_evidence_but_arbitrary_diagnostics_are_refused() {

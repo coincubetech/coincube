@@ -617,6 +617,7 @@ fn parse(
     if result.txid != tx.compute_txid()
         || result.wtxid != tx.compute_wtxid()
         || result.tip_hash != tip
+        || result.observed_at < 0
     {
         return Err(Error::InvalidResponse);
     }
