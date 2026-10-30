@@ -288,8 +288,8 @@ pub struct Cache {
     pub split_records: Vec<crate::services::split_coins::SplitRecord>,
     /// Outputs of this Vault's splits still short of their confirmations.
     pub splitting: std::collections::HashMap<coincube_core::miniscript::bitcoin::OutPoint, u32>,
-    /// Coins a recorded split separated: confirmed signature-split outputs
-    /// here, and coins whose twin copy the twin Cube's split spent.
+    /// Coins whose twin copy a split-key split on the twin Cube spent, as
+    /// Connect last showed it deep on the twin chain.
     pub separated: std::collections::HashSet<coincube_core::miniscript::bitcoin::OutPoint>,
     /// Current theme mode (dark/light) — used for theme-aware widget rendering
     pub theme_mode: coincube_ui::theme::palette::ThemeMode,
