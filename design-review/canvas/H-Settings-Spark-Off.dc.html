@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Settings · Spark</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--acc-ink:#f59a45;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--focus:#8fc1ff;--hover:rgba(245,240,232,.06);--on-accent:#1a1208;--gutter:clamp(24px,3vw,48px);--page-max:1120px;color-scheme:dark}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--acc-ink:#a14d00;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--focus:#1d5fb8;--hover:rgba(32,32,32,.05);color-scheme:light}
+a{color:#f3821d}a:hover{color:#ffa54d}
+.tenshu *{box-sizing:border-box}
+.tenshu{font-variant-numeric:tabular-nums}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.tenshu button{font:inherit;color:inherit}
+.tenshu h1,.tenshu h2,.tenshu h3,.tenshu p,.tenshu ul{margin:0}
+.tenshu ul{padding:0;list-style:none}
+.ic{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.ic.s{width:16px;height:16px}
+.muted{color:var(--muted)}.ok{color:var(--good)}
+.top{height:56px;flex:none;display:flex;align-items:center;gap:12px;padding:0 16px;background:var(--panel);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px}
+.chips{margin-left:auto;display:flex;gap:8px;align-items:center}
+.chip{display:flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:8px;font-size:13px;white-space:nowrap}
+.body{flex:1;display:flex;min-height:0}
+.side{width:248px;flex:none;display:flex;flex-direction:column;background:var(--rail);border-right:1px solid var(--line)}
+.navp{padding:12px 10px 0;display:flex;flex-direction:column;gap:2px}
+.mid{flex:1;padding:0 10px 12px;display:flex;flex-direction:column;gap:2px}
+.gh{font-size:13px;font-weight:600;color:var(--muted);padding:22px 10px 6px}
+.ni{display:flex;align-items:center;gap:10px;min-height:38px;padding:8px 10px;border-radius:8px;font-size:14px;line-height:1.3;color:var(--ink);text-decoration:none}
+.tenshu a.ni{color:var(--ink)}
+.ni .ic{color:var(--muted)}
+.ni.on{background:var(--selected);font-weight:600}.ni.on .ic{color:var(--acc-ink)}
+.ni{justify-content:flex-start}
+.ni>span{flex:1 1 auto;min-width:0;text-align:left}
+.foot{border-top:1px solid var(--line);padding:10px}
+.cubeid{display:flex;align-items:center;gap:10px;padding:6px 8px 10px;margin-bottom:4px;border-bottom:1px solid var(--line)}
+.av{display:inline-grid;place-items:center;width:36px;height:36px;border-radius:50%;background:var(--panel);color:var(--acc-ink);flex:none}
+.cubeidt{flex:1;display:flex;flex-direction:column;min-width:0}
+.cubeidt b{font-weight:600;font-size:14px;line-height:1.3}
+.cubeidt span{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)}
+.cubeidt img{width:14px;height:14px;border-radius:50%}
+/* page head: the shared pattern (from Activity). Pinned; the rule spans the whole content pane; content scrolls under it. */
+.main{flex:1;min-width:0;display:flex;flex-direction:column}
+.phead{flex:none;background:var(--bg);border-bottom:1px solid var(--line)}
+.phead .in{max-width:calc(var(--page-max) + 2 * var(--gutter));padding:28px var(--gutter) 20px}
+.phead.ctl .in{padding-bottom:0}
+.hrow{display:flex;align-items:flex-end;justify-content:space-between;gap:16px}
+.hrow h1{font-size:22px;font-weight:600;line-height:1.25}
+.idl{color:var(--muted);font-size:13px;margin-top:4px;display:flex;align-items:center;gap:6px}
+.idl img{width:16px;height:16px;display:block;border-radius:50%}
+.hact{display:flex;align-items:center;gap:8px;white-space:nowrap}
+.tabs{display:flex;gap:4px;margin-top:16px}
+.tab{padding:10px 12px;border:0;background:none;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-1px;font-size:14px}
+.tab:hover{color:var(--ink)}
+.tab.on{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}
+.scroll{flex:1;min-height:0;overflow:hidden}
+.pg{max-width:calc(var(--page-max) + 2 * var(--gutter));padding:24px var(--gutter) 40px}
+.btn{display:inline-flex;align-items:center;gap:6px;height:36px;padding:0 16px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font-weight:500;font-size:14px;color:var(--ink)}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.btn.acc{border-color:var(--accent);color:var(--acc-ink);font-weight:600}
+.eye{width:36px;height:36px;display:grid;place-items:center;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;padding:2px}
+.seg button{height:30px;padding:0 12px;border:0;border-radius:6px;background:transparent;cursor:pointer;font-size:13px;font-weight:500;color:var(--muted);display:inline-flex;align-items:center;gap:6px}
+.seg button[aria-pressed="true"]{background:var(--selected);color:var(--ink);font-weight:600}
+.k{font-size:13px;color:var(--muted)}
+.big{font-size:36px;font-weight:600;line-height:1.2;margin-top:2px}
+.sats{font-size:14px;color:var(--muted)}.sats b{color:var(--ink);font-weight:600}
+.badge{display:inline-flex;align-items:center;height:20px;padding:0 8px;border:1px solid var(--accent);border-radius:999px;font-size:11.5px;font-weight:600;color:var(--acc-ink);vertical-align:middle;margin-left:8px}
+.coin{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;background:#f7931a;color:#1a1208;font-weight:700;font-size:13px}
+.coin.usd{background:var(--panel);color:var(--ink);border:1px solid var(--line);font-size:11px}
+.arow{display:grid;grid-template-columns:32px 80px minmax(0,1fr) auto;column-gap:14px;align-items:center;min-height:64px;border-bottom:1px solid var(--line)}
+.arow .tk{font-weight:600}
+.arow .amt{font-weight:600}.arow .amt .u{color:var(--muted);font-weight:400;font-size:12px;margin-left:3px}
+.arow .fx{font-size:13px;color:var(--muted)}
+.ac{display:flex;gap:8px}
+.sec{margin-top:32px}
+.sec h2{font-size:16px;font-weight:600}
+.tx{display:grid;grid-template-columns:28px minmax(0,1fr) auto;column-gap:12px;align-items:center;min-height:56px;padding:6px 4px;border-bottom:1px solid var(--line)}
+.txl{margin-top:10px;border-top:1px solid var(--line)}
+.tx .dir{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;border:1px solid var(--line);color:var(--muted)}
+.tx .nm{font-weight:500}.tx .when{font-size:13px;color:var(--muted);display:block}
+.tx .v{text-align:right;font-weight:600}.tx .v .f{display:block;font-size:13px;color:var(--muted);font-weight:400}
+.grp{margin-top:8px}
+.grp+.grp{margin-top:36px}
+.grp h3{font-size:16px;font-weight:600}
+.rows{margin-top:12px;border-bottom:1px solid var(--line)}
+.row{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:32px;align-items:center;min-height:56px;padding:12px 0;border-top:1px solid var(--line)}
+.row .t{font-weight:500}.row .d{font-size:13px;color:var(--muted)}
+.cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-top:16px}
+.card{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:18px}
+.card .ch{display:flex;align-items:center;gap:8px;font-weight:600}
+.card .ch .ic{color:var(--muted)}
+.card .amt{font-size:22px;font-weight:600;margin-top:12px}
+.card .ac{margin-top:16px}
+.pill{display:inline-flex;align-items:center;height:30px;padding:0 14px;border-radius:8px;border:1px solid var(--accent);background:transparent;font-weight:600;font-size:13px;color:var(--acc-ink)}
+.pill.fill{background:var(--accent);color:var(--on-accent)}
+.ic.spk{stroke-width:2}
+.eye{width:36px;height:36px;display:grid;place-items:center;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}
+.dlg-scrim{position:absolute;inset:0;background:rgba(0,0,0,.55);display:grid;place-items:center;z-index:5}
+.tenshu.light .dlg-scrim{background:rgba(32,32,32,.35)}
+.dlg{width:480px;border:1px solid var(--line);border-radius:16px;background:var(--panel);padding:24px;box-shadow:0 24px 64px rgba(0,0,0,.45)}
+.dlg h2{font-size:18px;font-weight:600}
+.dlg p{margin-top:10px;color:var(--muted)}
+.dlg .cv{margin-top:16px;padding:14px 16px;border:1px solid var(--line);border-radius:12px;background:var(--bg);display:flex;align-items:center;justify-content:space-between;gap:12px}
+.dlg .cv b{font-weight:600;font-size:16px}.dlg .cv .ic{color:var(--muted)}
+.dlg ul{margin-top:14px;display:flex;flex-direction:column;gap:6px;font-size:13px;color:var(--muted)}
+.dlg ul li{display:flex;gap:8px}.dlg ul li::before{content:"";width:4px;height:4px;border-radius:50%;background:var(--muted);margin-top:8px;flex:none}
+.dlg .act{display:flex;justify-content:flex-end;gap:8px;margin-top:22px}
+.state{font-size:13px;color:var(--muted);white-space:nowrap}
+.eye.tb{width:32px;height:32px}.eye:hover{background:var(--hover);color:var(--ink)}
+/* App preferences (Robert, 2026-10-29): a sliders icon button at the right end of the top bar (the gear stays with Cube Settings), styled like the eye, with an "App preferences" tooltip on hover or focus. */
+.tenshu .top{position:relative;z-index:8}
+.tenshu a.apg{position:relative;text-decoration:none;color:var(--muted)}.tenshu a.apg:hover{color:var(--ink)}
+.apg::after{content:attr(data-tip);position:absolute;top:calc(100% + 8px);right:0;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--muted);font-size:13px;font-weight:400;line-height:1.3;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .12s ease .25s}
+.apg:hover::after,.apg:focus-visible::after{opacity:1}
+/* shared top bar (Robert, 2026-10-29): the same bar on every screen, Launcher and Cube: 64px on the rail colour; on the right the hide-balances eye first, then the status chips, then App preferences; the eye and App preferences are borderless icons. */
+.tenshu .top{height:64px;padding:0 24px;gap:16px;background:var(--rail)}
+.top .brand .ic{width:20px;height:20px}
+.top .chips .eye:not(.apg){order:-1}
+.top .chips .eye{width:32px;height:32px;border:0;background:transparent}
+.top .chips .eye:hover{background:var(--hover);color:var(--ink)}
+/* on/off (Robert, 2026-10-29): a two-state setting is a switch; segmented controls are for real choices such as BTC | Sats. Same switch as Settings in the prototype. */
+.tog{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 12px 0 4px;border:1px solid var(--line);border-radius:16px;background:transparent;cursor:pointer;font-size:13px}
+.tog .kn{width:30px;height:18px;border-radius:9px;background:var(--line);position:relative;flex:none}
+.tog .kn::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--ink);transition:left .15s}
+.tog[aria-pressed="true"] .kn{background:var(--accent)}
+.tog[aria-pressed="true"] .kn::after{left:14px;background:var(--on-accent)}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}}" style="width:1440px;height:900px;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+  <header class="top">
+    <span class="brand"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg>Tenshu</span>
+    <div class="chips">
+      <button type="button" class="eye tb" aria-label="Hide balances" aria-pressed="false"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"></path><circle cx="9" cy="9" r="2.25"></circle></svg></button>
+      <span class="chip"><span class="ok" style="display:inline-flex;align-items:center;gap:5px"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Signed in</span></span>
+      <span class="chip"><span class="ok" style="display:inline-flex;align-items:center;gap:5px"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Connected</span></span>
+      <a class="eye apg" href="P-AppPrefs-InCube.dc.html" aria-label="App preferences" data-tip="App preferences"><svg class="ic s" aria-hidden="true" viewBox="0 0 24 24" style="stroke-width:1.75"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg></a>
+    </div>
+  </header>
+  <div class="body">
+    <nav class="side" aria-label="Cube navigation">
+      <div class="navp">
+        <div class="cubeid"><span class="av" aria-hidden="true"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg></span><span class="cubeidt"><b>Everyday</b><span><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Bitcoin mainnet</span></span><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="m5 7 4 4 4-4"/></svg></div>
+        <a class="ni" href="#"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"/><rect x="10.5" y="2.5" width="5" height="5" rx="1"/><rect x="2.5" y="10.5" width="5" height="5" rx="1"/><rect x="10.5" y="10.5" width="5" height="5" rx="1"/></svg><span>Overview</span></a><a class="ni" href="#"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2.5 1.5"/></svg><span>Activity</span></a><a class="ni" href="#"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/><path d="m6.5 9 1.8 1.8 3.5-3.5"/></svg><span>Backup &amp; protection</span></a>
+      </div>
+      <div class="mid">
+        <h2 class="gh">Wallets</h2>
+        <a class="ni on" href="#"><svg class="ic spk" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"></path></svg><span>Spark · Daily spending</span></a><a class="ni" href="#"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg><span>Vault · Family savings</span></a>
+      </div>
+      <div class="foot"><a class="ni" href="#"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="2.25"/><circle cx="9" cy="9" r="5"/><path d="M9 2v2M9 14v2M2 9h2M14 9h2M4.05 4.05l1.41 1.41M12.54 12.54l1.41 1.41M4.05 13.95l1.41-1.41M12.54 5.46l1.41-1.41"/></svg><span>Settings</span></a></div>
+    </nav>
+    <main class="main" style="position:relative">
+      <div class="phead ctl"><div class="in">
+        <div class="hrow">
+          <div><h1>Settings</h1><p class="idl"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Spark · Daily spending · Everyday · Bitcoin mainnet</p></div>
+          <div class="hact"><div class="seg" role="group" aria-label="Settings scope"><button type="button" aria-pressed="false"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg>Cube</button><button type="button" aria-pressed="false"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg>Vault</button><button type="button" aria-pressed="true"><svg class="ic s spk" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"></path></svg>Spark</button></div></div>
+        </div>
+        <nav class="tabs" aria-label="Sections"><button type="button" class="tab on" aria-current="page">Balances &amp; conversion</button><button type="button" class="tab">Lightning address</button><button type="button" class="tab">Payment checks</button><button type="button" class="tab">Advanced</button></nav>
+      </div></div>
+      <div class="scroll">
+        <div class="pg">
+          <section class="grp"><h3>US dollar balance (USDB)</h3><div class="rows">
+            <div class="row"><div><p class="t">Auto-convert received bitcoin</p><p class="d">Bitcoin that arrives in Spark is converted to USDB, so the whole wallet holds its dollar value. Saved on this device only: restoring the Cube elsewhere starts with it off.</p></div><button type="button" class="tog" aria-label="Auto-convert received bitcoin" aria-pressed="{{onP}}"><span class="kn"></span>{{onW}}</button></div>
+            <div class="row"><div><p class="t">Pay from USDB when bitcoin runs short</p><p class="d">A send uses bitcoin first, then converts just enough USDB to cover the rest. The review step shows the conversion before you confirm.</p></div><span class="state">Always on</span></div>
+          </div></section>
+          <section class="grp"><h3>Conversion</h3><div class="rows">
+            <div class="row"><div><p class="t">Max price change</p><p class="d">A conversion that would fill worse than this fails instead, and nothing moves.</p></div><button type="button" class="btn">0.5% <svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="m5 7 4 4 4-4"/></svg></button></div>
+            <div class="row"><div><p class="t">Swap by hand</p><p class="d">Move any amount between bitcoin and USDB. Also on the Spark page.</p></div><button type="button" class="btn">Swap BTC ⇄ USDB</button></div>
+          </div></section>
+        </div>
+      </div>
+      <sc-if value="{{confirmOff}}" hint-placeholder-val="{{ false }}">
+      <div class="dlg-scrim"><div class="dlg" role="alertdialog" aria-modal="true" aria-labelledby="dlgt" aria-describedby="dlgd">
+        <h2 id="dlgt">Turn off auto-convert?</h2>
+        <p id="dlgd">Your whole USDB balance converts back to bitcoin at the current rate. From then on, the price of bitcoin moves this wallet's value.</p>
+        <div class="cv"><b>10,376.19 USDB</b><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 6.5h11.5M11.5 3.5l3 3-3 3M15 11.5H3.5M6.5 8.5l-3 3 3 3"></path></svg><b>≈ 12,934,000 SATS</b></div>
+        <ul><li>Bitcoin you receive afterwards stays bitcoin.</li><li>You can still swap by hand from the Spark page.</li><li>The conversion fee and max price change apply.</li></ul>
+        <div class="act"><button type="button" class="btn" autofocus>Keep auto-convert</button><button type="button" class="btn acc">Turn off and convert</button></div>
+      </div></div>
+      </sc-if>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"confirmOff":{"editor":"boolean","default":true},"light":{"editor":"boolean","default":false},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+renderVals() {
+return {
+confirmOff: this.props.confirmOff,
+onP: this.props.confirmOff ? 'true' : 'false', onW: this.props.confirmOff ? 'On' : 'Off', offP: this.props.confirmOff ? 'false' : 'true',
+themeClass: this.props.light ? 'light' : ''
+};
+}
+}
+</script>
+</body>
+</html>

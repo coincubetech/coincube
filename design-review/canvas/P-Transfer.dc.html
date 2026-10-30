@@ -60,6 +60,8 @@ a{color:#f3821d}a:hover{color:#ffa54d}
 .ni:hover{background:var(--hover)}
 .ni.on{background:var(--selected);font-weight:600}
 .ni.on .ic{color:var(--acc-ink)}
+.ni{justify-content:flex-start}
+.ni>span{flex:1 1 auto;min-width:0;text-align:left}
 .attn{display:flex;align-items:center;gap:6px;margin:0 6px 8px;padding:9px 8px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-size:12.5px;line-height:1.3;text-decoration:none}
 .tenshu a.attn{color:var(--ink)}
 .attn .go{margin-left:auto;color:var(--acc-ink);font-weight:600}
@@ -103,7 +105,6 @@ a{color:#f3821d}a:hover{color:#ffa54d}
 .alt{display:flex;align-items:center;gap:10px;width:100%;margin-top:24px;padding:14px 12px;border:0;border-top:1px solid var(--line);background:none;cursor:pointer;text-align:left;color:var(--ink);border-radius:0}
 .alt:hover{background:var(--hover)}
 .alt .tx{flex:1}
-.alt.clone{margin:2px 0 6px 32px;width:calc(100% - 32px);padding:10px 12px;border:1px solid var(--line);border-radius:8px}
 .sgn li{display:grid;grid-template-columns:18px minmax(0,1fr) auto;column-gap:10px;align-items:center;min-height:44px;border-bottom:1px solid var(--line)}
 .sgn li .ic{color:var(--muted)}
 .mono{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:13px;color:var(--muted)}
@@ -190,6 +191,43 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 /* page shell (Robert, 2026-10-27): every Cube page starts one gutter from the side menu; only its right edge varies. Reading pages cap at --page-max; Activity is wide. */
 .tenshu{--gutter:clamp(24px,3vw,48px);--page-max:1120px}
 .main .pg{margin:0;max-width:calc(var(--page-max) + 2 * var(--gutter));padding:28px var(--gutter) 48px}
+/* page head (Robert, 2026-10-29): every Cube page pins its head as Activity does: title and Cube line left, page actions right, tabs sitting on a rule that spans the content pane; the page scrolls under it. */
+.main>.phead{position:sticky;top:0;z-index:6;flex:none;background:var(--bg);border-bottom:1px solid var(--line)}
+.phead>.in{max-width:calc(var(--page-max) + 2 * var(--gutter));padding:24px var(--gutter) 20px}
+.phead h1,.phead .ph{margin-top:0;font-size:22px;font-weight:600;line-height:1.25}
+.phead .back{margin-bottom:8px}.phead a.back{text-decoration:none}
+.phead .crumbs{margin-bottom:8px}.phead .crumbs .back{margin-bottom:0}
+.phead .hrow{display:flex;align-items:flex-end;justify-content:space-between;gap:16px}
+.phead .hrow>div:first-child{min-width:0}
+.phead .hact{display:flex;align-items:center;gap:8px;flex:none}
+.phead .tabs,.phead .subnav{border-bottom:0;margin-bottom:-20px}
+.phead .hd,.phead .ttl{margin:0}
+.main .pg{padding-top:24px}
+/* App preferences (Robert, 2026-10-29): a sliders icon button at the right end of the top bar (the gear stays with Cube Settings), styled like the eye, with an "App preferences" tooltip on hover or focus. */
+.tenshu .top{position:relative;z-index:8}
+.tenshu a.apg{position:relative;text-decoration:none;color:var(--muted)}.tenshu a.apg:hover{color:var(--ink)}
+.apg::after{content:attr(data-tip);position:absolute;top:calc(100% + 8px);right:0;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--muted);font-size:13px;font-weight:400;line-height:1.3;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .12s ease .25s}
+.apg:hover::after,.apg:focus-visible::after{opacity:1}
+/* shared top bar (Robert, 2026-10-29): the same bar on every screen, Launcher and Cube: 64px on the rail colour; on the right the hide-balances eye first, then the status chips, then App preferences; the eye and App preferences are borderless icons. */
+.tenshu .top{height:64px;padding:0 24px;gap:16px;background:var(--rail)}
+.top .brand .ic{width:20px;height:20px}
+.top .chips .eye:not(.apg){order:-1}
+.top .chips .eye{width:32px;height:32px;border:0;background:transparent}
+.top .chips .eye:hover{background:var(--hover);color:var(--ink)}
+/* sub-page head (Robert, 2026-10-29, from the page-header study): Back is the last action on the right of the head; steps sit on the rule. */
+.phead .hact .back{display:inline-flex;align-items:center;gap:6px;height:36px;margin:0;padding:0 12px 0 8px;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--ink);font-size:13px;font-weight:500;line-height:1;text-decoration:none;white-space:nowrap}
+.phead .hact .back:hover{background:var(--hover)}.phead .hact .back .ic{color:var(--muted)}
+.phead .hsteps{display:flex;gap:4px;margin:16px 0 -20px;padding:0;list-style:none}
+.phead .hsteps li{display:inline-flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:2px solid transparent;color:var(--muted);font-size:14px}
+.phead .hsteps .n{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;border:1px solid var(--line);font-size:12px;font-weight:600}
+.phead .hsteps li.cur{color:var(--ink);font-weight:600;border-bottom-color:var(--accent)}
+.phead .hsteps li.cur .n{background:var(--accent);border-color:var(--accent);color:var(--on-accent,#1a1208)}
+.phead .hsteps li.done .n{border-color:var(--good);color:var(--good)}
+/* Transfer steps on the head rule (Robert, 2026-10-29, page-header study) */
+.phead .stepper{margin:16px 0 -20px;padding:0;border:0;gap:4px}
+.phead .stepper li{flex:none;padding:10px 12px;border-bottom:2px solid transparent;font-size:14px}
+.phead .stepper li.cur{border-bottom-color:var(--accent)}
+.phead .stepper .n{width:20px;height:20px}
 </style>
 </helmet>
 <div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
@@ -201,15 +239,15 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
         <svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="6.5" r="3"/><path d="M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg>
         <span>alex@example.test</span><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Signed in</span>
       </a>
-      <div class="chip">
+      <a class="chip" href="P-Settings.dc.html" onClick="{{ toNode }}" title="Cube service · Connected" aria-label="Cube service · Connected. Open Node settings">
         <svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M7.5 10.5a3 3 0 0 0 4.2 0l2.3-2.3a3 3 0 0 0-4.2-4.2l-.9.9"/><path d="M10.5 7.5a3 3 0 0 0-4.2 0L4 9.8A3 3 0 0 0 8.2 14l.9-.9"/></svg>
         <span class="k">Cube service</span><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Connected</span>
-      </div>
+      </a>
       <button type="button" class="eye" aria-pressed="{{ hideP }}" aria-label="Hide balances" onClick="{{ toggleHide }}">
         <sc-if value="{{ shown }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/></svg></sc-if>
         <sc-if value="{{ hidden }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/><path d="M3 3l12 12"/></svg></sc-if>
       </button>
-      <a class="chip" href="P-AppPrefs-InCube.dc.html" title="App preferences" aria-label="App preferences" style="padding:0 10px"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 5h12M3 9h12M3 13h12"/><circle cx="7" cy="5" r="1.6" fill="var(--panel)"/><circle cx="12" cy="9" r="1.6" fill="var(--panel)"/><circle cx="6" cy="13" r="1.6" fill="var(--panel)"/></svg></a>
+      <a class="eye apg" href="P-AppPrefs-InCube.dc.html" aria-label="App preferences" data-tip="App preferences"><svg class="ic s" aria-hidden="true" viewBox="0 0 24 24" style="stroke-width:1.75"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg></a>
     </div>
   </header>
 
@@ -239,7 +277,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
       </div>
       <div class="mid">
         <h2 class="gh">Wallets</h2>
-        <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg><span>Spark · Daily spending</span></a>
+        <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path stroke-width="2" d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/></svg><span>Spark · Daily spending</span></a>
         <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg><span>Vault · Family savings</span></a>
         <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg><span>Liquid · Travel</span></a>
       </div>
@@ -250,11 +288,8 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
     </nav>
 
     <main class="main">
-      <div class="pg">
-        <a class="back" href="P-Overview.dc.html"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M11 4.5 6.5 9l4.5 4.5"/></svg>Overview</a>
-        <h1 class="ph">{{ title }}</h1>
-        <p class="idl"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Everyday · Bitcoin mainnet</p>
-
+      <div class="phead"><div class="in">
+          <div class="hrow"><div><h1 class="ph">{{ title }}</h1><p class="idl"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Everyday · Bitcoin mainnet</p></div><div class="hact"><a class="back" href="P-Overview.dc.html"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M11 4.5 6.5 9l4.5 4.5"/></svg>Back to Overview</a></div></div>
         <sc-if value="{{ showStepper }}" hint-placeholder-val="{{ true }}">
           <ol class="stepper" aria-label="Transfer steps">
             <sc-for list="{{ steps }}" as="s" hint-placeholder-count="5">
@@ -262,6 +297,9 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
             </sc-for>
           </ol>
         </sc-if>
+      </div></div>
+      <div class="pg">
+
 
         <sc-if value="{{ second.show }}" hint-placeholder-val="{{ false }}">
           <p class="ctx" role="status"><sc-if value="{{ second.open }}" hint-placeholder-val="{{ true }}"><svg class="ic s warn" aria-hidden="true" viewBox="0 0 18 18"><rect x="3.5" y="8" width="11" height="7.5" rx="1.5"/><path d="M6 8V5.75a3 3 0 0 1 6 0"/></svg></sc-if><sc-if value="{{ second.locked }}" hint-placeholder-val="{{ false }}"><svg class="ic s ok" aria-hidden="true" viewBox="0 0 18 18"><rect x="3.5" y="8" width="11" height="7.5" rx="1.5"/><path d="M6 8V5.75a3 3 0 0 1 6 0V8"/></svg></sc-if><span>{{ second.text }}</span></p>
@@ -277,15 +315,12 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
             <sc-for list="{{ fromRows }}" as="r" hint-placeholder-count="3">
               <label class="opt {{ r.cls }}" for="{{ r.id }}">
                 <input type="radio" name="xfer-from" id="{{ r.id }}" checked="{{ r.checked }}" disabled="{{ r.disabled }}" aria-describedby="{{ r.descId }}" onChange="{{ r.pick }}">
-                <sc-if value="{{ r.spark }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg></sc-if>
+                <sc-if value="{{ r.spark }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path stroke-width="2" d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/></svg></sc-if>
                 <sc-if value="{{ r.vault }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg></sc-if>
                 <sc-if value="{{ r.liquid }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg></sc-if>
                 <span><span class="nm">{{ r.name }}</span><span class="sub" id="{{ r.descId }}">{{ r.sub }}</span></span>
                 <span class="bal">{{ r.bal }}</span>
               </label>
-              <sc-if value="{{ r.clone }}" hint-placeholder-val="{{ false }}">
-                <button type="button" class="alt clone" onClick="{{ goSplit }}"><span class="mk" aria-hidden="true"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span><span class="tx">Create a Bitcoin Blake2b copy of this Vault…<span class="ds">New Blake2b Cube, same keys and policy</span></span><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="m7 4.5 4.5 4.5L7 13.5"/></svg></button>
-              </sc-if>
             </sc-for>
           </fieldset>
           <fieldset class="grp">
@@ -293,7 +328,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
             <sc-for list="{{ toRows }}" as="r" hint-placeholder-count="3">
               <label class="opt {{ r.cls }}" for="{{ r.id }}">
                 <input type="radio" name="xfer-to" id="{{ r.id }}" checked="{{ r.checked }}" aria-describedby="{{ r.descId }}" onChange="{{ r.pick }}">
-                <sc-if value="{{ r.spark }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg></sc-if>
+                <sc-if value="{{ r.spark }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path stroke-width="2" d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/></svg></sc-if>
                 <sc-if value="{{ r.vault }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg></sc-if>
                 <sc-if value="{{ r.liquid }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg></sc-if>
                 <sc-if value="{{ r.other }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg></sc-if>
@@ -377,7 +412,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
               <legend class="lg">Wallet in Archive</legend>
               <label class="opt on" for="dest-spark">
                 <input type="radio" name="xfer-dest" id="dest-spark" checked="{{ destChecked }}" aria-describedby="dest-spark-d" onChange="{{ noop }}">
-                <svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg>
+                <svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path stroke-width="2" d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/></svg>
                 <span><span class="nm">Spark</span><span class="sub" id="dest-spark-d"></span></span><span></span>
               </label>
             </fieldset>
@@ -436,81 +471,6 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
           </div>
         </sc-if>
 
-        <!-- CLONE THE VAULT TO BITCOIN BLAKE2B (step split, sub-state splitStage) -->
-        <sc-if value="{{ sp.explain }}" hint-placeholder-val="{{ false }}">
-          <h2 id="flow-h">Create a Bitcoin Blake2b copy of this Vault</h2>
-          <p class="lede">A new Bitcoin Blake2b Cube gets a Vault with these keys.</p>
-          <dl class="dl">
-            <div><dt>Source Vault</dt><dd>Vault · Family savings <span class="muted">· Everyday · Bitcoin mainnet</span></dd></div>
-            <div><dt>Policy</dt><dd>2-of-3 synthetic policy <span class="muted">· recovery after 180 days, 1-of-2</span></dd></div>
-            <div><dt>Signers</dt><dd><ul class="sgn">
-              <sc-for list="{{ signers }}" as="g" hint-placeholder-count="3">
-                <li><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="6" cy="11.5" r="3"/><path d="M8.2 9.3 14.5 3M12 5.5l1.9 1.9M10.3 7.2l1.5 1.5"/></svg><span>{{ g.name }}</span><span class="mono">{{ g.fp }}</span></li>
-              </sc-for>
-            </ul></dd></div>
-          </dl>
-          <div class="acts"><button type="button" class="btn" onClick="{{ back }}">Back</button><span class="sp"></span><button type="button" class="btn pri" onClick="{{ sp.toNew }}">Continue</button></div>
-        </sc-if>
-        <sc-if value="{{ sp.newcube }}" hint-placeholder-val="{{ false }}">
-          <h2 id="flow-h">New Cube</h2>
-          <div class="fld">
-            <label for="clone-name">Cube name</label>
-            <input id="clone-name" class="txt" type="text" autocomplete="off" value="{{ sp.name }}" onInput="{{ sp.onName }}">
-          </div>
-          <div class="fld">
-            <span style="font-weight:600" id="clone-net-l">Network</span>
-            <p class="netfix" aria-labelledby="clone-net-l"><span class="mk" aria-hidden="true"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span><span>Bitcoin Blake2b mainnet</span></p>
-          </div>
-          <sc-if value="{{ sp.usePin }}" hint-placeholder-val="{{ true }}">
-            <div class="fld">
-              <label for="clone-pin">PIN</label>
-              <input id="clone-pin" class="pin" type="password" inputmode="numeric" autocomplete="new-password" value="{{ sp.pin1 }}" onInput="{{ sp.onPin1 }}">
-            </div>
-            <div class="fld">
-              <label for="clone-pin2">Confirm PIN</label>
-              <input id="clone-pin2" class="pin" type="password" inputmode="numeric" autocomplete="new-password" value="{{ sp.pin2 }}" aria-invalid="{{ sp.mismatchA }}" aria-describedby="clone-pin2-err" onInput="{{ sp.onPin2 }}">
-              <sc-if value="{{ sp.mismatch }}" hint-placeholder-val="{{ false }}"><span class="err" id="clone-pin2-err" role="alert"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5v4M9 12.25v.01"/></svg>PINs don't match</span></sc-if>
-              <div><button type="button" class="btn" onClick="{{ sp.toKey }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="6" cy="11.5" r="3"/><path d="M8.2 9.3 14.5 3M12 5.5l1.9 1.9M10.3 7.2l1.5 1.5"/></svg>Use passkey</button></div>
-            </div>
-          </sc-if>
-          <sc-if value="{{ sp.useKey }}" hint-placeholder-val="{{ false }}">
-            <div class="fld">
-              <p class="netfix" role="status"><svg class="ic s ok" aria-hidden="true" viewBox="0 0 18 18"><circle cx="6" cy="11.5" r="3"/><path d="M8.2 9.3 14.5 3M12 5.5l1.9 1.9M10.3 7.2l1.5 1.5"/></svg>Passkey will be set on this device</p>
-              <div><button type="button" class="lbtn" onClick="{{ sp.toPin }}">Use a PIN instead</button></div>
-            </div>
-          </sc-if>
-          <p class="note"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 8.25v4M9 5.75v.01"/></svg>Same seed as this Vault.</p>
-          <div class="acts"><button type="button" class="btn" onClick="{{ sp.toExplain }}">Back</button><span class="sp"></span><button type="button" class="btn pri" disabled="{{ sp.cannotCreate }}" onClick="{{ sp.toCreate }}">Create Cube</button></div>
-        </sc-if>
-        <sc-if value="{{ sp.creating }}" hint-placeholder-val="{{ false }}">
-          <h2 id="flow-h">Creating {{ sp.name }}</h2>
-          <p class="idl" style="margin-top:8px"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt="">Bitcoin Blake2b mainnet</p>
-          <ol class="checks" aria-live="polite" aria-label="Creation steps">
-            <sc-for list="{{ sp.rows }}" as="k" hint-placeholder-count="4">
-              <li>
-                <sc-if value="{{ k.done }}" hint-placeholder-val="{{ true }}"><svg class="ic ok" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg></sc-if>
-                <sc-if value="{{ k.run }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5" stroke-dasharray="3 3"/><path d="M9 5.5V9l2 1.5"/></svg></sc-if>
-                <sc-if value="{{ k.wait }}" hint-placeholder-val="{{ false }}"><svg class="ic muted" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/></svg></sc-if>
-                <span class="tx">{{ k.text }}</span><span class="sv">{{ k.status }}</span>
-              </li>
-            </sc-for>
-          </ol>
-          <p class="val"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5 16 15H2z"/><path d="M9 7.5v3M9 12.75v.01"/></svg>Mechanics subject to source validation</p>
-          <div class="acts"><span class="sp"></span><button type="button" class="btn pri" disabled="{{ sp.notReady }}" onClick="{{ sp.toDone }}">Continue</button></div>
-        </sc-if>
-        <sc-if value="{{ sp.done }}" hint-placeholder-val="{{ false }}">
-          <div class="donehd"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg><h2 id="flow-h">{{ sp.name }} created</h2></div>
-          <p class="idl" style="margin-top:8px"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt="">Bitcoin Blake2b mainnet · Locked</p>
-          <p style="margin-top:16px">Your coins now exist on both chains and can be spent separately.</p>
-          <div class="acts top0">
-            <a class="btn pri" href="P-Launcher.dc.html">Open the new Cube</a>
-            <div class="secact">
-              <a class="btn" href="P-Split.dc.html" aria-describedby="split-d" style="align-self:flex-start">Split coins now</a>
-              <p class="cap" id="split-d">Splitting separates each coin into a Bitcoin-only and a Blake2b-only coin. Two transactions, then confirmations on each chain.</p>
-            </div>
-          </div>
-        </sc-if>
-
         </section>
         <p class="cap synth">Prototype · synthetic Cubes, balances and quotes · limits, routes and fees come from the rails, subject to source validation</p>
       </div>
@@ -518,7 +478,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
   </div>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"step":{"editor":"enum","options":["fromto","pickcube","unlock","amount","quote","done","split"],"default":"fromto","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"btcb2Beta":{"editor":"boolean","default":true,"section":"Review"},"$preview":{"width":1440,"height":900}}'>
+<script type="text/x-dc" data-dc-script data-props='{"step":{"editor":"enum","options":["fromto","pickcube","unlock","amount","quote","done"],"default":"fromto","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":900}}'>
 class Component extends DCLogic {
   constructor(p){super(p); try { const bump = () => { try { this.setState({ protoTick: Date.now() }); } catch (e) {} }; window.addEventListener('tenshu-proto', bump); window.addEventListener('storage', bump); } catch (e) {}this.state={k:null,hide:null,lockAsk:false};}
   renderVals(){
@@ -528,11 +488,10 @@ class Component extends DCLogic {
     let B2B = false; try { B2B = localStorage.getItem('tenshu.proto.b2b') === '1'; } catch (e) {}
     const P=this.props,self=this;
     const lever=P.step||'fromto';
-    const init={for:lever,step:lever,from:lever==='split'?'vault':'spark',stage:'explain',prog:0,cname:'Family savings · Blake2b',to:'other',cube:'archive',phase:'pin',method:'pin',sats:10000,unit:'sats',text:null,cmethod:'pin',pin1:'',pin2:''};
+    const init={for:lever,step:lever,from:'spark',to:'other',cube:'archive',phase:'pin',method:'pin',sats:10000,unit:'sats',text:null};
     const S=(this.state.k&&this.state.k.for===lever)?this.state.k:init;
     const set=(patch)=>self.setState({k:Object.assign({},S,patch)});
     const hb=!!P.hideBalances;
-    const beta=P.btcb2Beta!==false&&B2B;
     const hide=(this.state.hide&&this.state.hide.for===hb)?this.state.hide.v:hb;
     const D='••••••';
     const W={
@@ -547,8 +506,8 @@ class Component extends DCLogic {
     const go=(st)=>()=>set({step:st});
 
     // back: one step earlier in whichever path is active
-    const prev={pickcube:'fromto',unlock:'pickcube',amount:cross?'unlock':'fromto',quote:'amount',split:'fromto'};
-    const back=()=>set({step:prev[step]||'fromto',phase:'pin',from:step==='split'?'vault':S.from});
+    const prev={pickcube:'fromto',unlock:'pickcube',amount:cross?'unlock':'fromto',quote:'amount'};
+    const back=()=>set({step:prev[step]||'fromto',phase:'pin',from:S.from});
 
     const icons=(k)=>({spark:k==='spark',vault:k==='vault',liquid:k==='liquid',other:k==='other'});
     const fromRows=['spark','vault','liquid'].map((k)=>{
@@ -557,7 +516,6 @@ class Component extends DCLogic {
         id:'from-'+k,descId:'from-'+k+'-d',name:W[k].name,bal:bal(k),
         sub:empty?'Empty':'',
         checked:S.from===k,disabled:false,cls:S.from===k?'on':'',
-        clone:k==='vault'&&S.from==='vault'&&beta,
         pick:()=>set({from:k,to:S.to===k?'other':S.to})
       });
     });
@@ -624,12 +582,10 @@ class Component extends DCLogic {
       fee:fee+' SATS',total:fmt(sats+fee)+' SATS'
     };
 
-    const pathSteps=step==='split'
-      ?[['explain','Source'],['newcube','New Cube'],['creating','Create'],['done','Done']]
-      :cross
+    const pathSteps=cross
       ?[['fromto','Wallets'],['pickcube','Other Cube'],['unlock','Unlock'],['amount','Amount'],['quote','Review']]
       :[['fromto','Wallets'],['amount','Amount'],['quote','Review']];
-    const ix=step==='split'?pathSteps.findIndex((p)=>p[0]===S.stage)+(S.stage==='done'?1:0):step==='done'?pathSteps.length:pathSteps.findIndex((p)=>p[0]===step);
+    const ix=step==='done'?pathSteps.length:pathSteps.findIndex((p)=>p[0]===step);
     const steps=pathSteps.map((p,i)=>({num:String(i+1),isDone:i<ix,notDone:!(i<ix),label:p[1],
       cls:i<ix?'done':(i===ix?'cur':''),cur:i===ix?'step':'false',sr:i<ix?', done':(i===ix?', current':'')}));
 
@@ -637,41 +593,27 @@ class Component extends DCLogic {
     const second={show:cross&&(secondOpen||step==='done'),open:secondOpen,locked:step==='done',
       text:secondOpen?'Archive · Bitcoin mainnet · unlocked for this transfer':'Archive is locked again.'};
 
-    // clone flow: explain -> newcube -> creating (timed checks) -> done
-    const CR=['Checking Bitcoin Blake2b admission','Creating Cube','Creating Vault with mirrored policy','Registering signers'];
-    const tick=()=>{const cur=self.state.k;if(!cur||cur.stage!=='creating'||cur.prog>=CR.length)return;self.setState({k:Object.assign({},cur,{prog:cur.prog+1})});setTimeout(tick,700);};
-    const mismatch=S.cmethod!=='key'&&S.pin2!==''&&S.pin1!==S.pin2;
-    const cannotCreate=S.cmethod!=='key'&&(S.pin1===''||S.pin1!==S.pin2);
-    const sp={explain:step==='split'&&S.stage==='explain',newcube:step==='split'&&S.stage==='newcube',creating:step==='split'&&S.stage==='creating',done:step==='split'&&S.stage==='done',
-      name:S.cname,onName:(e)=>set({cname:(e&&e.target)?e.target.value:''}),
-      toNew:()=>set({stage:'newcube'}),toExplain:()=>set({stage:'explain'}),
-      toCreate:()=>{if(cannotCreate)return;set({stage:'creating',prog:0});setTimeout(tick,700);},toDone:()=>set({stage:'done'}),
-      usePin:S.cmethod!=='key',useKey:S.cmethod==='key',toKey:()=>set({cmethod:'key'}),toPin:()=>set({cmethod:'pin'}),
-      pin1:S.pin1,pin2:S.pin2,onPin1:(e)=>set({pin1:(e&&e.target)?e.target.value:''}),onPin2:(e)=>set({pin2:(e&&e.target)?e.target.value:''}),
-      mismatch:mismatch,mismatchA:mismatch?'true':'false',cannotCreate:cannotCreate,
-      notReady:S.prog<CR.length,
-      rows:CR.map((t,i)=>i<S.prog?{text:t,status:'Done',done:true,run:false,wait:false}:i===S.prog?{text:t+'…',status:'In progress',done:false,run:true,wait:false}:{text:t,status:'Waiting',done:false,run:false,wait:true})};
-    const signers=[{name:'This device',fp:'a1b2c3d4'},{name:"Keychain · Alex's phone",fp:'e5f6a7b8'},{name:'Hardware · Ledger-style device',fp:'c9d0e1f2'}];
-    const titles={fromto:'Transfer',pickcube:'Transfer',unlock:'Transfer',amount:'Transfer',quote:'Transfer',done:'Transfer',split:'Bitcoin Blake2b copy'};
     return {
+
+      toNode:()=>{ try { localStorage.setItem('tenshu.proto.settingsScope', JSON.stringify({scope:'vault',tab:'node'})); } catch (e) {} },
       lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
       themeClass:this.props.forceTheme?(this.props.forceTheme==='light'?'light':''):((THEME==='light'||(THEME!=='dark'&&(P.theme||'dark')==='light'))?'light':''),motionClass:P.reducedMotion?'reduced':'',
       hideP:hide?'true':'false',shown:!hide,hidden:hide,
       lock:{idle:!self.state.lockAsk,asking:!!self.state.lockAsk,ask:()=>self.setState({lockAsk:true}),cancel:()=>self.setState({lockAsk:false})},
       toggleHide:()=>self.setState({hide:{for:hb,v:!hide}}),
-      title:titles[step]||'Transfer',
-      showStepper:true,sp:sp,signers:signers,
+      title:'Transfer',
+      showStepper:true,
       contDisabled:W[S.from].sats===0,contNote:W[S.from].sats===0?W[S.from].name+' has nothing to transfer.':'',steps:steps,second:second,
-      is:{fromto:step==='fromto',pickcube:step==='pickcube',unlock:step==='unlock',amount:step==='amount',quote:step==='quote',done:step==='done',split:step==='split'},
+      is:{fromto:step==='fromto',pickcube:step==='pickcube',unlock:step==='unlock',amount:step==='amount',quote:step==='quote',done:step==='done'},
       cross:cross,same:!cross,
       fromRows:fromRows,toRows:toRows,fromName:W[S.from].name,toName:W[S.to]?W[S.to].name:'',
       fromtoNext:()=>set({step:cross?'pickcube':'amount',phase:'pin'}),
-      goSplit:()=>set({step:'split',stage:'explain',prog:0,cmethod:'pin',pin1:'',pin2:''}),back:back,
+      back:back,
       cubes:cubes,cubeName:'Archive',pickNext:()=>set({step:'unlock',phase:'pin',cube:'archive'}),
       destChecked:true,noop:()=>{},
       un:un,avail:hide?D:fmt(avail)+' SATS',amt:amt,q:q,
       confirm:go('done'),
-      restart:()=>set({step:'fromto',stage:'explain',prog:0,to:'other',phase:'pin',sats:10000,text:null,cmethod:'pin',pin1:'',pin2:''})
+      restart:()=>set({step:'fromto',to:'other',phase:'pin',sats:10000,text:null})
     };
   }
 }

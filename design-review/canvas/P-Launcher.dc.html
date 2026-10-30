@@ -12,6 +12,12 @@
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 body{margin:0}
+.oshell{position:relative;width:1440px;height:900px;overflow:hidden}
+.flash{position:absolute;inset:0;z-index:50;pointer-events:none}
+/* finale (Robert, 2026-10-29: Flash): the face rushes forward and the screen washes in the Cube's edge colour, then the Overview */
+.flash{animation:flat 1700ms ease-out both}
+@keyframes flat{0%{opacity:0}42%{opacity:.92}55%{opacity:.92}100%{opacity:0}}
+@media (prefers-reduced-motion: reduce){.flash{animation:none;opacity:0}}
 .tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff}
 .tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8}
 .tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
@@ -20,7 +26,7 @@ body{margin:0}
 a{color:#f3821d}a:hover{color:#ffa54d}
 
 /* scene tokens (V2): flat neutral greys, top lightest; edge hue = network family. --face-b = the two back faces and the flat panel laid over them */
-.tenshu{--floor:#1b1c1a;--floor-rule:#2b2c29;--face-t:#41423e;--face-l:#2e2f2c;--face-r:#262724;--face-b:#2a2b28;--edge-btc:rgba(243,130,29,.6);--edge-b2b:rgba(212,166,42,.6);--edge-test:rgba(185,187,181,.6);--shadow:rgba(0,0,0,.6);--on-accent:#201407;--spin:cubic-bezier(0.22,1,0.36,1);font-variant-numeric:tabular-nums}
+.tenshu{--floor:#1b1c1a;--floor-rule:#2b2c29;--face-t:#41423e;--face-l:#2e2f2c;--face-r:#262724;--face-b:#2a2b28;--edge-btc:rgba(243,130,29,.6);--edge-b2b:rgba(212,166,42,.6);--edge-test:rgba(185,187,181,.6);--shadow:rgba(0,0,0,.6);--on-accent:#1a1208;--spin:cubic-bezier(0.22,1,0.36,1);font-variant-numeric:tabular-nums}
 .tenshu.light{--floor:#efebe3;--floor-rule:#e0d9cd;--face-t:#e6e0d5;--face-l:#d6cfc2;--face-r:#c9c1b2;--face-b:#e6e0d5;--edge-test:rgba(87,90,84,.6);--shadow:rgba(70,52,30,.3)}
 .tenshu button{font:inherit;color:inherit}
 .grow{flex:1}
@@ -66,13 +72,41 @@ a.tbtn:hover{color:var(--ink)}
 .quiet .chip.on{background:none;border-color:var(--line);font-weight:400}
 .quiet .dock .btn.primary{background:none;border-color:var(--line)}
 
+
+/* design B backdrop: a block rail floating above the Cubes (recent blocks, tip, mempool queue). Static at rest; one 900ms slide when a block lands */
+.brail{position:absolute;left:50%;top:84px;transform:translateX(-50%);width:960px;display:flex;flex-direction:column;align-items:center;gap:6px;pointer-events:none}
+.brow{display:flex;align-items:flex-end;gap:3px;height:12px}
+.brow .bk{display:block;flex:none;border-radius:1px;background:var(--line)}
+.brow .bq{display:block;flex:none;height:6px;margin-left:5px;box-sizing:border-box;border:1px dashed var(--line);border-radius:1px}
+.brow.ra{animation:railA 900ms var(--spin)}
+.brow.rb{animation:railB 900ms var(--spin)}
+@keyframes railA{from{transform:translateX(26px)}to{transform:none}}
+@keyframes railB{from{transform:translateX(26px)}to{transform:none}}
+.bbase{width:100%;height:1px;margin-top:-6px;background:linear-gradient(90deg,transparent,var(--line) 18%,var(--line) 82%,transparent)}
+.bstats{display:flex;gap:40px;margin:14px 0 0;padding:0;list-style:none}
+.bstats li{display:flex;flex-direction:column;align-items:center;gap:2px}
+.bstats .bl{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.bstats .bv{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:13px;color:var(--ink)}
+.bstats .bs{font-size:11px;color:var(--muted)}
+.srcwrap{position:relative;margin-right:8px}
+.srcbtn{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 10px;border-radius:6px;border:1px solid transparent;background:none;cursor:pointer;font-size:13px;color:var(--muted)}
+.srcbtn:hover,.srcbtn[aria-expanded="true"]{border-color:var(--line);background:var(--panel)}
+.srcbtn .sdot{width:8px;height:8px;border-radius:2px;border:1px solid var(--line);box-sizing:border-box}
+.srcbtn svg{width:14px;height:14px}
+.srcmenu{position:absolute;right:0;bottom:calc(100% + 8px);width:300px;padding:6px;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 18px 40px -12px rgba(0,0,0,.5);z-index:8}
+.srcmenu .mh{margin:6px 10px 4px;font-size:12px;color:var(--muted)}
+.srcmenu .mh b{color:var(--ink);font-weight:600}
+.srcmenu .mi{color:var(--ink)}
+.srcmenu a.mi{text-decoration:none;color:var(--ink)}
+.srcmenu hr{border:0;border-top:1px solid var(--line);margin:6px 4px}
+
 /* stage */
 .stage{flex:1;min-height:0;position:relative;overflow:hidden}
 .floor{position:absolute;left:0;right:0;bottom:0;background:var(--floor);clip-path:polygon(14% 0,86% 0,100% 100%,0 100%)}
 .floor::before{content:"";position:absolute;top:0;left:14%;right:14%;height:1px;background:var(--floor-rule)}
 .field{position:absolute;inset:0;overflow-x:hidden;overflow-y:auto}
 .rows{display:flex;flex-direction:column;box-sizing:border-box}
-.rows.big{padding:168px 48px 24px}
+.rows.big{padding:236px 48px 24px}
 .rows.mid{padding:40px 48px 24px;gap:12px}
 .rows.dense{padding:28px 48px 24px;gap:8px}
 .row{display:flex;justify-content:center}
@@ -100,6 +134,29 @@ a.tbtn:hover{color:var(--ink)}
 .cube.test{--edge:var(--edge-test)}
 .f{position:absolute;inset:0;box-sizing:border-box;border:1.5px solid var(--edge);overflow:hidden;display:flex;align-items:center;justify-content:center;color:var(--ink);backface-visibility:hidden}
 .cube.test .f{border-style:dashed}
+/* GHOST (Robert, 2026-10-29): a Cube registered in Connect but not on this device, shown in the row with the local Cubes.
+   See-through in its network's edge colour: all six edges drawn so the back corner shows through, no floor shadow, a dashed footprint instead.
+   Recovery Kit in Connect = solid edges and a faint fill; no Recovery Kit = dotted edges, no fill. Left face: a cloud. Right face: the kit, ticked or struck through */
+.tenshu{--ghost-fill:rgba(245,240,232,.04);--ghost-btc:rgba(243,130,29,.5);--ghost-b2b:rgba(212,166,42,.5);--ghost-test:rgba(185,187,181,.5)}
+.tenshu.light{--ghost-fill:rgba(32,32,32,.035);--ghost-btc:rgba(176,86,8,.55);--ghost-b2b:rgba(140,104,10,.55);--ghost-test:rgba(87,90,84,.5)}
+.cube.btc{--gedge:var(--ghost-btc)}.cube.b2b{--gedge:var(--ghost-b2b)}.cube.test{--gedge:var(--ghost-test)}
+.cube.ghost .f{background:transparent;border-color:var(--gedge);color:var(--muted);backface-visibility:visible}
+.cube.ghost.kit .f{background:var(--ghost-fill)}
+.cube.ghost.nokit .f{border-style:dotted;border-width:2px}
+.cube.ghost .coin img{filter:grayscale(1);opacity:.55}
+.cube.ghost.kit .pad{color:var(--good)}
+.cube.ghost .f.panel{background:var(--face-b);color:var(--ink)}
+/* a restored ghost fills in: its faces and edges ease from see-through to solid as it becomes a local Cube */
+.cube .f{transition:background-color 700ms var(--spin),border-color 700ms var(--spin)}
+.gfoot{display:none;position:absolute;left:50%;top:calc(47.5% + var(--s) * .5);width:calc(var(--s) * 1.3);height:calc(var(--s) * .5);transform:translate(-46%,-46%);border-radius:50%;border:1px dashed var(--line);box-sizing:border-box;transition:opacity 500ms var(--spin)}
+.cb.ghostcb .gfoot{display:block}
+.cb.ghostcb .shadow{display:none}
+.cb.active .gfoot{opacity:0}
+.cb.ghostcb:not(.dim):not(.active) .scene{opacity:.85}
+.cb.ghostcb .nm{color:var(--muted)}
+.av.ghost{background:none;border:1px dashed var(--muted);color:var(--muted);box-sizing:border-box}
+.av.ghost svg{width:16px;height:16px}
+.st.warn{color:var(--warn)}
 .f.t{background:var(--face-t);transform:rotateX(90deg) translateZ(calc(var(--s) / 2))}
 .f.l{background:var(--face-l);transform:rotateY(-90deg) translateZ(calc(var(--s) / 2))}
 .f.r{background:var(--face-r);transform:translateZ(calc(var(--s) / 2))}
@@ -178,6 +235,9 @@ fieldset.fld{border:0;margin:24px 0 0;padding:0;min-width:0}
 .pineye[aria-pressed="true"]{border-color:var(--line);color:var(--ink)}
 .pineye svg{width:20px;height:20px}
 .fld .help{margin-top:6px}
+/* restore: a second row confirms the new PIN; the two fieldsets sit closer so the face still fits */
+fieldset.fld.confirm{margin-top:14px}
+.help.tone-warn{color:var(--warn)}
 .help{font-size:12px;color:var(--muted)}
 .steps{list-style:none;margin:20px 0 0;padding:16px 0 0;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:14px}
 .step{display:flex;align-items:flex-start;gap:10px;font-size:14px;line-height:20px}
@@ -194,11 +254,77 @@ fieldset.fld{border:0;margin:24px 0 0;padding:0;min-width:0}
 a.btn.primary:hover,.btn.primary:hover{background:#ffa54d;border-color:#ffa54d;color:var(--on-accent)}
 .fc .linkbtn{font-size:14px}
 
+/* OPENING ON THE CUBE (Robert, 2026-10-29). After the PIN or passkey the Cube tumbles to its bottom face, the one face nothing used yet,
+   and grows to a 700px face (1.67x the 420px credentials face: the most that fits between the bars).
+   The face edge powers on: a flicker, then a breathing glow that brightens with each loader stage. No artwork, no dots */
+.cube.btc{--glow:243,130,29}.cube.b2b{--glow:212,166,42}.cube.test{--glow:185,187,181}
+.f.bt{background:var(--face-b);transform:rotateX(-90deg) translateZ(calc(var(--s) / 2));overflow:visible}
+.f.bt::before,.f.bt::after{content:"";position:absolute;inset:-1.5px;border:1.5px solid rgb(var(--glow));pointer-events:none;opacity:0}
+.f.bt::before{box-shadow:0 0 2px rgba(var(--glow),.9),0 0 7px rgba(var(--glow),.45),inset 0 0 5px rgba(var(--glow),.22);transition:opacity 900ms var(--spin)}
+.f.bt::after{box-shadow:0 0 4px rgba(var(--glow),.9),0 0 14px rgba(var(--glow),.5),inset 0 0 9px rgba(var(--glow),.3)}
+.f.bt.on::before{opacity:var(--lvl,.35)}
+.f.bt.on::after{animation:ignite 1300ms linear 700ms both,breathe 1900ms ease-in-out 2000ms infinite}
+.f.bt.peak::before{opacity:1}
+.f.bt.peak::after{animation:none;opacity:1}
+@keyframes ignite{0%{opacity:0}6%{opacity:.9}10%{opacity:.05}18%{opacity:.7}23%{opacity:.1}34%{opacity:1}40%{opacity:.35}55%{opacity:.95}100%{opacity:.25}}
+@keyframes breathe{0%,100%{opacity:.25}50%{opacity:.95}}
+.fc.load{width:700px;height:700px;padding:56px 72px;align-items:center;justify-content:center;text-align:center;animation:loadin 700ms var(--spin) 500ms both}
+@keyframes loadin{from{opacity:0}to{opacity:1}}
+.lhead{position:absolute;left:0;right:0;top:44px;margin:0;display:flex;align-items:center;justify-content:center;gap:8px;font-size:14px;color:var(--muted)}
+.lhead b{color:var(--ink);font-weight:600}
+.lhead .coin{width:18px;height:18px}
+.lquote{margin:0;max-width:520px}
+.lquote blockquote{margin:0;font-size:22px;line-height:1.5}
+.lquote figcaption{margin-top:12px;font-size:13px;color:var(--muted)}
+.lstage{margin:40px 0 0;font-size:15px;color:var(--muted);min-height:22px}
+.lstage.ready{color:var(--good);font-weight:500}
+/* edge glow (Robert, 2026-10-29: the bright variant): a wider halo, a stronger inner glow, the face itself warming with each stage, a deeper breath */
+.glow-bright .f.bt.on{border-width:2px}
+.glow-bright .f.bt::before,.glow-bright .f.bt::after{inset:-2px;border-width:2px}
+.glow-bright .f.bt::before{box-shadow:0 0 2px rgba(var(--glow),1),0 0 8px rgba(var(--glow),.75),0 0 22px rgba(var(--glow),.4),inset 0 0 12px rgba(var(--glow),.35)}
+.glow-bright .f.bt::after{box-shadow:0 0 3px rgba(var(--glow),1),0 0 12px rgba(var(--glow),.85),0 0 34px rgba(var(--glow),.5),inset 0 0 20px rgba(var(--glow),.45)}
+.glow-bright .f.bt.on{background:linear-gradient(rgba(var(--glow),calc(var(--lvl,.35) * .09)),rgba(var(--glow),calc(var(--lvl,.35) * .09))),var(--face-b);transition:background 900ms var(--spin)}
+.glow-bright .f.bt.on::after{animation:ignite 1300ms linear 700ms both,breatheB 1700ms ease-in-out 2000ms infinite}
+@keyframes breatheB{0%,100%{opacity:.4}50%{opacity:1}}
+.glow-bright .f.bt.peak::after{animation:none;opacity:1}
+/* a stalled loader: after a wait the face offers a way out */
+.lslow{margin:18px 0 0;font-size:13px;color:var(--muted);animation:loadin 500ms var(--spin) both}
+.lslow .linkbtn{font-size:13px}
+/* List view: the same loading content, full screen under the header; the glowing edge is the screen's own frame */
+.oroot{position:relative}
+.lload{position:absolute;left:0;right:0;top:64px;bottom:28px;z-index:9;background:var(--bg);display:flex;align-items:center;justify-content:center;text-align:center;animation:loadin 500ms var(--spin) both}
+.lframe{position:absolute;inset:20px;border:1.5px solid rgba(var(--glow),.35);border-radius:14px;pointer-events:none;transition:inset 950ms cubic-bezier(.55,0,.9,.4)}
+.lframe::before,.lframe::after{content:"";position:absolute;inset:-1.5px;border:1.5px solid rgb(var(--glow));border-radius:14px;opacity:0}
+.lframe::before{box-shadow:0 0 6px rgba(var(--glow),.9),0 0 22px rgba(var(--glow),.45),inset 0 0 16px rgba(var(--glow),.22);opacity:var(--lvl,.35);transition:opacity 900ms var(--spin)}
+.lframe::after{box-shadow:0 0 12px rgba(var(--glow),.9),0 0 46px rgba(var(--glow),.5),inset 0 0 30px rgba(var(--glow),.3);animation:ignite 1300ms linear 300ms both,breathe 1900ms ease-in-out 1600ms infinite}
+.glow-bright .lframe{border-width:2px}
+.glow-bright .lframe::before{box-shadow:0 0 6px rgba(var(--glow),1),0 0 26px rgba(var(--glow),.75),0 0 70px rgba(var(--glow),.4),inset 0 0 40px rgba(var(--glow),.35)}
+.glow-bright .lframe::after{box-shadow:0 0 10px rgba(var(--glow),1),0 0 40px rgba(var(--glow),.85),0 0 110px rgba(var(--glow),.5),inset 0 0 70px rgba(var(--glow),.45);animation:ignite 1300ms linear 300ms both,breatheB 1700ms ease-in-out 1600ms infinite}
+.glow-bright .lload{background:radial-gradient(ellipse at 50% 50%,rgba(var(--glow),calc(var(--lvl,.35) * .08)),transparent 70%),var(--bg)}
+.lload.peak .lframe::before{opacity:1}
+.lload.peak .lframe::after{animation:none;opacity:1}
+.lload.fin .lframe{inset:-60px}
+.lload .lhead{top:64px}
+.lcol{display:flex;flex-direction:column;align-items:center}
+.lload .lquote{max-width:640px}
+
+/* the rest of the Launcher steps further back while a Cube opens */
+.cb.dim.deep .scene{opacity:.12}
+.cb.dim.deep .lbl{opacity:.35}
+.lbl{transition:opacity 500ms var(--spin)}
+/* finale: the face rushes forward through the viewer (ease-in; perspective makes it accelerate) */
+.cb.finale .cube{transition:transform 950ms cubic-bezier(.55,0,.9,.4)}
+
 /* empty / no-match */
 .empty{position:absolute;left:0;right:0;top:32%;display:flex;flex-direction:column;align-items:center;gap:8px;text-align:center}
 .empty h2{margin:0;font-size:20px;font-weight:600}
 .empty p{margin:0;color:var(--muted);font-size:14px}
 .empty .ghost{width:64px;height:64px;margin-bottom:8px;color:var(--muted)}
+.empty p a{color:var(--acc-ink)}
+/* a new device: nothing local yet, but Connect has Cubes. The ghosts stand in the row; this line says what they are */
+.gintro{position:absolute;left:0;right:0;top:118px;display:flex;flex-direction:column;align-items:center;gap:6px;text-align:center;pointer-events:none;z-index:1}
+.gintro h2{margin:0;font-size:20px;font-weight:600}
+.gintro p{margin:0;max-width:560px;color:var(--muted);font-size:14px}
 
 /* bottom bar: create/import left, Key right. The Key card opens on hover, focus or click (click pins/unpins); Escape closes */
 .bottom{height:64px;flex:none;display:flex;align-items:center;gap:24px;padding:0 24px;border-top:1px solid var(--line);background:var(--rail);position:relative;z-index:8}
@@ -207,8 +333,19 @@ a.btn.primary:hover,.btn.primary:hover{background:#ffa54d;border-color:#ffa54d;c
 .keybtn:hover{border-color:var(--line)}
 .keybtn[aria-expanded="true"]{border-color:var(--line);background:var(--panel)}
 .keybtn svg{width:16px;height:16px}
-.keycard{display:none;position:absolute;right:0;bottom:calc(100% + 8px);width:264px;box-sizing:border-box;padding:12px 14px;background:var(--panel);border:1px solid var(--line);border-radius:8px}
+.keycard{display:none;position:absolute;right:0;bottom:calc(100% + 8px);width:380px;box-sizing:border-box;padding:12px 14px;background:var(--panel);border:1px solid var(--line);border-radius:8px}
 .keywrap.open .keycard,.keywrap:not(.shut):hover .keycard,.keywrap:not(.shut):has(.keybtn:focus-visible) .keycard{display:block}
+/* Key sections (2026-10-29): faces, one row per network edge, then the two ghost varieties */
+.lgh{margin:4px 0 0;padding-top:10px;border-top:1px solid var(--line);font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.lgh.first{margin-top:0;padding-top:0;border-top:0}
+.lgnote{margin:-4px 0 0;font-size:12px;color:var(--muted)}
+.lg.two,.lg.net{align-items:flex-start}
+.lg svg.gc{width:22px;height:22px;margin-top:-2px}
+.lg svg.kit{width:18px;height:18px}
+.lg svg.kit.good{color:var(--good)}
+.lg svg.kit.warnc{color:var(--warn)}
+.lg .gt{display:flex;flex-direction:column;gap:1px}
+.lg .gt span{font-size:12px;color:var(--muted)}
 .legend{display:flex;flex-direction:column;align-items:stretch;gap:10px;margin:0;padding:0;list-style:none;font-size:13px;color:var(--ink)}
 .lg{display:flex;align-items:center;gap:6px}
 .lg svg{width:16px;height:16px;color:var(--ink)}
@@ -257,9 +394,29 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 .lpanel,.lpanel *{pointer-events:auto}
 .lpanel{position:relative;z-index:7}
 .lpanel .fc .grow{flex:0}
+/* shared top bar (Robert, 2026-10-29): the same bar on every screen, Launcher and Cube: 64px on the rail colour; on the right the hide-balances eye, the Connect account chip, then App preferences as an icon with a tooltip. tbx- names keep it clear of page classes. */
+.top{height:64px;padding:0 24px;gap:16px;background:var(--rail)}
+.tbx-r{display:flex;align-items:center;gap:8px;flex:none}
+.tbx-ico{position:relative;width:32px;height:32px;display:grid;place-items:center;padding:0;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer;text-decoration:none}
+.tbx-ico:hover{background:var(--hover,rgba(245,240,232,.06));color:var(--ink)}
+.tbx-ico[aria-pressed="true"],.tbx-ico[aria-current="page"]{background:var(--selected);color:var(--ink)}
+.tbx-ico svg{width:16px;height:16px}
+.tbx-ico[data-tip]::after{content:attr(data-tip);position:absolute;top:calc(100% + 8px);right:0;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--muted);font-size:13px;font-weight:400;line-height:1.3;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .12s ease .25s;z-index:20}
+.tbx-ico[data-tip]:hover::after,.tbx-ico[data-tip]:focus-visible::after{opacity:1}
+.tbx-chip{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--ink);font:inherit;font-size:13px;white-space:nowrap;text-decoration:none;cursor:pointer}
+a.tbx-chip{color:var(--ink)}
+.tbx-chip:hover{background:var(--hover,rgba(245,240,232,.06))}
+.tbx-chip[aria-current="page"]{border-color:var(--accent);background:var(--selected)}
+.tbx-chip svg{width:16px;height:16px;flex:none}
+.tbx-chip .pi{color:var(--muted)}
+.tbx-st{display:inline-flex;align-items:center;gap:5px}
+.tbx-st.ok{color:var(--good)}.tbx-st.out{color:var(--muted)}.tbx-st.warn{color:var(--warn)}
+.tbx-mini{font-weight:600;color:var(--acc-ink,var(--accent))}
 </style>
 </helmet>
-<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+<div class="oshell">
+<sc-if value="{{ notOpened }}" hint-placeholder-val="{{ true }}">
+<div class="tenshu oroot glow-bright {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
 
   <header class="top {{ quietCls }}">
     <a class="brand" href="P-Launcher.dc.html" title="Back to the Launcher">
@@ -298,30 +455,28 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
       </sc-if>
     </sc-if>
     <span class="grow"></span>
-    <button type="button" class="tbtn eye" aria-pressed="{{ hidePressed }}" aria-label="Hide balances" title="{{ hideTitle }}" onClick="{{ toggleHide }}">
+    <div class="tbx-r"><button type="button" class="tbx-ico" aria-pressed="{{ hidePressed }}" aria-label="Hide balances" title="{{ hideTitle }}" onClick="{{ toggleHide }}">
       <sc-if value="{{ eyeOpen }}" hint-placeholder-val="{{ true }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"></path><circle cx="12" cy="12" r="3"></circle></svg></sc-if>
       <sc-if value="{{ eyeShut }}" hint-placeholder-val="{{ false }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.9 5.8A9.6 9.6 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a16 16 0 0 1-2.6 3.4M6.4 7.4C3.9 9.1 2.5 12 2.5 12S6 18.5 12 18.5c1.8 0 3.3-.5 4.6-1.2M9.9 9.9a3 3 0 0 0 4.2 4.2M4 4l16 16"></path></svg></sc-if>
-    </button>
-    <sc-if value="{{ signedIn }}" hint-placeholder-val="{{ true }}">
-    <a class="tbtn" href="P-Connect.dc.html" aria-label="Connect, alex@example.test, signed in">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="8.5" r="3.5"></circle><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"></path></svg>
-      <span>Connect</span><span class="dot">·</span><span class="who">alex@example.test</span><span class="stw">Signed in</span>
-    </a>
-    </sc-if>
-    <sc-if value="{{ signedOut }}" hint-placeholder-val="{{ false }}">
-    <a class="tbtn out" href="P-SignIn.dc.html" aria-label="Connect, sign in">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="8.5" r="3.5"></circle><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"></path></svg>
-      <span>Connect</span><span class="dot">·</span><span class="who">Sign in</span>
-    </a>
-    </sc-if>
-    <a class="tbtn" href="P-AppPrefs.dc.html">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg>
-      <span>App preferences</span>
-    </a>
+    </button><sc-if value="{{ signedIn }}" hint-placeholder-val="{{ true }}"><a href="P-Connect.dc.html" class="tbx-chip" aria-label="Connect account alex@example.test: signed in"><svg class="pi" aria-hidden="true" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="6.5" r="3"/><path d="M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg><span class="tbx-st ok"><svg aria-hidden="true" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Signed in</span></a></sc-if><sc-if value="{{ signedOut }}" hint-placeholder-val="{{ false }}"><a href="P-SignIn.dc.html" class="tbx-chip" aria-label="Connect account: signed out. Sign in"><svg class="pi" aria-hidden="true" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="6.5" r="3"/><path d="M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg><span class="tbx-st out">Signed out</span><span class="tbx-mini">Sign in</span></a></sc-if><a class="tbx-ico" href="P-AppPrefs.dc.html" aria-label="App preferences" data-tip="App preferences"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg></a></div>
   </header>
 
   <main class="stage" aria-label="Cubes on this device" tabIndex="-1" onWheel="{{ wheel }}" onKeyDown="{{ pageKeys }}">
     <div class="floor" style="{{ floorStyle }}" aria-hidden="true"></div>
+    <sc-if value="{{ railOn }}" hint-placeholder-val="{{ false }}">
+      <div class="brail" aria-hidden="true">
+        <div class="brow {{ railAnim }}">
+          <sc-for list="{{ railBlocks }}" as="b" hint-placeholder-count="14"><span class="bk" style="{{ b.style }}"></span></sc-for>
+          <sc-if value="{{ railHasQ }}" hint-placeholder-val="{{ true }}"><span class="bq" style="{{ railQStyle }}"></span></sc-if>
+        </div>
+        <div class="bbase"></div>
+        <ul class="bstats">
+          <sc-for list="{{ railStats }}" as="x" hint-placeholder-count="4">
+            <li><span class="bl">{{ x.label }}</span><span class="bv">{{ x.value }}</span><span class="bs">{{ x.sub }}</span></li>
+          </sc-for>
+        </ul>
+      </div>
+    </sc-if>
     <p class="sr" aria-live="polite">{{ announce }}</p>
     <sc-if value="{{ paged }}" hint-placeholder-val="{{ false }}">
       <button type="button" class="pgbtn l" aria-label="Previous Cubes" disabled="{{ pgPrevOff }}" onClick="{{ pgPrev }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M11 4 6 9l5 5"/></svg></button>
@@ -337,6 +492,14 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
         <svg class="ghost" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-dasharray="2 2" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path></svg>
         <h2>No Cubes yet</h2>
         <p>Create a Cube or import one. You choose its network when you create it.</p>
+        <sc-if value="{{ signedOut }}" hint-placeholder-val="{{ false }}"><p>Used Tenshu before? <a href="P-SignIn.dc.html">Sign in to COINCUBE | Connect</a> to see the Cubes you registered there.</p></sc-if>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ ghostIntro }}" hint-placeholder-val="{{ false }}">
+      <div class="gintro">
+        <h2>Nothing on this device yet</h2>
+        <p>{{ ghostIntroText }}</p>
       </div>
     </sc-if>
 
@@ -357,7 +520,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
                 <div class="cb {{ item.cls }}" style="{{ item.slotStyle }}">
                   <button type="button" class="hit {{ item.hitCls }}" tabIndex="{{ item.tab }}" aria-expanded="{{ item.expanded }}" aria-label="{{ item.aria }}" onClick="{{ item.pick }}">
                     <span class="lbl">
-                      <span class="av" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="11" fill="currentColor" opacity=".08" stroke="none"></circle><path d="{{ item.av }}"></path></svg></span>
+                      <span class="av {{ item.avCls }}" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="{{ item.avStroke }}" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="11" fill="currentColor" opacity="{{ item.avFill }}" stroke="none"></circle><path d="{{ item.av }}"></path></svg></span>
                       <span class="lblt">
                       <span class="nm" title="{{ item.name }}">{{ item.name }}</span>
                       <span class="st {{ item.stCls }}">{{ item.state }}</span>
@@ -368,7 +531,8 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
                   </button>
                   <div class="scene" style="{{ item.sceneStyle }}">
                     <div class="shadow" aria-hidden="true"></div>
-                    <div class="cube {{ item.edge }}" style="{{ item.cubeStyle }}">
+                    <div class="gfoot" aria-hidden="true"></div>
+                    <div class="cube {{ item.cubeCls }}" style="{{ item.cubeStyle }}">
                       <div class="f t" aria-hidden="true"><div class="tc">
                         <sc-if value="{{ item.btcLogo }}" hint-placeholder-val="{{ true }}"><span class="coin {{ item.coinCls }}"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></sc-if>
                         <sc-if value="{{ item.logo }}" hint-placeholder-val="{{ false }}"><span class="coin {{ item.coinCls }}"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span></sc-if>
@@ -378,6 +542,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
                         <sc-if value="{{ item.hasVault }}" hint-placeholder-val="{{ true }}"><svg class="wi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M12 3l7 3v5.5c0 4.3-3 7.6-7 9.5-4-1.9-7-5.2-7-9.5V6z"></path></svg></sc-if>
                         <sc-if value="{{ item.hasSpark }}" hint-placeholder-val="{{ true }}"><svg class="wi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M13 3L5 13.5h6L10 21l8-10.5h-6z"></path></svg></sc-if>
                         <sc-if value="{{ item.hasLiquid }}" hint-placeholder-val="{{ true }}"><svg class="wi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M12 3.5c3.5 4.2 6 7.6 6 10.5a6 6 0 0 1-12 0c0-2.9 2.5-6.3 6-10.5z"></path></svg></sc-if>
+                        <sc-if value="{{ item.ghost }}" hint-placeholder-val="{{ false }}"><svg class="wi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18h10a4 4 0 0 0 .6-7.95A5.5 5.5 0 0 0 6.9 9.2 4.4 4.4 0 0 0 7 18z"></path></svg></sc-if>
                       </div></div>
                       <div class="f r" aria-hidden="true"><div class="rc">
                         <svg class="pad" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="{{ item.lockPath }}"></path></svg>
@@ -386,10 +551,10 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
                       </div></div>
 
                       <!-- back-left face: DETAILS, on the geometry -->
-                      <div class="f bl" aria-hidden="{{ item.blHidden }}">
+                      <div class="f bl {{ item.blCls }}" aria-hidden="{{ item.blHidden }}">
                         <sc-if value="{{ item.showDetails }}" hint-placeholder-val="{{ false }}">
                           <section class="fc" style="{{ item.fcStyle }}" aria-labelledby="face-title">
-                            <h2 class="pn" id="face-title" style="display:flex;align-items:center;gap:10px"><span class="av" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="11" fill="currentColor" opacity=".08" stroke="none"></circle><path d="{{ item.av }}"></path></svg></span>{{ item.p.name }}</h2>
+                            <h2 class="pn" id="face-title" style="display:flex;align-items:center;gap:10px"><span class="av {{ item.avCls }}" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="{{ item.avStroke }}" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="11" fill="currentColor" opacity="{{ item.avFill }}" stroke="none"></circle><path d="{{ item.av }}"></path></svg></span>{{ item.p.name }}</h2>
                             <p class="pnet">
                               <sc-if value="{{ item.btcLogo }}" hint-placeholder-val="{{ true }}"><span class="coin {{ item.coinCls }}" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></sc-if>
                               <sc-if value="{{ item.logo }}" hint-placeholder-val="{{ false }}"><span class="coin {{ item.coinCls }}" aria-hidden="true"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span></sc-if>
@@ -416,15 +581,65 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
                             <p class="pfoot">{{ item.hint }}</p>
                           </section>
                         </sc-if>
+                        <!-- ghost (in Connect, not on this device): the same face shows what Connect holds and what can be done -->
+                        <sc-if value="{{ item.showGhostKit }}" hint-placeholder-val="{{ false }}">
+                          <section class="fc" style="{{ item.fcStyle }}" aria-labelledby="item-gk-title">
+                            <h2 class="pn" id="item-gk-title" style="display:flex;align-items:center;gap:10px"><span class="av ghost" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18h10a4 4 0 0 0 .6-7.95A5.5 5.5 0 0 0 6.9 9.2 4.4 4.4 0 0 0 7 18z"></path></svg></span>{{ item.p.name }}</h2>
+                            <p class="pnet">
+                              <sc-if value="{{ item.btcLogo }}" hint-placeholder-val="{{ true }}"><span class="coin {{ item.coinCls }}" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></sc-if>
+                              <sc-if value="{{ item.logo }}" hint-placeholder-val="{{ false }}"><span class="coin {{ item.coinCls }}" aria-hidden="true"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span></sc-if>
+                              <span>{{ item.p.net }}</span>
+                              <sc-if value="{{ item.hasTag }}" hint-placeholder-val="{{ false }}"><span class="tb {{ item.edge }}">{{ item.tag }}</span></sc-if>
+                            </p>
+                            <dl class="pdl">
+                              <div><dt>Where</dt><dd class="tone-muted">In Connect, not on this device</dd></div>
+                              <div><dt>Backup</dt><dd class="tone-good"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg><span>Recovery Kit available</span></dd></div>
+                            </dl>
+                            <p class="pnote">Restore brings this Cube onto this device from its Recovery Kit. You'll set a PIN for it here.</p>
+                            <div class="grow"></div>
+                            <div class="pact">
+                              <button type="button" class="btn primary" tabIndex="{{ item.p.dTab }}" onClick="{{ item.p.restore }}">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19h14"></path></svg>
+                                <span>Restore to this device</span>
+                              </button>
+                              <button type="button" class="linkbtn" tabIndex="{{ item.p.dTab }}" onClick="{{ item.p.toBrowse }}">Back</button>
+                              <a class="linkbtn" tabIndex="{{ item.p.dTab }}" href="P-Delete.dc.html">Delete</a>
+                            </div>
+                            <p class="pfoot">Choose a PIN, then the Cube opens.</p>
+                          </section>
+                        </sc-if>
+                        <sc-if value="{{ item.showGhostNoKit }}" hint-placeholder-val="{{ false }}">
+                          <section class="fc" style="{{ item.fcStyle }}" aria-labelledby="item-gn-title">
+                            <h2 class="pn" id="item-gn-title" style="display:flex;align-items:center;gap:10px"><span class="av ghost" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18h10a4 4 0 0 0 .6-7.95A5.5 5.5 0 0 0 6.9 9.2 4.4 4.4 0 0 0 7 18z"></path></svg></span>{{ item.p.name }}</h2>
+                            <p class="pnet">
+                              <sc-if value="{{ item.btcLogo }}" hint-placeholder-val="{{ true }}"><span class="coin {{ item.coinCls }}" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></sc-if>
+                              <sc-if value="{{ item.logo }}" hint-placeholder-val="{{ false }}"><span class="coin {{ item.coinCls }}" aria-hidden="true"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span></sc-if>
+                              <span>{{ item.p.net }}</span>
+                              <sc-if value="{{ item.hasTag }}" hint-placeholder-val="{{ false }}"><span class="tb {{ item.edge }}">{{ item.tag }}</span></sc-if>
+                            </p>
+                            <dl class="pdl">
+                              <div><dt>Where</dt><dd class="tone-muted">In Connect, not on this device</dd></div>
+                              <div><dt>Backup</dt><dd class="tone-warn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7.5v5.5M12 16.2v.3"></path></svg><span>No Recovery Kit in Connect</span></dd></div>
+                            </dl>
+                            <p class="pnote">Connect has this Cube's registration but not its keys, so it can't be restored from here. Open it on the device that holds it and add a Recovery Kit, or import it with its recovery phrase.</p>
+                            <div class="grow"></div>
+                            <div class="pact">
+                              <a class="btn" tabIndex="{{ item.p.dTab }}" href="P-Restore.dc.html">Import with recovery phrase…</a>
+                              <button type="button" class="linkbtn" tabIndex="{{ item.p.dTab }}" onClick="{{ item.p.toBrowse }}">Back</button>
+                              <a class="linkbtn" tabIndex="{{ item.p.dTab }}" href="P-Delete.dc.html">Delete</a>
+                            </div>
+                            <p class="pfoot">Delete removes the registration only; no funds are touched.</p>
+                          </section>
+                        </sc-if>
                       </div>
 
                       <!-- back-right face: UNLOCK, then CHECKS, on the geometry -->
-                      <div class="f br">
+                      <div class="f br {{ item.brCls }}">
                         <sc-if value="{{ item.showUnlock }}" hint-placeholder-val="{{ false }}">
                           <section class="fc" style="{{ item.fcStyle }}" aria-labelledby="unlock-title">
-                            <h2 class="pn" id="unlock-title">Open {{ item.p.name }} <span class="sub">· {{ item.p.net }}</span></h2>
+                            <h2 class="pn" id="unlock-title">{{ item.p.unlockVerb }} {{ item.p.name }} <span class="sub">· {{ item.p.net }}</span></h2>
                             <fieldset class="fld">
-                              <legend>PIN</legend>
+                              <legend>{{ item.p.pinLegend }}</legend>
                               <div class="pinrow">
                                 <input id="pin-d1" class="dg {{ item.p.pinDemo }}" type="{{ item.p.pinType }}" inputmode="numeric" autocomplete="off" maxLength="1" aria-label="PIN digit 1" aria-describedby="pin-note" value="{{ item.p.d1 }}" onInput="{{ item.p.set1 }}" onKeyDown="{{ item.p.back1 }}">
                                 <input id="pin-d2" class="dg" type="{{ item.p.pinType }}" inputmode="numeric" autocomplete="off" maxLength="1" aria-label="PIN digit 2" aria-describedby="pin-note" value="{{ item.p.d2 }}" onInput="{{ item.p.set2 }}" onKeyDown="{{ item.p.back2 }}">
@@ -434,17 +649,29 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
                                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ item.p.eyePath }}"></path></svg>
                                 </button>
                               </div>
-                              <span class="help">Enter this Cube's PIN, or use its passkey.</span>
+                              <span class="help">{{ item.p.pinHelp }}</span>
                             </fieldset>
+                            <sc-if value="{{ item.p.isRestore }}" hint-placeholder-val="{{ false }}">
+                              <fieldset class="fld confirm">
+                                <legend>Confirm PIN</legend>
+                                <div class="pinrow">
+                                  <input id="pin-c1" class="dg" type="{{ item.p.pinType }}" inputmode="numeric" autocomplete="off" maxLength="1" aria-label="Confirm PIN digit 1" aria-describedby="pin-match" value="{{ item.p.c1 }}" onInput="{{ item.p.cset1 }}" onKeyDown="{{ item.p.cback1 }}">
+                                  <input id="pin-c2" class="dg" type="{{ item.p.pinType }}" inputmode="numeric" autocomplete="off" maxLength="1" aria-label="Confirm PIN digit 2" aria-describedby="pin-match" value="{{ item.p.c2 }}" onInput="{{ item.p.cset2 }}" onKeyDown="{{ item.p.cback2 }}">
+                                  <input id="pin-c3" class="dg" type="{{ item.p.pinType }}" inputmode="numeric" autocomplete="off" maxLength="1" aria-label="Confirm PIN digit 3" aria-describedby="pin-match" value="{{ item.p.c3 }}" onInput="{{ item.p.cset3 }}" onKeyDown="{{ item.p.cback3 }}">
+                                  <input id="pin-c4" class="dg" type="{{ item.p.pinType }}" inputmode="numeric" autocomplete="off" maxLength="1" aria-label="Confirm PIN digit 4" aria-describedby="pin-match" value="{{ item.p.c4 }}" onInput="{{ item.p.cset4 }}" onKeyDown="{{ item.p.cback4 }}">
+                                </div>
+                                <span class="help {{ item.p.matchCls }}" id="pin-match" aria-live="polite">{{ item.p.matchText }}</span>
+                              </fieldset>
+                            </sc-if>
                             <div class="pact" style="margin-top:20px">
-                              <button type="button" class="btn primary" disabled="{{ item.p.unlockOff }}" onClick="{{ item.p.unlockPin }}">Unlock</button>
-                              <button type="button" class="btn" onClick="{{ item.p.unlockKey }}">
+                              <button type="button" class="btn primary" disabled="{{ item.p.unlockOff }}" onClick="{{ item.p.unlockPin }}">{{ item.p.unlockLabel }}</button>
+                              <sc-if value="{{ item.p.notRestore }}" hint-placeholder-val="{{ true }}"><button type="button" class="btn" onClick="{{ item.p.unlockKey }}">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="15.5" r="4"></circle><path d="M10.9 12.6L19 4.5M16 7.5l2.5 2.5M13.8 9.7l2 2"></path></svg>
                                 <span>Use passkey</span>
-                              </button>
+                              </button></sc-if>
                             </div>
                             <div class="grow"></div>
-                            <p class="pnote" id="pin-note">Network checks run after your PIN is accepted.</p>
+                            <sc-if value="{{ item.p.notRestore }}" hint-placeholder-val="{{ true }}"><p class="pnote" id="pin-note">{{ item.p.pinNote }}</p></sc-if>
                             <div class="pact" style="margin-top:8px">
                               <button type="button" class="linkbtn" onClick="{{ item.p.toDetails }}">Cancel</button>
                             </div>
@@ -476,6 +703,24 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
                           </section>
                         </sc-if>
                       </div>
+
+                      <!-- bottom face: LOADING, on the geometry (unused until now). The Cube tumbles to it after the PIN or passkey -->
+                      <div class="f bt {{ item.btCls }}" style="{{ item.btStyle }}" aria-hidden="{{ item.btHidden }}">
+                        <sc-if value="{{ item.showLoading }}" hint-placeholder-val="{{ false }}">
+                          <section class="fc load" style="{{ item.fcBigStyle }}" aria-labelledby="load-title" aria-busy="true">
+                            <p class="lhead" id="load-title"><span>{{ item.p.loadVerb }}</span> <b>{{ item.p.name }}</b> <span>·</span>
+                              <sc-if value="{{ item.btcLogo }}" hint-placeholder-val="{{ true }}"><span class="coin {{ item.coinCls }}" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></sc-if>
+                              <sc-if value="{{ item.logo }}" hint-placeholder-val="{{ false }}"><span class="coin {{ item.coinCls }}" aria-hidden="true"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span></sc-if>
+                              <span>{{ item.p.net }}</span></p>
+                            <figure class="lquote">
+                              <blockquote><p style="margin:0">{{ item.p.qText }}</p></blockquote>
+                              <figcaption>— {{ item.p.qBy }}</figcaption>
+                            </figure>
+                            <p class="lstage {{ item.p.lsCls }}">{{ item.p.lsText }}</p>
+                            <sc-if value="{{ item.p.slow }}" hint-placeholder-val="{{ false }}"><p class="lslow">Taking longer than usual. <button type="button" class="linkbtn" onClick="{{ item.p.cancelOpen }}">Cancel</button></p></sc-if>
+                          </section>
+                        </sc-if>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -491,13 +736,14 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
           <div class="lhead" aria-hidden="true"><span></span><span>Cube</span><span>Network</span><span>Wallets</span><span>Backup</span><span></span></div>
           <sc-for list="{{ listItems }}" as="item" hint-placeholder-count="9">
             <button type="button" class="lrow {{ item.lcls }}" role="listitem" aria-pressed="{{ item.pressed }}" aria-label="{{ item.aria }}" onClick="{{ item.pick }}">
-              <span class="av" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="11" fill="currentColor" opacity=".08" stroke="none"></circle><path d="{{ item.av }}"></path></svg></span>
+              <span class="av {{ item.avCls }}" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="{{ item.avStroke }}" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="11" fill="currentColor" opacity="{{ item.avFill }}" stroke="none"></circle><path d="{{ item.av }}"></path></svg></span>
               <span class="lblt"><span class="nm">{{ item.name }}</span><span class="st {{ item.stCls }}">{{ item.state }}</span></span>
               <span class="lnet"><sc-if value="{{ item.btcLogo }}" hint-placeholder-val="{{ true }}"><span class="coin {{ item.coinCls }}" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></sc-if><sc-if value="{{ item.logo }}" hint-placeholder-val="{{ false }}"><span class="coin {{ item.coinCls }}" aria-hidden="true"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span></sc-if><span>{{ item.netFull }}</span><sc-if value="{{ item.hasTag }}" hint-placeholder-val="{{ false }}"><span class="tb {{ item.edge }}">{{ item.tag }}</span></sc-if></span>
               <span class="lw" aria-label="Wallets">
                 <sc-if value="{{ item.hasVault }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg></sc-if>
-                <sc-if value="{{ item.hasSpark }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg></sc-if>
+                <sc-if value="{{ item.hasSpark }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path stroke-width="2" d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/></svg></sc-if>
                 <sc-if value="{{ item.hasLiquid }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg></sc-if>
+                <sc-if value="{{ item.ghost }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 24 24"><path d="M7 18h10a4 4 0 0 0 .6-7.95A5.5 5.5 0 0 0 6.9 9.2 4.4 4.4 0 0 0 7 18z"/></svg></sc-if>
               </span>
               <span class="lb {{ item.bTone }}">{{ item.bShort }}</span>
               <span class="lact">{{ item.actLabel }}</span>
@@ -509,7 +755,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
           <aside class="lpanel" aria-label="Selected Cube">
                         <sc-if value="{{ lsel.detailsOnly }}" hint-placeholder-val="{{ false }}">
                           <section class="fc lp" aria-labelledby="lp-title">
-                            <h2 class="pn" id="lp-title" style="display:flex;align-items:center;gap:10px"><span class="av" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="11" fill="currentColor" opacity=".08" stroke="none"></circle><path d="{{ lsel.av }}"></path></svg></span>{{ lsel.p.name }}</h2>
+                            <h2 class="pn" id="lp-title" style="display:flex;align-items:center;gap:10px"><span class="av {{ lsel.avCls }}" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="{{ lsel.avStroke }}" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="11" fill="currentColor" opacity="{{ lsel.avFill }}" stroke="none"></circle><path d="{{ lsel.av }}"></path></svg></span>{{ lsel.p.name }}</h2>
                             <p class="pnet">
                               <sc-if value="{{ lsel.btcLogo }}" hint-placeholder-val="{{ true }}"><span class="coin {{ lsel.coinCls }}" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></sc-if>
                               <sc-if value="{{ lsel.logo }}" hint-placeholder-val="{{ false }}"><span class="coin {{ lsel.coinCls }}" aria-hidden="true"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span></sc-if>
@@ -536,11 +782,61 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
                             <p class="pfoot">{{ lsel.hint }}</p>
                           </section>
                         </sc-if>
+                        <!-- ghost (in Connect, not on this device): the same face shows what Connect holds and what can be done -->
+                        <sc-if value="{{ lsel.showGhostKit }}" hint-placeholder-val="{{ false }}">
+                          <section class="fc lp" aria-labelledby="lsel-gk-title">
+                            <h2 class="pn" id="lsel-gk-title" style="display:flex;align-items:center;gap:10px"><span class="av ghost" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18h10a4 4 0 0 0 .6-7.95A5.5 5.5 0 0 0 6.9 9.2 4.4 4.4 0 0 0 7 18z"></path></svg></span>{{ lsel.p.name }}</h2>
+                            <p class="pnet">
+                              <sc-if value="{{ lsel.btcLogo }}" hint-placeholder-val="{{ true }}"><span class="coin {{ lsel.coinCls }}" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></sc-if>
+                              <sc-if value="{{ lsel.logo }}" hint-placeholder-val="{{ false }}"><span class="coin {{ lsel.coinCls }}" aria-hidden="true"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span></sc-if>
+                              <span>{{ lsel.p.net }}</span>
+                              <sc-if value="{{ lsel.hasTag }}" hint-placeholder-val="{{ false }}"><span class="tb {{ lsel.edge }}">{{ lsel.tag }}</span></sc-if>
+                            </p>
+                            <dl class="pdl">
+                              <div><dt>Where</dt><dd class="tone-muted">In Connect, not on this device</dd></div>
+                              <div><dt>Backup</dt><dd class="tone-good"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg><span>Recovery Kit available</span></dd></div>
+                            </dl>
+                            <p class="pnote">Restore brings this Cube onto this device from its Recovery Kit. You'll set a PIN for it here.</p>
+                            <div class="grow"></div>
+                            <div class="pact">
+                              <button type="button" class="btn primary" onClick="{{ lsel.p.restore }}">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19h14"></path></svg>
+                                <span>Restore to this device</span>
+                              </button>
+                              <button type="button" class="linkbtn" onClick="{{ lsel.p.toBrowse }}">Back</button>
+                              <a class="linkbtn" href="P-Delete.dc.html">Delete</a>
+                            </div>
+                            <p class="pfoot">Choose a PIN, then the Cube opens.</p>
+                          </section>
+                        </sc-if>
+                        <sc-if value="{{ lsel.showGhostNoKit }}" hint-placeholder-val="{{ false }}">
+                          <section class="fc lp" aria-labelledby="lsel-gn-title">
+                            <h2 class="pn" id="lsel-gn-title" style="display:flex;align-items:center;gap:10px"><span class="av ghost" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18h10a4 4 0 0 0 .6-7.95A5.5 5.5 0 0 0 6.9 9.2 4.4 4.4 0 0 0 7 18z"></path></svg></span>{{ lsel.p.name }}</h2>
+                            <p class="pnet">
+                              <sc-if value="{{ lsel.btcLogo }}" hint-placeholder-val="{{ true }}"><span class="coin {{ lsel.coinCls }}" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></sc-if>
+                              <sc-if value="{{ lsel.logo }}" hint-placeholder-val="{{ false }}"><span class="coin {{ lsel.coinCls }}" aria-hidden="true"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span></sc-if>
+                              <span>{{ lsel.p.net }}</span>
+                              <sc-if value="{{ lsel.hasTag }}" hint-placeholder-val="{{ false }}"><span class="tb {{ lsel.edge }}">{{ lsel.tag }}</span></sc-if>
+                            </p>
+                            <dl class="pdl">
+                              <div><dt>Where</dt><dd class="tone-muted">In Connect, not on this device</dd></div>
+                              <div><dt>Backup</dt><dd class="tone-warn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7.5v5.5M12 16.2v.3"></path></svg><span>No Recovery Kit in Connect</span></dd></div>
+                            </dl>
+                            <p class="pnote">Connect has this Cube's registration but not its keys, so it can't be restored from here. Open it on the device that holds it and add a Recovery Kit, or import it with its recovery phrase.</p>
+                            <div class="grow"></div>
+                            <div class="pact">
+                              <a class="btn" href="P-Restore.dc.html">Import with recovery phrase…</a>
+                              <button type="button" class="linkbtn" onClick="{{ lsel.p.toBrowse }}">Back</button>
+                              <a class="linkbtn" href="P-Delete.dc.html">Delete</a>
+                            </div>
+                            <p class="pfoot">Delete removes the registration only; no funds are touched.</p>
+                          </section>
+                        </sc-if>
                         <sc-if value="{{ lsel.showUnlock }}" hint-placeholder-val="{{ false }}">
                           <section class="fc lp" aria-labelledby="unlock-title">
-                            <h2 class="pn" id="unlock-title">Open {{ lsel.p.name }} <span class="sub">· {{ lsel.p.net }}</span></h2>
+                            <h2 class="pn" id="unlock-title">{{ lsel.p.unlockVerb }} {{ lsel.p.name }} <span class="sub">· {{ lsel.p.net }}</span></h2>
                             <fieldset class="fld">
-                              <legend>PIN</legend>
+                              <legend>{{ lsel.p.pinLegend }}</legend>
                               <div class="pinrow">
                                 <input id="pin-d1" class="dg {{ lsel.p.pinDemo }}" type="{{ lsel.p.pinType }}" inputmode="numeric" autocomplete="off" maxLength="1" aria-label="PIN digit 1" aria-describedby="pin-note" value="{{ lsel.p.d1 }}" onInput="{{ lsel.p.set1 }}" onKeyDown="{{ lsel.p.back1 }}">
                                 <input id="pin-d2" class="dg" type="{{ lsel.p.pinType }}" inputmode="numeric" autocomplete="off" maxLength="1" aria-label="PIN digit 2" aria-describedby="pin-note" value="{{ lsel.p.d2 }}" onInput="{{ lsel.p.set2 }}" onKeyDown="{{ lsel.p.back2 }}">
@@ -550,17 +846,29 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
                                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ lsel.p.eyePath }}"></path></svg>
                                 </button>
                               </div>
-                              <span class="help">Enter this Cube's PIN, or use its passkey.</span>
+                              <span class="help">{{ lsel.p.pinHelp }}</span>
                             </fieldset>
+                            <sc-if value="{{ lsel.p.isRestore }}" hint-placeholder-val="{{ false }}">
+                              <fieldset class="fld confirm">
+                                <legend>Confirm PIN</legend>
+                                <div class="pinrow">
+                                  <input id="pin-c1" class="dg" type="{{ lsel.p.pinType }}" inputmode="numeric" autocomplete="off" maxLength="1" aria-label="Confirm PIN digit 1" aria-describedby="pin-match" value="{{ lsel.p.c1 }}" onInput="{{ lsel.p.cset1 }}" onKeyDown="{{ lsel.p.cback1 }}">
+                                  <input id="pin-c2" class="dg" type="{{ lsel.p.pinType }}" inputmode="numeric" autocomplete="off" maxLength="1" aria-label="Confirm PIN digit 2" aria-describedby="pin-match" value="{{ lsel.p.c2 }}" onInput="{{ lsel.p.cset2 }}" onKeyDown="{{ lsel.p.cback2 }}">
+                                  <input id="pin-c3" class="dg" type="{{ lsel.p.pinType }}" inputmode="numeric" autocomplete="off" maxLength="1" aria-label="Confirm PIN digit 3" aria-describedby="pin-match" value="{{ lsel.p.c3 }}" onInput="{{ lsel.p.cset3 }}" onKeyDown="{{ lsel.p.cback3 }}">
+                                  <input id="pin-c4" class="dg" type="{{ lsel.p.pinType }}" inputmode="numeric" autocomplete="off" maxLength="1" aria-label="Confirm PIN digit 4" aria-describedby="pin-match" value="{{ lsel.p.c4 }}" onInput="{{ lsel.p.cset4 }}" onKeyDown="{{ lsel.p.cback4 }}">
+                                </div>
+                                <span class="help {{ lsel.p.matchCls }}" id="pin-match" aria-live="polite">{{ lsel.p.matchText }}</span>
+                              </fieldset>
+                            </sc-if>
                             <div class="pact" style="margin-top:20px">
-                              <button type="button" class="btn primary" disabled="{{ lsel.p.unlockOff }}" onClick="{{ lsel.p.unlockPin }}">Unlock</button>
-                              <button type="button" class="btn" onClick="{{ lsel.p.unlockKey }}">
+                              <button type="button" class="btn primary" disabled="{{ lsel.p.unlockOff }}" onClick="{{ lsel.p.unlockPin }}">{{ lsel.p.unlockLabel }}</button>
+                              <sc-if value="{{ lsel.p.notRestore }}" hint-placeholder-val="{{ true }}"><button type="button" class="btn" onClick="{{ lsel.p.unlockKey }}">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="15.5" r="4"></circle><path d="M10.9 12.6L19 4.5M16 7.5l2.5 2.5M13.8 9.7l2 2"></path></svg>
                                 <span>Use passkey</span>
-                              </button>
+                              </button></sc-if>
                             </div>
                             <div class="grow"></div>
-                            <p class="pnote" id="pin-note">Network checks run after your PIN is accepted.</p>
+                            <sc-if value="{{ lsel.p.notRestore }}" hint-placeholder-val="{{ true }}"><p class="pnote" id="pin-note">{{ lsel.p.pinNote }}</p></sc-if>
                             <div class="pact" style="margin-top:8px">
                               <button type="button" class="linkbtn" onClick="{{ lsel.p.toDetails }}">Cancel</button>
                             </div>
@@ -610,6 +918,30 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
       </a>
     </div>
     <span class="grow"></span>
+    <sc-if value="{{ srcShow }}" hint-placeholder-val="{{ false }}">
+      <div class="srcwrap">
+        <button type="button" class="srcbtn" aria-expanded="{{ srcExpanded }}" aria-controls="chain-src" onClick="{{ toggleSrc }}">
+          <span class="sdot" style="{{ srcDotStyle }}" aria-hidden="true"></span>
+          <span>{{ srcLabel }}</span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 14.5l5-5 5 5"></path></svg>
+        </button>
+        <sc-if value="{{ srcMenu }}" hint-placeholder-val="{{ false }}">
+          <div class="srcmenu" id="chain-src">
+            <p class="mh">Network activity for <b>{{ railName }}</b> · follows the Network filter</p>
+            <sc-for list="{{ srcOpts }}" as="o" hint-placeholder-count="3">
+              <button type="button" class="mi {{ o.cls }}" aria-pressed="{{ o.pressed }}" onClick="{{ o.pick }}">
+                <span class="ck"><sc-if value="{{ o.on }}" hint-placeholder-val="{{ false }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></sc-if></span>
+                <span>{{ o.label }}</span>
+                <span class="n">{{ o.note }}</span>
+              </button>
+            </sc-for>
+            <p class="mnote">The Launcher reads a node that is already running. It never starts one.</p>
+            <hr>
+            <a class="mi" href="P-AppPrefs.dc.html"><span class="ck"></span><span>Turn off in App preferences</span></a>
+          </div>
+        </sc-if>
+      </div>
+    </sc-if>
     <sc-if value="{{ hasAny }}" hint-placeholder-val="{{ true }}">
       <div class="keywrap {{ keyCls }}" onMouseEnter="{{ keyEnter }}" onMouseLeave="{{ keyLeave }}" onKeyDown="{{ keyDown }}">
         <button type="button" class="keybtn" aria-expanded="{{ keyExpanded }}" aria-controls="cube-key" onClick="{{ keyClick }}" onFocus="{{ keyFocus }}" onBlur="{{ keyBlur }}">
@@ -618,35 +950,86 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
         </button>
         <div class="keycard">
           <ul class="legend" id="cube-key" aria-label="How to read a Cube">
+            <li class="lgh first">Faces</li>
             <li class="lg">
               <span class="coin" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span>
-              <span class="coin" aria-hidden="true"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span>
-              <span>Top: network</span>
+              <sc-if value="{{ b2bOn }}" hint-placeholder-val="{{ false }}"><span class="coin" aria-hidden="true"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span></sc-if>
+              <span>Top: network coin (and name tag on test networks)</span>
             </li>
             <li class="lg">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v5.5c0 4.3-3 7.6-7 9.5-4-1.9-7-5.2-7-9.5V6z"></path></svg>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M13 3L5 13.5h6L10 21l8-10.5h-6z"></path></svg>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5c3.5 4.2 6 7.6 6 10.5a6 6 0 0 1-12 0c0-2.9 2.5-6.3 6-10.5z"></path></svg>
-              <span>Left: wallets</span>
+              <span>Left: wallets (Vault, Spark, Liquid)</span>
             </li>
             <li class="lg">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 11h10v9H7zM9 11V8a3 3 0 0 1 6 0v3"></path></svg>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7.5v5.5M12 16.2v.3"></path></svg>
-              <span>Right: lock, backup attention</span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true" style="color:var(--warn)"><circle cx="12" cy="12" r="9"></circle><path d="M12 7.5v5.5M12 16.2v.3"></path></svg>
+              <span>Right: lock, backup needs attention</span>
             </li>
-            <li class="lg">
-              <span class="sw btc" aria-hidden="true"></span><sc-if value="{{ b2bOn }}" hint-placeholder-val="{{ false }}"><span class="sw b2b" aria-hidden="true"></span></sc-if><span class="sw test" aria-hidden="true"></span>
-              <span>Edge: network family</span>
+
+            <li class="lgh">Edges: network</li>
+            <li class="lg net">
+              <svg class="gc" viewBox="0 0 24 24" fill="none" stroke="var(--edge-btc)" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z" fill="var(--face-t)"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path></svg>
+              <span class="gt">Bitcoin mainnet<span>Solid orange edge</span></span>
+            </li>
+            <sc-if value="{{ b2bOn }}" hint-placeholder-val="{{ false }}">
+              <li class="lg net">
+                <svg class="gc" viewBox="0 0 24 24" fill="none" stroke="var(--edge-b2b)" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z" fill="var(--face-t)"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path></svg>
+                <span class="gt">Bitcoin Blake2b mainnet<span>Solid gold edge</span></span>
+              </li>
+            </sc-if>
+            <sc-if value="{{ devOn }}" hint-placeholder-val="{{ false }}">
+              <li class="lg net">
+                <svg class="gc" viewBox="0 0 24 24" fill="none" stroke="var(--edge-test)" stroke-width="1.6" stroke-linejoin="round" stroke-dasharray="2.2 1.6" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z" fill="var(--face-t)"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path></svg>
+                <span class="gt">Test networks<span>Dashed grey edge · Testnet4, Signet, Regtest; the top names which</span></span>
+              </li>
+            </sc-if>
+
+            <li class="lgh">Ghosts: in Connect, not on this device</li>
+            <li class="lgnote">Drawn see-through in the network's edge colour. The left face shows a cloud.</li>
+            <li class="lg two">
+              <svg class="gc" viewBox="0 0 24 24" fill="none" stroke="var(--ghost-btc)" stroke-width="1.3" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z" fill="var(--ghost-fill)"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path><path d="M12 3v9M4 16.5l8-4.5 8 4.5" stroke-dasharray="1.5 1.5" opacity=".7"></path></svg>
+              <svg class="kit good" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8.5h16V19H4zM9 8.5V6.5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M8.8 13.6l2.2 2.2 4.2-4.3"></path></svg>
+              <span class="gt">Solid edge, kit with a tick: Recovery Kit in Connect<span>Select it to restore it on this device.</span></span>
+            </li>
+            <li class="lg two">
+              <svg class="gc" viewBox="0 0 24 24" fill="none" stroke="var(--ghost-btc)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="0.1 2.4" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path><path d="M12 3v9M4 16.5l8-4.5 8 4.5" opacity=".7"></path></svg>
+              <svg class="kit warnc" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8.5h16V19H4zM9 8.5V6.5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M3 4l18 18"></path></svg>
+              <span class="gt">Dotted edge, kit struck through: no Recovery Kit<span>Registered only. It can't be restored from Connect.</span></span>
             </li>
           </ul>
         </div>
       </div>
     </sc-if>
   </div>
-  <div class="foot">Concept prototype V3 · synthetic data · spin-to-face flow; face content is a flat panel over the scene, as the native Iced plan requires</div>
+  <sc-if value="{{ lload.on }}" hint-placeholder-val="{{ false }}">
+    <section class="lload {{ lload.cls }}" style="{{ lload.style }}" aria-labelledby="lload-title" aria-busy="true">
+      <div class="lframe" aria-hidden="true"></div>
+      <p class="lhead" id="lload-title"><span>{{ lload.verb }}</span> <b>{{ lload.name }}</b> <span>·</span>
+        <sc-if value="{{ lload.btcLogo }}" hint-placeholder-val="{{ true }}"><span class="coin {{ lload.coinCls }}" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></sc-if>
+        <sc-if value="{{ lload.logo }}" hint-placeholder-val="{{ false }}"><span class="coin {{ lload.coinCls }}" aria-hidden="true"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span></sc-if>
+        <span>{{ lload.net }}</span></p>
+      <div class="lcol">
+        <figure class="lquote">
+          <blockquote><p style="margin:0">{{ lload.qText }}</p></blockquote>
+          <figcaption>— {{ lload.qBy }}</figcaption>
+        </figure>
+        <p class="lstage {{ lload.lsCls }}">{{ lload.lsText }}</p>
+        <sc-if value="{{ lload.slow }}" hint-placeholder-val="{{ false }}"><p class="lslow">Taking longer than usual. <button type="button" class="linkbtn" onClick="{{ lload.cancel }}">Cancel</button></p></sc-if>
+      </div>
+    </section>
+  </sc-if>
+  <div class="foot">Concept prototype V3 · synthetic data · spin-to-face flow, then the Cube tumbles to its loading face and opens; face content is a flat panel over the scene, as the native Iced plan requires</div>
+</div>
+</sc-if>
+<sc-if value="{{ opened }}" hint-placeholder-val="{{ false }}">
+  <dc-import name="P-Overview" hint-size="1440px,900px"></dc-import>
+</sc-if>
+<sc-if value="{{ flashOn }}" hint-placeholder-val="{{ false }}"><div class="flash" style="{{ flashStyle }}" aria-hidden="true"></div></sc-if>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"cubeCount":{"editor":"enum","options":["0","1","4","9","20"],"default":"9","section":"Review"},"launcherStyle":{"editor":"enum","options":["auto","cubes","list"],"default":"auto","section":"Review"},"startPhase":{"editor":"enum","options":["browse","details","unlock","checks"],"default":"browse","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"focusDemo":{"editor":"boolean","default":false,"section":"Review"},"accountState":{"editor":"enum","options":["signedIn","signedOut"],"default":"signedIn","section":"Review"},"$preview":{"width":1440,"height":900}}'>
+<script type="text/x-dc" data-dc-script data-props='{"cubeCount":{"editor":"enum","options":["0","1","4","9","20"],"default":"9","section":"Review"},"launcherStyle":{"editor":"enum","options":["auto","cubes","list"],"default":"auto","section":"Review"},"startPhase":{"editor":"enum","options":["browse","details","unlock","loading"],"default":"browse","section":"Review"},"autoplay":{"editor":"boolean","default":true,"section":"Opening"},"startStage":{"editor":"enum","options":["0","1","2","3","4"],"default":"0","section":"Opening"},"stall":{"editor":"boolean","default":false,"section":"Opening"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"focusDemo":{"editor":"boolean","default":false,"section":"Review"},"accountState":{"editor":"enum","options":["signedIn","signedOut"],"default":"signedIn","section":"Review"},"backdrop":{"editor":"enum","options":["off","preference","on"],"default":"off","section":"Backdrop (design B)"},"localNode":{"editor":"enum","options":["stopped","running"],"default":"stopped","section":"Backdrop (design B)"},"blockDemo":{"editor":"boolean","default":true,"section":"Backdrop (design B)"},"$preview":{"width":1440,"height":900}}'>
 class Component extends DCLogic {
   constructor(p) {
     super(p);
@@ -654,8 +1037,15 @@ class Component extends DCLogic {
     try { const bump = () => { try { this.setState({ protoTick: Date.now() }); } catch (e) {} }; window.addEventListener('tenshu-proto', bump); window.addEventListener('storage', bump); window.addEventListener('focus', bump); document.addEventListener('visibilitychange', bump); } catch (e) {}
     const lever = (this.props && this.props.startPhase) || 'browse';
     // lever = the startPhase value the current state was made under; when the lever changes, it wins (Everyday selected)
+    // prototype-only: ghosts restored on this device; a fresh Launcher starts with every ghost back in Connect
+    try { localStorage.removeItem('tenshu.proto.restored'); } catch (e) {}
     this.state = { filter: 'all', networkMenu: false, selected: 1, phase: lever, method: 'pin', lever: lever, prev: null, handoff: false, hideBalances: false, keyMode: 'closed' };
   }
+  componentDidMount() {
+    // prototype-only (design B): a block lands every 9s so the rail's one motion can be reviewed; paused while hidden
+    this._iv = setInterval(() => { try { if (this._railTick && !document.hidden) this.setState({ blk: (this.state.blk || 0) + 1 }); } catch (e) {} }, 9000);
+  }
+  componentWillUnmount() { clearInterval(this._iv); }
   renderVals() {
     // prototype-only: Appearance (App preferences) is a device setting shared across artboards: system follows the review lever
     let THEME = 'system'; try { THEME = localStorage.getItem('tenshu.proto.theme') || 'system'; } catch (e) {}
@@ -682,7 +1072,11 @@ class Component extends DCLogic {
     // prototype-only: the open Cube is remembered across artboards in localStorage (the app keeps it in memory)
     const OPEN_KEY = 'tenshu.proto.open';
     let openId = null; try { openId = Number(localStorage.getItem(OPEN_KEY)) || null; } catch (e) {}
-    const setOpen = (id) => { try { if (id) localStorage.setItem(OPEN_KEY, String(id)); else localStorage.removeItem(OPEN_KEY); localStorage.removeItem('tenshu.proto.seen'); } catch (e) {} };
+    // the Overview names the Cube it shows from tenshu.proto.openCube (name, network, coin, avatar), written here when a Cube opens
+    const setOpen = (id) => { try {
+      if (id) { localStorage.setItem(OPEN_KEY, String(id)); const c = all.find((x) => x.id === id); if (c) localStorage.setItem('tenshu.proto.openCube', JSON.stringify({ name: c.name, net: CH[c.network].full, logo: CH[c.network].logo ? 'b2b' : 'btc', av: AV[c.id] || AV[1] })); }
+      else { localStorage.removeItem(OPEN_KEY); localStorage.removeItem('tenshu.proto.openCube'); }
+      localStorage.removeItem('tenshu.proto.seen'); } catch (e) {} };
     const AV = {1: "M12 4.2c4.6-.4 7.9 3.1 7.6 7.4-.3 4.6-4.2 8.2-8.6 7.6-4.2-.6-6.9-4.4-6.3-8.5.5-3.3 3-5.9 6.2-6.4", 2: "M8 20c.6-5.2.3-10.4 1.4-15.6M8.9 9.8c2.2-1.2 4.2-1 6.3.2M8.6 14.2c2.4-1.5 4.8-1.3 7.1 0M12 4l1.6 3.4", 3: "M3 18 9.2 7.3 12.4 12l2.1-3.3L21 18M6.8 14.9l1.3-.9 1.4 1.1", 4: "M4 15c3.2-2.6 5.6-2.6 8.2 0s5.2 2.6 8 0M5 10.4c2.9-2.3 5-2.3 7.4 0s4.7 2.3 7.2 0M13.6 6.2c1.2-.9 2.3-.9 3.4 0", 5: "M5 19c2.4-4.6 5.8-8 10-10.4M9.5 8.5c1.7-2.2 3.8-3.3 6.2-3.5-.1 2.6-1.2 4.8-3.3 6.5M16 14.5c-1.3 2.4-3.3 3.9-6 4.4", 6: "M12 20V9M12 9 6.5 13M12 9l5.5 4M12 13.5 7.8 17M12 13.5l4.2 3.5M9.2 6.4 12 3.6l2.8 2.8"};
     const ICON = {
       V: { label: 'Vault', path: 'M12 3l7 3v5.5c0 4.3-3 7.6-7 9.5-4-1.9-7-5.2-7-9.5V6z' },
@@ -693,15 +1087,32 @@ class Component extends DCLogic {
       ok: { text: 'Confirmed', aria: 'Backup confirmed', tone: 'tone-good', path: 'M5 12.5l4.5 4.5L19 7.5' },
       warn: { text: 'Not confirmed', aria: 'Backup not confirmed', tone: 'tone-warn', path: CIRC + 'M12 7.5v5.5M12 16.2v.3' },
       unk: { text: 'Status unknown', aria: 'Backup status unknown', tone: 'tone-muted', path: CIRC + 'M9.6 9.6a2.4 2.4 0 1 1 3.4 2.2c-.7.3-1 .8-1 1.5v.4M12 16.3v.3' },
-      na: { text: 'Watch-only, no local keys', aria: 'Watch-only, no local keys', tone: 'tone-muted', path: CIRC + 'M8.5 12h7' }
+      na: { text: 'Watch-only, no local keys', aria: 'Watch-only, no local keys', tone: 'tone-muted', path: CIRC + 'M8.5 12h7' },
+      kit: { text: 'Recovery Kit in Connect', aria: 'Recovery Kit in Connect', tone: 'tone-good', path: 'M5 12.5l4.5 4.5L19 7.5' },
+      nokit: { text: 'No Recovery Kit in Connect', aria: 'no Recovery Kit in Connect', tone: 'tone-warn', path: CIRC + 'M12 7.5v5.5M12 16.2v.3' }
     };
     // Home list Connect status lines (home.rs): one per backup state in these fixtures
     const CN = {
       ok: { text: 'Backed up to Connect \u2014 recovery kit ready', tone: 'tone-good' },
       warn: { text: 'Registered to Connect \u2014 no recovery kit', tone: 'tone-warn' },
       unk: { text: 'Not yet synced to Connect. It will sync automatically in a moment.', tone: 'tone-muted' },
-      na: { text: 'Sovereign \u2014 local only', tone: 'tone-muted' }
+      na: { text: 'Sovereign \u2014 local only', tone: 'tone-muted' },
+      kit: { text: 'In Connect, not on this device', tone: 'tone-muted' },
+      nokit: { text: 'In Connect, not on this device', tone: 'tone-muted' }
     };
+    // Robert (2026-10-29): Cubes registered in Connect but not on this device show as ghosts in the row, after the local Cubes
+    // (replacing the "Available in Connect" list). Only while signed in to Connect
+    const GHOSTS = [
+      [31, 'Passkey', 'btc', 'kit', 'VS', ''],
+      [32, 'Old laptop', 'btc', 'nokit', 'VS', '']
+    ];
+    // prototype-only: a ghost restored from its Recovery Kit becomes a local Cube (kept in localStorage, cleared when the Launcher mounts)
+    const RKEY = 'tenshu.proto.restored';
+    let restored = []; try { restored = JSON.parse(localStorage.getItem(RKEY) || '[]'); } catch (e) {}
+    const setRestored = (id, on) => { try { const r = restored.filter((x) => x !== id); if (on) r.push(id); localStorage.setItem(RKEY, JSON.stringify(r)); } catch (e) {} };
+    const CLOUD = 'M7 18h10a4 4 0 0 0 .6-7.95A5.5 5.5 0 0 0 6.9 9.2 4.4 4.4 0 0 0 7 18z';
+    const KIT = 'M4 8.5h16V19H4zM9 8.5V6.5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M8.8 13.6l2.2 2.2 4.2-4.3';
+    const NOKIT = 'M4 8.5h16V19H4zM9 8.5V6.5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M3 4l18 18';
     const B2 = 'Bitcoin Blake2b supports Vault creation only.';
     const NOV = 'No Vault configured.';
     // V2 fixtures. This artboard shows the Launcher at app start, so every Cube is locked (Everyday included).
@@ -739,7 +1150,14 @@ class Component extends DCLogic {
     const f = (!DEV && (f0 === 'live' || f0 === 'test' || (CH[f0] && !CH[f0].live))) ? 'all' : f0;
     const matches = (c) => f === 'all' ? true : f === 'live' ? CH[c.network].live : f === 'test' ? !CH[c.network].live : c.network === f;
 
-    const all = CUBES.filter((r) => (B2B || (r[2] !== 'b2b' && r[2] !== 'b2t')) && (DEV || CH[r[2]].live)).slice(0, count).map((r) => ({ id: r[0], name: r[1], network: r[2], bk: r[3], w: r[4], note: r[5] }));
+    const signedInNow = (this.props.accountState ?? 'signedIn') !== 'signedOut';
+    const locals = CUBES.filter((r) => (B2B || (r[2] !== 'b2b' && r[2] !== 'b2t')) && (DEV || CH[r[2]].live)).slice(0, count);
+    // Robert (2026-10-29): ghosts show with or without local Cubes; on a new device they are the whole row
+    const ghostRows = signedInNow ? GHOSTS : [];
+    const all = locals.concat(ghostRows).map((r) => {
+      const wasGhost = r[3] === 'kit' || r[3] === 'nokit', back = wasGhost && restored.indexOf(r[0]) >= 0;
+      return { id: r[0], name: r[1], network: r[2], bk: back ? 'ok' : r[3], w: r[4], note: r[5], ghost: wasGhost && !back };
+    });
     const vis = all.filter(matches);
     const n = vis.length;
     const pages = Math.max(1, Math.ceil(n / 4));
@@ -756,10 +1174,48 @@ class Component extends DCLogic {
     if (!leverWins && selCube && selCube.id === openId && (phase === 'unlock' || (phase === 'checks' && seenId === selCube.id))) { phase = 'browse'; }
     const method = leverWins ? 'pin' : st.method;
     const browsing = phase === 'browse';
+    const opening = phase === 'loading' || phase === 'finale';
     const handoff = !leverWins && !browsing && !!st.handoff;
     // every action clears the handoff flag (so later spins have no delay) unless the patch sets it
-    const cur = { lever, phase, selected: selId, method, filter: f, prev: leverWins ? null : st.prev, handoff: false, hideBalances: !!st.hideBalances, page: pg };
-    const go = (patch) => this.setState(Object.assign({}, cur, { networkMenu: false, pin: null, showPin: false }, patch));
+    // restoring = the ghost whose Recovery Kit is being restored: the PIN face asks for a new PIN, the loader fetches the kit first
+    const isRestore = !leverWins && !!selCube && st.restoring === selCube.id;
+    const cur = { lever, phase, selected: selId, method, filter: f, prev: leverWins ? null : st.prev, handoff: false, hideBalances: !!st.hideBalances, page: pg, restoring: isRestore ? st.restoring : null };
+    // loader stages, quoted from coincube-gui/src/loader.rs; the last one is the beat before the Cube opens
+    // restore stages (first two invented for the prototype; the app's restore loader may word them differently)
+    const LST = isRestore ? ['Fetching Recovery Kit from Connect...', 'Restoring ' + selCube.name + '...', 'Starting daemon...', 'Syncing blockchain...', 'Ready']
+      : ['Connecting to daemon...', 'Starting daemon...', 'Syncing blockchain...', 'Almost there...', 'Ready'];
+    const QUOTES = [
+      ['Trusted third parties are security holes.', 'Nick Szabo, Trusted Third Parties Are Security Holes, 2001'],
+      ['Bitcoin is the hardest money ever invented: growth in its value cannot possibly increase its supply.', 'Saifedean Ammous, The Bitcoin Standard, 2018'],
+      ['Inflation is a tax on those most unable to pay.', 'Jeff Booth, The Greatest Game, The Bitcoin Times Ed. 3, 2020']
+    ];
+    // props arrive as strings when this artboard is imported into a review board
+    const flag = (v, d) => v === undefined ? d : !(v === false || v === 'false');
+    const ls0 = Math.min(4, parseInt(this.props.startStage || '0', 10) || 0);
+    const ls = leverWins ? ls0 : Math.min(4, st.ls === undefined ? ls0 : st.ls);
+    const autoplay = flag(this.props.autoplay, true);
+    // stall (review): the loader holds on "Syncing blockchain..." so the Cancel offer can be seen
+    const stall = flag(this.props.stall, false);
+    // prototype autoplay: one loader stage at a time, then the finale, then the Overview mounts in place.
+    // Timers are cleared whenever the Cube leaves the opening phases (Cancel, Back, another Cube).
+    if (!(selCube && opening)) { clearTimeout(this._lt); this._lt = null; }
+    // Robert (2026-10-29): a loader stage that runs past 15s offers Cancel, in case the app stalls with no error. The wait restarts at each stage
+    if (!(selCube && phase === 'loading') || this._slowLs !== ls) { clearTimeout(this._slowT); this._slowT = null; }
+    if (selCube && phase === 'loading' && !st.slow && !this._slowT) {
+      this._slowLs = ls;
+      this._slowT = setTimeout(() => { this._slowT = null; this.setState(Object.assign({}, this.state, { lever, phase: 'loading', selected: selId, method, slow: true })); }, 15000);
+    }
+    if (selCube && phase === 'loading' && autoplay && !(stall && ls >= 2) && !this._lt) {
+      this._lt = setTimeout(() => {
+        this._lt = null;
+        const base = Object.assign({}, this.state, { lever, phase: 'loading', selected: selId, method, opened: false, slow: false });
+        this.setState(ls < 4 ? Object.assign(base, { ls: ls + 1 }) : Object.assign(base, { phase: 'finale', ls: 4 }));
+      }, ls < 3 ? 1700 : ls === 3 ? 1400 : 800);
+    }
+    if (selCube && phase === 'finale' && !st.opened && !this._lt) {
+      this._lt = setTimeout(() => { this._lt = null; this.setState(Object.assign({}, this.state, { opened: true })); }, 900);
+    }
+    const go = (patch) => this.setState(Object.assign({}, cur, { networkMenu: false, srcMenu: false, pin: null, pin2: null, showPin: false, restoring: null }, patch));
 
     // Robert (2026-10-23): "All networks" only when more than one network is listed; Live/Test only in Developer mode
     const chips = (ORDER.length > 1 ? [['all', 'All networks']] : []).concat(DEV ? [['live', 'Live networks'], ['test', 'Test networks']] : []).map(([k, label]) => ({
@@ -771,12 +1227,16 @@ class Component extends DCLogic {
       on: f === k, cls: f === k ? 'on' : '', pressed: String(f === k), pick: () => go({ filter: k })
     }));
     let countText = '';
-    if (count > 0 && f === 'all') countText = n + (n === 1 ? ' Cube' : ' Cubes');
-    else if (count > 0) countText = n + ' of ' + count + ' Cubes · ' + hidden + ' hidden';
+    const nGhost = vis.filter((c) => c.ghost).length, nLocal = n - nGhost;
+    const inConnect = nGhost ? ' · ' + nGhost + ' in Connect only' : '';
+    if (nLocal === 0 && nGhost > 0 && f === 'all') countText = 'No Cubes on this device' + inConnect;
+    else if (count > 0 && f === 'all') countText = nLocal + (nLocal === 1 ? ' Cube' : ' Cubes') + inConnect;
+    else if (count > 0) countText = nLocal + ' of ' + count + ' Cubes' + inConnect + ' · ' + hidden + ' hidden';
 
     // size tiers (V2). Slot heights are fixed so each scene's stage position is computable.
     // Robert (2026-10-23): one size, four Cubes per page; more Cubes page sideways (arrows, trackpad swipe, arrow keys). padT matches .rows.big.
-    const T = { mode: 'big', s: 152, slot: 232, h: 344, cols: 4, gap: 40, padT: 168, rowGap: 0 };
+    // Robert (2026-10-28): Cubes moved down so the floor's horizon runs through their centres and the sky above holds network activity
+    const T = { mode: 'big', s: 152, slot: 232, h: 344, cols: 4, gap: 40, padT: 236, rowGap: 0 };
 
     // spin target: face center at stage (720, 392), projected face = 420px.
     // The scene's perspective-origin travels with the Cube so the final face sits on the optical axis:
@@ -785,6 +1245,10 @@ class Component extends DCLogic {
     const S = FACE * D / (D + FACE / 2);
     const k = S / T.s;
     const yaw = phase === 'details' ? 180 : 270; // 45 -> 180 shows back-left; 180 -> 270 shows back-right
+    // loading face: 700px, centred in the stage (744px tall). rotateX 0 -> 90 tips the bottom face up to the viewer while yaw 270 -> 360
+    // squares it, so the Cube tumbles diagonally. Finale: scale x3.6 brings the face to just short of the eye (z < d), filling the screen.
+    const FACE2 = 700, TY2 = 372;
+    const k2 = (FACE2 * D / (D + FACE2 / 2)) / T.s;
     const px = (v) => v.toFixed(2) + 'px';
     const REST = 'translate3d(0px,0px,0px) scale(1) rotateX(-35deg) rotateY(45deg)';
 
@@ -793,6 +1257,10 @@ class Component extends DCLogic {
     const digits = (!leverWins && Array.isArray(st.pin)) ? st.pin : ['', '', '', ''];
     const showPin = !leverWins && !!st.showPin;
     const pinFull = digits.every((x) => x !== '');
+    // restore only: the confirm row; Restore stays off until both rows are full and match
+    const digits2 = (!leverWins && Array.isArray(st.pin2)) ? st.pin2 : ['', '', '', ''];
+    const pin2Full = digits2.every((x) => x !== '');
+    const pinsMatch = pinFull && pin2Full && digits.join('') === digits2.join('');
     const EYE_OPEN = 'M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12zM12 9a3 3 0 1 0 0 6a3 3 0 1 0 0-6';
     const EYE_SHUT = 'M9.9 5.8A9.6 9.6 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a16 16 0 0 1-2.6 3.4M6.4 7.4C3.9 9.1 2.5 12 2.5 12S6 18.5 12 18.5c1.8 0 3.3-.5 4.6-1.2M9.9 9.9a3 3 0 0 0 4.2 4.2M4 4l16 16';
     let P = null;
@@ -813,17 +1281,28 @@ class Component extends DCLogic {
         openDemo: focusDemo ? 'demo-focus' : '', pinDemo: focusDemo ? 'demo-focus' : '', contDemo: focusDemo ? 'demo-focus' : '',
         toBrowse: () => go({ phase: 'browse' }),
         markSeen: () => { try { localStorage.setItem('tenshu.proto.seen', selCube.id); } catch (e) {} },
-        cancelOpen: () => { setOpen(null); go({ phase: 'browse' }); },
+        // Cancel during a restore puts the Cube back in Connect as a ghost
+        cancelOpen: () => { setOpen(null); if (isRestore) setRestored(selCube.id, false); go({ phase: 'browse', ls: 0, slow: false, opened: false }); },
+        unlockVerb: isRestore ? 'Restore' : 'Open', unlockLabel: isRestore ? 'Restore' : 'Unlock', notRestore: !isRestore,
+        pinLegend: isRestore ? 'Choose a PIN for this device' : 'PIN',
+        pinHelp: isRestore ? "You'll use it to open " + selCube.name + ' on this device.' : "Enter this Cube's PIN, or use its passkey.",
+        pinNote: isRestore ? 'The Recovery Kit is fetched from Connect once you choose a PIN.' : 'Network checks run after your PIN is accepted.',
+        loadVerb: isRestore ? 'Restoring' : 'Opening',
         toDetails: () => go({ phase: 'details' }),
         toUnlock: () => go({ phase: 'unlock' }),
-        unlockPin: () => { if (pinFull) { setOpen(selCube.id); go({ phase: 'checks', method: 'pin' }); } },
-        pinType: showPin ? 'text' : 'password', unlockOff: !pinFull,
+        unlockPin: () => { if (isRestore ? pinsMatch : pinFull) { if (isRestore) setRestored(selCube.id, true); setOpen(selCube.id); go({ phase: 'loading', method: 'pin', ls: 0, opened: false, slow: false, restoring: isRestore ? selCube.id : null }); } },
+        pinType: showPin ? 'text' : 'password', unlockOff: isRestore ? !pinsMatch : !pinFull, isRestore,
+        matchText: isRestore && pinFull && pin2Full ? (pinsMatch ? 'PINs match.' : "These PINs don't match. Check the confirm row.") : 'Type the same four digits again.',
+        matchCls: isRestore && pinFull && pin2Full && !pinsMatch ? 'tone-warn' : '',
         showPressed: String(showPin), eyePath: showPin ? EYE_SHUT : EYE_OPEN,
-        toggleShow: () => this.setState(Object.assign({}, cur, { keyMode: st.keyMode, pin: digits, showPin: !showPin })),
-        unlockKey: () => { setOpen(selCube.id); go({ phase: 'checks', method: 'key' }); },
+        toggleShow: () => this.setState(Object.assign({}, cur, { keyMode: st.keyMode, pin: digits, pin2: digits2, showPin: !showPin })),
+        unlockKey: () => { setOpen(selCube.id); go({ phase: 'loading', method: 'key', ls: 0, opened: false, slow: false }); },
+        slow: phase === 'loading' && !!st.slow,
+        qText: QUOTES[ls % QUOTES.length][0], qBy: QUOTES[ls % QUOTES.length][1],
+        lsText: LST[ls], lsCls: ls === 4 ? 'ready' : '',
         lockNow: () => { setOpen(null); go({ phase: 'browse' }); }
       };
-      if (!browsing) announce = phase === 'details' ? P.name + ' details' : phase === 'unlock' ? 'Unlock ' + P.name : 'Opening ' + P.name;
+      if (!browsing) announce = phase === 'details' ? P.name + ' details' : phase === 'unlock' ? (isRestore ? 'Restore ' : 'Unlock ') + P.name : opening ? (isRestore ? 'Restoring ' : 'Opening ') + P.name + '. ' + LST[ls] : 'Opening ' + P.name;
     }
     if (P) {
       // four PIN boxes: typing keeps the last digit and moves focus on; Backspace on an empty box clears and returns to the previous one.
@@ -831,31 +1310,37 @@ class Component extends DCLogic {
       // No autoFocus on box 1: re-applying it on re-render blanked that box's dot. Open focuses box 1 by id instead.
       // After each render the boxes are re-synced from state, so every box shows exactly the digit the handler stored.
       const later = (f) => { f(); setTimeout(f, 0); setTimeout(f, 60); };
-      const moveTo = (j) => later(() => { const el = document.getElementById('pin-d' + (j + 1)); if (el && document.activeElement !== el) el.focus({ preventScroll: true }); });
-      const syncBoxes = (vals) => later(() => vals.forEach((x, k) => { const el = document.getElementById('pin-d' + (k + 1)); if (el && el.value !== x) el.value = x; }));
+      // row 'd' is the PIN; row 'c' is the restore confirm row. Filling the last PIN box moves on to the confirm row
+      const moveTo = (j, row) => later(() => { const el = document.getElementById('pin-' + (row || 'd') + (j + 1)); if (el && document.activeElement !== el) el.focus({ preventScroll: true }); });
+      const syncBoxes = (vals, row) => later(() => vals.forEach((x, k) => { const el = document.getElementById('pin-' + (row || 'd') + (k + 1)); if (el && el.value !== x) el.value = x; }));
       P.toUnlock = () => { go({ phase: 'unlock' }); moveTo(0); };
-      digits.forEach((dv, i) => {
-        P['d' + (i + 1)] = dv;
-        P['set' + (i + 1)] = (e) => {
+      P.restore = () => { go({ phase: 'unlock', restoring: selCube.id }); moveTo(0); };
+      const rows2 = [['d', '', digits, 'pin'], ['c', 'c', digits2, 'pin2']];
+      rows2.forEach(([row, pre, vals, key]) => vals.forEach((dv, i) => {
+        P[row + (i + 1)] = dv;
+        const store = (next) => this.setState(Object.assign({}, cur, { keyMode: st.keyMode, pin: digits, pin2: digits2, showPin }, { [key]: next }));
+        P[pre + 'set' + (i + 1)] = (e) => {
           const raw = e && e.target ? String(e.target.value) : '';
           const v = raw.replace(/[^0-9]/g, '').slice(-1);
-          const next = digits.slice(); next[i] = v;
-          this.setState(Object.assign({}, cur, { keyMode: st.keyMode, pin: next, showPin }));
-          syncBoxes(next);
-          if (v && i < 3) moveTo(i + 1);
+          const next = vals.slice(); next[i] = v;
+          store(next);
+          syncBoxes(next, row);
+          if (v && i < 3) moveTo(i + 1, row);
+          else if (v && row === 'd' && isRestore) moveTo(0, 'c');
         };
-        P['back' + (i + 1)] = (e) => {
-          if (!e || e.key !== 'Backspace' || digits[i] !== '' || i === 0) return;
+        P[pre + 'back' + (i + 1)] = (e) => {
+          if (!e || e.key !== 'Backspace' || vals[i] !== '') return;
+          if (i === 0) { if (row === 'c') { if (e.preventDefault) e.preventDefault(); moveTo(3, 'd'); } return; }
           if (e.preventDefault) e.preventDefault();
-          const next = digits.slice(); next[i - 1] = '';
-          this.setState(Object.assign({}, cur, { keyMode: st.keyMode, pin: next, showPin }));
-          syncBoxes(next);
-          moveTo(i - 1);
+          const next = vals.slice(); next[i - 1] = '';
+          store(next);
+          syncBoxes(next, row);
+          moveTo(i - 1, row);
         };
-      });
+      }));
     }
-    const BSHORT = { ok: 'Backed up', warn: 'Backup not confirmed', unk: 'Backup status unknown', na: 'Local only' };
-    const EMPTY = { name: '', net: '', bText: '', bTone: '', bPath: '', wallets: [], cText: '', cTone: '', hasNote: false, note: '', openLabel: '', dTab: '-1', step1: '', step2: '', step3: '', openDemo: '', pinDemo: '', contDemo: '', pinType: 'password', unlockOff: true, showPressed: 'false', eyePath: '', d1: '', d2: '', d3: '', d4: '' };
+    const BSHORT = { ok: 'Backed up', warn: 'Backup not confirmed', unk: 'Backup status unknown', na: 'Local only', kit: 'Recovery Kit in Connect', nokit: 'No Recovery Kit' };
+    const EMPTY = { isRestore: false, matchText: '', matchCls: '', c1: '', c2: '', c3: '', c4: '', unlockVerb: 'Open', unlockLabel: 'Unlock', notRestore: true, pinLegend: 'PIN', pinHelp: '', pinNote: '', loadVerb: 'Opening', name: '', net: '', bText: '', bTone: '', bPath: '', wallets: [], cText: '', cTone: '', hasNote: false, note: '', openLabel: '', dTab: '-1', step1: '', step2: '', step3: '', openDemo: '', pinDemo: '', contDemo: '', pinType: 'password', unlockOff: true, showPressed: 'false', eyePath: '', d1: '', d2: '', d3: '', d4: '' };
 
     // Items keep the same order and keys in every phase: only classes and transform strings change, so both Cubes in a handoff keep their transitions.
     const rows = [];
@@ -873,31 +1358,46 @@ class Component extends DCLogic {
         const cy = T.padT + r * (T.h + T.rowGap) + 8 + 1.72 * T.s * 0.475;
         const sx = 0.75 * T.s, sy = 1.72 * T.s * 0.475;
         const dx = TX - cx, dy = TY - cy;
-        const origin = active ? px(sx + dx) + ' ' + px(sy + dy) : px(sx) + ' ' + px(1.72 * T.s * 0.5);
-        const cubeT = active ? 'translate3d(' + px(dx) + ',' + px(dy) + ',0px) scale(' + k.toFixed(4) + ') rotateX(0deg) rotateY(' + yaw + 'deg)' : REST;
+        const dy2 = TY2 - cy;
+        const origin = active ? px(sx + dx) + ' ' + px(sy + (opening ? dy2 : dy)) : px(sx) + ' ' + px(1.72 * T.s * 0.5);
+        const cubeT = !active ? REST
+          : opening ? 'translate3d(' + px(dx) + ',' + px(dy2) + ',0px) scale(' + (k2 * (phase === 'finale' ? 3.6 : 1)).toFixed(4) + ') rotateX(90deg) rotateY(360deg)'
+          : 'translate3d(' + px(dx) + ',' + px(dy) + ',0px) scale(' + k.toFixed(4) + ') rotateX(0deg) rotateY(' + yaw + 'deg)';
         const ws = c.w.split('').map((x) => ICON[x].label).join(', ');
+        const gkit = c.ghost && c.bk === 'kit';
         const isPrev = !browsing && st.prev === c.id && !isSel;
         return {
           hint: c.id === openId ? 'Already open on this device.' : 'PIN or passkey, then network checks.',
-          name: c.name, state: c.id === openId ? 'Open' : 'Locked', stCls: c.id === openId ? 'open' : '', isOpen: c.id === openId, notOpen: c.id !== openId, av: AV[c.id] || AV[1],
+          name: c.name, state: c.ghost ? (gkit ? 'In Connect · Restore' : 'In Connect · No Recovery Kit') : c.id === openId ? 'Open' : 'Locked',
+          stCls: c.ghost ? (gkit ? '' : 'warn') : c.id === openId ? 'open' : '', isOpen: !c.ghost && c.id === openId, notOpen: !c.ghost && c.id !== openId,
+          av: c.ghost ? CLOUD : AV[c.id] || AV[1], avCls: c.ghost ? 'ghost' : '', avStroke: c.ghost ? '1.6' : '2.1', avFill: c.ghost ? '0' : '.08', ghost: c.ghost,
           tag: ch.tag, hasTag: !!ch.tag, showNet: T.mode === 'dense' && !!ch.tag,
-          edge: ch.edge,
+          edge: ch.edge, cubeCls: ch.edge + (c.ghost ? ' ghost ' + c.bk : ''),
           btcLogo: !ch.logo, logo: !!ch.logo, coinCls: ch.live ? '' : 'tn',
           hasVault: c.w.indexOf('V') >= 0, hasSpark: c.w.indexOf('S') >= 0, hasLiquid: c.w.indexOf('L') >= 0,
-          lockPath: c.id === openId ? UNLOCKED : LOCKED, warn: c.bk === 'warn', unk: c.bk === 'unk',
+          lockPath: c.ghost ? (gkit ? KIT : NOKIT) : c.id === openId ? UNLOCKED : LOCKED, warn: c.bk === 'warn' || c.bk === 'nokit', unk: c.bk === 'unk',
           expanded: String(active),
           tab: browsing ? '0' : '-1',
-          aria: c.name + ', ' + ch.full + ', locked, ' + BK[c.bk].aria + ', wallets: ' + ws + '. Show details',
-          cls: T.mode + (isSel ? ' lead' : '') + (isPrev ? ' prev' : '') + (active ? ' active' : '') + (active && handoff ? ' handoff' : '') + (!browsing && !isSel ? ' dim' : ''),
+          aria: c.ghost ? c.name + ', ' + ch.full + ', in Connect, not on this device, ' + BK[c.bk].aria + (gkit ? '. Show restore options' : '. Show options')
+            : c.name + ', ' + ch.full + ', locked, ' + BK[c.bk].aria + ', wallets: ' + ws + '. Show details',
+          cls: T.mode + (isSel ? ' lead' : '') + (isPrev ? ' prev' : '') + (active ? ' active' : '') + (active && handoff ? ' handoff' : '') + (!browsing && !isSel ? ' dim' : '') + (opening && !isSel ? ' deep' : '') + (active && phase === 'finale' ? ' finale' : '') + (c.ghost ? ' ghostcb' : ''),
           hitCls: focusDemo && browsing && idx === 1 ? 'demo-focus' : '',
-          netFull: ch.full, bShort: BSHORT[c.bk] || '', bTone: (BK[c.bk] || {}).tone || '', lcls: isSel ? 'on' : '', actLabel: c.id === openId ? 'Go to Cube' : 'Open', pressed: String(isSel),
+          netFull: ch.full, bShort: BSHORT[c.bk] || '', bTone: (BK[c.bk] || {}).tone || '', lcls: isSel ? 'on' : '', actLabel: c.ghost ? (gkit ? 'Restore' : 'Options') : c.id === openId ? 'Go to Cube' : 'Open', pressed: String(isSel),
           slotStyle: 'width:' + T.slot + 'px;height:' + T.h + 'px',
           sceneStyle: '--s:' + T.s + 'px;perspective-origin:' + origin,
           cubeStyle: 'transform:' + cubeT,
           // face content: 420x420 layout scaled into the face's padding box (s minus the 1.5px edges)
           fcStyle: 'transform:scale(' + ((T.s - 3) / FACE).toFixed(5) + ')',
-          showDetails: active, detailsOnly: active && phase === 'details', showUnlock: active && phase === 'unlock', showChecks: active && phase === 'checks',
+          // a ghost has one face, its details; it never reaches the PIN or loading faces
+          showDetails: active && !c.ghost, detailsOnly: active && phase === 'details' && !c.ghost,
+          showGhostKit: active && phase === 'details' && gkit, showGhostNoKit: active && phase === 'details' && c.ghost && !gkit,
+          blCls: active && c.ghost ? 'panel' : '', brCls: active && c.ghost ? 'panel' : '', showUnlock: active && phase === 'unlock', showChecks: active && phase === 'checks',
           blHidden: String(!(active && phase === 'details')),
+          showLoading: active && opening, btHidden: String(!(active && opening)),
+          btCls: active && opening ? 'on' + (ls === 4 || phase === 'finale' ? ' peak' : '') : '',
+          btStyle: '--lvl:' + [0.35, 0.5, 0.65, 0.8, 1][ls],
+          // the loading face is laid out at 700x700, so its text renders at its own size once the Cube has grown
+          fcBigStyle: 'transform:scale(' + ((T.s - 3) / FACE2).toFixed(5) + ')',
           p: active ? P : EMPTY,
           // a background Cube hands off: outgoing reverses at once, incoming starts 160ms later in details with a fresh PIN field
           pick: (e) => {
@@ -915,15 +1415,91 @@ class Component extends DCLogic {
     const km = st.keyMode || 'closed';
     const listItems = rows.length ? rows[0].items : [];
     const lfound = listItems.find((it) => it.p !== EMPTY) || null;
-    const lsel = Object.assign({ on: !!lfound, p: EMPTY, name: '', state: '', stCls: '', edge: '', tag: '', hasTag: false, btcLogo: true, logo: false, coinCls: '', isOpen: false, notOpen: true, hint: '', showDetails: false, detailsOnly: false, showUnlock: false, showChecks: false, av: '' }, lfound || {});
-    return {
-      b2bOn: B2B,
+    const lsel = Object.assign({ on: !!lfound, p: EMPTY, name: '', state: '', stCls: '', edge: '', tag: '', hasTag: false, btcLogo: true, logo: false, coinCls: '', isOpen: false, notOpen: true, hint: '', showDetails: false, detailsOnly: false, showUnlock: false, showChecks: false, showGhostKit: false, showGhostNoKit: false, av: '', avCls: '', avStroke: '2.1', avFill: '.08' }, lfound || {});
+    // Design B (backdrop): sample chain data; the rail follows the Network filter, the source is a device setting (App preferences › Launcher)
+    let BD = 'on'; try { if (localStorage.getItem('tenshu.proto.backdrop') === 'off') BD = 'off'; } catch (e) {}
+    let SRC = 'auto'; try { SRC = localStorage.getItem('tenshu.proto.chainsrc') || 'auto'; } catch (e) {}
+    const bdProp = this.props.backdrop || 'off';
+    const railWanted = (bdProp === 'on' || (bdProp === 'preference' && BD === 'on')) && !listMode && n > 0;
+    const RD = {
+      btc: { tip: 968412, q: 3.4, hash: '1.08 ZH/s', every: 210000, edge: 'var(--edge-btc)', connect: true, auth: false },
+      b2b: { tip: 951806, q: 0.6, hash: '38.2 PH/s', every: 210000, edge: 'var(--edge-b2b)', connect: true, auth: false },
+      t4: { tip: 121580, q: 0.3, hash: '2.4 PH/s', every: 210000, edge: 'var(--edge-test)', connect: true, auth: false },
+      sig: { tip: 281044, q: 0.2, hash: null, every: 210000, edge: 'var(--edge-test)', connect: false, auth: false },
+      reg: { tip: 412, q: 0, hash: null, every: 150, edge: 'var(--edge-test)', connect: false, auth: false },
+      b2t: { tip: 118930, q: 0.1, hash: '0.9 PH/s', every: 210000, edge: 'var(--edge-test)', connect: true, auth: false }
+    };
+    const rk = RD[f] ? f : (f === 'test' ? 't4' : 'btc');
+    const rd = RD[rk];
+    const rName = (CH[rk] && CH[rk].menu) || 'Bitcoin mainnet';
+    const nodeUp = this.props.localNode === 'running';
+    const acctIn = (this.props.accountState ?? 'signedIn') !== 'signedOut';
+    const connectOk = rd.connect && (!rd.auth || acctIn);
+    let via = null, why = '';
+    if (SRC === 'local') { if (nodeUp) via = 'local'; else why = 'Local node isn’t running'; }
+    else if (SRC === 'connect') { if (connectOk) via = 'connect'; else why = rd.connect ? 'Sign in to Connect for ' + rName : 'Connect has no ' + rName + ' data'; }
+    else { via = nodeUp ? 'local' : (connectOk ? 'connect' : null); if (!via) why = 'No activity source for ' + rName; }
+    const blk = st.blk || 0;
+    const tip = rd.tip + blk;
+    const rnd = (h) => { let x = Math.imul(h ^ 0x5bd1e995, 2654435761) >>> 0; x ^= x >>> 15; return (x % 1000) / 1000; };
+    const railBlocks = [];
+    for (let i = 13; i >= 0; i--) {
+      const h = tip - i; const r = rnd(h);
+      railBlocks.push({ style: 'width:' + (16 + Math.round(r * 14)) + 'px;height:' + (5 + Math.round(r * 5)) + 'px;' + (i === 0 ? 'background:' + rd.edge : 'opacity:' + (0.3 + 0.6 * (13 - i) / 13).toFixed(2)) });
+    }
+    const q = rd.q === 0 ? 0 : Math.max(0.1, rd.q - 0.6 * (blk % 3));
+    // next halving from the tip alone; the date assumes 10-minute blocks
+    const toHalving = rd.every - (tip % rd.every);
+    const halvingAt = new Date(Date.now() + toHalving * 600000);
+    const halvingWhen = rk === 'reg' ? 'block ' + (tip + toHalving).toLocaleString('en-US') : '≈ ' + halvingAt.toLocaleString('en-US', { month: 'short', year: 'numeric' });
+    const railStats = [
+      { label: 'Block', value: '#' + tip.toLocaleString('en-US'), sub: via === 'local' ? 'from your node' : 'from Connect' },
+      { label: 'Mempool', value: q > 0 ? '≈ ' + q.toFixed(1) + ' blocks' : 'empty', sub: q > 0 ? 'worth of txs waiting to confirm' : 'nothing waiting' },
+      { label: 'Fee rate', value: '≈ ' + Math.max(1, ({ btc: 6, b2b: 2 }[rk] || 1) + (blk % 3) - 1) + ' sat/vB', sub: 'average for the next block' },
+      rd.hash ? { label: 'Hashrate', value: rd.hash, sub: 'from difficulty' } : null,
+      { label: 'Next halving', value: halvingWhen, sub: 'in ' + toHalving.toLocaleString('en-US') + ' blocks' }
+    ].filter(Boolean);
+    const railOn = railWanted && via !== null;
+    this._railTick = railOn && this.props.blockDemo !== false && this.props.blockDemo !== 'false';
+    const pickSrc = (v) => () => { try { localStorage.setItem('tenshu.proto.chainsrc', v); window.dispatchEvent(new CustomEvent('tenshu-proto')); } catch (e) {} this.setState({ srcMenu: false, protoTick: Date.now() }); };
+    const srcOpts = [
+      ['auto', 'Automatic', nodeUp ? 'Local node now' : (connectOk ? 'Connect now' : 'Nothing available')],
+      ['local', 'Local node', nodeUp ? 'Running' : 'Not running'],
+      ['connect', 'COINCUBE | Connect', connectOk ? 'Available' : (rd.connect ? 'Sign in needed' : 'Not offered')]
+    ].map(([v, label, note]) => ({ label, note, on: SRC === v, cls: SRC === v ? 'on' : '', pressed: String(SRC === v), pick: pickSrc(v) }));
+    const rv = {
+      railOn, railBlocks, railStats, railName: rName,
+      railAnim: blk === 0 ? '' : (blk % 2 ? 'ra' : 'rb'),
+      railTip: '#' + tip.toLocaleString('en-US'),
+      railHasQ: q > 0, railQStyle: 'width:' + Math.round(q * 24) + 'px',
+      railQLabel: q > 0 ? 'mempool ≈ ' + q.toFixed(1) + ' blocks' : 'mempool empty',
+      srcShow: railWanted, srcMenu: railWanted && !!st.srcMenu, srcExpanded: String(railWanted && !!st.srcMenu), srcOpts,
+      srcLabel: via ? 'Block ' + tip.toLocaleString('en-US') + ' · ' + (via === 'local' ? 'Local node' : 'COINCUBE | Connect') : why,
+      srcDotStyle: via ? 'background:' + rd.edge + ';border-color:transparent' : '',
+      toggleSrc: () => this.setState({ srcMenu: !st.srcMenu, networkMenu: false })
+    };
+    const selCh = selCube ? CH[selCube.network] : CH.btc;
+    const GL = { btc: '243,130,29', b2b: '212,166,42', test: '185,187,181' }[selCh.edge];
+    const flashOn = !!selCube && phase === 'finale';
+    const lload = Object.assign({ on: false }, listMode && selCube && opening && P ? {
+      on: true, name: P.name, net: P.net, verb: P.loadVerb, qText: P.qText, qBy: P.qBy, lsText: P.lsText, lsCls: P.lsCls, slow: P.slow, cancel: P.cancelOpen,
+      btcLogo: !selCh.logo, logo: !!selCh.logo, coinCls: selCh.live ? '' : 'tn',
+      cls: (ls === 4 || phase === 'finale' ? 'peak' : '') + (phase === 'finale' ? ' fin' : ''),
+      style: '--glow:' + GL + ';--lvl:' + [0.35, 0.5, 0.65, 0.8, 1][ls]
+    } : {});
+    return Object.assign(rv, {
+      opened: flashOn && !!st.opened, notOpened: !(flashOn && !!st.opened),
+      lload,
+      flashOn, flashStyle: 'background:rgb(' + GL + ')',
+      b2bOn: B2B, devOn: DEV,
       themeClass: this.props.forceTheme ? (this.props.forceTheme === 'light' ? 'light' : '') : ((THEME === 'light' || (THEME !== 'dark' && theme === 'light')) ? 'light' : ''),
       motionClass: this.props.reducedMotion ? 'reduced' : '',
       quietCls: browsing ? '' : 'quiet',
       signedIn: (this.props.accountState ?? 'signedIn') !== 'signedOut',
       signedOut: (this.props.accountState ?? 'signedIn') === 'signedOut',
-      hasAny: count > 0,
+      hasAny: count > 0 || ghostRows.length > 0,
+      ghostIntro: !listMode && count === 0 && n > 0 && nGhost === n,
+      ghostIntroText: 'These Cubes are in COINCUBE | Connect. Select one with a Recovery Kit to restore it here, or create a new Cube.',
       chips, networkItems,
       networkCls: networkOn ? 'on' : '', networkPressed: String(networkOn),
       networkExpanded: String(!!st.networkMenu), networkMenu: !!st.networkMenu,
@@ -932,12 +1508,12 @@ class Component extends DCLogic {
       clear: () => go({ filter: 'all' }),
       filterActive: f !== 'all',
       countText,
-      isEmpty: count === 0,
-      noMatch: count > 0 && n === 0,
+      isEmpty: count === 0 && ghostRows.length === 0,
+      noMatch: (count > 0 || ghostRows.length > 0) && n === 0,
       hasCubes: n > 0,
       hiddenText: hidden + (hidden === 1 ? ' Cube hidden.' : ' Cubes hidden.'),
       mode: T.mode, rows,
-      floorStyle: listMode ? 'display:none' : (n === 0 ? 'top:44%' : 'top:40%'),
+      floorStyle: listMode ? 'display:none' : (n === 0 ? 'top:44%' : 'top:50%'),
       cubesMode: !listMode, listMode, listItems, lsel,
       paged: pages > 1 && !listMode, pgN: String(pg + 1), pgTotal: String(pages), pgPrevOff: pg === 0, pgNextOff: pg >= pages - 1,
       pgPrev: () => { if (pg > 0) go({ page: pg - 1, phase: 'browse' }); },
@@ -958,7 +1534,7 @@ class Component extends DCLogic {
       keyEnter: () => { if (km === 'closed') this.setState(Object.assign({}, st, { keyMode: 'peek' })); },
       keyLeave: () => { if (km === 'peek' || km === 'shut') this.setState(Object.assign({}, st, { keyMode: 'closed' })); },
       keyDown: (e) => { if (e && e.key === 'Escape' && km !== 'shut' && km !== 'closed') this.setState(Object.assign({}, st, { keyMode: 'shut' })); }
-    };
+    });
   }
 }
 </script>

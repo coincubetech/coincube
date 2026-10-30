@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Launcher · network activity · light</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>body{margin:0}</style>
+</helmet>
+<div style="width:1440px;height:900px;overflow:hidden">
+  <dc-import name="P-Launcher" hint-size="1440px,900px" theme="light" force-theme="light" launcher-style="cubes" cube-count="9" backdrop="preference" local-node="stopped"></dc-import>
+</div>
+<script type="text/x-dc" data-dc-script data-props='{}'>
+class Component extends DCLogic {
+  constructor(p){super(p);this.state={};}
+  renderVals() {
+    // Design B example: light-theme twin of P-Launcher-Rail.
+    return {};
+  }
+}
+</script>
+</x-dc>
+</body>
+</html>
