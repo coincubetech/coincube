@@ -681,10 +681,10 @@ mod admitted_app_startup_tests {
                 let path = std::env::temp_dir()
                     .join(format!("admitted-app-startup-{}", uuid::Uuid::new_v4()));
                 let root = CoincubeDirectory::new(path.clone());
-                let (fixture, wallet) = crate::app::claim_step1_tests::bitcoin_app(&path);
+                let (fixture, wallet) = crate::app::shell_tests::bitcoin_app(&path);
                 let settings = fixture.cube_settings().clone();
                 let cache = fixture.cache().clone();
-                let daemon = crate::app::claim_step1_tests::fixture_daemon(&fixture);
+                let daemon = crate::app::shell_tests::fixture_daemon(&fixture);
                 drop(fixture);
                 let breez = Arc::new(app::breez_liquid::BreezClient::disconnected(
                     settings.network.bitcoin_network(),
@@ -7584,8 +7584,7 @@ mod fork_completion_tests {
                     .unwrap();
                 let _enter = runtime.enter();
                 let _guard = app::session::test_guard();
-                let (source, handoff, path) =
-                    app::claim_step1_tests::returning_claim_fixture(false);
+                let (source, handoff, path) = app::shell_tests::returning_claim_fixture(false);
                 let root = source.datadir().clone();
                 let target = app::settings::Settings::from_file(
                     &root.network_directory(ChainId::BitcoinBlake2b),

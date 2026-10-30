@@ -77,7 +77,7 @@ mod seed_export_duress_gui_tests {
         let _guard = crate::app::session::test_guard();
         crate::app::session::close();
         let path = std::env::temp_dir().join(format!("seed-export-gui-{}", uuid::Uuid::new_v4()));
-        let (app, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+        let (app, _) = crate::app::shell_tests::bitcoin_app(&path);
         let root = app.datadir().clone();
         let cube_id = app.cube_settings().id.clone();
         let chain = app.cube_settings().network;
@@ -152,7 +152,7 @@ mod seed_export_duress_gui_tests {
                 let _guard = crate::app::session::test_guard();
                 let path = std::env::temp_dir()
                     .join(format!("seed-export-global-seal-{}", uuid::Uuid::new_v4()));
-                let (source, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+                let (source, _) = crate::app::shell_tests::bitcoin_app(&path);
                 let root = source.datadir().clone();
                 let proof = crate::services::unlock::throttle::verified_seed_export_duress_for_test(
                     path.clone(),
@@ -172,7 +172,7 @@ mod seed_export_duress_gui_tests {
                         .update(tab::Message::UnlockMotionTick(Instant::now())),
                 );
 
-                let (mut revealing, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+                let (mut revealing, _) = crate::app::shell_tests::bitcoin_app(&path);
                 revealing.reviewer_show_seed_phrase_for_test();
                 let stopped =
                     crate::app::tests::reviewer_attach_counted_claim_context(&mut revealing);
@@ -233,7 +233,7 @@ mod seed_export_duress_gui_tests {
                     "unlock-duress-global-seal-{}",
                     uuid::Uuid::new_v4()
                 ));
-                let (source, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+                let (source, _) = crate::app::shell_tests::bitcoin_app(&path);
                 let root = source.datadir().clone();
                 let (home, startup) = home::Home::new_for_chain(root.clone(), None);
                 drop(startup);
@@ -258,7 +258,7 @@ mod seed_export_duress_gui_tests {
                 );
                 gui.panes.get_mut(pane_id).unwrap().tabs[0].state = tab::State::PinEntry(pin);
 
-                let (mut revealing, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+                let (mut revealing, _) = crate::app::shell_tests::bitcoin_app(&path);
                 revealing.reviewer_show_seed_phrase_for_test();
                 let stopped =
                     crate::app::tests::reviewer_attach_counted_claim_context(&mut revealing);
@@ -317,7 +317,7 @@ mod seed_export_duress_gui_tests {
                         reopen,
                         uuid::Uuid::new_v4()
                     ));
-                    let (source, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+                    let (source, _) = crate::app::shell_tests::bitcoin_app(&path);
                     let cube = source.cube_settings().clone();
                     let root = source.datadir().clone();
                     let (home, startup) = home::Home::new_for_chain(root.clone(), None);
@@ -341,7 +341,7 @@ mod seed_export_duress_gui_tests {
                     let old_generation = pin.reviewer_trial_generation();
                     gui.panes.get_mut(pane_id).unwrap().tabs[0].state = tab::State::PinEntry(pin);
 
-                    let (mut revealing, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+                    let (mut revealing, _) = crate::app::shell_tests::bitcoin_app(&path);
                     revealing.reviewer_show_seed_phrase_for_test();
                     let stopped =
                         crate::app::tests::reviewer_attach_counted_claim_context(&mut revealing);
@@ -478,7 +478,7 @@ mod seed_export_duress_gui_tests {
         let _enter = runtime.enter();
         let _guard = crate::app::session::test_guard();
         let path = std::env::temp_dir().join(format!("seed-export-close-{}", uuid::Uuid::new_v4()));
-        let (app, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+        let (app, _) = crate::app::shell_tests::bitcoin_app(&path);
         let root = app.datadir().clone();
         let cube_id = app.cube_settings().id.clone();
         let chain = app.cube_settings().network;
@@ -560,7 +560,7 @@ mod seed_export_duress_gui_tests {
         let _guard = crate::app::session::test_guard();
         let path =
             std::env::temp_dir().join(format!("seed-export-no-tab-{}", uuid::Uuid::new_v4()));
-        let (app, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+        let (app, _) = crate::app::shell_tests::bitcoin_app(&path);
         let root = app.datadir().clone();
         let proof = crate::services::unlock::throttle::verified_seed_export_duress_for_test(
             path.clone(),
@@ -673,7 +673,7 @@ mod seed_export_duress_gui_tests {
         let _guard = crate::app::session::test_guard();
         let path =
             std::env::temp_dir().join(format!("seed-export-close-wrong-{}", uuid::Uuid::new_v4()));
-        let (app, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+        let (app, _) = crate::app::shell_tests::bitcoin_app(&path);
         let (home, startup) = home::Home::new_for_chain(app.datadir().clone(), None);
         drop(startup);
         let mut gui = GUI::reviewer_app_home_gui(app, home);
@@ -895,7 +895,7 @@ mod balance_privacy_eye_origin_tests {
         let _enter = runtime.enter();
         let path =
             std::env::temp_dir().join(format!("privacy-eye-origin-{}", uuid::Uuid::new_v4()));
-        let (app, _) = app::claim_step1_tests::bitcoin_app(&path);
+        let (app, _) = app::shell_tests::bitcoin_app(&path);
         let mut tab = tab::Tab::new(1, tab::State::App(app));
         let generation = tab.app_generation_token().unwrap();
         let change = PreferenceChange::HideBalances(false);
@@ -4849,7 +4849,7 @@ mod app_preferences_sheet_tests {
                     .join(format!("settings-restore-route-{}", uuid::Uuid::new_v4()));
                 std::fs::create_dir_all(&path).unwrap();
                 let root = CoincubeDirectory::new(path.clone());
-                let (app, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+                let (app, _) = crate::app::shell_tests::bitcoin_app(&path);
                 let pane = pane::Pane::new_with_tab(tab::State::App(app));
                 let (panes, pane_id) = pane_grid::State::new(pane);
                 let mut gui = GUI {
@@ -7083,10 +7083,10 @@ mod shared_adoption_generation_tests {
                 client.set_token(token);
                 client
             };
-            let (source, wallet) = app::claim_step1_tests::bitcoin_app(&root_path);
+            let (source, wallet) = app::shell_tests::bitcoin_app(&root_path);
             let cache = source.cache().clone();
             let settings = source.cube_settings().clone();
-            let daemon = app::claim_step1_tests::fixture_daemon(&source);
+            let daemon = app::shell_tests::fixture_daemon(&source);
             let (mut home, startup) = home::Home::new_for_chain(root.clone(), None);
             drop(startup);
             drop(home.adopt_connect_client(client(old_server.base_url(), "old-session")));
@@ -7293,8 +7293,8 @@ mod shell_escape_dispatch_tests {
                 let path = std::env::temp_dir()
                     .join(format!("cube-connect-sheet-{}", uuid::Uuid::new_v4()));
                 std::fs::create_dir_all(&path).unwrap();
-                let (mut app, _) = app::claim_step1_tests::bitcoin_app(&path);
-                app::claim_step1_tests::signed_in_connect_for_shell(&mut app);
+                let (mut app, _) = app::shell_tests::bitcoin_app(&path);
+                app::shell_tests::signed_in_connect_for_shell(&mut app);
                 let (panes, pane_id) =
                     pane_grid::State::new(pane::Pane::new_with_tab(tab::State::App(app)));
                 let mut gui = GUI {
@@ -7365,7 +7365,7 @@ mod shell_escape_dispatch_tests {
         let _enter = runtime.enter();
         let path = std::env::temp_dir().join(format!("cube-escape-{}", uuid::Uuid::new_v4()));
         let root = CoincubeDirectory::new(path.clone());
-        let (source, _) = app::claim_step1_tests::bitcoin_app(&path);
+        let (source, _) = app::shell_tests::bitcoin_app(&path);
         let cube_id = source.cube_settings().id.clone();
         let owner = source.cache().app_generation;
         app::session::open_without_pin(cube_id.clone());
@@ -7475,7 +7475,7 @@ mod lock_cube_dispatch_tests {
         let path =
             std::env::temp_dir().join(format!("cube-lock-home-claim-{}", uuid::Uuid::new_v4()));
         let root = CoincubeDirectory::new(path.clone());
-        let (source, _) = app::claim_step1_tests::bitcoin_app(&path);
+        let (source, _) = app::shell_tests::bitcoin_app(&path);
         let owner = source.cache().app_generation;
         let source_id = source.cube_settings().id.clone();
         let (unrelated, startup) = home::Home::new_for_chain(root.clone(), None);
@@ -7575,7 +7575,7 @@ mod lock_cube_dispatch_tests {
         let path =
             std::env::temp_dir().join(format!("cube-refused-switch-{}", uuid::Uuid::new_v4()));
         let root = CoincubeDirectory::new(path.clone());
-        let (source, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+        let (source, _) = crate::app::shell_tests::bitcoin_app(&path);
         let source_id = source.cube_settings().id.clone();
         let (home, startup) = home::Home::new_for_chain(root.clone(), None);
         drop(startup);
@@ -7660,7 +7660,7 @@ mod lock_cube_dispatch_tests {
         let path =
             std::env::temp_dir().join(format!("cube-switch-cascade-{}", uuid::Uuid::new_v4()));
         let root = CoincubeDirectory::new(path.clone());
-        let (source, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+        let (source, _) = crate::app::shell_tests::bitcoin_app(&path);
         let source_settings = source.cube_settings().clone();
         let owner = source.cache().app_generation;
         let (loader, startup) = crate::loader::Loader::new(
@@ -7747,13 +7747,13 @@ mod lock_cube_dispatch_tests {
         let root_path =
             std::env::temp_dir().join(format!("cube-lock-siblings-{}", uuid::Uuid::new_v4()));
         let root = CoincubeDirectory::new(root_path.clone());
-        let (first, _) = crate::app::claim_step1_tests::bitcoin_app(&root_path);
+        let (first, _) = crate::app::shell_tests::bitcoin_app(&root_path);
         let same_cube_id = first.cube_settings().id.clone();
         let same_settings = first.cube_settings().clone();
-        let sibling = crate::app::claim_step1_tests::bitcoin_app_with_id(&root_path, &same_cube_id);
+        let sibling = crate::app::shell_tests::bitcoin_app_with_id(&root_path, &same_cube_id);
         let same_pane_sibling =
-            crate::app::claim_step1_tests::bitcoin_app_with_id(&root_path, &same_cube_id);
-        let (unrelated, _) = crate::app::claim_step1_tests::bitcoin_app(&root_path);
+            crate::app::shell_tests::bitcoin_app_with_id(&root_path, &same_cube_id);
+        let (unrelated, _) = crate::app::shell_tests::bitcoin_app(&root_path);
         let mut first_pane = pane::Pane::new_with_tab(tab::State::App(first));
         first_pane
             .tabs
@@ -7856,11 +7856,11 @@ mod lock_cube_dispatch_tests {
         let path =
             std::env::temp_dir().join(format!("closed-claim-loader-{}", uuid::Uuid::new_v4()));
         let root = CoincubeDirectory::new(path.clone());
-        let (source, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+        let (source, _) = crate::app::shell_tests::bitcoin_app(&path);
         let source_cube = source.cube_settings().id.clone();
         let source_generation = source.cache().app_generation;
-        let (target, wallet) = crate::app::claim_step1_tests::bitcoin_app(&path.join("target"));
-        let target_daemon = crate::app::claim_step1_tests::fixture_daemon(&target);
+        let (target, wallet) = crate::app::shell_tests::bitcoin_app(&path.join("target"));
+        let target_daemon = crate::app::shell_tests::fixture_daemon(&target);
         let target_cache = target.cache().clone();
         let target_settings = target.cube_settings().clone();
         let node = crate::node::bitcoind::Bitcoind::for_test(
@@ -7949,7 +7949,7 @@ mod lock_cube_dispatch_tests {
                 tab::Message::Load(crate::loader::Message::Synced(Ok((
                     late_wallet,
                     late_cache,
-                    crate::app::claim_step1_tests::fixture_daemon(&target),
+                    crate::app::shell_tests::fixture_daemon(&target),
                     Some(node),
                     None,
                     target.cube_settings().clone(),
@@ -7997,7 +7997,7 @@ mod lock_cube_dispatch_tests {
             ),
             wallet: std::sync::Arc::new(target.wallet().unwrap().clone()),
             cache: target.cache().clone(),
-            daemon: crate::app::claim_step1_tests::fixture_daemon(&target),
+            daemon: crate::app::shell_tests::fixture_daemon(&target),
             bitcoind: Some(node),
             settings: target.cube_settings().clone(),
             client: None,
@@ -8038,7 +8038,7 @@ mod lock_cube_dispatch_tests {
             ),
             wallet: std::sync::Arc::new(target.wallet().unwrap().clone()),
             cache: target.cache().clone(),
-            daemon: crate::app::claim_step1_tests::fixture_daemon(&target),
+            daemon: crate::app::shell_tests::fixture_daemon(&target),
             bitcoind: Some(node),
             settings: target.cube_settings().clone(),
             client: None,
@@ -8314,7 +8314,7 @@ mod claim_return_routing_tests {
                     "held-imported-credentials-{}",
                     uuid::Uuid::new_v4()
                 ));
-                let source = app::claim_step1_tests::imported_app_ready_for_claim(&path);
+                let source = app::shell_tests::imported_app_ready_for_claim(&path);
                 let source_id = source.cube_settings().id.clone();
                 let root = source.datadir().clone();
                 let (home, startup) = home::Home::new_for_chain(root.clone(), None);
@@ -8362,10 +8362,10 @@ mod claim_return_routing_tests {
                     uuid::Uuid::new_v4()
                 ));
                 let replacement =
-                    app::claim_step1_tests::bitcoin_app_with_id(&replacement_path, &source_id);
+                    app::shell_tests::bitcoin_app_with_id(&replacement_path, &source_id);
                 let cache = replacement.cache().clone();
                 let wallet = std::sync::Arc::new(replacement.wallet().unwrap().clone());
-                let daemon = app::claim_step1_tests::fixture_daemon(&replacement);
+                let daemon = app::shell_tests::fixture_daemon(&replacement);
                 let settings = replacement.cube_settings().clone();
                 drop(replacement);
                 let breez = std::sync::Arc::new(app::breez_liquid::BreezClient::disconnected(
@@ -8481,8 +8481,7 @@ mod claim_return_routing_tests {
                     .unwrap();
                 let _enter = runtime.enter();
                 let _guard = app::session::test_guard();
-                let (source, handoff, path) =
-                    app::claim_step1_tests::returning_claim_fixture(false);
+                let (source, handoff, path) = app::shell_tests::returning_claim_fixture(false);
                 let source_id = source.cube_settings().id.clone();
                 let root = source.datadir().clone();
                 let (home, startup) = home::Home::new_for_chain(root.clone(), None);
@@ -8523,10 +8522,10 @@ mod claim_return_routing_tests {
                 // The ordinary synthetic Loader completion reuses the tab ID
                 // and creates a distinct App owner, as in the shared-client
                 // hold regression. No keychain or daemon process starts.
-                let replacement = app::claim_step1_tests::bitcoin_app_with_id(&path, &source_id);
+                let replacement = app::shell_tests::bitcoin_app_with_id(&path, &source_id);
                 let cache = replacement.cache().clone();
                 let wallet = std::sync::Arc::new(replacement.wallet().unwrap().clone());
-                let daemon = app::claim_step1_tests::fixture_daemon(&replacement);
+                let daemon = app::shell_tests::fixture_daemon(&replacement);
                 let settings = replacement.cube_settings().clone();
                 drop(replacement);
                 let breez = std::sync::Arc::new(app::breez_liquid::BreezClient::disconnected(
@@ -8585,8 +8584,7 @@ mod claim_return_routing_tests {
         let _guard = app::session::test_guard();
         for cross_pane in [false, true] {
             for wrong_wallet in [false, true] {
-                let (app, handoff, path) =
-                    app::claim_step1_tests::returning_claim_fixture(wrong_wallet);
+                let (app, handoff, path) = app::shell_tests::returning_claim_fixture(wrong_wallet);
                 let root = app.datadir().clone();
                 let (home, startup) = home::Home::new_for_chain(root.clone(), None);
                 drop(startup);
@@ -8719,14 +8717,13 @@ mod single_open_lifecycle_tests {
                     .unwrap();
                 let _enter = runtime.enter();
                 let _guard = app::session::test_guard();
-                let (mut source, handoff, path) =
-                    app::claim_step1_tests::returning_claim_fixture(false);
+                let (mut source, handoff, path) = app::shell_tests::returning_claim_fixture(false);
                 let root = source.datadir().clone();
                 let source_settings = source.cube_settings().clone();
                 let source_id = source_settings.id.clone();
                 let owner = source.cache().app_generation;
                 let source_stops = app::tests::reviewer_attach_counted_claim_context(&mut source);
-                let (mut legacy, _) = app::claim_step1_tests::bitcoin_app(&path);
+                let (mut legacy, _) = app::shell_tests::bitcoin_app(&path);
                 let legacy_stops = app::tests::reviewer_attach_counted_claim_context(&mut legacy);
                 let (home, startup) = home::Home::new_for_chain(root.clone(), None);
                 drop(startup);
@@ -8835,7 +8832,7 @@ mod single_open_lifecycle_tests {
                 ] {
                     let path = std::env::temp_dir()
                         .join(format!("installer-admission-{}", uuid::Uuid::new_v4()));
-                    let (source, _) = app::claim_step1_tests::bitcoin_app(&path);
+                    let (source, _) = app::shell_tests::bitcoin_app(&path);
                     let source_id = source.cube_settings().id.clone();
                     let root = source.datadir().clone();
                     let (home, startup) = home::Home::new_for_chain(root.clone(), None);
@@ -8905,7 +8902,7 @@ mod single_open_lifecycle_tests {
                     "split-installer-admission-{}",
                     uuid::Uuid::new_v4()
                 ));
-                let (source, _) = app::claim_step1_tests::bitcoin_app(&path);
+                let (source, _) = app::shell_tests::bitcoin_app(&path);
                 let source_id = source.cube_settings().id.clone();
                 let root = source.datadir().clone();
                 let (mut home, startup) = home::Home::new_for_chain(root.clone(), None);
@@ -8973,7 +8970,7 @@ mod single_open_lifecycle_tests {
                 let _guard = app::session::test_guard();
                 let path = std::env::temp_dir()
                     .join(format!("remote-login-admission-{}", uuid::Uuid::new_v4()));
-                let (mut source, wallet) = app::claim_step1_tests::bitcoin_app(&path);
+                let (mut source, wallet) = app::shell_tests::bitcoin_app(&path);
                 let stopped = app::tests::reviewer_attach_counted_claim_context(&mut source);
                 let source_id = source.cube_settings().id.clone();
                 let root = source.datadir().clone();
@@ -9086,7 +9083,7 @@ mod single_open_lifecycle_tests {
                 let _guard = app::session::test_guard();
                 let path =
                     std::env::temp_dir().join(format!("delete-admission-{}", uuid::Uuid::new_v4()));
-                let (source, _) = app::claim_step1_tests::bitcoin_app(&path);
+                let (source, _) = app::shell_tests::bitcoin_app(&path);
                 let cube_id = source.cube_settings().id.clone();
                 let (home, startup) = home::Home::new_for_chain(source.datadir().clone(), None);
                 drop(startup);
@@ -9468,7 +9465,7 @@ mod single_open_lifecycle_tests {
                 let _guard = app::session::test_guard();
                 let path = std::env::temp_dir()
                     .join(format!("remote-duress-owner-{}", uuid::Uuid::new_v4()));
-                let (mut source, _) = app::claim_step1_tests::bitcoin_app(&path);
+                let (mut source, _) = app::shell_tests::bitcoin_app(&path);
                 let stopped = app::tests::reviewer_attach_counted_claim_context(&mut source);
                 let source_id = source.cube_settings().id.clone();
                 let (home, startup) = home::Home::new_for_chain(source.datadir().clone(), None);
@@ -9501,7 +9498,7 @@ mod single_open_lifecycle_tests {
 
                 let new_path = std::env::temp_dir()
                     .join(format!("remote-duress-new-owner-{}", uuid::Uuid::new_v4()));
-                let (new_owner, _) = app::claim_step1_tests::bitcoin_app(&new_path);
+                let (new_owner, _) = app::shell_tests::bitcoin_app(&new_path);
                 let new_id = new_owner.cube_settings().id.clone();
                 // Test-only replacement on the same tab identity models a
                 // later admitted owner. The real App→Duress transition already
@@ -9558,7 +9555,7 @@ mod single_open_lifecycle_tests {
                 let _guard = app::session::test_guard();
                 let path = std::env::temp_dir()
                     .join(format!("local-duress-owner-{}", uuid::Uuid::new_v4()));
-                let (mut source, _) = app::claim_step1_tests::bitcoin_app(&path);
+                let (mut source, _) = app::shell_tests::bitcoin_app(&path);
                 let stopped = app::tests::reviewer_attach_counted_claim_context(&mut source);
                 let source_id = source.cube_settings().id.clone();
                 let root = source.datadir().clone();
@@ -9608,7 +9605,7 @@ mod single_open_lifecycle_tests {
                 let _enter = runtime.enter();
                 let _guard = app::session::test_guard();
                 let (source, handoff, path) =
-                    app::claim_step1_tests::returning_claim_fixture(false);
+                    app::shell_tests::returning_claim_fixture(false);
                 let root = source.datadir().clone();
                 let source_settings = source.cube_settings().clone();
                 let source_id = source_settings.id.clone();

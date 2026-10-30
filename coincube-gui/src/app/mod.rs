@@ -13963,8 +13963,7 @@ pub(crate) mod tests {
         use std::sync::atomic::Ordering;
 
         let _guard = crate::app::session::test_guard();
-        let (mut source, _handoff, path) =
-            crate::app::claim_step1_tests::returning_claim_fixture(false);
+        let (mut source, _handoff, path) = crate::app::shell_tests::returning_claim_fixture(false);
         let calls = reviewer_attach_counted_claim_context(&mut source);
         source.claim_pair_context.take().unwrap().stop();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -14289,8 +14288,7 @@ pub(crate) mod tests {
             .build()
             .unwrap();
         let _enter = runtime.enter();
-        let (mut source, handoff, path) =
-            crate::app::claim_step1_tests::returning_claim_fixture(false);
+        let (mut source, handoff, path) = crate::app::shell_tests::returning_claim_fixture(false);
         let target = split_app(&path, false, true);
         let target_settings = settings::Settings::from_file(
             &source
@@ -14630,7 +14628,7 @@ pub(crate) mod tests {
                     .unwrap();
                 }
                 crate::imported_claim::tests::prepare_storage(&root, &source_cube);
-                let (mut source, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+                let (mut source, _) = crate::app::shell_tests::bitcoin_app(&path);
                 source.cube_settings = source_cube.clone();
                 source.cache.cube_id = source_cube.id.clone();
                 let mut source_client =
@@ -14954,8 +14952,7 @@ pub(crate) mod tests {
     #[test]
     fn visible_paired_claim_actions_stay_with_the_restricted_fork_owner() {
         let _guard = crate::app::session::test_guard();
-        let (mut source, _handoff, path) =
-            crate::app::claim_step1_tests::returning_claim_fixture(false);
+        let (mut source, _handoff, path) = crate::app::shell_tests::returning_claim_fixture(false);
         let target = split_app(&path, false, true);
         let mut target_settings = target.cube_settings.clone();
         let target_wallet = target.wallet.as_ref().unwrap().clone();
@@ -16707,7 +16704,7 @@ pub(crate) mod tests {
     fn split_gets_no_daemon_while_a_switch_is_in_flight() {
         let _guard = crate::app::session::test_guard();
         let root = std::env::temp_dir().join(format!("split-switch-{}", uuid::Uuid::new_v4()));
-        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
         assert!(app.split_daemon().is_some());
         let mut cfg = app.daemon.as_ref().unwrap().config().unwrap().clone();
         if let Some(coincubed::config::BitcoinBackend::Esplora(selection)) =
@@ -18453,9 +18450,10 @@ mod duress_chain_identity_tests {
     }
 }
 
-/// Claim step 1 entry and routing (Lane B1.5), at the App level.
+/// App-level shell fixtures (a Bitcoin Cube with a Vault) and the tests that
+/// drive them.
 #[cfg(test)]
-pub(crate) mod claim_step1_tests {
+pub(crate) mod shell_tests {
     use super::*;
     use crate::app::state::vault::claim::{Checked, ClaimEvent, CoinSet, ForkWindow};
     use coincube_core::miniscript::bitcoin::hashes::Hash;
@@ -20673,7 +20671,7 @@ mod received_celebration_privacy_tests {
         let _guard = crate::app::session::test_guard();
         let root =
             std::env::temp_dir().join(format!("celebration-privacy-{}", uuid::Uuid::new_v4()));
-        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
         app.show_received_celebration = true;
         app.received_celebration_amount = "12,345 SATS".into();
 
@@ -20721,7 +20719,7 @@ mod incoming_liquid_toast_privacy_tests {
         let _guard = crate::app::session::test_guard();
         let root =
             std::env::temp_dir().join(format!("incoming-toast-privacy-{}", uuid::Uuid::new_v4()));
-        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
         assert_eq!(
             super::ToastContent::Text("Split review: 12,345 sats".into())
                 .display(app.cache.bitcoin_unit, true),
@@ -20797,7 +20795,7 @@ mod settings_navigation_integration_tests {
         let _guard = crate::app::session::test_guard();
         let root =
             std::env::temp_dir().join(format!("settings-default-route-{}", uuid::Uuid::new_v4()));
-        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
 
         drop(app.update(Message::View(view::Message::Menu(Menu::Vault(
             menu::VaultSubMenu::Settings(None),
@@ -20836,7 +20834,7 @@ mod local_node_sync_tests {
         use local_switch::{NodePruning, VaultHistory};
         let root = std::env::temp_dir().join(format!("guided-switch-{}", uuid::Uuid::new_v4()));
         let _guard = crate::app::session::test_guard();
-        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
         let pending = BitcoindConfig {
             addr: "127.0.0.1:8332".parse().unwrap(),
             rpc_auth: BitcoindRpcAuth::CookieFile(
@@ -20922,7 +20920,7 @@ mod local_node_sync_tests {
     fn cancel_during_history_batch_is_queued_and_acknowledged() {
         let root = std::env::temp_dir().join(format!("history-cancel-{}", uuid::Uuid::new_v4()));
         let _guard = crate::app::session::test_guard();
-        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
         app.node_history_in_progress = true;
         app.cache.node_history.busy = true;
 
@@ -20941,7 +20939,7 @@ mod local_node_sync_tests {
         let root =
             std::env::temp_dir().join(format!("history-completion-{}", uuid::Uuid::new_v4()));
         let _guard = crate::app::session::test_guard();
-        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
         let wallet = app.wallet.as_ref().unwrap().id();
         app.node_history_request_epoch = 2;
         app.node_history_in_progress = true;
@@ -20967,7 +20965,7 @@ mod local_node_sync_tests {
         let root =
             std::env::temp_dir().join(format!("history-settings-owner-{}", uuid::Uuid::new_v4()));
         let _guard = crate::app::session::test_guard();
-        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
         let config = node(8333);
         let mut daemon_config = app.daemon.as_ref().unwrap().config().unwrap().clone();
         daemon_config.pending_bitcoind = Some(config.clone());
@@ -21018,7 +21016,7 @@ mod local_node_sync_tests {
     fn superseded_history_completion_cannot_release_a_new_worker() {
         let root = std::env::temp_dir().join(format!("history-epoch-{}", uuid::Uuid::new_v4()));
         let _guard = crate::app::session::test_guard();
-        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
         let wallet = app.wallet.as_ref().unwrap().id();
         app.node_history_request_epoch = 3;
         app.node_history_in_progress = true;
@@ -21042,7 +21040,7 @@ mod local_node_sync_tests {
     fn a_probe_started_before_recovery_cannot_restore_history_permission() {
         let root = std::env::temp_dir().join(format!("recovery-probe-{}", uuid::Uuid::new_v4()));
         let _guard = crate::app::session::test_guard();
-        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
         let pending = node(8333);
         let mut config = app.daemon.as_ref().unwrap().config().unwrap().clone();
         config.pending_bitcoind = Some(pending.clone());
@@ -21144,7 +21142,7 @@ mod local_node_sync_tests {
     #[tokio::test]
     async fn local_node_sync_survives_switch_and_rejects_previous_node() {
         let root = std::env::temp_dir().join(format!("local-node-sync-{}", uuid::Uuid::new_v4()));
-        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
         let mut cfg = app.daemon.as_ref().unwrap().config().unwrap().clone();
         let active = node(8332);
         let pending = node(8333);
@@ -21222,8 +21220,8 @@ mod local_node_sync_tests {
         let root =
             std::env::temp_dir().join(format!("stale-local-history-{}", uuid::Uuid::new_v4()));
         let _guard = crate::app::session::test_guard();
-        let (previous, _) = super::claim_step1_tests::bitcoin_app(&root);
-        let (mut current, _) = super::claim_step1_tests::bitcoin_app(&root);
+        let (previous, _) = super::shell_tests::bitcoin_app(&root);
+        let (mut current, _) = super::shell_tests::bitcoin_app(&root);
         assert_ne!(previous.cache.app_generation, current.cache.app_generation);
         let mut cfg = current.daemon.as_ref().unwrap().config().unwrap().clone();
         let pending = node(8333);
@@ -21266,7 +21264,7 @@ mod local_node_sync_tests {
 
         let root = std::env::temp_dir().join(format!("local-switch-{}", uuid::Uuid::new_v4()));
         let _guard = crate::app::session::test_guard();
-        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
         let mut cfg = app.daemon.as_ref().unwrap().config().unwrap().clone();
         let pending = node(8333);
         cfg.pending_bitcoind = Some(pending.clone());
@@ -21362,7 +21360,7 @@ mod local_node_sync_tests {
 
         let root = std::env::temp_dir().join(format!("local-switch-{}", uuid::Uuid::new_v4()));
         let _guard = crate::app::session::test_guard();
-        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
         let mut cfg = app.daemon.as_ref().unwrap().config().unwrap().clone();
         assert!(matches!(
             cfg.bitcoin_backend,
@@ -21479,7 +21477,7 @@ mod wallet_recent_activity_tests {
     fn vault_page_refreshes_its_rows_without_dropping_a_request() {
         let _guard = crate::app::session::test_guard();
         let root = std::env::temp_dir().join(format!("recent-refresh-{}", uuid::Uuid::new_v4()));
-        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
 
         app.panels.current = Menu::Cube(menu::CubeSubMenu::Overview);
         drop(app.update(Message::Payments(Ok(Vec::new()))));
@@ -21538,7 +21536,7 @@ mod wallet_recent_activity_tests {
     fn a_wallet_page_selection_ends_with_its_row_or_the_page() {
         let _guard = crate::app::session::test_guard();
         let root = std::env::temp_dir().join(format!("recent-select-{}", uuid::Uuid::new_v4()));
-        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
         app.panels.current = Menu::Spark(menu::SparkSubMenu::Overview);
         let generation = app.panels.activity.generation_for_tests();
         let at = |n: u64, id: &str| coincube_spark_protocol::PaymentSummary {
@@ -21631,7 +21629,7 @@ mod wallet_recent_activity_tests {
     fn wallet_pages_route_activity_and_view_all_opens_filtered_activity() {
         let _guard = crate::app::session::test_guard();
         let root = std::env::temp_dir().join(format!("recent-activity-{}", uuid::Uuid::new_v4()));
-        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
         app.panels.current = Menu::Vault(menu::VaultSubMenu::Overview);
 
         let generation = app.panels.activity.generation_for_tests();

@@ -14276,7 +14276,7 @@ mod chain_identity_open_tests {
     #[test]
     fn claim_navigation_cannot_borrow_another_app_or_destination() {
         let _guard = crate::app::session::test_guard();
-        let (app, handoff, path) = app::claim_step1_tests::returning_claim_fixture(false);
+        let (app, handoff, path) = app::shell_tests::returning_claim_fixture(false);
         let root = app.datadir().clone();
         let target = handoff.resolve_target(&root).unwrap();
         let owner = app.cache().app_generation;

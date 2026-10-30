@@ -201,7 +201,7 @@ mod tests {
     }
     #[tokio::test]
     async fn unswept_notice_app_ignores_old_callbacks_and_revokes_live_evidence() {
-        use crate::app::{cache::AppGeneration, claim_step1_tests::bitcoin_app, message::Message};
+        use crate::app::{cache::AppGeneration, message::Message, shell_tests::bitcoin_app};
         let root = std::env::temp_dir().join(format!("coincube-notice-{}", uuid::Uuid::new_v4()));
         let (mut app, _) = bitcoin_app(&root);
         let generation = *app.panels.claim_generation.borrow();
@@ -241,7 +241,7 @@ mod tests {
     }
     #[test]
     fn unswept_notice_account_and_provider_replacement_without_claim_panel_revokes() {
-        use crate::app::{claim_step1_tests::bitcoin_app, message::Message, view};
+        use crate::app::{message::Message, shell_tests::bitcoin_app, view};
         let _guard = crate::app::session::test_guard();
         let root =
             std::env::temp_dir().join(format!("coincube-notice-session-{}", uuid::Uuid::new_v4()));
@@ -302,7 +302,7 @@ mod tests {
     fn app_with_unswept_request(
         root: &std::path::Path,
     ) -> (crate::app::App, std::sync::Arc<Wallet>, u64) {
-        use crate::app::claim_step1_tests::bitcoin_app;
+        use crate::app::shell_tests::bitcoin_app;
         let (mut app, wallet) = {
             let _guard = crate::app::session::test_guard();
             bitcoin_app(root)

@@ -726,9 +726,9 @@ fn cube_auth_changes_return_focus_to_mounted_control() {
     with_runtime("connect-cube-auth-focus", |path, _| {
         for signed_in_at_open in [false, true] {
             for escape in [false, true] {
-                let (mut app, _) = app::claim_step1_tests::bitcoin_app(path);
+                let (mut app, _) = app::shell_tests::bitcoin_app(path);
                 if signed_in_at_open {
-                    app::claim_step1_tests::signed_in_connect_for_shell(&mut app);
+                    app::shell_tests::signed_in_connect_for_shell(&mut app);
                     app.cache_mut().sidebar_connect_signed_in = true;
                 }
                 let (panes, pane_id) =
@@ -803,7 +803,7 @@ fn cube_auth_changes_return_focus_to_mounted_control() {
 fn launcher_sheet_sign_out_invalidates_sibling_cube_session() {
     with_runtime("connect-sheet-global-sign-out", |path, _| {
         let root = CoincubeDirectory::new(path.to_path_buf());
-        let (app, _) = app::claim_step1_tests::bitcoin_app(path);
+        let (app, _) = app::shell_tests::bitcoin_app(path);
         let (mut home, startup) = home::Home::new_for_chain(root, None);
         drop(startup);
         for _ in crate::hw_advisory::ADVISORIES {
@@ -894,7 +894,7 @@ async fn outputs_within(task: Task<Message>) -> Vec<Message> {
 #[test]
 fn probe_p4_signed_out_cube_chip_overlays_cube() {
     with_runtime("pr805-p4", |path, runtime| {
-        let (app, _) = app::claim_step1_tests::bitcoin_app(path);
+        let (app, _) = app::shell_tests::bitcoin_app(path);
         assert!(!app.can_restore_connect_session());
         let (panes, pane_id) =
             pane_grid::State::new(pane::Pane::new_with_tab(tab::State::App(app)));
@@ -992,7 +992,7 @@ fn probe_p4_signed_out_cube_chip_overlays_cube() {
 #[test]
 fn view_plans_sheet_returns_focus_to_cube_settings() {
     with_runtime("connect-view-plans-focus", |path, _| {
-        let (app, _) = app::claim_step1_tests::bitcoin_app(path);
+        let (app, _) = app::shell_tests::bitcoin_app(path);
         let (panes, pane_id) =
             pane_grid::State::new(pane::Pane::new_with_tab(tab::State::App(app)));
         let mut gui = GUI {
@@ -1153,8 +1153,8 @@ fn probe_p5_capture_compact_composed_sheet() {
         drop(gui.update(Message::ConnectSheet(ConnectSheetMessage::Close)));
         capture(&gui, "launcher-after-plan-cta-close");
 
-        let (mut app, _) = app::claim_step1_tests::bitcoin_app(path);
-        app::claim_step1_tests::signed_in_connect_for_shell(&mut app);
+        let (mut app, _) = app::shell_tests::bitcoin_app(path);
+        app::shell_tests::signed_in_connect_for_shell(&mut app);
         let (panes, pane_id) =
             pane_grid::State::new(pane::Pane::new_with_tab(tab::State::App(app)));
         let mut gui = GUI {

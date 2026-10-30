@@ -9,6 +9,8 @@ use coincube_core::{
     foreign_split::{create_split_step1, reconstruct_split_step1, SplitInputs},
     miniscript::bitcoin::{absolute::LockTime, hashes::Hash, Amount},
 };
+use reqwest::header::{HeaderMap, CACHE_CONTROL};
+use std::time::Duration;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -854,7 +856,8 @@ fn split_b1a_services_have_no_new_gui_callers() {
         "btcb2_fee_source",
         "bitcoin_step1_feerate",
     ];
-    const OWN_FILES: [&str; 7] = [
+    const OWN_FILES: [&str; 8] = [
+        "src/services/connect_esplora.rs",
         "src/services/split_evidence.rs",
         "src/services/split_evidence/tests.rs",
         "src/services/split_fees.rs",

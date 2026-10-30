@@ -244,7 +244,7 @@ pub async fn fee_rate(
     client: Option<crate::services::coincube::CoincubeClient>,
     chain: ChainId,
 ) -> Option<u64> {
-    use crate::services::{foreign_psbt::SweepFeeSource, split_fees};
+    use crate::services::split_fees::{self, SweepFeeSource};
     let client = client?;
     let rate = match chain {
         ChainId::Bitcoin => {

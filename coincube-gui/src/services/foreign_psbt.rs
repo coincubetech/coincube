@@ -20,6 +20,7 @@ use coincube_core::{
 use sha2::{Digest, Sha256};
 
 use super::foreign_scan::{Branch, DiscoveredCoin, ForkSide, ScanDescriptor, ScanReport};
+pub use super::split_fees::{btcb2_sweep_feerate, SweepFeeSource, UnavailableBtcb2Fees};
 use crate::{
     app::{
         settings::{CubeSettings, WalletId},
@@ -489,42 +490,6 @@ pub fn review_sweep_economics(
         fee: Amount::from_sat(fee_sat),
         destination: Amount::from_sat(destination_sat),
     })
-}
-
-/// A fee-rate source for a Split sweep, tagged with the chain whose mempool
-/// it measures. The BTCB2 flow consults only a BTCB2-scoped source.
-#[async_trait::async_trait]
-pub trait SweepFeeSource: Send + Sync {
-    fn chain(&self) -> ChainId;
-    async fn mid_priority_sat_vb(&self) -> Option<u64>;
-}
-
-/// The fail-closed source when no Connect account session can read the
-/// BTCB2 estimate (`ConnectBtcb2Fees` in `split_fees`, #568 D4). Bitcoin
-/// mainnet fees do not describe the BTCB2 mempool, so the review shows fees
-/// as unavailable.
-pub struct UnavailableBtcb2Fees;
-
-#[async_trait::async_trait]
-impl SweepFeeSource for UnavailableBtcb2Fees {
-    fn chain(&self) -> ChainId {
-        ChainId::BitcoinBlake2b
-    }
-    async fn mid_priority_sat_vb(&self) -> Option<u64> {
-        None
-    }
-}
-
-/// Resolve a BTCB2 sweep fee rate. A source scoped to any other chain is
-/// never queried; an out-of-bounds rate is unavailable, not clamped.
-pub async fn btcb2_sweep_feerate(source: &dyn SweepFeeSource) -> Option<u64> {
-    if source.chain() != ChainId::BitcoinBlake2b {
-        return None;
-    }
-    source
-        .mid_priority_sat_vb()
-        .await
-        .filter(|rate| (1..=spend::MAX_FEERATE).contains(rate))
 }
 
 impl PreparedForeignSweep {
@@ -1402,53 +1367,6 @@ mod tests {
             .err(),
             Some(ForeignPsbtError::ForkUnknown)
         );
-    }
-
-    struct CountingFees {
-        chain: ChainId,
-        rate: Option<u64>,
-        calls: std::sync::atomic::AtomicUsize,
-    }
-
-    #[async_trait::async_trait]
-    impl SweepFeeSource for CountingFees {
-        fn chain(&self) -> ChainId {
-            self.chain
-        }
-        async fn mid_priority_sat_vb(&self) -> Option<u64> {
-            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.rate
-        }
-    }
-
-    #[tokio::test]
-    async fn btcb2_sweep_never_queries_a_bitcoin_fee_source() {
-        use std::sync::atomic::Ordering;
-        let bitcoin = CountingFees {
-            chain: ChainId::Bitcoin,
-            rate: Some(5),
-            calls: Default::default(),
-        };
-        assert_eq!(btcb2_sweep_feerate(&bitcoin).await, None);
-        assert_eq!(bitcoin.calls.load(Ordering::SeqCst), 0);
-
-        let btcb2 = CountingFees {
-            chain: ChainId::BitcoinBlake2b,
-            rate: Some(5),
-            calls: Default::default(),
-        };
-        assert_eq!(btcb2_sweep_feerate(&btcb2).await, Some(5));
-        assert_eq!(btcb2.calls.load(Ordering::SeqCst), 1);
-        for rate in [Some(0), Some(spend::MAX_FEERATE + 1), None] {
-            let bounded = CountingFees {
-                chain: ChainId::BitcoinBlake2b,
-                rate,
-                calls: Default::default(),
-            };
-            assert_eq!(btcb2_sweep_feerate(&bounded).await, None);
-        }
-        // Production has no BTCB2 estimator: fees are unavailable.
-        assert_eq!(btcb2_sweep_feerate(&UnavailableBtcb2Fees).await, None);
     }
 
     #[test]

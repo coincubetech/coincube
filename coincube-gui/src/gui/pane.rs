@@ -46,7 +46,7 @@ mod claim_owner_tests {
         let _enter = runtime.enter();
         let path = std::env::temp_dir().join(format!("claim-home-close-{}", uuid::Uuid::new_v4()));
         let root = CoincubeDirectory::new(path.clone());
-        let (source, _) = app::claim_step1_tests::bitcoin_app(&path);
+        let (source, _) = app::shell_tests::bitcoin_app(&path);
         let owner = source.cache().app_generation;
         let mut pane = Pane::new_with_tab(tab::State::App(source));
         let mut claim = home_tab(2, &root);
@@ -82,8 +82,8 @@ mod claim_owner_tests {
         let path =
             std::env::temp_dir().join(format!("claim-cancel-owner-{}", uuid::Uuid::new_v4()));
         let root = CoincubeDirectory::new(path.clone());
-        let (unrelated, _) = app::claim_step1_tests::bitcoin_app(&path);
-        let (source, _) = app::claim_step1_tests::bitcoin_app(&path);
+        let (unrelated, _) = app::shell_tests::bitcoin_app(&path);
+        let (source, _) = app::shell_tests::bitcoin_app(&path);
         let owner = source.cache().app_generation;
         let unrelated_owner = unrelated.cache().app_generation;
         assert_ne!(owner, unrelated_owner);

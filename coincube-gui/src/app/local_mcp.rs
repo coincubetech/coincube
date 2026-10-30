@@ -1364,7 +1364,7 @@ mod tests {
         let _guard = super::super::session::test_guard();
         let root = std::env::temp_dir().join(format!("mcp-modal-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join("bitcoin")).unwrap();
-        let (mut app, wallet) = super::super::claim_step1_tests::bitcoin_app(&root);
+        let (mut app, wallet) = super::super::shell_tests::bitcoin_app(&root);
         let location = pairings::Location::new(&root, wallet.chain, &app.cube_settings.id).unwrap();
         let mut store =
             pairings::Store::open(location.clone(), zeroize::Zeroizing::new([51; 32]), true)
@@ -2096,7 +2096,7 @@ mod tests {
         let _guard = super::super::session::test_guard();
         let root = std::env::temp_dir().join(format!("mcp-modal-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join("bitcoin")).unwrap();
-        let (mut app, wallet) = super::super::claim_step1_tests::bitcoin_app(&root);
+        let (mut app, wallet) = super::super::shell_tests::bitcoin_app(&root);
         let location = pairings::Location::new(&root, wallet.chain, &app.cube_settings.id).unwrap();
         let mut store =
             pairings::Store::open(location.clone(), zeroize::Zeroizing::new([51; 32]), true)

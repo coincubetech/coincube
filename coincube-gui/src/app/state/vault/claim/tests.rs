@@ -4790,7 +4790,7 @@ mod flow {
         let root = std::env::temp_dir().join(format!("reviewer-app-{}", uuid::Uuid::new_v4()));
         let (app, _) = {
             let _guard = crate::app::session::test_guard();
-            crate::app::claim_step1_tests::bitcoin_app(&root)
+            crate::app::shell_tests::bitcoin_app(&root)
         };
         let _ = std::fs::remove_dir_all(&root);
         app
