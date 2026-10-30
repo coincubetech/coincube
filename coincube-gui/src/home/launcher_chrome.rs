@@ -481,7 +481,7 @@ pub(super) fn top_bar<'a>(
     let count = count_text(
         projection.locals.len(),
         projection.local_total,
-        projection.remotes.len(),
+        projection.connect_only(home.catalog.mode),
     );
 
     let separator = Container::new(Space::new())
@@ -1288,7 +1288,7 @@ pub(super) fn snapshot(home: &Home, projection: &Projection<'_>) -> ChromeSnapsh
         count: count_text(
             projection.locals.len(),
             projection.local_total,
-            projection.remotes.len(),
+            projection.connect_only(home.catalog.mode),
         ),
         eye: home
             .balance_privacy

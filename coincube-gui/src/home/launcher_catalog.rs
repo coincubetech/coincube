@@ -472,11 +472,17 @@ impl Home {
             }
             return None;
         }
+        // A local Cube of that network, or one of its ghosts on the floor.
         if key.cube_id.is_empty()
-            || !self
+            || !(self
                 .network_catalog(key.chain)
                 .iter()
                 .any(|cube| cube.id == key.cube_id)
+                || (intent == PendingIntent::Select
+                    && project(self)
+                        .ghosts
+                        .iter()
+                        .any(|cube| ghost_key(cube) == *key)))
         {
             return None;
         }
@@ -705,11 +711,11 @@ impl Home {
                     marks: super::launcher_gpu::marks(row.cube),
                 },
                 FloorEntry::Ghost(cube) => LauncherScenePeer {
-                    key: ghost_key(cube, projection.network),
+                    key: ghost_key(cube),
                     name: catalog_display_name(&cube.name),
                     status: ghost_status(cube),
                     marks: super::launcher_scene::CubeMarks::ghost(
-                        projection.network,
+                        ghost_key(cube).chain,
                         ghost_kind(cube),
                     ),
                 },
@@ -754,10 +760,7 @@ impl Home {
         // Only a floor draws a ghost's face; a List fallback has none.
         let projection = project(self);
         projection.floor_eligible(self.catalog.mode)
-            && projection
-                .remotes
-                .iter()
-                .any(|cube| ghost_key(cube, self.network) == *key)
+            && projection.ghosts.iter().any(|cube| ghost_key(cube) == *key)
     }
 
     pub(super) fn update_catalog(&mut self, message: CatalogMessage) -> Task<Message> {
@@ -1319,6 +1322,11 @@ pub(super) struct Projection<'a> {
     /// Unfiltered counts, so a search never changes what the plan shows.
     pub(super) local_total: usize,
     pub(super) remote_total: usize,
+    /// Connect-only Cubes on every network the filter shows: the floor's
+    /// ghosts, after the local Cubes, in network order. `remotes` stays the
+    /// current network's, as the List acts on those in place.
+    pub(super) ghosts: Vec<&'a RemoteCube>,
+    pub(super) ghost_total: usize,
     /// The selected local Cube when it is listed exactly once and visible.
     pub(super) selected: Option<usize>,
     /// The selected ghost on the floor: its index in `remotes`.
@@ -1373,10 +1381,10 @@ pub(super) enum FloorEntry<'p, 'a> {
 }
 
 impl<'p> FloorEntry<'p, '_> {
-    pub(super) fn key(&self, network: ChainId) -> CubeCatalogKey {
+    pub(super) fn key(&self) -> CubeCatalogKey {
         match self {
             FloorEntry::Local(row) => row.key.clone(),
-            FloorEntry::Ghost(cube) => ghost_key(cube, network),
+            FloorEntry::Ghost(cube) => ghost_key(cube),
         }
     }
 }
@@ -1384,11 +1392,17 @@ impl<'p> FloorEntry<'p, '_> {
 /// A ghost's selection key: its network and the registration's UUID. A
 /// local Cube's ID is its registration UUID, and a ghost is a registration
 /// with no local Cube, so the two never collide.
-pub(super) fn ghost_key(cube: &RemoteCube, network: ChainId) -> CubeCatalogKey {
+pub(super) fn ghost_key(cube: &RemoteCube) -> CubeCatalogKey {
     CubeCatalogKey {
-        chain: network,
+        chain: ghost_chain(cube).unwrap_or(ChainId::Bitcoin),
         cube_id: cube.uuid.clone(),
     }
+}
+
+/// The chain a registration names. The floor stands only ghosts whose
+/// network parses; acting on one first makes its network current.
+pub(super) fn ghost_chain(cube: &RemoteCube) -> Option<ChainId> {
+    ChainId::from_api_str(&cube.network)
 }
 
 /// A ghost looks restorable only when this device can restore it: a kit
@@ -1417,8 +1431,8 @@ impl Projection<'_> {
     /// as ghosts after the local Cubes, and are the whole row on a new device.
     pub(super) fn floor_eligible(&self, mode: LauncherMode) -> bool {
         mode == LauncherMode::Cubes
-            && self.local_total + self.remote_total > 0
-            && self.filtered_total + self.remote_total <= FLOOR_MAX_CUBES
+            && self.local_total + self.ghost_total > 0
+            && self.filtered_total + self.ghost_total <= FLOOR_MAX_CUBES
             && self.query.is_empty()
     }
 
@@ -1427,19 +1441,26 @@ impl Projection<'_> {
         self.locals
             .iter()
             .map(FloorEntry::Local)
-            .chain(self.remotes.iter().copied().map(FloorEntry::Ghost))
+            .chain(self.ghosts.iter().copied().map(FloorEntry::Ghost))
             .collect()
+    }
+
+    /// Cubes in Connect only that this view stands or lists: the floor's
+    /// ghosts on every shown network, or the List's current-network rows.
+    pub(super) fn connect_only(&self, mode: LauncherMode) -> usize {
+        if self.floor_eligible(mode) {
+            self.ghosts.len()
+        } else {
+            self.remotes.len()
+        }
     }
 
     pub(super) fn floor_len(&self) -> usize {
-        self.locals.len() + self.remotes.len()
+        self.locals.len() + self.ghosts.len()
     }
 
     pub(super) fn floor_keys(&self) -> Vec<CubeCatalogKey> {
-        self.floor_entries()
-            .iter()
-            .map(|entry| entry.key(self.network))
-            .collect()
+        self.floor_entries().iter().map(FloorEntry::key).collect()
     }
 
     pub(super) fn floor_position(&self, key: &CubeCatalogKey) -> Option<usize> {
@@ -1447,9 +1468,9 @@ impl Projection<'_> {
             .iter()
             .position(|row| &row.key == key)
             .or_else(|| {
-                self.remotes
+                self.ghosts
                     .iter()
-                    .position(|cube| ghost_key(cube, self.network) == *key)
+                    .position(|cube| ghost_key(cube) == *key)
                     .map(|index| self.locals.len() + index)
             })
     }
@@ -1577,14 +1598,29 @@ pub(super) fn project(home: &Home) -> Projection<'_> {
         .into_iter()
         .filter(|rc| matches_query(&catalog_display_name(&rc.name), &query))
         .collect();
+    // The floor's ghosts follow the filter across networks, as local Cubes
+    // do, in the networks' listed order. Bitcoin Blake2b has no ghosts.
+    let all_ghosts: Vec<&RemoteCube> = home
+        .ordered_networks()
+        .into_iter()
+        .filter(|chain| !chain.is_blake2b() && filter.matches(*chain))
+        .flat_map(|chain| {
+            home.remote_cubes
+                .iter()
+                .filter(move |rc| ghost_chain(rc) == Some(chain))
+        })
+        .collect();
+    let ghost_total = all_ghosts.len();
+    let ghosts: Vec<&RemoteCube> = all_ghosts
+        .into_iter()
+        .filter(|rc| matches_query(&catalog_display_name(&rc.name), &query))
+        .collect();
     // A ghost is selected on the floor only, where it has a details face.
     let selected_ghost = home.catalog.selected.as_ref().and_then(|key| {
         if !catalog_visible(home) || home.catalog.mode != LauncherMode::Cubes {
             return None;
         }
-        remotes
-            .iter()
-            .position(|cube| ghost_key(cube, network) == *key)
+        ghosts.iter().position(|cube| ghost_key(cube) == *key)
     });
     // Effective selection: the List is visible, the key resolves to exactly
     // one record, and that very record is a visible, actionable row.
@@ -1606,6 +1642,8 @@ pub(super) fn project(home: &Home) -> Projection<'_> {
         unread: home.network_catalog_unread.clone(),
         filter,
         remote_total,
+        ghosts,
+        ghost_total,
         locals,
         remotes,
         selected,
@@ -3239,7 +3277,73 @@ mod tests {
             .iter()
             .find(|cube| cube.uuid == uuid)
             .expect("fixture ghost");
-        ghost_key(cube, home.network)
+        ghost_key(cube)
+    }
+
+    #[test]
+    fn ghosts_follow_the_network_filter_across_networks() {
+        let mut home = home_with(&[("a", "Alpha")]);
+        home.developer_mode = true;
+        home.displayed_networks = vec![ChainId::Bitcoin, ChainId::Testnet4, ChainId::Signet];
+        let on = |uuid: &str, chain: ChainId| RemoteCube {
+            network: settings::network_to_api_string(chain),
+            ..remote(uuid, uuid, true, true, false, false)
+        };
+        home.remote_cubes = vec![
+            on("signet", ChainId::Signet),
+            on("main", ChainId::Bitcoin),
+            on("t4", ChainId::Testnet4),
+        ];
+        home.catalog.mode = LauncherMode::Cubes;
+        let chained = |uuid: &str, chain: ChainId| CubeCatalogKey {
+            chain,
+            cube_id: uuid.into(),
+        };
+        // All networks: every network's ghosts, in the networks' order,
+        // each keyed and marked by its own chain.
+        let projection = project(&home);
+        assert_eq!(
+            projection.floor_keys(),
+            vec![
+                key("a"),
+                chained("main", ChainId::Bitcoin),
+                chained("t4", ChainId::Testnet4),
+                chained("signet", ChainId::Signet),
+            ]
+        );
+        assert_eq!(projection.connect_only(LauncherMode::Cubes), 3);
+        // The List still acts in place, so it keeps the current network's.
+        assert_eq!(projection.remotes.len(), 1);
+        assert_eq!(projection.connect_only(LauncherMode::List), 1);
+
+        home.catalog.filter = NetworkFilter::Test;
+        assert_eq!(
+            project(&home).floor_keys(),
+            vec![
+                chained("t4", ChainId::Testnet4),
+                chained("signet", ChainId::Signet),
+            ]
+        );
+        home.catalog.filter = NetworkFilter::Network(ChainId::Bitcoin);
+        assert_eq!(
+            project(&home).floor_keys(),
+            vec![key("a"), chained("main", ChainId::Bitcoin)]
+        );
+
+        // Picking another network's ghost makes its network current first;
+        // its face waits for that network, where its actions apply.
+        home.catalog.filter = NetworkFilter::All;
+        let t4 = chained("t4", ChainId::Testnet4);
+        let task = home.update(Message::View(ViewMessage::Catalog(
+            CatalogMessage::SelectFloor(t4.clone()),
+        )));
+        assert_eq!(task.units(), 1);
+        assert_eq!(home.catalog.selected, None);
+        assert_eq!(
+            home.catalog.pending_select,
+            Some((t4.clone(), PendingIntent::Select))
+        );
+        assert!(!home.catalog_selectable(&t4), "not on the current network");
     }
 
     #[test]

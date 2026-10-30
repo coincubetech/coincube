@@ -351,6 +351,11 @@ pub(crate) struct GhostImport {
     pub uuid: String,
     pub name: String,
     pub encryption_pubkey: Option<String>,
+    /// The chain Connect registered the Cube on. Test networks share a coin
+    /// type, so the key alone cannot tell them apart.
+    pub network: ChainId,
+    /// The Connect account whose list held the ghost.
+    pub account: Option<u32>,
 }
 
 /// Whether a parsed recovery phrase may take a ghost's identity: only when
@@ -362,6 +367,14 @@ pub(crate) fn ghost_import_identity(
     network: ChainId,
     mnemonic: &bip39::Mnemonic,
 ) -> Result<Option<uuid::Uuid>, String> {
+    if network != ghost.network {
+        return Err(format!(
+            "{} is registered on {}. Switch back to {} to restore it, or cancel.",
+            catalog_display_name(&ghost.name),
+            ghost.network.label(),
+            ghost.network.label()
+        ));
+    }
     let Some(registered) = ghost.encryption_pubkey.as_deref() else {
         return Ok(None);
     };
@@ -545,6 +558,9 @@ pub struct Home {
     pending_cube_id: Option<uuid::Uuid>,
     /// The ghost a recovery-phrase import was started from, if any.
     ghost_import: Option<GhostImport>,
+    /// A ghost import's write in flight: the reclaimed ID and the account
+    /// it was listed under.
+    ghost_claim: Option<(String, Option<u32>)>,
     recovery_words: [String; 12],
     recovery_active_index: Option<usize>,
     /// The seed phrase of the Cube currently being created, held in memory
@@ -739,6 +755,7 @@ impl Home {
                 creating_cube: false,
                 pending_cube_id: None,
                 ghost_import: None,
+                ghost_claim: None,
                 recovery_words: Default::default(),
                 recovery_active_index: None,
                 creation_backup_words: None,
@@ -917,6 +934,30 @@ impl Home {
             self.network,
             self.datadir_path.network_directory(self.network),
         )
+    }
+
+    /// The signed-in Connect account, when its user record is loaded.
+    fn connect_account_id(&self) -> Option<u32> {
+        self.connect_account
+            .authenticated_client()
+            .and(self.connect_account.user.as_ref())
+            .map(|user| user.id)
+    }
+
+    /// A ghost import goes ahead only while the account that listed the
+    /// ghost is signed in and still lists it, on the same network.
+    fn ghost_still_registered(&self, ghost: &GhostImport) -> Result<(), String> {
+        let listed = self.remote_cubes.iter().any(|cube| {
+            cube.uuid == ghost.uuid && launcher_catalog::ghost_chain(cube) == Some(ghost.network)
+        });
+        if listed && ghost.account == self.connect_account_id() {
+            Ok(())
+        } else {
+            Err(format!(
+                "Connect no longer lists {} for this account. Cancel, then pick it again from the Launcher.",
+                catalog_display_name(&ghost.name)
+            ))
+        }
     }
 
     fn catalog_index(&self, key: &CubeCatalogKey) -> Option<usize> {
@@ -2461,10 +2502,16 @@ impl Home {
                 let Some(ghost) = self.remote_cubes.iter().find(|cube| cube.uuid == uuid) else {
                     return Task::none();
                 };
+                // A ghost's face is shown only on its own network.
+                let Some(network) = launcher_catalog::ghost_chain(ghost) else {
+                    return Task::none();
+                };
                 self.ghost_import = Some(GhostImport {
                     uuid: ghost.uuid.clone(),
                     name: ghost.name.clone(),
                     encryption_pubkey: ghost.encryption_pubkey.clone(),
+                    network,
+                    account: self.connect_account_id(),
                 });
                 self.create_cube_name = coincube_ui::component::form::Value {
                     value: catalog_display_name(&ghost.name),
@@ -2600,6 +2647,7 @@ impl Home {
                         // cube creation starts with a fresh identifier.
                         self.pending_cube_id = None;
                         self.ghost_import = None;
+                        let ghost_claim = self.ghost_claim.take();
                         // The operation identity is now durable on this exact
                         // Cube. A fresh creation must not reuse it.
                         self.pending_bitcoin_import = None;
@@ -2642,6 +2690,19 @@ impl Home {
                                 cube.id
                             );
                             reload_task
+                        } else if ghost_claim.as_ref().is_some_and(|(uuid, account)| {
+                            *uuid == cube.id && *account != self.connect_account_id()
+                        }) {
+                            // A ghost's Cube reclaims a registration in the
+                            // account that listed it. Signed out or switched
+                            // since, it stays local: the catch-up sync
+                            // registers it once that account is back.
+                            tracing::warn!(
+                                "Cube {} reclaimed a Connect registration from another session; \
+                                 not registering it with the current account",
+                                cube.id
+                            );
+                            reload_task
                         } else if let Some(client) = self.connect_account.authenticated_client() {
                             let cube_id = cube.id.clone();
                             let cube_network = cube.network;
@@ -2673,6 +2734,7 @@ impl Home {
                         }
                     }
                     Err(e) => {
+                        self.ghost_claim = None;
                         // Retain pending_cube_id so a retry reuses the same UUID.
                         // Clear recovery words on error too
                         for word in &mut self.recovery_words {
@@ -3601,7 +3663,10 @@ impl Home {
                         // outlives this form (a failed write keeps it for a
                         // retry), and a later Create or import must not reuse it.
                         let ghost_id = match &self.ghost_import {
-                            Some(ghost) => match ghost_import_identity(ghost, network, &mnemonic) {
+                            Some(ghost) => match self
+                                .ghost_still_registered(ghost)
+                                .and_then(|()| ghost_import_identity(ghost, network, &mnemonic))
+                            {
                                 Ok(id) => id,
                                 Err(e) => {
                                     self.creating_cube = false;
@@ -3611,6 +3676,14 @@ impl Home {
                             },
                             None => None,
                         };
+                        // Held until the write lands: its registration must
+                        // go only to the account the ghost was listed under.
+                        self.ghost_claim = ghost_id.map(|id| {
+                            (
+                                id.to_string(),
+                                self.ghost_import.as_ref().and_then(|ghost| ghost.account),
+                            )
+                        });
                         // Otherwise reuse the UUID that was pre-generated when
                         // the user first clicked "Create Cube" (recovery path).
                         let cube_id = match ghost_id {
@@ -3745,6 +3818,11 @@ impl Home {
                 }
             }
             Message::View(ViewMessage::CancelRecovery) => {
+                // Once the write has started it runs to completion; the
+                // form's Cancel is disabled until it does.
+                if self.creating_cube {
+                    return Task::none();
+                }
                 for word in &mut self.recovery_words {
                     word.clear();
                     word.shrink_to_fit();
@@ -6449,6 +6527,7 @@ impl Home {
                                 State::RecoveryInput => recovery_input_view(
                                     &self.recovery_words,
                                     self.recovery_active_index,
+                                    self.creating_cube,
                                 ),
                                 State::CreationBackup(step) => creation_backup_view(
                                     step,
@@ -7516,6 +7595,7 @@ fn creation_backup_bypass_view(
 fn recovery_input_view(
     recovery_words: &[String; 12],
     active_index: Option<usize>,
+    creating: bool,
 ) -> Element<ViewMessage> {
     use coincube_ui::widget::{Row, TextInput};
 
@@ -7641,16 +7721,23 @@ fn recovery_input_view(
         .push(
             button::secondary(None, "Cancel")
                 .width(Length::Fixed(145.0))
-                .on_press(ViewMessage::CancelRecovery),
+                .on_press_maybe((!creating).then_some(ViewMessage::CancelRecovery)),
         )
         .push(
-            button::primary(None, "Recover Wallet")
-                .width(Length::Fixed(145.0))
-                .on_press_maybe(if all_filled {
-                    Some(ViewMessage::SubmitRecovery)
+            button::primary(
+                None,
+                if creating {
+                    "Recovering…"
                 } else {
-                    None
-                }),
+                    "Recover Wallet"
+                },
+            )
+            .width(Length::Fixed(145.0))
+            .on_press_maybe(if all_filled && !creating {
+                Some(ViewMessage::SubmitRecovery)
+            } else {
+                None
+            }),
         )
         .push(Space::new().width(Length::Fill))
         .into();
@@ -10144,6 +10231,8 @@ mod tests {
             uuid: uuid.into(),
             name: "Old laptop".into(),
             encryption_pubkey: Some(registered_key(&phrase, ChainId::Bitcoin)),
+            network: ChainId::Bitcoin,
+            account: None,
         };
         assert_eq!(
             ghost_import_identity(&ghost, ChainId::Bitcoin, &phrase),
@@ -10163,6 +10252,26 @@ mod tests {
         );
         // The key is per network: the same seed on Testnet4 is not this Cube.
         assert!(ghost_import_identity(&ghost, ChainId::Testnet4, &phrase).is_err());
+        // Test networks share a coin type, so the same key matches on each;
+        // only the registered chain may take the identity.
+        let mut testnet = GhostImport {
+            encryption_pubkey: Some(registered_key(&phrase, ChainId::Testnet4)),
+            network: ChainId::Testnet4,
+            ..ghost.clone()
+        };
+        assert_eq!(
+            registered_key(&phrase, ChainId::Testnet4),
+            registered_key(&phrase, ChainId::Signet),
+            "the premise: one key on both test networks"
+        );
+        assert!(ghost_import_identity(&testnet, ChainId::Testnet4, &phrase).is_ok());
+        let switched = ghost_import_identity(&testnet, ChainId::Signet, &phrase).unwrap_err();
+        assert!(switched.contains("registered on Testnet4"), "{}", switched);
+        testnet.encryption_pubkey = None;
+        assert!(
+            ghost_import_identity(&testnet, ChainId::Signet, &phrase).is_err(),
+            "even with no key, the form belongs to its own chain"
+        );
         // Nothing registered proves the phrase, so it becomes a new Cube.
         ghost.encryption_pubkey = None;
         assert_eq!(
@@ -10209,6 +10318,71 @@ mod tests {
         );
     }
 
+    /// A Home on the ghost import form with `phrase` and a PIN typed in.
+    fn ghost_import_form(phrase: &bip39::Mnemonic, uuid: &str) -> Home {
+        let mut home = home();
+        let mut ghost = remote_cube(uuid, "Old laptop", Network::Bitcoin);
+        ghost.encryption_pubkey = Some(registered_key(phrase, ChainId::Bitcoin));
+        home.remote_cubes = vec![ghost];
+        let _ = home.update(Message::View(ViewMessage::ImportGhostWithPhrase(
+            uuid.into(),
+        )));
+        for (index, word) in phrase.words().enumerate() {
+            home.recovery_words[index] = word.to_string();
+        }
+        for (index, digit) in ["1", "2", "3", "4"].iter().enumerate() {
+            let _ = home
+                .create_cube_pin
+                .update(pin_input::Message::DigitChanged(index, digit.to_string()));
+            let _ = home
+                .create_cube_pin_confirm
+                .update(pin_input::Message::DigitChanged(index, digit.to_string()));
+        }
+        home
+    }
+
+    #[test]
+    fn a_ghost_import_is_refused_once_its_account_no_longer_lists_it() {
+        let phrase = abandon_phrase();
+        let uuid = "6f1c7a3e-2b4d-4c8e-9a10-3f2e1d0c9b8a";
+        // Signed out with the form open: the logout path empties the list.
+        let mut home = ghost_import_form(&phrase, uuid);
+        home.remote_cubes.clear();
+        let _ = home.update(Message::View(ViewMessage::SubmitRecovery));
+        assert!(!home.creating_cube, "no write starts");
+        assert!(home.ghost_claim.is_none());
+        let error = home.error.clone().unwrap_or_default();
+        assert!(error.contains("no longer lists Old laptop"), "{}", error);
+        // Another account signed in since the ghost was picked.
+        let mut home = ghost_import_form(&phrase, uuid);
+        home.ghost_import.as_mut().unwrap().account = Some(41);
+        let _ = home.update(Message::View(ViewMessage::SubmitRecovery));
+        assert!(!home.creating_cube);
+        // The same account still listing it goes ahead and holds the claim.
+        let mut home = ghost_import_form(&phrase, uuid);
+        let _ = home.update(Message::View(ViewMessage::SubmitRecovery));
+        assert!(home.creating_cube);
+        assert_eq!(home.ghost_claim, Some((uuid.to_string(), None)));
+    }
+
+    #[test]
+    fn cancel_waits_for_a_ghost_import_that_is_already_writing() {
+        let phrase = abandon_phrase();
+        let uuid = "6f1c7a3e-2b4d-4c8e-9a10-3f2e1d0c9b8a";
+        let mut home = ghost_import_form(&phrase, uuid);
+        let _ = home.update(Message::View(ViewMessage::SubmitRecovery));
+        assert!(home.creating_cube);
+        let _ = home.update(Message::View(ViewMessage::CancelRecovery));
+        assert!(home.creating_cube, "the write is not abandoned mid-way");
+        assert!(home.ghost_import.is_some() && home.ghost_claim.is_some());
+        assert!(matches!(home.state, State::RecoveryInput));
+        // A failed write releases the form, and Cancel works again.
+        let _ = home.update(Message::CubeCreated(Err("disk full".into())));
+        assert!(home.ghost_claim.is_none());
+        let _ = home.update(Message::View(ViewMessage::CancelRecovery));
+        assert!(home.ghost_import.is_none());
+    }
+
     #[test]
     fn import_with_phrase_opens_the_recovery_form_named_for_the_ghost() {
         let mut home = home();
@@ -10226,6 +10400,8 @@ mod tests {
                 uuid: "ghost-a".into(),
                 name: "Old laptop".into(),
                 encryption_pubkey: Some("02ab".into()),
+                network: ChainId::Bitcoin,
+                account: None,
             })
         );
         // Cancel forgets the ghost, so a later import is a plain new Cube.
@@ -11811,9 +11987,9 @@ mod tests {
 
         let mut words: [String; 12] = Default::default();
         words[0] = "ab".to_string();
-        let _ = recovery_input_view(&words, Some(0));
+        let _ = recovery_input_view(&words, Some(0), false);
         words.fill("abandon".to_string());
-        let _ = recovery_input_view(&words, None);
+        let _ = recovery_input_view(&words, None, true);
     }
 
     #[test]

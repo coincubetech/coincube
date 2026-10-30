@@ -866,7 +866,7 @@ fn ghost_details<'a>(
     light: bool,
 ) -> Element<'a, ViewMessage> {
     use coincube_ui::font;
-    let key = launcher_catalog::ghost_key(cube, network);
+    let key = launcher_catalog::ghost_key(cube);
     let (backup_text, backup_tone, note) = ghost_copy(cube);
     let facts = Column::new()
         .spacing(10)
@@ -976,11 +976,10 @@ fn ghost_details<'a>(
 /// state, over a hit area that turns it to its details face.
 fn ghost_slot<'a>(
     cube: &super::RemoteCube,
-    network: ChainId,
     layout: &launcher_scene::Layout,
     active: bool,
 ) -> Element<'a, ViewMessage> {
-    let key = launcher_catalog::ghost_key(cube, network);
+    let key = launcher_catalog::ghost_key(cube);
     let label = Row::new()
         .spacing(8)
         .align_y(Alignment::Center)
@@ -1580,7 +1579,6 @@ fn floor_layout<'a>(
 ) -> Element<'a, ViewMessage> {
     debug_assert!(projection.floor_len() > 0);
     use launcher_catalog::FloorEntry;
-    let network = projection.network;
     let hover = |key: &CubeCatalogKey, now| {
         hover
             .iter()
@@ -1596,14 +1594,14 @@ fn floor_layout<'a>(
     let selected = projection
         .floor_selected()
         .and_then(|index| entries.get(index).copied());
-    let selected_key = selected.map(|entry| entry.key(network));
+    let selected_key = selected.map(|entry| entry.key());
     let selected_key = selected_key.as_ref();
     let visible: Vec<_> = entries
         .iter()
         .copied()
         .skip(page * per_page)
         .take(per_page)
-        .map(|entry| (entry.key(network), entry))
+        .map(|entry| (entry.key(), entry))
         .collect();
     let now = std::time::Instant::now();
     let pose = |key: &CubeCatalogKey| {
@@ -1648,7 +1646,10 @@ fn floor_layout<'a>(
         let (marks, details, ghost_details) = match entry {
             FloorEntry::Local(row) => (launcher_gpu::marks(row.cube), Some(face_text(row)), None),
             FloorEntry::Ghost(cube) => (
-                launcher_scene::CubeMarks::ghost(network, launcher_catalog::ghost_kind(cube)),
+                launcher_scene::CubeMarks::ghost(
+                    launcher_catalog::ghost_key(cube).chain,
+                    launcher_catalog::ghost_kind(cube),
+                ),
                 None,
                 ghost_text[*index]
                     .as_ref()
@@ -1712,9 +1713,7 @@ fn floor_layout<'a>(
             FloorEntry::Local(row) => {
                 floor_slot(row, &layout, pose.spin > 0.0 || covered, pose.dim > 0.5)
             }
-            FloorEntry::Ghost(cube) => {
-                ghost_slot(cube, network, &layout, pose.spin > 0.0 || covered)
-            }
+            FloorEntry::Ghost(cube) => ghost_slot(cube, &layout, pose.spin > 0.0 || covered),
         });
     }
     stage = stage.push(
@@ -1736,7 +1735,9 @@ fn floor_layout<'a>(
             let (_, target_y) = layout.target();
             let details = match entry {
                 FloorEntry::Local(row) => floor_details(row, light),
-                FloorEntry::Ghost(cube) => ghost_details(cube, network, light),
+                FloorEntry::Ghost(cube) => {
+                    ghost_details(cube, launcher_catalog::ghost_key(cube).chain, light)
+                }
             };
             stage = stage.push(
                 Column::new()
@@ -2894,7 +2895,6 @@ mod tests {
                 // last page, as a ghost the floor can select.
                 let ghost = launcher_catalog::select_id(&launcher_catalog::ghost_key(
                     &home.remote_cubes[0],
-                    ChainId::Bitcoin,
                 ));
                 assert_eq!(mounted.has_focus(ghost), page == 2);
                 assert_eq!(mounted.contains("In Connect · Restore"), page == 2);
@@ -2943,7 +2943,7 @@ mod tests {
             assert!(mounted.contains("In Connect · No Recovery Kit"));
             assert!(!mounted.contains("Available in Connect"));
             for cube in &home.remote_cubes {
-                let key = launcher_catalog::ghost_key(cube, ChainId::Bitcoin);
+                let key = launcher_catalog::ghost_key(cube);
                 assert!(mounted.has_focus(launcher_catalog::select_id(&key)));
             }
         }
@@ -2988,7 +2988,7 @@ mod tests {
             ),
         ] {
             let cube = home.remote_cubes.iter().find(|c| c.uuid == uuid).unwrap();
-            let key = launcher_catalog::ghost_key(cube, ChainId::Bitcoin);
+            let key = launcher_catalog::ghost_key(cube);
             home.catalog.selected = Some(key.clone());
             for (size, appearance, palette) in [
                 ((1024, 768), "dark", theme::Theme::dark()),
@@ -3813,6 +3813,8 @@ mod tests {
             remotes: Vec::new(),
             local_total: 3,
             remote_total: 2,
+            ghosts: Vec::new(),
+            ghost_total: 0,
             selected: None,
             selected_ghost: None,
             query: "hidden".into(),
