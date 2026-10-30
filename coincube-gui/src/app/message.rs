@@ -379,9 +379,15 @@ pub enum Message {
         seq: u64,
         /// The twin Cube's split journal as read for this pass.
         twin_records: Vec<crate::services::split_coins::SplitRecord>,
-        /// The twin splits checked through Connect in this pass, and whether
-        /// each was deep enough on the twin chain.
-        twin_checked: Vec<(coincube_core::miniscript::bitcoin::Txid, bool)>,
+        /// Every twin split this pass nominated, with the inputs of its
+        /// transaction if Connect showed it deep enough on the twin chain
+        /// ([`crate::services::split_coins::TwinCheck::spent`]).
+        twin_checked: Vec<(
+            coincube_core::miniscript::bitcoin::Txid,
+            Option<std::collections::HashSet<coincube_core::miniscript::bitcoin::OutPoint>>,
+        )>,
+        /// When the twin lookups finished; orders them against other passes'.
+        twin_checked_at: std::time::Instant,
     },
     /// A sync-driven ancestry check batch for the Chains column finished
     /// ([`crate::services::chain_status::check_ancestry`]). `claimed` is the

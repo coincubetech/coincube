@@ -21,10 +21,11 @@
 //! be replayed onto the other chain. The transaction is handed to the Vault's
 //! normal PSBT screen for signing and broadcast, and recorded in a small
 //! journal ([`journal`]) from which the Chains column derives *Splitting*
-//! and the split outputs' proofs. The twin Cube's journal only nominates its
-//! splits: a coin counts as separated by one only once Connect shows that
-//! split [`SPLIT_CONFIRMATIONS`] deep on the twin chain now
-//! ([`twin_confirmed`]).
+//! and candidate proofs for the split outputs, which a fresh ancestry check
+//! must still verify. The twin Cube's journal only nominates its splits: a
+//! coin counts as separated by one only once Connect shows that split
+//! [`SPLIT_CONFIRMATIONS`] deep on the twin chain now and its confirmed
+//! transaction spends the coin ([`twin_confirmed`]).
 
 pub mod journal;
 
@@ -112,7 +113,10 @@ pub struct Derived {
     /// Outputs of signature splits past [`SPLIT_CONFIRMATIONS`], whose
     /// signatures nothing has checked.
     pub unconfirmed: HashSet<OutPoint>,
-    /// Outputs of confirmed split-key splits, proven by the key's extended path.
+    /// Outputs of confirmed split-key splits with the key's extended path,
+    /// as [`ProofEntry::Saved`]: the path is only structurally checked, so a
+    /// fresh ancestry check must qualify it before it is shown as verified or
+    /// used as a split key. Merge with [`merge_proofs`].
     pub proofs: Vec<(OutPoint, ProofEntry)>,
     /// Whether any record changed (its confirmations moved or it was pruned).
     pub changed: bool,
@@ -184,7 +188,7 @@ pub fn derive(
                     if let Some(path) = extended_path(record, tx, coin.outpoint) {
                         derived
                             .proofs
-                            .push((coin.outpoint, ProofEntry::Verified(path)));
+                            .push((coin.outpoint, ProofEntry::Saved(path)));
                     }
                 }
             }
@@ -196,6 +200,8 @@ pub fn derive(
 /// The proof of a split-key split's output: the split transaction, linked
 /// through the key's input, followed by the key's own path. Structurally
 /// verified by [`RetainedPath::new`]; `None` if anything does not line up.
+/// The key's path comes from the journal, so nothing here re-qualifies it
+/// against the chains: [`derive`] offers it as [`ProofEntry::Saved`].
 pub fn extended_path(
     record: &SplitRecord,
     tx: &Transaction,
@@ -218,6 +224,24 @@ pub fn extended_path(
     RetainedPath::new(output, links).ok()
 }
 
+/// Add [`Derived::proofs`] to the cache's ancestry results. A derived path
+/// only fills a gap: it never replaces a check's own answer, verified or not,
+/// so a coin a check found no path for keeps that answer until it is due
+/// again. Returns whether anything was added.
+pub fn merge_proofs(
+    chain_proofs: &mut HashMap<OutPoint, ProofEntry>,
+    derived: Vec<(OutPoint, ProofEntry)>,
+) -> bool {
+    let mut added = false;
+    for (outpoint, entry) in derived {
+        if let std::collections::hash_map::Entry::Vacant(slot) = chain_proofs.entry(outpoint) {
+            slot.insert(entry);
+            added = true;
+        }
+    }
+    added
+}
+
 /// At most this many of the twin Cube's splits are looked up per pass.
 pub const MAX_TWIN_LOOKUPS: usize = 8;
 
@@ -226,12 +250,36 @@ pub const MAX_TWIN_LOOKUPS: usize = 8;
 pub const TWIN_CHECK_LIFETIME: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 /// The last fresh check of one twin split.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TwinCheck {
-    /// Connect showed it at least [`SPLIT_CONFIRMATIONS`] deep on the twin
-    /// chain. A failed read is recorded as `false`.
-    pub confirmed: bool,
+    /// The inputs of the transaction Connect showed at least
+    /// [`SPLIT_CONFIRMATIONS`] deep on the twin chain, read from its
+    /// txid-authenticated bytes. `None` when it was shallower or absent, a
+    /// read failed, or the lookup did not run.
+    pub spent: Option<HashSet<OutPoint>>,
+    /// When the pass that made the check finished.
     pub at: std::time::Instant,
+}
+
+/// Record the twin lookups of one pass, which finished at `at`. A lookup
+/// replaces a split's previous check only if that check is older, so a pass
+/// that lands after a newer one still counts for the splits it looked up,
+/// and a pass that did not look a split up leaves its check alone. Returns
+/// whether any check changed.
+pub fn record_twin_checks(
+    checks: &mut HashMap<Txid, TwinCheck>,
+    checked: Vec<(Txid, Option<HashSet<OutPoint>>)>,
+    at: std::time::Instant,
+) -> bool {
+    let mut changed = false;
+    for (txid, spent) in checked {
+        if checks.get(&txid).is_some_and(|check| check.at >= at) {
+            continue;
+        }
+        checks.insert(txid, TwinCheck { spent, at });
+        changed = true;
+    }
+    changed
 }
 
 /// The twin Cube's split-key splits to ask Connect about this pass: never
@@ -261,7 +309,9 @@ pub fn twin_candidates(
 /// Coins of this Cube whose twin copy a split on the twin Cube has separated:
 /// the inputs of the twin's split-key splits whose last fresh check, within
 /// [`TWIN_CHECK_LIFETIME`] of `now`, showed them [`SPLIT_CONFIRMATIONS`]
-/// deep on the twin chain. Signature splits never count (see [`derive`]).
+/// deep on the twin chain. Only inputs the journal lists *and* the confirmed
+/// transaction spends count: the journal nominates, the chain decides.
+/// Signature splits never count (see [`derive`]).
 pub fn twin_separated(
     twin_records: &[SplitRecord],
     checks: &HashMap<Txid, TwinCheck>,
@@ -270,12 +320,19 @@ pub fn twin_separated(
     twin_records
         .iter()
         .filter(|record| record.method == Method::SplitKey)
-        .filter(|record| {
-            checks.get(&record.txid).is_some_and(|check| {
-                check.confirmed && now.saturating_duration_since(check.at) <= TWIN_CHECK_LIFETIME
+        .filter_map(|record| {
+            let check = checks.get(&record.txid)?;
+            let spent = check.spent.as_ref()?;
+            (now.saturating_duration_since(check.at) <= TWIN_CHECK_LIFETIME).then(|| {
+                record
+                    .inputs
+                    .iter()
+                    .copied()
+                    .filter(|input| spent.contains(input))
+                    .collect::<Vec<_>>()
             })
         })
-        .flat_map(|record| record.inputs.iter().copied())
+        .flatten()
         .collect()
 }
 
@@ -387,19 +444,22 @@ pub async fn depth_on(source: &dyn ObservationSource, chain: ChainId, txid: Txid
 }
 
 /// Check the twin Cube's splits (`txids`) on the twin of `here` now: for
-/// each, whether Connect shows it at least [`SPLIT_CONFIRMATIONS`] deep. A
-/// failed read answers `false`. Empty without a usable source.
+/// each that Connect shows at least [`SPLIT_CONFIRMATIONS`] deep, the inputs
+/// of that transaction (see [`TwinCheck::spent`]). Every txid gets an answer;
+/// a shallow or absent split, a failed read or a source that cannot be built
+/// answers `None`.
 pub async fn twin_confirmed(
     client: crate::services::coincube::CoincubeClient,
     here: ChainId,
     txids: Vec<Txid>,
     generation: u64,
     live: tokio::sync::watch::Receiver<u64>,
-) -> Vec<(Txid, bool)> {
+) -> Vec<(Txid, Option<HashSet<OutPoint>>)> {
     use crate::services::claim_observation::{http::HttpObservationSource, CollectionContext};
 
+    let unchecked = |txids: Vec<Txid>| txids.into_iter().map(|txid| (txid, None)).collect();
     let Some(twin) = crate::services::entangled::twin_chain(here) else {
-        return Vec::new();
+        return unchecked(txids);
     };
     let Ok(source) = HttpObservationSource::new(
         client,
@@ -410,16 +470,33 @@ pub async fn twin_confirmed(
             generation: live,
         },
     ) else {
-        return Vec::new();
+        return unchecked(txids);
     };
     let mut checked = Vec::with_capacity(txids.len());
     for txid in txids {
-        let confirmed = depth_on(&source, twin, txid)
+        let deep = depth_on(&source, twin, txid)
             .await
             .is_some_and(|depth| depth >= SPLIT_CONFIRMATIONS);
-        checked.push((txid, confirmed));
+        let spent = if deep {
+            source
+                .ancestry_transaction(twin, txid)
+                .await
+                .ok()
+                .and_then(|raw| spent_by(&raw, txid))
+        } else {
+            None
+        };
+        checked.push((txid, spent));
     }
     checked
+}
+
+/// The inputs of `raw` if it is the transaction `txid`. A txid commits to
+/// every input, so these are the inputs of the transaction the chain holds.
+fn spent_by(raw: &[u8], txid: Txid) -> Option<HashSet<OutPoint>> {
+    let tx: Transaction = coincube_core::miniscript::bitcoin::consensus::deserialize(raw).ok()?;
+    (tx.compute_txid() == txid)
+        .then(|| tx.input.iter().map(|input| input.previous_output).collect())
 }
 
 /// Build the split, store it with the daemon, and return it for the PSBT
@@ -667,7 +744,7 @@ mod tests {
     }
 
     #[test]
-    fn split_output_is_splitting_until_six_confirmations_then_proven() {
+    fn split_output_is_splitting_until_six_confirmations_then_saved() {
         let (record, split) = split_fixture();
         let output = OutPoint::new(record.txid, 0);
         let transactions: HashMap<_, _> = [(record.txid, split)].into();
@@ -695,9 +772,42 @@ mod tests {
         assert!(derived.splitting.is_empty());
         assert_eq!(derived.proofs.len(), 1);
         assert!(
-            matches!(&derived.proofs[0], (o, ProofEntry::Verified(p)) if *o == output && p.selected() == output)
+            matches!(&derived.proofs[0], (o, ProofEntry::Saved(p)) if *o == output && p.selected() == output),
+            "the journal's key path is not re-qualified, so a fresh check must verify it"
         );
+        assert_eq!(derived.proofs[0].1.outcome(), None, "not shown as verified");
         assert_eq!(records[0].confirmations, 6);
+    }
+
+    #[test]
+    fn a_derived_path_only_fills_a_gap() {
+        let (record, split) = split_fixture();
+        let output = OutPoint::new(record.txid, 0);
+        let path = extended_path(&record, &split, output).unwrap();
+        let derived = || vec![(output, ProofEntry::Saved(path.clone()))];
+
+        let mut proofs = HashMap::new();
+        assert!(merge_proofs(&mut proofs, derived()));
+        assert!(matches!(proofs.get(&output), Some(ProofEntry::Saved(_))));
+        assert!(!merge_proofs(&mut proofs, derived()), "already there");
+
+        for answer in [
+            ProofEntry::Verified(path.clone()),
+            ProofEntry::NoQualifyingAncestry {
+                checked_at: UNIX_EPOCH,
+            },
+            ProofEntry::Failed {
+                failed_at: UNIX_EPOCH,
+            },
+        ] {
+            let mut proofs: HashMap<_, _> = [(output, answer.clone())].into();
+            assert!(!merge_proofs(&mut proofs, derived()));
+            assert_eq!(
+                std::mem::discriminant(&proofs[&output]),
+                std::mem::discriminant(&answer),
+                "a check's own answer stays"
+            );
+        }
     }
 
     #[test]
@@ -743,7 +853,7 @@ mod tests {
         let checks: HashMap<Txid, TwinCheck> = vec![(
             records[0].txid,
             TwinCheck {
-                confirmed: true,
+                spent: Some(records[0].inputs.iter().copied().collect()),
                 at: std::time::Instant::now(),
             },
         )]
@@ -824,24 +934,103 @@ mod tests {
             twin_separated(&[record.clone()], &HashMap::new(), now).is_empty(),
             "the twin journal's count is never trusted"
         );
-        let check = |confirmed, at| -> HashMap<Txid, TwinCheck> {
-            vec![(record.txid, TwinCheck { confirmed, at })]
+        let (_, split) = split_fixture();
+        let confirmed = spent_by(&serialize(&split), record.txid);
+        let check = |spent, at| -> HashMap<Txid, TwinCheck> {
+            vec![(record.txid, TwinCheck { spent, at })]
                 .into_iter()
                 .collect()
         };
         assert_eq!(
-            twin_separated(&[record.clone()], &check(true, now), now),
+            twin_separated(&[record.clone()], &check(confirmed.clone(), now), now),
             record.inputs.iter().copied().collect()
         );
         assert!(
-            twin_separated(&[record.clone()], &check(false, now), now).is_empty(),
+            twin_separated(&[record.clone()], &check(None, now), now).is_empty(),
             "a failed or shallow read separates nothing"
         );
         let later = now + TWIN_CHECK_LIFETIME + std::time::Duration::from_secs(1);
         assert!(
-            twin_separated(&[record.clone()], &check(true, now), later).is_empty(),
+            twin_separated(&[record.clone()], &check(confirmed, now), later).is_empty(),
             "an old check stops counting"
         );
+    }
+
+    #[test]
+    fn only_inputs_the_confirmed_transaction_spends_are_separated() {
+        let (mut record, split) = split_fixture();
+        let shared = record.inputs[0];
+        let extra = OutPoint::new(Txid::from_str(&"22".repeat(32)).unwrap(), 1);
+        record.inputs.push(extra);
+        let now = std::time::Instant::now();
+        let checks: HashMap<Txid, TwinCheck> = [(
+            record.txid,
+            TwinCheck {
+                spent: spent_by(&serialize(&split), record.txid),
+                at: now,
+            },
+        )]
+        .into();
+        assert_eq!(
+            twin_separated(&[record], &checks, now),
+            [shared].into(),
+            "a journal input the confirmed transaction does not spend stays"
+        );
+    }
+
+    #[test]
+    fn spent_inputs_come_only_from_the_named_transaction() {
+        let (record, split) = split_fixture();
+        assert_eq!(
+            spent_by(&serialize(&split), record.txid),
+            Some(
+                split
+                    .input
+                    .iter()
+                    .map(|input| input.previous_output)
+                    .collect()
+            )
+        );
+        let other = Txid::from_str(&"33".repeat(32)).unwrap();
+        assert_eq!(spent_by(&serialize(&split), other), None);
+        assert_eq!(spent_by(&[0, 1, 2], record.txid), None);
+    }
+
+    #[test]
+    fn a_late_pass_keeps_its_checks_and_an_unchecked_split_clears() {
+        let (record, split) = split_fixture();
+        let spent = spent_by(&serialize(&split), record.txid);
+        let other = Txid::from_str(&"44".repeat(32)).unwrap();
+        let early = std::time::Instant::now();
+        let late = early + std::time::Duration::from_secs(1);
+        let mut checks = HashMap::new();
+
+        // The newer pass finished first and did not look `record` up.
+        assert!(record_twin_checks(&mut checks, vec![(other, None)], late));
+        // The older pass that did look it up still counts for it.
+        assert!(record_twin_checks(
+            &mut checks,
+            vec![(record.txid, spent.clone()), (other, spent.clone())],
+            early
+        ));
+        assert_eq!(checks[&record.txid].spent, spent);
+        assert_eq!(
+            checks[&other].spent, None,
+            "an older check never replaces a newer one"
+        );
+        assert_eq!(
+            twin_separated(std::slice::from_ref(&record), &checks, late),
+            record.inputs.iter().copied().collect()
+        );
+
+        // A later lookup that did not run or came back negative clears it.
+        let later = late + std::time::Duration::from_secs(1);
+        assert!(record_twin_checks(
+            &mut checks,
+            vec![(record.txid, None)],
+            later
+        ));
+        assert!(twin_separated(&[record], &checks, later).is_empty());
     }
 
     #[test]
@@ -860,13 +1049,7 @@ mod tests {
         assert_eq!(first[0], records.last().unwrap().txid, "newest first");
         let at = std::time::Instant::now();
         for txid in &first {
-            checks.insert(
-                *txid,
-                TwinCheck {
-                    confirmed: true,
-                    at,
-                },
-            );
+            checks.insert(*txid, TwinCheck { spent: None, at });
         }
         let second = twin_candidates(&records, &checks);
         assert_eq!(

@@ -1200,6 +1200,9 @@ pub struct App {
     split_refresh_applied: u64,
     /// The last fresh Connect check of each twin split.
     twin_checks: std::collections::HashMap<bitcoin::Txid, crate::services::split_coins::TwinCheck>,
+    /// The twin Cube's split journal as the last applied pass read it, so a
+    /// late pass's twin checks can still be applied to it.
+    twin_records: Vec<crate::services::split_coins::SplitRecord>,
     /// Whether this Vault's saved ancestry results have been read into the
     /// cache yet ([`crate::services::chain_status::store::load`]).
     chain_proofs_loaded: bool,
@@ -4123,6 +4126,7 @@ impl App {
             split_refresh_issued: 0,
             split_refresh_applied: 0,
             twin_checks: std::collections::HashMap::new(),
+            twin_records: Vec::new(),
             chain_proofs_loaded: false,
             unswept_in_flight: None,
             unswept_session: None,
@@ -4375,6 +4379,7 @@ impl App {
                 split_refresh_issued: 0,
                 split_refresh_applied: 0,
                 twin_checks: std::collections::HashMap::new(),
+                twin_records: Vec::new(),
                 chain_proofs_loaded: false,
                 unswept_in_flight: None,
                 unswept_session: None,
@@ -4674,6 +4679,8 @@ impl App {
                         })
                         .unwrap_or_default()
                 };
+                // A nominated split this pass could not look up is answered
+                // as not separated, never left on an older positive.
                 let confirmed = async {
                     match client {
                         Some(client) => {
@@ -4682,18 +4689,22 @@ impl App {
                             )
                             .await
                         }
-                        None => Vec::new(),
+                        None => candidates.into_iter().map(|txid| (txid, None)).collect(),
                     }
                 };
                 let (transactions, twin_checked) = tokio::join!(transactions, confirmed);
-                (transactions, twin_records, twin_checked)
+                let twin_checked_at = std::time::Instant::now();
+                (transactions, twin_records, twin_checked, twin_checked_at)
             },
-            move |(transactions, twin_records, twin_checked)| Message::SplitTransactions {
-                origin,
-                transactions,
-                seq,
-                twin_records,
-                twin_checked,
+            move |(transactions, twin_records, twin_checked, twin_checked_at)| {
+                Message::SplitTransactions {
+                    origin,
+                    transactions,
+                    seq,
+                    twin_records,
+                    twin_checked,
+                    twin_checked_at,
+                }
             },
         )
     }
@@ -9595,29 +9606,34 @@ impl App {
                 seq,
                 twin_records,
                 twin_checked,
+                twin_checked_at,
             } => {
                 let Some(wallet) = self.wallet.as_ref() else {
                     return Task::none();
                 };
-                if !self.cache.issued_here(origin)
-                    || origin.chain != wallet.chain
-                    || !crate::services::split_coins::newer_pass(
-                        &mut self.split_refresh_applied,
-                        seq,
-                    )
-                {
+                if !self.cache.issued_here(origin) || origin.chain != wallet.chain {
                     return Task::none();
                 }
-                let checked_at = std::time::Instant::now();
-                for (txid, confirmed) in twin_checked {
-                    self.twin_checks.insert(
-                        txid,
-                        crate::services::split_coins::TwinCheck {
-                            confirmed,
-                            at: checked_at,
-                        },
+                // Twin checks apply even from a pass that lands late: each
+                // replaces only an older check of the same split.
+                let checks_changed = crate::services::split_coins::record_twin_checks(
+                    &mut self.twin_checks,
+                    twin_checked,
+                    twin_checked_at,
+                );
+                if !crate::services::split_coins::newer_pass(&mut self.split_refresh_applied, seq) {
+                    if !checks_changed {
+                        return Task::none();
+                    }
+                    self.cache.separated = crate::services::split_coins::twin_separated(
+                        &self.twin_records,
+                        &self.twin_checks,
+                        std::time::Instant::now(),
                     );
+                    return Task::done(Message::CacheUpdated);
                 }
+                self.twin_records = twin_records;
+                let twin_records = &self.twin_records;
                 self.twin_checks
                     .retain(|txid, _| twin_records.iter().any(|record| record.txid == *txid));
                 let coins = self.cache.coins().to_vec();
@@ -9632,20 +9648,14 @@ impl App {
                 self.cache.splitting = derived.splitting;
                 self.cache.split_unconfirmed = derived.unconfirmed;
                 self.cache.separated = crate::services::split_coins::twin_separated(
-                    &twin_records,
+                    &self.twin_records,
                     &self.twin_checks,
-                    checked_at,
+                    std::time::Instant::now(),
                 );
-                let mut proved = false;
-                for (outpoint, entry) in derived.proofs {
-                    if !matches!(
-                        self.cache.chain_proofs.get(&outpoint),
-                        Some(crate::services::chain_status::ProofEntry::Verified(_))
-                    ) {
-                        self.cache.chain_proofs.insert(outpoint, entry);
-                        proved = true;
-                    }
-                }
+                let proved = crate::services::split_coins::merge_proofs(
+                    &mut self.cache.chain_proofs,
+                    derived.proofs,
+                );
                 if derived.changed {
                     self.save_split_records();
                 }
