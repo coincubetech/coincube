@@ -272,6 +272,44 @@ pub enum Method {
     /// populated with the quote (amount out, fees, provider, expiry), and an
     /// opaque handle routed by the same [`Method::SendPayment`].
     PrepareCrossChain(PrepareCrossChainParams),
+    /// Read the bridge-driven auto-convert setting and its circuit breaker.
+    /// Returns [`OkPayload::AutoConvert`].
+    ///
+    /// Auto-convert is the bridge's own BTC → USDB conversion of incoming
+    /// bitcoin. It is not the SDK's Stable Balance, which
+    /// [`Method::SetStableBalance`] still drives until S2b migrates off it.
+    GetAutoConvert,
+    /// Turn bridge-driven auto-convert on or off. Returns the resulting
+    /// [`AutoConvertState`] in [`OkPayload::AutoConvert`]. Turning it on also
+    /// resets a paused breaker.
+    SetAutoConvert(SetAutoConvertParams),
+    /// Minimum amounts for a conversion out of `from`. Returns
+    /// [`OkPayload::GetConversionLimits`]. Lets the Swap form state the
+    /// minimum before the user asks for an estimate.
+    GetConversionLimits(GetConversionLimitsParams),
+    /// Estimate a BTC ⇄ USDB swap and hold the prepared self-transfer under an
+    /// opaque handle. Returns [`OkPayload::PrepareSwap`]. The estimate is not
+    /// a locked price: the slippage cap is the only protection.
+    PrepareSwap(PrepareSwapParams),
+    /// Execute a swap prepared by [`Method::PrepareSwap`]. Moves funds, so the
+    /// gui treats a missing answer as an unknown outcome. Returns
+    /// [`OkPayload::Swap`].
+    Swap(SwapParams),
+    /// [`Method::PrepareSend`] with an explicit balance to pay from. Returns
+    /// [`OkPayload::PrepareSendFrom`]; the handle executes through the
+    /// ordinary [`Method::SendPayment`].
+    ///
+    /// A separate method rather than a new field on [`PrepareSendParams`] so a
+    /// stale bridge fails closed: one that predates this method can't parse
+    /// the request and drops it, where it would silently ignore an unknown
+    /// `pay_from` field and prepare a bitcoin send instead.
+    PrepareSendFrom(PrepareSendFromParams),
+    /// [`Method::PrepareLnurlPay`] with an explicit balance to pay from: the
+    /// LNURL / Lightning-address twin of [`Method::PrepareSendFrom`], and a
+    /// separate method for the same reason. Returns
+    /// [`OkPayload::PrepareSendFrom`]; the handle executes through the
+    /// ordinary [`Method::SendPayment`].
+    PrepareLnurlPayFrom(PrepareLnurlPayFromParams),
     /// Gracefully disconnect and exit the bridge.
     Shutdown,
 }
@@ -588,6 +626,85 @@ pub struct PrepareLnurlPayParams {
     pub comment: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct SetAutoConvertParams {
+    /// `true` to convert incoming bitcoin to USDB, `false` to stop. Turning it
+    /// off leaves the existing USDB balance as USDB.
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct GetConversionLimitsParams {
+    /// The asset being converted out of. The other asset is the target.
+    pub from: WalletAsset,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrepareSwapParams {
+    /// How much to convert, and out of which asset.
+    pub amount: SwapAmount,
+    /// Slippage cap in basis points. `None` uses
+    /// [`CONVERSION_MAX_SLIPPAGE_BPS`]. The quote echoes the cap applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_slippage_bps: Option<u32>,
+}
+
+/// The amount a swap converts. Each variant names the direction exactly once,
+/// so a request can't name one direction and denominate the amount in the
+/// other: bitcoin converts to USDB and USDB to bitcoin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SwapAmount {
+    /// Convert exactly `amount_in`, in the asset converted out of.
+    Exact { amount_in: AssetAmount },
+    /// Convert all of `from`. The bridge works out the figure: the whole
+    /// token balance for USDB, and the spendable sats less fees for bitcoin.
+    /// [`ConversionQuote::amount_in`] reports what it settled on.
+    Max { from: WalletAsset },
+}
+
+impl SwapAmount {
+    /// The asset converted out of.
+    pub fn from_asset(&self) -> WalletAsset {
+        match self {
+            Self::Exact { amount_in } => amount_in.asset,
+            Self::Max { from } => *from,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwapParams {
+    /// Opaque handle from [`PrepareSwapOk::handle`]. Single-use.
+    pub prepare_handle: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrepareSendFromParams {
+    /// Same as [`PrepareSendParams::input`].
+    pub input: String,
+    /// Same as [`PrepareSendParams::amount_sat`].
+    #[serde(default)]
+    pub amount_sat: Option<u64>,
+    /// Which balance pays. [`WalletAsset::Bitcoin`] keeps today's
+    /// [`Method::PrepareSend`] behaviour, including its USDB shortfall
+    /// conversion. [`WalletAsset::Usdb`] converts the full amount from USDB.
+    pub pay_from: WalletAsset,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrepareLnurlPayFromParams {
+    /// Same as [`PrepareLnurlPayParams::input`].
+    pub input: String,
+    /// Same as [`PrepareLnurlPayParams::amount_sat`].
+    pub amount_sat: u64,
+    /// Same as [`PrepareLnurlPayParams::comment`].
+    #[serde(default)]
+    pub comment: Option<String>,
+    /// Which balance pays, as in [`PrepareSendFromParams::pay_from`].
+    pub pay_from: WalletAsset,
+}
+
 /// A response envelope. Exactly one of `ok` / `err` is populated.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Response {
@@ -627,6 +744,13 @@ pub enum OkPayload {
     RegisterLightningAddress(RegisterLightningAddressOk),
     GetLightningAddress(GetLightningAddressOk),
     DeleteLightningAddress {},
+    /// Shared between [`Method::GetAutoConvert`] and
+    /// [`Method::SetAutoConvert`]: both report the state after the call.
+    AutoConvert(AutoConvertState),
+    GetConversionLimits(ConversionLimits),
+    PrepareSwap(PrepareSwapOk),
+    Swap(SwapOk),
+    PrepareSendFrom(PrepareSendFromOk),
     Shutdown {},
 }
 
@@ -640,6 +764,190 @@ pub struct GetInfoOk {
     /// without hardcoding decimals or ticker.
     #[serde(default)]
     pub stable_balance: Option<StableBalanceSnapshot>,
+    /// The USDB balance at full precision, reported separately from
+    /// [`Self::balance_sats`] so the gui can show it as its own row.
+    ///
+    /// `None` when the bridge doesn't report it: a bridge older than this
+    /// field, or one before S1b fills it in. Treat `Some` with a zero
+    /// balance the same as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usdb_balance: Option<UsdbBalanceSnapshot>,
+}
+
+/// The wallet's USDB holding at the SDK's full `u128` precision.
+///
+/// [`StableBalanceSnapshot`] clamps the balance to `u64`. This keeps the
+/// SDK's width and names the token, so the gui never has to assume which
+/// token the figure is for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsdbBalanceSnapshot {
+    /// The SDK's token identifier (`btkn1…`).
+    pub token_identifier: String,
+    /// Balance in token base units (`balance / 10^decimals` is the dollar
+    /// value).
+    #[serde(with = "u128_dec")]
+    pub balance: u128,
+    /// Token base-units precision.
+    pub decimals: u32,
+    /// Display ticker, e.g. "USDB".
+    pub ticker: String,
+}
+
+/// A balance the Spark wallet holds.
+///
+/// Not named `SparkAsset`: the bridge already imports the SDK's
+/// `breez_sdk_spark::SparkAsset`, which has a different shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WalletAsset {
+    /// Amounts are in sats.
+    Bitcoin,
+    /// Amounts are in USDB token base units.
+    Usdb,
+}
+
+/// An amount with its denomination attached, so a sats figure can't be read
+/// as token base units or the other way round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetAmount {
+    pub asset: WalletAsset,
+    /// Sats for [`WalletAsset::Bitcoin`], token base units for
+    /// [`WalletAsset::Usdb`]. A decimal string on the wire.
+    #[serde(with = "u128_dec")]
+    pub amount: u128,
+}
+
+/// Bridge-driven auto-convert, as reported by [`Method::GetAutoConvert`],
+/// [`Method::SetAutoConvert`] and [`Event::AutoConvertStateChanged`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutoConvertState {
+    /// Whether incoming bitcoin is converted to USDB.
+    pub enabled: bool,
+    /// The circuit breaker on repeated conversion failures. When it trips,
+    /// the bridge also turns auto-convert off, so `enabled` is `false`.
+    pub breaker: AutoConvertBreaker,
+}
+
+/// Circuit breaker on auto-convert failures. Tagged so a pause can't be
+/// represented without its reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum AutoConvertBreaker {
+    /// Conversions run when auto-convert is on.
+    Ready,
+    /// The bridge paused auto-convert after `failures` consecutive failed
+    /// conversions. `reason` is the last failure's text, for the gui to show.
+    Paused { failures: u32, reason: String },
+}
+
+/// Minimum amounts for a conversion. Each is `None` when the SDK sets no
+/// minimum on that side.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ConversionLimits {
+    /// Least that can be converted, in the asset converted out of.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_from: Option<AssetAmount>,
+    /// Least that can be received, in the asset converted into.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_to: Option<AssetAmount>,
+}
+
+/// Why the SDK changed the requested conversion amount. Mirrors
+/// `breez_sdk_spark::AmountAdjustmentReason`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AmountAdjustment {
+    /// Raised to the minimum conversion amount.
+    FlooredToMinLimit,
+    /// Raised to convert the whole token balance, so no balance below the
+    /// minimum is left behind.
+    IncreasedToAvoidDust,
+}
+
+/// The SDK's estimate for a conversion, every figure with its denomination.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversionQuote {
+    /// What is converted: the figure the bridge settled on for
+    /// [`SwapAmount::Max`]. May differ from an exact request; see
+    /// [`Self::amount_adjustment`].
+    pub amount_in: AssetAmount,
+    /// Estimated amount received. Not guaranteed: the conversion fails and is
+    /// refunded if it would deliver less than this minus
+    /// [`Self::max_slippage_bps`].
+    pub amount_out: AssetAmount,
+    /// Conversion fee. The SDK denominates it in the asset converted out of.
+    pub fee: AssetAmount,
+    /// Set when the SDK changed the requested amount.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount_adjustment: Option<AmountAdjustment>,
+    /// The slippage cap applied, in basis points.
+    pub max_slippage_bps: u32,
+}
+
+/// Result of [`Method::PrepareSwap`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrepareSwapOk {
+    /// Opaque handle to pass to [`Method::Swap`]. Single-use, and evicted by
+    /// the bridge's prepare TTL like a send handle.
+    pub handle: String,
+    pub quote: ConversionQuote,
+    pub limits: ConversionLimits,
+}
+
+/// Where a swap is in its lifecycle. Mirrors `breez_sdk_spark::ConversionStatus`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwapStatus {
+    /// Submitted and not finished.
+    Pending,
+    Completed,
+    /// Failed, e.g. the SDK's initial send was rejected.
+    Failed,
+    /// Failed, and the SDK still has to refund the input.
+    RefundNeeded,
+    /// Failed, and the input was refunded.
+    Refunded,
+}
+
+/// Result of [`Method::Swap`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwapOk {
+    /// The [`PaymentSummary::id`] of the swap's Activity row, which is also
+    /// the id later [`Event::SwapStatusChanged`] events carry. One id, one
+    /// Activity item.
+    ///
+    /// The SDK's self-transfer `send_payment` returns the conversion's
+    /// receive payment and hides the send leg from `list_payments` as its
+    /// child, so the bridge reports that receive payment's id. Read from the
+    /// SDK source at `a38117d`; not yet run.
+    pub swap_id: String,
+    pub status: SwapStatus,
+}
+
+/// Result of [`Method::PrepareSendFrom`] and [`Method::PrepareLnurlPayFrom`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrepareSendFromOk {
+    /// The ordinary send preview. Its handle executes through
+    /// [`Method::SendPayment`].
+    pub prepare: PrepareSendOk,
+    /// The balance the bridge prepared the send from. The gui checks it
+    /// matches the request.
+    pub pay_from: WalletAsset,
+    /// The USDB → bitcoin conversion funding the send. The bridge fills it in
+    /// whenever the SDK's prepare carries a conversion estimate, whichever
+    /// balance pays, so the gui can show it before the user confirms:
+    ///
+    /// - paying from USDB always attaches one; paying from bitcoin attaches
+    ///   one only to cover a shortfall;
+    /// - a conversion is a token leg, so `Some` here means
+    ///   `prepare.has_token_leg` is `Some(true)`. Not the other way round: a
+    ///   direct token transfer is a token leg with no conversion.
+    ///
+    /// The gui client rejects a response that breaks either rule.
+    ///
+    /// Boxed for the same reason as [`PrepareSendOk::cross_chain`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversion: Option<Box<ConversionQuote>>,
 }
 
 /// Snapshot of the wallet's USDB (Stable Balance) holding. Mirrors the
@@ -732,6 +1040,34 @@ pub struct PaymentDetailSummary {
     /// Bitcoin txid of a deposit or withdrawal, or a token transaction hash.
     #[serde(default)]
     pub tx_id: Option<String>,
+    /// The BTC ⇄ USDB conversion behind this payment, from the SDK's
+    /// `conversion_details`. Set on a swap's row and on a send funded by a
+    /// conversion. `None` from a bridge older than this field, and from every
+    /// bridge until S3b fills it in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversion: Option<PaymentConversionSummary>,
+}
+
+/// A payment's conversion, as Activity shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaymentConversionSummary {
+    /// The SDK's overall `ConversionDetails.status`. Updated in place by
+    /// [`Event::SwapStatusChanged`].
+    pub status: SwapStatus,
+    /// What the BTC ⇄ USDB step converted. `None` until the SDK fills in the
+    /// steps, which it does later from child payments, or when there is no
+    /// BTC ⇄ USDB step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amounts: Option<ConversionAmounts>,
+}
+
+/// Both sides of a BTC ⇄ USDB conversion, each with its denomination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversionAmounts {
+    /// Converted out of.
+    pub from: AssetAmount,
+    /// Received.
+    pub to: AssetAmount,
 }
 
 /// High-level classification of a user-supplied destination string,
@@ -1109,6 +1445,19 @@ pub enum Event {
     /// is the SDK's own error text (e.g. `Pool has no liquidity`) for
     /// the gui to show; `failures` is how many attempts were seen.
     StableBalancePaused { reason: String, failures: u32 },
+    /// Bridge-driven auto-convert changed: switched on or off, or its breaker
+    /// tripped. Settings re-renders from `state`.
+    ///
+    /// Not emitted until S2b. A gui built before this variant can't parse
+    /// it, and its reader stops on an unparseable line, so the bridge must
+    /// only emit it to a gui that knows it.
+    AutoConvertStateChanged { state: AutoConvertState },
+    /// A swap from [`Method::Swap`] moved to `status`. `swap_id` is
+    /// [`SwapOk::swap_id`], the [`PaymentSummary::id`] of the swap's Activity
+    /// row, so the gui updates that row's
+    /// [`PaymentDetailSummary::conversion`]. Not emitted until S3b; the same
+    /// caution as [`Event::AutoConvertStateChanged`] applies.
+    SwapStatusChanged { swap_id: String, status: SwapStatus },
 }
 
 /// How many consecutive `Auto-conversion failed` warnings the bridge
@@ -1119,6 +1468,11 @@ pub enum Event {
 /// doesn't fill up. Lives in the protocol crate so the gui can name the
 /// same number in its copy.
 pub const STABLE_BALANCE_PAUSE_THRESHOLD: u32 = 3;
+
+/// Slippage cap, in basis points, on every BTC ⇄ USDB conversion the bridge
+/// requests: 50 bps is 0.5%. Lives here so the bridge's requests and the
+/// gui's copy name the same number.
+pub const CONVERSION_MAX_SLIPPAGE_BPS: u32 = 50;
 
 /// The top-level message envelope written/read on the wire. We use a single
 /// outer discriminator so one `serde_json::from_str` call works for all
@@ -1504,5 +1858,851 @@ mod tests {
         // sibling test above asserts on its `expecting()` string. Asserting on
         // a std error's Display made this test hostage to std's wording.
         assert!(err.to_string().contains("u128 out of range: -1"), "{err}");
+    }
+
+    // ---- P0 (#950): USDB balance, auto-convert, swap, pay-from ----
+
+    /// Past `u64::MAX`, so a figure that went through a `u64` or a JSON number
+    /// anywhere on the path would not survive.
+    const BIG: u128 = u64::MAX as u128 + 7; // 18446744073709551622
+    const BIG_STR: &str = "18446744073709551622";
+
+    fn usdb(amount: u128) -> AssetAmount {
+        AssetAmount {
+            asset: WalletAsset::Usdb,
+            amount,
+        }
+    }
+
+    fn sats(amount: u128) -> AssetAmount {
+        AssetAmount {
+            asset: WalletAsset::Bitcoin,
+            amount,
+        }
+    }
+
+    fn quote() -> ConversionQuote {
+        ConversionQuote {
+            amount_in: usdb(BIG),
+            amount_out: sats(15_003),
+            fee: usdb(1_200),
+            amount_adjustment: Some(AmountAdjustment::IncreasedToAvoidDust),
+            max_slippage_bps: CONVERSION_MAX_SLIPPAGE_BPS,
+        }
+    }
+
+    fn legacy_prepare() -> PrepareSendOk {
+        PrepareSendOk {
+            handle: "h".into(),
+            amount_sat: 15_000,
+            fee_sat: 3,
+            method: "Bolt11Invoice".into(),
+            cross_chain: None,
+            has_token_leg: Some(true),
+        }
+    }
+
+    fn request_json(id: u64, method: Method) -> serde_json::Value {
+        serde_json::to_value(Frame::Request(Request { id, method })).expect("serialize")
+    }
+
+    fn response_json(id: u64, payload: OkPayload) -> serde_json::Value {
+        serde_json::to_value(Frame::Response(Response::ok(id, payload))).expect("serialize")
+    }
+
+    /// Serialize, then parse the line back the way the reader does, through
+    /// the flattened envelope.
+    fn ok_round_trip(payload: OkPayload) -> OkPayload {
+        let line =
+            serde_json::to_string(&Frame::Response(Response::ok(1, payload))).expect("serialize");
+        let Frame::Response(Response {
+            result: ResponseResult::Ok(payload),
+            ..
+        }) = serde_json::from_str(&line).expect("parse")
+        else {
+            panic!("expected an ok response: {line}");
+        };
+        payload
+    }
+
+    fn method_round_trip(method: Method) -> Method {
+        let line =
+            serde_json::to_string(&Frame::Request(Request { id: 1, method })).expect("serialize");
+        let Frame::Request(Request { method, .. }) = serde_json::from_str(&line).expect("parse")
+        else {
+            panic!("expected a request: {line}");
+        };
+        method
+    }
+
+    fn event_round_trip(event: Event) -> Event {
+        let line = serde_json::to_string(&Frame::Event(event)).expect("serialize");
+        let Frame::Event(event) = serde_json::from_str(&line).expect("parse") else {
+            panic!("expected an event: {line}");
+        };
+        event
+    }
+
+    #[test]
+    fn new_request_frames_have_exact_wire_shapes() {
+        assert_eq!(
+            request_json(1, Method::GetAutoConvert),
+            json!({ "type": "request", "id": 1, "method": "get_auto_convert" })
+        );
+        assert_eq!(
+            request_json(
+                2,
+                Method::SetAutoConvert(SetAutoConvertParams { enabled: false })
+            ),
+            json!({
+                "type": "request", "id": 2, "method": "set_auto_convert",
+                "params": { "enabled": false }
+            })
+        );
+        assert_eq!(
+            request_json(
+                3,
+                Method::GetConversionLimits(GetConversionLimitsParams {
+                    from: WalletAsset::Usdb
+                })
+            ),
+            json!({
+                "type": "request", "id": 3, "method": "get_conversion_limits",
+                "params": { "from": "usdb" }
+            })
+        );
+        assert_eq!(
+            request_json(
+                4,
+                Method::PrepareSwap(PrepareSwapParams {
+                    amount: SwapAmount::Exact {
+                        amount_in: usdb(BIG)
+                    },
+                    max_slippage_bps: None,
+                })
+            ),
+            json!({
+                "type": "request", "id": 4, "method": "prepare_swap",
+                "params": {
+                    "amount": { "kind": "exact", "amount_in": { "asset": "usdb", "amount": BIG_STR } }
+                }
+            })
+        );
+        assert_eq!(
+            request_json(
+                5,
+                Method::PrepareSwap(PrepareSwapParams {
+                    amount: SwapAmount::Exact {
+                        amount_in: sats(25_000)
+                    },
+                    max_slippage_bps: Some(CONVERSION_MAX_SLIPPAGE_BPS),
+                })
+            ),
+            json!({
+                "type": "request", "id": 5, "method": "prepare_swap",
+                "params": {
+                    "amount": {
+                        "kind": "exact", "amount_in": { "asset": "bitcoin", "amount": "25000" }
+                    },
+                    "max_slippage_bps": 50
+                }
+            })
+        );
+        assert_eq!(
+            request_json(
+                8,
+                Method::PrepareSwap(PrepareSwapParams {
+                    amount: SwapAmount::Max {
+                        from: WalletAsset::Usdb
+                    },
+                    max_slippage_bps: None,
+                })
+            ),
+            json!({
+                "type": "request", "id": 8, "method": "prepare_swap",
+                "params": { "amount": { "kind": "max", "from": "usdb" } }
+            })
+        );
+        assert_eq!(
+            request_json(
+                6,
+                Method::Swap(SwapParams {
+                    prepare_handle: "swap-h".into()
+                })
+            ),
+            json!({
+                "type": "request", "id": 6, "method": "swap",
+                "params": { "prepare_handle": "swap-h" }
+            })
+        );
+        assert_eq!(
+            request_json(
+                7,
+                Method::PrepareSendFrom(PrepareSendFromParams {
+                    input: "lnbc1".into(),
+                    amount_sat: Some(15_000),
+                    pay_from: WalletAsset::Usdb,
+                })
+            ),
+            json!({
+                "type": "request", "id": 7, "method": "prepare_send_from",
+                "params": { "input": "lnbc1", "amount_sat": 15000, "pay_from": "usdb" }
+            })
+        );
+        assert_eq!(
+            request_json(
+                10,
+                Method::PrepareLnurlPayFrom(PrepareLnurlPayFromParams {
+                    input: "shop@example.test".into(),
+                    amount_sat: 15_000,
+                    comment: Some("thanks".into()),
+                    pay_from: WalletAsset::Usdb,
+                })
+            ),
+            json!({
+                "type": "request", "id": 10, "method": "prepare_lnurl_pay_from",
+                "params": {
+                    "input": "shop@example.test", "amount_sat": 15000,
+                    "comment": "thanks", "pay_from": "usdb"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn new_request_frames_round_trip() {
+        let Method::PrepareSwap(p) = method_round_trip(Method::PrepareSwap(PrepareSwapParams {
+            amount: SwapAmount::Exact {
+                amount_in: usdb(BIG),
+            },
+            max_slippage_bps: Some(75),
+        })) else {
+            panic!("expected prepare_swap");
+        };
+        assert_eq!(
+            p.amount,
+            SwapAmount::Exact {
+                amount_in: usdb(BIG)
+            }
+        );
+        assert_eq!(p.amount.from_asset(), WalletAsset::Usdb);
+        assert_eq!(p.max_slippage_bps, Some(75));
+
+        let Method::PrepareSwap(p) = method_round_trip(Method::PrepareSwap(PrepareSwapParams {
+            amount: SwapAmount::Max {
+                from: WalletAsset::Bitcoin,
+            },
+            max_slippage_bps: None,
+        })) else {
+            panic!("expected prepare_swap");
+        };
+        assert_eq!(
+            p.amount,
+            SwapAmount::Max {
+                from: WalletAsset::Bitcoin
+            }
+        );
+        assert_eq!(p.amount.from_asset(), WalletAsset::Bitcoin);
+
+        let Method::PrepareLnurlPayFrom(p) =
+            method_round_trip(Method::PrepareLnurlPayFrom(PrepareLnurlPayFromParams {
+                input: "shop@example.test".into(),
+                amount_sat: 21,
+                comment: None,
+                pay_from: WalletAsset::Bitcoin,
+            }))
+        else {
+            panic!("expected prepare_lnurl_pay_from");
+        };
+        assert_eq!(p.input, "shop@example.test");
+        assert_eq!(p.amount_sat, 21);
+        assert_eq!(p.comment, None);
+        assert_eq!(p.pay_from, WalletAsset::Bitcoin);
+
+        let Method::PrepareSendFrom(p) =
+            method_round_trip(Method::PrepareSendFrom(PrepareSendFromParams {
+                input: "sp1".into(),
+                amount_sat: None,
+                pay_from: WalletAsset::Bitcoin,
+            }))
+        else {
+            panic!("expected prepare_send_from");
+        };
+        assert_eq!(p.input, "sp1");
+        assert_eq!(p.amount_sat, None);
+        assert_eq!(p.pay_from, WalletAsset::Bitcoin);
+
+        let Method::SetAutoConvert(p) =
+            method_round_trip(Method::SetAutoConvert(SetAutoConvertParams {
+                enabled: true,
+            }))
+        else {
+            panic!("expected set_auto_convert");
+        };
+        assert!(p.enabled);
+
+        let Method::GetConversionLimits(p) =
+            method_round_trip(Method::GetConversionLimits(GetConversionLimitsParams {
+                from: WalletAsset::Bitcoin,
+            }))
+        else {
+            panic!("expected get_conversion_limits");
+        };
+        assert_eq!(p.from, WalletAsset::Bitcoin);
+
+        let Method::Swap(p) = method_round_trip(Method::Swap(SwapParams {
+            prepare_handle: "swap-h".into(),
+        })) else {
+            panic!("expected swap");
+        };
+        assert_eq!(p.prepare_handle, "swap-h");
+
+        assert!(matches!(
+            method_round_trip(Method::GetAutoConvert),
+            Method::GetAutoConvert
+        ));
+    }
+
+    #[test]
+    fn prepare_swap_slippage_defaults_to_none_when_absent() {
+        let parsed: Frame = serde_json::from_value(json!({
+            "type": "request", "id": 4, "method": "prepare_swap",
+            "params": { "amount": { "kind": "max", "from": "bitcoin" } }
+        }))
+        .expect("parses");
+        let Frame::Request(Request {
+            method: Method::PrepareSwap(p),
+            ..
+        }) = parsed
+        else {
+            panic!("expected prepare_swap");
+        };
+        assert_eq!(p.max_slippage_bps, None);
+    }
+
+    /// Why pay-from is a method and not a field. A bridge that predates it
+    /// drops an unknown method (`unknown_method_is_rejected_instead_of_silently_accepted`
+    /// in `tests/wire_contract.rs`), but it would ignore an unknown field and
+    /// prepare a bitcoin send.
+    #[test]
+    fn prepare_send_silently_ignores_an_unknown_pay_from_field() {
+        let parsed: Frame = serde_json::from_value(json!({
+            "type": "request", "id": 1, "method": "prepare_send",
+            "params": { "input": "lnbc1", "amount_sat": 15000, "pay_from": "usdb" }
+        }))
+        .expect("an unknown field is ignored");
+        let Frame::Request(Request {
+            method: Method::PrepareSend(p),
+            ..
+        }) = parsed
+        else {
+            panic!("expected prepare_send");
+        };
+        assert_eq!(p.input, "lnbc1");
+        assert_eq!(p.amount_sat, Some(15_000));
+    }
+
+    /// `prepare_send` is untouched by P0: same tag, same fields, nothing new.
+    #[test]
+    fn legacy_prepare_send_wire_shapes_are_unchanged() {
+        assert_eq!(
+            request_json(
+                9,
+                Method::PrepareSend(PrepareSendParams {
+                    input: "lnbc1".into(),
+                    amount_sat: Some(15_000),
+                })
+            ),
+            json!({
+                "type": "request", "id": 9, "method": "prepare_send",
+                "params": { "input": "lnbc1", "amount_sat": 15000 }
+            })
+        );
+        assert_eq!(
+            response_json(9, OkPayload::PrepareSend(legacy_prepare())),
+            json!({
+                "type": "response", "id": 9,
+                "ok": {
+                    "kind": "prepare_send",
+                    "data": {
+                        "handle": "h", "amount_sat": 15000, "fee_sat": 3,
+                        "method": "Bolt11Invoice", "has_token_leg": true
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn get_info_usdb_balance_is_additive_and_keeps_full_precision() {
+        // An older bridge's frame: no `usdb_balance`.
+        let old: GetInfoOk = serde_json::from_value(json!({
+            "balance_sats": 21,
+            "identity_pubkey": "02ab",
+            "stable_balance": { "balance": 5, "decimals": 6, "ticker": "USDB" }
+        }))
+        .expect("old get_info parses");
+        assert_eq!(old.usdb_balance, None);
+        assert_eq!(old.stable_balance.map(|s| s.balance), Some(5));
+
+        // `None` is omitted, so an older gui sees exactly today's frame.
+        let none = GetInfoOk {
+            balance_sats: 21,
+            identity_pubkey: "02ab".into(),
+            stable_balance: None,
+            usdb_balance: None,
+        };
+        assert_eq!(
+            response_json(1, OkPayload::GetInfo(none)),
+            json!({
+                "type": "response", "id": 1,
+                "ok": {
+                    "kind": "get_info",
+                    "data": { "balance_sats": 21, "identity_pubkey": "02ab", "stable_balance": null }
+                }
+            })
+        );
+
+        let snapshot = UsdbBalanceSnapshot {
+            token_identifier: "btkn1usdb".into(),
+            balance: BIG,
+            decimals: 6,
+            ticker: "USDB".into(),
+        };
+        let some = GetInfoOk {
+            balance_sats: 21,
+            identity_pubkey: "02ab".into(),
+            stable_balance: None,
+            usdb_balance: Some(snapshot.clone()),
+        };
+        assert_eq!(
+            response_json(1, OkPayload::GetInfo(some.clone()))["ok"]["data"]["usdb_balance"],
+            json!({
+                "token_identifier": "btkn1usdb", "balance": BIG_STR,
+                "decimals": 6, "ticker": "USDB"
+            })
+        );
+        let OkPayload::GetInfo(back) = ok_round_trip(OkPayload::GetInfo(some)) else {
+            panic!("expected get_info");
+        };
+        assert_eq!(back.usdb_balance, Some(snapshot));
+    }
+
+    #[test]
+    fn auto_convert_payloads_have_exact_wire_shapes_and_round_trip() {
+        let ready = AutoConvertState {
+            enabled: true,
+            breaker: AutoConvertBreaker::Ready,
+        };
+        assert_eq!(
+            response_json(1, OkPayload::AutoConvert(ready.clone())),
+            json!({
+                "type": "response", "id": 1,
+                "ok": {
+                    "kind": "auto_convert",
+                    "data": { "enabled": true, "breaker": { "status": "ready" } }
+                }
+            })
+        );
+        let OkPayload::AutoConvert(back) = ok_round_trip(OkPayload::AutoConvert(ready.clone()))
+        else {
+            panic!("expected auto_convert");
+        };
+        assert_eq!(back, ready);
+
+        let paused = AutoConvertState {
+            enabled: false,
+            breaker: AutoConvertBreaker::Paused {
+                failures: STABLE_BALANCE_PAUSE_THRESHOLD,
+                reason: "Pool has no liquidity".into(),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&paused).expect("serialize"),
+            json!({
+                "enabled": false,
+                "breaker": { "status": "paused", "failures": 3, "reason": "Pool has no liquidity" }
+            })
+        );
+        let OkPayload::AutoConvert(back) = ok_round_trip(OkPayload::AutoConvert(paused.clone()))
+        else {
+            panic!("expected auto_convert");
+        };
+        assert_eq!(back, paused);
+    }
+
+    #[test]
+    fn a_paused_breaker_without_a_reason_does_not_parse() {
+        let err = serde_json::from_value::<AutoConvertState>(json!({
+            "enabled": false,
+            "breaker": { "status": "paused", "failures": 3 }
+        }))
+        .expect_err("a pause needs its reason");
+        assert!(err.to_string().contains("reason"), "{err}");
+    }
+
+    #[test]
+    fn conversion_limits_have_exact_wire_shapes_and_round_trip() {
+        let limits = ConversionLimits {
+            min_from: Some(usdb(BIG)),
+            min_to: Some(sats(1_000)),
+        };
+        assert_eq!(
+            response_json(1, OkPayload::GetConversionLimits(limits.clone())),
+            json!({
+                "type": "response", "id": 1,
+                "ok": {
+                    "kind": "get_conversion_limits",
+                    "data": {
+                        "min_from": { "asset": "usdb", "amount": BIG_STR },
+                        "min_to": { "asset": "bitcoin", "amount": "1000" }
+                    }
+                }
+            })
+        );
+        let OkPayload::GetConversionLimits(back) =
+            ok_round_trip(OkPayload::GetConversionLimits(limits.clone()))
+        else {
+            panic!("expected get_conversion_limits");
+        };
+        assert_eq!(back, limits);
+
+        // No minimum on either side: both omitted, and an empty object parses.
+        assert_eq!(
+            serde_json::to_value(ConversionLimits::default()).expect("serialize"),
+            json!({})
+        );
+        let empty: ConversionLimits = serde_json::from_value(json!({})).expect("parses");
+        assert_eq!(empty, ConversionLimits::default());
+    }
+
+    #[test]
+    fn prepare_swap_ok_has_exact_wire_shape_and_round_trips() {
+        let ok = PrepareSwapOk {
+            handle: "swap-h".into(),
+            quote: quote(),
+            limits: ConversionLimits {
+                min_from: Some(usdb(1_000_000)),
+                min_to: None,
+            },
+        };
+        assert_eq!(
+            response_json(1, OkPayload::PrepareSwap(ok.clone())),
+            json!({
+                "type": "response", "id": 1,
+                "ok": {
+                    "kind": "prepare_swap",
+                    "data": {
+                        "handle": "swap-h",
+                        "quote": {
+                            "amount_in": { "asset": "usdb", "amount": BIG_STR },
+                            "amount_out": { "asset": "bitcoin", "amount": "15003" },
+                            "fee": { "asset": "usdb", "amount": "1200" },
+                            "amount_adjustment": "increased_to_avoid_dust",
+                            "max_slippage_bps": 50
+                        },
+                        "limits": { "min_from": { "asset": "usdb", "amount": "1000000" } }
+                    }
+                }
+            })
+        );
+        let OkPayload::PrepareSwap(back) = ok_round_trip(OkPayload::PrepareSwap(ok.clone())) else {
+            panic!("expected prepare_swap");
+        };
+        assert_eq!(back.handle, ok.handle);
+        assert_eq!(back.quote, ok.quote);
+        assert_eq!(back.limits, ok.limits);
+
+        // No adjustment: omitted on the wire, `None` when absent.
+        let mut plain = quote();
+        plain.amount_adjustment = None;
+        let value = serde_json::to_value(&plain).expect("serialize");
+        assert!(value.get("amount_adjustment").is_none(), "{value}");
+        let back: ConversionQuote = serde_json::from_value(value).expect("parse");
+        assert_eq!(back.amount_adjustment, None);
+
+        assert_eq!(
+            serde_json::to_value(AmountAdjustment::FlooredToMinLimit).expect("serialize"),
+            json!("floored_to_min_limit")
+        );
+    }
+
+    #[test]
+    fn swap_ok_and_every_status_have_exact_wire_shapes() {
+        for (status, tag) in [
+            (SwapStatus::Pending, "pending"),
+            (SwapStatus::Completed, "completed"),
+            (SwapStatus::Failed, "failed"),
+            (SwapStatus::RefundNeeded, "refund_needed"),
+            (SwapStatus::Refunded, "refunded"),
+        ] {
+            let ok = SwapOk {
+                swap_id: "swap-1".into(),
+                status,
+            };
+            assert_eq!(
+                response_json(1, OkPayload::Swap(ok)),
+                json!({
+                    "type": "response", "id": 1,
+                    "ok": { "kind": "swap", "data": { "swap_id": "swap-1", "status": tag } }
+                })
+            );
+            let OkPayload::Swap(back) = ok_round_trip(OkPayload::Swap(SwapOk {
+                swap_id: "swap-1".into(),
+                status,
+            })) else {
+                panic!("expected swap");
+            };
+            assert_eq!(back.status, status);
+        }
+    }
+
+    #[test]
+    fn prepare_send_from_ok_has_exact_wire_shape_and_round_trips() {
+        let ok = PrepareSendFromOk {
+            prepare: legacy_prepare(),
+            pay_from: WalletAsset::Usdb,
+            conversion: Some(Box::new(quote())),
+        };
+        assert_eq!(
+            response_json(1, OkPayload::PrepareSendFrom(ok)),
+            json!({
+                "type": "response", "id": 1,
+                "ok": {
+                    "kind": "prepare_send_from",
+                    "data": {
+                        "prepare": {
+                            "handle": "h", "amount_sat": 15000, "fee_sat": 3,
+                            "method": "Bolt11Invoice", "has_token_leg": true
+                        },
+                        "pay_from": "usdb",
+                        "conversion": {
+                            "amount_in": { "asset": "usdb", "amount": BIG_STR },
+                            "amount_out": { "asset": "bitcoin", "amount": "15003" },
+                            "fee": { "asset": "usdb", "amount": "1200" },
+                            "amount_adjustment": "increased_to_avoid_dust",
+                            "max_slippage_bps": 50
+                        }
+                    }
+                }
+            })
+        );
+
+        let OkPayload::PrepareSendFrom(back) =
+            ok_round_trip(OkPayload::PrepareSendFrom(PrepareSendFromOk {
+                prepare: legacy_prepare(),
+                pay_from: WalletAsset::Usdb,
+                conversion: Some(Box::new(quote())),
+            }))
+        else {
+            panic!("expected prepare_send_from");
+        };
+        assert_eq!(back.pay_from, WalletAsset::Usdb);
+        assert_eq!(back.prepare.handle, "h");
+        assert_eq!(back.prepare.has_token_leg, Some(true));
+        assert_eq!(back.conversion.as_deref(), Some(&quote()));
+
+        // Paying from bitcoin with no shortfall conversion: omitted, `None`.
+        let value = serde_json::to_value(PrepareSendFromOk {
+            prepare: legacy_prepare(),
+            pay_from: WalletAsset::Bitcoin,
+            conversion: None,
+        })
+        .expect("serialize");
+        assert!(value.get("conversion").is_none(), "{value}");
+        let back: PrepareSendFromOk = serde_json::from_value(value).expect("parse");
+        assert!(back.conversion.is_none());
+    }
+
+    #[test]
+    fn new_events_have_exact_wire_shapes_and_round_trip() {
+        let state = AutoConvertState {
+            enabled: false,
+            breaker: AutoConvertBreaker::Paused {
+                failures: 3,
+                reason: "Pool has no liquidity".into(),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(Frame::Event(Event::AutoConvertStateChanged {
+                state: state.clone()
+            }))
+            .expect("serialize"),
+            json!({
+                "type": "event",
+                "event": "auto_convert_state_changed",
+                "payload": {
+                    "state": {
+                        "enabled": false,
+                        "breaker": {
+                            "status": "paused", "failures": 3,
+                            "reason": "Pool has no liquidity"
+                        }
+                    }
+                }
+            })
+        );
+        let Event::AutoConvertStateChanged { state: back } =
+            event_round_trip(Event::AutoConvertStateChanged {
+                state: state.clone(),
+            })
+        else {
+            panic!("expected auto_convert_state_changed");
+        };
+        assert_eq!(back, state);
+
+        assert_eq!(
+            serde_json::to_value(Frame::Event(Event::SwapStatusChanged {
+                swap_id: "swap-1".into(),
+                status: SwapStatus::Refunded,
+            }))
+            .expect("serialize"),
+            json!({
+                "type": "event",
+                "event": "swap_status_changed",
+                "payload": { "swap_id": "swap-1", "status": "refunded" }
+            })
+        );
+        let Event::SwapStatusChanged { swap_id, status } =
+            event_round_trip(Event::SwapStatusChanged {
+                swap_id: "swap-1".into(),
+                status: SwapStatus::RefundNeeded,
+            })
+        else {
+            panic!("expected swap_status_changed");
+        };
+        assert_eq!(swap_id, "swap-1");
+        assert_eq!(status, SwapStatus::RefundNeeded);
+    }
+
+    #[test]
+    fn asset_amounts_reject_a_negative_or_non_numeric_amount() {
+        for bad in [json!(-1), json!("12.5"), json!("abc"), json!(true)] {
+            assert!(
+                serde_json::from_value::<AssetAmount>(json!({ "asset": "usdb", "amount": bad }))
+                    .is_err(),
+                "{bad} must not parse as an amount"
+            );
+        }
+        assert!(
+            serde_json::from_value::<AssetAmount>(json!({ "asset": "liquid", "amount": "1" }))
+                .is_err(),
+            "an unknown asset must not parse"
+        );
+    }
+
+    #[test]
+    fn a_swap_amount_needs_its_direction() {
+        for bad in [
+            json!({ "kind": "exact" }),
+            json!({ "kind": "max" }),
+            json!({ "kind": "max", "from": "liquid" }),
+            json!({ "kind": "all", "from": "usdb" }),
+            // The shape before `SwapAmount`: no `kind`.
+            json!({ "asset": "usdb", "amount": "1" }),
+        ] {
+            assert!(
+                serde_json::from_value::<SwapAmount>(bad.clone()).is_err(),
+                "{bad} must not parse as a swap amount"
+            );
+        }
+        assert!(
+            serde_json::from_value::<PrepareSwapParams>(json!({
+                "amount_in": { "asset": "usdb", "amount": "1" }
+            }))
+            .is_err(),
+            "a swap request needs `amount`"
+        );
+    }
+
+    #[test]
+    fn prepare_lnurl_pay_from_comment_defaults_to_none_and_pay_from_is_required() {
+        let p: PrepareLnurlPayFromParams = serde_json::from_value(json!({
+            "input": "shop@example.test", "amount_sat": 21, "pay_from": "usdb"
+        }))
+        .expect("parses without a comment");
+        assert_eq!(p.comment, None);
+        assert_eq!(p.pay_from, WalletAsset::Usdb);
+
+        // A legacy `prepare_lnurl_pay` body: without `pay_from` it is not a
+        // pay-from request, and must not default to either balance.
+        assert!(serde_json::from_value::<PrepareLnurlPayFromParams>(json!({
+            "input": "shop@example.test", "amount_sat": 21
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<PrepareSendFromParams>(json!({
+            "input": "lnbc1", "amount_sat": 21
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn payment_detail_conversion_is_additive_and_keeps_denominations() {
+        // An older bridge's details: no `conversion`.
+        let old: PaymentDetailSummary = serde_json::from_value(json!({
+            "payment_hash": null, "invoice": null,
+            "lightning_address": null, "tx_id": "ab"
+        }))
+        .expect("old details parse");
+        assert_eq!(old.conversion, None);
+        assert_eq!(old.tx_id.as_deref(), Some("ab"));
+
+        // `None` is omitted, so an older gui sees exactly today's object.
+        assert_eq!(
+            serde_json::to_value(PaymentDetailSummary::default()).expect("serialize"),
+            json!({
+                "payment_hash": null, "invoice": null,
+                "lightning_address": null, "tx_id": null
+            })
+        );
+
+        let swap = PaymentDetailSummary {
+            conversion: Some(PaymentConversionSummary {
+                status: SwapStatus::Completed,
+                amounts: Some(ConversionAmounts {
+                    from: usdb(BIG),
+                    to: sats(15_003),
+                }),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_value(&swap).expect("serialize")["conversion"],
+            json!({
+                "status": "completed",
+                "amounts": {
+                    "from": { "asset": "usdb", "amount": BIG_STR },
+                    "to": { "asset": "bitcoin", "amount": "15003" }
+                }
+            })
+        );
+        let back: PaymentDetailSummary =
+            serde_json::from_value(serde_json::to_value(&swap).expect("serialize")).expect("parse");
+        assert_eq!(back, swap);
+
+        // Status before the SDK fills in the steps: `amounts` omitted.
+        let pending = PaymentConversionSummary {
+            status: SwapStatus::Pending,
+            amounts: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&pending).expect("serialize"),
+            json!({ "status": "pending" })
+        );
+        let back: PaymentConversionSummary =
+            serde_json::from_value(json!({ "status": "pending" })).expect("parse");
+        assert_eq!(back, pending);
+
+        // It reaches the gui through the list payload, nested in a row.
+        let row: PaymentSummary = serde_json::from_value(json!({
+            "id": "swap-1", "amount_sat": 15003, "timestamp": 1,
+            "status": "completed", "direction": "receive",
+            "details": { "conversion": { "status": "refunded" } }
+        }))
+        .expect("row parses");
+        assert_eq!(
+            row.details.conversion.map(|c| c.status),
+            Some(SwapStatus::Refunded)
+        );
     }
 }

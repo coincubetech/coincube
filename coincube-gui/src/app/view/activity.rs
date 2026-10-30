@@ -2961,6 +2961,7 @@ mod tests {
                 invoice: Some("lnbc42u1psyntheticinvoiceforactivitytests".into()),
                 lightning_address: Some("shop@example.test".into()),
                 tx_id: None,
+                conversion: None,
             },
             ..spark_payment()
         }

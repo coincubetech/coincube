@@ -45,14 +45,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use coincube_spark_protocol::{
-    CheckLightningAddressAvailableParams, ClaimDepositOk, ClaimDepositParams, CrossChainAddress,
-    CrossChainRoute, CrossChainRoutesOk, ErrorKind, ErrorPayload, Event, Frame,
-    GetCrossChainRoutesParams, GetInfoOk, GetInfoParams, GetUserSettingsOk, InitParams,
-    LightningAddressInfo, ListPaymentsOk, ListPaymentsParams, ListUnclaimedDepositsOk, Method,
-    OkPayload, ParseInputOk, ParseInputParams, PrepareCrossChainParams, PrepareLnurlPayParams,
-    PrepareSendOk, PrepareSendParams, ReceiveBolt11Params, ReceiveOnchainParams, ReceivePaymentOk,
-    RegisterLightningAddressParams, Request, Response, ResponseResult, SendPaymentOk,
-    SendPaymentParams, SetStableBalanceParams,
+    AutoConvertState, CheckLightningAddressAvailableParams, ClaimDepositOk, ClaimDepositParams,
+    ConversionLimits, ConversionQuote, CrossChainAddress, CrossChainRoute, CrossChainRoutesOk,
+    ErrorKind, ErrorPayload, Event, Frame, GetConversionLimitsParams, GetCrossChainRoutesParams,
+    GetInfoOk, GetInfoParams, GetUserSettingsOk, InitParams, LightningAddressInfo, ListPaymentsOk,
+    ListPaymentsParams, ListUnclaimedDepositsOk, Method, OkPayload, ParseInputOk, ParseInputParams,
+    PrepareCrossChainParams, PrepareLnurlPayFromParams, PrepareLnurlPayParams, PrepareSendFromOk,
+    PrepareSendFromParams, PrepareSendOk, PrepareSendParams, PrepareSwapOk, PrepareSwapParams,
+    ReceiveBolt11Params, ReceiveOnchainParams, ReceivePaymentOk, RegisterLightningAddressParams,
+    Request, Response, ResponseResult, SendPaymentOk, SendPaymentParams, SetAutoConvertParams,
+    SetStableBalanceParams, SwapAmount, SwapOk, SwapParams, WalletAsset,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
@@ -672,6 +674,201 @@ impl SparkClient {
         }
     }
 
+    /// Read bridge-driven auto-convert and its circuit breaker. Not the SDK's
+    /// Stable Balance, which [`Self::get_user_settings`] still reports until
+    /// S2b migrates off it.
+    pub async fn get_auto_convert(&self) -> Result<AutoConvertState, SparkClientError> {
+        match self.request(Method::GetAutoConvert).await? {
+            OkPayload::AutoConvert(state) => Ok(state),
+            other => Err(SparkClientError::Protocol(format!(
+                "get_auto_convert returned unexpected payload: {:?}",
+                other
+            ))),
+        }
+    }
+
+    /// Turn bridge-driven auto-convert on or off, and return the state after
+    /// the call. Turning it on also resets a paused breaker.
+    ///
+    /// This is a **state-changing** request: switching it on starts
+    /// converting incoming bitcoin. A lost answer is
+    /// [`SparkClientError::OutcomeUnknown`], and [`Self::get_auto_convert`]
+    /// tells which way it went.
+    pub async fn set_auto_convert(
+        &self,
+        enabled: bool,
+    ) -> Result<AutoConvertState, SparkClientError> {
+        match self
+            .request_with(
+                Method::SetAutoConvert(SetAutoConvertParams { enabled }),
+                RequestKind::StateChanging,
+            )
+            .await?
+        {
+            OkPayload::AutoConvert(state) => Ok(state),
+            other => Err(SparkClientError::Protocol(format!(
+                "set_auto_convert returned unexpected payload: {:?}",
+                other
+            ))),
+        }
+    }
+
+    /// Minimum amounts for a conversion out of `from`, so the Swap form can
+    /// state the minimum before asking for an estimate.
+    pub async fn get_conversion_limits(
+        &self,
+        from: WalletAsset,
+    ) -> Result<ConversionLimits, SparkClientError> {
+        match self
+            .request(Method::GetConversionLimits(GetConversionLimitsParams {
+                from,
+            }))
+            .await?
+        {
+            OkPayload::GetConversionLimits(limits) => {
+                check_limits(&limits, from).map_err(|reason| {
+                    SparkClientError::Protocol(format!(
+                        "get_conversion_limits returned inconsistent limits: {reason}"
+                    ))
+                })?;
+                Ok(limits)
+            }
+            other => Err(SparkClientError::Protocol(format!(
+                "get_conversion_limits returned unexpected payload: {:?}",
+                other
+            ))),
+        }
+    }
+
+    /// Estimate a BTC ⇄ USDB swap. The returned handle goes to
+    /// [`Self::swap`]. The estimate is not a locked price; the slippage cap
+    /// is the only protection. `max_slippage_bps: None` uses
+    /// [`coincube_spark_protocol::CONVERSION_MAX_SLIPPAGE_BPS`].
+    ///
+    /// A quote that doesn't convert out of the requested asset is refused,
+    /// so the form never shows a figure in the wrong denomination.
+    pub async fn prepare_swap(
+        &self,
+        amount: SwapAmount,
+        max_slippage_bps: Option<u32>,
+    ) -> Result<PrepareSwapOk, SparkClientError> {
+        match self
+            .request(Method::PrepareSwap(PrepareSwapParams {
+                amount,
+                max_slippage_bps,
+            }))
+            .await?
+        {
+            OkPayload::PrepareSwap(ok) => {
+                let from = amount.from_asset();
+                check_quote(&ok.quote, from)
+                    .and_then(|()| check_limits(&ok.limits, from))
+                    .map_err(|reason| {
+                        SparkClientError::Protocol(format!(
+                            "prepare_swap returned an inconsistent estimate: {reason}"
+                        ))
+                    })?;
+                Ok(ok)
+            }
+            other => Err(SparkClientError::Protocol(format!(
+                "prepare_swap returned unexpected payload: {:?}",
+                other
+            ))),
+        }
+    }
+
+    /// Execute a swap prepared by [`Self::prepare_swap`]. The handle is
+    /// single-use.
+    ///
+    /// This is a **state-changing** request: it moves funds. A lost answer is
+    /// [`SparkClientError::OutcomeUnknown`], never a failure, and
+    /// [`Self::take_late_swap_outcome`] holds the bridge's answer if it
+    /// arrives later.
+    pub async fn swap(&self, prepare_handle: String) -> Result<SwapOk, SparkClientError> {
+        match self
+            .request_with(
+                Method::Swap(SwapParams { prepare_handle }),
+                RequestKind::StateChanging,
+            )
+            .await?
+        {
+            OkPayload::Swap(ok) => Ok(ok),
+            other => Err(SparkClientError::Protocol(format!(
+                "swap returned unexpected payload: {:?}",
+                other
+            ))),
+        }
+    }
+
+    /// [`Self::prepare_send`] with an explicit balance to pay from. The
+    /// preview's handle executes through [`Self::send_payment`].
+    ///
+    /// A preview that doesn't disclose its conversion is refused, so Review
+    /// can never commit a conversion it hasn't shown. See
+    /// [`PrepareSendFromOk::conversion`] for the rules.
+    pub async fn prepare_send_from(
+        &self,
+        input: String,
+        amount_sat: Option<u64>,
+        pay_from: WalletAsset,
+    ) -> Result<PrepareSendFromOk, SparkClientError> {
+        match self
+            .request(Method::PrepareSendFrom(PrepareSendFromParams {
+                input,
+                amount_sat,
+                pay_from,
+            }))
+            .await?
+        {
+            OkPayload::PrepareSendFrom(ok) => {
+                check_send_from(&ok, pay_from).map_err(|reason| {
+                    SparkClientError::Protocol(format!(
+                        "prepare_send_from returned an inconsistent preview: {reason}"
+                    ))
+                })?;
+                Ok(ok)
+            }
+            other => Err(SparkClientError::Protocol(format!(
+                "prepare_send_from returned unexpected payload: {:?}",
+                other
+            ))),
+        }
+    }
+
+    /// [`Self::prepare_lnurl_pay`] with an explicit balance to pay from: the
+    /// LNURL / Lightning-address twin of [`Self::prepare_send_from`], with
+    /// the same checks.
+    pub async fn prepare_lnurl_pay_from(
+        &self,
+        input: String,
+        amount_sat: u64,
+        comment: Option<String>,
+        pay_from: WalletAsset,
+    ) -> Result<PrepareSendFromOk, SparkClientError> {
+        match self
+            .request(Method::PrepareLnurlPayFrom(PrepareLnurlPayFromParams {
+                input,
+                amount_sat,
+                comment,
+                pay_from,
+            }))
+            .await?
+        {
+            OkPayload::PrepareSendFrom(ok) => {
+                check_send_from(&ok, pay_from).map_err(|reason| {
+                    SparkClientError::Protocol(format!(
+                        "prepare_lnurl_pay_from returned an inconsistent preview: {reason}"
+                    ))
+                })?;
+                Ok(ok)
+            }
+            other => Err(SparkClientError::Protocol(format!(
+                "prepare_lnurl_pay_from returned unexpected payload: {:?}",
+                other
+            ))),
+        }
+    }
+
     /// Subscribe to bridge [`Event`] frames. Each call returns a fresh
     /// `broadcast::Receiver` — each subscriber gets its own independent
     /// cursor over the buffered events. The [`iced::Subscription`]
@@ -935,6 +1132,92 @@ impl SparkClient {
                 Err(SparkClientError::BridgeError { kind, message })
             }
         })
+    }
+
+    /// [`Self::take_late_outcome`] for a [`Self::swap`]: the bridge's answer
+    /// to a swap whose caller gave up waiting, if it has arrived since.
+    pub async fn take_late_swap_outcome(
+        &self,
+        request_id: u64,
+    ) -> Option<Result<SwapOk, SparkClientError>> {
+        let response = self.inner.late_outcomes.lock().await.remove(&request_id)?;
+        self.inner.awaiting_late.lock().await.remove(&request_id);
+        Some(match response.result {
+            ResponseResult::Ok(OkPayload::Swap(ok)) => Ok(ok),
+            ResponseResult::Ok(other) => Err(SparkClientError::Protocol(format!(
+                "late swap outcome carried unexpected payload: {:?}",
+                other
+            ))),
+            ResponseResult::Err(ErrorPayload { kind, message }) => {
+                Err(SparkClientError::BridgeError { kind, message })
+            }
+        })
+    }
+}
+
+/// The asset a conversion out of `from` delivers.
+fn converted_into(from: WalletAsset) -> WalletAsset {
+    match from {
+        WalletAsset::Bitcoin => WalletAsset::Usdb,
+        WalletAsset::Usdb => WalletAsset::Bitcoin,
+    }
+}
+
+/// Check that a quote converts out of `from`: amount and fee in `from`, the
+/// estimate in the other asset. The SDK denominates the fee in the asset
+/// converted out of.
+fn check_quote(quote: &ConversionQuote, from: WalletAsset) -> Result<(), String> {
+    let into = converted_into(from);
+    if quote.amount_in.asset != from || quote.fee.asset != from || quote.amount_out.asset != into {
+        return Err(format!(
+            "expected {from:?} in and {into:?} out, got {:?} in, {:?} out and a fee in {:?}",
+            quote.amount_in.asset, quote.amount_out.asset, quote.fee.asset
+        ));
+    }
+    Ok(())
+}
+
+/// Check that conversion limits for `from` are denominated that way: the
+/// minimum converted in `from`, the minimum received in the other asset.
+fn check_limits(limits: &ConversionLimits, from: WalletAsset) -> Result<(), String> {
+    let into = converted_into(from);
+    if let Some(min) = limits.min_from.filter(|min| min.asset != from) {
+        return Err(format!(
+            "minimum converted is in {:?}, expected {from:?}",
+            min.asset
+        ));
+    }
+    if let Some(min) = limits.min_to.filter(|min| min.asset != into) {
+        return Err(format!(
+            "minimum received is in {:?}, expected {into:?}",
+            min.asset
+        ));
+    }
+    Ok(())
+}
+
+/// Check a pay-from preview against the balance it was asked to pay from,
+/// and that it discloses any conversion it carries. The rules are on
+/// [`PrepareSendFromOk::conversion`].
+fn check_send_from(ok: &PrepareSendFromOk, pay_from: WalletAsset) -> Result<(), String> {
+    if ok.pay_from != pay_from {
+        return Err(format!(
+            "prepared from {:?}, asked to pay from {pay_from:?}",
+            ok.pay_from
+        ));
+    }
+    match ok.conversion.as_deref() {
+        // A conversion is a token leg. The converse doesn't hold: a direct
+        // token transfer is a token leg with no conversion.
+        Some(_) if ok.prepare.has_token_leg != Some(true) => {
+            Err("a conversion without a token leg".to_string())
+        }
+        // Every conversion that funds a send turns USDB into bitcoin.
+        Some(quote) => check_quote(quote, WalletAsset::Usdb),
+        None if pay_from == WalletAsset::Usdb => {
+            Err("paying from USDB without a conversion".to_string())
+        }
+        None => Ok(()),
     }
 }
 
@@ -1662,5 +1945,446 @@ mod stderr_relay_tests {
             SparkClientError::Protocol("wrong payload".to_string()).to_string(),
             "Spark protocol error: wrong payload"
         );
+    }
+}
+
+#[cfg(test)]
+mod p0_contract_tests {
+    use super::*;
+    use coincube_spark_protocol::{AssetAmount, AutoConvertBreaker};
+
+    /// A client wired to channels instead of a subprocess. The test plays the
+    /// bridge with [`bridge_answers`].
+    fn fake_client() -> (SparkClient, mpsc::UnboundedReceiver<Request>) {
+        let (request_tx, request_rx) = mpsc::unbounded_channel();
+        let (event_tx, _) = broadcast::channel(16);
+        let client = SparkClient {
+            inner: Arc::new(SparkClientInner {
+                next_id: AtomicU64::new(1),
+                request_tx,
+                pending: Arc::new(Mutex::new(HashMap::new())),
+                late_outcomes: Arc::new(Mutex::new(HashMap::new())),
+                awaiting_late: Arc::new(Mutex::new(std::collections::HashSet::new())),
+                event_tx,
+                child: Mutex::new(None),
+                closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }),
+        };
+        (client, request_rx)
+    }
+
+    /// Take the next request off the wire and answer it. `None` drops the
+    /// waiter instead, as the reader does when the bridge exits mid-request.
+    async fn bridge_answers(
+        client: &SparkClient,
+        requests: &mut mpsc::UnboundedReceiver<Request>,
+        answer: Option<OkPayload>,
+    ) -> Method {
+        let request = requests.recv().await.expect("a request was sent");
+        let waiter = client
+            .inner
+            .pending
+            .lock()
+            .await
+            .remove(&request.id)
+            .expect("the caller is waiting");
+        if let Some(payload) = answer {
+            let _ = waiter.send(Response::ok(request.id, payload));
+        }
+        request.method
+    }
+
+    fn amount(asset: WalletAsset, amount: u128) -> AssetAmount {
+        AssetAmount { asset, amount }
+    }
+
+    /// A consistent estimate for a conversion out of `from`.
+    fn quote(from: WalletAsset) -> ConversionQuote {
+        ConversionQuote {
+            amount_in: amount(from, 1_000_000),
+            amount_out: amount(converted_into(from), 1_500),
+            fee: amount(from, 1_200),
+            amount_adjustment: None,
+            max_slippage_bps: coincube_spark_protocol::CONVERSION_MAX_SLIPPAGE_BPS,
+        }
+    }
+
+    fn send_from(
+        pay_from: WalletAsset,
+        has_token_leg: Option<bool>,
+        conversion: Option<ConversionQuote>,
+    ) -> PrepareSendFromOk {
+        PrepareSendFromOk {
+            prepare: PrepareSendOk {
+                handle: "h".to_string(),
+                amount_sat: 1_500,
+                fee_sat: 3,
+                method: "Bolt11Invoice".to_string(),
+                cross_chain: None,
+                has_token_leg,
+            },
+            pay_from,
+            conversion: conversion.map(Box::new),
+        }
+    }
+
+    #[test]
+    fn a_pay_from_preview_must_disclose_its_conversion() {
+        use WalletAsset::{Bitcoin, Usdb};
+
+        // Accepted: USDB pays through a conversion; bitcoin pays plainly, with
+        // a shortfall conversion, or as a direct token transfer (a token leg
+        // with no conversion).
+        for ok in [
+            send_from(Usdb, Some(true), Some(quote(Usdb))),
+            send_from(Bitcoin, Some(false), None),
+            send_from(Bitcoin, Some(true), Some(quote(Usdb))),
+            send_from(Bitcoin, Some(true), None),
+        ] {
+            assert_eq!(check_send_from(&ok, ok.pay_from), Ok(()), "{:?}", ok);
+        }
+
+        for (ok, asked, why) in [
+            (send_from(Bitcoin, Some(false), None), Usdb, "prepared from"),
+            (
+                send_from(Usdb, Some(true), Some(quote(Usdb))),
+                Bitcoin,
+                "prepared from",
+            ),
+            (
+                send_from(Usdb, Some(true), None),
+                Usdb,
+                "without a conversion",
+            ),
+            (
+                send_from(Usdb, Some(false), None),
+                Usdb,
+                "without a conversion",
+            ),
+            // A conversion the retry guard can't see: the gui would trust an
+            // idempotency key the bridge drops.
+            (
+                send_from(Usdb, Some(false), Some(quote(Usdb))),
+                Usdb,
+                "without a token leg",
+            ),
+            (
+                send_from(Bitcoin, None, Some(quote(Usdb))),
+                Bitcoin,
+                "without a token leg",
+            ),
+            // Funding a send means turning USDB into bitcoin.
+            (
+                send_from(Usdb, Some(true), Some(quote(Bitcoin))),
+                Usdb,
+                "expected Usdb in",
+            ),
+        ] {
+            let err = check_send_from(&ok, asked).expect_err(why);
+            assert!(err.contains(why), "{}: {}", why, err);
+        }
+    }
+
+    #[test]
+    fn a_quote_and_its_limits_must_convert_out_of_the_requested_asset() {
+        use WalletAsset::{Bitcoin, Usdb};
+
+        assert_eq!(check_quote(&quote(Usdb), Usdb), Ok(()));
+        assert_eq!(check_quote(&quote(Bitcoin), Bitcoin), Ok(()));
+        assert!(check_quote(&quote(Usdb), Bitcoin).is_err());
+        let mut fee_in_sats = quote(Usdb);
+        fee_in_sats.fee = amount(Bitcoin, 3);
+        assert!(check_quote(&fee_in_sats, Usdb).is_err());
+        let mut same_asset_out = quote(Usdb);
+        same_asset_out.amount_out = amount(Usdb, 1);
+        assert!(check_quote(&same_asset_out, Usdb).is_err());
+
+        let limits = ConversionLimits {
+            min_from: Some(amount(Usdb, 1_000_000)),
+            min_to: Some(amount(Bitcoin, 1_000)),
+        };
+        assert_eq!(check_limits(&limits, Usdb), Ok(()));
+        assert!(check_limits(&limits, Bitcoin).is_err());
+        assert_eq!(check_limits(&ConversionLimits::default(), Bitcoin), Ok(()));
+        let swapped_min_to = ConversionLimits {
+            min_from: None,
+            min_to: Some(amount(Usdb, 1)),
+        };
+        assert!(check_limits(&swapped_min_to, Usdb).is_err());
+    }
+
+    /// Losing the bridge after a swap or an auto-convert switch was handed
+    /// over must read as unknown, never as failed: the swap may have moved
+    /// funds, and the switch may have started converting.
+    #[tokio::test]
+    async fn state_changing_calls_report_an_unknown_outcome_when_the_bridge_goes_quiet() {
+        let (client, mut requests) = fake_client();
+
+        let (result, method) = tokio::join!(
+            client.swap("swap-h".to_string()),
+            bridge_answers(&client, &mut requests, None)
+        );
+        assert!(
+            matches!(method, Method::Swap(SwapParams { ref prepare_handle }) if prepare_handle == "swap-h")
+        );
+        assert!(
+            matches!(result, Err(SparkClientError::OutcomeUnknown { .. })),
+            "{:?}",
+            result
+        );
+
+        let (result, method) = tokio::join!(
+            client.set_auto_convert(true),
+            bridge_answers(&client, &mut requests, None)
+        );
+        assert!(matches!(
+            method,
+            Method::SetAutoConvert(SetAutoConvertParams { enabled: true })
+        ));
+        assert!(
+            matches!(result, Err(SparkClientError::OutcomeUnknown { .. })),
+            "{:?}",
+            result
+        );
+    }
+
+    /// The reads and estimates move nothing, so losing the bridge is a plain
+    /// failure for them.
+    #[tokio::test]
+    async fn queries_report_the_bridge_unavailable_when_it_goes_quiet() {
+        let (client, mut requests) = fake_client();
+        let unavailable = |result: Result<(), SparkClientError>| {
+            assert!(
+                matches!(result, Err(SparkClientError::BridgeUnavailable(_))),
+                "{:?}",
+                result
+            );
+        };
+
+        let (result, _) = tokio::join!(
+            client.get_auto_convert(),
+            bridge_answers(&client, &mut requests, None)
+        );
+        unavailable(result.map(drop));
+        let (result, _) = tokio::join!(
+            client.get_conversion_limits(WalletAsset::Usdb),
+            bridge_answers(&client, &mut requests, None)
+        );
+        unavailable(result.map(drop));
+        let (result, _) = tokio::join!(
+            client.prepare_swap(
+                SwapAmount::Max {
+                    from: WalletAsset::Usdb
+                },
+                None
+            ),
+            bridge_answers(&client, &mut requests, None)
+        );
+        unavailable(result.map(drop));
+        let (result, _) = tokio::join!(
+            client.prepare_send_from("lnbc1".to_string(), None, WalletAsset::Usdb),
+            bridge_answers(&client, &mut requests, None)
+        );
+        unavailable(result.map(drop));
+        let (result, _) = tokio::join!(
+            client.prepare_lnurl_pay_from(
+                "shop@example.test".to_string(),
+                21,
+                None,
+                WalletAsset::Usdb
+            ),
+            bridge_answers(&client, &mut requests, None)
+        );
+        unavailable(result.map(drop));
+    }
+
+    #[tokio::test]
+    async fn each_call_sends_its_method_and_returns_its_payload() {
+        let (client, mut requests) = fake_client();
+
+        let state = AutoConvertState {
+            enabled: true,
+            breaker: AutoConvertBreaker::Ready,
+        };
+        let (result, method) = tokio::join!(
+            client.get_auto_convert(),
+            bridge_answers(
+                &client,
+                &mut requests,
+                Some(OkPayload::AutoConvert(state.clone()))
+            )
+        );
+        assert!(matches!(method, Method::GetAutoConvert));
+        assert_eq!(result.expect("state"), state);
+
+        let (result, method) = tokio::join!(
+            client.prepare_swap(
+                SwapAmount::Exact {
+                    amount_in: amount(WalletAsset::Usdb, 1_000_000)
+                },
+                Some(75)
+            ),
+            bridge_answers(
+                &client,
+                &mut requests,
+                Some(OkPayload::PrepareSwap(PrepareSwapOk {
+                    handle: "swap-h".to_string(),
+                    quote: quote(WalletAsset::Usdb),
+                    limits: ConversionLimits::default(),
+                }))
+            )
+        );
+        let Method::PrepareSwap(params) = method else {
+            panic!("expected prepare_swap, got {:?}", method);
+        };
+        assert_eq!(params.amount.from_asset(), WalletAsset::Usdb);
+        assert_eq!(params.max_slippage_bps, Some(75));
+        assert_eq!(result.expect("estimate").handle, "swap-h");
+
+        let (result, method) = tokio::join!(
+            client.prepare_lnurl_pay_from(
+                "shop@example.test".to_string(),
+                1_500,
+                Some("thanks".to_string()),
+                WalletAsset::Usdb
+            ),
+            bridge_answers(
+                &client,
+                &mut requests,
+                Some(OkPayload::PrepareSendFrom(send_from(
+                    WalletAsset::Usdb,
+                    Some(true),
+                    Some(quote(WalletAsset::Usdb))
+                )))
+            )
+        );
+        let Method::PrepareLnurlPayFrom(params) = method else {
+            panic!("expected prepare_lnurl_pay_from, got {:?}", method);
+        };
+        assert_eq!(params.amount_sat, 1_500);
+        assert_eq!(params.comment.as_deref(), Some("thanks"));
+        assert_eq!(params.pay_from, WalletAsset::Usdb);
+        assert!(result.expect("preview").conversion.is_some());
+
+        // The legacy payload for a new method is a protocol error, not a
+        // preview with the conversion silently missing.
+        let (result, _) = tokio::join!(
+            client.prepare_send_from("lnbc1".to_string(), Some(1_500), WalletAsset::Bitcoin),
+            bridge_answers(
+                &client,
+                &mut requests,
+                Some(OkPayload::PrepareSend(
+                    send_from(WalletAsset::Bitcoin, None, None).prepare
+                ))
+            )
+        );
+        assert!(
+            matches!(result, Err(SparkClientError::Protocol(_))),
+            "{:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn inconsistent_answers_are_refused_before_the_gui_sees_them() {
+        let (client, mut requests) = fake_client();
+
+        // Asked to pay from USDB, prepared a plain bitcoin send.
+        let (result, _) = tokio::join!(
+            client.prepare_send_from("lnbc1".to_string(), Some(1_500), WalletAsset::Usdb),
+            bridge_answers(
+                &client,
+                &mut requests,
+                Some(OkPayload::PrepareSendFrom(send_from(
+                    WalletAsset::Bitcoin,
+                    Some(false),
+                    None
+                )))
+            )
+        );
+        let Err(SparkClientError::Protocol(message)) = result else {
+            panic!("expected a protocol error, got {:?}", result);
+        };
+        assert!(message.contains("prepare_send_from"), "{}", message);
+
+        // Asked to swap out of bitcoin, estimated a swap out of USDB.
+        let (result, _) = tokio::join!(
+            client.prepare_swap(
+                SwapAmount::Max {
+                    from: WalletAsset::Bitcoin
+                },
+                None
+            ),
+            bridge_answers(
+                &client,
+                &mut requests,
+                Some(OkPayload::PrepareSwap(PrepareSwapOk {
+                    handle: "swap-h".to_string(),
+                    quote: quote(WalletAsset::Usdb),
+                    limits: ConversionLimits::default(),
+                }))
+            )
+        );
+        assert!(
+            matches!(result, Err(SparkClientError::Protocol(_))),
+            "{:?}",
+            result
+        );
+
+        let (result, _) = tokio::join!(
+            client.get_conversion_limits(WalletAsset::Bitcoin),
+            bridge_answers(
+                &client,
+                &mut requests,
+                Some(OkPayload::GetConversionLimits(ConversionLimits {
+                    min_from: Some(amount(WalletAsset::Usdb, 1)),
+                    min_to: None,
+                }))
+            )
+        );
+        assert!(
+            matches!(result, Err(SparkClientError::Protocol(_))),
+            "{:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn a_late_swap_answer_is_taken_once_and_typed() {
+        let (client, _requests) = fake_client();
+        let ok = Response::ok(
+            41,
+            OkPayload::Swap(SwapOk {
+                swap_id: "payment-1".to_string(),
+                status: coincube_spark_protocol::SwapStatus::Pending,
+            }),
+        );
+        client.inner.awaiting_late.lock().await.insert(41);
+        client.inner.late_outcomes.lock().await.insert(41, ok);
+
+        let taken = client
+            .take_late_swap_outcome(41)
+            .await
+            .expect("the answer arrived");
+        assert_eq!(taken.expect("a swap").swap_id, "payment-1");
+        assert!(client.take_late_swap_outcome(41).await.is_none());
+        assert!(!client.inner.awaiting_late.lock().await.contains(&41));
+
+        // A send's late answer is not a swap's.
+        client.inner.late_outcomes.lock().await.insert(
+            42,
+            Response::ok(
+                42,
+                OkPayload::SendPayment(SendPaymentOk {
+                    payment_id: "p".to_string(),
+                    amount_sat: 1,
+                    fee_sat: 0,
+                }),
+            ),
+        );
+        assert!(matches!(
+            client.take_late_swap_outcome(42).await,
+            Some(Err(SparkClientError::Protocol(_)))
+        ));
     }
 }
