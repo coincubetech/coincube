@@ -368,6 +368,13 @@ impl Daemon for EmbeddedDaemon {
         self.command(|daemon| Ok(daemon.get_info())).await
     }
 
+    async fn chain_tip_hash(
+        &self,
+    ) -> Result<coincube_core::miniscript::bitcoin::BlockHash, DaemonError> {
+        self.command(|daemon| daemon.chain_tip_hash().ok_or(DaemonError::NotImplemented))
+            .await
+    }
+
     async fn request_sync(&self) -> Result<(), DaemonError> {
         self.command(|daemon| {
             daemon.request_sync();

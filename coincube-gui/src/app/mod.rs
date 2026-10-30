@@ -7723,23 +7723,87 @@ impl App {
                     && self.cube_settings.network == crate::chain::ChainId::Regtest
                 {
                     if let Some(wallet) = &self.wallet {
-                        if let Some(native) = self
-                            .local_mcp
-                            .prepared_transaction(client_id, draft_id, wallet)
+                        if let Some(service) = self.local_mcp.transaction_service(client_id, wallet)
                         {
-                            if let Some(panel) = self.panels.current_mut() {
-                                panel.interrupt();
-                            }
-                            self.panels.create_spend = Some(CreateSpendPanel::from_mcp_prepared(
-                                wallet.clone(),
-                                native,
-                                self.cache.blockheight(),
-                            ));
-                            self.panels.current = Menu::Vault(menu::VaultSubMenu::Send);
+                            let client_id = client_id.clone();
+                            let draft_id = draft_id.clone();
+                            let check_id = draft_id.clone();
+                            let session_id = service.session_id();
+                            return Task::perform(
+                                async move { service.native_checked(&check_id).await },
+                                move |native| {
+                                    Message::View(view::Message::LocalMcp(
+                                        local_mcp::Message::ReviewTransactionChecked {
+                                            client_id,
+                                            draft_id,
+                                            session_id,
+                                            native,
+                                        },
+                                    ))
+                                },
+                            );
                         }
                     }
                 }
-                return Task::none();
+                return Task::done(Message::View(view::Message::ShowError(
+                    "The AI pairing or Vault changed. Reopen AI access and review the current draft."
+                        .into(),
+                )));
+            }
+            #[cfg(feature = "mcp-transactions")]
+            if let local_mcp::Message::ReviewTransactionChecked {
+                client_id,
+                draft_id,
+                session_id,
+                native,
+            } = &message
+            {
+                let pairing_changed = "The AI pairing or Vault changed. Reopen AI access and review the current draft.";
+                let unavailable = "Native review is temporarily unavailable. Try Review again.";
+                let stale = "This draft is stale. Ask the paired client to prepare a new request, then review it in Tenshu.";
+                let failure = if self.mcp_supported()
+                    && self.cube_settings.network == crate::chain::ChainId::Regtest
+                {
+                    if let Some(wallet) = &self.wallet {
+                        if let Some(service) = self.local_mcp.transaction_service(client_id, wallet)
+                        {
+                            if service.session_id() == *session_id {
+                                match service.review_status(draft_id) {
+                                    local_mcp::transactions::ReviewStatus::Ready => {
+                                        if let Some(native) = native {
+                                            if let Some(panel) = self.panels.current_mut() {
+                                                panel.interrupt();
+                                            }
+                                            self.panels.create_spend =
+                                                Some(CreateSpendPanel::from_mcp_prepared(
+                                                    wallet.clone(),
+                                                    native.clone(),
+                                                    self.cache.blockheight(),
+                                                ));
+                                            self.panels.current =
+                                                Menu::Vault(menu::VaultSubMenu::Send);
+                                            return Task::none();
+                                        }
+                                        unavailable
+                                    }
+                                    local_mcp::transactions::ReviewStatus::Stale => stale,
+                                    local_mcp::transactions::ReviewStatus::Unavailable => {
+                                        unavailable
+                                    }
+                                }
+                            } else {
+                                pairing_changed
+                            }
+                        } else {
+                            pairing_changed
+                        }
+                    } else {
+                        pairing_changed
+                    }
+                } else {
+                    pairing_changed
+                };
+                return Task::done(Message::View(view::Message::ShowError(failure.into())));
             }
             let supported = self.mcp_supported() || self.mcp_proposals_supported();
             let config = self.local_mcp.update(
