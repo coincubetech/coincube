@@ -9527,6 +9527,7 @@ impl App {
                     std::time::SystemTime::now(),
                 );
                 self.cache.splitting = derived.splitting;
+                self.cache.split_unconfirmed = derived.unconfirmed;
                 self.cache.separated = crate::services::split_coins::twin_separated(
                     &twin_records,
                     &self.twin_checks,

@@ -1112,6 +1112,7 @@ pub async fn load_application(
         chain_proofs: std::collections::HashMap::new(),
         split_records: Vec::new(),
         splitting: std::collections::HashMap::new(),
+        split_unconfirmed: std::collections::HashSet::new(),
         separated: std::collections::HashSet::new(),
         split_deposit: None,
         last_poll_at_startup: config.info.last_poll_timestamp,
