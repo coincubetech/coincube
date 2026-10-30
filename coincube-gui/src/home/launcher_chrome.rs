@@ -10,6 +10,7 @@ use iced::{
 };
 
 use coincube_ui::{
+    component::tenshu::top_bar::{self, APP_PREFERENCES, EYE_OPEN, EYE_SHUT, SLIDERS},
     font, theme,
     widget::{action::Action, Column, Container, Element, Row},
 };
@@ -21,14 +22,14 @@ use super::{
 };
 use crate::{
     app::settings::preferences::{NetworkActivitySource, PreferenceChange},
-    app::state::preferences::{BalancePrivacy, BalancePrivacyChrome},
+    app::state::preferences::BalancePrivacyChrome,
     chain::{ChainId, ChainIdExt},
     feature_flags,
 };
 
-/// `.top` and `.bottom`: 64px bars with a 24px gutter.
-pub(super) const BAR_HEIGHT: f32 = 64.0;
-const GUTTER: f32 = 24.0;
+/// `.top` and `.bottom`: 64px bars with a 24px gutter, as the shared top bar.
+pub(super) const BAR_HEIGHT: f32 = top_bar::HEIGHT;
+const GUTTER: f32 = top_bar::GUTTER;
 /// `.keycard`: 264px wide, 8px above the bar.
 const KEY_CARD_WIDTH: f32 = 264.0;
 /// `.keybtn { height: 32px }`.
@@ -38,11 +39,7 @@ const ACTIVITY_MENU_WIDTH: f32 = 300.0;
 /// button rather than the Key's.
 const KEY_BUTTON_WIDTH: f32 = 72.0;
 
-const CUBE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linejoin="round"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/></svg>"##;
-const EYE_OPEN: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></svg>"##;
-const EYE_SHUT: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9.9 5.8A9.6 9.6 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a16 16 0 0 1-2.6 3.4M6.4 7.4C3.9 9.1 2.5 12 2.5 12S6 18.5 12 18.5c1.8 0 3.3-.5 4.6-1.2M9.9 9.9a3 3 0 0 0 4.2 4.2M4 4l16 16"/></svg>"##;
 const PERSON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round"><circle cx="12" cy="8.5" r="3.5"/><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"/></svg>"##;
-const SLIDERS: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>"##;
 const PLUS: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>"##;
 const IMPORT: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19h14"/></svg>"##;
 const KEY: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4"/><path d="M11 12l8-8M16 7l2 2M14 9l2 2"/></svg>"##;
@@ -129,27 +126,7 @@ fn bar_button(
     status: iced_button::Status,
     pressed: bool,
 ) -> iced_button::Style {
-    let shell = theme.colors.shell;
-    let hovered = matches!(
-        status,
-        iced_button::Status::Hovered | iced_button::Status::Pressed
-    );
-    iced_button::Style {
-        background: pressed.then_some(iced::Background::Color(shell.selected)),
-        text_color: shell.ink,
-        border: Border {
-            color: if pressed {
-                shell.accent
-            } else if hovered {
-                shell.line
-            } else {
-                Color::TRANSPARENT
-            },
-            width: 1.0,
-            radius: 6.0.into(),
-        },
-        ..Default::default()
-    }
+    top_bar::button_style(theme, status, pressed)
 }
 
 /// `.btn` and `.btn.primary`: 36px dock actions, 8px radius.
@@ -325,30 +302,13 @@ fn privacy_eye<'a>(
     chrome: Option<BalancePrivacyChrome>,
     quiet: bool,
 ) -> Option<Element<'a, ViewMessage>> {
-    let chrome = chrome?;
-    let hidden = chrome.privacy.masks_amounts();
-    let pressed = matches!(
-        chrome.privacy,
-        BalancePrivacy::Hidden | BalancePrivacy::HiddenLocally
+    let eye = crate::app::view::nav::shell::balance_privacy_eye(
+        launcher_catalog::privacy_id(),
+        chrome?,
+        focus,
+        ViewMessage::ChangeDevicePreference,
     );
-    Some(
-        Action::new(
-            launcher_catalog::privacy_id(),
-            Container::new(glyph(
-                if hidden { EYE_SHUT } else { EYE_OPEN },
-                16.0,
-                body(quiet),
-            ))
-            .center_x(Length::Fill)
-            .center_y(Length::Fill),
-            focus,
-        )
-        .width(Length::Fixed(32.0))
-        .height(Length::Fixed(32.0))
-        .style(move |theme, status| bar_button(theme, status, pressed))
-        .on_press_maybe(chrome.intent().map(ViewMessage::ChangeDevicePreference))
-        .into(),
-    )
+    Some(eye.muted(quiet).into())
 }
 
 /// One `.chip`: a 32px filter toggle, `.chip.on` while it applies.
@@ -471,8 +431,21 @@ fn clear_filters<'a>(id: Id) -> Element<'a, ViewMessage> {
     .into()
 }
 
-/// `.top`: brand, network chip and count; then balances, Connect and App
-/// preferences. The theme lives in App preferences, as in the prototype.
+/// `.vsep`: the 1px rule between the brand and the filters.
+fn separator<'a, M: 'a>() -> Element<'a, M> {
+    Container::new(Space::new())
+        .width(Length::Fixed(1.0))
+        .height(Length::Fixed(20.0))
+        .style(|theme: &theme::Theme| container::Style {
+            background: Some(iced::Background::Color(theme.colors.shell.line)),
+            ..Default::default()
+        })
+        .into()
+}
+
+/// `.top` on the shared bar: brand, network chips and count; then balances,
+/// Connect and App preferences. The theme lives in App preferences, as in the
+/// prototype.
 pub(super) fn top_bar<'a>(
     home: &'a Home,
     projection: &Projection<'_>,
@@ -483,59 +456,24 @@ pub(super) fn top_bar<'a>(
         projection.local_total,
         projection.connect_only(home.catalog.mode),
     );
-
-    let separator = Container::new(Space::new())
-        .width(Length::Fixed(1.0))
-        .height(Length::Fixed(20.0))
-        .style(|theme: &theme::Theme| container::Style {
-            background: Some(iced::Background::Color(theme.colors.shell.line)),
-            ..Default::default()
-        });
-    let open = home.app_preferences_open;
-    let preferences = Action::new(
+    let preferences = top_bar::preferences(
         launcher_catalog::settings_id(),
-        Container::new(
-            Row::new()
-                .spacing(8)
-                .align_y(Alignment::Center)
-                .push(glyph(SLIDERS, 16.0, body(quiet)))
-                .push(words(
-                    "App preferences",
-                    13.0,
-                    if open { font::MEDIUM } else { font::REGULAR },
-                    body(quiet),
-                )),
-        )
-        .center_y(Length::Fill),
         focus,
+        ViewMessage::OpenAppPreferences,
     )
-    .height(Length::Fixed(32.0))
-    .padding([0.0, 10.0])
-    .style(move |theme, status| bar_button(theme, status, open))
-    .on_press(ViewMessage::OpenAppPreferences);
-    Container::new(
-        Row::new()
-            .spacing(16)
-            .align_y(Alignment::Center)
-            .height(Length::Fill)
-            .push(brand(body(quiet)))
-            .push(separator)
-            .push(filter_chips(home, projection.filter, quiet))
-            .push(words(count, 13.0, font::REGULAR, Ink::Muted))
-            .push(
-                (projection.filter != NetworkFilter::All)
-                    .then(|| clear_filters(launcher_catalog::clear_filters_id())),
-            )
-            .push(Space::new().width(Length::Fill))
-            .push(privacy_eye(home.balance_privacy, quiet))
-            .push(connect_entry(home, quiet))
-            .push(preferences),
-    )
-    .height(Length::Fixed(BAR_HEIGHT))
-    .padding([0.0, GUTTER])
-    .width(Length::Fill)
-    .style(rail)
-    .into()
+    .pressed(home.app_preferences_open)
+    .muted(quiet);
+    top_bar::top_bar(top_bar::brand_mark(quiet), preferences)
+        .lead(separator())
+        .lead(filter_chips(home, projection.filter, quiet))
+        .lead(words(count, 13.0, font::REGULAR, Ink::Muted))
+        .lead(
+            (projection.filter != NetworkFilter::All)
+                .then(|| clear_filters(launcher_catalog::clear_filters_id())),
+        )
+        .eye(privacy_eye(home.balance_privacy, quiet))
+        .chip(connect_entry(home, quiet))
+        .into()
 }
 
 fn rail(theme: &theme::Theme) -> container::Style {
@@ -1031,21 +969,19 @@ pub(super) fn key_card<'a>(home: &Home) -> Element<'a, ViewMessage> {
     .into()
 }
 
-/// `.brand`: the cube mark and the product name.
-fn brand<'a, M: 'a>(tone: Ink) -> Element<'a, M> {
-    // Iced's SVG tint drops alpha, so the undrawn copy lays out a space.
-    let mark: Element<'a, M> = match tone {
-        Ink::Clear => Space::new()
-            .width(Length::Fixed(20.0))
-            .height(Length::Fixed(20.0))
-            .into(),
-        tone => glyph(CUBE, 20.0, tone),
-    };
+/// An undrawn copy of the bar's brand (`top_bar::brand_mark`), to place a
+/// menu under a control after it. Iced's SVG tint drops alpha, so the cube's
+/// place is a space.
+fn brand_footprint<'a, M: 'a>() -> Element<'a, M> {
     Row::new()
         .spacing(8)
         .align_y(Alignment::Center)
-        .push(mark)
-        .push(words("Tenshu", 15.0, font::SEMIBOLD, tone))
+        .push(
+            Space::new()
+                .width(Length::Fixed(20.0))
+                .height(Length::Fixed(20.0)),
+        )
+        .push(words("Tenshu", 15.0, font::SEMIBOLD, Ink::Clear))
         .into()
 }
 
@@ -1170,7 +1106,7 @@ pub(super) fn network_layer<'a>(
         .push(
             Row::new()
                 .spacing(16)
-                .push(brand(Ink::Clear))
+                .push(brand_footprint())
                 .push(Space::new().width(Length::Fixed(1.0)))
                 // Presses on the menu's own padding and note stay in it.
                 .push(under_network_chip(home, iced::widget::opaque(menu))),
@@ -1417,23 +1353,12 @@ pub(crate) fn quiet_top_bar<'a, M: 'a>(chrome: &ChromeSnapshot) -> Element<'a, M
             chip_style(false)(theme, iced_button::Status::Active)
         }));
     }
-    let separator = Container::new(Space::new())
-        .width(Length::Fixed(1.0))
-        .height(Length::Fixed(20.0))
-        .style(|theme: &theme::Theme| container::Style {
-            background: Some(iced::Background::Color(theme.colors.shell.line)),
-            ..Default::default()
-        });
     let eye = chrome.eye.map(|hidden| {
-        Container::new(glyph(
-            if hidden { EYE_SHUT } else { EYE_OPEN },
-            16.0,
-            body(quiet),
-        ))
-        .width(Length::Fixed(32.0))
-        .height(Length::Fixed(32.0))
-        .center_x(Length::Fixed(32.0))
-        .center_y(Length::Fixed(32.0))
+        if hidden {
+            top_bar::resting_icon(EYE_SHUT, "Balances hidden")
+        } else {
+            top_bar::resting_icon(EYE_OPEN, "Balances shown")
+        }
     });
     let mut connect =
         Row::new()
@@ -1453,33 +1378,18 @@ pub(crate) fn quiet_top_bar<'a, M: 'a>(chrome: &ChromeSnapshot) -> Element<'a, M
         ));
     }
     let resting_bar = |theme: &theme::Theme| bar_button(theme, iced_button::Status::Active, false);
-    let preferences = Row::new()
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .push(glyph(SLIDERS, 16.0, body(quiet)))
-        .push(words("App preferences", 13.0, font::REGULAR, body(quiet)));
-    Container::new(
-        Row::new()
-            .spacing(16)
-            .align_y(Alignment::Center)
-            .height(Length::Fill)
-            .push(brand(body(quiet)))
-            .push(separator)
-            .push(chips)
-            .push(words(chrome.count.clone(), 13.0, font::REGULAR, Ink::Muted))
-            .push(chrome.filtered.then(|| {
-                Container::new(words("Clear filters", 13.0, font::REGULAR, Ink::Muted))
-                    .padding([2.0, 4.0])
-            }))
-            .push(Space::new().width(Length::Fill))
-            .push(eye)
-            .push(resting(connect, 32.0, 10.0, resting_bar))
-            .push(resting(preferences, 32.0, 10.0, resting_bar)),
+    top_bar::top_bar(
+        top_bar::brand_mark(quiet),
+        top_bar::resting_icon(SLIDERS, APP_PREFERENCES),
     )
-    .height(Length::Fixed(BAR_HEIGHT))
-    .padding([0.0, GUTTER])
-    .width(Length::Fill)
-    .style(rail)
+    .lead(separator())
+    .lead(chips)
+    .lead(words(chrome.count.clone(), 13.0, font::REGULAR, Ink::Muted))
+    .lead(chrome.filtered.then(|| {
+        Container::new(words("Clear filters", 13.0, font::REGULAR, Ink::Muted)).padding([2.0, 4.0])
+    }))
+    .eye(eye)
+    .chip(resting(connect, 32.0, 10.0, resting_bar))
     .into()
 }
 
@@ -1559,5 +1469,227 @@ mod tests {
             count_text(1, 3, 1),
             "1 of 3 Cubes · 1 in Connect only · 2 hidden"
         );
+    }
+}
+
+/// The Launcher's bars on the shared top bar. The capture test writes frames
+/// beside the Cube's (`app::view::nav::shell::capture_tests`), opt-in only:
+/// `TOP_BAR_CAPTURE_DIR=<dir> cargo test -p coincube-gui --lib top_bar_capture
+/// -- --ignored`. Every Cube is a synthetic fixture.
+#[cfg(test)]
+mod top_bar_tests {
+    use std::path::PathBuf;
+
+    use iced::{
+        advanced::{
+            layout,
+            renderer::Headless,
+            widget::{operation::Focusable, Id, Operation, Tree},
+            Layout,
+        },
+        widget::rule,
+        Rectangle, Size,
+    };
+
+    use super::super::{launcher_catalog, Home, State};
+    use crate::app::view::nav::shell::capture_tests::{directory, renderer, save, themes, WINDOWS};
+    use crate::{app::settings::CubeSettings, chain::ChainId, dir::CoincubeDirectory};
+
+    fn home(light: bool) -> Home {
+        let mut home = Home::new(
+            CoincubeDirectory::new(PathBuf::new()),
+            Some(coincube_core::miniscript::bitcoin::Network::Bitcoin),
+        )
+        .0;
+        home.network = ChainId::Bitcoin;
+        let cubes = ["Everyday", "Archive", "Household 2024", "Travel fund"]
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                CubeSettings::new_with_raw_id(format!("cube-{i}"), (*name).into(), ChainId::Bitcoin)
+            })
+            .collect();
+        home.state = State::Cubes {
+            cubes,
+            create_cube: false,
+            source: ChainId::Bitcoin,
+        };
+        home.advisory_notice = None;
+        home.catalog.mode = launcher_catalog::LauncherMode::Cubes;
+        home.balance_privacy = Some(crate::app::state::preferences::BalancePrivacyChrome {
+            privacy: crate::app::state::preferences::BalancePrivacy::Shown,
+            busy: false,
+            interactive: true,
+        });
+        home.theme_mode = if light {
+            coincube_ui::theme::palette::ThemeMode::Light
+        } else {
+            coincube_ui::theme::palette::ThemeMode::Dark
+        };
+        home
+    }
+
+    #[derive(Default)]
+    struct Probe {
+        focus: Vec<(Id, Rectangle)>,
+        text: Vec<(String, Rectangle)>,
+    }
+
+    impl Operation for Probe {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+        fn focusable(&mut self, id: Option<&Id>, bounds: Rectangle, _: &mut dyn Focusable) {
+            if let Some(id) = id {
+                self.focus.push((id.clone(), bounds));
+            }
+        }
+        fn text(&mut self, _: Option<&Id>, bounds: Rectangle, value: &str) {
+            self.text.push((value.to_owned(), bounds));
+        }
+    }
+
+    fn probe<M>(mut element: coincube_ui::widget::Element<'_, M>) -> (Rectangle, Probe) {
+        for bytes in coincube_ui::font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(bytes);
+        }
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(14.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, Size::new(1024.0, 400.0)),
+        );
+        let mut probe = Probe::default();
+        element
+            .as_widget_mut()
+            .operate(&mut tree, Layout::new(&node), &renderer, &mut probe);
+        (node.bounds(), probe)
+    }
+
+    /// App preferences is icon-only on both Launcher bars, and its accessible
+    /// label stays "App preferences". The right group reads eye, Connect,
+    /// App preferences, packed to the 24px gutter.
+    #[test]
+    fn launcher_bars_take_the_shared_layout_and_label_the_preferences_icon() {
+        let home = home(false);
+        let projection = launcher_catalog::project(&home);
+        let (bar, live) = probe(super::top_bar(&home, &projection, false));
+        assert_eq!(bar.height, super::BAR_HEIGHT);
+        let at = |id: &Id| {
+            live.focus
+                .iter()
+                .find(|(target, _)| target == id)
+                .map(|(_, bounds)| *bounds)
+                .unwrap()
+        };
+        let settings = at(&launcher_catalog::settings_id());
+        assert_eq!((settings.width, settings.height), (32.0, 32.0));
+        assert_eq!(settings.x + settings.width, 1024.0 - super::GUTTER);
+        let labels: Vec<_> = live
+            .text
+            .iter()
+            .filter(|(value, _)| value == "App preferences")
+            .collect();
+        assert_eq!(labels.len(), 1, "{:?}", live.text);
+        assert_eq!(labels[0].1, settings);
+        let eye = at(&launcher_catalog::privacy_id());
+        // A session still being checked leaves the Connect entry inert.
+        let connect = live
+            .text
+            .iter()
+            .find(|(value, _)| value == "Connect")
+            .unwrap()
+            .1;
+        assert!(eye.x < connect.x && connect.x < settings.x);
+        assert!(live.text.iter().any(|(value, _)| value == "Hide balances"));
+        let brand = live
+            .text
+            .iter()
+            .find(|(value, _)| value == "Tenshu")
+            .unwrap()
+            .1;
+        // The 20px cube and its 8px gap sit at the gutter.
+        assert_eq!(brand.x, super::GUTTER + 28.0);
+
+        let chrome = super::snapshot(&home, &projection);
+        let (bar, quiet) = probe(super::quiet_top_bar::<()>(&chrome));
+        assert_eq!(bar.height, super::BAR_HEIGHT);
+        assert!(quiet.focus.is_empty());
+        let label = quiet
+            .text
+            .iter()
+            .find(|(value, _)| value == "App preferences")
+            .unwrap()
+            .1;
+        assert_eq!((label.width, label.height), (32.0, 32.0));
+        assert_eq!(label.x + label.width, 1024.0 - super::GUTTER);
+        assert!(quiet
+            .text
+            .iter()
+            .any(|(value, _)| value == "Balances shown"));
+    }
+
+    #[test]
+    #[ignore = "writes PNG frames; needs a GPU adapter"]
+    fn top_bar_capture_launcher() {
+        let Some(directory) = directory() else {
+            return;
+        };
+        let mut renderer = renderer();
+        for (appearance, palette) in themes() {
+            let home = home(appearance == "light");
+            for (width, height) in WINDOWS {
+                save(
+                    &mut renderer,
+                    launcher_catalog::launcher_view(&home),
+                    Size::new(width, height),
+                    &palette,
+                    None,
+                    directory.join(format!("launcher-{appearance}-{width}x{height}.png")),
+                );
+            }
+            for (id, name) in [
+                (launcher_catalog::privacy_id(), "eye"),
+                (launcher_catalog::sign_in_id(), "connect"),
+                (launcher_catalog::settings_id(), "preferences"),
+            ] {
+                save(
+                    &mut renderer,
+                    launcher_catalog::launcher_view(&home),
+                    Size::new(1024.0, 768.0),
+                    &palette,
+                    Some(id),
+                    directory.join(format!("launcher-{appearance}-focus-{name}-1024x768.png")),
+                );
+            }
+            // The live bar over the quiet one the unlock face stands on.
+            let projection = launcher_catalog::project(&home);
+            let chrome = super::snapshot(&home, &projection);
+            let bars = iced::widget::column![
+                super::top_bar(&home, &projection, false),
+                rule::horizontal(1),
+                super::quiet_top_bar(&chrome),
+                rule::horizontal(1),
+            ];
+            save(
+                &mut renderer,
+                bars.into(),
+                Size::new(1024.0, 2.0 * (super::BAR_HEIGHT + 1.0)),
+                &palette,
+                None,
+                directory.join(format!(
+                    "launcher-{appearance}-live-and-quiet-bars-1024.png"
+                )),
+            );
+        }
     }
 }

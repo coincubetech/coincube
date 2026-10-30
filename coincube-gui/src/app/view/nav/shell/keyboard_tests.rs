@@ -138,8 +138,10 @@ fn focus_snapshot(
     snapshot
 }
 
+/// The shared bar's right group: the eye, the account and connection chips,
+/// then App preferences, in both visual and Tab order.
 #[test]
-fn top_bar_eye_precedes_app_preferences_in_visual_and_focus_order() {
+fn top_bar_right_group_is_eye_then_chips_then_app_preferences() {
     load_fonts();
     let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
         coincube_ui::font::REGULAR,
@@ -160,19 +162,24 @@ fn top_bar_eye_precedes_app_preferences_in_visual_and_focus_order() {
         &renderer,
         &layout::Limits::new(Size::ZERO, Size::new(1024.0, TOP_BAR_HEIGHT)),
     );
-    let eye = Id::new(BALANCE_PRIVACY_ID);
-    let preferences = Id::new(APP_PREFERENCES_ID);
+    let order = [
+        BALANCE_PRIVACY_ID,
+        "tenshu.connect.sign-in",
+        CONNECTION_ID,
+        APP_PREFERENCES_ID,
+    ]
+    .map(Id::new);
     let bounds = focus_snapshot(&mut element, &mut tree, &node, &renderer).bounds;
-    let eye_x = bounds.iter().find(|(id, _)| id == &eye).unwrap().1.x;
-    let preferences_x = bounds
-        .iter()
-        .find(|(id, _)| id == &preferences)
-        .unwrap()
-        .1
-        .x;
+    let at = |target: &Id| bounds.iter().find(|(id, _)| id == target).unwrap().1;
+    let x = |target: &Id| at(target).x;
+    // The eye and App preferences are the shared 32px icon controls.
+    for icon in [&order[0], &order[3]] {
+        assert_eq!((at(icon).width, at(icon).height), (32.0, 32.0));
+    }
     assert!(
-        eye_x < preferences_x,
-        "eye must appear before App preferences"
+        order.windows(2).all(|pair| x(&pair[0]) < x(&pair[1])),
+        "right group order: {:?}",
+        bounds
     );
 
     operate(
@@ -180,19 +187,21 @@ fn top_bar_eye_precedes_app_preferences_in_visual_and_focus_order() {
         &mut tree,
         &node,
         &renderer,
-        focusable::focus::<()>(eye.clone()),
+        focusable::focus::<()>(order[0].clone()),
     );
-    operate(
-        &mut element,
-        &mut tree,
-        &node,
-        &renderer,
-        focusable::focus_next::<()>(),
-    );
-    assert_eq!(
-        focus_snapshot(&mut element, &mut tree, &node, &renderer).focused,
-        vec![preferences]
-    );
+    for next in &order[1..] {
+        operate(
+            &mut element,
+            &mut tree,
+            &node,
+            &renderer,
+            focusable::focus_next::<()>(),
+        );
+        assert_eq!(
+            focus_snapshot(&mut element, &mut tree, &node, &renderer).focused,
+            vec![next.clone()]
+        );
+    }
 }
 
 #[derive(Default)]
@@ -324,6 +333,7 @@ fn shell_actions_follow_visual_order_and_dispatch_keyboard_once() {
     for expected in [
         LAUNCHER_RETURN_ID,
         "tenshu.connect.sign-in",
+        CONNECTION_ID,
         APP_PREFERENCES_ID,
         CUBE_SWITCHER_ID,
     ] {
@@ -394,23 +404,25 @@ fn shell_actions_follow_visual_order_and_dispatch_keyboard_once() {
         ),
         Some(Id::new(APP_PREFERENCES_ID))
     );
-    operate(
-        &mut element,
-        &mut tree,
-        &node,
-        &renderer,
-        focusable::focus_previous::<()>(),
-    );
-    assert_eq!(
+    for expected in [CONNECTION_ID, "tenshu.connect.sign-in"] {
         operate(
             &mut element,
             &mut tree,
             &node,
             &renderer,
-            focusable::find_focused()
-        ),
-        Some(Id::new("tenshu.connect.sign-in"))
-    );
+            focusable::focus_previous::<()>(),
+        );
+        assert_eq!(
+            operate(
+                &mut element,
+                &mut tree,
+                &node,
+                &renderer,
+                focusable::find_focused()
+            ),
+            Some(Id::new(expected))
+        );
+    }
     assert!(matches!(
         send(
             &mut element,
@@ -480,11 +492,12 @@ fn signed_in_connect_chip_opens_account_sheet_intent() {
     ));
 }
 
-/// A rejected device's only fix is the Re-register button on Cube Settings →
-/// About. The red chip must be a reachable control that routes there; a
-/// healthy or merely connecting chip stays a plain label.
+/// The connection chip is the third control (after the brand and the account
+/// chip) in every state, under one id. A rejected device's only fix is the
+/// Re-register button on Cube Settings → About, so that state routes there;
+/// every other state opens the Vault's Node settings.
 #[test]
-fn rejected_device_chip_routes_to_reregistration() {
+fn connection_chip_routes_to_reregistration_or_node_settings() {
     load_fonts();
     let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
         coincube_ui::font::REGULAR,
@@ -537,7 +550,7 @@ fn rejected_device_chip_routes_to_reregistration() {
     };
 
     let (focused, sent) = third_focus(&REJECTED);
-    assert_eq!(focused, Some(Id::new(CONNECT_REREGISTER_ID)));
+    assert_eq!(focused, Some(Id::new(CONNECTION_ID)));
     assert!(matches!(
         sent.as_slice(),
         [Message::Menu(to)] if to == &DEVICE_REJECTED_ROUTE
@@ -547,8 +560,94 @@ fn rejected_device_chip_routes_to_reregistration() {
         Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::About))
     );
 
-    let (focused, _) = third_focus(&CONNECTING);
-    assert_ne!(focused, Some(Id::new(CONNECT_REREGISTER_ID)));
+    let (focused, sent) = third_focus(&CONNECTING);
+    assert_eq!(focused, Some(Id::new(CONNECTION_ID)));
+    assert!(matches!(
+        sent.as_slice(),
+        [Message::Menu(Menu::Vault(VaultSubMenu::Settings(Some(
+            SettingsOption::Node
+        ))))]
+    ));
+}
+
+/// The chip keeps one id, so a status change while it has focus keeps focus
+/// on it.
+#[test]
+fn connection_chip_keeps_focus_across_a_status_change() {
+    load_fonts();
+    let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+        coincube_ui::font::REGULAR,
+        14.into(),
+        Some("tiny-skia"),
+    ))
+    .unwrap();
+    static CONNECTING: ConnectionStatus = ConnectionStatus::Connecting;
+    static CONNECTED: ConnectionStatus = ConnectionStatus::Connected;
+    let size = Size::new(1024.0, 768.0);
+    let mut ctx = fixture_context();
+    ctx.connect_stream_status = &CONNECTING;
+    let mut element = shell_tree(&ctx, ShellState::default());
+    let mut tree = Tree::new(element.as_widget());
+    let node = element.as_widget_mut().layout(
+        &mut tree,
+        &renderer,
+        &layout::Limits::new(Size::ZERO, size),
+    );
+    operate(
+        &mut element,
+        &mut tree,
+        &node,
+        &renderer,
+        focusable::focus::<()>(Id::new(CONNECTION_ID)),
+    );
+
+    ctx.connect_stream_status = &CONNECTED;
+    let mut element = shell_tree(&ctx, ShellState::default());
+    tree.diff(element.as_widget());
+    let node = element.as_widget_mut().layout(
+        &mut tree,
+        &renderer,
+        &layout::Limits::new(Size::ZERO, size),
+    );
+    assert_eq!(
+        focus_snapshot(&mut element, &mut tree, &node, &renderer).focused,
+        vec![Id::new(CONNECTION_ID)]
+    );
+}
+
+#[test]
+fn connection_route_prefers_node_settings_and_keeps_the_rejected_device_fix() {
+    let node = Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::Node)));
+    let first_tab = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::General));
+    let route = |status: &ConnectionStatus, has_vault, has_imported_bitcoin| {
+        let mut ctx = fixture_context();
+        ctx.has_vault = has_vault;
+        ctx.has_imported_bitcoin = has_imported_bitcoin;
+        connection_route(status, ctx.has_vault || ctx.has_imported_bitcoin)
+    };
+    for status in [
+        ConnectionStatus::Connected,
+        ConnectionStatus::Connecting,
+        ConnectionStatus::Error("socket closed".to_string()),
+        ConnectionStatus::Inactive,
+    ] {
+        // A Vault.
+        assert_eq!(route(&status, true, false), node, "{status:?}");
+        // An imported Bitcoin wallet takes the Vault scope and its Node tab.
+        assert_eq!(route(&status, false, true), node, "{status:?}");
+        // Neither: Settings' first tab.
+        assert_eq!(route(&status, false, false), first_tab, "{status:?}");
+    }
+    for (has_vault, has_imported_bitcoin) in [(true, false), (false, true), (false, false)] {
+        assert_eq!(
+            route(
+                &ConnectionStatus::DeviceRejected,
+                has_vault,
+                has_imported_bitcoin
+            ),
+            DEVICE_REJECTED_ROUTE
+        );
+    }
 }
 
 #[test]
