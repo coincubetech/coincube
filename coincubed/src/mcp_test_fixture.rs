@@ -3,7 +3,7 @@ use crate::{
     config::{BitcoinConfig, Config},
     database::{
         sqlite::{FreshDbOptions, SqliteDb},
-        Coin,
+        Coin, DatabaseConnection,
     },
     datadir::DataDirectory,
     testutils::DummyBitcoind,
@@ -26,6 +26,32 @@ pub fn regtest_wallet(
     descriptor: coincube_core::descriptors::CoincubeDescriptor,
 ) -> (Config, DaemonHandle) {
     wallet_on_chain(root, descriptor, bitcoin::Network::Regtest.into())
+}
+/// Simulate an input disappearing from the disposable wallet's coin set.
+/// Test-only: this changes only the fixture's SQLite database, never a node.
+pub fn remove_coin(root: &std::path::Path, outpoint: bitcoin::OutPoint) {
+    let database = SqliteDb::new(
+        root.join("wallet.sqlite3"),
+        None,
+        &Secp256k1::verification_only(),
+    )
+    .unwrap();
+    database.connection().unwrap().remove_coins(&[outpoint]);
+}
+/// Apply a same-height tip replacement without advancing the poll timestamp.
+pub fn replace_tip_hash_same_height(root: &std::path::Path) {
+    let database = SqliteDb::new(
+        root.join("wallet.sqlite3"),
+        None,
+        &Secp256k1::verification_only(),
+    )
+    .unwrap();
+    let mut connection = database.connection().unwrap();
+    let tip = connection.chain_tip().unwrap();
+    connection.update_tip(&crate::bitcoin::BlockChainTip {
+        hash: bitcoin::BlockHash::all_zeros(),
+        height: tip.height,
+    });
 }
 fn wallet_on_chain(
     root: &std::path::Path,
@@ -105,5 +131,20 @@ fn wallet_on_chain(
         false,
     )
     .unwrap();
+    if chain == coincube_core::chain::ChainId::Regtest {
+        // The MCP transaction tests start from a polled wallet. The poller runs
+        // on another thread, so waiting for its first scheduled tick in each
+        // caller can time out on a busy CI runner before it publishes sync.
+        let (done, received) = std::sync::mpsc::sync_channel(0);
+        let DaemonHandle::Controller { poller_sender, .. } = &handle else {
+            unreachable!("the test fixture starts an embedded daemon");
+        };
+        poller_sender
+            .send(crate::bitcoin::poller::PollerMessage::PollNow(done))
+            .expect("request synthetic wallet poll");
+        received
+            .recv_timeout(Duration::from_secs(30))
+            .expect("synthetic wallet poll completed");
+    }
     (config, handle)
 }
