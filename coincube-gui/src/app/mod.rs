@@ -7451,8 +7451,10 @@ impl App {
                 if let Ok(record) = &result {
                     tasks.push(self.record_split((**record).clone()));
                 }
+                // To the Coins panel whichever panel is showing: its overlay
+                // stays locked until it hears the result.
                 if let (Some(daemon), Some(panel)) =
-                    (self.daemon.clone(), self.panels.current_mut())
+                    (self.daemon.clone(), self.panels.coins.as_mut())
                 {
                     tasks.push(panel.update(
                         Some(daemon),
@@ -13670,6 +13672,25 @@ pub(crate) mod shell_tests {
             .unwrap(),
         );
         (app, wallet)
+    }
+
+    #[test]
+    fn a_split_result_reaches_the_coins_panel_from_another_panel() {
+        let root = std::env::temp_dir().join(format!("split-result-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = bitcoin_app(&root);
+        app.panels
+            .coins
+            .as_mut()
+            .unwrap()
+            .start_building_split_for_test();
+        drop(app.set_current_panel(Menu::Vault(menu::VaultSubMenu::Overview)));
+        drop(app.update(Message::SplitPrepared(Err("Couldn't build".into()))));
+        assert_eq!(
+            app.panels.coins.as_ref().unwrap().split_progress_for_test(),
+            Some((false, Some("Couldn't build".to_string()))),
+            "unlocked, with the error"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
