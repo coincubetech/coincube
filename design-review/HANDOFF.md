@@ -16,7 +16,9 @@ Read this file first, then the review doc, then the inventory.
 | Design briefs v1–v6 (history; superseded where the review doc disagrees) | `tenshu-design-brief-*.md`, `tenshu-concepts.md` |
 | Pre-canvas concept pages (superseded) | `archive/` |
 
-Precedence when sources disagree: review doc > artboard source > brief.
+Precedence when sources disagree: on a screen the v175 delta touches, the v175
+plan and Robert's decisions on it come first (see "v175 delta" below); then
+review doc > artboard source > brief.
 
 ## v175 delta (2026-10-29)
 
@@ -32,7 +34,10 @@ boards are the acceptance target, in both themes at 1024×768 and 1440×900. The
 The v175 sources are in `canvas/` (exported on 2026-10-30, #955), and
 `screens/` has a local render of every board's default state (#957). Where a
 render disagrees with the live canvas, the canvas wins. Each board that changed
-names its decision in a dated `(Robert, 2026-10-29)` comment in its CSS. The
+a design decision names it in a dated `(Robert, 2026-10-29)` comment in its
+CSS. Three changed boards carry no note: `P-Light-Split` and
+`P-Light-Transfer` changed only their `<title>`, and `P-BorderWallet` only took
+the settled `--on-accent` and the 22px title. The
 renders are at canvas size (mostly 1440 px wide), so check 1024×768 against the
 source. States behind a lever, such as the Swap Review and Swapped steps or the
 auto-convert turn-off confirmation on `P-Settings`, are only in the source and
@@ -62,7 +67,12 @@ Where the plan departs from the boards, the plan wins:
   "turning auto-convert off converts the USDB balance back", and its render
   (`screens/studies/H-Settings-Spark-Off.png`) shows that dialog. Build
   neither the convert-back copy nor the conversion. The board's "stays USDB"
-  status note, shown while auto-convert is off, still applies.
+  status note, shown while auto-convert is off, still applies. This decision
+  also supersedes the review doc's Stable Balance placement and convert-back
+  language ("Detailed Settings layouts", 7. Spark, and the 2026-10-23
+  afternoon round): there is no Stable Balance toggle on the Spark page or in
+  Settings › Spark, auto-convert lives in Balances & conversion (plan S2, W2),
+  and "deactivation converts back" no longer holds.
 - **Liquid is hidden.** Most Cube boards still show a Liquid wallet (a side
   panel row, an Overview card, activity rows), and `P-Liquid` is still on the
   canvas. Build without them, for every account and Cube (master §3 decision 2,
@@ -84,7 +94,9 @@ Where the plan departs from the boards, the plan wins:
 Already in the app and not changed by the plan: the Launcher's network activity
 (canvas page "Launcher backdrop (design B)": `P-Launcher-Rail*`,
 `P-AppPrefs-Rail` and the `backdrop` lever on `P-Launcher`) is
-`home/launcher_activity.rs` with its App preferences row. Connect-only Cubes
+`home/launcher_activity.rs`. Its App preferences row ("Network activity") is in
+`app/view/preferences.rs`, saved as `NetworkActivitySource` in
+`app/settings/preferences.rs`. Connect-only Cubes
 already stand on the floor as ghosts (#943, #949); N1 is checked against the
 `G-` boards.
 
@@ -131,7 +143,7 @@ Implement none of these. They exist only so the prototype could be clicked throu
 | `localStorage` key `tenshu.proto.b2b` | Share the Bitcoin Blake2b device toggle across artboards | A persisted per-device app setting (next to Developer mode in `app/view/settings/general.rs`); when off, nothing Blake2b is rendered anywhere |
 | `localStorage` key `tenshu.proto.dev` | Share the Developer-mode toggle across artboards | The existing Developer-mode device setting; when off, no test network is rendered anywhere (no Live/Test chips, "All networks" only with two or more networks listed, no test networks in the Launcher menu or Cube list, none in Create) |
 | v175 `localStorage` hand-offs `tenshu.proto.land`, `settingsScope`, `sendFrom`, `recvTo`, `openCube` and `restored`, and the `tenshu-proto` window event | Tell the next artboard where to land (wallet page, Settings scope and tab, Send/Receive wallet and asset, which Cube opened, which ghosts were restored) | Route arguments and in-memory state (`app/menu.rs::Menu`, `gui/tab.rs::State`) |
-| v175 `localStorage` keys `tenshu.proto.theme`, `launcher`, `backdrop` and `chainsrc` | Share App preferences (Appearance, Launcher style, network activity and its source) across artboards | The existing persisted device settings |
+| `localStorage` keys `tenshu.proto.theme` and `launcher`, plus `backdrop` and `chainsrc` (new in v175) | Share App preferences (Appearance, Launcher style, network activity and its source) across artboards | The existing persisted device settings |
 | `kf` focus demos and the `focusDemo` lever | Show the keyboard focus ring in a still frame | Real keyboard focus |
 | `P-Locking` / `V3-Locking` artboards | The runtime navigates on a link before the link's own handler runs | Lock Cube is one action: clear the session, return to the Launcher |
 | `P-Opening` mounting `P-Overview` after 900 ms via `dc-import` | No programmatic navigation in the runtime | Opening finishes → Overview, no timer |
@@ -204,7 +216,8 @@ The artboards define these on `.tenshu` (dark) and `.tenshu.light`. Map them ont
 Type: IBM Plex Sans 400/500/600 for UI, IBM Plex Mono 400/500 for addresses,
 txids, amounts in detail views. Base 14px / line-height 1.45; captions 12px;
 tabular numerals everywhere amounts appear. Radii: 6px controls, 8px inputs and
-switcher, 10px cards and menus, 16px chips. Side menu 248px; top bar 56px.
+switcher, 10px cards and menus, 8px chips (the top-bar chips are 32px tall,
+with a leading icon). Side menu 248px; top bar 56px.
 Reduced motion: every transition and the 3D floor spin are off under
 `prefers-reduced-motion` and under the app preference.
 
