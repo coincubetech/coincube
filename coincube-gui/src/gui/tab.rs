@@ -5360,6 +5360,7 @@ pub fn create_app_with_remote_backend(
             chain_proofs: std::collections::HashMap::new(),
             split_records: Vec::new(),
             splitting: std::collections::HashMap::new(),
+            split_unconfirmed: std::collections::HashSet::new(),
             separated: std::collections::HashSet::new(),
             // We ignore last poll fields for remote backend.
             last_poll_at_startup: None,

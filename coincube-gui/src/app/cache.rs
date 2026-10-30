@@ -279,6 +279,9 @@ pub struct Cache {
     pub split_records: Vec<crate::services::split_coins::SplitRecord>,
     /// Outputs of this Vault's splits still short of their confirmations.
     pub splitting: std::collections::HashMap<coincube_core::miniscript::bitcoin::OutPoint, u32>,
+    /// Outputs of this Vault's signature splits past their confirmations,
+    /// shown as split but unconfirmed.
+    pub split_unconfirmed: std::collections::HashSet<coincube_core::miniscript::bitcoin::OutPoint>,
     /// Coins whose twin copy a split-key split on the twin Cube spent, as
     /// Connect last showed it deep on the twin chain.
     pub separated: std::collections::HashSet<coincube_core::miniscript::bitcoin::OutPoint>,
@@ -448,6 +451,7 @@ impl std::default::Default for Cache {
             chain_proofs: std::collections::HashMap::new(),
             split_records: Vec::new(),
             splitting: std::collections::HashMap::new(),
+            split_unconfirmed: std::collections::HashSet::new(),
             separated: std::collections::HashSet::new(),
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
             balance_privacy: None,
@@ -614,6 +618,7 @@ impl Cache {
                 .get(outpoint)
                 .and_then(|entry| entry.outcome()),
             splitting: self.splitting.get(outpoint).copied(),
+            signature_split: self.split_unconfirmed.contains(outpoint),
             separated: self.separated.contains(outpoint),
         }
     }

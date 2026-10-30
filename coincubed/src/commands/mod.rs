@@ -1217,6 +1217,12 @@ impl DaemonControl {
         }
     }
 
+    /// Current wallet database tip identity for embedded, read-only callers.
+    /// An empty chain has no identity and must not authorize a prepared draft.
+    pub fn chain_tip_hash(&self) -> Option<bitcoin::BlockHash> {
+        self.db.connection().chain_tip().map(|tip| tip.hash)
+    }
+
     /// Get a new deposit address. This will always generate a new deposit address, regardless of
     /// whether it was actually used.
     pub fn get_new_address(&self) -> GetAddressResult {

@@ -82,6 +82,14 @@ pub enum Message {
         client_id: String,
         draft_id: String,
     },
+    /// Completion of the bounded daemon and input checks before native review.
+    #[cfg(feature = "mcp-transactions")]
+    ReviewTransactionChecked {
+        client_id: String,
+        draft_id: String,
+        session_id: uuid::Uuid,
+        native: Option<transactions::NativeDraft>,
+    },
     /// Revoke one stored client; ordinary locks never perform this action.
     RevokePair(String),
     /// Show the durable-pairing revocation decision before changing storage.
@@ -606,7 +614,9 @@ impl Settings {
                 return None;
             }
             #[cfg(feature = "mcp-transactions")]
-            Message::ReviewTransaction { .. } => return None,
+            Message::ReviewTransaction { .. } | Message::ReviewTransactionChecked { .. } => {
+                return None;
+            }
             Message::Enable(value) => {
                 self.revoke();
                 self.clear_pairing_selection();
@@ -854,12 +864,11 @@ impl Settings {
     }
 
     #[cfg(feature = "mcp-transactions")]
-    pub(crate) fn prepared_transaction(
+    pub(crate) fn transaction_service(
         &self,
         client_id: &str,
-        draft_id: &str,
         wallet: &Wallet,
-    ) -> Option<transactions::NativeDraft> {
+    ) -> Option<Arc<transactions::Service>> {
         if wallet.chain != crate::chain::ChainId::Regtest {
             return None;
         }
@@ -882,8 +891,21 @@ impl Settings {
             .paired
             .iter()
             .find(|v| v.id == client_id && v.server.grant.active())?;
-        let native = runtime.transactions.as_ref()?.native(draft_id)?;
-        runtime.server.grant.active().then_some(native)
+        if !runtime.server.grant.active() {
+            return None;
+        }
+        runtime.transactions.clone()
+    }
+
+    #[cfg(all(test, feature = "mcp-transactions"))]
+    pub(crate) fn prepared_transaction(
+        &self,
+        client_id: &str,
+        draft_id: &str,
+        wallet: &Wallet,
+    ) -> Option<transactions::NativeDraft> {
+        self.transaction_service(client_id, wallet)?
+            .native(draft_id)
     }
 
     fn transaction_selection(&self) -> bool {
