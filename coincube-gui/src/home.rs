@@ -348,6 +348,16 @@ pub struct RemoteCube {
     pub has_vault: Option<bool>,
 }
 
+/// Whether the motion preference saved under `root`, against the system's,
+/// reduces motion: the opening that follows an unlock then holds still.
+pub(crate) fn motion_reduced(root: &CoincubeDirectory, system: Option<bool>) -> bool {
+    use crate::app::settings::global::GlobalSettings;
+    GlobalSettings::load_preferences(&GlobalSettings::path(root))
+        .unwrap_or_default()
+        .resolve(None, system)
+        .reduce_motion
+}
+
 /// A ghost the recovery-phrase import is restoring: Connect's record of the
 /// Cube the user picked on the floor.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1659,16 +1669,6 @@ impl Home {
     }
 
     /// Update the purely visual Launcher mode when macOS Accessibility changes.
-    /// Whether the saved motion preference, against the system's, reduces
-    /// motion: the opening that follows an unlock then holds still.
-    pub(crate) fn reduces_motion(&self) -> bool {
-        use crate::app::settings::global::GlobalSettings;
-        GlobalSettings::load_preferences(&GlobalSettings::path(&self.datadir_path))
-            .unwrap_or_default()
-            .resolve(None, self.system_reduces_motion)
-            .reduce_motion
-    }
-
     pub(crate) fn set_system_reduces_motion(&mut self, observed: Option<bool>) {
         if self.system_reduces_motion != observed {
             self.system_reduces_motion = observed;

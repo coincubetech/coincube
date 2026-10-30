@@ -854,8 +854,8 @@ pub struct Tab {
     unlock_motion: Option<Instant>,
     /// Safe, owned Launcher geometry retained only through this unlock.
     unlock_floor: Option<home::LauncherSceneContext>,
-    /// Whether motion is reduced for the unlock under way.
-    unlock_reduced: bool,
+    /// The system's reduce-motion setting, as last observed.
+    system_reduces_motion: Option<bool>,
     /// The verified Cube opening, until the App shows.
     opening: Option<CubeOpening>,
     /// An opening was cancelled before the Loader: its wallet load may still
@@ -936,7 +936,7 @@ impl Tab {
             balance_privacy: None,
             unlock_motion: None,
             unlock_floor: None,
-            unlock_reduced: false,
+            system_reduces_motion: None,
             opening: None,
             opening_cancelled: false,
             pending_unlock_warnings: Vec::new(),
@@ -989,6 +989,7 @@ impl Tab {
 
     /// Feed the current native motion observation to a retained Launcher.
     pub fn set_system_reduces_motion(&mut self, observed: Option<bool>) {
+        self.system_reduces_motion = observed;
         if let State::Home(home) = &mut self.state {
             home.set_system_reduces_motion(observed);
         }
@@ -2184,7 +2185,6 @@ impl Tab {
                     let unlock_floor = spin_from_details
                         .then(|| l.launcher_scene_context(&cube))
                         .flatten();
-                    let reduced = l.reduces_motion();
                     let mut state = unlock_state(cube, datadir_root, on_success, duress_account_id);
                     if let State::PinEntry(pin) = &mut state {
                         pin.set_connect_provider(&l.connect_account.client.base_url);
@@ -2197,7 +2197,6 @@ impl Tab {
                             *connect_client = None;
                         }
                     }
-                    self.unlock_reduced = reduced;
                     self.state = state;
                     self.unlock_motion = unlock_floor.as_ref().map(|_| Instant::now());
                     self.unlock_floor = unlock_floor;
@@ -4878,22 +4877,30 @@ impl Tab {
     /// while the unlock screen still owns the load, and follow its stage.
     fn track_opening(&mut self, pin_verified: bool, result: Task<Message>) -> Task<Message> {
         let now = Instant::now();
+        // Every unlock reads the motion preference afresh, whichever route
+        // (Launcher, auto-lock, a new Cube) brought it here.
+        let datadir = |on_success: &crate::pin_entry::PinEntrySuccess| {
+            let crate::pin_entry::PinEntrySuccess::LoadApp { datadir, .. } = on_success;
+            datadir.clone()
+        };
         let verified = match &self.state {
             State::PinEntry(pin) if pin_verified && pin.is_loading() => {
-                Some(pin.loading_quote().clone())
+                Some((pin.loading_quote().clone(), datadir(&pin.on_success)))
             }
-            State::PasskeyUnlock(passkey) if passkey.is_opening() => {
-                Some(passkey.loading_quote().clone())
-            }
+            State::PasskeyUnlock(passkey) if passkey.is_opening() => Some((
+                passkey.loading_quote().clone(),
+                datadir(&passkey.on_success),
+            )),
             _ => None,
         };
-        if let (None, Some(quote)) = (self.opening.as_ref(), verified) {
+        if let (None, Some((quote, root))) = (self.opening.as_ref(), verified) {
             if let Some(Some(stage)) = self.opening_stage() {
                 self.opening_cancelled = false;
+                let reduced = home::motion_reduced(&root, self.system_reduces_motion);
                 self.opening = Some(CubeOpening {
                     scene: home::launcher_opening::Opening::new(
                         self.unlock_floor.take(),
-                        self.unlock_reduced,
+                        reduced,
                         stage,
                         now,
                     ),
@@ -4924,8 +4931,11 @@ impl Tab {
         match stage {
             None => self.opening = None,
             Some(stage) => {
-                if let Some(stage) = stage {
-                    opening.scene.set_stage(stage, now);
+                match stage {
+                    Some(stage) => opening.scene.set_stage(stage, now),
+                    // The error page owns the screen; a Retry starts the
+                    // stall wait from when it leaves.
+                    None => opening.scene.hold(now),
                 }
                 if !matches!(self.state, State::PinEntry(_) | State::PasskeyUnlock(_)) {
                     // The Loader or App owns its work now; Cancel uses its routes.
@@ -4942,14 +4952,16 @@ impl Tab {
     /// own loads are aborted and its Back route taken; in the Loader, its
     /// Back. Either way the session for this Cube is closed: it is locked.
     fn cancel_opening(&mut self) -> Task<Message> {
-        let Some(opening) = self.opening.take() else {
-            return Task::none();
-        };
+        // A press that lands after the Cube is ready changes nothing: the
+        // opening carries on to its finale.
         let cube_id = match &self.state {
             State::PinEntry(pin) => pin.cube().id.clone(),
             State::PasskeyUnlock(passkey) => passkey.cube().id.clone(),
             State::Loader(loader) => loader.cube_settings.id.clone(),
             _ => return Task::none(),
+        };
+        let Some(opening) = self.opening.take() else {
+            return Task::none();
         };
         for load in opening.loads {
             load.abort();
@@ -8679,6 +8691,26 @@ mod opening_tests {
         );
         assert!(tab.unlock_floor.is_none());
         drop(result);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_unlock_without_the_launcher_still_honours_reduced_motion() {
+        // Auto-lock and a freshly created Cube reach the PIN screen without
+        // the Launcher; the system setting alone must still be read.
+        let root = datadir();
+        let mut tab = submitted(&root);
+        tab.unlock_floor = None;
+        tab.set_system_reduces_motion(Some(true));
+        drop(tab.track_opening(true, Task::none()));
+        let opening = tab.opening.as_ref().expect("a verified PIN opens the Cube");
+        assert!(opening.scene.floor().is_none());
+        assert!(!opening.scene.breathes(), "no flicker or breath");
+
+        let mut tab = submitted(&root);
+        tab.set_system_reduces_motion(Some(false));
+        drop(tab.track_opening(true, Task::none()));
+        assert!(tab.opening.as_ref().unwrap().scene.breathes());
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -166,6 +166,12 @@ impl Opening {
         }
     }
 
+    /// Restart the stall wait without changing the stage: while the loader
+    /// shows an error, nothing is stalled.
+    pub fn hold(&mut self, now: Instant) {
+        self.stage_since = now;
+    }
+
     fn since(&self, at: Instant, now: Instant) -> Duration {
         now.saturating_duration_since(at)
     }
@@ -453,6 +459,17 @@ mod tests {
         assert!(!reduced.breathes());
         reduced.set_stage(Stage::Syncing, t0 + ms(10));
         assert_eq!(reduced.level(t0 + ms(10)), 0.65);
+    }
+
+    #[test]
+    fn a_held_error_restarts_the_stall_wait() {
+        let t0 = Instant::now();
+        let mut opening = Opening::new(Some(floor()), false, Stage::Connecting, t0);
+        // An error page shows from 3s to 40s; Retry comes back to Connecting.
+        opening.hold(t0 + ms(40_000));
+        opening.set_stage(Stage::Connecting, t0 + ms(40_000));
+        assert!(!opening.stalled(t0 + ms(40_000)));
+        assert!(opening.stalled(t0 + ms(40_000) + STALL));
     }
 
     #[test]
