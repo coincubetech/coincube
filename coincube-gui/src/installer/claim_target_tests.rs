@@ -678,9 +678,10 @@ async fn a_claim_install_writes_a_seed_the_minted_cube_can_open() {
     let _ = std::fs::remove_dir_all(root.path());
 }
 
-/// A passkey source Cube has no PIN, and the fork refuses a passkey unlock
-/// outright — so a claim from one would mint a Cube nothing could open. Refused
-/// at admission rather than at the seed write.
+/// A source Cube with no unlock credential in this session — a passkey Cube
+/// whose derived seed is not parked, or a PIN Cube whose session lapsed —
+/// would mint a copy nothing could open. Refused at admission rather than at
+/// the seed write, with advice that works for each.
 #[tokio::test]
 async fn a_claim_is_refused_when_the_source_cube_has_no_pin_in_this_session() {
     let _guard = crate::app::session::test_guard();
@@ -743,6 +744,61 @@ async fn a_claim_is_refused_when_the_source_cube_has_no_pin_in_this_session() {
     let message = refused.err().unwrap().to_string();
     assert!(message.contains("Reopen this Cube"), "{}", message);
     assert!(!message.contains("passkey"), "{}", message);
+}
+
+/// A passkey source Cube's copy unlocks with the same passkey (decision
+/// 2026-10-29): admitted once the source's derived seed is in the session,
+/// its seed file written under the password derived from that seed, and the
+/// minted copy records the source's passkey and master fingerprint.
+#[tokio::test]
+async fn a_passkey_source_cube_can_create_its_copy() {
+    let _guard = crate::app::session::test_guard();
+    let server = MockServer::start_async().await;
+    let (mut passkey_source, fingerprint) = source("Passkey Cube");
+    let metadata = crate::app::settings::PasskeyMetadata {
+        credential_id: "synthetic-credential".to_string(),
+        rp_id: "coincube.io".to_string(),
+        created_at: 0,
+        label: None,
+    };
+    passkey_source.cube.passkey_metadata = Some(metadata.clone());
+    passkey_source.cube.master_signer_fingerprint = Some(fingerprint);
+    let source_id = passkey_source.cube_id().to_string();
+    crate::app::session::open_without_pin(source_id.clone());
+    crate::app::session::store_unlocked_signer(
+        &source_id,
+        fingerprint,
+        coincube_core::signer::MasterSigner::generate(Network::Bitcoin).unwrap(),
+    );
+    let expected_password =
+        crate::app::session::seed_file_password(&passkey_source.cube).expect("derivable");
+
+    let (installer, _) = Installer::try_new_for_chain(
+        temp_root("passkey-copy"),
+        ChainId::BitcoinBlake2b,
+        None,
+        UserFlow::ClaimBlake2b {
+            from_cube: Box::new(passkey_source),
+        },
+        true,
+        None,
+        None,
+        None,
+        false,
+        Some(authenticated_client(&server)),
+    )
+    .unwrap();
+    assert!(installer.context.cube_pin.is_none());
+    assert_eq!(
+        installer.context.seed_password().map(|p| p.as_str()),
+        Some(expected_password.as_str())
+    );
+    let exit = crate::gui::tab::installer_exit_seed(&installer).expect("passkey exit seed");
+    assert_eq!(
+        exit.passkey.map(|p| p.credential_id),
+        Some(metadata.credential_id)
+    );
+    assert_eq!(exit.master_signer_fingerprint, fingerprint);
 }
 
 /// Backing out of a claim must put the user back in the Cube they started in.

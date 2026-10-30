@@ -1070,6 +1070,7 @@ impl Tab {
             State::App(app) => app.cube_settings().network.is_blake2b(),
             State::Loader(loader) => loader.cube_settings.network.is_blake2b(),
             State::PinEntry(pin) => pin.cube().network.is_blake2b(),
+            State::PasskeyUnlock(unlock) => unlock.cube().network.is_blake2b(),
             State::Installer(installer) => installer.context.bitcoin_config.chain.is_blake2b(),
             _ => false,
         };
@@ -1213,6 +1214,14 @@ impl Tab {
                     *connect_client = None;
                     return Task::none();
                 }
+                State::PasskeyUnlock(unlock)
+                    if unlock.cube().network.is_blake2b() && !unlock.requires_connect() =>
+                {
+                    let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } =
+                        &mut unlock.on_success;
+                    *connect_client = None;
+                    return Task::none();
+                }
                 State::Installer(installer)
                     if installer.context.fresh_fork_cube
                         && !installer.context.use_coincube_connect =>
@@ -1282,6 +1291,14 @@ impl Tab {
                     &mut pin.on_success;
                 *connect_client = None;
                 pin.fail_open(if capability_revoked { "Bitcoin Blake2b is disabled. Check Global Settings before reopening this Cube." } else { "Connect session changed. Return Home and sign in again." }.into());
+            }
+            // The same for a passkey copy: its assertion must not open the
+            // copy with the previous account's client.
+            State::PasskeyUnlock(unlock) if unlock.cube().network.is_blake2b() => {
+                let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } =
+                    &mut unlock.on_success;
+                *connect_client = None;
+                unlock.fail_open(if capability_revoked { "Bitcoin Blake2b is disabled. Check Global Settings before reopening this Cube." } else { "Connect session changed. Return Home and sign in again." }.into());
             }
             State::Installer(installer) if installer.context.bitcoin_config.chain.is_blake2b() => {
                 installer.stop();
@@ -4117,10 +4134,87 @@ impl Tab {
             (State::PasskeyUnlock(unlock), Message::PasskeyUnlock(msg)) => match msg {
                 crate::passkey_unlock::Message::Unlocked { fingerprint } => {
                     if unlock.cube().network.is_blake2b() {
-                        // Fork passkey creation is unavailable; do not route a
-                        // forged/stale callback into legacy SDK initialization.
-                        unlock.relocked();
-                        return Task::none();
+                        // A Bitcoin Blake2b copy of a passkey Cube unlocks with
+                        // the same passkey (decision 2026-10-29). It has a
+                        // Vault only: open it through the fork loader, as the
+                        // PIN path does, and never start Liquid or Spark.
+                        let crate::pin_entry::PinEntrySuccess::LoadApp {
+                            datadir,
+                            config,
+                            wallet_settings,
+                            connect_client,
+                            ..
+                        } = &unlock.on_success;
+                        let cube = unlock.cube().clone();
+                        // Every way out below that does not open the Vault
+                        // closes the session the assertion just opened, so a
+                        // copy that looks locked holds no seed.
+                        if self.claim_open.is_some() {
+                            // A scoped Claim reopen is PIN-only.
+                            crate::app::session::close_cube(&cube.id);
+                            unlock.relocked();
+                            return Task::none();
+                        }
+                        let requires_connect = !crate::chain::has_managed_local_fork(
+                            datadir,
+                            cube.network,
+                            wallet_settings.as_ref(),
+                        );
+                        let client = connect_client.clone().filter(|c| c.token().is_some());
+                        if requires_connect && client.is_none() {
+                            crate::app::session::close_cube(&cube.id);
+                            unlock.fail_open(
+                                "Sign in to Connect from Home before opening this Bitcoin Blake2b Cube"
+                                    .into(),
+                            );
+                            return Task::none();
+                        }
+                        let Some(wallet_settings) = wallet_settings
+                            .clone()
+                            .filter(|w| w.remote_backend_auth.is_none())
+                        else {
+                            crate::app::session::close_cube(&cube.id);
+                            unlock.fail_open(
+                                "Bitcoin Blake2b requires a local Connect-backed Vault".into(),
+                            );
+                            return Task::none();
+                        };
+                        // The assertion parked the derived master seed in the
+                        // session under this Cube; the Vault's seed file opens
+                        // with the password derived from it
+                        // (`app::session::seed_file_password`).
+                        let Some(signer) =
+                            crate::app::session::unlocked_signer(&cube.id, fingerprint)
+                        else {
+                            crate::app::session::close_cube(&cube.id);
+                            unlock.relocked();
+                            return Task::none();
+                        };
+                        let cek =
+                            Arc::new(crate::services::connect::crypto::CubeEncryptionKey::derive(
+                                &signer,
+                                cube.network.bitcoin_network(),
+                            ));
+                        let (loader, command) = if requires_connect {
+                            Loader::new_for_chain(
+                                datadir.clone(),
+                                config.clone(),
+                                wallet_settings,
+                                cube,
+                                client.expect("authenticated backend checked"),
+                                cek,
+                            )
+                        } else {
+                            Loader::new_local_fork(
+                                datadir.clone(),
+                                config.clone(),
+                                wallet_settings,
+                                cube,
+                                cek,
+                            )
+                        };
+                        self.state = State::Loader(loader);
+                        return command.map(Message::Load);
                     }
                     // The assertion succeeded and `passkey_unlock` has already
                     // parked the derived signer in `app::session`. What follows
@@ -4322,6 +4416,9 @@ impl Tab {
                     )
                 }
                 crate::passkey_unlock::Message::Back => {
+                    // A failed open stays on this screen with the session the
+                    // assertion opened; leaving closes it.
+                    crate::app::session::close_cube(&unlock.cube().id);
                     self.pending_split_intent = None;
                     // As for PIN Back: abandoning the unlock clears Split.
                     app::split_intent::clear();
@@ -4858,6 +4955,12 @@ pub(crate) struct RestoreCubeSeed {
     pub(crate) pin: zeroize::Zeroizing<String>,
     pub(crate) master_signer_fingerprint: bitcoin::bip32::Fingerprint,
     pub(crate) seed_backed_up: bool,
+    /// For a Bitcoin Blake2b copy of a passkey Cube: the source's passkey,
+    /// which the copy unlocks with. Its seed file was written under the
+    /// password derived from that passkey's seed, and `pin` is empty and
+    /// never read: a copy is a Blake2b Cube, and every use of `pin` at the
+    /// exit seam is on a Bitcoin-family Cube.
+    pub(crate) passkey: Option<app::settings::PasskeyMetadata>,
 }
 
 /// The deleted Cube's original identity, carried out of the decrypted
@@ -4959,10 +5062,23 @@ pub(crate) fn installer_exit_seed(i: &Installer) -> Option<RestoreCubeSeed> {
         // under the source Cube's PIN (`Context::cube_pin`, resolved from the
         // source session at admission) — not a `restore_pin`, because nothing
         // was restored and no PIN was chosen.
+        if let Some(passkey) = source.cube.passkey_metadata.clone() {
+            return i
+                .context
+                .passkey_seed_password
+                .as_ref()
+                .map(|_| RestoreCubeSeed {
+                    pin: zeroize::Zeroizing::new(String::new()),
+                    master_signer_fingerprint: source.master_signer_fingerprint(),
+                    seed_backed_up: source.seed_backed_up(),
+                    passkey: Some(passkey),
+                });
+        }
         return i.context.cube_pin.clone().map(|pin| RestoreCubeSeed {
             pin,
             master_signer_fingerprint: source.master_signer_fingerprint(),
             seed_backed_up: source.seed_backed_up(),
+            passkey: None,
         });
     }
     match (
@@ -4981,6 +5097,7 @@ pub(crate) fn installer_exit_seed(i: &Installer) -> Option<RestoreCubeSeed> {
             pin,
             master_signer_fingerprint: fp,
             seed_backed_up: i.context.fresh_fork_seed_backed_up,
+            passkey: None,
         }),
         _ => None,
     }
@@ -5115,6 +5232,9 @@ pub(crate) async fn find_or_create_cube<C: Into<crate::chain::ChainId>>(
                 // what verifies that PIN from now on (I1).
                 cube = cube.with_master_signer(seed.master_signer_fingerprint);
                 cube.backed_up |= seed.seed_backed_up;
+                if let Some(passkey) = &seed.passkey {
+                    cube = cube.with_passkey(passkey.clone());
+                }
             }
             Ok(cube)
         };
@@ -6251,6 +6371,7 @@ mod find_or_create_cube_tests {
         let seed = RestoreCubeSeed {
             pin: zeroize::Zeroizing::new("246810".to_string()),
             master_signer_fingerprint: fp,
+            passkey: None,
             seed_backed_up: false,
         };
         let mut cube = app::settings::CubeSettings::new(
@@ -6312,6 +6433,7 @@ mod find_or_create_cube_tests {
         let wrong_seed = RestoreCubeSeed {
             pin: zeroize::Zeroizing::new("246810".to_string()),
             master_signer_fingerprint: bitcoin::bip32::Fingerprint::from([9, 9, 9, 9]),
+            passkey: None,
             seed_backed_up: false,
         };
         let mismatch = find_or_create_cube_for_imported_restore(
@@ -6513,6 +6635,7 @@ mod find_or_create_cube_tests {
         let seed = RestoreCubeSeed {
             pin: zeroize::Zeroizing::new("synthetic-pin".into()),
             master_signer_fingerprint: fp,
+            passkey: None,
             seed_backed_up: true,
         };
         let cube = find_or_create_cube(
@@ -6913,6 +7036,7 @@ mod find_or_create_cube_tests {
         let seed = RestoreCubeSeed {
             pin: zeroize::Zeroizing::new("135790".to_string()),
             master_signer_fingerprint: fp,
+            passkey: None,
             seed_backed_up: false,
         };
         let mut settings = app::settings::Settings::default();
@@ -7110,6 +7234,7 @@ mod find_or_create_cube_tests {
         let seed = RestoreCubeSeed {
             pin: zeroize::Zeroizing::new("246810".to_string()),
             master_signer_fingerprint: fp,
+            passkey: None,
             seed_backed_up: false,
         };
 
@@ -7339,6 +7464,93 @@ mod unlock_routing_tests {
                 passkey
             );
         }
+    }
+
+    /// #947 review: after the assertion parked the seed, a refused open
+    /// (here: no Connect sign-in) must close the session, and so must Back.
+    #[test]
+    fn a_refused_passkey_copy_open_closes_the_session() {
+        use crate::chain::ChainId;
+        use coincube_core::{miniscript::bitcoin::secp256k1::Secp256k1, signer::MasterSigner};
+        let _guard = crate::app::session::test_guard();
+        crate::app::session::close();
+        let signer = MasterSigner::generate(Network::Bitcoin).unwrap();
+        let fingerprint = signer.fingerprint(&Secp256k1::signing_only());
+        let cube = CubeSettings::new("Copy".to_string(), ChainId::BitcoinBlake2b).with_passkey(
+            PasskeyMetadata {
+                credential_id: "Y3JlZC1pZA==".to_string(),
+                rp_id: "coincube.io".to_string(),
+                created_at: 1_786_122_245,
+                label: None,
+            },
+        );
+        let id = cube.id.clone();
+        let mut tab = super::Tab::new(
+            1,
+            unlock_state(
+                cube,
+                std::path::PathBuf::from("/tmp/unused"),
+                on_success(),
+                None,
+            ),
+        );
+        crate::app::session::open_without_pin(id.clone());
+        crate::app::session::store_unlocked_signer(&id, fingerprint, signer);
+        let _ = tab.update(super::Message::PasskeyUnlock(
+            crate::passkey_unlock::Message::Unlocked { fingerprint },
+        ));
+        assert!(
+            matches!(tab.state, State::PasskeyUnlock(_)),
+            "the open was refused"
+        );
+        assert!(crate::app::session::unlocked_signer(&id, fingerprint).is_none());
+        assert!(!crate::app::session::is_open());
+
+        // Back from a failed open closes it too.
+        let signer = MasterSigner::generate(Network::Bitcoin).unwrap();
+        let fingerprint = signer.fingerprint(&Secp256k1::signing_only());
+        crate::app::session::open_without_pin(id.clone());
+        crate::app::session::store_unlocked_signer(&id, fingerprint, signer);
+        let _ = tab.update(super::Message::PasskeyUnlock(
+            crate::passkey_unlock::Message::Back,
+        ));
+        assert!(!crate::app::session::is_open());
+    }
+
+    /// #947 review: a Connect change while a Connect-backed passkey copy is
+    /// at its prompt drops the old client and fails the open, as PIN entry
+    /// does, so the assertion cannot open it under the previous account.
+    #[test]
+    fn a_connect_change_fails_a_waiting_passkey_copy_open() {
+        use crate::chain::ChainId;
+        let cube = CubeSettings::new("Copy".to_string(), ChainId::BitcoinBlake2b).with_passkey(
+            PasskeyMetadata {
+                credential_id: "Y3JlZC1pZA==".to_string(),
+                rp_id: "coincube.io".to_string(),
+                created_at: 1_786_122_245,
+                label: None,
+            },
+        );
+        let mut success = on_success();
+        let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } = &mut success;
+        *connect_client = Some(crate::services::coincube::CoincubeClient::for_test(
+            "https://connect.example/",
+        ));
+        let mut tab = super::Tab::new(
+            1,
+            unlock_state(cube, std::path::PathBuf::from("/tmp/unused"), success, None),
+        );
+        drop(tab.invalidate_fork_state(super::AuthChange::LogOut, false, false));
+        let State::PasskeyUnlock(unlock) = &tab.state else {
+            panic!("still at the prompt");
+        };
+        assert!(unlock.requires_connect());
+        let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } = &unlock.on_success;
+        assert!(connect_client.is_none(), "the old client is dropped");
+        assert_eq!(
+            unlock.error_for_test(),
+            Some("Connect session changed. Return Home and sign in again.")
+        );
     }
 
     fn blake2b_error_loader() -> super::State {
