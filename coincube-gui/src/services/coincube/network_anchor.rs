@@ -129,10 +129,12 @@ pub struct NetworkAnchor {
 
 /// Re-expresses a Connect `observed_at` on this desktop's clock, so freshness
 /// checks measure the evidence's age and not the skew between the two clocks.
+/// `sent_at` is this desktop's time when the request was sent, so the whole
+/// round trip (bounded by the request timeout) also counts toward the age.
 /// Without `served_at` (an older API) the server's stamp is kept as is.
-pub(crate) fn local_observed_at(observed_at: i64, served_at: Option<i64>, now: i64) -> i64 {
+pub(crate) fn local_observed_at(observed_at: i64, served_at: Option<i64>, sent_at: i64) -> i64 {
     match served_at {
-        Some(served_at) => now.saturating_sub(served_at.saturating_sub(observed_at)),
+        Some(served_at) => sent_at.saturating_sub(served_at.saturating_sub(observed_at)),
         None => observed_at,
     }
 }
@@ -219,6 +221,11 @@ impl CoincubeClient {
         // Anchor observations cannot redirect authentication or allocate an
         // unbounded response body. Other CoincubeClient routes are unchanged.
         let client = self.anchor_transport()?;
+        let sent_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|d| i64::try_from(d.as_secs()).ok())
+            .unwrap_or(-1);
         let mut response = client
             .get(format!(
                 "{}/api/v1/connect/networks/{}/anchor",
@@ -274,15 +281,10 @@ impl CoincubeClient {
         {
             return Err(NetworkStatusError::InvalidResponse);
         }
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()
-            .and_then(|d| i64::try_from(d.as_secs()).ok())
-            .unwrap_or(-1);
         let mut anchor = envelope.data.anchor;
         if let Some(anchor) = &mut anchor {
             anchor.observed_at =
-                local_observed_at(anchor.observed_at, envelope.data.served_at, now);
+                local_observed_at(anchor.observed_at, envelope.data.served_at, sent_at);
         }
         Ok(NetworkAnchorStatus {
             network: chain,

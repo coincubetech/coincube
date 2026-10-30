@@ -199,6 +199,7 @@ fn parse_value(status: StatusCode, body: Value) -> Result<Evidence, Error> {
         7,
         policy(),
         10000,
+        10000,
     )
 }
 fn client(server: &MockServer) -> (PreflightClient, watch::Sender<u64>) {
@@ -273,14 +274,27 @@ fn exact_bindings_and_explicit_clock_bounds_are_required() {
 }
 #[test]
 fn served_at_measures_age_on_the_connect_clock() {
-    // Connect's clock is an hour ahead of this desktop's (now = 10000).
+    // Connect's clock is an hour ahead of this desktop's. The request was sent
+    // at 9995 and answered at 10000, so the 5 s round trip counts as age.
     let skewed = |observed_at: i64, served_at: i64| {
         let mut body = response(ChainId::BitcoinBlake2b, observed_at);
         body["data"]["served_at"] = json!(served_at);
-        parse_value(StatusCode::OK, body)
+        parse(
+            StatusCode::OK,
+            &headers(),
+            &serde_json::to_vec(&body).unwrap(),
+            ChainId::BitcoinBlake2b,
+            &tx(),
+            tip(),
+            7,
+            policy(),
+            9995,
+            10000,
+        )
     };
-    assert_eq!(skewed(13600, 13601).unwrap().observed_at(), 9999);
-    assert_eq!(skewed(13500, 13601), Err(Error::Stale));
+    assert_eq!(skewed(13600, 13601).unwrap().observed_at(), 9994);
+    // 56 s old when served, plus the round trip, exceeds the 60 s bound.
+    assert_eq!(skewed(13545, 13601), Err(Error::Stale));
 }
 #[test]
 fn rejection_is_evidence_but_arbitrary_diagnostics_are_refused() {
@@ -396,6 +410,7 @@ fn witness_mutation_is_detected_even_with_same_txid() {
             tip(),
             7,
             policy(),
+            10000,
             10000
         ),
         Err(Error::InvalidResponse)

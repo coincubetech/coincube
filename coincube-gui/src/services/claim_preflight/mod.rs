@@ -354,6 +354,7 @@ impl PreflightClient {
             let _ = generation.changed().await;
         };
         let operation = async {
+            let sent_at = now();
             let mut response = self
                 .client
                 .post(format!(
@@ -392,6 +393,7 @@ impl PreflightClient {
                 expected_tip,
                 self.expected,
                 policy,
+                sent_at,
                 now(),
             )
         };
@@ -568,6 +570,7 @@ fn parse(
     tip: BlockHash,
     generation: u64,
     policy: FreshnessPolicy,
+    sent_at: i64,
     now: i64,
 ) -> Result<Evidence, Error> {
     let retry_after_seconds = retry_after(headers);
@@ -617,7 +620,7 @@ fn parse(
     {
         return Err(Error::InvalidResponse);
     }
-    let observed_at = local_observed_at(result.observed_at, data.served_at, now);
+    let observed_at = local_observed_at(result.observed_at, data.served_at, sent_at);
     if !policy.fresh(observed_at, now) {
         return Err(Error::Stale);
     }
