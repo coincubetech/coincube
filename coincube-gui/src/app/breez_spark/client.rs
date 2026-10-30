@@ -55,6 +55,7 @@ use coincube_spark_protocol::{
     ReceiveBolt11Params, ReceiveOnchainParams, ReceivePaymentOk, RegisterLightningAddressParams,
     Request, Response, ResponseResult, SendPaymentOk, SendPaymentParams, SetAutoConvertParams,
     SetStableBalanceParams, SwapAmount, SwapOk, SwapParams, WalletAsset,
+    CONVERSION_MAX_SLIPPAGE_BPS,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
@@ -174,6 +175,67 @@ enum RequestKind {
     Query,
     /// A send. No answer means **unknown**, never "failed".
     StateChanging,
+}
+
+/// What a state-changing request handed the bridge. Each one gets its own
+/// wording for an unknown outcome and its own way to reconcile it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Handover {
+    /// A send.
+    Payment,
+    /// A swap: a self-transfer payment, so it keeps the payment wording. An
+    /// [`ErrorKind::Sdk`] answer can follow submission (see [`Method::Swap`]),
+    /// so it is unknown too.
+    Swap,
+    /// An auto-convert switch. Not a payment, and
+    /// [`SparkClient::get_auto_convert`] reconciles it, so a late answer has
+    /// no reader and is dropped rather than held forever.
+    AutoConvert,
+}
+
+impl Handover {
+    fn of(method: &Method) -> Self {
+        match method {
+            Method::Swap(_) => Self::Swap,
+            Method::SetAutoConvert(_) => Self::AutoConvert,
+            _ => Self::Payment,
+        }
+    }
+
+    /// The [`SparkClientError::OutcomeUnknown`] message when the bridge goes
+    /// away with the request in hand.
+    fn bridge_gone(self) -> String {
+        match self {
+            Self::Payment | Self::Swap => {
+                "The Spark bridge stopped responding after the payment was sent to it."
+            }
+            Self::AutoConvert => {
+                "The Spark bridge stopped responding while changing auto-convert. Check \
+                 whether auto-convert is on before changing it again."
+            }
+        }
+        .to_string()
+    }
+
+    /// The [`SparkClientError::OutcomeUnknown`] message when `secs` pass with
+    /// no answer.
+    fn deadline_passed(self, secs: u64) -> String {
+        match self {
+            Self::Payment | Self::Swap => format!(
+                "The Spark bridge did not answer within {secs}s of being given this payment."
+            ),
+            Self::AutoConvert => format!(
+                "The Spark bridge did not answer within {secs}s while changing auto-convert. \
+                 Check whether auto-convert is on before changing it again."
+            ),
+        }
+    }
+
+    /// Whether a late answer is held for [`SparkClient::take_late_outcome`]
+    /// or [`SparkClient::take_late_swap_outcome`].
+    fn holds_late_answer(self) -> bool {
+        !matches!(self, Self::AutoConvert)
+    }
 }
 
 /// Handle to a running `coincube-spark-bridge` subprocess.
@@ -693,7 +755,8 @@ impl SparkClient {
     /// This is a **state-changing** request: switching it on starts
     /// converting incoming bitcoin. A lost answer is
     /// [`SparkClientError::OutcomeUnknown`], and [`Self::get_auto_convert`]
-    /// tells which way it went.
+    /// tells which way it went: it is the only reconciliation, so no late
+    /// answer is held.
     pub async fn set_auto_convert(
         &self,
         enabled: bool,
@@ -743,10 +806,12 @@ impl SparkClient {
     /// Estimate a BTC ⇄ USDB swap. The returned handle goes to
     /// [`Self::swap`]. The estimate is not a locked price; the slippage cap
     /// is the only protection. `max_slippage_bps: None` uses
-    /// [`coincube_spark_protocol::CONVERSION_MAX_SLIPPAGE_BPS`].
+    /// [`CONVERSION_MAX_SLIPPAGE_BPS`]; the accepted range for an explicit
+    /// cap is on [`PrepareSwapParams::max_slippage_bps`].
     ///
     /// A quote that doesn't convert out of the requested asset is refused,
-    /// so the form never shows a figure in the wrong denomination.
+    /// so the form never shows a figure in the wrong denomination, and so is
+    /// one whose cap isn't the one asked for.
     pub async fn prepare_swap(
         &self,
         amount: SwapAmount,
@@ -761,8 +826,10 @@ impl SparkClient {
         {
             OkPayload::PrepareSwap(ok) => {
                 let from = amount.from_asset();
+                let cap = max_slippage_bps.unwrap_or(CONVERSION_MAX_SLIPPAGE_BPS);
                 check_quote(&ok.quote, from)
                     .and_then(|()| check_limits(&ok.limits, from))
+                    .and_then(|()| check_slippage_cap(&ok.quote, cap))
                     .map_err(|reason| {
                         SparkClientError::Protocol(format!(
                             "prepare_swap returned an inconsistent estimate: {reason}"
@@ -784,6 +851,12 @@ impl SparkClient {
     /// [`SparkClientError::OutcomeUnknown`], never a failure, and
     /// [`Self::take_late_swap_outcome`] holds the bridge's answer if it
     /// arrives later.
+    ///
+    /// An [`ErrorKind::Sdk`] answer is `OutcomeUnknown` too, because the SDK
+    /// can fail after submitting the swap. Only `BadRequest`, `NotConnected`
+    /// and `ShuttingDown` come back as a definite
+    /// [`SparkClientError::BridgeError`]. After `OutcomeUnknown`, reconcile
+    /// from Activity before offering another swap.
     pub async fn swap(&self, prepare_handle: String) -> Result<SwapOk, SparkClientError> {
         match self
             .request_with(
@@ -1048,6 +1121,7 @@ impl SparkClient {
         self.inner.pending.lock().await.insert(id, tx);
 
         let deadline = deadline_for(&method, kind);
+        let handover = Handover::of(&method);
         let request = Request { id, method };
         if self.inner.request_tx.send(request).is_err() {
             // Writer task exited before this was handed over. Nothing was
@@ -1070,9 +1144,7 @@ impl SparkClient {
                     ),
                     RequestKind::StateChanging => SparkClientError::OutcomeUnknown {
                         request_id: id,
-                        message: "The Spark bridge stopped responding after the payment \
-                                  was sent to it."
-                            .to_string(),
+                        message: handover.bridge_gone(),
                     },
                 });
             }
@@ -1086,15 +1158,14 @@ impl SparkClient {
                     )),
                     RequestKind::StateChanging => {
                         // Keep listening: the bridge still owes an answer, and
-                        // when it arrives it is the authoritative one.
-                        self.inner.awaiting_late.lock().await.insert(id);
+                        // when it arrives it is the authoritative one. Not for
+                        // an auto-convert change, whose answer nothing reads.
+                        if handover.holds_late_answer() {
+                            self.inner.awaiting_late.lock().await.insert(id);
+                        }
                         SparkClientError::OutcomeUnknown {
                             request_id: id,
-                            message: format!(
-                                "The Spark bridge did not answer within {}s of being \
-                                 given this payment.",
-                                deadline.as_secs()
-                            ),
+                            message: handover.deadline_passed(deadline.as_secs()),
                         }
                     }
                 });
@@ -1103,6 +1174,9 @@ impl SparkClient {
 
         match response.result {
             ResponseResult::Ok(payload) => Ok(payload),
+            ResponseResult::Err(ErrorPayload { kind, message }) if handover == Handover::Swap => {
+                Err(swap_error(id, kind, message))
+            }
             ResponseResult::Err(ErrorPayload { kind, message }) => {
                 Err(SparkClientError::BridgeError { kind, message })
             }
@@ -1136,6 +1210,11 @@ impl SparkClient {
 
     /// [`Self::take_late_outcome`] for a [`Self::swap`]: the bridge's answer
     /// to a swap whose caller gave up waiting, if it has arrived since.
+    ///
+    /// A late [`ErrorKind::Sdk`] error is still
+    /// [`SparkClientError::OutcomeUnknown`], as on time. `None` also follows
+    /// a swap that was reported unknown because of an SDK error: that answer
+    /// has already arrived. Either way, reconcile from Activity.
     pub async fn take_late_swap_outcome(
         &self,
         request_id: u64,
@@ -1149,9 +1228,31 @@ impl SparkClient {
                 other
             ))),
             ResponseResult::Err(ErrorPayload { kind, message }) => {
-                Err(SparkClientError::BridgeError { kind, message })
+                Err(swap_error(request_id, kind, message))
             }
         })
+    }
+}
+
+/// A swap's error answer. Only the refusals before submission are definite
+/// ([`ErrorKind::BadRequest`], [`ErrorKind::NotConnected`],
+/// [`ErrorKind::ShuttingDown`]). An [`ErrorKind::Sdk`] error can follow
+/// submission (see [`Method::Swap`]), so it is an unknown outcome: the swap
+/// may still complete. Its text goes to the log, not the error, because it may
+/// say "failed".
+fn swap_error(request_id: u64, kind: ErrorKind, message: String) -> SparkClientError {
+    if kind != ErrorKind::Sdk {
+        return SparkClientError::BridgeError { kind, message };
+    }
+    warn!(
+        "Spark bridge answered swap id {} with an SDK error; the swap may still complete: {}",
+        request_id, message
+    );
+    SparkClientError::OutcomeUnknown {
+        request_id,
+        message: "The Spark SDK reported an error after this swap was handed to it, so it may \
+                  still complete. Check Activity before swapping again."
+            .to_string(),
     }
 }
 
@@ -1172,6 +1273,17 @@ fn check_quote(quote: &ConversionQuote, from: WalletAsset) -> Result<(), String>
         return Err(format!(
             "expected {from:?} in and {into:?} out, got {:?} in, {:?} out and a fee in {:?}",
             quote.amount_in.asset, quote.amount_out.asset, quote.fee.asset
+        ));
+    }
+    Ok(())
+}
+
+/// Check that a quote applies the slippage cap it was asked for.
+fn check_slippage_cap(quote: &ConversionQuote, cap: u32) -> Result<(), String> {
+    if quote.max_slippage_bps != cap {
+        return Err(format!(
+            "slippage cap is {} bps, asked for {cap} bps",
+            quote.max_slippage_bps
         ));
     }
     Ok(())
@@ -1602,13 +1714,16 @@ pub enum SparkClientError {
     /// Bridge returned an error response for a request. A **definite**
     /// rejection: the bridge answered, and the answer was "no".
     BridgeError { kind: ErrorKind, message: String },
-    /// A state-changing request was dispatched and no answer came back.
+    /// A state-changing request was dispatched and no answer came back, or a
+    /// swap was answered with an SDK error that can follow submission.
     ///
     /// **Not a failure.** The bridge has the request and the SDK may already
     /// have moved the money; the transport simply stopped telling us. Callers
     /// must reconcile — [`SparkClient::take_late_outcome`] first, then the
     /// payment history — before offering to send anything again, and must never
-    /// render this as "the payment failed".
+    /// render this as "the payment failed". A swap reconciles from Activity
+    /// ([`SparkClient::take_late_swap_outcome`] only helps after a timeout),
+    /// and an auto-convert change from [`SparkClient::get_auto_convert`].
     OutcomeUnknown {
         /// The request id, for [`SparkClient::take_late_outcome`].
         request_id: u64,
@@ -1638,7 +1753,9 @@ impl std::fmt::Display for SparkClientError {
                 write!(f, "Spark bridge error ({}): {}", kind, message)
             }
             Self::OutcomeUnknown { message, .. } => {
-                write!(f, "Spark payment outcome unknown: {}", message)
+                // Not "payment": an auto-convert change can be unknown too.
+                // A send's message still names the payment.
+                write!(f, "Spark outcome unknown: {}", message)
             }
             Self::Protocol(msg) => write!(f, "Spark protocol error: {}", msg),
         }
@@ -1998,6 +2115,29 @@ mod p0_contract_tests {
         request.method
     }
 
+    /// Take the next request off the wire and answer it with a `kind` error
+    /// whose text says "failed", as an SDK error can. Returns the request id.
+    async fn bridge_refuses(
+        client: &SparkClient,
+        requests: &mut mpsc::UnboundedReceiver<Request>,
+        kind: ErrorKind,
+    ) -> u64 {
+        let request = requests.recv().await.expect("a request was sent");
+        let waiter = client
+            .inner
+            .pending
+            .lock()
+            .await
+            .remove(&request.id)
+            .expect("the caller is waiting");
+        let _ = waiter.send(Response::err(
+            request.id,
+            kind,
+            "Conversion failed: timeout waiting for conversion to complete",
+        ));
+        request.id
+    }
+
     fn amount(asset: WalletAsset, amount: u128) -> AssetAmount {
         AssetAmount { asset, amount }
     }
@@ -2137,10 +2277,13 @@ mod p0_contract_tests {
         assert!(
             matches!(method, Method::Swap(SwapParams { ref prepare_handle }) if prepare_handle == "swap-h")
         );
-        assert!(
-            matches!(result, Err(SparkClientError::OutcomeUnknown { .. })),
-            "{:?}",
-            result
+        // A swap is a self-transfer payment and keeps the send wording.
+        let Err(SparkClientError::OutcomeUnknown { message, .. }) = result else {
+            panic!("expected an unknown outcome, got {:?}", result);
+        };
+        assert_eq!(
+            message,
+            "The Spark bridge stopped responding after the payment was sent to it."
         );
 
         let (result, method) = tokio::join!(
@@ -2151,11 +2294,250 @@ mod p0_contract_tests {
             method,
             Method::SetAutoConvert(SetAutoConvertParams { enabled: true })
         ));
+        let Err(err @ SparkClientError::OutcomeUnknown { .. }) = result else {
+            panic!("expected an unknown outcome, got {:?}", result);
+        };
+        assert_not_a_payment(&err);
+    }
+
+    /// An auto-convert change's unknown outcome, message and `Display` alike,
+    /// names auto-convert and says nothing about a payment or a send.
+    fn assert_not_a_payment(err: &SparkClientError) {
+        let SparkClientError::OutcomeUnknown { message, .. } = err else {
+            panic!("expected an unknown outcome, got {:?}", err);
+        };
+        let rendered = format!("{} | {}", message, err).to_lowercase();
+        assert!(rendered.contains("auto-convert"), "{}", rendered);
+        for forbidden in ["payment", "send", "sent", "failed"] {
+            assert!(
+                !rendered.contains(forbidden),
+                "an auto-convert change says {:?}: {}",
+                forbidden,
+                rendered
+            );
+        }
+    }
+
+    /// The auto-convert switch times out like any state-changing request, but
+    /// it isn't a payment, and nothing reads a late answer to it:
+    /// `get_auto_convert` is how the gui finds out which way it went.
+    #[tokio::test(start_paused = true)]
+    async fn an_unanswered_auto_convert_change_holds_no_late_answer() {
+        let (client, mut requests) = fake_client();
+
+        // The bridge never answers; the paused clock runs out the deadline.
+        let err = client
+            .set_auto_convert(true)
+            .await
+            .expect_err("no answer came back");
+        let request = requests.recv().await.expect("the change was sent");
+        assert!(matches!(
+            request.method,
+            Method::SetAutoConvert(SetAutoConvertParams { enabled: true })
+        ));
         assert!(
-            matches!(result, Err(SparkClientError::OutcomeUnknown { .. })),
+            matches!(err, SparkClientError::OutcomeUnknown { request_id, .. } if request_id == request.id),
+            "{:?}",
+            err
+        );
+        assert_not_a_payment(&err);
+
+        // Not awaited, so the reader drops its late answer instead of holding
+        // it where nothing would ever take it.
+        assert!(!client
+            .inner
+            .awaiting_late
+            .lock()
+            .await
+            .contains(&request.id));
+        assert_eq!(route_response(false, false), ResponseRoute::Drop);
+
+        // The reconciliation route.
+        let state = AutoConvertState {
+            enabled: true,
+            breaker: AutoConvertBreaker::Ready,
+        };
+        let (result, method) = tokio::join!(
+            client.get_auto_convert(),
+            bridge_answers(
+                &client,
+                &mut requests,
+                Some(OkPayload::AutoConvert(state.clone()))
+            )
+        );
+        assert!(matches!(method, Method::GetAutoConvert));
+        assert_eq!(result.expect("state"), state);
+    }
+
+    /// Sends and swaps keep the payment wording on a timeout, and their late
+    /// answers are still held for `take_late_outcome` /
+    /// `take_late_swap_outcome`.
+    #[tokio::test(start_paused = true)]
+    async fn unanswered_sends_and_swaps_still_hold_their_late_answer() {
+        let (client, mut requests) = fake_client();
+        let expected = "The Spark bridge did not answer within 120s of being given this payment.";
+
+        let err = client
+            .send_payment("send-h".to_string(), Some("key".to_string()))
+            .await
+            .expect_err("no answer came back");
+        let request = requests.recv().await.expect("the send went out");
+        let SparkClientError::OutcomeUnknown {
+            request_id,
+            message,
+        } = err
+        else {
+            panic!("expected an unknown outcome, got {:?}", err);
+        };
+        assert_eq!((request_id, message.as_str()), (request.id, expected));
+        assert!(client
+            .inner
+            .awaiting_late
+            .lock()
+            .await
+            .contains(&request_id));
+
+        let err = client
+            .swap("swap-h".to_string())
+            .await
+            .expect_err("no answer came back");
+        let request = requests.recv().await.expect("the swap went out");
+        let SparkClientError::OutcomeUnknown {
+            request_id,
+            message,
+        } = err
+        else {
+            panic!("expected an unknown outcome, got {:?}", err);
+        };
+        assert_eq!((request_id, message.as_str()), (request.id, expected));
+        assert!(client
+            .inner
+            .awaiting_late
+            .lock()
+            .await
+            .contains(&request_id));
+    }
+
+    /// An SDK error can come after the SDK sent the swap's input to the pool,
+    /// so it is an unknown outcome, on time or late. Only the refusals before
+    /// submission are definite. A send's SDK error is unchanged.
+    #[tokio::test]
+    async fn a_swap_sdk_error_is_unknown_and_only_refusals_are_definite() {
+        let (client, mut requests) = fake_client();
+
+        let (result, id) = tokio::join!(
+            client.swap("swap-h".to_string()),
+            bridge_refuses(&client, &mut requests, ErrorKind::Sdk)
+        );
+        let Err(SparkClientError::OutcomeUnknown {
+            request_id,
+            message,
+        }) = result
+        else {
+            panic!("expected an unknown outcome, got {:?}", result);
+        };
+        assert_eq!(request_id, id);
+        // The SDK's "failed" stays in the log.
+        assert!(message.contains("Check Activity"), "{}", message);
+        assert!(!message.to_lowercase().contains("failed"), "{}", message);
+
+        for kind in [
+            ErrorKind::BadRequest,
+            ErrorKind::NotConnected,
+            ErrorKind::ShuttingDown,
+        ] {
+            let (result, _) = tokio::join!(
+                client.swap("swap-h".to_string()),
+                bridge_refuses(&client, &mut requests, kind)
+            );
+            assert!(
+                matches!(result, Err(SparkClientError::BridgeError { kind: k, .. }) if k == kind),
+                "{:?}: {:?}",
+                kind,
+                result
+            );
+        }
+
+        let (result, _) = tokio::join!(
+            client.send_payment("send-h".to_string(), None),
+            bridge_refuses(&client, &mut requests, ErrorKind::Sdk)
+        );
+        assert!(
+            matches!(
+                result,
+                Err(SparkClientError::BridgeError {
+                    kind: ErrorKind::Sdk,
+                    ..
+                })
+            ),
             "{:?}",
             result
         );
+
+        // The same rule for an answer that arrives after the deadline.
+        for (id, kind) in [(61, ErrorKind::Sdk), (62, ErrorKind::BadRequest)] {
+            client.inner.awaiting_late.lock().await.insert(id);
+            client
+                .inner
+                .late_outcomes
+                .lock()
+                .await
+                .insert(id, Response::err(id, kind, "Conversion failed"));
+        }
+        assert!(matches!(
+            client.take_late_swap_outcome(61).await,
+            Some(Err(SparkClientError::OutcomeUnknown { request_id: 61, .. }))
+        ));
+        assert!(matches!(
+            client.take_late_swap_outcome(62).await,
+            Some(Err(SparkClientError::BridgeError {
+                kind: ErrorKind::BadRequest,
+                ..
+            }))
+        ));
+    }
+
+    /// The quote echoes the cap applied; one that isn't the cap asked for
+    /// (50 bps when the gui sends `None`) is refused.
+    #[tokio::test]
+    async fn a_swap_quote_must_apply_the_slippage_cap_asked_for() {
+        let (client, mut requests) = fake_client();
+
+        for (asked, echoed, accepted) in [
+            (None, CONVERSION_MAX_SLIPPAGE_BPS, true),
+            (None, 100, false),
+            (Some(75), 75, true),
+            (Some(75), CONVERSION_MAX_SLIPPAGE_BPS, false),
+        ] {
+            let (result, _) = tokio::join!(
+                client.prepare_swap(
+                    SwapAmount::Exact {
+                        amount_in: amount(WalletAsset::Usdb, 1_000_000)
+                    },
+                    asked
+                ),
+                bridge_answers(
+                    &client,
+                    &mut requests,
+                    Some(OkPayload::PrepareSwap(PrepareSwapOk {
+                        handle: "swap-h".to_string(),
+                        quote: ConversionQuote {
+                            max_slippage_bps: echoed,
+                            ..quote(WalletAsset::Usdb)
+                        },
+                        limits: ConversionLimits::default(),
+                    }))
+                )
+            );
+            match result {
+                Ok(_) => assert!(accepted, "{:?} accepted a {} bps quote", asked, echoed),
+                Err(SparkClientError::Protocol(message)) => {
+                    assert!(!accepted, "{:?} refused a {} bps quote", asked, echoed);
+                    assert!(message.contains("slippage cap"), "{}", message);
+                }
+                Err(other) => panic!("unexpected error: {:?}", other),
+            }
+        }
     }
 
     /// The reads and estimates move nothing, so losing the bridge is a plain
@@ -2239,7 +2621,10 @@ mod p0_contract_tests {
                 &mut requests,
                 Some(OkPayload::PrepareSwap(PrepareSwapOk {
                     handle: "swap-h".to_string(),
-                    quote: quote(WalletAsset::Usdb),
+                    quote: ConversionQuote {
+                        max_slippage_bps: 75,
+                        ..quote(WalletAsset::Usdb)
+                    },
                     limits: ConversionLimits::default(),
                 }))
             )

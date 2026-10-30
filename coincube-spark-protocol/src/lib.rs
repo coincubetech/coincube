@@ -294,6 +294,18 @@ pub enum Method {
     /// Execute a swap prepared by [`Method::PrepareSwap`]. Moves funds, so the
     /// gui treats a missing answer as an unknown outcome. Returns
     /// [`OkPayload::Swap`].
+    ///
+    /// Only a refusal before submission is a definite failure:
+    /// [`ErrorKind::BadRequest`], [`ErrorKind::NotConnected`] or
+    /// [`ErrorKind::ShuttingDown`]. The bridge answers `BadRequest` for every
+    /// refusal it makes before asking the SDK to execute (S3b). An
+    /// [`ErrorKind::Sdk`] error can come after the SDK has sent the input to
+    /// the pool: at `a38117d` it gives up waiting for the output after 30 s
+    /// and returns an error, and the output can still arrive. So the gui
+    /// treats an `Sdk` error as an unknown outcome too, and reconciles from
+    /// Activity before it offers another swap. A retry can't be made safe
+    /// with an idempotency key, because the bridge drops the key for any
+    /// conversion leg.
     Swap(SwapParams),
     /// [`Method::PrepareSend`] with an explicit balance to pay from. Returns
     /// [`OkPayload::PrepareSendFrom`]; the handle executes through the
@@ -649,8 +661,14 @@ pub struct GetConversionLimitsParams {
 pub struct PrepareSwapParams {
     /// How much to convert, and out of which asset.
     pub amount: SwapAmount,
-    /// Slippage cap in basis points. `None` uses
-    /// [`CONVERSION_MAX_SLIPPAGE_BPS`]. The quote echoes the cap applied.
+    /// Slippage cap in basis points. An explicit cap must be in `10..=500`,
+    /// the same range as [`PrepareCrossChainParams::max_slippage_bps`]; the
+    /// bridge refuses anything outside it with [`ErrorKind::BadRequest`]
+    /// (S3b). `None` uses [`CONVERSION_MAX_SLIPPAGE_BPS`]. The cap is shown
+    /// read-only, so gui callers send `None` until it becomes editable.
+    ///
+    /// The quote echoes the cap applied, and the gui client refuses a quote
+    /// whose cap isn't the one asked for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_slippage_bps: Option<u32>,
 }
@@ -661,7 +679,15 @@ pub struct PrepareSwapParams {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SwapAmount {
-    /// Convert exactly `amount_in`, in the asset converted out of.
+    /// Convert `amount_in`, in the asset converted out of.
+    ///
+    /// Exact for USDB, unless the quote reports an
+    /// [`ConversionQuote::amount_adjustment`]. For bitcoin it is a target: the
+    /// SDK takes an exact input only out of a token, so the bridge converts
+    /// the sats into a USDB target, and the pool pads the sats by up to the
+    /// slippage cap. The quote's `amount_in` can then differ from the request
+    /// with no adjustment. Review always shows [`ConversionQuote::amount_in`],
+    /// never the figure the user typed.
     Exact { amount_in: AssetAmount },
     /// Convert all of `from`. The bridge works out the figure: the whole
     /// token balance for USDB, and the spendable sats less fees for bitcoin.
@@ -874,13 +900,23 @@ pub enum AmountAdjustment {
 /// The SDK's estimate for a conversion, every figure with its denomination.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversionQuote {
-    /// What is converted: the figure the bridge settled on for
-    /// [`SwapAmount::Max`]. May differ from an exact request; see
-    /// [`Self::amount_adjustment`].
+    /// What is converted, and the figure Review shows: never the one the user
+    /// typed. For [`SwapAmount::Max`] it is the figure the bridge settled on.
+    /// Out of USDB it differs from an exact request only with an
+    /// [`Self::amount_adjustment`]. Out of bitcoin it can differ by up to
+    /// about the slippage cap with no adjustment; see [`SwapAmount::Exact`].
     pub amount_in: AssetAmount,
-    /// Estimated amount received. Not guaranteed: the conversion fails and is
-    /// refunded if it would deliver less than this minus
-    /// [`Self::max_slippage_bps`].
+    /// Estimated amount received. The least the conversion will deliver
+    /// depends on the SDK's path (`flashnet.rs` at `a38117d`):
+    ///
+    /// - a swap out of USDB, which is an exact input: the SDK has already taken
+    ///   [`Self::max_slippage_bps`] off the simulated output and signs this
+    ///   figure as the minimum, so this is the least it delivers;
+    /// - toward a target (a swap out of bitcoin, or a pay-from conversion):
+    ///   this is the simulated output, and the minimum is the target, about
+    ///   this figure less [`Self::max_slippage_bps`].
+    ///
+    /// Below the minimum the conversion fails and is refunded.
     pub amount_out: AssetAmount,
     /// Conversion fee. The SDK denominates it in the asset converted out of.
     pub fee: AssetAmount,
@@ -917,6 +953,11 @@ pub enum SwapStatus {
 }
 
 /// Result of [`Method::Swap`].
+///
+/// Only this answer says the swap was submitted. An error answer is a
+/// definite failure only for the refusals before submission listed on
+/// [`Method::Swap`]; an [`ErrorKind::Sdk`] error leaves the outcome unknown,
+/// to be reconciled from Activity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwapOk {
     /// The [`PaymentSummary::id`] of the swap's Activity row, which is also
