@@ -289,6 +289,14 @@ impl DefineSpend {
         self
     }
 
+    /// Treat the current selection as the user's own, so drafting spends
+    /// exactly these coins instead of handing the choice to automatic coin
+    /// selection. Coin control's Send selected uses this.
+    pub fn with_user_coin_selection(mut self) -> Self {
+        self.is_user_coin_selection = true;
+        self
+    }
+
     pub fn with_coins_sorted(mut self, blockheight: u32) -> Self {
         self.sort_coins(blockheight);
         self
@@ -2054,6 +2062,43 @@ mod tests {
         let self_send = recovery.self_send();
         assert!(self_send.recipients.is_empty());
         assert!(self_send.is_user_coin_selection);
+    }
+
+    #[test]
+    fn coins_sent_from_coin_control_are_the_users_own_selection() {
+        let wallet = wallet();
+        let coins = vec![coin(1, 10_000, Some(90)), coin(2, 20_000, Some(91))];
+        let preselected = DefineSpend::new(
+            Network::Bitcoin,
+            wallet.clone(),
+            &coins,
+            100,
+            None,
+            true,
+            Amount::from_sat(30_000),
+            Amount::ZERO,
+            SyncStatus::Synced,
+            BitcoinDisplayUnit::Sats,
+        )
+        .with_preselected_coins(&[coins[0].outpoint]);
+        assert!(
+            !preselected.is_user_coin_selection,
+            "a preselection alone still lets automatic selection choose"
+        );
+        let chosen = preselected.with_user_coin_selection();
+        assert!(
+            chosen.is_user_coin_selection,
+            "drafting passes exactly the chosen outpoints"
+        );
+        assert_eq!(
+            chosen
+                .coins
+                .iter()
+                .filter(|(_, selected)| *selected)
+                .map(|(coin, _)| coin.outpoint)
+                .collect::<Vec<_>>(),
+            vec![coins[0].outpoint]
+        );
     }
 
     #[test]
