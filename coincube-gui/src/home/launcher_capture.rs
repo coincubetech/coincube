@@ -240,6 +240,71 @@ fn launcher_capture_sizes() {
     }
 }
 
+fn ghost(uuid: &str, name: &str, kit: bool) -> super::RemoteCube {
+    super::RemoteCube {
+        id: 9,
+        uuid: uuid.into(),
+        name: name.into(),
+        network: crate::app::settings::network_to_api_string(ChainId::Bitcoin),
+        has_recovery_kit: kit,
+        has_encrypted_seed: kit,
+        phone_recoverable: false,
+        phone_full_cube: false,
+        encryption_pubkey: None,
+        has_vault: Some(true),
+    }
+}
+
+/// Connect-only Cubes as ghosts: after two local Cubes, as a new device's
+/// whole row, and each kind's details face.
+#[test]
+#[ignore = "writes PNG frames; needs a GPU adapter"]
+fn launcher_capture_ghosts() {
+    let Ok(directory) = std::env::var("LAUNCHER_CAPTURE_DIR") else {
+        return;
+    };
+    let directory = PathBuf::from(directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let mut renderer = renderer().expect("wgpu headless renderer");
+    let size = Size::new(1440.0, 900.0);
+    for light in [false, true] {
+        let appearance = if light { "light" } else { "dark" };
+        let palette = if light {
+            theme::Theme::light()
+        } else {
+            theme::Theme::dark()
+        };
+        let mut home = home(light);
+        if let State::Cubes { cubes, .. } = &mut home.state {
+            cubes.truncate(2);
+        }
+        home.remote_cubes = vec![
+            ghost("ghost-kit", "Passkey", true),
+            ghost("ghost-nokit", "Old laptop", false),
+        ];
+        let mut shot = |home: &Home, name: &str| {
+            save(
+                &mut renderer,
+                super::launcher_catalog::launcher_view(home),
+                size,
+                &palette,
+                directory.join(format!("{appearance}-ghosts-{name}.png")),
+            );
+        };
+        shot(&home, "1-mixed-row");
+        for uuid in ["ghost-kit", "ghost-nokit"] {
+            home.catalog.selected = Some(CubeCatalogKey {
+                chain: ChainId::Bitcoin,
+                cube_id: uuid.into(),
+            });
+            shot(&home, &format!("2-face-{uuid}"));
+        }
+        home.catalog.selected = None;
+        home.state = State::NoCube { create_cube: false };
+        shot(&home, "3-new-device");
+    }
+}
+
 #[test]
 #[ignore = "writes PNG frames; needs a GPU adapter"]
 fn launcher_capture() {
