@@ -344,6 +344,28 @@ pub enum Message {
         claimed: Vec<coincube_core::miniscript::bitcoin::Txid>,
         answers: Vec<crate::services::entangled::LookupAnswer>,
     },
+    /// Coin control asks the app for what the Split coins overlay needs: the
+    /// chain's fee rate and, without a split key, a fresh receive address.
+    SplitFetch {
+        fee: bool,
+        address: bool,
+    },
+    /// The chain-tagged Connect fee rate for the overlay; `None` is
+    /// unavailable, never a guess.
+    SplitFeeRate(Option<u64>),
+    /// A fresh receive address for a split key, or why there isn't one.
+    SplitAddress(Result<String, String>),
+    /// Build the split the overlay shows ([`crate::services::split_coins::prepare`]).
+    SplitRequest {
+        method: crate::services::split_coins::Method,
+        coins: Vec<coincube_core::miniscript::bitcoin::OutPoint>,
+        key: Option<coincube_core::miniscript::bitcoin::OutPoint>,
+        feerate_vb: u64,
+    },
+    /// The split was built and stored with the daemon, or why not.
+    SplitPrepared(Result<Box<crate::services::split_coins::SplitRecord>, String>),
+    /// Open Send with exactly these coins chosen.
+    SendSelectedCoins(Vec<coincube_core::miniscript::bitcoin::OutPoint>),
     /// The daemon's copies of this Vault's recorded split transactions, for
     /// the Chains column ([`crate::services::split_coins::derive`]).
     SplitTransactions {

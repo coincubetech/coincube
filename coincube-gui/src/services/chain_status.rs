@@ -37,6 +37,10 @@ pub enum ChainStatus {
     /// Spent by this Cube's split, which has `confirmations` of
     /// [`SPLIT_CONFIRMATIONS`].
     Splitting { confirmations: u32 },
+    /// Spent by this Cube's signature split, which is past
+    /// [`SPLIT_CONFIRMATIONS`] but whose replay-protected signatures nothing
+    /// has checked yet (decision open item 1). Not proof.
+    SplitUnconfirmed,
     /// Proven to exist on this chain only.
     OnlyHere,
     /// The twin chain has no such transaction, which proves nothing; an
@@ -65,6 +69,8 @@ pub struct CoinEvidence {
     pub proof: Option<ProofOutcome>,
     /// Confirmations of the split of this Cube that spends this coin.
     pub splitting: Option<u32>,
+    /// Spent by this Cube's signature split past [`SPLIT_CONFIRMATIONS`].
+    pub signature_split: bool,
     /// A split-key split on the twin Cube spent this coin's twin copy, and
     /// Connect showed it [`SPLIT_CONFIRMATIONS`] deep on the twin chain.
     pub separated: bool,
@@ -91,6 +97,11 @@ pub fn classify(evidence: CoinEvidence) -> ChainStatus {
     }
     if evidence.entanglement == Some(Entanglement::Entangled) {
         return ChainStatus::BothChains;
+    }
+    // After the twin-chain lookup: a signature split replayed onto the twin
+    // chain shows up there, and the safe reading wins over its intent.
+    if evidence.signature_split {
+        return ChainStatus::SplitUnconfirmed;
     }
     match evidence.proof {
         Some(ProofOutcome::Verified) => ChainStatus::OnlyHere,
@@ -120,6 +131,7 @@ impl ChainStatus {
             Self::Splitting { confirmations } => {
                 format!("Splitting · {} of {}", confirmations, SPLIT_CONFIRMATIONS)
             }
+            Self::SplitUnconfirmed => "Split · unconfirmed".to_string(),
             Self::OnlyHere => format!("{} only · verified", short_name(here)),
             Self::NotSeen => format!("Not seen on {} · checking", short_name(twin)),
             Self::CouldntVerify => "Couldn't verify".to_string(),
@@ -139,6 +151,10 @@ impl ChainStatus {
                 "Spent by a split. After {} confirmations it exists on each chain separately.",
                 SPLIT_CONFIRMATIONS
             ),
+            Self::SplitUnconfirmed => format!(
+                "Spent by a split meant to use a replay-protected signature. The app can't check that signature yet, so this coin isn't verified as {} only.",
+                short_name(here)
+            ),
             Self::OnlyHere => format!(
                 "It can no longer be copied to or from {}.",
                 chain_name(twin)
@@ -157,7 +173,7 @@ impl ChainStatus {
 
     pub fn tone(self) -> StatusTone {
         match self {
-            Self::BothChains | Self::Splitting { .. } => StatusTone::Warn,
+            Self::BothChains | Self::Splitting { .. } | Self::SplitUnconfirmed => StatusTone::Warn,
             Self::OnlyHere => StatusTone::Good,
             Self::NotSeen | Self::CouldntVerify | Self::NotChecked => StatusTone::Muted,
         }
@@ -388,6 +404,30 @@ mod tests {
         assert_eq!(status, ChainStatus::Splitting { confirmations: 6 });
         assert_eq!(status.label(ChainId::Bitcoin), "Splitting · 6 of 6");
         assert!(!status.needs_split());
+    }
+
+    #[test]
+    fn a_deep_signature_split_is_split_but_unconfirmed() {
+        let status = classify(CoinEvidence {
+            entanglement: Some(Entanglement::NotEntangled),
+            signature_split: true,
+            ..Default::default()
+        });
+        assert_eq!(status, ChainStatus::SplitUnconfirmed);
+        assert_eq!(status.label(ChainId::BitcoinBlake2b), "Split · unconfirmed");
+        assert_eq!(status.tone(), StatusTone::Warn);
+        assert!(!status.needs_split());
+    }
+
+    #[test]
+    fn a_replayed_signature_split_is_on_both_chains() {
+        let status = classify(CoinEvidence {
+            entanglement: Some(Entanglement::Entangled),
+            signature_split: true,
+            ..Default::default()
+        });
+        assert_eq!(status, ChainStatus::BothChains);
+        assert!(status.needs_split());
     }
 
     #[test]

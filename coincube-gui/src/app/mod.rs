@@ -417,11 +417,10 @@ impl Panels {
                 cube_id.clone(),
                 &data_dir.network_directory(cache.fiat_chain),
             ),
-            coins: Some(CoinsPanel::new(
-                cache.coins(),
-                wallet.recovery_timelock(),
-                wallet.chain,
-            )),
+            coins: Some(
+                CoinsPanel::new(cache.coins(), wallet.recovery_timelock(), wallet.chain)
+                    .with_wallet(wallet.clone()),
+            ),
             transactions: Some(VaultTransactionsPanel::new(wallet.clone())),
             psbts: wallet
                 .supports_inheritance()
@@ -567,11 +566,10 @@ impl Panels {
             cache.blockheight(),
             needs_rescan_date(&data_dir, cache.chain(), &wallet, &daemon_backend),
         ));
-        self.coins = Some(CoinsPanel::new(
-            cache.coins(),
-            wallet.recovery_timelock(),
-            wallet.chain,
-        ));
+        self.coins = Some(
+            CoinsPanel::new(cache.coins(), wallet.recovery_timelock(), wallet.chain)
+                .with_wallet(wallet.clone()),
+        );
         self.transactions = Some(VaultTransactionsPanel::new(wallet.clone()));
         self.psbts = wallet
             .supports_inheritance()
@@ -4692,7 +4690,6 @@ impl App {
 
     /// Record a split this Cube just built and stored with the daemon, so the
     /// Chains column follows it.
-    #[allow(dead_code)] // Called by the Split coins overlay (next slice).
     pub(crate) fn record_split(
         &mut self,
         record: crate::services::split_coins::SplitRecord,
@@ -9430,6 +9427,129 @@ impl App {
                 self.save_chain_proofs();
                 return Task::done(Message::CacheUpdated);
             }
+            Message::SplitFetch { fee, address } => {
+                let Some(wallet) = self.wallet.as_ref() else {
+                    return Task::none();
+                };
+                let mut tasks = Vec::new();
+                if fee {
+                    let client = self.authenticated_coincube_client();
+                    let chain = wallet.chain;
+                    tasks.push(Task::perform(
+                        crate::services::split_coins::fee_rate(client, chain),
+                        Message::SplitFeeRate,
+                    ));
+                }
+                if let (true, Some(daemon)) = (address, self.daemon.clone()) {
+                    tasks.push(Task::perform(
+                        async move {
+                            daemon
+                                .get_new_address()
+                                .await
+                                .map(|result| result.address.to_string())
+                                .map_err(|e| format!("Couldn't get an address: {}", e))
+                        },
+                        Message::SplitAddress,
+                    ));
+                }
+                return Task::batch(tasks);
+            }
+            Message::SplitRequest {
+                method,
+                coins,
+                key,
+                feerate_vb,
+            } => {
+                let failed = |e: &str| Task::done(Message::SplitPrepared(Err(e.to_string())));
+                let (Some(wallet), Some(daemon)) = (self.wallet.clone(), self.daemon.clone())
+                else {
+                    return failed("This Vault isn't loaded.");
+                };
+                let Some(client) = self.authenticated_coincube_client() else {
+                    return failed("Sign in to COINCUBE Connect to split coins.");
+                };
+                let key = match key {
+                    Some(outpoint) => match self
+                        .cache
+                        .split_keys()
+                        .into_iter()
+                        .find(|(coin, _)| coin.outpoint == outpoint)
+                    {
+                        Some((_, path)) => Some(crate::services::split_coins::KeyChoice {
+                            outpoint,
+                            path: path.clone(),
+                        }),
+                        None => return failed("The split key is no longer available."),
+                    },
+                    None => None,
+                };
+                let generation = *self.panels.claim_generation.borrow();
+                let live = self.panels.claim_generation.subscribe();
+                return Task::perform(
+                    crate::services::split_coins::prepare(
+                        daemon, wallet, method, coins, key, feerate_vb, client, generation, live,
+                    ),
+                    |result| {
+                        Message::SplitPrepared(result.map(|prepared| Box::new(prepared.record)))
+                    },
+                );
+            }
+            Message::SplitPrepared(result) => {
+                let txid = result.as_ref().ok().map(|record| record.txid);
+                let mut tasks = Vec::new();
+                if let Ok(record) = &result {
+                    tasks.push(self.record_split((**record).clone()));
+                }
+                if let (Some(daemon), Some(panel)) =
+                    (self.daemon.clone(), self.panels.current_mut())
+                {
+                    tasks.push(panel.update(
+                        Some(daemon),
+                        &self.cache,
+                        Message::SplitPrepared(result),
+                    ));
+                }
+                if let Some(txid) = txid {
+                    // Sign and broadcast through the Vault's normal PSBT screen.
+                    tasks.push(Task::done(Message::View(view::Message::Menu(Menu::Vault(
+                        menu::VaultSubMenu::PSBTs(Some(txid)),
+                    )))));
+                }
+                return Task::batch(tasks);
+            }
+            Message::SendSelectedCoins(outpoints) => {
+                let Some(wallet) = self.wallet.clone() else {
+                    return Task::none();
+                };
+                let (balance, unconfirmed_balance, _, _) = state::coins_summary(
+                    self.cache.coins(),
+                    self.cache.blockheight() as u32,
+                    wallet.recovery_timelock(),
+                );
+                self.panels.create_spend = Some(CreateSpendPanel::new_with_coins(
+                    wallet.clone(),
+                    self.cache.coins(),
+                    self.cache.blockheight() as u32,
+                    &outpoints,
+                    self.cache.network,
+                    balance,
+                    unconfirmed_balance,
+                    sync_status(
+                        self.daemon_backend(),
+                        self.cache.blockheight(),
+                        self.cache.sync_progress(),
+                        self.cache.last_poll_timestamp(),
+                        self.cache.last_poll_at_startup,
+                        self.cache.history_sync(),
+                    ),
+                    self.cache.bitcoin_unit,
+                ));
+                self.panels.current = Menu::Vault(menu::VaultSubMenu::Send);
+                if let Some(panel) = self.panels.current_mut() {
+                    return panel.reload(self.daemon.clone(), self.wallet.clone());
+                }
+                return Task::none();
+            }
             Message::SplitTransactions {
                 origin,
                 transactions,
@@ -9471,6 +9591,7 @@ impl App {
                     std::time::SystemTime::now(),
                 );
                 self.cache.splitting = derived.splitting;
+                self.cache.split_unconfirmed = derived.unconfirmed;
                 self.cache.separated = crate::services::split_coins::twin_separated(
                     &twin_records,
                     &self.twin_checks,

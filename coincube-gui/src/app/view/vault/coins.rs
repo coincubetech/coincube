@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use iced::{widget::Space, Alignment, Length};
+use iced::{
+    widget::{checkbox, Space},
+    Alignment, Length,
+};
 
 use coincube_ui::component::amount::BitcoinDisplayUnit;
 use coincube_ui::{
@@ -14,7 +17,11 @@ use crate::{
     app::{
         cache::Cache,
         menu::Menu,
-        view::{message::Message, placeholder, vault::label},
+        view::{
+            message::{CoinControlMessage, Message},
+            placeholder,
+            vault::{label, split_coins},
+        },
     },
     chain::ChainId,
     daemon::model::{remaining_sequence, Coin},
@@ -63,6 +70,8 @@ fn recovery_timing_known(coin: &Coin, tip: u32) -> bool {
 const AMOUNT_COLUMN_WIDTH: f32 = 160.0;
 const CONFIRMATIONS_COLUMN_WIDTH: f32 = 130.0;
 const DETAILS_COLUMN_WIDTH: f32 = 85.0;
+const CHECK_COLUMN_WIDTH: f32 = 24.0;
+const CHAINS_COLUMN_WIDTH: f32 = 210.0;
 
 fn coin_label(coin: &Coin, labels: &HashMap<String, String>) -> String {
     let outpoint = coin.outpoint.to_string();
@@ -93,11 +102,12 @@ fn short_address(address: &str) -> String {
     }
 }
 
-fn coin_table_header<'a>() -> Container<'a, Message> {
+fn coin_table_header<'a>(blake2b: bool) -> Container<'a, Message> {
     Container::new(
         Row::new()
             .spacing(12)
             .align_y(Alignment::Center)
+            .push(Space::new().width(Length::Fixed(CHECK_COLUMN_WIDTH)))
             .push(
                 Container::new(p2_regular("Amount").bold().style(theme::text::secondary))
                     .width(Length::Fixed(AMOUNT_COLUMN_WIDTH)),
@@ -110,6 +120,10 @@ fn coin_table_header<'a>() -> Container<'a, Message> {
                 )
                 .width(Length::Fixed(CONFIRMATIONS_COLUMN_WIDTH)),
             )
+            .push_maybe(blake2b.then(|| {
+                Container::new(p2_regular("Chains").bold().style(theme::text::secondary))
+                    .width(Length::Fixed(CHAINS_COLUMN_WIDTH))
+            }))
             .push(
                 Container::new(p2_regular("Label").bold().style(theme::text::secondary))
                     .width(Length::FillPortion(1)),
@@ -137,7 +151,13 @@ pub fn coins_view<'a>(
     labels_editing: &'a HashMap<String, form::Value<String>>,
     bitcoin_unit: BitcoinDisplayUnit,
     blake2b: bool,
+    control: CoinControl,
 ) -> Element<'a, Message> {
+    let chosen_total: coincube_core::miniscript::bitcoin::Amount = coins
+        .iter()
+        .filter(|coin| control.chosen.contains(&coin.outpoint))
+        .map(|coin| coin.amount)
+        .sum();
     Column::new()
         .push(Container::new(h3("Coin control").bold()).width(Length::Fill))
         .push(
@@ -148,6 +168,9 @@ pub fn coins_view<'a>(
             })
             .style(theme::text::secondary),
         )
+        .push(control.both_chains.map(|(count, total, can_split)| {
+            split_coins::both_chains_banner(cache.chain(), count, total, can_split)
+        }))
         .push(coins.is_empty().then(|| {
             placeholder(
                 coins_icon().size(80),
@@ -158,7 +181,7 @@ pub fn coins_view<'a>(
         .push((!coins.is_empty()).then(|| {
             Container::new(
                 Column::new()
-                    .push(coin_table_header())
+                    .push(coin_table_header(blake2b))
                     .push(coins.iter().enumerate().fold(
                         Column::new().spacing(0),
                         |col, (i, coin)| {
@@ -169,6 +192,7 @@ pub fn coins_view<'a>(
                                     cache.blockheight().max(0) as u32,
                                     i,
                                     selected.contains(&i),
+                                    control.chosen.contains(&coin.outpoint),
                                     labels,
                                     labels_editing,
                                     bitcoin_unit,
@@ -187,9 +211,25 @@ pub fn coins_view<'a>(
             .style(theme::card::simple)
             .width(Length::Fill)
         }))
+        .push(
+            (control.selection_bar && !coins.is_empty())
+                .then(|| split_coins::selection_bar(control.chosen.len(), chosen_total)),
+        )
         .align_x(Alignment::Center)
         .spacing(35)
         .into()
+}
+
+/// Coin control's selection and split state, as the table shows it.
+#[derive(Debug, Default)]
+pub struct CoinControl {
+    /// Ticked coins: the Split coins overlay's inputs while it is open.
+    pub chosen: std::collections::BTreeSet<coincube_core::miniscript::bitcoin::OutPoint>,
+    /// Coins still on both chains (count, total, whether Split coins can
+    /// open now), when the Chains column shows and any are.
+    pub both_chains: Option<(usize, coincube_core::miniscript::bitcoin::Amount, bool)>,
+    /// Whether to show the selection bar (not while the overlay is open).
+    pub selection_bar: bool,
 }
 
 #[allow(clippy::collapsible_else_if)]
@@ -200,6 +240,7 @@ fn coin_list_view<'a>(
     blockheight: u32,
     index: usize,
     collapsed: bool,
+    chosen: bool,
     labels: &'a HashMap<String, String>,
     labels_editing: &'a HashMap<String, form::Value<String>>,
     bitcoin_unit: BitcoinDisplayUnit,
@@ -245,7 +286,7 @@ fn coin_list_view<'a>(
             "The open split wizard verified this exact coin's chain-specific ancestry. It will be combined with the shared coins in a self-transfer. The app rechecks it before signing.",
         ))
     } else {
-        chain.map(|(status, here)| chain_badge(status, here))
+        None
     };
     Container::new(
         Column::new()
@@ -257,6 +298,14 @@ fn coin_list_view<'a>(
                             Row::new()
                                 .spacing(12)
                                 .align_y(Alignment::Center)
+                                .push(
+                                    Container::new(checkbox(chosen).on_toggle(move |_| {
+                                        Message::CoinControl(CoinControlMessage::Choose(
+                                            coin.outpoint,
+                                        ))
+                                    }))
+                                    .width(Length::Fixed(CHECK_COLUMN_WIDTH)),
+                                )
                                 .push(
                                     Container::new(amount)
                                         .width(Length::Fixed(AMOUNT_COLUMN_WIDTH)),
@@ -271,6 +320,10 @@ fn coin_list_view<'a>(
                                     )
                                     .width(Length::Fixed(CONFIRMATIONS_COLUMN_WIDTH)),
                                 )
+                                .push_maybe(chain.map(|(status, here)| {
+                                    Container::new(chain_badge(status, here))
+                                        .width(Length::Fixed(CHAINS_COLUMN_WIDTH))
+                                }))
                                 .push(
                                     Container::new(
                                         p1_regular(coin_label(coin, labels))
@@ -315,21 +368,8 @@ fn coin_list_view<'a>(
                                     .width(Length::FillPortion(1)),
                                 )
                                 .push(
-                                    Container::new(
-                                        Row::new()
-                                            .spacing(8)
-                                            .align_y(Alignment::Center)
-                                            .push(
-                                                p2_regular("Chains:").style(theme::text::secondary),
-                                            )
-                                            .push_maybe(replay)
-                                            .push(if chain.is_none() && !verified_deposit {
-                                                p2_regular("Bitcoin").style(theme::text::secondary)
-                                            } else {
-                                                p2_regular("")
-                                            }),
-                                    )
-                                    .width(Length::FillPortion(1)),
+                                    Container::new(Row::new().push_maybe(replay))
+                                        .width(Length::FillPortion(1)),
                                 ),
                         ),
                 )
@@ -689,6 +729,7 @@ mod tests {
                     &HashMap::new(),
                     BitcoinDisplayUnit::Sats,
                     false,
+                    CoinControl::default(),
                 ),
                 (1024, 768),
                 "dark",
@@ -699,7 +740,10 @@ mod tests {
             assert!(mounted.contains("Confirmations"));
             assert!(mounted.contains("Address"));
             assert!(mounted.contains("Status:"));
-            assert!(mounted.contains("Chains:"));
+            assert!(
+                !mounted.contains("Chains"),
+                "no chain surface with Blake2b off"
+            );
             assert!(mounted.contains("Details ▾"));
             assert!(mounted.contains("Spendable"));
             assert!(mounted.contains("Confirmed · confirmations unavailable"));
@@ -751,6 +795,7 @@ mod tests {
                     &HashMap::new(),
                     BitcoinDisplayUnit::Sats,
                     false,
+                    CoinControl::default(),
                 ),
                 size,
                 appearance,
@@ -794,6 +839,7 @@ mod tests {
                         &HashMap::new(),
                         unit,
                         false,
+                        CoinControl::default(),
                     ),
                     (1024, 768),
                     appearance,
@@ -823,6 +869,7 @@ mod tests {
                 &HashMap::new(),
                 BitcoinDisplayUnit::Sats,
                 false,
+                CoinControl::default(),
             ),
             (1024, 768),
             "light",
@@ -847,6 +894,7 @@ mod tests {
                 &HashMap::new(),
                 BitcoinDisplayUnit::Sats,
                 false,
+                CoinControl::default(),
             ),
             (1024, 768),
             "dark",
@@ -870,6 +918,7 @@ mod tests {
                 &HashMap::new(),
                 BitcoinDisplayUnit::Sats,
                 false,
+                CoinControl::default(),
             ),
             (1024, 768),
             "light",
@@ -912,6 +961,7 @@ mod tests {
                     &HashMap::new(),
                     BitcoinDisplayUnit::Sats,
                     true,
+                    CoinControl::default(),
                 ),
                 (1024, 768),
                 "light",
@@ -940,6 +990,7 @@ mod tests {
                 &HashMap::new(),
                 BitcoinDisplayUnit::Sats,
                 false,
+                CoinControl::default(),
             ),
             (1024, 768),
             "dark",
@@ -964,6 +1015,7 @@ mod tests {
                 &HashMap::new(),
                 BitcoinDisplayUnit::Sats,
                 false,
+                CoinControl::default(),
             ),
             (1024, 768),
             "dark",
@@ -993,6 +1045,44 @@ mod tests {
             theme::Theme::dark(),
         );
         assert!(both.contains("Both chains"));
+    }
+
+    #[test]
+    fn blake2b_on_shows_chains_column_banner_and_selection() {
+        let coins = [confirmed_coin(100)];
+        let mut cache = Cache::default();
+        cache.record_entanglement(
+            coins[0].outpoint.txid,
+            Entanglement::Entangled,
+            std::time::Instant::now(),
+        );
+        let mounted = capture::inspect(
+            "vault-coins-split-surfaces",
+            coins_view(
+                &cache,
+                &coins,
+                Some(1008),
+                &[],
+                &HashMap::new(),
+                &HashMap::new(),
+                BitcoinDisplayUnit::Sats,
+                true,
+                CoinControl {
+                    chosen: vec![coins[0].outpoint].into_iter().collect(),
+                    both_chains: Some((1, coins[0].amount, true)),
+                    selection_bar: true,
+                },
+            ),
+            (1280, 800),
+            "light",
+            theme::Theme::light(),
+        );
+        assert!(mounted.contains("Chains"));
+        assert!(mounted.contains("Both chains"));
+        assert!(mounted.contains("Split coins"));
+        assert!(mounted.contains("also exists on Bitcoin Blake2b"));
+        assert!(mounted.contains("1 selected · 98,765,432 sats"));
+        assert!(mounted.contains("Send selected"));
     }
 
     #[test]

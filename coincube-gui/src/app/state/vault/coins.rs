@@ -1,6 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::{cmp::Ordering, collections::HashSet};
+
+use coincube_core::miniscript::bitcoin::OutPoint;
 
 use iced::Task;
 
@@ -15,13 +17,14 @@ use crate::{
         menu::Menu,
         message::Message,
         state::{vault::label::LabelsEdited, State},
-        view,
+        view::{self, CoinControlMessage},
         wallet::Wallet,
     },
     daemon::{
         model::{Coin, LabelItem, Labelled},
         Daemon,
     },
+    services::split_coins::{self, Method},
 };
 
 #[derive(Debug, Default)]
@@ -54,6 +57,27 @@ pub struct CoinsPanel {
     timelock: Option<u16>,
     /// The Cube's chain, for other-chain deposit status on the fork pair.
     chain: crate::chain::ChainId,
+    wallet: Option<Arc<Wallet>>,
+    /// Coins ticked in the table, for Send selected.
+    chosen: BTreeSet<OutPoint>,
+    /// The open Split coins overlay.
+    split: Option<SplitState>,
+}
+
+/// The Split coins overlay's own state. Which coins are on both chains and
+/// which coin is the key are read from the cache each time it is drawn.
+#[derive(Debug)]
+struct SplitState {
+    /// The table's selection before the overlay opened, restored on cancel.
+    previous: BTreeSet<OutPoint>,
+    /// Both-chain coins the user left out.
+    excluded: BTreeSet<OutPoint>,
+    method: Method,
+    feerate: Option<u64>,
+    fee_failed: bool,
+    address: Option<String>,
+    working: bool,
+    error: Option<String>,
 }
 
 impl CoinsPanel {
@@ -69,9 +93,212 @@ impl CoinsPanel {
             warning: None,
             timelock: timelock.into(),
             chain,
+            wallet: None,
+            chosen: BTreeSet::new(),
+            split: None,
         };
         panel.update_coins(coins);
         panel
+    }
+
+    pub fn with_wallet(mut self, wallet: Arc<Wallet>) -> Self {
+        self.wallet = Some(wallet);
+        self
+    }
+
+    /// Whether the Chains column and split surfaces show: a Blake2b Cube,
+    /// or a Bitcoin Cube with Bitcoin Blake2b enabled.
+    fn blake2b(&self, cache: &Cache) -> bool {
+        self.chain.is_blake2b()
+            || (matches!(
+                self.chain,
+                crate::chain::ChainId::Bitcoin | crate::chain::ChainId::Testnet4
+            ) && cache.btcb2_server_enabled)
+    }
+
+    /// Confirmed coins of this table still on both chains.
+    fn both_chain_coins<'a>(&'a self, cache: &'a Cache) -> impl Iterator<Item = &'a Coin> + 'a {
+        self.coins.list.iter().filter(move |coin| {
+            coin.block_height.is_some() && cache.chain_status(&coin.outpoint).needs_split()
+        })
+    }
+
+    fn signature_available(&self) -> bool {
+        self.wallet
+            .as_deref()
+            .is_some_and(split_coins::signature_available)
+    }
+
+    /// The overlay as drawn now, and the coins it spends.
+    fn split_overlay(&self, cache: &Cache) -> Option<view::vault::split_coins::SplitOverlay> {
+        use view::vault::split_coins::{InputRow, SplitOverlay};
+        let split = self.split.as_ref()?;
+        let label = |coin: &Coin| {
+            self.coins
+                .labels
+                .get(&coin.outpoint.to_string())
+                .or_else(|| self.coins.labels.get(&coin.outpoint.txid.to_string()))
+                .filter(|label| !label.is_empty())
+                .cloned()
+                .unwrap_or_else(|| "No label".to_string())
+        };
+        let mut inputs: Vec<InputRow> = self
+            .both_chain_coins(cache)
+            .map(|coin| InputRow {
+                outpoint: coin.outpoint,
+                amount: coin.amount,
+                label: label(coin),
+                included: !split.excluded.contains(&coin.outpoint),
+                key: false,
+            })
+            .collect();
+        let key = (split.method == Method::SplitKey)
+            .then(|| cache.split_keys().into_iter().next())
+            .flatten();
+        if let Some((coin, _)) = key {
+            inputs.push(InputRow {
+                outpoint: coin.outpoint,
+                amount: coin.amount,
+                label: label(coin),
+                included: true,
+                key: true,
+            });
+        }
+        let included = inputs.iter().filter(|row| row.included && !row.key).count();
+        let vbytes = self.wallet.as_ref().and_then(|wallet| {
+            let descriptor = wallet.inheritance_descriptor()?;
+            // The estimator counts one input beyond the shared ones: the key,
+            // or for a signature split an overestimate by one input.
+            coincube_core::claim_spend::estimate_ancestry_self_transfer_vbytes(
+                descriptor,
+                included.max(1),
+            )
+            .ok()
+        });
+        Some(SplitOverlay {
+            here: self.chain,
+            method: split.method,
+            signature_available: self.signature_available(),
+            inputs,
+            key_needed: split.method == Method::SplitKey && key.is_none(),
+            address: split.address.clone(),
+            feerate: split.feerate,
+            fee_failed: split.fee_failed,
+            vbytes,
+            working: split.working,
+            error: split.error.clone(),
+        })
+    }
+
+    /// The table's ticked coins: the overlay's inputs while it is open.
+    fn effective_chosen(&self, cache: &Cache) -> BTreeSet<OutPoint> {
+        match self.split_overlay(cache) {
+            Some(overlay) => overlay
+                .inputs
+                .iter()
+                .filter(|row| row.included)
+                .map(|row| row.outpoint)
+                .collect(),
+            None => self.chosen.clone(),
+        }
+    }
+
+    fn update_split(&mut self, cache: &Cache, message: CoinControlMessage) -> Task<Message> {
+        match message {
+            CoinControlMessage::Choose(outpoint) => {
+                if self.split.is_none() && !self.chosen.remove(&outpoint) {
+                    self.chosen.insert(outpoint);
+                }
+            }
+            CoinControlMessage::ClearChosen => {
+                if self.split.is_none() {
+                    self.chosen.clear();
+                }
+            }
+            CoinControlMessage::SendSelected => {
+                if self.split.is_none() && !self.chosen.is_empty() {
+                    return Task::done(Message::SendSelectedCoins(
+                        self.chosen.iter().copied().collect(),
+                    ));
+                }
+            }
+            CoinControlMessage::OpenSplit => {
+                if self.split.is_some() || self.both_chain_coins(cache).next().is_none() {
+                    return Task::none();
+                }
+                let method = if self.signature_available() {
+                    Method::Signature
+                } else {
+                    Method::SplitKey
+                };
+                let needs_address = cache.split_keys().is_empty();
+                self.split = Some(SplitState {
+                    previous: self.chosen.clone(),
+                    excluded: BTreeSet::new(),
+                    method,
+                    feerate: None,
+                    fee_failed: false,
+                    address: None,
+                    working: false,
+                    error: None,
+                });
+                return Task::done(Message::SplitFetch {
+                    fee: true,
+                    address: needs_address,
+                });
+            }
+            CoinControlMessage::CancelSplit => {
+                if let Some(split) = self.split.take_if(|split| !split.working) {
+                    self.chosen = split.previous;
+                }
+            }
+            CoinControlMessage::ToggleSplitCoin(outpoint) => {
+                if let Some(split) = self.split.as_mut().filter(|split| !split.working) {
+                    if !split.excluded.remove(&outpoint) {
+                        split.excluded.insert(outpoint);
+                    }
+                }
+            }
+            CoinControlMessage::SplitMethod(method) => {
+                let signature = self.signature_available();
+                if let Some(split) = self.split.as_mut().filter(|split| !split.working) {
+                    if method == Method::SplitKey || signature {
+                        split.method = method;
+                    }
+                }
+            }
+            CoinControlMessage::SignSplit => {
+                let Some(overlay) = self.split_overlay(cache) else {
+                    return Task::none();
+                };
+                let Some(feerate_vb) = overlay.feerate.filter(|_| overlay.blocked().is_none())
+                else {
+                    return Task::none();
+                };
+                let coins = overlay
+                    .inputs
+                    .iter()
+                    .filter(|row| row.included && !row.key)
+                    .map(|row| row.outpoint)
+                    .collect();
+                let key = overlay
+                    .inputs
+                    .iter()
+                    .find(|row| row.key)
+                    .map(|row| row.outpoint);
+                if let Some(split) = self.split.as_mut() {
+                    split.working = true;
+                    split.error = None;
+                }
+                return Task::done(Message::SplitRequest {
+                    method: overlay.method,
+                    coins,
+                    key,
+                    feerate_vb,
+                });
+            }
+        }
+        Task::none()
     }
 
     fn update_coins(&mut self, coins: &[Coin]) {
@@ -100,7 +327,24 @@ impl CoinsPanel {
 
 impl State for CoinsPanel {
     fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
-        view::dashboard(
+        let blake2b = self.blake2b(cache);
+        let both: Vec<&Coin> = if blake2b {
+            self.both_chain_coins(cache).collect()
+        } else {
+            Vec::new()
+        };
+        let control = view::vault::coins::CoinControl {
+            chosen: self.effective_chosen(cache),
+            both_chains: (!both.is_empty()).then(|| {
+                (
+                    both.len(),
+                    both.iter().map(|coin| coin.amount).sum(),
+                    self.split.is_none(),
+                )
+            }),
+            selection_bar: self.split.is_none(),
+        };
+        let content = view::dashboard(
             menu,
             cache,
             view::vault::coins::coins_view(
@@ -111,23 +355,68 @@ impl State for CoinsPanel {
                 &self.coins.labels,
                 self.labels_edited.cache(),
                 cache.bitcoin_unit,
-                self.chain.is_blake2b()
-                    || (matches!(
-                        self.chain,
-                        crate::chain::ChainId::Bitcoin | crate::chain::ChainId::Testnet4
-                    ) && cache.btcb2_server_enabled),
+                blake2b,
+                control,
             ),
-        )
+        );
+        match self.split_overlay(cache) {
+            Some(overlay) => {
+                let working = overlay.working;
+                let modal = coincube_ui::widget::modal::Modal::new(
+                    content,
+                    view::vault::split_coins::split_overlay(&overlay),
+                );
+                if working {
+                    modal.into()
+                } else {
+                    modal
+                        .on_blur(Some(view::Message::CoinControl(
+                            CoinControlMessage::CancelSplit,
+                        )))
+                        .into()
+                }
+            }
+            None => content,
+        }
     }
 
     fn update(
         &mut self,
         daemon: Option<Arc<dyn Daemon + Sync + Send>>,
-        _cache: &Cache,
+        cache: &Cache,
         message: Message,
     ) -> Task<Message> {
         let daemon = daemon.expect("Daemon required for vault coins panel");
         match message {
+            Message::View(view::Message::CoinControl(message)) => {
+                return self.update_split(cache, message);
+            }
+            Message::SplitFeeRate(rate) => {
+                if let Some(split) = self.split.as_mut() {
+                    split.feerate = rate;
+                    split.fee_failed = rate.is_none();
+                }
+            }
+            Message::SplitAddress(result) => {
+                if let Some(split) = self.split.as_mut() {
+                    match result {
+                        Ok(address) => split.address = Some(address),
+                        Err(e) => split.error = Some(e),
+                    }
+                }
+            }
+            Message::SplitPrepared(result) => match result {
+                Ok(_) => {
+                    self.split = None;
+                    self.chosen.clear();
+                }
+                Err(e) => {
+                    if let Some(split) = self.split.as_mut() {
+                        split.working = false;
+                        split.error = Some(e);
+                    }
+                }
+            },
             Message::Coins(res) => match res {
                 Err(e) => {
                     let err_msg = crate::user_error::report(&e);
@@ -138,6 +427,9 @@ impl State for CoinsPanel {
                     self.selected = Vec::new();
                     self.warning = None;
                     self.update_coins(&coins);
+                    let held: HashSet<OutPoint> =
+                        self.coins.list.iter().map(|coin| coin.outpoint).collect();
+                    self.chosen.retain(|outpoint| held.contains(outpoint));
                 }
             },
             Message::Labels(res) => match res {
@@ -302,5 +594,151 @@ mod tests {
                 bitcoin::OutPoint { txid, vout: 3 },
             ]
         )
+    }
+
+    mod split_overlay {
+        use super::super::*;
+        use crate::{
+            app::{cache::Cache, view::CoinControlMessage},
+            services::{chain_status::ProofEntry, entangled::Entanglement},
+        };
+        use coincube_core::{
+            claim_ancestry::{retained::RetainedPath, search::OwnedLink},
+            miniscript::bitcoin::{
+                self, absolute, consensus::serialize, script::Builder, transaction, Amount,
+                ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
+            },
+        };
+        use std::str::FromStr;
+
+        fn coin(outpoint: OutPoint, sats: u64) -> Coin {
+            Coin {
+                outpoint,
+                amount: Amount::from_sat(sats),
+                block_height: Some(100),
+                spend_info: None,
+                is_immature: false,
+                address: bitcoin::Address::from_str("bc1qvrl2849aggm6qry9ea7xqp2kk39j8vaa8r3cwg")
+                    .unwrap()
+                    .assume_checked(),
+                derivation_index: 0.into(),
+                is_change: false,
+                is_from_self: false,
+            }
+        }
+
+        /// Two both-chain coins, one verified split key and one coin the
+        /// twin chain lacks without proof.
+        fn fixture() -> (CoinsPanel, Cache, [OutPoint; 4]) {
+            let coinbase = Transaction {
+                version: transaction::Version::TWO,
+                lock_time: absolute::LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint::null(),
+                    script_sig: Builder::new().push_int(962_000).push_int(1).into_script(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                }],
+                output: vec![TxOut {
+                    value: Amount::from_sat(30_000),
+                    script_pubkey: ScriptBuf::new(),
+                }],
+            };
+            let shared = |n: u8| {
+                OutPoint::from_str(&format!("{}:0", format!("{:02x}", n).repeat(32))).unwrap()
+            };
+            let (a, b, unseen) = (shared(1), shared(2), shared(3));
+            let key = OutPoint::new(coinbase.compute_txid(), 0);
+            let coins = vec![
+                coin(a, 100_000),
+                coin(b, 100_000),
+                coin(key, 30_000),
+                coin(unseen, 5_000),
+            ];
+            let mut cache = Cache::default();
+            cache.daemon_cache.coins = coins.clone();
+            let now = std::time::Instant::now();
+            cache.record_entanglement(a.txid, Entanglement::Entangled, now);
+            cache.record_entanglement(b.txid, Entanglement::Entangled, now);
+            cache.record_entanglement(key.txid, Entanglement::NotEntangled, now);
+            cache.record_entanglement(unseen.txid, Entanglement::NotEntangled, now);
+            cache.chain_proofs.insert(
+                key,
+                ProofEntry::Verified(
+                    RetainedPath::new(
+                        key,
+                        vec![OwnedLink {
+                            transaction: serialize(&coinbase),
+                            parent_input: None,
+                        }],
+                    )
+                    .unwrap(),
+                ),
+            );
+            let panel = CoinsPanel::new(&coins, 0, crate::chain::ChainId::Bitcoin);
+            (panel, cache, [a, b, key, unseen])
+        }
+
+        #[test]
+        fn opening_selects_exactly_the_inputs_and_cancel_restores() {
+            let (mut panel, cache, [a, b, key, unseen]) = fixture();
+            let _ = panel.update_split(&cache, CoinControlMessage::Choose(unseen));
+            let _ = panel.update_split(&cache, CoinControlMessage::OpenSplit);
+            let overlay = panel.split_overlay(&cache).unwrap();
+            assert_eq!(
+                overlay.method,
+                Method::SplitKey,
+                "Bitcoin splits with a key"
+            );
+            assert!(!overlay.key_needed);
+            assert_eq!(
+                panel.effective_chosen(&cache),
+                vec![a, b, key].into_iter().collect::<BTreeSet<_>>()
+            );
+            // The key can't be toggled out; a coin can.
+            let _ = panel.update_split(&cache, CoinControlMessage::ToggleSplitCoin(b));
+            assert_eq!(
+                panel.effective_chosen(&cache),
+                vec![a, key].into_iter().collect::<BTreeSet<_>>()
+            );
+            let _ = panel.update_split(&cache, CoinControlMessage::CancelSplit);
+            assert!(panel.split.is_none());
+            assert_eq!(
+                panel.effective_chosen(&cache),
+                vec![unseen].into_iter().collect::<BTreeSet<_>>()
+            );
+        }
+
+        #[test]
+        fn without_a_key_the_overlay_waits_and_asks_for_an_address() {
+            let (mut panel, mut cache, _) = fixture();
+            cache.chain_proofs.clear();
+            let task = panel.update_split(&cache, CoinControlMessage::OpenSplit);
+            drop(task);
+            let overlay = panel.split_overlay(&cache).unwrap();
+            assert!(overlay.key_needed);
+            assert_eq!(overlay.blocked(), Some("Waiting for a split key"));
+        }
+
+        #[test]
+        fn sign_waits_for_the_fee_then_locks_the_overlay() {
+            let (mut panel, cache, _) = fixture();
+            let _ = panel.update_split(&cache, CoinControlMessage::OpenSplit);
+            let _ = panel.update_split(&cache, CoinControlMessage::SignSplit);
+            assert!(!panel.split.as_ref().unwrap().working, "no fee rate yet");
+            panel.split.as_mut().unwrap().feerate = Some(4);
+            let _ = panel.update_split(&cache, CoinControlMessage::SignSplit);
+            assert!(panel.split.as_ref().unwrap().working);
+            let _ = panel.update_split(&cache, CoinControlMessage::CancelSplit);
+            assert!(panel.split.is_some(), "can't cancel while building");
+        }
+
+        #[test]
+        fn the_signature_method_needs_a_capable_blake2b_vault() {
+            let (mut panel, cache, _) = fixture();
+            let _ = panel.update_split(&cache, CoinControlMessage::OpenSplit);
+            let _ = panel.update_split(&cache, CoinControlMessage::SplitMethod(Method::Signature));
+            assert_eq!(panel.split.as_ref().unwrap().method, Method::SplitKey);
+        }
     }
 }
