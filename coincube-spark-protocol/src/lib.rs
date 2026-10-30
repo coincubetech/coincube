@@ -296,12 +296,20 @@ pub enum Method {
     /// [`OkPayload::Swap`].
     ///
     /// Only a refusal before submission is a definite failure:
-    /// [`ErrorKind::BadRequest`], [`ErrorKind::NotConnected`] or
-    /// [`ErrorKind::ShuttingDown`]. The bridge answers `BadRequest` for every
-    /// refusal it makes before asking the SDK to execute (S3b). An
-    /// [`ErrorKind::Sdk`] error can come after the SDK has sent the input to
-    /// the pool: at `a38117d` it gives up waiting for the output after 30 s
-    /// and returns an error, and the output can still arrive. So the gui
+    /// [`ErrorKind::BadRequest`] or [`ErrorKind::ShuttingDown`]. They are
+    /// definite because the bridge sends them only for a swap it hasn't
+    /// started executing. The bridge answers `BadRequest` for every refusal
+    /// it makes before asking the SDK to execute (S3b). A bridge that
+    /// answers a swap it is already executing must not use either kind.
+    ///
+    /// The gui treats [`ErrorKind::NotConnected`] as an unknown outcome. Its
+    /// client makes that answer up for every request still in flight when
+    /// the bridge dies, so it can't be told apart from the bridge's own
+    /// pre-`init` refusal; reconciling after that refusal finds nothing moved.
+    ///
+    /// An [`ErrorKind::Sdk`] error can come after the SDK has sent the input
+    /// to the pool: at `a38117d` it gives up waiting for the output after
+    /// 30 s and returns an error, and the output can still arrive. So the gui
     /// treats an `Sdk` error as an unknown outcome too, and reconciles from
     /// Activity before it offers another swap. A retry can't be made safe
     /// with an idempotency key, because the bridge drops the key for any
@@ -956,8 +964,12 @@ pub enum SwapStatus {
 ///
 /// Only this answer says the swap was submitted. An error answer is a
 /// definite failure only for the refusals before submission listed on
-/// [`Method::Swap`]; an [`ErrorKind::Sdk`] error leaves the outcome unknown,
-/// to be reconciled from Activity.
+/// [`Method::Swap`]: [`ErrorKind::BadRequest`] and
+/// [`ErrorKind::ShuttingDown`], which the bridge sends only for a swap it
+/// hasn't started. An [`ErrorKind::Sdk`] or [`ErrorKind::NotConnected`]
+/// error leaves the outcome unknown, to be reconciled from Activity:
+/// `NotConnected` because the gui's client makes it up for requests still in
+/// flight when the bridge dies.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwapOk {
     /// The [`PaymentSummary::id`] of the swap's Activity row, which is also

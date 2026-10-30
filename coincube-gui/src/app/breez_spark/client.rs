@@ -185,11 +185,14 @@ enum Handover {
     Payment,
     /// A swap: a self-transfer payment, so it keeps the payment wording. An
     /// [`ErrorKind::Sdk`] answer can follow submission (see [`Method::Swap`]),
-    /// so it is unknown too.
+    /// so it is unknown too, and so is [`ErrorKind::NotConnected`] (see
+    /// [`swap_error`]).
     Swap,
     /// An auto-convert switch. Not a payment, and
     /// [`SparkClient::get_auto_convert`] reconciles it, so a late answer has
-    /// no reader and is dropped rather than held forever.
+    /// no reader and is dropped rather than held forever. An
+    /// [`ErrorKind::NotConnected`] answer is unknown, as for a swap (see
+    /// [`auto_convert_error`]).
     AutoConvert,
 }
 
@@ -756,7 +759,10 @@ impl SparkClient {
     /// converting incoming bitcoin. A lost answer is
     /// [`SparkClientError::OutcomeUnknown`], and [`Self::get_auto_convert`]
     /// tells which way it went: it is the only reconciliation, so no late
-    /// answer is held.
+    /// answer is held. An [`ErrorKind::NotConnected`] answer is
+    /// `OutcomeUnknown` too, because this client makes that answer up for
+    /// every request in flight when the bridge dies. Read
+    /// [`Self::get_auto_convert`] before changing it again.
     pub async fn set_auto_convert(
         &self,
         enabled: bool,
@@ -853,10 +859,13 @@ impl SparkClient {
     /// arrives later.
     ///
     /// An [`ErrorKind::Sdk`] answer is `OutcomeUnknown` too, because the SDK
-    /// can fail after submitting the swap. Only `BadRequest`, `NotConnected`
+    /// can fail after submitting the swap, and so is
+    /// [`ErrorKind::NotConnected`], because this client makes that answer up
+    /// for every request in flight when the bridge dies. Only `BadRequest`
     /// and `ShuttingDown` come back as a definite
-    /// [`SparkClientError::BridgeError`]. After `OutcomeUnknown`, reconcile
-    /// from Activity before offering another swap.
+    /// [`SparkClientError::BridgeError`]: the bridge sends them only for a
+    /// swap it hasn't started. After `OutcomeUnknown`, reconcile from
+    /// Activity before offering another swap.
     pub async fn swap(&self, prepare_handle: String) -> Result<SwapOk, SparkClientError> {
         match self
             .request_with(
@@ -1101,6 +1110,13 @@ impl SparkClient {
     /// honest report is [`SparkClientError::OutcomeUnknown`] — including when
     /// the bridge dies mid-send, which says nothing about whether the SDK
     /// finished the payment first.
+    ///
+    /// When the bridge dies, the writer and reader tasks answer every request
+    /// still in flight with an [`ErrorKind::NotConnected`] error they make up
+    /// themselves, so that error, not a closed channel, is what a caller
+    /// usually sees. A swap and an auto-convert change read it as
+    /// [`SparkClientError::OutcomeUnknown`]. A send still reads it as a
+    /// definite [`SparkClientError::BridgeError`]; that is tracked on #950.
     async fn request_with(
         &self,
         method: Method,
@@ -1174,12 +1190,11 @@ impl SparkClient {
 
         match response.result {
             ResponseResult::Ok(payload) => Ok(payload),
-            ResponseResult::Err(ErrorPayload { kind, message }) if handover == Handover::Swap => {
-                Err(swap_error(id, kind, message))
-            }
-            ResponseResult::Err(ErrorPayload { kind, message }) => {
-                Err(SparkClientError::BridgeError { kind, message })
-            }
+            ResponseResult::Err(ErrorPayload { kind, message }) => Err(match handover {
+                Handover::Payment => SparkClientError::BridgeError { kind, message },
+                Handover::Swap => swap_error(id, kind, message),
+                Handover::AutoConvert => auto_convert_error(id, kind, message),
+            }),
         }
     }
 
@@ -1234,25 +1249,60 @@ impl SparkClient {
     }
 }
 
-/// A swap's error answer. Only the refusals before submission are definite
-/// ([`ErrorKind::BadRequest`], [`ErrorKind::NotConnected`],
-/// [`ErrorKind::ShuttingDown`]). An [`ErrorKind::Sdk`] error can follow
-/// submission (see [`Method::Swap`]), so it is an unknown outcome: the swap
-/// may still complete. Its text goes to the log, not the error, because it may
-/// say "failed".
+/// A swap's error answer. Only the bridge's refusals before submission are
+/// definite ([`ErrorKind::BadRequest`], [`ErrorKind::ShuttingDown`]; see
+/// [`Method::Swap`]). Two kinds are an unknown outcome, because the swap may
+/// still complete:
+///
+/// - an [`ErrorKind::Sdk`] error can follow submission;
+/// - an [`ErrorKind::NotConnected`] error is what the writer and reader tasks
+///   make up for every request in flight when the bridge dies (see
+///   [`SparkClient::request_with`]).
+///
+/// The error's text goes to the log, not the error, because it may say
+/// "failed".
 fn swap_error(request_id: u64, kind: ErrorKind, message: String) -> SparkClientError {
-    if kind != ErrorKind::Sdk {
-        return SparkClientError::BridgeError { kind, message };
-    }
+    // Exhaustive, so a new kind has to be classified here. `AlreadyConnected`
+    // answers only `init`; it stays definite, as before.
+    let unknown = match kind {
+        ErrorKind::BadRequest | ErrorKind::ShuttingDown | ErrorKind::AlreadyConnected => {
+            return SparkClientError::BridgeError { kind, message };
+        }
+        ErrorKind::Sdk => {
+            "The Spark SDK reported an error after this swap was handed to it, so it may \
+             still complete. Check Activity before swapping again."
+        }
+        ErrorKind::NotConnected => {
+            "The Spark bridge stopped responding after this swap was handed to it, so it may \
+             still complete. Check Activity before swapping again."
+        }
+    };
     warn!(
-        "Spark bridge answered swap id {} with an SDK error; the swap may still complete: {}",
-        request_id, message
+        "Spark swap id {} ended with a {:?} error, so it may still complete: {}",
+        request_id, kind, message
     );
     SparkClientError::OutcomeUnknown {
         request_id,
-        message: "The Spark SDK reported an error after this swap was handed to it, so it may \
-                  still complete. Check Activity before swapping again."
-            .to_string(),
+        message: unknown.to_string(),
+    }
+}
+
+/// An auto-convert change's error answer. [`ErrorKind::NotConnected`] is
+/// what the writer and reader tasks make up for every request in flight when
+/// the bridge dies (see [`SparkClient::request_with`]), so the change may
+/// have been made: an unknown outcome, reconciled with
+/// [`SparkClient::get_auto_convert`]. Every other kind is a definite refusal.
+fn auto_convert_error(request_id: u64, kind: ErrorKind, message: String) -> SparkClientError {
+    if kind != ErrorKind::NotConnected {
+        return SparkClientError::BridgeError { kind, message };
+    }
+    warn!(
+        "Spark auto-convert change id {} ended with a {:?} error, so it may have been made: {}",
+        request_id, kind, message
+    );
+    SparkClientError::OutcomeUnknown {
+        request_id,
+        message: Handover::AutoConvert.bridge_gone(),
     }
 }
 
@@ -1715,7 +1765,9 @@ pub enum SparkClientError {
     /// rejection: the bridge answered, and the answer was "no".
     BridgeError { kind: ErrorKind, message: String },
     /// A state-changing request was dispatched and no answer came back, or a
-    /// swap was answered with an SDK error that can follow submission.
+    /// swap was answered with an SDK error that can follow submission, or a
+    /// swap or auto-convert change got the [`ErrorKind::NotConnected`] answer
+    /// the client makes up when the bridge dies.
     ///
     /// **Not a failure.** The bridge has the request and the SDK may already
     /// have moved the money; the transport simply stopped telling us. Callers
@@ -2095,7 +2147,8 @@ mod p0_contract_tests {
     }
 
     /// Take the next request off the wire and answer it. `None` drops the
-    /// waiter instead, as the reader does when the bridge exits mid-request.
+    /// waiter instead, so the caller sees the channel close. When the bridge
+    /// exits mid-request, the reader answers first; see [`bridge_exits`].
     async fn bridge_answers(
         client: &SparkClient,
         requests: &mut mpsc::UnboundedReceiver<Request>,
@@ -2134,6 +2187,30 @@ mod p0_contract_tests {
             request.id,
             kind,
             "Conversion failed: timeout waiting for conversion to complete",
+        ));
+        request.id
+    }
+
+    /// Take the next request off the wire and answer it as the reader task
+    /// does when the bridge exits mid-request: with an
+    /// [`ErrorKind::NotConnected`] error it makes up itself. Returns the
+    /// request id.
+    async fn bridge_exits(
+        client: &SparkClient,
+        requests: &mut mpsc::UnboundedReceiver<Request>,
+    ) -> u64 {
+        let request = requests.recv().await.expect("a request was sent");
+        let waiter = client
+            .inner
+            .pending
+            .lock()
+            .await
+            .remove(&request.id)
+            .expect("the caller is waiting");
+        let _ = waiter.send(Response::err(
+            request.id,
+            ErrorKind::NotConnected,
+            "Spark bridge subprocess exited unexpectedly",
         ));
         request.id
     }
@@ -2420,7 +2497,9 @@ mod p0_contract_tests {
 
     /// An SDK error can come after the SDK sent the swap's input to the pool,
     /// so it is an unknown outcome, on time or late. Only the refusals before
-    /// submission are definite. A send's SDK error is unchanged.
+    /// submission are definite. A send's SDK error is unchanged. A
+    /// `NotConnected` answer is unknown too; see
+    /// `a_made_up_not_connected_answer_is_unknown_for_a_swap_or_auto_convert`.
     #[tokio::test]
     async fn a_swap_sdk_error_is_unknown_and_only_refusals_are_definite() {
         let (client, mut requests) = fake_client();
@@ -2441,11 +2520,7 @@ mod p0_contract_tests {
         assert!(message.contains("Check Activity"), "{}", message);
         assert!(!message.to_lowercase().contains("failed"), "{}", message);
 
-        for kind in [
-            ErrorKind::BadRequest,
-            ErrorKind::NotConnected,
-            ErrorKind::ShuttingDown,
-        ] {
+        for kind in [ErrorKind::BadRequest, ErrorKind::ShuttingDown] {
             let (result, _) = tokio::join!(
                 client.swap("swap-h".to_string()),
                 bridge_refuses(&client, &mut requests, kind)
@@ -2494,6 +2569,86 @@ mod p0_contract_tests {
                 kind: ErrorKind::BadRequest,
                 ..
             }))
+        ));
+    }
+
+    /// When the bridge dies, the writer and reader answer every request still
+    /// in flight with a `NotConnected` error they make up. The swap or the
+    /// auto-convert change may already have been made, so both read it as
+    /// unknown, with copy that says how to reconcile. A send still reads it
+    /// as a definite `BridgeError`, unchanged (#950 follow-up).
+    #[tokio::test]
+    async fn a_made_up_not_connected_answer_is_unknown_for_a_swap_or_auto_convert() {
+        let (client, mut requests) = fake_client();
+
+        let (result, id) = tokio::join!(
+            client.swap("swap-h".to_string()),
+            bridge_exits(&client, &mut requests)
+        );
+        let Err(SparkClientError::OutcomeUnknown {
+            request_id,
+            message,
+        }) = result
+        else {
+            panic!("expected an unknown outcome, got {:?}", result);
+        };
+        assert_eq!(request_id, id);
+        assert!(
+            message.contains("Check Activity before swapping again"),
+            "{}",
+            message
+        );
+        assert!(!message.to_lowercase().contains("failed"), "{}", message);
+
+        let (result, id) = tokio::join!(
+            client.set_auto_convert(true),
+            bridge_exits(&client, &mut requests)
+        );
+        let Err(err @ SparkClientError::OutcomeUnknown { .. }) = result else {
+            panic!("expected an unknown outcome, got {:?}", result);
+        };
+        assert!(
+            matches!(err, SparkClientError::OutcomeUnknown { request_id, .. } if request_id == id),
+            "{:?}",
+            err
+        );
+        assert_not_a_payment(&err);
+        assert!(
+            err.to_string()
+                .contains("Check whether auto-convert is on before changing it again"),
+            "{}",
+            err
+        );
+
+        let (result, _) = tokio::join!(
+            client.send_payment("send-h".to_string(), Some("key".to_string())),
+            bridge_exits(&client, &mut requests)
+        );
+        assert!(
+            matches!(
+                result,
+                Err(SparkClientError::BridgeError {
+                    kind: ErrorKind::NotConnected,
+                    ..
+                })
+            ),
+            "{:?}",
+            result
+        );
+
+        // A late swap answer follows the same rule.
+        client.inner.awaiting_late.lock().await.insert(63);
+        client.inner.late_outcomes.lock().await.insert(
+            63,
+            Response::err(
+                63,
+                ErrorKind::NotConnected,
+                "Spark bridge subprocess exited unexpectedly",
+            ),
+        );
+        assert!(matches!(
+            client.take_late_swap_outcome(63).await,
+            Some(Err(SparkClientError::OutcomeUnknown { request_id: 63, .. }))
         ));
     }
 
