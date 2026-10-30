@@ -16,26 +16,24 @@ use crate::{
         menu::Menu,
         view::{message::Message, placeholder, vault::label},
     },
+    chain::ChainId,
     daemon::model::{remaining_sequence, Coin},
-    services::entangled::Entanglement,
+    services::chain_status::ChainStatus,
 };
 
-/// Presence is not ancestry proof: a missing transaction may still replay.
-pub fn entangled_badge<'a, T: 'a>(status: Entanglement) -> Option<Container<'a, T>> {
-    match status {
-        Entanglement::Entangled => Some(badge::badge_pill(
-            "  Seen on both chains  ",
-            "This deposit transaction has been seen on both Bitcoin and BTCB2. It may be replayable. Use the split wizard to verify and separate shared coins.",
-        )),
-        Entanglement::Unknown => Some(badge::badge_pill(
-            "  Replay status not checked  ",
-            "The other-chain lookup has not completed. It retries after sync. This coin has not been verified for replay protection.",
-        )),
-        Entanglement::NotEntangled => Some(badge::badge_pill(
-            "  Replay protection unverified  ",
-            "This transaction was not found on the other chain. That alone does not prove it cannot replay. The split wizard checks its ancestry before using it as a chain-specific deposit.",
-        )),
-    }
+/// The Chains badge. Only positive evidence reads as *verified*; see
+/// [`crate::services::chain_status`].
+pub fn chain_badge<'a, T: 'a>(status: ChainStatus, here: ChainId) -> Container<'a, T> {
+    Container::new(iced::widget::tooltip::Tooltip::new(
+        Container::new(p2_regular(status.label(here)))
+            .padding(10)
+            .center_x(Length::Shrink)
+            .style(theme::pill::simple),
+        Container::new(p1_regular(status.explanation(here)))
+            .padding(10)
+            .style(theme::card::simple),
+        iced::widget::tooltip::Position::Top,
+    ))
 }
 
 /// A saved coin's block height proves it was confirmed, even while the
@@ -175,7 +173,9 @@ pub fn coins_view<'a>(
                                     labels_editing,
                                     bitcoin_unit,
                                     cache.balance_amounts_masked(),
-                                    blake2b.then(|| cache.entanglement_of(&coin.outpoint.txid)),
+                                    blake2b.then(|| {
+                                        (cache.chain_status(&coin.outpoint), cache.chain())
+                                    }),
                                     cache.split_deposit.is_some_and(|(outpoint, expires)| {
                                         outpoint == coin.outpoint
                                             && std::time::Instant::now() < expires
@@ -204,7 +204,7 @@ fn coin_list_view<'a>(
     labels_editing: &'a HashMap<String, form::Value<String>>,
     bitcoin_unit: BitcoinDisplayUnit,
     mask_amounts: bool,
-    entangled: Option<Entanglement>,
+    chain: Option<(ChainStatus, ChainId)>,
     verified_deposit: bool,
 ) -> Container<'a, Message> {
     let outpoint = coin.outpoint.to_string();
@@ -245,7 +245,7 @@ fn coin_list_view<'a>(
             "The open split wizard verified this exact coin's chain-specific ancestry. It will be combined with the shared coins in a self-transfer. The app rechecks it before signing.",
         ))
     } else {
-        entangled.and_then(entangled_badge)
+        chain.map(|(status, here)| chain_badge(status, here))
     };
     Container::new(
         Column::new()
@@ -323,7 +323,7 @@ fn coin_list_view<'a>(
                                                 p2_regular("Chains:").style(theme::text::secondary),
                                             )
                                             .push_maybe(replay)
-                                            .push(if entangled.is_none() && !verified_deposit {
+                                            .push(if chain.is_none() && !verified_deposit {
                                                 p2_regular("Bitcoin").style(theme::text::secondary)
                                             } else {
                                                 p2_regular("")
@@ -629,6 +629,7 @@ mod tests {
     use super::*;
     use crate::app::state::preferences::{BalancePrivacy, BalancePrivacyChrome};
     use crate::app::view::shared::landing::capture;
+    use crate::services::entangled::Entanglement;
     use coincube_core::miniscript::bitcoin::{bip32::ChildNumber, Address, Amount, OutPoint, Txid};
     use std::str::FromStr;
 
@@ -884,17 +885,17 @@ mod tests {
         for (answer, expected, scenario) in [
             (
                 Entanglement::Unknown,
-                "Replay status not checked",
+                "Not checked yet",
                 "vault-coin-replay-unknown",
             ),
             (
                 Entanglement::Entangled,
-                "Seen on both chains",
+                "Both chains",
                 "vault-coin-replay-both",
             ),
             (
                 Entanglement::NotEntangled,
-                "Replay protection unverified",
+                "Not seen on Blake2b · checking",
                 "vault-coin-replay-unverified",
             ),
         ] {
@@ -974,21 +975,24 @@ mod tests {
     }
 
     #[test]
-    fn presence_badges_never_treat_a_missing_transaction_as_replay_protection() {
-        assert!(entangled_badge::<Message>(Entanglement::Entangled).is_some());
-        assert!(entangled_badge::<Message>(Entanglement::Unknown).is_some());
-        assert!(entangled_badge::<Message>(Entanglement::NotEntangled).is_some());
+    fn chain_badge_never_calls_a_missing_transaction_verified() {
         let mounted = capture::inspect(
-            "vault-entangled-presence",
-            entangled_badge::<Message>(Entanglement::Entangled)
-                .unwrap()
-                .into(),
+            "vault-chain-status",
+            chain_badge::<Message>(ChainStatus::NotSeen, ChainId::Bitcoin).into(),
             (400, 100),
             "dark",
             theme::Theme::dark(),
         );
-        assert!(mounted.contains("Seen on both chains"));
-        assert!(!mounted.contains("Before fork"));
+        assert!(mounted.contains("Not seen on Blake2b · checking"));
+        assert!(!mounted.contains("verified"));
+        let both = capture::inspect(
+            "vault-chain-status-both",
+            chain_badge::<Message>(ChainStatus::BothChains, ChainId::BitcoinBlake2b).into(),
+            (400, 100),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(both.contains("Both chains"));
     }
 
     #[test]

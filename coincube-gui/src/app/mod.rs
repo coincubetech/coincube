@@ -1184,6 +1184,12 @@ pub struct App {
     /// txids that answered `Unknown`, which are not written to the cache and
     /// would otherwise stay claimed forever.
     entangled_in_flight: HashSet<bitcoin::Txid>,
+    /// Coins a Chains-column ancestry check batch has claimed and not yet
+    /// answered. Released as a whole set when its `ChainProofs` lands.
+    chain_proofs_in_flight: HashSet<bitcoin::OutPoint>,
+    /// Whether this Vault's saved ancestry results have been read into the
+    /// cache yet ([`crate::services::chain_status::store::load`]).
+    chain_proofs_loaded: bool,
     unswept_in_flight: Option<u64>,
     unswept_session: Option<state::vault::claim::ConnectSession>,
     /// Global "payment received" celebration overlay — shown for incoming
@@ -4100,6 +4106,8 @@ impl App {
             auto_switch_suppressed: false,
             local_switch_hold: None,
             entangled_in_flight: HashSet::new(),
+            chain_proofs_in_flight: HashSet::new(),
+            chain_proofs_loaded: false,
             unswept_in_flight: None,
             unswept_session: None,
             show_received_celebration: false,
@@ -4347,6 +4355,8 @@ impl App {
                 auto_switch_suppressed: false,
                 local_switch_hold: None,
                 entangled_in_flight: HashSet::new(),
+                chain_proofs_in_flight: HashSet::new(),
+                chain_proofs_loaded: false,
                 unswept_in_flight: None,
                 unswept_session: None,
                 show_received_celebration: false,
@@ -4511,6 +4521,76 @@ impl App {
                 origin,
                 claimed: claimed.clone(),
                 answers,
+            },
+        )
+    }
+
+    /// The Vault's data directory, where its Chains-column results are saved.
+    fn vault_data_dir(&self) -> Option<std::path::PathBuf> {
+        let wallet = self.wallet.as_ref()?;
+        Some(
+            self.cache
+                .datadir_path
+                .network_directory(wallet.chain)
+                .coincubed_data_directory(&wallet.id())
+                .path()
+                .to_path_buf(),
+        )
+    }
+
+    /// Ancestry checks for the Chains column: only coins whose funding
+    /// transaction the twin chain lacks, a few per pass, behind the ancestry
+    /// launch gate. Saved results are read in on the first pass, gate or not,
+    /// so a status verified under the gate still shows.
+    fn chain_proof_task(&mut self) -> Task<Message> {
+        let Some(wallet) = self.wallet.as_ref() else {
+            return Task::none();
+        };
+        let chain = wallet.chain;
+        if crate::services::entangled::twin_chain(chain).is_none()
+            || (!chain.is_blake2b() && !self.panels.connect.account.bitcoin_blake2b_enabled())
+        {
+            return Task::none();
+        }
+        if !self.chain_proofs_loaded {
+            self.chain_proofs_loaded = true;
+            if let Some(dir) = self.vault_data_dir() {
+                let saved = crate::services::chain_status::store::load(&dir);
+                for (outpoint, entry) in saved {
+                    self.cache.chain_proofs.entry(outpoint).or_insert(entry);
+                }
+            }
+        }
+        if !crate::services::chain_status::checks_enabled(chain) {
+            return Task::none();
+        }
+        let Some(client) = self.authenticated_coincube_client() else {
+            return Task::none();
+        };
+        let pending = crate::services::chain_status::proof_candidates(
+            self.cache.coins().iter().map(|coin| coin.outpoint),
+            |txid| self.cache.entanglement_of(txid),
+            &self.cache.chain_proofs,
+            &self.chain_proofs_in_flight,
+            std::time::SystemTime::now(),
+        );
+        if pending.is_empty() {
+            return Task::none();
+        }
+        self.chain_proofs_in_flight.extend(pending.iter().copied());
+        let origin = cache::LookupOrigin {
+            app: self.cache.app_generation,
+            chain,
+        };
+        let generation = *self.panels.claim_generation.borrow();
+        let live = self.panels.claim_generation.subscribe();
+        let claimed = pending.clone();
+        Task::perform(
+            crate::services::chain_status::check_ancestry(client, chain, pending, generation, live),
+            move |results| Message::ChainProofs {
+                origin,
+                claimed: claimed.clone(),
+                results,
             },
         )
     }
@@ -9194,6 +9274,39 @@ impl App {
                 if !changed {
                     return Task::none();
                 }
+                // A new negative answer can make a coin an ancestry candidate.
+                let chain_proofs = self.chain_proof_task();
+                return Task::batch([chain_proofs, Task::done(Message::CacheUpdated)]);
+            }
+            Message::ChainProofs {
+                origin,
+                claimed,
+                results,
+            } => {
+                let changed = self.cache.chain_proofs_landed(
+                    &mut self.chain_proofs_in_flight,
+                    origin,
+                    &claimed,
+                    results,
+                );
+                if !changed {
+                    return Task::none();
+                }
+                if let Some(dir) = self.vault_data_dir() {
+                    let held: HashSet<bitcoin::OutPoint> = self
+                        .cache
+                        .coins()
+                        .iter()
+                        .map(|coin| coin.outpoint)
+                        .collect();
+                    if let Err(e) = crate::services::chain_status::store::save(
+                        &dir,
+                        &self.cache.chain_proofs,
+                        |outpoint| held.contains(outpoint),
+                    ) {
+                        tracing::warn!("couldn't save Chains-column results: {}", e);
+                    }
+                }
                 return Task::done(Message::CacheUpdated);
             }
             Message::EntangledRevalidated {
@@ -9561,10 +9674,12 @@ impl App {
                         // Same posture for the BTCB2 entangled-deposit lookups:
                         // `Task::none()` on every Bitcoin-family Cube.
                         let entangled = self.entangled_lookup_task();
+                        let chain_proofs = self.chain_proof_task();
                         let unswept = self.unswept_notice_task();
                         return Task::batch([
                             heartbeat,
                             entangled,
+                            chain_proofs,
                             unswept,
                             retire_obligation.unwrap_or_else(Task::none),
                             Task::done(Message::CacheUpdated),
