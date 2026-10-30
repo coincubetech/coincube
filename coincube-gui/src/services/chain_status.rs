@@ -92,14 +92,16 @@ pub fn classify(evidence: CoinEvidence) -> ChainStatus {
             confirmations: confirmations.min(SPLIT_CONFIRMATIONS),
         };
     }
-    if evidence.signature_split {
-        return ChainStatus::SplitUnconfirmed;
-    }
     if evidence.separated {
         return ChainStatus::OnlyHere;
     }
     if evidence.entanglement == Some(Entanglement::Entangled) {
         return ChainStatus::BothChains;
+    }
+    // After the twin-chain lookup: a signature split replayed onto the twin
+    // chain shows up there, and the safe reading wins over its intent.
+    if evidence.signature_split {
+        return ChainStatus::SplitUnconfirmed;
     }
     match evidence.proof {
         Some(ProofOutcome::Verified) => ChainStatus::OnlyHere,
@@ -150,7 +152,7 @@ impl ChainStatus {
                 SPLIT_CONFIRMATIONS
             ),
             Self::SplitUnconfirmed => format!(
-                "Spent by a split with a replay-protected signature. The app can't yet confirm the signature, so this coin isn't verified as {} only.",
+                "Spent by a split meant to use a replay-protected signature. The app can't check that signature yet, so this coin isn't verified as {} only.",
                 short_name(here)
             ),
             Self::OnlyHere => format!(
@@ -415,6 +417,17 @@ mod tests {
         assert_eq!(status.label(ChainId::BitcoinBlake2b), "Split · unconfirmed");
         assert_eq!(status.tone(), StatusTone::Warn);
         assert!(!status.needs_split());
+    }
+
+    #[test]
+    fn a_replayed_signature_split_is_on_both_chains() {
+        let status = classify(CoinEvidence {
+            entanglement: Some(Entanglement::Entangled),
+            signature_split: true,
+            ..Default::default()
+        });
+        assert_eq!(status, ChainStatus::BothChains);
+        assert!(status.needs_split());
     }
 
     #[test]
