@@ -208,9 +208,9 @@ impl StageData {
                         // A ghost's turned-away faces show only their edges.
                         let facing = projected.area() > 0.5;
                         // `.cube.ghost .f.panel`: the face a ghost turns to is
-                        // solid, so its details read as on a local Cube.
-                        let panel = matches!(projected.face, Face::BackLeft | Face::BackRight)
-                            && spin > 0.0;
+                        // solid once it faces the viewer, so its details read
+                        // as on a local Cube. A ghost never turns to unlock.
+                        let panel = projected.face == Face::BackLeft && facing && spin > 0.0;
                         let (color, alpha) = match ghost {
                             Some(ghost) if !panel => {
                                 let [r, g, b, a] = launcher_scene::ghost_fill(ghost, light);

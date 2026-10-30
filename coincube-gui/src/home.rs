@@ -3596,28 +3596,27 @@ impl Home {
                         let pending_bitcoin_import = self.pending_bitcoin_import.clone();
                         // A ghost's import takes the ghost's identity only when
                         // the phrase proves it is that Cube's seed, so Connect's
-                        // registration is reclaimed rather than duplicated.
-                        if let Some(ghost) = &self.ghost_import {
-                            match ghost_import_identity(ghost, network, &mnemonic) {
-                                Ok(Some(id)) => self.pending_cube_id = Some(id),
-                                Ok(None) => {
-                                    if self
-                                        .pending_cube_id
-                                        .is_some_and(|id| id.to_string() == ghost.uuid)
-                                    {
-                                        self.pending_cube_id = None;
-                                    }
-                                }
+                        // registration is reclaimed rather than duplicated. The
+                        // ghost's ID never enters `pending_cube_id`: that slot
+                        // outlives this form (a failed write keeps it for a
+                        // retry), and a later Create or import must not reuse it.
+                        let ghost_id = match &self.ghost_import {
+                            Some(ghost) => match ghost_import_identity(ghost, network, &mnemonic) {
+                                Ok(id) => id,
                                 Err(e) => {
                                     self.creating_cube = false;
                                     self.error = Some(e);
                                     return Task::none();
                                 }
-                            }
-                        }
-                        // Reuse the UUID that was pre-generated when the user
-                        // first clicked "Create Cube" (recovery path).
-                        let cube_id = *self.pending_cube_id.get_or_insert_with(uuid::Uuid::new_v4);
+                            },
+                            None => None,
+                        };
+                        // Otherwise reuse the UUID that was pre-generated when
+                        // the user first clicked "Create Cube" (recovery path).
+                        let cube_id = match ghost_id {
+                            Some(id) => id,
+                            None => *self.pending_cube_id.get_or_insert_with(uuid::Uuid::new_v4),
+                        };
 
                         Task::perform(
                             async move {
@@ -10169,6 +10168,44 @@ mod tests {
         assert_eq!(
             ghost_import_identity(&ghost, ChainId::Bitcoin, &phrase),
             Ok(None)
+        );
+    }
+
+    #[test]
+    fn a_ghost_import_never_leaves_its_identity_for_the_next_cube() {
+        let phrase = abandon_phrase();
+        let uuid = "6f1c7a3e-2b4d-4c8e-9a10-3f2e1d0c9b8a";
+        let mut home = home();
+        let mut ghost = remote_cube(uuid, "Old laptop", Network::Bitcoin);
+        ghost.encryption_pubkey = Some(registered_key(&phrase, ChainId::Bitcoin));
+        home.remote_cubes = vec![ghost];
+        let _ = home.update(Message::View(ViewMessage::ImportGhostWithPhrase(
+            uuid.into(),
+        )));
+        for (index, word) in phrase.words().enumerate() {
+            home.recovery_words[index] = word.to_string();
+        }
+        for (index, digit) in ["1", "2", "3", "4"].iter().enumerate() {
+            let _ = home
+                .create_cube_pin
+                .update(pin_input::Message::DigitChanged(index, digit.to_string()));
+            let _ = home
+                .create_cube_pin_confirm
+                .update(pin_input::Message::DigitChanged(index, digit.to_string()));
+        }
+        let _ = home.update(Message::View(ViewMessage::SubmitRecovery));
+        assert!(home.creating_cube, "the matching phrase is accepted");
+        // The ghost's ID was used for this write only: the retry slot that
+        // a failed write keeps, and that Create reuses, never holds it.
+        assert_ne!(
+            home.pending_cube_id.map(|id| id.to_string()).as_deref(),
+            Some(uuid)
+        );
+        let _ = home.update(Message::CubeCreated(Err("disk full".into())));
+        let _ = home.update(Message::View(ViewMessage::CancelRecovery));
+        assert_ne!(
+            home.pending_cube_id.map(|id| id.to_string()).as_deref(),
+            Some(uuid)
         );
     }
 

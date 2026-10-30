@@ -745,10 +745,16 @@ impl Home {
     /// A ghost is selectable on the floor only: its key is the current
     /// network and a Connect registration this device does not hold.
     fn ghost_resolves(&self, key: &CubeCatalogKey) -> bool {
-        self.catalog.mode == LauncherMode::Cubes
-            && !key.cube_id.is_empty()
-            && key.chain == self.network
-            && project(self)
+        if self.catalog.mode != LauncherMode::Cubes
+            || key.cube_id.is_empty()
+            || key.chain != self.network
+        {
+            return false;
+        }
+        // Only a floor draws a ghost's face; a List fallback has none.
+        let projection = project(self);
+        projection.floor_eligible(self.catalog.mode)
+            && projection
                 .remotes
                 .iter()
                 .any(|cube| ghost_key(cube, self.network) == *key)
