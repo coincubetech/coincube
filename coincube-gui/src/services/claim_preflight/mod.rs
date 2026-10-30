@@ -1,7 +1,8 @@
 //! Dormant anonymous operator-node policy evidence, never spend permission.
 pub mod direct;
 use crate::services::{
-    claim_observation::CollectionContext, coincube::network_anchor::AnchorState,
+    claim_observation::CollectionContext,
+    coincube::network_anchor::{local_observed_at, AnchorState},
 };
 use coincube_core::{
     chain::ChainId,
@@ -231,6 +232,7 @@ struct Data {
     network: String,
     state: AnchorState,
     result: Option<WireResult>,
+    served_at: Option<i64>,
 }
 #[derive(Deserialize)]
 struct WireResult {
@@ -352,6 +354,7 @@ impl PreflightClient {
             let _ = generation.changed().await;
         };
         let operation = async {
+            let sent_at = now();
             let mut response = self
                 .client
                 .post(format!(
@@ -390,6 +393,7 @@ impl PreflightClient {
                 expected_tip,
                 self.expected,
                 policy,
+                sent_at,
                 now(),
             )
         };
@@ -566,6 +570,7 @@ fn parse(
     tip: BlockHash,
     generation: u64,
     policy: FreshnessPolicy,
+    sent_at: i64,
     now: i64,
 ) -> Result<Evidence, Error> {
     let retry_after_seconds = retry_after(headers);
@@ -612,10 +617,12 @@ fn parse(
     if result.txid != tx.compute_txid()
         || result.wtxid != tx.compute_wtxid()
         || result.tip_hash != tip
+        || result.observed_at < 0
     {
         return Err(Error::InvalidResponse);
     }
-    if !policy.fresh(result.observed_at, now) {
+    let observed_at = local_observed_at(result.observed_at, data.served_at, sent_at);
+    if !policy.fresh(observed_at, now) {
         return Err(Error::Stale);
     }
     let policy = match (result.allowed, result.reject_reason) {
@@ -636,7 +643,7 @@ fn parse(
         txid: result.txid,
         wtxid: result.wtxid,
         tip: result.tip_hash,
-        observed_at: result.observed_at,
+        observed_at,
         generation,
         policy,
     })
