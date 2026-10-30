@@ -3,7 +3,7 @@ use crate::{
     config::{BitcoinConfig, Config},
     database::{
         sqlite::{FreshDbOptions, SqliteDb},
-        Coin,
+        Coin, DatabaseConnection,
     },
     datadir::DataDirectory,
     testutils::DummyBitcoind,
@@ -26,6 +26,32 @@ pub fn regtest_wallet(
     descriptor: coincube_core::descriptors::CoincubeDescriptor,
 ) -> (Config, DaemonHandle) {
     wallet_on_chain(root, descriptor, bitcoin::Network::Regtest.into())
+}
+/// Simulate an input disappearing from the disposable wallet's coin set.
+/// Test-only: this changes only the fixture's SQLite database, never a node.
+pub fn remove_coin(root: &std::path::Path, outpoint: bitcoin::OutPoint) {
+    let database = SqliteDb::new(
+        root.join("wallet.sqlite3"),
+        None,
+        &Secp256k1::verification_only(),
+    )
+    .unwrap();
+    database.connection().unwrap().remove_coins(&[outpoint]);
+}
+/// Apply a same-height tip replacement without advancing the poll timestamp.
+pub fn replace_tip_hash_same_height(root: &std::path::Path) {
+    let database = SqliteDb::new(
+        root.join("wallet.sqlite3"),
+        None,
+        &Secp256k1::verification_only(),
+    )
+    .unwrap();
+    let mut connection = database.connection().unwrap();
+    let tip = connection.chain_tip().unwrap();
+    connection.update_tip(&crate::bitcoin::BlockChainTip {
+        hash: bitcoin::BlockHash::all_zeros(),
+        height: tip.height,
+    });
 }
 fn wallet_on_chain(
     root: &std::path::Path,

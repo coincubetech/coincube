@@ -9,7 +9,7 @@ use crate::{
 };
 use coincube_core::{
     descriptors::CoincubeDescriptor,
-    miniscript::bitcoin::{secp256k1, Address, Network, Psbt},
+    miniscript::bitcoin::{secp256k1, Address, BlockHash, Network, Psbt},
 };
 use coincube_mcp::{
     self as wire,
@@ -26,17 +26,53 @@ use std::{
 
 /// A native-only construction; never serializable over MCP.
 #[derive(Clone)]
-pub(crate) struct NativeDraft {
+pub struct NativeDraft {
     pub psbt: Psbt,
     pub coins: Vec<Coin>,
     pub warnings: Vec<String>,
 }
+impl std::fmt::Debug for NativeDraft {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("NativeDraft(<redacted>)")
+    }
+}
 struct Draft {
     input: PrepareInput,
     result: Result<(Prepared, NativeDraft), wire::Error>,
+    chain: Option<ChainSnapshot>,
+}
+/// Wallet and chain identity available at construction. An unchanged poll
+/// leaves the draft usable; a new tip or changed selected coin invalidates it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ChainSnapshot {
+    wallet_created_at: u32,
+    block_height: i32,
+    tip_hash: BlockHash,
+}
+impl ChainSnapshot {
+    fn new(info: &crate::daemon::model::GetInfoResult, tip_hash: BlockHash) -> Self {
+        Self {
+            wallet_created_at: info.timestamp,
+            block_height: info.block_height,
+            tip_hash,
+        }
+    }
+}
+const STALE_STATUS: &str = "stale_requires_new_request";
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReviewStatus {
+    Ready,
+    Stale,
+    Unavailable,
+}
+fn stale(draft: &mut Draft) {
+    if let Ok((summary, _)) = &mut draft.result {
+        summary.status = STALE_STATUS.into();
+    }
 }
 #[derive(Clone)]
-pub(super) struct Service {
+pub(crate) struct Service {
+    session_id: uuid::Uuid,
     descriptor: CoincubeDescriptor,
     daemon: Arc<dyn Daemon + Send + Sync>,
     wallet_id: String,
@@ -53,6 +89,7 @@ impl Service {
         last_poll_at_startup: Option<u32>,
     ) -> Self {
         Self {
+            session_id: uuid::Uuid::new_v4(),
             descriptor,
             daemon,
             wallet_id,
@@ -64,6 +101,9 @@ impl Service {
     }
     pub fn revoke(&self) {
         self.revoked.store(true, Ordering::SeqCst);
+    }
+    pub fn session_id(&self) -> uuid::Uuid {
+        self.session_id
     }
     pub fn summaries(&self) -> Vec<Prepared> {
         if self.revoked.load(Ordering::SeqCst) {
@@ -78,6 +118,7 @@ impl Service {
             })
             .unwrap_or_default()
     }
+    #[cfg(test)]
     pub fn native(&self, id: &str) -> Option<NativeDraft> {
         if self.revoked.load(Ordering::SeqCst) {
             return None;
@@ -87,8 +128,97 @@ impl Service {
             .ok()?
             .values()
             .filter_map(|d| d.result.as_ref().ok())
-            .find(|(s, _)| s.draft_id == id)
+            .find(|(s, _)| s.draft_id == id && s.status != STALE_STATUS)
             .map(|(_, native)| native.clone())
+    }
+    /// Check whether a concurrent MCP read invalidated this identity after its
+    /// async validation completed. Lock contention is temporary unavailability.
+    pub fn review_status(&self, id: &str) -> ReviewStatus {
+        if self.revoked.load(Ordering::SeqCst) {
+            return ReviewStatus::Unavailable;
+        }
+        let Ok(drafts) = self.drafts.try_lock() else {
+            return ReviewStatus::Unavailable;
+        };
+        drafts
+            .values()
+            .filter_map(|draft| draft.result.as_ref().ok())
+            .find(|(summary, _)| summary.draft_id == id)
+            .map_or(ReviewStatus::Unavailable, |(summary, _)| {
+                if summary.status == STALE_STATUS {
+                    ReviewStatus::Stale
+                } else {
+                    ReviewStatus::Ready
+                }
+            })
+    }
+    /// Recheck the selected coins and the daemon snapshot immediately before a
+    /// native handoff. The returned PSBT is the original immutable construction.
+    pub async fn native_checked(&self, id: &str) -> Option<NativeDraft> {
+        if self.revoked.load(Ordering::SeqCst) {
+            return None;
+        }
+        let mut drafts = self.drafts.lock().await;
+        let draft = drafts.values_mut().find(|d| {
+            d.result
+                .as_ref()
+                .is_ok_and(|(summary, _)| summary.draft_id == id)
+        })?;
+        let info = match self.daemon.get_info().await {
+            Ok(info) => info,
+            Err(_) => {
+                stale(draft);
+                return None;
+            }
+        };
+        if !self.ready(&info) || !self.refresh(draft, &info).await {
+            stale(draft);
+            return None;
+        }
+        if self.revoked.load(Ordering::SeqCst) {
+            return None;
+        }
+        draft.result.as_ref().ok().map(|(_, native)| native.clone())
+    }
+    async fn refresh(&self, draft: &mut Draft, info: &crate::daemon::model::GetInfoResult) -> bool {
+        let Ok((summary, native)) = &draft.result else {
+            return false;
+        };
+        if summary.status == STALE_STATUS {
+            return false;
+        }
+        let Ok(tip_before) = self.daemon.chain_tip_hash().await else {
+            return false;
+        };
+        if draft.chain != Some(ChainSnapshot::new(info, tip_before)) {
+            return false;
+        }
+        let outpoints: Vec<_> = native
+            .psbt
+            .unsigned_tx
+            .input
+            .iter()
+            .map(|input| input.previous_output)
+            .collect();
+        let Ok(current) = self.daemon.list_coins(&[], &outpoints).await else {
+            return false;
+        };
+        if !selected_inputs_unchanged(&native.coins, &current.coins) {
+            return false;
+        }
+        if validate(&draft.input, &native.psbt, &current.coins, &self.descriptor).is_err() {
+            return false;
+        }
+        let Ok(tip_after) = self.daemon.chain_tip_hash().await else {
+            return false;
+        };
+        if tip_after != tip_before {
+            return false;
+        }
+        let Ok(info_after) = self.daemon.get_info().await else {
+            return false;
+        };
+        self.ready(&info_after) && draft.chain == Some(ChainSnapshot::new(&info_after, tip_after))
     }
     fn ready(&self, info: &crate::daemon::model::GetInfoResult) -> bool {
         !(!self.daemon.backend().is_embedded()
@@ -123,12 +253,21 @@ impl Service {
             wire::Request::Transaction(v) if v.wallet_id == self.wallet_id => {}
             _ => return Err(Error::AccessDenied),
         }
-        let info = self
-            .daemon
-            .get_info()
-            .await
-            .map_err(|_| Error::Unavailable)?;
+        let info = match self.daemon.get_info().await {
+            Ok(info) => info,
+            Err(_) => {
+                let mut drafts = self.drafts.lock().await;
+                for draft in drafts.values_mut() {
+                    stale(draft);
+                }
+                return Err(Error::Unavailable);
+            }
+        };
         if !self.ready(&info) {
+            let mut drafts = self.drafts.lock().await;
+            for draft in drafts.values_mut() {
+                stale(draft);
+            }
             return Err(Error::Unavailable);
         }
         match request {
@@ -139,28 +278,40 @@ impl Service {
                     wallet_type: "vault".into(),
                 }],
             })),
-            wire::Request::PrepareTransaction(input) => {
-                self.prepare(input).await.map(wire::Response::Transaction)
-            }
-            wire::Request::Transaction(DraftInput { draft_id, .. }) => self
-                .drafts
-                .lock()
+            wire::Request::PrepareTransaction(input) => self
+                .prepare(input, &info)
                 .await
-                .values()
-                .filter_map(|d| d.result.as_ref().ok())
-                .find(|(s, _)| s.draft_id == draft_id)
-                .map(|(s, _)| wire::Response::Transaction(s.clone()))
-                .ok_or(Error::AccessDenied),
+                .map(wire::Response::Transaction),
+            wire::Request::Transaction(DraftInput { draft_id, .. }) => {
+                let mut drafts = self.drafts.lock().await;
+                let draft = drafts
+                    .values_mut()
+                    .find(|d| d.result.as_ref().is_ok_and(|(s, _)| s.draft_id == draft_id))
+                    .ok_or(Error::AccessDenied)?;
+                if !self.refresh(draft, &info).await {
+                    stale(draft);
+                }
+                Ok(wire::Response::Transaction(
+                    draft.result.as_ref().expect("matched success").0.clone(),
+                ))
+            }
             _ => Err(Error::AccessDenied),
         }
     }
-    async fn prepare(&self, input: PrepareInput) -> Result<Prepared, wire::Error> {
+    async fn prepare(
+        &self,
+        input: PrepareInput,
+        info: &crate::daemon::model::GetInfoResult,
+    ) -> Result<Prepared, wire::Error> {
         use wire::Error;
         // Held only on the single bounded blocking worker. A timed-out caller
         // can retry the stored construction instead of reserving change twice.
         let mut drafts = self.drafts.lock().await;
-        if let Some(draft) = drafts.get(&input.request_id) {
+        if let Some(draft) = drafts.get_mut(&input.request_id) {
             return if draft.input == input {
+                if draft.result.is_ok() && !self.refresh(draft, info).await {
+                    stale(draft);
+                }
                 draft
                     .result
                     .as_ref()
@@ -187,6 +338,11 @@ impl Service {
                 return Err(Error::InvalidInput);
             }
         }
+        let tip_before = self
+            .daemon
+            .chain_tip_hash()
+            .await
+            .map_err(|_| Error::Unavailable)?;
         // Charge and cache every engine attempt, including fee/validation failures:
         // successful engine construction may already have reserved change. Keep
         // this lock across completion so cancellation/retries cannot build twice.
@@ -195,18 +351,24 @@ impl Service {
             Draft {
                 input: input.clone(),
                 result: Err(Error::Unavailable),
+                chain: None,
             },
         );
         let result = self.construct(&input, &destinations).await;
-        let summary = result
+        let draft = drafts.get_mut(&input.request_id).expect("attempt inserted");
+        draft.chain = result
+            .as_ref()
+            .ok()
+            .map(|_| ChainSnapshot::new(info, tip_before));
+        draft.result = result;
+        if draft.result.is_ok() && !self.refresh(draft, info).await {
+            stale(draft);
+        }
+        draft
+            .result
             .as_ref()
             .map(|(s, _)| s.clone())
-            .map_err(Clone::clone);
-        drafts
-            .get_mut(&input.request_id)
-            .expect("attempt inserted")
-            .result = result;
-        summary
+            .map_err(Clone::clone)
     }
     async fn construct(
         &self,
@@ -287,6 +449,25 @@ impl Service {
             },
         ))
     }
+}
+
+fn selected_inputs_unchanged(original: &[Coin], current: &[Coin]) -> bool {
+    let mut seen = HashSet::new();
+    original.len() == current.len()
+        && current.iter().all(|coin| {
+            seen.insert(coin.outpoint)
+                && original.iter().any(|old| {
+                    old.outpoint == coin.outpoint
+                        && old.amount == coin.amount
+                        && old.block_height == coin.block_height
+                        && old.derivation_index == coin.derivation_index
+                        && old.is_change == coin.is_change
+                        && old.is_from_self == coin.is_from_self
+                        && old.spend_info.is_none()
+                        && coin.spend_info.is_none()
+                        && !coin.is_immature
+                })
+        })
 }
 impl wire::Reader for Service {
     fn read(
@@ -553,6 +734,163 @@ mod tests {
             service.revoke();assert!(service.native(&first.draft_id).is_none());
             assert!(matches!(service.read(wire::Request::PrepareTransaction(input())).await,Err(wire::Error::AccessDenied)));
             cleanup(root,service).await;
+        });
+    }
+    #[test]
+    fn mcp_transaction_draft_freshness_requires_new_identity() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let (root, service) = fixture().await;
+            let first = prepared(&service, input()).await;
+            let native = service.native_checked(&first.draft_id).await.unwrap();
+            assert_eq!(format!("{native:?}"), "NativeDraft(<redacted>)");
+            assert!(selected_inputs_unchanged(&native.coins, &native.coins));
+            assert!(!selected_inputs_unchanged(&native.coins, &[]));
+            let mut spent = native.coins.clone();
+            spent[0].spend_info = Some(coincubed::commands::LCSpendInfo {
+                txid: coincube_core::miniscript::bitcoin::Txid::all_zeros(),
+                height: None,
+            });
+            assert!(!selected_inputs_unchanged(&native.coins, &spent));
+            let mut immature = native.coins.clone();
+            immature[0].is_immature = true;
+            assert!(!selected_inputs_unchanged(&native.coins, &immature));
+            let mut reorged = native.coins.clone();
+            reorged[0].block_height = Some(2);
+            assert!(!selected_inputs_unchanged(&native.coins, &reorged));
+
+            // Simulate a later daemon poll or wallet replacement. A request
+            // identity remains charged, and its native PSBT can no longer open.
+            let before = service.daemon.get_info().await.unwrap().change_index;
+            {
+                let mut drafts = service.drafts.lock().await;
+                let snapshot = drafts
+                    .get_mut(&input().request_id)
+                    .unwrap()
+                    .chain
+                    .as_mut()
+                    .unwrap();
+                snapshot.wallet_created_at = snapshot.wallet_created_at.wrapping_add(1);
+            }
+            let get = wire::Request::Transaction(DraftInput {
+                wallet_id: "wallet".into(),
+                draft_id: first.draft_id.clone(),
+            });
+            let wire::Response::Transaction(stale_summary) = service.read(get).await.unwrap()
+            else {
+                panic!("expected stale summary")
+            };
+            assert_eq!(stale_summary.status, STALE_STATUS);
+            assert!(matches!(
+                service.review_status(&first.draft_id),
+                ReviewStatus::Stale
+            ));
+            assert!(service.native_checked(&first.draft_id).await.is_none());
+            assert!(service.native(&first.draft_id).is_none());
+            assert_eq!(prepared(&service, input()).await, stale_summary);
+            assert_eq!(
+                service.daemon.get_info().await.unwrap().change_index,
+                before
+            );
+            let serialized = serde_json::to_string(&stale_summary).unwrap();
+            assert!(!serialized.contains("psbt"));
+            assert!(!serialized.contains("outpoint"));
+            assert!(!serialized.contains("change_address"));
+            let mut fresh = input();
+            fresh.request_id = "payment-2".into();
+            let replacement = prepared(&service, fresh).await;
+            assert_ne!(replacement.draft_id, first.draft_id);
+            assert_eq!(replacement.status, "unsigned_ready_for_native_review");
+            cleanup(root, service).await;
+        });
+    }
+    #[test]
+    fn mcp_transaction_noop_poll_keeps_prepared_draft_reviewable() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let (root, service) = fixture().await;
+            let first = prepared(&service, input()).await;
+            let before = service.daemon.get_info().await.unwrap();
+            let tip = service.daemon.chain_tip_hash().await.unwrap();
+            // The fixture uses a real poller but normally sleeps for an hour.
+            // Wake it after the whole-second timestamp can advance.
+            tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+            service.daemon.request_sync().await.unwrap();
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+            let after = loop {
+                let info = service.daemon.get_info().await.unwrap();
+                if info.last_poll_timestamp != before.last_poll_timestamp && service.ready(&info) {
+                    break info;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "no-op poll did not complete"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            };
+            assert_eq!(after.block_height, before.block_height);
+            assert_eq!(service.daemon.chain_tip_hash().await.unwrap(), tip);
+            assert_eq!(prepared(&service, input()).await, first);
+            let get = wire::Request::Transaction(DraftInput {
+                wallet_id: "wallet".into(),
+                draft_id: first.draft_id.clone(),
+            });
+            assert!(
+                matches!(service.read(get).await, Ok(wire::Response::Transaction(v)) if v == first)
+            );
+            assert!(service.native_checked(&first.draft_id).await.is_some());
+            assert!(matches!(
+                service.review_status(&first.draft_id),
+                ReviewStatus::Ready
+            ));
+            assert_eq!(
+                service.daemon.get_info().await.unwrap().change_index,
+                after.change_index
+            );
+            cleanup(root, service).await;
+        });
+    }
+    #[test]
+    fn mcp_transaction_missing_input_is_stale_before_native_review() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let (root, service) = fixture().await;
+            let summary = prepared(&service, input()).await;
+            let outpoint = service.native(&summary.draft_id).unwrap().coins[0].outpoint;
+            coincubed::mcp_test_fixture::remove_coin(&root, outpoint);
+            assert!(service.native_checked(&summary.draft_id).await.is_none());
+            let get = wire::Request::Transaction(DraftInput {
+                wallet_id: "wallet".into(),
+                draft_id: summary.draft_id.clone(),
+            });
+            let wire::Response::Transaction(status) = service.read(get).await.unwrap() else {
+                panic!("expected transaction summary")
+            };
+            assert_eq!(status.status, STALE_STATUS);
+            assert!(matches!(
+                service.review_status(&summary.draft_id),
+                ReviewStatus::Stale
+            ));
+            assert_eq!(prepared(&service, input()).await, status);
+            cleanup(root, service).await;
+        });
+    }
+    #[test]
+    fn mcp_transaction_same_height_reorg_invalidates_draft() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let (root, service) = fixture().await;
+            let summary = prepared(&service, input()).await;
+            let before = service.daemon.get_info().await.unwrap();
+            let hash_before = service.daemon.chain_tip_hash().await.unwrap();
+            coincubed::mcp_test_fixture::replace_tip_hash_same_height(&root);
+            let after = service.daemon.get_info().await.unwrap();
+            assert_eq!(after.block_height, before.block_height);
+            assert_eq!(after.last_poll_timestamp, before.last_poll_timestamp);
+            assert_ne!(service.daemon.chain_tip_hash().await.unwrap(), hash_before);
+            assert!(service.native_checked(&summary.draft_id).await.is_none());
+            let get = wire::Request::Transaction(DraftInput {
+                wallet_id: "wallet".into(),
+                draft_id: summary.draft_id.clone(),
+            });
+            assert!(matches!(service.read(get).await, Ok(wire::Response::Transaction(v)) if v.status == STALE_STATUS));
+            cleanup(root, service).await;
         });
     }
     #[test]
