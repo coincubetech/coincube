@@ -16,8 +16,11 @@
 //! Either way one side is enough: once the split has depth, neither copy can
 //! be replayed onto the other chain. The transaction is handed to the Vault's
 //! normal PSBT screen for signing and broadcast, and recorded in a small
-//! journal ([`journal`]) from which the Chains column derives *Splitting*,
-//! the split outputs' proofs, and the twin Cube's separated coins.
+//! journal ([`journal`]) from which the Chains column derives *Splitting*
+//! and the split outputs' proofs. The twin Cube's journal only nominates its
+//! splits: a coin counts as separated by one only once Connect shows that
+//! split [`SPLIT_CONFIRMATIONS`] deep on the twin chain now
+//! ([`twin_confirmed`]).
 
 pub mod journal;
 
@@ -41,7 +44,10 @@ use crate::{
         model::{Coin, CreateSpendResult},
         Daemon,
     },
-    services::chain_status::{ProofEntry, SPLIT_CONFIRMATIONS},
+    services::{
+        chain_status::{ProofEntry, SPLIT_CONFIRMATIONS},
+        claim_observation::{ObservationSource, TransactionObservation},
+    },
 };
 
 /// How the split is made rejectable on the twin chain.
@@ -70,8 +76,9 @@ pub struct SplitRecord {
     pub key_path: Option<String>,
     /// Unix seconds.
     pub created_at: u64,
-    /// The most confirmations this Cube has seen the split reach. The twin
-    /// Cube reads it; it only ever grows while the split is seen confirmed.
+    /// The split's confirmations when this Cube last looked: 0 while it is
+    /// unconfirmed or after a reorg drops it. Display state only; the twin
+    /// Cube never trusts it (see [`twin_confirmed`]).
     #[serde(default)]
     pub confirmations: u32,
 }
@@ -102,7 +109,7 @@ pub struct Derived {
     pub proofs: Vec<(OutPoint, ProofEntry)>,
     /// Outputs of confirmed signature splits: one-chain by their signatures.
     pub signed_outputs: HashSet<OutPoint>,
-    /// Whether any record changed (confirmations grew or it was pruned).
+    /// Whether any record changed (its confirmations moved or it was pruned).
     pub changed: bool,
 }
 
@@ -130,20 +137,21 @@ pub fn derive(
             .iter()
             .filter(|coin| coin.outpoint.txid == record.txid)
             .collect();
-        let Some(height) = outputs.iter().find_map(|coin| coin.block_height) else {
+        let confirmations = match outputs.iter().find_map(|coin| coin.block_height) {
+            Some(height) if height >= 0 && height <= tip => (tip - height + 1) as u32,
+            _ => 0,
+        };
+        // Follow the chain both ways: a reorg that drops the split takes its
+        // confirmations with it.
+        if confirmations != record.confirmations {
+            record.confirmations = confirmations;
+            derived.changed = true;
+        }
+        if confirmations == 0 {
             for coin in &outputs {
                 derived.splitting.insert(coin.outpoint, 0);
             }
             continue;
-        };
-        let confirmations = if height >= 0 && height <= tip {
-            (tip - height + 1) as u32
-        } else {
-            0
-        };
-        if confirmations > record.confirmations {
-            record.confirmations = confirmations;
-            derived.changed = true;
         }
         if confirmations < SPLIT_CONFIRMATIONS {
             for coin in &outputs {
@@ -199,14 +207,103 @@ pub fn extended_path(
     RetainedPath::new(output, links).ok()
 }
 
+/// At most this many of the twin Cube's splits are looked up per pass, newest
+/// first.
+pub const MAX_TWIN_LOOKUPS: usize = 8;
+
+/// The twin Cube's splits worth asking Connect about, newest first. Its own
+/// confirmation count is not consulted: it may be stale by any amount.
+pub fn twin_candidates(twin_records: &[SplitRecord]) -> Vec<Txid> {
+    let mut records: Vec<&SplitRecord> = twin_records.iter().collect();
+    records.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    records
+        .into_iter()
+        .map(|record| record.txid)
+        .take(MAX_TWIN_LOOKUPS)
+        .collect()
+}
+
 /// Coins of this Cube whose twin copy a split on the twin Cube has separated:
-/// the inputs of the twin's splits that reached [`SPLIT_CONFIRMATIONS`].
-pub fn twin_separated(twin_records: &[SplitRecord]) -> HashSet<OutPoint> {
+/// the inputs of the twin's splits that Connect showed
+/// [`SPLIT_CONFIRMATIONS`] deep on the twin chain in this pass (`confirmed`).
+pub fn twin_separated(
+    twin_records: &[SplitRecord],
+    confirmed: &HashSet<Txid>,
+) -> HashSet<OutPoint> {
     twin_records
         .iter()
-        .filter(|record| record.confirmations >= SPLIT_CONFIRMATIONS)
+        .filter(|record| confirmed.contains(&record.txid))
         .flat_map(|record| record.inputs.iter().copied())
         .collect()
+}
+
+/// How deep `chain`'s best chain holds `txid` now, from fresh reads: the tip,
+/// the transaction's block, and the hash at that height, which must be the
+/// same block. `None` when it is unconfirmed, absent, off the best chain or
+/// any read fails; never a guess.
+pub async fn depth_on(source: &dyn ObservationSource, chain: ChainId, txid: Txid) -> Option<u32> {
+    let tip = source
+        .tip(chain)
+        .await
+        .ok()
+        .filter(|read| read.chain() == chain)?;
+    let found = source
+        .transaction(chain, txid)
+        .await
+        .ok()
+        .filter(|read| read.chain() == chain)?;
+    let TransactionObservation::Confirmed { txid: seen, block } = *found.value() else {
+        return None;
+    };
+    if seen != txid || block.height > tip.value().height {
+        return None;
+    }
+    let at = source
+        .hash_at_height(chain, block.height)
+        .await
+        .ok()
+        .filter(|read| read.chain() == chain)?;
+    if *at.value() != block.hash {
+        return None;
+    }
+    std::convert::TryFrom::try_from(tip.value().height - block.height + 1).ok()
+}
+
+/// Which of the twin Cube's splits (`txids`) Connect shows at least
+/// [`SPLIT_CONFIRMATIONS`] deep on the twin of `here` now.
+pub async fn twin_confirmed(
+    client: crate::services::coincube::CoincubeClient,
+    here: ChainId,
+    txids: Vec<Txid>,
+    generation: u64,
+    live: tokio::sync::watch::Receiver<u64>,
+) -> HashSet<Txid> {
+    use crate::services::claim_observation::{http::HttpObservationSource, CollectionContext};
+
+    let Some(twin) = crate::services::entangled::twin_chain(here) else {
+        return HashSet::new();
+    };
+    let Ok(source) = HttpObservationSource::new(
+        client,
+        ChainId::Bitcoin,
+        ChainId::BitcoinBlake2b,
+        CollectionContext {
+            expected_generation: generation,
+            generation: live,
+        },
+    ) else {
+        return HashSet::new();
+    };
+    let mut confirmed = HashSet::new();
+    for txid in txids {
+        if depth_on(&source, twin, txid)
+            .await
+            .is_some_and(|depth| depth >= SPLIT_CONFIRMATIONS)
+        {
+            confirmed.insert(txid);
+        }
+    }
+    confirmed
 }
 
 /// Build the split, store it with the daemon, and return it for the PSBT
@@ -549,15 +646,181 @@ mod tests {
     }
 
     #[test]
-    fn twin_coins_separate_only_after_six_confirmations() {
+    fn a_reorg_takes_the_confirmations_back() {
+        let (record, split) = split_fixture();
+        let output = OutPoint::new(record.txid, 0);
+        let transactions: HashMap<_, _> = [(record.txid, split)].into();
+        let mut records = vec![record];
+        derive(
+            &mut records,
+            &[coin(output, Some(100))],
+            107,
+            &transactions,
+            UNIX_EPOCH,
+        );
+        assert_eq!(records[0].confirmations, 8);
+        // The block is gone: the output is unconfirmed again.
+        let derived = derive(
+            &mut records,
+            &[coin(output, None)],
+            107,
+            &transactions,
+            UNIX_EPOCH,
+        );
+        assert_eq!(records[0].confirmations, 0);
+        assert!(derived.changed);
+        assert_eq!(derived.splitting.get(&output), Some(&0));
+        assert!(derived.proofs.is_empty());
+        // Or the transaction left the wallet entirely.
+        records[0].confirmations = 8;
+        assert!(derive(&mut records, &[], 107, &transactions, UNIX_EPOCH).changed);
+        assert_eq!(records[0].confirmations, 0);
+    }
+
+    #[test]
+    fn twin_coins_separate_only_on_a_fresh_confirmation_not_the_stored_count() {
         let (mut record, _) = split_fixture();
-        record.confirmations = 5;
-        assert!(twin_separated(&[record.clone()]).is_empty());
-        record.confirmations = 6;
+        record.confirmations = 100;
+        assert!(
+            twin_separated(&[record.clone()], &HashSet::new()).is_empty(),
+            "the twin journal's count is never trusted"
+        );
+        record.confirmations = 0;
         assert_eq!(
-            twin_separated(&[record.clone()]),
+            twin_separated(&[record.clone()], &vec![record.txid].into_iter().collect()),
             record.inputs.iter().copied().collect()
         );
+    }
+
+    #[test]
+    fn twin_candidates_are_the_newest_records_capped() {
+        let (record, _) = split_fixture();
+        let records: Vec<SplitRecord> = (0..(MAX_TWIN_LOOKUPS as u8 + 2))
+            .map(|n| SplitRecord {
+                txid: Txid::from_str(&format!("{:02x}", n).repeat(32)).unwrap(),
+                created_at: u64::from(n),
+                ..record.clone()
+            })
+            .collect();
+        let candidates = twin_candidates(&records);
+        assert_eq!(candidates.len(), MAX_TWIN_LOOKUPS);
+        assert_eq!(candidates[0], records.last().unwrap().txid);
+    }
+
+    mod depth {
+        use super::super::*;
+        use crate::services::claim_observation::{FailureKind, FreshRead};
+        use coincube_core::claim::BlockRef;
+        use coincube_core::miniscript::bitcoin::{hashes::Hash, BlockHash};
+        use reqwest::header::{HeaderMap, CACHE_CONTROL};
+
+        fn fresh<T>(chain: ChainId, value: T) -> FreshRead<T> {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-cache", "BYPASS".parse().unwrap());
+            headers.insert(CACHE_CONTROL, "private, no-store".parse().unwrap());
+            FreshRead::from_response(chain, value, 1, &headers).unwrap()
+        }
+
+        struct Source {
+            tip: u64,
+            tx: TransactionObservation,
+            at_height: BlockHash,
+        }
+
+        #[async_trait::async_trait]
+        impl ObservationSource for Source {
+            fn now(&self) -> i64 {
+                1
+            }
+            async fn anchor(
+                &self,
+                _: ChainId,
+            ) -> Result<crate::services::coincube::network_anchor::NetworkAnchorStatus, FailureKind>
+            {
+                Err(FailureKind::Unavailable)
+            }
+            async fn tip(&self, chain: ChainId) -> Result<FreshRead<BlockRef>, FailureKind> {
+                Ok(fresh(
+                    chain,
+                    BlockRef {
+                        height: self.tip,
+                        hash: BlockHash::from_byte_array([9; 32]),
+                    },
+                ))
+            }
+            async fn transaction(
+                &self,
+                chain: ChainId,
+                _: Txid,
+            ) -> Result<FreshRead<TransactionObservation>, FailureKind> {
+                Ok(fresh(chain, self.tx))
+            }
+            async fn hash_at_height(
+                &self,
+                chain: ChainId,
+                _: u64,
+            ) -> Result<FreshRead<BlockHash>, FailureKind> {
+                Ok(fresh(chain, self.at_height))
+            }
+        }
+
+        fn txid() -> Txid {
+            Txid::from_byte_array([4; 32])
+        }
+
+        fn confirmed_at(height: u64) -> TransactionObservation {
+            TransactionObservation::Confirmed {
+                txid: txid(),
+                block: BlockRef {
+                    height,
+                    hash: BlockHash::from_byte_array([1; 32]),
+                },
+            }
+        }
+
+        #[tokio::test]
+        async fn depth_counts_from_the_fresh_tip() {
+            let source = Source {
+                tip: 105,
+                tx: confirmed_at(100),
+                at_height: BlockHash::from_byte_array([1; 32]),
+            };
+            assert_eq!(
+                depth_on(&source, ChainId::BitcoinBlake2b, txid()).await,
+                Some(6)
+            );
+        }
+
+        #[tokio::test]
+        async fn a_block_off_the_best_chain_has_no_depth() {
+            let source = Source {
+                tip: 105,
+                tx: confirmed_at(100),
+                at_height: BlockHash::from_byte_array([2; 32]),
+            };
+            assert_eq!(
+                depth_on(&source, ChainId::BitcoinBlake2b, txid()).await,
+                None
+            );
+        }
+
+        #[tokio::test]
+        async fn unconfirmed_or_absent_has_no_depth() {
+            for tx in vec![
+                TransactionObservation::Absent,
+                TransactionObservation::Unconfirmed { txid: txid() },
+            ] {
+                let source = Source {
+                    tip: 105,
+                    tx,
+                    at_height: BlockHash::from_byte_array([1; 32]),
+                };
+                assert_eq!(
+                    depth_on(&source, ChainId::BitcoinBlake2b, txid()).await,
+                    None
+                );
+            }
+        }
     }
 
     #[test]
