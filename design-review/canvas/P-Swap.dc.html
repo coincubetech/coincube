@@ -1,0 +1,466 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Swap BTC ⇄ USDB · Spark</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--acc-ink:#f59a45;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff;--hover:rgba(245,240,232,.06);--on-accent:#1a1208;--b2b:#d4a62a}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--acc-ink:#a14d00;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8;--hover:rgba(32,32,32,.05);--b2b:#8a6a10}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+.tenshu *{box-sizing:border-box}
+.tenshu{font-variant-numeric:tabular-nums}
+.tenshu button,.tenshu input{font:inherit;color:inherit}
+.tenshu h1,.tenshu h2,.tenshu h3,.tenshu p,.tenshu ol,.tenshu ul,.tenshu dl,.tenshu dd,.tenshu fieldset{margin:0}
+.tenshu ol,.tenshu ul{padding:0;list-style:none}
+.tenshu fieldset{border:0;padding:0;min-width:0}
+.tenshu a{color:var(--acc-ink)}
+.ic{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.ic.s{width:16px;height:16px}
+.muted{color:var(--muted)}.cap{font-size:12px;color:var(--muted)}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.ok{color:var(--good)}.warn{color:var(--warn)}.bad{color:var(--bad)}.unk{color:var(--muted)}
+/* top bar: single open Cube, no tab list */
+.top{height:56px;flex:none;display:flex;align-items:center;gap:12px;padding:0 16px;background:var(--panel);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px}
+.vsep{width:1px;height:24px;background:var(--line);flex:none}
+.cid{display:flex;align-items:center;gap:6px;min-width:0;white-space:nowrap}
+.cid b{font-weight:600}
+.net{display:inline-flex;align-items:center;gap:5px;font-size:13px;color:var(--muted);white-space:nowrap}
+.net>img,.mk>img{display:block;width:16px;height:16px;flex:none;border-radius:50%}
+.tbtn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font-size:13px;font-weight:500;color:var(--ink);text-decoration:none;white-space:nowrap}
+.tenshu a.tbtn{color:var(--ink)}
+.tbtn:hover{background:var(--hover)}
+.lockgrp{display:flex;align-items:center;gap:8px}
+.chips{margin-left:auto;display:flex;gap:8px;align-items:center;flex:none}
+.chip{display:flex;align-items:center;gap:8px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:8px;font-size:13px;white-space:nowrap}
+.chip .k{color:var(--muted)}
+.st{display:inline-flex;align-items:center;gap:5px;font-weight:500}
+.eye{width:32px;height:32px;display:grid;place-items:center;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}
+.eye:hover{background:var(--hover);color:var(--ink)}
+/* shell (V2) */
+.body{flex:1;display:flex;min-height:0}
+.side{width:248px;flex:none;display:flex;flex-direction:column;background:var(--rail);border-right:1px solid var(--line)}
+.navp{padding:12px 10px 0;display:flex;flex-direction:column;gap:2px}
+.mid{flex:1;min-height:0;overflow:auto;padding:0 10px 12px;display:flex;flex-direction:column;gap:2px}
+.gh{font-size:13px;font-weight:600;color:var(--muted);padding:22px 10px 6px}
+.ni{display:flex;align-items:center;gap:10px;width:100%;min-height:38px;padding:8px 10px;border:0;border-radius:8px;background:transparent;cursor:pointer;text-align:left;font-size:14px;line-height:1.3;text-decoration:none}
+.tenshu a.ni{color:var(--ink)}
+.ni .ic{color:var(--muted)}
+.ni:hover{background:var(--hover)}
+.ni.on{background:var(--selected);font-weight:600}
+.ni.on .ic{color:var(--acc-ink)}
+.ni{justify-content:flex-start}
+.ni>span{flex:1 1 auto;min-width:0;text-align:left}
+.attn{display:flex;align-items:center;gap:6px;margin:0 6px 8px;padding:9px 8px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-size:12.5px;line-height:1.3;text-decoration:none}
+.tenshu a.attn{color:var(--ink)}
+.attn .go{margin-left:auto;color:var(--acc-ink);font-weight:600}
+.foot{border-top:1px solid var(--line);padding:10px}
+.main{flex:1;min-width:0;overflow:auto}
+.pg{max-width:820px;margin:0 auto;padding:28px 48px 48px}
+/* flow */
+.back{display:inline-flex;align-items:center;gap:4px;font-size:13px;font-weight:500;text-decoration:none}
+.ph{font-size:22px;font-weight:600;line-height:1.25;margin-top:10px}
+.idl{color:var(--muted);font-size:13px;margin-top:4px;display:flex;align-items:center;gap:6px}
+.idl>img{width:16px;height:16px;display:block}
+.stepper{display:flex;gap:4px;margin-top:24px;padding-bottom:16px;border-bottom:1px solid var(--line)}
+.stepper li{display:flex;align-items:center;gap:8px;flex:1;min-width:0;font-size:13px;color:var(--muted)}
+.stepper .n{width:22px;height:22px;flex:none;display:grid;place-items:center;border-radius:50%;border:1px solid var(--line);font-size:12px;font-weight:600}
+.stepper li.cur{color:var(--ink);font-weight:600}
+.stepper li.cur .n{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.stepper li.done .n{color:var(--good);border-color:var(--good)}
+.ctx{display:flex;align-items:center;gap:8px;margin-top:16px;font-size:13px}
+.form{margin-top:16px;border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:24px}
+.form h2{font-size:18px;font-weight:600;line-height:1.3}
+.form .lede{color:var(--muted);font-size:13px;margin-top:4px;max-width:60ch}
+.grp{margin-top:20px}
+.grp+.grp{margin-top:24px;padding-top:20px;border-top:1px solid var(--line)}
+.lg{font-size:14px;font-weight:600;margin-bottom:8px}
+.opt{display:grid;grid-template-columns:20px 18px minmax(0,1fr) auto;align-items:center;column-gap:12px;min-height:52px;padding:8px 12px;border-radius:8px;cursor:pointer}
+.opt:hover{background:var(--hover)}
+.opt.on{background:var(--selected)}
+.opt.off{cursor:default}.opt.off:hover{background:transparent}
+.opt input{margin:0;width:16px;height:16px;accent-color:var(--accent)}
+.opt .nm{font-weight:500;overflow-wrap:anywhere}
+.opt .sub{display:block;font-size:13px;color:var(--muted);margin-top:1px}
+.opt .bal{font-size:13px;text-align:right;white-space:nowrap}
+.opt .ic{color:var(--muted)}
+.opt.cube{grid-template-columns:20px 22px minmax(0,1fr) auto}
+.mk{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%}
+.mk.tn{border:1px dashed var(--muted);padding:2px}.mk.tn>img{opacity:.6}
+.tag{display:inline-flex;align-items:center;height:18px;padding:0 6px;margin-left:6px;border-radius:4px;border:1px solid var(--muted);font-size:12px;font-weight:500;color:var(--ink);vertical-align:1px}
+.tag.b2b{border-color:var(--b2b)}.tag.test{border-style:dashed}
+.why{display:flex;align-items:flex-start;gap:6px;font-size:13px;color:var(--muted);margin-top:2px}
+.why .ic{margin-top:2px}
+.alt{display:flex;align-items:center;gap:10px;width:100%;margin-top:24px;padding:14px 12px;border:0;border-top:1px solid var(--line);background:none;cursor:pointer;text-align:left;color:var(--ink);border-radius:0}
+.alt:hover{background:var(--hover)}
+.alt .tx{flex:1}
+.sgn li{display:grid;grid-template-columns:18px minmax(0,1fr) auto;column-gap:10px;align-items:center;min-height:44px;border-bottom:1px solid var(--line)}
+.sgn li .ic{color:var(--muted)}
+.mono{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:13px;color:var(--muted)}
+.txt{height:40px;width:360px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+.txt:focus{border-color:var(--focus)}
+.netfix{display:flex;align-items:center;gap:8px;min-height:40px}
+.next li{padding:8px 0;border-bottom:1px solid var(--line);font-size:13px}
+.next b{font-weight:600}.alt .ds{display:block;font-size:13px;color:var(--muted)}
+.acts{display:flex;align-items:center;gap:10px;margin-top:24px}
+.acts .sp{flex:1}
+.btn{display:inline-flex;align-items:center;gap:6px;height:36px;padding:0 16px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font-weight:500;font-size:14px;color:var(--ink);white-space:nowrap;text-decoration:none}
+.tenshu a.btn{color:var(--ink)}
+.btn:hover{background:var(--hover)}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.tenshu a.btn.pri{color:var(--on-accent)}
+.btn.pri:hover{background:#ff9a3f}
+.btn[disabled]{cursor:not-allowed;background:transparent;border-color:var(--line);color:var(--muted)}
+.lbtn{border:0;background:none;padding:2px;color:var(--acc-ink);font-weight:500;cursor:pointer;border-radius:4px;font-size:13px}
+.fld{display:flex;flex-direction:column;gap:6px;margin-top:20px}
+.fld label{font-weight:600}
+.pin{height:44px;width:240px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);font-size:18px;letter-spacing:.25em}
+.pin:focus,.amt:focus{border-color:var(--focus)}
+.help{font-size:13px;color:var(--muted)}
+.unlockp{margin-top:20px;padding-top:20px;border-top:1px solid var(--line)}
+.checks{margin-top:16px;border-top:1px solid var(--line)}
+.checks li{display:flex;align-items:center;gap:10px;min-height:44px;border-bottom:1px solid var(--line)}
+.checks .tx{flex:1}.checks .sv{font-size:13px;color:var(--muted)}
+.amtrow{display:flex;align-items:center;gap:10px}
+.amt{height:44px;width:260px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);font-size:18px;font-weight:500;text-align:right}
+.amt[aria-invalid="true"]{border-color:var(--bad)}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;padding:2px}
+.seg button{height:36px;padding:0 12px;border:0;border-radius:6px;background:transparent;cursor:pointer;font-size:13px;font-weight:500;color:var(--muted)}
+.seg button[aria-pressed="true"]{background:var(--selected);color:var(--ink);font-weight:600}
+.err{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--bad);font-weight:500}
+.dl{margin-top:16px;border-top:1px solid var(--line)}
+.dl>div{display:grid;grid-template-columns:180px minmax(0,1fr);column-gap:16px;padding:12px 0;border-bottom:1px solid var(--line)}
+.dl dt{color:var(--muted)}
+.dl dd{overflow-wrap:anywhere}
+.dl .tot dd,.dl .tot dt{font-weight:600;color:var(--ink)}
+.note{display:flex;align-items:flex-start;gap:8px;margin-top:16px;font-size:13px;color:var(--muted)}
+.note .ic{margin-top:1px}
+.donehd{display:flex;align-items:center;gap:10px}
+.donehd .ic{width:28px;height:28px;color:var(--good)}
+.req li{display:flex;gap:10px;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--line)}
+.req li:first-child{border-top:1px solid var(--line)}
+.req .ic{margin-top:2px;color:var(--muted)}
+.val{display:inline-flex;align-items:center;gap:6px;margin-top:16px;font-size:13px;font-weight:500;color:var(--warn)}
+.synth{margin-top:20px;text-align:center}
+.lockask{display:flex;align-items:center;gap:8px;font-size:13px;white-space:nowrap}
+.tbtn.pri{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.tenshu a.tbtn.pri{color:var(--on-accent)}
+.tbtn.pri:hover{background:#ff9a3f}
+.acts.top0{align-items:flex-start}
+.secact{display:flex;flex-direction:column;gap:6px;max-width:46ch}
+.pin[aria-invalid="true"]{border-color:var(--bad)}
+.dl .sgn li:last-child{border-bottom:0}
+
+/* prototype links */
+.tenshu a.chip{color:var(--ink);text-decoration:none}.tenshu a.chip:hover{background:var(--hover,var(--selected))}.tenshu a.ni,.tenshu a.row{color:var(--ink);text-decoration:none}.tenshu a.pill,.tenshu a.rlink,.tenshu a.attn{text-decoration:none}.tenshu span.mini{display:inline-flex;align-items:center}
+.av{display:inline-grid;place-items:center;width:32px;height:32px;border-radius:50%;background:var(--panel);color:var(--ink);flex:none}
+.av svg{width:24px;height:24px}
+.cubeid{display:flex;align-items:center;gap:10px;padding:6px 10px 12px;margin-bottom:4px;border-bottom:1px solid var(--line)}
+.cubeid .av{width:36px;height:36px}
+.cubeidt{display:flex;flex-direction:column;min-width:0}
+.cubeidt b{font-weight:600;font-size:14px;line-height:1.3}
+.cubeidt span{font-size:12px;color:var(--muted)}
+.tenshu .side{position:relative}
+.side .cubeid{display:flex;align-items:center;gap:10px;width:100%;padding:6px 8px 10px;margin:0 0 4px;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.side .cubeid:hover{background:var(--hover)}
+.side .cubeidt{flex:1;min-width:0}
+.side .cubeidt .net{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);white-space:nowrap}
+.side .cubeidt .net img{width:14px;height:14px;border-radius:50%}
+.side .cv{color:var(--muted)}
+.side .menu{position:absolute;top:69px;left:4px;right:8px;width:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 32px var(--shadow,rgba(0,0,0,.35));padding:6px;z-index:30}
+.side .menu .ml{font-size:12px;color:var(--muted);padding:8px 10px 4px}
+.side .mi{display:flex;align-items:center;gap:10px;width:100%;padding:9px 10px;border:0;border-radius:6px;background:transparent;cursor:pointer;text-align:left;text-decoration:none;color:var(--ink);font:inherit}
+.side a.mi{color:var(--ink)}.side .mi:hover{background:var(--hover)}.side .mi.on{background:var(--selected)}
+.side .mi .grow{flex:1;min-width:0}
+.side .menu hr{border:0;border-top:1px solid var(--line);margin:6px 0}
+.side .lockq,.side .lockask{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 10px;font-size:13px;white-space:normal;position:static}
+.side .lockq p,.side .lockask>span{margin:0;flex:1 1 100%}
+.side .lockgrp{display:contents}
+a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color:var(--acc-ink)}
+/* page shell (Robert, 2026-10-27): every Cube page starts one gutter from the side menu; only its right edge varies. Reading pages cap at --page-max; Activity is wide. */
+.tenshu{--gutter:clamp(24px,3vw,48px);--page-max:1120px}
+.main .pg{margin:0;max-width:calc(var(--page-max) + 2 * var(--gutter));padding:28px var(--gutter) 48px}
+/* page head (Robert, 2026-10-29): every Cube page pins its head as Activity does: title and Cube line left, page actions right, tabs sitting on a rule that spans the content pane; the page scrolls under it. */
+.main>.phead{position:sticky;top:0;z-index:6;flex:none;background:var(--bg);border-bottom:1px solid var(--line)}
+.phead>.in{max-width:calc(var(--page-max) + 2 * var(--gutter));padding:24px var(--gutter) 20px}
+.phead h1,.phead .ph{margin-top:0;font-size:22px;font-weight:600;line-height:1.25}
+.phead .back{margin-bottom:8px}.phead a.back{text-decoration:none}
+.phead .crumbs{margin-bottom:8px}.phead .crumbs .back{margin-bottom:0}
+.phead .hrow{display:flex;align-items:flex-end;justify-content:space-between;gap:16px}
+.phead .hrow>div:first-child{min-width:0}
+.phead .hact{display:flex;align-items:center;gap:8px;flex:none}
+.phead .tabs,.phead .subnav{border-bottom:0;margin-bottom:-20px}
+.phead .hd,.phead .ttl{margin:0}
+.main .pg{padding-top:24px}
+/* App preferences (Robert, 2026-10-29): a sliders icon button at the right end of the top bar (the gear stays with Cube Settings), styled like the eye, with an "App preferences" tooltip on hover or focus. */
+.tenshu .top{position:relative;z-index:8}
+.tenshu a.apg{position:relative;text-decoration:none;color:var(--muted)}.tenshu a.apg:hover{color:var(--ink)}
+.apg::after{content:attr(data-tip);position:absolute;top:calc(100% + 8px);right:0;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--muted);font-size:13px;font-weight:400;line-height:1.3;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .12s ease .25s}
+.apg:hover::after,.apg:focus-visible::after{opacity:1}
+/* shared top bar (Robert, 2026-10-29): the same bar on every screen, Launcher and Cube: 64px on the rail colour; on the right the hide-balances eye first, then the status chips, then App preferences; the eye and App preferences are borderless icons. */
+.tenshu .top{height:64px;padding:0 24px;gap:16px;background:var(--rail)}
+.top .brand .ic{width:20px;height:20px}
+.top .chips .eye:not(.apg){order:-1}
+.top .chips .eye{width:32px;height:32px;border:0;background:transparent}
+.top .chips .eye:hover{background:var(--hover);color:var(--ink)}
+/* sub-page head (Robert, 2026-10-29, from the page-header study): Back is the last action on the right of the head; steps sit on the rule. */
+.phead .hact .back{display:inline-flex;align-items:center;gap:6px;height:36px;margin:0;padding:0 12px 0 8px;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--ink);font-size:13px;font-weight:500;line-height:1;text-decoration:none;white-space:nowrap}
+.phead .hact .back:hover{background:var(--hover)}.phead .hact .back .ic{color:var(--muted)}
+.phead .hsteps{display:flex;gap:4px;margin:16px 0 -20px;padding:0;list-style:none}
+.phead .hsteps li{display:inline-flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:2px solid transparent;color:var(--muted);font-size:14px}
+.phead .hsteps .n{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;border:1px solid var(--line);font-size:12px;font-weight:600}
+.phead .hsteps li.cur{color:var(--ink);font-weight:600;border-bottom-color:var(--accent)}
+.phead .hsteps li.cur .n{background:var(--accent);border-color:var(--accent);color:var(--on-accent,#1a1208)}
+.phead .hsteps li.done .n{border-color:var(--good);color:var(--good)}
+/* Swap BTC ⇄ USDB (Robert, 2026-10-29): built from the page-header study boards H-Convert and H-Convert-Review. */
+.swp .lay{display:grid;grid-template-columns:minmax(0,1fr) 260px;gap:32px;align-items:start}
+.swp .form{border:1px solid var(--line);border-radius:16px;background:var(--panel)}
+.swp .fs{padding:20px 24px;border-top:1px solid var(--line)}
+.swp .fs:first-child{border-top:0}
+.swp .pair{display:grid;grid-template-columns:minmax(0,1fr) 36px minmax(0,1fr);gap:16px;align-items:center}
+.swp .blk{padding:14px 16px;border:1px solid var(--line);border-radius:12px;background:var(--bg)}
+.swp .k{font-size:13px;color:var(--muted)}
+.swp .asset{display:flex;align-items:center;gap:10px;margin-top:8px;font-weight:600;font-size:16px}
+.swp .blk .bal{display:block;margin-top:6px;font-size:13px;color:var(--muted)}
+.swp .coinw{position:relative;width:32px;height:32px;flex:none}
+.swp .coin{display:block;width:32px;height:32px;border-radius:50%;overflow:hidden}
+.swp .coin>img{width:100%;height:100%;display:block;border-radius:50%}
+.swp .bdg{position:absolute;right:-4px;bottom:-4px;width:16px;height:16px;border-radius:50%;display:grid;place-items:center;border:2px solid var(--bg)}
+.swp .bdg svg{width:10px;height:10px;fill:none;stroke:currentColor;stroke-width:2.25;stroke-linecap:round;stroke-linejoin:round}
+.swp .bdg.spark{background:#111;color:#fff}
+.swp .flip{width:36px;height:36px;display:grid;place-items:center;border:1px solid var(--line);border-radius:50%;background:var(--bg);color:var(--ink);cursor:pointer}.swp .flip:hover{background:var(--hover)}
+.swp .lbl{display:block;font-weight:600;margin-bottom:8px}
+.swp .amtw{position:relative;display:flex;gap:8px}
+.swp .inp{flex:1;min-width:0;height:52px;padding:0 64px 0 14px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink);font:inherit;font-size:18px;font-weight:600}
+.swp .inp[aria-invalid="true"]{border-color:var(--bad,#ffad9b)}
+.swp .amtw .u{position:absolute;right:96px;top:0;height:52px;display:flex;align-items:center;color:var(--muted);font-size:13px;pointer-events:none}
+.swp .amtw .btn{height:52px}
+.swp .hint{margin-top:8px;font-size:13px;color:var(--muted)}
+.swp .err{margin-top:8px;font-size:13px;color:var(--bad,#ffad9b)}
+.swp .kv{display:grid;grid-template-columns:minmax(0,1fr) auto;row-gap:10px;column-gap:24px;margin:0}
+.swp .kv dt{color:var(--muted)}.swp .kv dd{margin:0;text-align:right;font-weight:500}
+.swp .kv .tot{font-weight:600;font-size:16px;color:var(--ink)}
+.swp .kv .sp{padding-top:10px;border-top:1px solid var(--line)}
+.swp .sum{display:grid;grid-template-columns:minmax(0,1fr) 24px minmax(0,1fr);gap:16px;align-items:center}
+.swp .sum .v{font-size:22px;font-weight:600;margin-top:4px}.swp .sum .v .u{font-size:13px;color:var(--muted);font-weight:400;margin-left:4px}.swp .sum .f{font-size:13px;color:var(--muted)}
+.swp .note{display:flex;gap:10px;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:var(--bg);font-size:13px;color:var(--muted)}
+.swp .note .ic{color:var(--warn);margin-top:1px}
+.swp .ff{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.swp .ff .acts{display:flex;gap:8px;margin:0}
+.swp .done-h{display:flex;align-items:center;gap:8px;font-size:18px;font-weight:600}.swp .done-h .ic{color:var(--good)}
+.swp .done-l{margin-top:6px;color:var(--muted)}
+.swp .aside{display:flex;flex-direction:column;gap:20px;padding:0}
+.swp .bx{border-top:1px solid var(--line);padding-top:14px}
+.swp .bx .r{display:flex;justify-content:space-between;gap:12px;font-size:13px;margin-top:8px}.swp .bx .r b{font-weight:600}
+.swp .bx .r .ar{color:var(--muted)}
+.swp .bx p.d{font-size:13px;color:var(--muted);margin-top:6px}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+
+  <header class="top">
+    <a class="brand" href="P-Launcher.dc.html" title="Back to the Launcher"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg>Tenshu</a>
+    <div class="chips">
+      <a class="chip" href="P-Connect-InCube.dc.html">
+        <svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="6.5" r="3"/><path d="M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg>
+        <span>alex@example.test</span><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Signed in</span>
+      </a>
+      <a class="chip" href="P-Settings.dc.html" onClick="{{ toNode }}" title="Cube service · Connected" aria-label="Cube service · Connected. Open Node settings">
+        <svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M7.5 10.5a3 3 0 0 0 4.2 0l2.3-2.3a3 3 0 0 0-4.2-4.2l-.9.9"/><path d="M10.5 7.5a3 3 0 0 0-4.2 0L4 9.8A3 3 0 0 0 8.2 14l.9-.9"/></svg>
+        <span class="k">Cube service</span><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Connected</span>
+      </a>
+      <button type="button" class="eye" aria-pressed="{{ hideP }}" aria-label="Hide balances" onClick="{{ toggleHide }}">
+        <sc-if value="{{ shown }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/></svg></sc-if>
+        <sc-if value="{{ hidden }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/><path d="M3 3l12 12"/></svg></sc-if>
+      </button>
+      <a class="eye apg" href="P-AppPrefs-InCube.dc.html" aria-label="App preferences" data-tip="App preferences"><svg class="ic s" aria-hidden="true" viewBox="0 0 24 24" style="stroke-width:1.75"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg></a>
+    </div>
+  </header>
+
+  <div class="body">
+    <nav class="side" aria-label="Cube navigation">
+        <sc-if value="{{ menuOpen }}" hint-placeholder-val="{{ false }}">
+        <div class="menu">
+        <a class="mi" href="P-Launcher.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"/><rect x="10.5" y="2.5" width="5" height="5" rx="1"/><rect x="2.5" y="10.5" width="5" height="5" rx="1"/><rect x="10.5" y="10.5" width="5" height="5" rx="1"/></svg><span class="grow"><b>All Cubes</b></span></a>
+        <hr>
+        <sc-if value="{{ lock.idle }}" hint-placeholder-val="{{ true }}">
+        <button type="button" class="mi" aria-expanded="false" aria-controls="lock-ask" onClick="{{ lock.ask }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="3.5" y="8" width="11" height="7.5" rx="1.5"/><path d="M6 8V5.75a3 3 0 0 1 6 0V8"/></svg><span class="grow"><b>Lock Cube</b></span></button>
+      </sc-if>
+        <sc-if value="{{ lock.asking }}" hint-placeholder-val="{{ false }}">
+        <div class="lockask" id="lock-ask" role="group" aria-labelledby="lock-q">
+          <span id="lock-q" role="status">Lock Everyday and open the Launcher?</span>
+          <a class="tbtn pri" href="P-Locking.dc.html" onMouseDown="{{ lockNow }}" onClick="{{ lockNow }}">Lock</a>
+          <button type="button" class="tbtn" onClick="{{ lock.cancel }}">Cancel</button>
+        </div>
+      </sc-if>
+        </div>
+        </sc-if>
+      <div class="navp">
+        <button type="button" class="cubeid" aria-haspopup="true" aria-expanded="{{ menuOpen }}" aria-label="Cube menu. Current: Everyday · Bitcoin mainnet" onClick="{{ toggleMenu }}"><span class="av" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="11" fill="currentColor" opacity=".08" stroke="none"></circle><path d="M12 4.2c4.6-.4 7.9 3.1 7.6 7.4-.3 4.6-4.2 8.2-8.6 7.6-4.2-.6-6.9-4.4-6.3-8.5.5-3.3 3-5.9 6.2-6.4"></path></svg></span><span class="cubeidt"><b>Everyday</b><span class="net"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Bitcoin mainnet</span></span><svg class="ic s cv" aria-hidden="true" viewBox="0 0 18 18"><path d="m5 7 4 4 4-4"/></svg></button>
+        <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"/><rect x="10.5" y="2.5" width="5" height="5" rx="1"/><rect x="2.5" y="10.5" width="5" height="5" rx="1"/><rect x="10.5" y="10.5" width="5" height="5" rx="1"/></svg><span>Overview</span></a>
+        <a class="ni" href="P-Activity.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2.5 1.5"/></svg><span>Activity</span></a>
+        <a class="ni" href="P-Settings.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/><path d="m6.5 9 1.8 1.8 3.5-3.5"/></svg><span>Backup &amp; protection</span></a>
+      </div>
+      <div class="mid">
+        <h2 class="gh">Wallets</h2>
+        <a class="ni on" aria-current="page" href="P-Overview.dc.html" onMouseDown="{{ toSpark }}" onClick="{{ toSpark }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path stroke-width="2" d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/></svg><span>Spark · Daily spending</span></a>
+        <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg><span>Vault · Family savings</span></a>
+        <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg><span>Liquid · Travel</span></a>
+      </div>
+      <a class="attn" href="P-Settings.dc.html"><svg class="ic s warn" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5 16 15H2z"/><path d="M9 7.5v3M9 12.75v.01"/></svg><span class="warn" style="font-weight:500">Backup not confirmed</span><span class="go">Review</span></a>
+      <div class="foot">
+        <a class="ni" href="P-Settings.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="2.25"/><circle cx="9" cy="9" r="5"/><path d="M9 2v2M9 14v2M2 9h2M14 9h2M4.05 4.05l1.41 1.41M12.54 12.54l1.41 1.41M4.05 13.95l1.41-1.41M12.54 5.46l1.41-1.41"/></svg><span>Settings</span></a>
+      </div>
+    </nav>
+
+    <main class="main">
+      <div class="phead"><div class="in">
+        <div class="hrow">
+          <div><h1 class="ph">Swap BTC ⇄ USDB</h1><p class="idl"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Spark · Daily spending · Everyday · Bitcoin mainnet</p></div>
+          <div class="hact"><a class="back" href="P-Overview.dc.html" aria-label="Back to Spark · Daily spending" onMouseDown="{{ toSpark }}" onClick="{{ toSpark }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M11 4.5 6.5 9l4.5 4.5"/></svg>Back to Spark</a></div>
+        </div>
+        <ol class="hsteps" aria-label="Swap steps">
+          <sc-for list="{{ steps }}" as="s" hint-placeholder-count="3"><li class="{{ s.cls }}" aria-current="{{ s.cur }}"><span class="n" aria-hidden="true">{{ s.n }}</span>{{ s.label }}<span class="sr">{{ s.sr }}</span></li></sc-for>
+        </ol>
+      </div></div>
+      <div class="pg swp">
+        <div class="lay">
+          <sc-if value="{{ is.details }}" hint-placeholder-val="{{ true }}">
+          <section class="form" aria-label="Swap details">
+            <div class="fs">
+              <div class="pair">
+                <div class="blk"><span class="k">From</span><div class="asset"><span class="coinw"><span class="coin" aria-hidden="true"><img src="{{ d.fromImg }}" alt=""></span><span class="bdg spark"><svg viewBox="0 0 18 18" aria-hidden="true"><path d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/></svg></span></span>{{ d.fromName }}</div><span class="bal">Available {{ d.fromBal }}</span></div>
+                <button type="button" class="flip" aria-label="Swap direction: {{ d.flipLabel }}" onClick="{{ flip }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 6.5h11.5M11.5 3.5l3 3-3 3M15 11.5H3.5M6.5 8.5l-3 3 3 3"></path></svg></button>
+                <div class="blk"><span class="k">To</span><div class="asset"><span class="coinw"><span class="coin" aria-hidden="true"><img src="{{ d.toImg }}" alt=""></span><span class="bdg spark"><svg viewBox="0 0 18 18" aria-hidden="true"><path d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/></svg></span></span>{{ d.toName }}</div><span class="bal">Balance {{ d.toBal }}</span></div>
+              </div>
+            </div>
+            <div class="fs"><label class="lbl" for="swamt">Amount to swap</label>
+              <div class="amtw"><input id="swamt" class="inp" type="text" inputmode="decimal" autocomplete="off" value="{{ d.value }}" aria-invalid="{{ d.invalid }}" aria-describedby="swamt-h" onInput="{{ d.onInput }}"><span class="u">{{ d.unit }}</span><button type="button" class="btn" onClick="{{ d.max }}">Max</button></div>
+              <sc-if value="{{ d.hasErr }}" hint-placeholder-val="{{ false }}"><p class="err" role="alert">{{ d.err }}</p></sc-if>
+              <p class="hint" id="swamt-h">{{ d.limits }}</p>
+            </div>
+            <div class="fs"><dl class="kv"><dt>You get about</dt><dd class="tot">{{ d.get }}</dd><dt>Indicative rate</dt><dd>1 BTC ≈ $82,783.00</dd><dt>Conversion fee</dt><dd class="muted">Shown with the quote</dd></dl></div>
+            <div class="fs ff"><span class="muted">Get quote fetches the exact rate and fee. Nothing is swapped yet.</span><button type="button" class="btn pri" disabled="{{ d.cannot }}" onClick="{{ quote }}">Get quote</button></div>
+          </section>
+          </sc-if>
+          <sc-if value="{{ is.review }}" hint-placeholder-val="{{ false }}">
+          <section class="form" aria-label="Review swap">
+            <div class="fs">
+              <div class="sum">
+                <div><p class="k">You swap</p><p class="v">{{ r.out }}<span class="u">{{ r.outU }}</span></p><p class="f">{{ r.outF }}</p></div>
+                <svg class="ic muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 9h12M11 5l4 4-4 4"/></svg>
+                <div><p class="k">You get</p><p class="v">{{ r.in }}<span class="u">{{ r.inU }}</span></p><p class="f">{{ r.inF }}</p></div>
+              </div>
+            </div>
+            <div class="fs"><dl class="kv"><dt>Quoted rate</dt><dd>1 BTC = $82,700.00</dd><dt>Conversion fee</dt><dd>{{ r.fee }}</dd><dt>Max price change</dt><dd>0.5%</dd><dt class="sp">Settles in</dt><dd class="sp">Usually under a minute</dd></dl></div>
+            <div class="fs"><p class="note"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.75v3.75M9 12.25v.01"/></svg><span>If the price moves more than 0.5% before the swap settles, nothing is swapped and both balances stay as they are.</span></p></div>
+            <div class="fs ff"><button type="button" class="btn" onClick="{{ edit }}">Edit amount</button><button type="button" class="btn pri" onClick="{{ confirm }}">{{ r.cta }}</button></div>
+          </section>
+          </sc-if>
+          <sc-if value="{{ is.done }}" hint-placeholder-val="{{ false }}">
+          <section class="form" aria-label="Swap complete">
+            <div class="fs" role="status"><p class="done-h"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Swapped</p><p class="done-l">{{ r.doneLine }}</p></div>
+            <div class="fs ff"><button type="button" class="btn" onClick="{{ again }}">Swap again</button><span class="acts"><a class="btn" href="P-Activity.dc.html">See in Activity</a><a class="btn pri" href="P-Overview.dc.html" onMouseDown="{{ toSpark }}" onClick="{{ toSpark }}">Back to Spark</a></span></div>
+          </section>
+          </sc-if>
+          <aside class="aside" aria-label="Balances">
+            <div class="bx"><p class="k">{{ a.title }}</p>
+              <p class="r"><span>Bitcoin</span><span><sc-if value="{{ a.arrows }}" hint-placeholder-val="{{ true }}"><span class="ar">{{ a.btcNow }} →</span> </sc-if><b>{{ a.btcAfter }}</b></span></p>
+              <p class="r"><span>US Dollar</span><span><sc-if value="{{ a.arrows }}" hint-placeholder-val="{{ true }}"><span class="ar">{{ a.usdNow }} →</span> </sc-if><b>{{ a.usdAfter }}</b></span></p>
+            </div>
+            <div class="bx"><p class="k">Auto-convert is off</p><p class="d">Bitcoin you receive stays bitcoin. <a href="P-Settings.dc.html" onMouseDown="{{ toSettings }}" onClick="{{ toSettings }}">Change in Wallet settings</a></p></div>
+          </aside>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"step":{"editor":"enum","options":["details","review","done"],"default":"details","section":"Review"},"direction":{"editor":"enum","options":["toUsdb","toBtc"],"default":"toUsdb","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  constructor(p){super(p); try { const bump = () => { try { this.setState({ protoTick: Date.now() }); } catch (e) {} }; window.addEventListener('tenshu-proto', bump); window.addEventListener('storage', bump); } catch (e) {}this.state={k:null,hide:null,lockAsk:false,menuOpen:false};}
+  renderVals(){
+    // prototype-only: Appearance (App preferences) is a device setting shared across artboards: system follows the review lever
+    let THEME = 'system'; try { THEME = localStorage.getItem('tenshu.proto.theme') || 'system'; } catch (e) {}
+    const P=this.props,self=this;
+    const lever=(P.step||'details')+'|'+(P.direction||'toUsdb');
+    const S=(this.state.k&&this.state.k.for===lever)?this.state.k:{for:lever,step:P.step||'details',dir:P.direction||'toUsdb',v:null,text:null};
+    const set=(patch)=>self.setState({k:Object.assign({},S,patch)});
+    const hb=!!P.hideBalances;
+    const hide=(this.state.hide&&this.state.hide.for===hb)?this.state.hide.v:hb;
+    const D='••••••';
+    // synthetic Spark balances, matching the Spark wallet page
+    const BAL={sats:25053,usd:50};
+    const RATE=82783, QRATE=82700, FEE=0.001;
+    const fmt=(n)=>String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g,',');
+    const usd=(n)=>(Math.round(n*100)/100).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g,',');
+    const toUsdb=S.dir==='toUsdb';
+    const v=S.v===null?(toUsdb?10000:10):S.v;
+    const avail=toUsdb?BAL.sats:BAL.usd;
+    const min=toUsdb?1000:1;
+    const tooMuch=v>avail, tooLow=v<min;
+    const h=(s)=>hide?D:s;
+    const btcS=fmt(BAL.sats)+' SATS', usdS=usd(BAL.usd)+' USDB';
+    const d={
+      fromImg:toUsdb?'/_blob/dbbfc88f16f7cc27510d81f434c268ea':'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTI4IiBoZWlnaHQ9IjEyOCIgdmlld0JveD0iMCAwIDEyOCAxMjgiIGZpbGw9Im5vbmUiCiAgICB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPgogICAgPHJlY3Qgd2lkdGg9IjEyOCIgaGVpZ2h0PSIxMjgiIGZpbGw9IiMwMDg3NUEiLz4KICAgIDxwYXRoIGQ9Ik00MCA2OS4wMjE3QzM3Ljc5MDkgNjkuMDIxNyAzNiA2Ny4yMzA4IDM2IDY1LjAyMTdMMzYuMDAwNCAzNS41MTQ1QzM2LjAwMDQgMzMuMzA1NCAzNy43OTEzIDMxLjUxNDUgNDAuMDAwNCAzMS41MTQ1SDU0LjAyNTZINTguNDcyNUg2MS4xNDA1SDY1LjU4NzVINjguMjU2TDcyLjcwMyAzMS42MzE5Qzc1LjQ4NTYgMzEuODY1OCA3OC4wNTUzIDMyLjQ1MTkgODAuMzk2MSAzMy40MTExQzgzLjU4NiAzNC43MDY2IDg2LjE1IDM2LjY4MiA4OC4wMDk4IDM5LjM1MjVDODkuOTM3MSA0Mi4wNDk2IDkwLjg0NzMgNDUuMjk5NiA5MC44NDczIDQ4Ljk4NzRDOTAuODQ3MyA1MC4xOTA5IDkwLjc2NTYgNTEuMzM2NiA5MC41OTY0IDUyLjQyMDdDOTAuNDQ2MiA1My4zODI4IDg5LjYxNzcgNTQuMDkyIDg4LjY0NCA1NC4wOTJIODEuMTk1N0M3OS45OTgyIDU0LjA5MiA3OS4wNzYgNTMuMDM1NSA3OS4yMzc4IDUxLjg0OTFDNzkuMzA0MSA1MS4zNjI0IDc5LjMzOSA1MC44MzYxIDc5LjMzOSA1MC4yNjgxQzc5LjMzOSA0Ny4xOTA5IDc4LjM3MzkgNDUuMzA1MiA3Ni43NTMxIDQ0LjE1MDRMNzYuNzQzNSA0NC4xNDM1Qzc0LjkzNSA0Mi44Mzg2IDcyLjM2ODEgNDIuMDgzNyA2OC44NDkyIDQyLjA4MzdINDkuNzIyMkM0OC42MTc3IDQyLjA4MzcgNDcuNzIyMiA0Mi45NzkxIDQ3LjcyMjIgNDQuMDgzN1Y1Ni40NTI1QzQ3LjcyMjIgNTcuNTU3MSA0OC42MTc3IDU4LjQ1MjUgNDkuNzIyMiA1OC40NTI1SDY4Ljg0OTJDNzMuNTc5IDU4LjQ1MjUgNzcuODAxNSA1OS44MjYgODEuMDkzMSA2MS40OTExQzg0LjMwNjEgNjMuMTE2NSA4Ni43NTQ4IDY1LjA4MjggODguMDAwNiA2Ni40OTU1QzkwLjc5NzEgNjkuMjMxNyA5MiA3My4yODY4IDkyIDc4LjIzMDdDOTIgODIuMTk1NyA5MS4wNTExIDg1LjY5MDggODkuMDUxMSA4OC42MDk5Qzg3LjExMDMgOTEuNDU1NCA4NC40MzI2IDkzLjU2NzcgODEuMDkwNyA5NC45NTQ5TDgxLjA4MiA5NC45NTg1Qzc4LjUyNzUgOTYuMDA0NiA3NS43Mjk4IDk2LjYyNzcgNzIuNzA1NCA5Ni44NDk0TDY1LjU4OTcgOTYuOTQxNkg2MS4yMzc1SDYxLjE0MjdINTguNDc0N0w1OC41Njk1IDk2Ljk0MTZINTQuMTIyNUw1NC4wMjc4IDk2Ljk0MTZINDAuMDAwNEMzNy43OTEzIDk2Ljk0MTYgMzYuMDAwNCA5NS4xNTA4IDM2LjAwMDQgOTIuOTQxNkwzNi4wMDAyIDc2Ljk2MTNDMzYuMDAwMiA3NS44NTY3IDM2Ljg5NTYgNzQuOTYxMyAzOC4wMDAyIDc0Ljk2MTNINDUuNzIyMkM0Ni44MjY4IDc0Ljk2MTMgNDcuNzIyMiA3NS44NTY3IDQ3LjcyMjIgNzYuOTYxM1Y4NC4zNzI1QzQ3LjcyMjIgODUuNDc3IDQ4LjYxNzcgODYuMzcyNSA0OS43MjIyIDg2LjM3MjVINjkuMjMzNUM3MS42NzU0IDg2LjM3MjUgNzMuNzA4OSA4Ni4wNDA0IDc1LjM3NDQgODUuNDI5NEM3Ni45OTg3IDg0LjgxNiA3OC4xNzggODMuODk4OCA3OS4wMDYyIDgyLjdMNzkuMDEwNCA4Mi42OTRDNzkuODMxIDgxLjUxNTcgODAuMzIwOSA3OS44OTI5IDgwLjMyMDkgNzcuNjc1N0M4MC4zMjA5IDc1LjQ1NjUgNzkuODMwMiA3My44NTY0IDc5LjAyMDEgNzIuNzEzOUw3OS4wMTMxIDcyLjcwNDFMNzkuMDA2MiA3Mi42OTQyQzc4LjE4MTEgNzEuNDk5OSA3Ny4wMDgyIDcwLjU5OTUgNzUuMzkwOSA3MC4wMTM1TDc1LjM3NDUgNzAuMDA3Nkw3NS4zNTgzIDcwLjAwMTRDNzMuNjk5IDY5LjM2NjkgNzEuNjcxNiA2OS4wMjE3IDY5LjIzMzUgNjkuMDIxN0g0MFoiIGZpbGw9IiNGQUZBRkEiLz4KICAgIDxyZWN0IHg9IjU2LjY1NjMiIHk9IjIyIiB3aWR0aD0iMTIuMDgzOCIgaGVpZ2h0PSIxMy42NDI5IiByeD0iMiIgZmlsbD0iI0ZBRkFGQSIvPgogICAgPHJlY3QgeD0iNTYuNjU2MyIgeT0iOTIuMjc4MiIgd2lkdGg9IjEyLjA4MzgiIGhlaWdodD0iMTMuMzI5NyIgcng9IjIiIGZpbGw9IiNGQUZBRkEiLz4KPC9zdmc+Cg==', toImg:toUsdb?'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTI4IiBoZWlnaHQ9IjEyOCIgdmlld0JveD0iMCAwIDEyOCAxMjgiIGZpbGw9Im5vbmUiCiAgICB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPgogICAgPHJlY3Qgd2lkdGg9IjEyOCIgaGVpZ2h0PSIxMjgiIGZpbGw9IiMwMDg3NUEiLz4KICAgIDxwYXRoIGQ9Ik00MCA2OS4wMjE3QzM3Ljc5MDkgNjkuMDIxNyAzNiA2Ny4yMzA4IDM2IDY1LjAyMTdMMzYuMDAwNCAzNS41MTQ1QzM2LjAwMDQgMzMuMzA1NCAzNy43OTEzIDMxLjUxNDUgNDAuMDAwNCAzMS41MTQ1SDU0LjAyNTZINTguNDcyNUg2MS4xNDA1SDY1LjU4NzVINjguMjU2TDcyLjcwMyAzMS42MzE5Qzc1LjQ4NTYgMzEuODY1OCA3OC4wNTUzIDMyLjQ1MTkgODAuMzk2MSAzMy40MTExQzgzLjU4NiAzNC43MDY2IDg2LjE1IDM2LjY4MiA4OC4wMDk4IDM5LjM1MjVDODkuOTM3MSA0Mi4wNDk2IDkwLjg0NzMgNDUuMjk5NiA5MC44NDczIDQ4Ljk4NzRDOTAuODQ3MyA1MC4xOTA5IDkwLjc2NTYgNTEuMzM2NiA5MC41OTY0IDUyLjQyMDdDOTAuNDQ2MiA1My4zODI4IDg5LjYxNzcgNTQuMDkyIDg4LjY0NCA1NC4wOTJIODEuMTk1N0M3OS45OTgyIDU0LjA5MiA3OS4wNzYgNTMuMDM1NSA3OS4yMzc4IDUxLjg0OTFDNzkuMzA0MSA1MS4zNjI0IDc5LjMzOSA1MC44MzYxIDc5LjMzOSA1MC4yNjgxQzc5LjMzOSA0Ny4xOTA5IDc4LjM3MzkgNDUuMzA1MiA3Ni43NTMxIDQ0LjE1MDRMNzYuNzQzNSA0NC4xNDM1Qzc0LjkzNSA0Mi44Mzg2IDcyLjM2ODEgNDIuMDgzNyA2OC44NDkyIDQyLjA4MzdINDkuNzIyMkM0OC42MTc3IDQyLjA4MzcgNDcuNzIyMiA0Mi45NzkxIDQ3LjcyMjIgNDQuMDgzN1Y1Ni40NTI1QzQ3LjcyMjIgNTcuNTU3MSA0OC42MTc3IDU4LjQ1MjUgNDkuNzIyMiA1OC40NTI1SDY4Ljg0OTJDNzMuNTc5IDU4LjQ1MjUgNzcuODAxNSA1OS44MjYgODEuMDkzMSA2MS40OTExQzg0LjMwNjEgNjMuMTE2NSA4Ni43NTQ4IDY1LjA4MjggODguMDAwNiA2Ni40OTU1QzkwLjc5NzEgNjkuMjMxNyA5MiA3My4yODY4IDkyIDc4LjIzMDdDOTIgODIuMTk1NyA5MS4wNTExIDg1LjY5MDggODkuMDUxMSA4OC42MDk5Qzg3LjExMDMgOTEuNDU1NCA4NC40MzI2IDkzLjU2NzcgODEuMDkwNyA5NC45NTQ5TDgxLjA4MiA5NC45NTg1Qzc4LjUyNzUgOTYuMDA0NiA3NS43Mjk4IDk2LjYyNzcgNzIuNzA1NCA5Ni44NDk0TDY1LjU4OTcgOTYuOTQxNkg2MS4yMzc1SDYxLjE0MjdINTguNDc0N0w1OC41Njk1IDk2Ljk0MTZINTQuMTIyNUw1NC4wMjc4IDk2Ljk0MTZINDAuMDAwNEMzNy43OTEzIDk2Ljk0MTYgMzYuMDAwNCA5NS4xNTA4IDM2LjAwMDQgOTIuOTQxNkwzNi4wMDAyIDc2Ljk2MTNDMzYuMDAwMiA3NS44NTY3IDM2Ljg5NTYgNzQuOTYxMyAzOC4wMDAyIDc0Ljk2MTNINDUuNzIyMkM0Ni44MjY4IDc0Ljk2MTMgNDcuNzIyMiA3NS44NTY3IDQ3LjcyMjIgNzYuOTYxM1Y4NC4zNzI1QzQ3LjcyMjIgODUuNDc3IDQ4LjYxNzcgODYuMzcyNSA0OS43MjIyIDg2LjM3MjVINjkuMjMzNUM3MS42NzU0IDg2LjM3MjUgNzMuNzA4OSA4Ni4wNDA0IDc1LjM3NDQgODUuNDI5NEM3Ni45OTg3IDg0LjgxNiA3OC4xNzggODMuODk4OCA3OS4wMDYyIDgyLjdMNzkuMDEwNCA4Mi42OTRDNzkuODMxIDgxLjUxNTcgODAuMzIwOSA3OS44OTI5IDgwLjMyMDkgNzcuNjc1N0M4MC4zMjA5IDc1LjQ1NjUgNzkuODMwMiA3My44NTY0IDc5LjAyMDEgNzIuNzEzOUw3OS4wMTMxIDcyLjcwNDFMNzkuMDA2MiA3Mi42OTQyQzc4LjE4MTEgNzEuNDk5OSA3Ny4wMDgyIDcwLjU5OTUgNzUuMzkwOSA3MC4wMTM1TDc1LjM3NDUgNzAuMDA3Nkw3NS4zNTgzIDcwLjAwMTRDNzMuNjk5IDY5LjM2NjkgNzEuNjcxNiA2OS4wMjE3IDY5LjIzMzUgNjkuMDIxN0g0MFoiIGZpbGw9IiNGQUZBRkEiLz4KICAgIDxyZWN0IHg9IjU2LjY1NjMiIHk9IjIyIiB3aWR0aD0iMTIuMDgzOCIgaGVpZ2h0PSIxMy42NDI5IiByeD0iMiIgZmlsbD0iI0ZBRkFGQSIvPgogICAgPHJlY3QgeD0iNTYuNjU2MyIgeT0iOTIuMjc4MiIgd2lkdGg9IjEyLjA4MzgiIGhlaWdodD0iMTMuMzI5NyIgcng9IjIiIGZpbGw9IiNGQUZBRkEiLz4KPC9zdmc+Cg==':'/_blob/dbbfc88f16f7cc27510d81f434c268ea',
+      fromName:toUsdb?'Bitcoin':'US Dollar', toName:toUsdb?'US Dollar':'Bitcoin',
+      fromBal:h(toUsdb?btcS:usdS), toBal:h(toUsdb?usdS:btcS),
+      flipLabel:toUsdb?'swap US Dollar to Bitcoin instead':'swap Bitcoin to US Dollar instead',
+      value:S.text!==null?S.text:(toUsdb?fmt(v):usd(v)), unit:toUsdb?'SATS':'USDB',
+      invalid:(tooMuch||tooLow)?'true':'false', hasErr:tooMuch||tooLow,
+      err:tooMuch?('More than the '+h(toUsdb?btcS:usdS)+' available'):('The minimum is '+(toUsdb?'1,000 SATS':'1.00 USDB')),
+      cannot:tooMuch||tooLow,
+      limits:'Available '+h(toUsdb?btcS:usdS)+' · minimum '+(toUsdb?'1,000 SATS':'1.00 USDB'),
+      get:tooLow?'—':(toUsdb?usd(v/1e8*RATE*(1-FEE))+' USDB':fmt(v/RATE*1e8*(1-FEE))+' SATS'),
+      onInput:(e)=>{const t=(e&&e.target)?e.target.value:'';const c=String(t).replace(toUsdb?/[^0-9]/g:/[^0-9.]/g,'');const n=toUsdb?parseInt(c||'0',10):parseFloat(c||'0');set({text:t,v:isNaN(n)?0:n});},
+      max:()=>set({v:avail,text:null})
+    };
+    const got=toUsdb?v/1e8*QRATE*(1-FEE):v/QRATE*1e8*(1-FEE);
+    const r={
+      out:toUsdb?fmt(v):usd(v), outU:toUsdb?'SATS':'USDB', outF:toUsdb?('$'+usd(v/1e8*QRATE)):('≈ '+fmt(v/QRATE*1e8)+' SATS'),
+      in:toUsdb?usd(got):fmt(got), inU:toUsdb?'USDB':'SATS', inF:toUsdb?('≈ '+fmt(v*(1-FEE))+' SATS'):('$'+usd(v*(1-FEE))),
+      fee:toUsdb?(fmt(v*FEE)+' SATS (0.10%)'):(usd(v*FEE)+' USDB (0.10%)'),
+      cta:toUsdb?'Swap to USDB':'Swap to bitcoin',
+      doneLine:(toUsdb?fmt(v)+' SATS → '+usd(got)+' USDB':usd(v)+' USDB → '+fmt(got)+' SATS')+'. Both balances in Spark are updated.'
+    };
+    const btcAfter=toUsdb?BAL.sats-v:BAL.sats+got, usdAfter=toUsdb?BAL.usd+got:BAL.usd-v;
+    const done=S.step==='done';
+    const a={title:done?'Balances now':'After the swap',arrows:!done,
+      btcNow:h(fmt(BAL.sats)),usdNow:h(usd(BAL.usd)),
+      btcAfter:h(fmt(Math.max(0,btcAfter))+' SATS'),usdAfter:h(usd(Math.max(0,usdAfter))+' USDB')};
+    const ix={details:0,review:1,done:3}[S.step];
+    const steps=['Details','Review','Swapped'].map((l,i)=>({label:l,n:i<ix?'✓':String(i+1),cls:i<ix?'done':(i===ix?'cur':''),cur:i===ix?'step':'false',sr:i<ix?', done':(i===ix?', current':'')}));
+    // cross-artboard landing keys (owned by the P-Overview / P-Settings writer): read once on arrival
+    const land=(k,v)=>()=>{ try { localStorage.setItem(k,v); } catch (e) {} };
+    return {
+      toNode:()=>{ try { localStorage.setItem('tenshu.proto.settingsScope', JSON.stringify({scope:'vault',tab:'node'})); } catch (e) {} },
+      lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
+      themeClass:this.props.forceTheme?(this.props.forceTheme==='light'?'light':''):((THEME==='light'||(THEME!=='dark'&&(P.theme||'dark')==='light'))?'light':''),motionClass:P.reducedMotion?'reduced':'',
+      hideP:hide?'true':'false',shown:!hide,hidden:hide,
+      toggleHide:()=>self.setState({hide:{for:hb,v:!hide}}),
+      lock:{idle:!self.state.lockAsk,asking:!!self.state.lockAsk,ask:()=>self.setState({lockAsk:true}),cancel:()=>self.setState({lockAsk:false})},
+      menuOpen:!!self.state.menuOpen, toggleMenu:()=>self.setState({menuOpen:!self.state.menuOpen}),
+      steps:steps, is:{details:S.step==='details',review:S.step==='review',done:done}, d:d, r:r, a:a,
+      flip:()=>set({dir:toUsdb?'toBtc':'toUsdb',v:null,text:null}),
+      quote:()=>{ if(!(tooMuch||tooLow)) set({step:'review'}); },
+      edit:()=>set({step:'details'}), confirm:()=>set({step:'done'}),
+      again:()=>set({step:'details',v:null,text:null}),
+      toSpark:land('tenshu.proto.land',JSON.stringify({page:'spark'})),
+      toSettings:land('tenshu.proto.settingsScope',JSON.stringify({scope:'spark',tab:'balances'}))
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -12,8 +12,8 @@
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 body{margin:0}
-.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--acc-ink:#f59a45;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff;--hover:rgba(245,240,232,.06);--b2b:#5fb3c9;--mine:#2b2219}
-.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--acc-ink:#a14d00;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8;--hover:rgba(32,32,32,.05);--b2b:#2c6d7e;--mine:#f7ebdc}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--acc-ink:#f59a45;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff;--hover:rgba(245,240,232,.06);--b2b:#d4a62a;--mine:#2b2219}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--acc-ink:#a14d00;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8;--hover:rgba(32,32,32,.05);--b2b:#8a6a10;--mine:#f7ebdc}
 .tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 @media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
 .tenshu.reduced *{animation:none!important;transition:none!important}
@@ -67,6 +67,8 @@ a{color:#f3821d}a:hover{color:#ffa54d}
 .ni:hover{background:var(--hover)}
 .ni.on{background:var(--selected);font-weight:600}
 .ni.on .ic{color:var(--acc-ink)}
+.ni{justify-content:flex-start}
+.ni>span{flex:1 1 auto;min-width:0;text-align:left}
 .ni.sub{padding-left:38px;min-height:34px}
 .ni.par{margin-top:10px}
 .ni:disabled{cursor:not-allowed;background:transparent;color:var(--muted)}
@@ -264,6 +266,29 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 /* page shell (Robert, 2026-10-27): every Cube page starts one gutter from the side menu; only its right edge varies. Reading pages cap at --page-max; Activity is wide. */
 .tenshu{--gutter:clamp(24px,3vw,48px);--page-max:1120px}
 .main .pg{margin:0;max-width:calc(var(--page-max) + 2 * var(--gutter));padding:28px var(--gutter) 48px}
+/* page head (Robert, 2026-10-29): every Cube page pins its head as Activity does: title and Cube line left, page actions right, tabs sitting on a rule that spans the content pane; the page scrolls under it. */
+.main>.phead{position:sticky;top:0;z-index:6;flex:none;background:var(--bg);border-bottom:1px solid var(--line)}
+.phead>.in{max-width:calc(var(--page-max) + 2 * var(--gutter));padding:24px var(--gutter) 20px}
+.phead h1,.phead .ph{margin-top:0;font-size:22px;font-weight:600;line-height:1.25}
+.phead .back{margin-bottom:8px}.phead a.back{text-decoration:none}
+.phead .crumbs{margin-bottom:8px}.phead .crumbs .back{margin-bottom:0}
+.phead .hrow{display:flex;align-items:flex-end;justify-content:space-between;gap:16px}
+.phead .hrow>div:first-child{min-width:0}
+.phead .hact{display:flex;align-items:center;gap:8px;flex:none}
+.phead .tabs,.phead .subnav{border-bottom:0;margin-bottom:-20px}
+.phead .hd,.phead .ttl{margin:0}
+.main .pg{padding-top:24px}
+/* App preferences (Robert, 2026-10-29): a sliders icon button at the right end of the top bar (the gear stays with Cube Settings), styled like the eye, with an "App preferences" tooltip on hover or focus. */
+.tenshu .top{position:relative;z-index:8}
+.tenshu a.apg{position:relative;text-decoration:none;color:var(--muted)}.tenshu a.apg:hover{color:var(--ink)}
+.apg::after{content:attr(data-tip);position:absolute;top:calc(100% + 8px);right:0;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--muted);font-size:13px;font-weight:400;line-height:1.3;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .12s ease .25s}
+.apg:hover::after,.apg:focus-visible::after{opacity:1}
+/* shared top bar (Robert, 2026-10-29): the same bar on every screen, Launcher and Cube: 64px on the rail colour; on the right the hide-balances eye first, then the status chips, then App preferences; the eye and App preferences are borderless icons. */
+.tenshu .top{height:64px;padding:0 24px;gap:16px;background:var(--rail)}
+.top .brand .ic{width:20px;height:20px}
+.top .chips .eye:not(.apg){order:-1}
+.top .chips .eye{width:32px;height:32px;border:0;background:transparent}
+.top .chips .eye:hover{background:var(--hover);color:var(--ink)}
 </style>
 </helmet>
 <div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:1100px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
@@ -272,12 +297,12 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
     <a class="brand" href="P-Launcher.dc.html" title="Back to the Launcher"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg>Tenshu</a>
     <div class="chips">
       <a class="chip" href="P-Connect-InCube.dc.html" title="alex@example.test · Signed in"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="6.5" r="3"/><path d="M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg><span class="srl">Connect account alex@example.test:</span><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Signed in</span></a>
-      <div class="chip" title="Cube service · Connected"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M7.5 10.5a3 3 0 0 0 4.2 0l2.3-2.3a3 3 0 0 0-4.2-4.2l-.9.9"/><path d="M10.5 7.5a3 3 0 0 0-4.2 0L4 9.8A3 3 0 0 0 8.2 14l.9-.9"/></svg><span class="srl">Cube service:</span><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Connected</span></div>
+      <a class="chip" href="P-Settings.dc.html" onClick="{{ toNode }}" title="Cube service · Connected" aria-label="Cube service · Connected. Open Node settings"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M7.5 10.5a3 3 0 0 0 4.2 0l2.3-2.3a3 3 0 0 0-4.2-4.2l-.9.9"/><path d="M10.5 7.5a3 3 0 0 0-4.2 0L4 9.8A3 3 0 0 0 8.2 14l.9-.9"/></svg><span class="srl">Cube service:</span><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Connected</span></a>
       <button type="button" class="eye" aria-pressed="{{ hideP }}" aria-label="Hide balances" onClick="{{ toggleHide }}">
         <sc-if value="{{ shown }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/></svg></sc-if>
         <sc-if value="{{ hidden }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/><path d="M3 3l12 12"/></svg></sc-if>
       </button>
-      <a class="chip" href="P-AppPrefs-InCube.dc.html" title="App preferences" aria-label="App preferences" style="padding:0 10px"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 5h12M3 9h12M3 13h12"/><circle cx="7" cy="5" r="1.6" fill="var(--panel)"/><circle cx="12" cy="9" r="1.6" fill="var(--panel)"/><circle cx="6" cy="13" r="1.6" fill="var(--panel)"/></svg></a>
+      <a class="eye apg" href="P-AppPrefs-InCube.dc.html" aria-label="App preferences" data-tip="App preferences"><svg class="ic s" aria-hidden="true" viewBox="0 0 24 24" style="stroke-width:1.75"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg></a>
     </div>
   </header>
 
@@ -300,7 +325,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
       <div class="mid">
         <h2 class="gh">Wallets</h2>
         <sc-if value="{{ cube.main }}" hint-placeholder-val="{{ true }}">
-          <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg><span>Spark · Daily spending</span></a>
+          <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path stroke-width="2" d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/></svg><span>Spark · Daily spending</span></a>
           <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg><span>Vault · Family savings</span></a>
           <a class="ni" href="P-Liquid.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg><span>Liquid · Travel</span></a>
         </sc-if>
@@ -330,9 +355,11 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
     </nav>
 
     <main class="main">
+      <div class="phead"><div class="in">
+          <h1 class="ph">P2P</h1>
+          <p class="idl"><sc-if value="{{ cube.main }}" hint-placeholder-val="{{ true }}"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></sc-if>{{ cube.name }} · {{ cube.net }}</p>
+      </div></div>
       <div class="pg">
-        <h1 class="ph">P2P</h1>
-        <p class="idl"><sc-if value="{{ cube.main }}" hint-placeholder-val="{{ true }}"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></sc-if>{{ cube.name }} · {{ cube.net }}</p>
 
         <sc-if value="{{ v.hiddenNote }}" hint-placeholder-val="{{ false }}">
           <div class="hidnote" role="note"><b>{{ hid.title }}</b><p>{{ hid.text }}</p><p>A stale route shows: “The Marketplace isn't available right now.”</p></div>
@@ -535,7 +562,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
                           <div class="kv"><span class="k">Spark balance: </span><span>{{ pay.bal }}</span></div>
                           <div class="kv"><span class="k">Lock amount: </span><span>20,000 sats</span></div>
                         </div>
-                        <div class="acts"><button type="button" class="pill fill" onClick="{{ pay.spark }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg>Pay from Spark</button><button type="button" class="btn" onClick="{{ pay.other }}">Pay from another wallet</button><span class="sp"></span><button type="button" class="btn alert" onClick="{{ tr.cancelOrder }}">Cancel Order</button></div>
+                        <div class="acts"><button type="button" class="pill fill" onClick="{{ pay.spark }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path stroke-width="2" d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/></svg>Pay from Spark</button><button type="button" class="btn" onClick="{{ pay.other }}">Pay from another wallet</button><span class="sp"></span><button type="button" class="btn alert" onClick="{{ tr.cancelOrder }}">Cancel Order</button></div>
                       </sc-if>
                       <sc-if value="{{ pay.preparing }}" hint-placeholder-val="{{ false }}"><p class="acts" role="status"><span class="spin" aria-hidden="true"></span>Preparing payment…</p></sc-if>
                       <sc-if value="{{ pay.confirm }}" hint-placeholder-val="{{ false }}">
@@ -551,7 +578,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
                         <div class="qr">
                           <svg width="132" height="132" viewBox="0 0 29 29" role="img" aria-label="Synthetic hold invoice QR code"><rect width="29" height="29" fill="#fff"/><g fill="#161716"><path d="M2 2h7v7H2zM20 2h7v7h-7zM2 20h7v7H2z"/><path d="M3 3h5v5H3zM21 3h5v5h-5zM3 21h5v5H3z" fill="#fff"/><path d="M4 4h3v3H4zM22 4h3v3h-3zM4 22h3v3H4zM12 2h2v3h-2zM15 5h2v2h-2zM11 9h2v2h-2zM16 10h3v2h-3zM2 12h2v2H2zM6 11h3v2H6zM12 13h3v3h-3zM21 12h2v2h-2zM24 11h3v3h-3zM11 17h2v3h-2zM16 17h3v2h-3zM21 17h3v2h-3zM12 22h3v2h-3zM17 21h2v3h-2zM21 24h3v3h-3zM25 21h2v2h-2zM11 25h2v2h-2z"/></g></svg>
                           <div><label class="cap" for="p-hold">Hold invoice</label><div class="cpy"><input class="inp mono" id="p-hold" readonly value="lnbc…synthetic…h0ld"><button type="button" class="btn" style="height:40px" onClick="{{ pay.copy }}">{{ pay.copyLabel }}</button></div>
-                            <div class="acts"><button type="button" class="btn" onClick="{{ pay.back }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg>Back to Spark</button><span class="sp"></span><button type="button" class="btn alert" onClick="{{ tr.cancelOrder }}">Cancel Order</button></div></div>
+                            <div class="acts"><button type="button" class="btn" onClick="{{ pay.back }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path stroke-width="2" d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/></svg>Back to Spark</button><span class="sp"></span><button type="button" class="btn alert" onClick="{{ tr.cancelOrder }}">Cancel Order</button></div></div>
                         </div>
                       </sc-if>
                     </div>
@@ -833,7 +860,7 @@ class Component extends DCLogic {
       complete:{role:'b',st:'Success',cls:'ok',title:'Trade Complete!',body:'Rate your counterparty',rate:true,acts:'close',icon:'check'},
       canceledAfterSpark:{role:'s',st:'Canceled',cls:'unk',title:'Trade canceled after Spark payment',body:'Mostro canceled this trade after you paid the hold invoice from Spark. Your Spark payment will resolve automatically: Lightning returns the sats when the hold invoice times out. Check Spark → Transactions for the latest status.',acts:'close',icon:'alert'}};
     TS.sparkConfirm=TS.payHold;TS.sparkFailed=TS.payHold;
-    const ICON={clock:'M9 2.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM9 5.5V9l2.5 1.5',bolt:'M10 2 4 10h4.5L8 16l6-8H9.5z',cash:'M2.5 5h13v8h-13zM9 7.25a1.75 1.75 0 1 0 0 3.5 1.75 1.75 0 0 0 0-3.5zM5 9h.01M13 9h.01',check:'M9 2.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zm-2.75 6.75 1.9 1.9 3.6-3.9',alert:'M9 2.5 16 15H2zM9 7.5v3M9 12.75v.01'};
+    const ICON={clock:'M9 2.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM9 5.5V9l2.5 1.5',bolt:'M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5',cash:'M2.5 5h13v8h-13zM9 7.25a1.75 1.75 0 1 0 0 3.5 1.75 1.75 0 0 0 0-3.5zM5 9h.01M13 9h.01',check:'M9 2.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zm-2.75 6.75 1.9 1.9 3.6-3.9',alert:'M9 2.5 16 15H2zM9 7.5v3M9 12.75v.01'};
     const T=TS[S.ts];
     const trDetail=sec==='trades'&&!!T;
     const goTs=x=>set({ts:x,pay:payFor(x),busy:'',invoice:'',rating:0,copied:''});
@@ -893,6 +920,7 @@ class Component extends DCLogic {
 
     const secFlags={book:sec==='book',create:sec==='create',trades:sec==='trades',chat:sec==='chat',settings:sec==='settings'};
     return {
+      toNode:()=>{ try { localStorage.setItem('tenshu.proto.settingsScope', JSON.stringify({scope:'vault',tab:'node'})); } catch (e) {} },
       menuOpen: !!this.state.menuOpen, toggleMenu: () => { this.setState({ menuOpen: !this.state.menuOpen }); },
       lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
       themeClass:this.props.forceTheme?(this.props.forceTheme==='light'?'light':''):((THEME==='light'||(THEME!=='dark'&&(P.theme||'dark')==='light'))?'light':''),motionClass:P.reducedMotion?'reduced':'',

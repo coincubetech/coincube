@@ -60,6 +60,8 @@ a{color:#f3821d}a:hover{color:#ffa54d}
 .ni:hover{background:var(--hover)}
 .ni.on{background:var(--selected);font-weight:600}
 .ni.on .ic{color:var(--acc-ink)}
+.ni{justify-content:flex-start}
+.ni>span{flex:1 1 auto;min-width:0;text-align:left}
 .attn{display:flex;align-items:center;gap:6px;margin:0 6px 8px;padding:9px 8px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-size:12.5px;line-height:1.3;text-decoration:none}
 .tenshu a.attn{color:var(--ink)}
 .attn .go{margin-left:auto;color:var(--acc-ink);font-weight:600}
@@ -272,6 +274,39 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 /* page shell (Robert, 2026-10-27): every Cube page starts one gutter from the side menu; only its right edge varies. Reading pages cap at --page-max; Activity is wide. */
 .tenshu{--gutter:clamp(24px,3vw,48px);--page-max:1120px}
 .main .pg{margin:0;max-width:calc(var(--page-max) + 2 * var(--gutter));padding:28px var(--gutter) 48px}
+/* page head (Robert, 2026-10-29): every Cube page pins its head as Activity does: title and Cube line left, page actions right, tabs sitting on a rule that spans the content pane; the page scrolls under it. */
+.main>.phead{position:sticky;top:0;z-index:6;flex:none;background:var(--bg);border-bottom:1px solid var(--line)}
+.phead>.in{max-width:calc(var(--page-max) + 2 * var(--gutter));padding:24px var(--gutter) 20px}
+.phead h1,.phead .ph{margin-top:0;font-size:22px;font-weight:600;line-height:1.25}
+.phead .back{margin-bottom:8px}.phead a.back{text-decoration:none}
+.phead .crumbs{margin-bottom:8px}.phead .crumbs .back{margin-bottom:0}
+.phead .hrow{display:flex;align-items:flex-end;justify-content:space-between;gap:16px}
+.phead .hrow>div:first-child{min-width:0}
+.phead .hact{display:flex;align-items:center;gap:8px;flex:none}
+.phead .tabs,.phead .subnav{border-bottom:0;margin-bottom:-20px}
+.phead .hd,.phead .ttl{margin:0}
+.main .pg{padding-top:24px}
+.phead .back{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--acc-ink)}
+/* App preferences (Robert, 2026-10-29): a sliders icon button at the right end of the top bar (the gear stays with Cube Settings), styled like the eye, with an "App preferences" tooltip on hover or focus. */
+.tenshu .top{position:relative;z-index:8}
+.tenshu a.apg{position:relative;text-decoration:none;color:var(--muted)}.tenshu a.apg:hover{color:var(--ink)}
+.apg::after{content:attr(data-tip);position:absolute;top:calc(100% + 8px);right:0;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--muted);font-size:13px;font-weight:400;line-height:1.3;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .12s ease .25s}
+.apg:hover::after,.apg:focus-visible::after{opacity:1}
+/* shared top bar (Robert, 2026-10-29): the same bar on every screen, Launcher and Cube: 64px on the rail colour; on the right the hide-balances eye first, then the status chips, then App preferences; the eye and App preferences are borderless icons. */
+.tenshu .top{height:64px;padding:0 24px;gap:16px;background:var(--rail)}
+.top .brand .ic{width:20px;height:20px}
+.top .chips .eye:not(.apg){order:-1}
+.top .chips .eye{width:32px;height:32px;border:0;background:transparent}
+.top .chips .eye:hover{background:var(--hover);color:var(--ink)}
+/* sub-page head (Robert, 2026-10-29, from the page-header study): Back is the last action on the right of the head; steps sit on the rule. */
+.phead .hact .back{display:inline-flex;align-items:center;gap:6px;height:36px;margin:0;padding:0 12px 0 8px;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--ink);font-size:13px;font-weight:500;line-height:1;text-decoration:none;white-space:nowrap}
+.phead .hact .back:hover{background:var(--hover)}.phead .hact .back .ic{color:var(--muted)}
+.phead .hsteps{display:flex;gap:4px;margin:16px 0 -20px;padding:0;list-style:none}
+.phead .hsteps li{display:inline-flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:2px solid transparent;color:var(--muted);font-size:14px}
+.phead .hsteps .n{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;border:1px solid var(--line);font-size:12px;font-weight:600}
+.phead .hsteps li.cur{color:var(--ink);font-weight:600;border-bottom-color:var(--accent)}
+.phead .hsteps li.cur .n{background:var(--accent);border-color:var(--accent);color:var(--on-accent,#1a1208)}
+.phead .hsteps li.done .n{border-color:var(--good);color:var(--good)}
 </style>
 </helmet>
 <div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
@@ -283,15 +318,15 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
         <svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="6.5" r="3"/><path d="M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg>
         <span class="srl">Connect account alex@example.test:</span><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Signed in</span>
       </a>
-      <div class="chip" title="Cube service · Connected">
+      <a class="chip" href="P-Settings.dc.html" onClick="{{ toNode }}" title="Cube service · Connected" aria-label="Cube service · Connected. Open Node settings">
         <svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M7.5 10.5a3 3 0 0 0 4.2 0l2.3-2.3a3 3 0 0 0-4.2-4.2l-.9.9"/><path d="M10.5 7.5a3 3 0 0 0-4.2 0L4 9.8A3 3 0 0 0 8.2 14l.9-.9"/></svg>
         <span class="srl">Cube service:</span><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Connected</span>
-      </div>
+      </a>
       <button type="button" class="eye" aria-pressed="{{ hideP }}" aria-label="Hide balances" onClick="{{ toggleHide }}">
         <sc-if value="{{ shown }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/></svg></sc-if>
         <sc-if value="{{ hidden }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/><path d="M3 3l12 12"/></svg></sc-if>
       </button>
-      <a class="chip" href="P-AppPrefs-InCube.dc.html" title="App preferences" aria-label="App preferences" style="padding:0 10px"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 5h12M3 9h12M3 13h12"/><circle cx="7" cy="5" r="1.6" fill="var(--panel)"/><circle cx="12" cy="9" r="1.6" fill="var(--panel)"/><circle cx="6" cy="13" r="1.6" fill="var(--panel)"/></svg></a>
+      <a class="eye apg" href="P-AppPrefs-InCube.dc.html" aria-label="App preferences" data-tip="App preferences"><svg class="ic s" aria-hidden="true" viewBox="0 0 24 24" style="stroke-width:1.75"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg></a>
     </div>
   </header>
 
@@ -313,7 +348,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
       </div>
       <div class="mid">
         <h2 class="gh">Wallets</h2>
-        <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg><span>Spark · Daily spending</span></a>
+        <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path stroke-width="2" d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/></svg><span>Spark · Daily spending</span></a>
         <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg><span>Vault · Family savings</span></a>
         <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg><span>Liquid · Travel</span></a>
       </div>
@@ -324,9 +359,10 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
     </nav>
 
     <main class="main">
+    <div class="phead"><div class="in">
+        <div class="hrow"><div><h1>Transaction prepared by Claude Desktop<span class="stat plan" style="{{ annStyle }}">Planned</span></h1></div><div class="hact"><a class="back" href="P-AI-Access.dc.html"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M11 4.5 6.5 9l4.5 4.5"/></svg>Back to AI access</a></div></div>
+    </div></div>
     <div class="pg">
-      <a class="back" href="P-AI-Access.dc.html"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M11 4.5 6.5 9l4.5 4.5"/></svg>AI access</a>
-      <h1>Transaction prepared by Claude Desktop<span class="stat plan" style="{{ annStyle }}">Planned</span></h1>
       <p class="lead">The assistant built this draft with Tenshu's coin selection and fee engine. Preparing is not sending: you review and authorise signing here and on your devices. The assistant cannot spend.</p>
       <p class="qt">“Prepare a transaction sending $100 worth of bitcoin to bc1q…p0r7, ready for me to sign.”<span class="who">You, in Claude Desktop · 14:32</span></p>
       <div class="proto" role="group" aria-label="Prototype states">
@@ -435,6 +471,7 @@ class Component extends DCLogic {
       canSign:state==='ready'||state==='changed'||state==='signerOff',canRefresh:state==='stale',waitSig:state==='waitingSigs',canBroadcast:state==='signed',done:state==='broadcast',
       editable:state==='draft'||state==='ready'||state==='stale'||state==='changed'||state==='signerOff',ann:ann};
     return {
+      toNode:()=>{ try { localStorage.setItem('tenshu.proto.settingsScope', JSON.stringify({scope:'vault',tab:'node'})); } catch (e) {} },
       menuOpen: !!this.state.menuOpen, toggleMenu: () => { this.setState({ menuOpen: !this.state.menuOpen }); },
       lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
       themeClass:this.props.forceTheme?(this.props.forceTheme==='light'?'light':''):((THEME==='light'||(THEME!=='dark'&&(P.theme||'dark')==='light'))?'light':''),motionClass:P.reducedMotion?'reduced':'',

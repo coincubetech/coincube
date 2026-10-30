@@ -60,6 +60,8 @@ a{color:#f3821d}a:hover{color:#ffa54d}
 .ni:hover{background:var(--hover)}
 .ni.on{background:var(--selected);font-weight:600}
 .ni.on .ic{color:var(--acc-ink)}
+.ni{justify-content:flex-start}
+.ni>span{flex:1 1 auto;min-width:0;text-align:left}
 .sfoot{border-top:1px solid var(--line);padding:10px}
 .main{flex:1;min-width:0;overflow:auto;display:flex;flex-direction:column}
 .pg{flex:1;width:100%;max-width:900px;padding:28px 48px 32px}
@@ -188,6 +190,38 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 /* page shell (Robert, 2026-10-27): every Cube page starts one gutter from the side menu; only its right edge varies. Reading pages cap at --page-max; Activity is wide. */
 .tenshu{--gutter:clamp(24px,3vw,48px);--page-max:1120px}
 .main .pg{margin:0;max-width:calc(var(--page-max) + 2 * var(--gutter));padding:28px var(--gutter) 48px}
+/* page head (Robert, 2026-10-29): every Cube page pins its head as Activity does: title and Cube line left, page actions right, tabs sitting on a rule that spans the content pane; the page scrolls under it. */
+.main>.phead{position:sticky;top:0;z-index:6;flex:none;background:var(--bg);border-bottom:1px solid var(--line)}
+.phead>.in{max-width:calc(var(--page-max) + 2 * var(--gutter));padding:24px var(--gutter) 20px}
+.phead h1,.phead .ph{margin-top:0;font-size:22px;font-weight:600;line-height:1.25}
+.phead .back{margin-bottom:8px}.phead a.back{text-decoration:none}
+.phead .crumbs{margin-bottom:8px}.phead .crumbs .back{margin-bottom:0}
+.phead .hrow{display:flex;align-items:flex-end;justify-content:space-between;gap:16px}
+.phead .hrow>div:first-child{min-width:0}
+.phead .hact{display:flex;align-items:center;gap:8px;flex:none}
+.phead .tabs,.phead .subnav{border-bottom:0;margin-bottom:-20px}
+.phead .hd,.phead .ttl{margin:0}
+.main .pg{padding-top:24px}
+/* App preferences (Robert, 2026-10-29): a sliders icon button at the right end of the top bar (the gear stays with Cube Settings), styled like the eye, with an "App preferences" tooltip on hover or focus. */
+.tenshu .top{position:relative;z-index:8}
+.tenshu a.apg{position:relative;text-decoration:none;color:var(--muted)}.tenshu a.apg:hover{color:var(--ink)}
+.apg::after{content:attr(data-tip);position:absolute;top:calc(100% + 8px);right:0;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--muted);font-size:13px;font-weight:400;line-height:1.3;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .12s ease .25s}
+.apg:hover::after,.apg:focus-visible::after{opacity:1}
+/* shared top bar (Robert, 2026-10-29): the same bar on every screen, Launcher and Cube: 64px on the rail colour; on the right the hide-balances eye first, then the status chips, then App preferences; the eye and App preferences are borderless icons. */
+.tenshu .top{height:64px;padding:0 24px;gap:16px;background:var(--rail)}
+.top .brand .ic{width:20px;height:20px}
+.top .chips .eye:not(.apg){order:-1}
+.top .chips .eye{width:32px;height:32px;border:0;background:transparent}
+.top .chips .eye:hover{background:var(--hover);color:var(--ink)}
+/* sub-page head (Robert, 2026-10-29, from the page-header study): Back is the last action on the right of the head; steps sit on the rule. */
+.phead .hact .back{display:inline-flex;align-items:center;gap:6px;height:36px;margin:0;padding:0 12px 0 8px;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--ink);font-size:13px;font-weight:500;line-height:1;text-decoration:none;white-space:nowrap}
+.phead .hact .back:hover{background:var(--hover)}.phead .hact .back .ic{color:var(--muted)}
+.phead .hsteps{display:flex;gap:4px;margin:16px 0 -20px;padding:0;list-style:none}
+.phead .hsteps li{display:inline-flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:2px solid transparent;color:var(--muted);font-size:14px}
+.phead .hsteps .n{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;border:1px solid var(--line);font-size:12px;font-weight:600}
+.phead .hsteps li.cur{color:var(--ink);font-weight:600;border-bottom-color:var(--accent)}
+.phead .hsteps li.cur .n{background:var(--accent);border-color:var(--accent);color:var(--on-accent,#1a1208)}
+.phead .hsteps li.done .n{border-color:var(--good);color:var(--good)}
 </style>
 </helmet>
 <div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:1100px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
@@ -196,12 +230,12 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
     <a class="brand" href="P-Launcher.dc.html" title="Back to the Launcher"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg>Tenshu</a>
     <div class="chips">
       <a class="chip" href="P-Connect-InCube.dc.html" title="alex@example.test · Signed in"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="6.5" r="3"/><path d="M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg><span class="srl">Connect account alex@example.test:</span><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Signed in</span></a>
-      <div class="chip" title="Cube service · Connected"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M7.5 10.5a3 3 0 0 0 4.2 0l2.3-2.3a3 3 0 0 0-4.2-4.2l-.9.9"/><path d="M10.5 7.5a3 3 0 0 0-4.2 0L4 9.8A3 3 0 0 0 8.2 14l.9-.9"/></svg><span class="srl">Cube service:</span><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Connected</span></div>
+      <a class="chip" href="P-Settings.dc.html" onClick="{{ toNode }}" title="Cube service · Connected" aria-label="Cube service · Connected. Open Node settings"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M7.5 10.5a3 3 0 0 0 4.2 0l2.3-2.3a3 3 0 0 0-4.2-4.2l-.9.9"/><path d="M10.5 7.5a3 3 0 0 0-4.2 0L4 9.8A3 3 0 0 0 8.2 14l.9-.9"/></svg><span class="srl">Cube service:</span><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Connected</span></a>
       <button type="button" class="eye" aria-pressed="{{ hideP }}" aria-label="Hide balances" onClick="{{ toggleHide }}">
         <sc-if value="{{ shown }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/></svg></sc-if>
         <sc-if value="{{ hidden }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/><path d="M3 3l12 12"/></svg></sc-if>
       </button>
-      <a class="chip" href="P-AppPrefs-InCube.dc.html" title="App preferences" aria-label="App preferences" style="padding:0 10px"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 5h12M3 9h12M3 13h12"/><circle cx="7" cy="5" r="1.6" fill="var(--panel)"/><circle cx="12" cy="9" r="1.6" fill="var(--panel)"/><circle cx="6" cy="13" r="1.6" fill="var(--panel)"/></svg></a>
+      <a class="eye apg" href="P-AppPrefs-InCube.dc.html" aria-label="App preferences" data-tip="App preferences"><svg class="ic s" aria-hidden="true" viewBox="0 0 24 24" style="stroke-width:1.75"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg></a>
     </div>
   </header>
 
@@ -223,7 +257,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
       </div>
       <div class="mid">
         <h2 class="gh">Wallets</h2>
-        <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg><span>Spark · Daily spending</span></a>
+        <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path stroke-width="2" d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/></svg><span>Spark · Daily spending</span></a>
         <a class="ni" href="P-Advanced.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg><span>Vault · Family savings</span></a>
         <sc-if value="{{ liquidShown }}" hint-placeholder-val="{{ true }}"><a class="ni on" aria-current="page" href="P-Liquid.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg><span>Liquid · Travel</span></a></sc-if>
       </div>
@@ -233,19 +267,12 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
     </nav>
 
     <main class="main">
-      <div class="pg">
-        <a class="back" href="P-Overview.dc.html"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M11 4.5 6.5 9l4.5 4.5"/></svg>Overview</a>
-
-        <!-- Sunset gate: route reached while Liquid is gated off (the sidebar already hides it) -->
+      <div class="phead"><div class="in">
         <sc-if value="{{ sunset }}" hint-placeholder-val="{{ false }}">
-          <h1 class="ph">Liquid</h1>
-          <p class="idl"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Everyday · Bitcoin mainnet</p>
-          <div class="gate" role="status"><b>The Liquid wallet isn't available on this account.</b><p>Your other wallets are unaffected.</p><a class="btn" href="P-Overview.dc.html">Back to Overview</a></div>
+          <div class="hrow"><div><h1 class="ph">Liquid</h1><p class="idl"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Everyday · Bitcoin mainnet</p></div><div class="hact"><a class="back" href="P-Overview.dc.html"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M11 4.5 6.5 9l4.5 4.5"/></svg>Back to Overview</a></div></div>
         </sc-if>
-
         <sc-if value="{{ open }}" hint-placeholder-val="{{ true }}">
-        <h1 class="ph">Liquid · Travel</h1>
-        <p class="idl"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Everyday · Bitcoin mainnet</p>
+        <div class="hrow"><div><h1 class="ph">Liquid · Travel</h1><p class="idl"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Everyday · Bitcoin mainnet</p></div><div class="hact"><a class="back" href="P-Overview.dc.html"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M11 4.5 6.5 9l4.5 4.5"/></svg>Back to Overview</a></div></div>
         <nav class="tabs" aria-label="Liquid sections">
           <button type="button" class="tab {{ tab.overview.cls }}" aria-current="{{ tab.overview.cur }}" onClick="{{ tab.overview.pick }}">Overview</button>
           <a class="tab" href="P-Send.dc.html">Send</a>
@@ -254,6 +281,16 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
           <button type="button" class="tab {{ tab.transactions.cls }}" aria-current="{{ tab.transactions.cur }}" onClick="{{ tab.transactions.pick }}">Transactions</button>
           <button type="button" class="tab {{ tab.settings.cls }}" aria-current="{{ tab.settings.cur }}" onClick="{{ tab.settings.pick }}">Settings</button>
         </nav>
+        </sc-if>
+      </div></div>
+      <div class="pg">
+
+        <!-- Sunset gate: route reached while Liquid is gated off (the sidebar already hides it) -->
+        <sc-if value="{{ sunset }}" hint-placeholder-val="{{ false }}">
+          <div class="gate" role="status"><b>The Liquid wallet isn't available on this account.</b><p>Your other wallets are unaffected.</p><a class="btn" href="P-Overview.dc.html">Back to Overview</a></div>
+        </sc-if>
+
+        <sc-if value="{{ open }}" hint-placeholder-val="{{ true }}">
 
         <!-- ===== OVERVIEW ===== -->
         <sc-if value="{{ is.overview }}" hint-placeholder-val="{{ true }}">
@@ -520,6 +557,7 @@ class Component extends DCLogic {
       settings:'Prototype · Liquid Settings holds one line in the app · whole wallet sits behind the Liquid sunset gate (account flag or existing local wallet)'
     };
     return {
+      toNode:()=>{ try { localStorage.setItem('tenshu.proto.settingsScope', JSON.stringify({scope:'vault',tab:'node'})); } catch (e) {} },
       menuOpen: !!this.state.menuOpen, toggleMenu: () => { this.setState({ menuOpen: !this.state.menuOpen }); },
       lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
       themeClass:this.props.forceTheme?(this.props.forceTheme==='light'?'light':''):((THEME==='light'||(THEME!=='dark'&&(P.theme||'dark')==='light'))?'light':''),motionClass:P.reducedMotion?'reduced':'',

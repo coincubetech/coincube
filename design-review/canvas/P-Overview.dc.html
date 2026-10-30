@@ -59,10 +59,12 @@ a{color:#f3821d}a:hover{color:#ffa54d}
 .ni:hover{background:var(--hover)}
 .ni.on{background:var(--selected);font-weight:600}
 .ni.on .ic{color:var(--acc-ink)}
+/* left-aligned nav labels (Robert, 2026-10-29): the label fills the row after the icon and starts at its left edge */
+.ni{justify-content:flex-start}
+.ni>span{flex:1 1 auto;min-width:0;text-align:left}
 .ni .lbl{min-width:0;overflow-wrap:anywhere}
 .ni.sub{padding-left:38px;min-height:34px}
 .ni.par{margin-top:10px}
-.ni.kf{outline:2px solid var(--focus);outline-offset:2px}
 .attn{display:flex;align-items:center;gap:6px;width:calc(100% - 12px);margin:0 6px 8px;padding:9px 8px;white-space:nowrap;border:1px solid var(--line);border-radius:8px;background:var(--panel);cursor:pointer;text-align:left;font-size:12.5px;line-height:1.3}
 .attn .go{margin-left:auto;color:var(--acc-ink);font-weight:600}
 .foot{border-top:1px solid var(--line);padding:10px}
@@ -96,7 +98,6 @@ a{color:#f3821d}a:hover{color:#ffa54d}
 .pill.out:hover{background:var(--hover)}
 .cf{display:flex;align-items:center;margin-top:6px;padding-top:12px;border-top:1px solid var(--line)}
 .rlink{display:inline-flex;align-items:center;gap:6px;border:0;background:none;padding:4px 2px;color:var(--acc-ink);font-weight:500;cursor:pointer;border-radius:4px}
-.xfer{display:flex;justify-content:center;margin-top:20px}
 .synth{margin-top:24px;text-align:center}
 /* wallet pages */
 .pg h1.ph{font-size:22px;font-weight:600;line-height:1.25;overflow-wrap:anywhere}
@@ -188,6 +189,46 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 /* page shell (Robert, 2026-10-27): every Cube page starts one gutter from the side menu; only its right edge varies. Reading pages cap at --page-max; Activity is wide. */
 .tenshu{--gutter:clamp(24px,3vw,48px);--page-max:1120px}
 .main .pg{margin:0;max-width:calc(var(--page-max) + 2 * var(--gutter));padding:28px var(--gutter) 48px}
+/* page head (Robert, 2026-10-29): every Cube page pins its head as Activity does: title and Cube line left, page actions right, tabs sitting on a rule that spans the content pane; the page scrolls under it. */
+.main>.phead{position:sticky;top:0;z-index:6;flex:none;background:var(--bg);border-bottom:1px solid var(--line)}
+.phead>.in{max-width:calc(var(--page-max) + 2 * var(--gutter));padding:24px var(--gutter) 20px}
+.phead h1,.phead .ph{margin-top:0;font-size:22px;font-weight:600;line-height:1.25}
+.phead .back{margin-bottom:8px}.phead a.back{text-decoration:none}
+.phead .crumbs{margin-bottom:8px}.phead .crumbs .back{margin-bottom:0}
+.phead .hrow{display:flex;align-items:flex-end;justify-content:space-between;gap:16px}
+.phead .hrow>div:first-child{min-width:0}
+.phead .hact{display:flex;align-items:center;gap:8px;flex:none}
+.phead .tabs,.phead .subnav{border-bottom:0;margin-bottom:-20px}
+.phead .hd,.phead .ttl{margin:0}
+.main .pg{padding-top:24px}
+.kbal{font-size:13px;color:var(--muted)}
+/* App preferences (Robert, 2026-10-29): a sliders icon button at the right end of the top bar (the gear stays with Cube Settings), styled like the eye, with an "App preferences" tooltip on hover or focus. */
+.tenshu .top{position:relative;z-index:8}
+.tenshu a.apg{position:relative;text-decoration:none;color:var(--muted)}.tenshu a.apg:hover{color:var(--ink)}
+.apg::after{content:attr(data-tip);position:absolute;top:calc(100% + 8px);right:0;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--muted);font-size:13px;font-weight:400;line-height:1.3;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .12s ease .25s}
+.apg:hover::after,.apg:focus-visible::after{opacity:1}
+/* shared top bar (Robert, 2026-10-29): the same bar on every screen, Launcher and Cube: 64px on the rail colour; on the right the hide-balances eye first, then the status chips, then App preferences; the eye and App preferences are borderless icons. */
+.tenshu .top{height:64px;padding:0 24px;gap:16px;background:var(--rail)}
+.top .brand .ic{width:20px;height:20px}
+.top .chips .eye:not(.apg){order:-1}
+.top .chips .eye{width:32px;height:32px;border:0;background:transparent}
+.top .chips .eye:hover{background:var(--hover);color:var(--ink)}
+/* wallet pages (Robert, 2026-10-29): match the Page header study. Two wallet cards side by side; wallet pages show Total balance, one row per asset, and Recent activity in the Activity row style (44px time under day headings, wallet column). */
+.cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.wa{margin-top:20px;border-top:1px solid var(--line)}
+.wa .ar{grid-template-columns:32px 96px minmax(0,1fr) auto;min-height:64px;border-bottom:1px solid var(--line)}
+.sech{display:flex;align-items:baseline;justify-content:space-between;gap:16px}.sech h2{margin-bottom:0}
+.sech a{font-size:13px;font-weight:500;color:var(--accent);text-decoration:none}
+.acts5{margin:10px -12px 0}
+.acts5 .cols,.tr.w5{grid-template-columns:44px 112px minmax(0,1fr) 128px 132px}
+.acts5 .cols{display:grid;column-gap:12px;align-items:center;height:36px;padding:0 12px;font-size:12px;color:var(--muted);border-bottom:1px solid var(--line)}
+.acts5 .cols .r{text-align:right}
+.acts5 .dayh{display:flex;align-items:center;gap:12px;padding:20px 12px 8px;font-size:13px;font-weight:600;border-bottom:1px solid var(--line)}
+.acts5 .dayh .dn{color:var(--muted);font-weight:500}
+.prot{margin-top:28px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}
+.prot .row{padding:14px 18px;border-bottom:1px solid var(--line)}.prot .row:last-child{border-bottom:0}
+.prot .row.att .lead-ic{color:var(--warn)}
+.tenshu a.btn{text-decoration:none;color:var(--ink)}.btn.acc{border-color:var(--accent);color:var(--acc-ink);font-weight:600}.tenshu a.btn.acc{color:var(--acc-ink)}
 </style>
 </helmet>
 <div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
@@ -200,18 +241,18 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
         <sc-if value="{{ signedIn }}" hint-placeholder-val="{{ true }}"><span class="srl">Connect account alex@example.test:</span><span class="st ok end"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Signed in</span></sc-if>
         <sc-if value="{{ signedOut }}" hint-placeholder-val="{{ false }}"><span class="srl">Connect account:</span><span class="st unk"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M6 9h6"/></svg>Signed out</span><span class="mini">Sign in</span></sc-if>
       </a>
-      <div class="chip" title="{{ chipTitle.conn }}">
+      <a class="chip" href="P-Settings.dc.html" onClick="{{ toNode }}" title="{{ chipTitle.conn }}" aria-label="{{ chipTitle.conn }}. Open Node settings">
         <svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M7.5 10.5a3 3 0 0 0 4.2 0l2.3-2.3a3 3 0 0 0-4.2-4.2l-.9.9"/><path d="M10.5 7.5a3 3 0 0 0-4.2 0L4 9.8A3 3 0 0 0 8.2 14l.9-.9"/></svg>
         <span class="srl">Cube service:</span>
         <sc-if value="{{ conn.ok }}" hint-placeholder-val="{{ true }}"><span class="st ok end"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Connected</span></sc-if>
         <sc-if value="{{ conn.unk }}" hint-placeholder-val="{{ false }}"><span class="st unk end"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M7.2 7.2a1.9 1.9 0 1 1 2.6 1.75c-.5.25-.8.6-.8 1.15v.4M9 12.6v.01"/></svg>Not checked</span></sc-if>
-        <sc-if value="{{ conn.warn }}" hint-placeholder-val="{{ false }}"><span class="st warn"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5 16 15H2z"/><path d="M9 7.5v3M9 12.75v.01"/></svg>Reconnect required</span><button type="button" class="mini">Reconnect</button></sc-if>
-      </div>
+        <sc-if value="{{ conn.warn }}" hint-placeholder-val="{{ false }}"><span class="st warn"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5 16 15H2z"/><path d="M9 7.5v3M9 12.75v.01"/></svg>Reconnect required</span><span class="mini">Reconnect</span></sc-if>
+      </a>
       <button type="button" class="eye" aria-pressed="{{ hide.allP }}" aria-label="Hide balances" onClick="{{ toggleAll }}">
         <sc-if value="{{ hide.allShown }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/></svg></sc-if>
         <sc-if value="{{ hide.all }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/><path d="M3 3l12 12"/></svg></sc-if>
       </button>
-      <a class="chip" href="P-AppPrefs-InCube.dc.html" title="App preferences" aria-label="App preferences" style="padding:0 10px"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 5h12M3 9h12M3 13h12"/><circle cx="7" cy="5" r="1.6" fill="var(--panel)"/><circle cx="12" cy="9" r="1.6" fill="var(--panel)"/><circle cx="6" cy="13" r="1.6" fill="var(--panel)"/></svg></a>
+      <a class="eye apg" href="P-AppPrefs-InCube.dc.html" aria-label="App preferences" data-tip="App preferences"><svg class="ic s" aria-hidden="true" viewBox="0 0 24 24" style="stroke-width:1.75"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg></a>
     </div>
   </header>
 
@@ -226,16 +267,15 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
         </div>
         </sc-if>
       <div class="navp">
-        <button type="button" class="cubeid" aria-haspopup="true" aria-expanded="{{ menuOpen }}" aria-label="Cube menu. Current: Everyday · Bitcoin mainnet" onClick="{{ toggleMenu }}"><span class="av" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="11" fill="currentColor" opacity=".08" stroke="none"></circle><path d="M12 4.2c4.6-.4 7.9 3.1 7.6 7.4-.3 4.6-4.2 8.2-8.6 7.6-4.2-.6-6.9-4.4-6.3-8.5.5-3.3 3-5.9 6.2-6.4"></path></svg></span><span class="cubeidt"><b>Everyday</b><span class="net"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Bitcoin mainnet</span></span><svg class="ic s cv" aria-hidden="true" viewBox="0 0 18 18"><path d="m5 7 4 4 4-4"/></svg></button>
+        <button type="button" class="cubeid" aria-haspopup="true" aria-expanded="{{ menuOpen }}" aria-label="Cube menu. Current: {{ cubeName }} · {{ netName }}" onClick="{{ toggleMenu }}"><span class="av" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="11" fill="currentColor" opacity=".08" stroke="none"></circle><path d="{{ avPath }}"></path></svg></span><span class="cubeidt"><b>{{ cubeName }}</b><span class="net"><img src="{{ coinSrc }}" alt="">{{ netName }}</span></span><svg class="ic s cv" aria-hidden="true" viewBox="0 0 18 18"><path d="m5 7 4 4 4-4"/></svg></button>
         <button type="button" class="ni {{ nv.overview.cls }}" aria-current="{{ nv.overview.cur }}" onClick="{{ nv.overview.pick }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"/><rect x="10.5" y="2.5" width="5" height="5" rx="1"/><rect x="2.5" y="10.5" width="5" height="5" rx="1"/><rect x="10.5" y="10.5" width="5" height="5" rx="1"/></svg><span class="lbl">Overview</span></button>
         <a class="ni {{ nv.activity.cls }}" aria-current="{{ nv.activity.cur }}" href="P-Activity.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2.5 1.5"/></svg><span class="lbl">Activity</span></a>
         <button type="button" class="ni {{ nv.backup.cls }}" aria-current="{{ nv.backup.cur }}" onClick="{{ nv.backup.pick }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/><path d="m6.5 9 1.8 1.8 3.5-3.5"/></svg><span class="lbl">Backup &amp; protection</span></button>
       </div>
       <div class="mid">
         <h2 class="gh">Wallets</h2>
-        <button type="button" class="ni {{ nv.spark.cls }}" aria-current="{{ nv.spark.cur }}" onClick="{{ nv.spark.pick }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg><span class="lbl">Spark · Daily spending</span></button>
+        <button type="button" class="ni {{ nv.spark.cls }}" aria-current="{{ nv.spark.cur }}" onClick="{{ nv.spark.pick }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path stroke-width="2" d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/></svg><span class="lbl">Spark · Daily spending</span></button>
         <button type="button" class="ni {{ nv.vault.cls }}" aria-current="{{ nv.vault.cur }}" onClick="{{ nv.vault.pick }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg><span class="lbl">Vault · {{ vaultAlias }}</span></button>
-        <a class="ni {{ nv.liquid.cls }}" aria-current="{{ nv.liquid.cur }}" href="P-Liquid.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg><span class="lbl">Liquid · Travel</span></a>
         <a class="ni par" href="P-P2P.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 7.25 4 3h10l1 4.25"/><path d="M3 7.25c0 1.1.9 1.9 2 1.9s2-.8 2-1.9c0 1.1.9 1.9 2 1.9s2-.8 2-1.9c0 1.1.9 1.9 2 1.9s2-.8 2-1.9"/><path d="M4 9.1v6.4h10V9.1"/><path d="M7.5 15.5V12h3v3.5"/></svg><span class="lbl">Marketplace</span></a>
         <a class="ni sub" href="P-P2P.dc.html"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="6.5" r="3"/><path d="M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg><span class="lbl">P2P</span></a>
         <a class="ni sub" href="P-BuySell.dc.html"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M7 5.5v7M7 5.5h2.6a1.6 1.6 0 0 1 0 3.2H7m0 0h3a1.7 1.7 0 0 1 0 3.3H7"/></svg><span class="lbl">Buy/Sell</span></a>
@@ -247,18 +287,38 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
     </nav>
 
     <main class="main">
+      <div class="phead"><div class="in">
+        <sc-if value="{{ pg.overview }}" hint-placeholder-val="{{ true }}">
+          <div class="hrow"><div><h1 class="ph">Overview</h1><p class="idl"><img src="{{ coinSrc }}" alt="">{{ cubeName }} · {{ netName }}</p></div><div class="hact"><a class="btn" href="P-Transfer.dc.html" aria-label="Transfer between wallets"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 6h11M11 3l3 3-3 3M15 12H4M7 9l-3 3 3 3"/></svg>Transfer</a></div></div>
+        </sc-if>
+        <sc-if value="{{ pg.vault }}" hint-placeholder-val="{{ false }}">
+          <div class="hrow"><div><h1 class="ph">Vault · {{ vaultAlias }}</h1><p class="idl"><img src="{{ coinSrc }}" alt="">{{ cubeName }} · {{ netName }} · 2 of 3 keys</p></div><div class="hact"><a class="btn acc" href="P-Advanced.dc.html" aria-label="Vault tools: coins, PSBTs, recovery"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 5h7M13 5h2M3 13h3M9 13h6"/><circle cx="11.5" cy="5" r="1.5"/><circle cx="7.5" cy="13" r="1.5"/></svg>Tools</a><a class="btn" href="P-Settings.dc.html" onClick="{{ toVaultSettings }}" aria-label="Vault wallet settings"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="2.25"/><circle cx="9" cy="9" r="5"/><path d="M9 2v2M9 14v2M2 9h2M14 9h2M4.05 4.05l1.41 1.41M12.54 12.54l1.41 1.41M4.05 13.95l1.41-1.41M12.54 5.46l1.41-1.41"/></svg>Wallet settings</a></div></div>
+        </sc-if>
+        <sc-if value="{{ pg.spark }}" hint-placeholder-val="{{ false }}">
+          <div class="hrow"><div><h1 class="ph">Spark · Daily spending</h1><p class="idl"><img src="{{ coinSrc }}" alt="">{{ cubeName }} · {{ netName }}</p></div><div class="hact"><a class="btn acc" href="P-Swap.dc.html" aria-label="Swap between bitcoin and USDB"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 6.5h11.5M11.5 3.5l3 3-3 3M15 11.5H3.5M6.5 8.5l-3 3 3 3"/></svg>Swap BTC ⇄ USDB</a><a class="btn" href="P-Settings.dc.html" onClick="{{ toSparkSettings }}" aria-label="Spark wallet settings"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="2.25"/><circle cx="9" cy="9" r="5"/><path d="M9 2v2M9 14v2M2 9h2M14 9h2M4.05 4.05l1.41 1.41M12.54 12.54l1.41 1.41M4.05 13.95l1.41-1.41M12.54 5.46l1.41-1.41"/></svg>Wallet settings</a></div></div>
+        </sc-if>
+        <sc-if value="{{ pg.liquid }}" hint-placeholder-val="{{ false }}">
+        <h1 class="ph">Liquid · Travel</h1>
+        <p class="idl"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg>{{ cubeName }} · Liquid network</p>
+        </sc-if>
+        <sc-if value="{{ pg.activity }}" hint-placeholder-val="{{ false }}">
+        <h1 class="ph">Activity</h1>
+        <p class="idl"><img src="{{ coinSrc }}" alt="">{{ cubeName }} · {{ netName }}</p>
+        </sc-if>
+        <sc-if value="{{ pg.backup }}" hint-placeholder-val="{{ false }}">
+        <h1 class="ph">Backup &amp; protection</h1>
+        <p class="idl"><img src="{{ coinSrc }}" alt="">{{ cubeName }} · {{ netName }}</p>
+        </sc-if>
+        <sc-if value="{{ pg.settings }}" hint-placeholder-val="{{ false }}">
+        <h1 class="ph">Settings</h1>
+        <p class="idl"><img src="{{ coinSrc }}" alt="">{{ cubeName }} · {{ netName }}</p>
+        </sc-if>
+      </div></div>
       <div class="pg">
 
       <!-- OVERVIEW -->
       <sc-if value="{{ pg.overview }}" hint-placeholder-val="{{ true }}">
-        <div class="ttl">
-          <h1>Total Balance</h1>
-          <button type="button" class="eye" aria-pressed="{{ hide.totalP }}" aria-label="Hide total balance" onClick="{{ toggleTotal }}">
-            <sc-if value="{{ hide.totalShown }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/></svg></sc-if>
-            <sc-if value="{{ hide.total }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/><path d="M3 3l12 12"/></svg></sc-if>
-          </button>
-          <span class="netline"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">{{ cubeName }} · Bitcoin mainnet</span>
-        </div>
+        <p class="kbal">Total balance</p>
         <p class="big">{{ total.fiat }}</p>
         <p class="sats"><b>{{ total.sats }}</b> <span class="u">SATS</span></p>
 
@@ -272,30 +332,13 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 
         <div class="cards">
           <section class="card" aria-label="Spark · Daily spending">
-            <p class="ch"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg><span class="nm">Spark · Daily spending</span></p>
+            <p class="ch"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path stroke-width="2" d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/></svg><span class="nm">Spark · Daily spending</span></p>
             <p class="amt">{{ spark.fiat }}</p>
             <p class="sats"><b>{{ spark.sats }}</b> <span class="u">SATS</span></p>
             <div class="assets">
               <sc-for list="{{ spark.assets }}" as="a" hint-placeholder-count="1">
                 <div class="ar">
-                  <sc-if value="{{ a.btc }}" hint-placeholder-val="{{ true }}"><span class="coin c32" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""><svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true"><circle cx="26" cy="26" r="6" fill="#111211" style="stroke:var(--panel)" stroke-width="2"/><g transform="translate(26 26) scale(.75) translate(-31 -31)"><path d="M31 27v8M27.5 29l7 4M27.5 33l7-4" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/></g></svg></span></sc-if>
-                  <span class="tk">{{ a.tick }}</span>
-                  <span class="val {{ a.cls }}"><b>{{ a.num }}</b> <span class="u">{{ a.unit }}</span><span class="fx">{{ a.fiat }}</span></span>
-                  <span class="pills"><a class="pill fill" href="P-Send.dc.html" aria-label="{{ a.sendLabel }}">Send</a><a class="pill out" href="P-Receive.dc.html" aria-label="{{ a.recvLabel }}">Receive</a></span>
-                </div>
-              </sc-for>
-            </div>
-          </section>
-
-          <section class="card" aria-label="Liquid · Travel">
-            <p class="ch"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg><span class="nm">Liquid · Travel</span></p>
-            <p class="amt">{{ liquid.fiat }}</p>
-            <p class="sats"><b>{{ liquid.sats }}</b> <span class="u">SATS</span></p>
-            <div class="assets">
-              <sc-for list="{{ liquid.assets }}" as="a" hint-placeholder-count="2">
-                <div class="ar">
-                  <sc-if value="{{ a.lbtc }}" hint-placeholder-val="{{ true }}"><span class="coin c32" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""><svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true"><circle cx="26" cy="26" r="6" fill="#2a9d7f" style="stroke:var(--panel)" stroke-width="2"/><path d="M26 22.6c1.3 1.6 2.2 2.8 2.2 3.9a2.2 2.2 0 0 1-4.4 0c0-1.1.9-2.3 2.2-3.9z" fill="#ffffff"/></svg></span></sc-if>
-                  <sc-if value="{{ a.usdt }}" hint-placeholder-val="{{ false }}"><svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="16" fill="#2a9d7f"/><path d="M10 10.5h12M16 10.5v12M11.5 15.5c1.4.6 2.9.9 4.5.9s3.1-.3 4.5-.9" fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round"/></svg></sc-if>
+                  <sc-if value="{{ a.btc }}" hint-placeholder-val="{{ true }}"><span class="coin c32" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""><svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true"><circle cx="26" cy="26" r="6" fill="#111211" style="stroke:var(--panel)" stroke-width="2"/><g transform="translate(26 26) scale(.75) translate(-31 -31)"><path d="M31 27v8M27.5 29l7 4M27.5 33l7-4" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/></g></svg></span></sc-if><sc-if value="{{ a.usdb }}" hint-placeholder-val="{{ false }}"><span class="coin c32" aria-hidden="true"><img src="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTI4IiBoZWlnaHQ9IjEyOCIgdmlld0JveD0iMCAwIDEyOCAxMjgiIGZpbGw9Im5vbmUiCiAgICB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPgogICAgPHJlY3Qgd2lkdGg9IjEyOCIgaGVpZ2h0PSIxMjgiIGZpbGw9IiMwMDg3NUEiLz4KICAgIDxwYXRoIGQ9Ik00MCA2OS4wMjE3QzM3Ljc5MDkgNjkuMDIxNyAzNiA2Ny4yMzA4IDM2IDY1LjAyMTdMMzYuMDAwNCAzNS41MTQ1QzM2LjAwMDQgMzMuMzA1NCAzNy43OTEzIDMxLjUxNDUgNDAuMDAwNCAzMS41MTQ1SDU0LjAyNTZINTguNDcyNUg2MS4xNDA1SDY1LjU4NzVINjguMjU2TDcyLjcwMyAzMS42MzE5Qzc1LjQ4NTYgMzEuODY1OCA3OC4wNTUzIDMyLjQ1MTkgODAuMzk2MSAzMy40MTExQzgzLjU4NiAzNC43MDY2IDg2LjE1IDM2LjY4MiA4OC4wMDk4IDM5LjM1MjVDODkuOTM3MSA0Mi4wNDk2IDkwLjg0NzMgNDUuMjk5NiA5MC44NDczIDQ4Ljk4NzRDOTAuODQ3MyA1MC4xOTA5IDkwLjc2NTYgNTEuMzM2NiA5MC41OTY0IDUyLjQyMDdDOTAuNDQ2MiA1My4zODI4IDg5LjYxNzcgNTQuMDkyIDg4LjY0NCA1NC4wOTJIODEuMTk1N0M3OS45OTgyIDU0LjA5MiA3OS4wNzYgNTMuMDM1NSA3OS4yMzc4IDUxLjg0OTFDNzkuMzA0MSA1MS4zNjI0IDc5LjMzOSA1MC44MzYxIDc5LjMzOSA1MC4yNjgxQzc5LjMzOSA0Ny4xOTA5IDc4LjM3MzkgNDUuMzA1MiA3Ni43NTMxIDQ0LjE1MDRMNzYuNzQzNSA0NC4xNDM1Qzc0LjkzNSA0Mi44Mzg2IDcyLjM2ODEgNDIuMDgzNyA2OC44NDkyIDQyLjA4MzdINDkuNzIyMkM0OC42MTc3IDQyLjA4MzcgNDcuNzIyMiA0Mi45NzkxIDQ3LjcyMjIgNDQuMDgzN1Y1Ni40NTI1QzQ3LjcyMjIgNTcuNTU3MSA0OC42MTc3IDU4LjQ1MjUgNDkuNzIyMiA1OC40NTI1SDY4Ljg0OTJDNzMuNTc5IDU4LjQ1MjUgNzcuODAxNSA1OS44MjYgODEuMDkzMSA2MS40OTExQzg0LjMwNjEgNjMuMTE2NSA4Ni43NTQ4IDY1LjA4MjggODguMDAwNiA2Ni40OTU1QzkwLjc5NzEgNjkuMjMxNyA5MiA3My4yODY4IDkyIDc4LjIzMDdDOTIgODIuMTk1NyA5MS4wNTExIDg1LjY5MDggODkuMDUxMSA4OC42MDk5Qzg3LjExMDMgOTEuNDU1NCA4NC40MzI2IDkzLjU2NzcgODEuMDkwNyA5NC45NTQ5TDgxLjA4MiA5NC45NTg1Qzc4LjUyNzUgOTYuMDA0NiA3NS43Mjk4IDk2LjYyNzcgNzIuNzA1NCA5Ni44NDk0TDY1LjU4OTcgOTYuOTQxNkg2MS4yMzc1SDYxLjE0MjdINTguNDc0N0w1OC41Njk1IDk2Ljk0MTZINTQuMTIyNUw1NC4wMjc4IDk2Ljk0MTZINDAuMDAwNEMzNy43OTEzIDk2Ljk0MTYgMzYuMDAwNCA5NS4xNTA4IDM2LjAwMDQgOTIuOTQxNkwzNi4wMDAyIDc2Ljk2MTNDMzYuMDAwMiA3NS44NTY3IDM2Ljg5NTYgNzQuOTYxMyAzOC4wMDAyIDc0Ljk2MTNINDUuNzIyMkM0Ni44MjY4IDc0Ljk2MTMgNDcuNzIyMiA3NS44NTY3IDQ3LjcyMjIgNzYuOTYxM1Y4NC4zNzI1QzQ3LjcyMjIgODUuNDc3IDQ4LjYxNzcgODYuMzcyNSA0OS43MjIyIDg2LjM3MjVINjkuMjMzNUM3MS42NzU0IDg2LjM3MjUgNzMuNzA4OSA4Ni4wNDA0IDc1LjM3NDQgODUuNDI5NEM3Ni45OTg3IDg0LjgxNiA3OC4xNzggODMuODk4OCA3OS4wMDYyIDgyLjdMNzkuMDEwNCA4Mi42OTRDNzkuODMxIDgxLjUxNTcgODAuMzIwOSA3OS44OTI5IDgwLjMyMDkgNzcuNjc1N0M4MC4zMjA5IDc1LjQ1NjUgNzkuODMwMiA3My44NTY0IDc5LjAyMDEgNzIuNzEzOUw3OS4wMTMxIDcyLjcwNDFMNzkuMDA2MiA3Mi42OTQyQzc4LjE4MTEgNzEuNDk5OSA3Ny4wMDgyIDcwLjU5OTUgNzUuMzkwOSA3MC4wMTM1TDc1LjM3NDUgNzAuMDA3Nkw3NS4zNTgzIDcwLjAwMTRDNzMuNjk5IDY5LjM2NjkgNzEuNjcxNiA2OS4wMjE3IDY5LjIzMzUgNjkuMDIxN0g0MFoiIGZpbGw9IiNGQUZBRkEiLz4KICAgIDxyZWN0IHg9IjU2LjY1NjMiIHk9IjIyIiB3aWR0aD0iMTIuMDgzOCIgaGVpZ2h0PSIxMy42NDI5IiByeD0iMiIgZmlsbD0iI0ZBRkFGQSIvPgogICAgPHJlY3QgeD0iNTYuNjU2MyIgeT0iOTIuMjc4MiIgd2lkdGg9IjEyLjA4MzgiIGhlaWdodD0iMTMuMzI5NyIgcng9IjIiIGZpbGw9IiNGQUZBRkEiLz4KPC9zdmc+Cg==" alt=""><svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true"><circle cx="26" cy="26" r="6" fill="#111211" style="stroke:var(--panel)" stroke-width="2"/><g transform="translate(26 26) scale(.75) translate(-31 -31)"><path d="M31 27v8M27.5 29l7 4M27.5 33l7-4" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/></g></svg></span></sc-if>
                   <span class="tk">{{ a.tick }}</span>
                   <span class="val {{ a.cls }}"><b>{{ a.num }}</b> <span class="u">{{ a.unit }}</span><span class="fx">{{ a.fiat }}</span></span>
                   <span class="pills"><a class="pill fill" href="P-Send.dc.html" aria-label="{{ a.sendLabel }}">Send</a><a class="pill out" href="P-Receive.dc.html" aria-label="{{ a.recvLabel }}">Receive</a></span>
@@ -307,7 +350,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
           <section class="card" aria-label="Vault · {{ vaultAlias }}">
             <p class="ch"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg><span class="nm">Vault · {{ vaultAlias }}</span></p>
             <p class="amt">{{ vault.fiat }}</p>
-            <p class="sats zero"><b>{{ vault.sats }}</b> <span class="u">SATS</span></p>
+            <p class="sats"><b>{{ vault.sats }}</b> <span class="u">SATS</span></p>
             <div class="assets">
               <sc-for list="{{ vault.assets }}" as="a" hint-placeholder-count="1">
                 <div class="ar">
@@ -324,65 +367,90 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
           </section>
         </div>
 
-        <div class="xfer"><a class="pill out" href="P-Transfer.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M6 3v12M6 3 3.5 5.5M6 3l2.5 2.5M12 15V3M12 15l-2.5-2.5M12 15l2.5-2.5"/></svg>Transfer</a></div>
-      </sc-if>
-
-      <!-- VAULT -->
-      <sc-if value="{{ pg.vault }}" hint-placeholder-val="{{ false }}">
-        <h1 class="ph">Vault · {{ vaultAlias }}</h1>
-        <p class="idl"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">{{ cubeName }} · Bitcoin mainnet</p>
-        <div class="bal">
-          <div><p class="big">{{ vault.fiat }}</p><p class="sats zero"><b>{{ vault.sats }}</b> <span class="u">SATS</span></p></div>
-          <span class="pills"><a class="pill fill" href="P-Send.dc.html">Send</a><a class="pill out" href="P-Receive.dc.html">Receive</a></span>
-        </div>
         <div class="sec">
-          <h2>Recovery path</h2>
-          <div class="rows">
-            <a class="row" href="P-Advanced.dc.html"><svg class="ic lead-ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="10" r="5.75"/><path d="M9 7v3l2 1.25M7 2h4"/></svg><span class="tx"><span class="lb" style="display:block">Time-locked spending, separate from backup</span><span class="ds" style="display:block">After 180 days without spending, 1-of-2 recovery keys can spend</span></span><svg class="ic cv" aria-hidden="true" viewBox="0 0 18 18"><path d="m7 4.5 4.5 4.5L7 13.5"/></svg></a>
-          </div>
-        </div>
-        <div class="sec">
-          <h2>Recent activity</h2>
-          <div class="rows">
-            <sc-for list="{{ vaultAct }}" as="t" hint-placeholder-count="3">
-              <a class="tr" href="P-Activity.dc.html" title="Open in Activity">
-                <span class="tm">{{ t.when }}</span>
-                <span class="cell"><sc-if value="{{ t.inbound }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M13 5 5 13M5 7v6h6"/></svg></sc-if><sc-if value="{{ t.outbound }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M5 13 13 5M7 5h6v6"/></svg></sc-if><span class="ell">{{ t.desc }}</span></span>
+          <div class="sech"><h2>Recent activity</h2><a href="P-Activity.dc.html">See all in Activity</a></div>
+          <div class="acts5"><div class="cols" aria-hidden="true"><span>Time</span><span>Wallet</span><span>Details</span><span class="r">Amount</span><span>Status</span></div>
+            <sc-for list="{{ allAct }}" as="t" hint-placeholder-count="5">
+              <sc-if value="{{ t.dayHead }}" hint-placeholder-val="{{ false }}"><h3 class="dayh">{{ t.day }}<span class="dn">{{ t.date }}</span></h3></sc-if>
+              <a class="tr w5" href="P-Activity.dc.html" title="Open in Activity">
+                <span class="tm">{{ t.time }}</span>
+                <span class="cell"><sc-if value="{{ t.spark }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path stroke-width="2" d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/></svg></sc-if><sc-if value="{{ t.vault }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg></sc-if><span class="wn ell">{{ t.wname }}</span></span>
+                <span class="cell"><sc-if value="{{ t.inbound }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M13 5 5 13M5 7v6h6"/></svg></sc-if><sc-if value="{{ t.outbound }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M5 13 13 5M7 5h6v6"/></svg></sc-if><sc-if value="{{ t.swap }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 6.5h11.5M11.5 3.5l3 3-3 3M15 11.5H3.5M6.5 8.5l-3 3 3 3"/></svg></sc-if><span class="ell">{{ t.desc }}</span></span>
                 <span class="amt r">{{ t.amt }}<span class="fx">{{ t.fiat }}</span></span>
                 <span class="stc {{ t.stCls }}"><sc-if value="{{ t.sOk }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg></sc-if><sc-if value="{{ t.sPend }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2.5 1.5"/></svg></sc-if><sc-if value="{{ t.sSig }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="m3 15 1-4 8-8 3 3-8 8z"/></svg></sc-if><span class="ell">{{ t.st }}</span></span>
               </a>
             </sc-for>
           </div>
-          <p class="cap" style="margin-top:10px"><a href="P-Activity.dc.html" style="color:var(--accent)">View all transactions</a></p>
         </div>
-        <div class="adv1" style="margin-top:36px;border-top:1px solid var(--line)">
-          <a class="row" href="P-Advanced.dc.html"><svg class="ic lead-ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 5.5h12M3 9h12M3 12.5h12M6 4v3M11 7.5v3M8 11v3"/></svg><span class="tx"><span class="lb" style="display:block">Tools</span><span class="ds" style="display:block">Coin control, PSBT proposals, recovery path, split coins</span></span><svg class="ic cv" aria-hidden="true" viewBox="0 0 18 18"><path d="m7 4.5 4.5 4.5L7 13.5"/></svg></a>
+      </sc-if>
+
+      <!-- VAULT -->
+      <sc-if value="{{ pg.vault }}" hint-placeholder-val="{{ false }}">
+        <p class="kbal" style="margin-top:24px">Total balance</p>
+        <p class="big">{{ vault.fiat }}</p>
+        <p class="sats"><b>{{ vault.sats }}</b> <span class="u">SATS</span></p>
+        <div class="assets wa" aria-label="Assets">
+          <sc-for list="{{ vaultRows }}" as="a" hint-placeholder-count="1">
+            <div class="ar">
+              <sc-if value="{{ a.btc }}" hint-placeholder-val="{{ true }}"><span class="coin c32" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""><svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true"><circle cx="26" cy="26" r="6" fill="#f3821d" style="stroke:var(--panel)" stroke-width="2"/><g transform="translate(26 26) scale(.75) translate(-31 -31)"><path d="M29.6 32.4l2.8-2.8M30.4 28.9l.7-.7a2 2 0 0 1 2.8 2.8l-.7.7M31.6 33.1l-.7.7a2 2 0 0 1-2.8-2.8l.7-.7" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/></g></svg></span></sc-if><sc-if value="{{ a.usdb }}" hint-placeholder-val="{{ false }}"><span class="coin c32" aria-hidden="true"><img src="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTI4IiBoZWlnaHQ9IjEyOCIgdmlld0JveD0iMCAwIDEyOCAxMjgiIGZpbGw9Im5vbmUiCiAgICB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPgogICAgPHJlY3Qgd2lkdGg9IjEyOCIgaGVpZ2h0PSIxMjgiIGZpbGw9IiMwMDg3NUEiLz4KICAgIDxwYXRoIGQ9Ik00MCA2OS4wMjE3QzM3Ljc5MDkgNjkuMDIxNyAzNiA2Ny4yMzA4IDM2IDY1LjAyMTdMMzYuMDAwNCAzNS41MTQ1QzM2LjAwMDQgMzMuMzA1NCAzNy43OTEzIDMxLjUxNDUgNDAuMDAwNCAzMS41MTQ1SDU0LjAyNTZINTguNDcyNUg2MS4xNDA1SDY1LjU4NzVINjguMjU2TDcyLjcwMyAzMS42MzE5Qzc1LjQ4NTYgMzEuODY1OCA3OC4wNTUzIDMyLjQ1MTkgODAuMzk2MSAzMy40MTExQzgzLjU4NiAzNC43MDY2IDg2LjE1IDM2LjY4MiA4OC4wMDk4IDM5LjM1MjVDODkuOTM3MSA0Mi4wNDk2IDkwLjg0NzMgNDUuMjk5NiA5MC44NDczIDQ4Ljk4NzRDOTAuODQ3MyA1MC4xOTA5IDkwLjc2NTYgNTEuMzM2NiA5MC41OTY0IDUyLjQyMDdDOTAuNDQ2MiA1My4zODI4IDg5LjYxNzcgNTQuMDkyIDg4LjY0NCA1NC4wOTJIODEuMTk1N0M3OS45OTgyIDU0LjA5MiA3OS4wNzYgNTMuMDM1NSA3OS4yMzc4IDUxLjg0OTFDNzkuMzA0MSA1MS4zNjI0IDc5LjMzOSA1MC44MzYxIDc5LjMzOSA1MC4yNjgxQzc5LjMzOSA0Ny4xOTA5IDc4LjM3MzkgNDUuMzA1MiA3Ni43NTMxIDQ0LjE1MDRMNzYuNzQzNSA0NC4xNDM1Qzc0LjkzNSA0Mi44Mzg2IDcyLjM2ODEgNDIuMDgzNyA2OC44NDkyIDQyLjA4MzdINDkuNzIyMkM0OC42MTc3IDQyLjA4MzcgNDcuNzIyMiA0Mi45NzkxIDQ3LjcyMjIgNDQuMDgzN1Y1Ni40NTI1QzQ3LjcyMjIgNTcuNTU3MSA0OC42MTc3IDU4LjQ1MjUgNDkuNzIyMiA1OC40NTI1SDY4Ljg0OTJDNzMuNTc5IDU4LjQ1MjUgNzcuODAxNSA1OS44MjYgODEuMDkzMSA2MS40OTExQzg0LjMwNjEgNjMuMTE2NSA4Ni43NTQ4IDY1LjA4MjggODguMDAwNiA2Ni40OTU1QzkwLjc5NzEgNjkuMjMxNyA5MiA3My4yODY4IDkyIDc4LjIzMDdDOTIgODIuMTk1NyA5MS4wNTExIDg1LjY5MDggODkuMDUxMSA4OC42MDk5Qzg3LjExMDMgOTEuNDU1NCA4NC40MzI2IDkzLjU2NzcgODEuMDkwNyA5NC45NTQ5TDgxLjA4MiA5NC45NTg1Qzc4LjUyNzUgOTYuMDA0NiA3NS43Mjk4IDk2LjYyNzcgNzIuNzA1NCA5Ni44NDk0TDY1LjU4OTcgOTYuOTQxNkg2MS4yMzc1SDYxLjE0MjdINTguNDc0N0w1OC41Njk1IDk2Ljk0MTZINTQuMTIyNUw1NC4wMjc4IDk2Ljk0MTZINDAuMDAwNEMzNy43OTEzIDk2Ljk0MTYgMzYuMDAwNCA5NS4xNTA4IDM2LjAwMDQgOTIuOTQxNkwzNi4wMDAyIDc2Ljk2MTNDMzYuMDAwMiA3NS44NTY3IDM2Ljg5NTYgNzQuOTYxMyAzOC4wMDAyIDc0Ljk2MTNINDUuNzIyMkM0Ni44MjY4IDc0Ljk2MTMgNDcuNzIyMiA3NS44NTY3IDQ3LjcyMjIgNzYuOTYxM1Y4NC4zNzI1QzQ3LjcyMjIgODUuNDc3IDQ4LjYxNzcgODYuMzcyNSA0OS43MjIyIDg2LjM3MjVINjkuMjMzNUM3MS42NzU0IDg2LjM3MjUgNzMuNzA4OSA4Ni4wNDA0IDc1LjM3NDQgODUuNDI5NEM3Ni45OTg3IDg0LjgxNiA3OC4xNzggODMuODk4OCA3OS4wMDYyIDgyLjdMNzkuMDEwNCA4Mi42OTRDNzkuODMxIDgxLjUxNTcgODAuMzIwOSA3OS44OTI5IDgwLjMyMDkgNzcuNjc1N0M4MC4zMjA5IDc1LjQ1NjUgNzkuODMwMiA3My44NTY0IDc5LjAyMDEgNzIuNzEzOUw3OS4wMTMxIDcyLjcwNDFMNzkuMDA2MiA3Mi42OTQyQzc4LjE4MTEgNzEuNDk5OSA3Ny4wMDgyIDcwLjU5OTUgNzUuMzkwOSA3MC4wMTM1TDc1LjM3NDUgNzAuMDA3Nkw3NS4zNTgzIDcwLjAwMTRDNzMuNjk5IDY5LjM2NjkgNzEuNjcxNiA2OS4wMjE3IDY5LjIzMzUgNjkuMDIxN0g0MFoiIGZpbGw9IiNGQUZBRkEiLz4KICAgIDxyZWN0IHg9IjU2LjY1NjMiIHk9IjIyIiB3aWR0aD0iMTIuMDgzOCIgaGVpZ2h0PSIxMy42NDI5IiByeD0iMiIgZmlsbD0iI0ZBRkFGQSIvPgogICAgPHJlY3QgeD0iNTYuNjU2MyIgeT0iOTIuMjc4MiIgd2lkdGg9IjEyLjA4MzgiIGhlaWdodD0iMTMuMzI5NyIgcng9IjIiIGZpbGw9IiNGQUZBRkEiLz4KPC9zdmc+Cg==" alt=""><svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true"><circle cx="26" cy="26" r="6" fill="#111211" style="stroke:var(--panel)" stroke-width="2"/><g transform="translate(26 26) scale(.75) translate(-31 -31)"><path d="M31 27v8M27.5 29l7 4M27.5 33l7-4" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/></g></svg></span></sc-if>
+              <span class="tk">{{ a.name }}</span>
+              <span class="val {{ a.cls }}"><b>{{ a.num }}</b> <span class="u">{{ a.unit }}</span><span class="fx">{{ a.fiat }}</span></span>
+              <span class="pills"><a class="pill fill" href="P-Send.dc.html" onClick="{{ a.toSend }}" aria-label="{{ a.sendLabel }}">Send</a><a class="pill out" href="P-Receive.dc.html" onClick="{{ a.toRecv }}" aria-label="{{ a.recvLabel }}">Receive</a></span>
+            </div>
+          </sc-for>
+        </div>
+        <div class="prot" aria-label="Protection">
+          <a class="row" href="P-Advanced.dc.html"><svg class="ic lead-ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="10" r="5.75"/><path d="M9 7v3l2 1.25M7 2h4"/></svg><span class="tx"><span class="lb" style="display:block">Recovery path</span><span class="ds" style="display:block">After 180 days without spending, 1 of 2 recovery keys can spend. Separate from backup.</span></span><svg class="ic cv" aria-hidden="true" viewBox="0 0 18 18"><path d="m7 4.5 4.5 4.5L7 13.5"/></svg></a>
+          <a class="row att" href="P-Advanced.dc.html"><svg class="ic lead-ic" aria-hidden="true" viewBox="0 0 18 18"><path d="m3 15 1-4 8-8 3 3-8 8z"/></svg><span class="tx"><span class="lb" style="display:block">1 PSBT waiting for signatures</span><span class="ds" style="display:block">Roof repair deposit · 2 of 3 signatures. Open Tools to sign or export it.</span></span><svg class="ic cv" aria-hidden="true" viewBox="0 0 18 18"><path d="m7 4.5 4.5 4.5L7 13.5"/></svg></a>
+        </div>
+        <div class="sec">
+          <div class="sech"><h2>Recent activity</h2><a href="P-Activity.dc.html">See all Vault activity</a></div>
+          <div class="acts5"><div class="cols" aria-hidden="true"><span>Time</span><span>Wallet</span><span>Details</span><span class="r">Amount</span><span>Status</span></div>
+            <sc-for list="{{ vaultAct }}" as="t" hint-placeholder-count="3">
+              <sc-if value="{{ t.dayHead }}" hint-placeholder-val="{{ false }}"><h3 class="dayh">{{ t.day }}<span class="dn">{{ t.date }}</span></h3></sc-if>
+              <a class="tr w5" href="P-Activity.dc.html" title="Open in Activity">
+                <span class="tm">{{ t.time }}</span>
+                <span class="cell"><sc-if value="{{ t.spark }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path stroke-width="2" d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/></svg></sc-if><sc-if value="{{ t.vault }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg></sc-if><span class="wn ell">{{ t.wname }}</span></span>
+                <span class="cell"><sc-if value="{{ t.inbound }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M13 5 5 13M5 7v6h6"/></svg></sc-if><sc-if value="{{ t.outbound }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M5 13 13 5M7 5h6v6"/></svg></sc-if><sc-if value="{{ t.swap }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 6.5h11.5M11.5 3.5l3 3-3 3M15 11.5H3.5M6.5 8.5l-3 3 3 3"/></svg></sc-if><span class="ell">{{ t.desc }}</span></span>
+                <span class="amt r">{{ t.amt }}<span class="fx">{{ t.fiat }}</span></span>
+                <span class="stc {{ t.stCls }}"><sc-if value="{{ t.sOk }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg></sc-if><sc-if value="{{ t.sPend }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2.5 1.5"/></svg></sc-if><sc-if value="{{ t.sSig }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="m3 15 1-4 8-8 3 3-8 8z"/></svg></sc-if><span class="ell">{{ t.st }}</span></span>
+              </a>
+            </sc-for>
+          </div>
         </div>
       </sc-if>
 
       <!-- SPARK -->
       <sc-if value="{{ pg.spark }}" hint-placeholder-val="{{ false }}">
-        <h1 class="ph">Spark · Daily spending</h1>
-        <p class="idl"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">{{ cubeName }} · Bitcoin mainnet</p>
-        <div class="bal">
-          <div><p class="big">{{ spark.fiat }}</p><p class="sats"><b>{{ spark.sats }}</b> <span class="u">SATS</span></p></div>
-          <span class="pills"><a class="pill fill" href="P-Send.dc.html">Send</a><a class="pill out" href="P-Receive.dc.html">Receive</a></span>
+        <p class="kbal" style="margin-top:24px">Total balance</p>
+        <p class="big">{{ spark.fiat }}</p>
+        <p class="sats"><b>{{ spark.sats }}</b> <span class="u">SATS</span></p>
+        <div class="assets wa" aria-label="Assets">
+          <sc-for list="{{ sparkRows }}" as="a" hint-placeholder-count="2">
+            <div class="ar">
+              <sc-if value="{{ a.btc }}" hint-placeholder-val="{{ true }}"><span class="coin c32" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""><svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true"><circle cx="26" cy="26" r="6" fill="#111211" style="stroke:var(--panel)" stroke-width="2"/><g transform="translate(26 26) scale(.75) translate(-31 -31)"><path d="M31 27v8M27.5 29l7 4M27.5 33l7-4" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/></g></svg></span></sc-if><sc-if value="{{ a.usdb }}" hint-placeholder-val="{{ false }}"><span class="coin c32" aria-hidden="true"><img src="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTI4IiBoZWlnaHQ9IjEyOCIgdmlld0JveD0iMCAwIDEyOCAxMjgiIGZpbGw9Im5vbmUiCiAgICB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPgogICAgPHJlY3Qgd2lkdGg9IjEyOCIgaGVpZ2h0PSIxMjgiIGZpbGw9IiMwMDg3NUEiLz4KICAgIDxwYXRoIGQ9Ik00MCA2OS4wMjE3QzM3Ljc5MDkgNjkuMDIxNyAzNiA2Ny4yMzA4IDM2IDY1LjAyMTdMMzYuMDAwNCAzNS41MTQ1QzM2LjAwMDQgMzMuMzA1NCAzNy43OTEzIDMxLjUxNDUgNDAuMDAwNCAzMS41MTQ1SDU0LjAyNTZINTguNDcyNUg2MS4xNDA1SDY1LjU4NzVINjguMjU2TDcyLjcwMyAzMS42MzE5Qzc1LjQ4NTYgMzEuODY1OCA3OC4wNTUzIDMyLjQ1MTkgODAuMzk2MSAzMy40MTExQzgzLjU4NiAzNC43MDY2IDg2LjE1IDM2LjY4MiA4OC4wMDk4IDM5LjM1MjVDODkuOTM3MSA0Mi4wNDk2IDkwLjg0NzMgNDUuMjk5NiA5MC44NDczIDQ4Ljk4NzRDOTAuODQ3MyA1MC4xOTA5IDkwLjc2NTYgNTEuMzM2NiA5MC41OTY0IDUyLjQyMDdDOTAuNDQ2MiA1My4zODI4IDg5LjYxNzcgNTQuMDkyIDg4LjY0NCA1NC4wOTJIODEuMTk1N0M3OS45OTgyIDU0LjA5MiA3OS4wNzYgNTMuMDM1NSA3OS4yMzc4IDUxLjg0OTFDNzkuMzA0MSA1MS4zNjI0IDc5LjMzOSA1MC44MzYxIDc5LjMzOSA1MC4yNjgxQzc5LjMzOSA0Ny4xOTA5IDc4LjM3MzkgNDUuMzA1MiA3Ni43NTMxIDQ0LjE1MDRMNzYuNzQzNSA0NC4xNDM1Qzc0LjkzNSA0Mi44Mzg2IDcyLjM2ODEgNDIuMDgzNyA2OC44NDkyIDQyLjA4MzdINDkuNzIyMkM0OC42MTc3IDQyLjA4MzcgNDcuNzIyMiA0Mi45NzkxIDQ3LjcyMjIgNDQuMDgzN1Y1Ni40NTI1QzQ3LjcyMjIgNTcuNTU3MSA0OC42MTc3IDU4LjQ1MjUgNDkuNzIyMiA1OC40NTI1SDY4Ljg0OTJDNzMuNTc5IDU4LjQ1MjUgNzcuODAxNSA1OS44MjYgODEuMDkzMSA2MS40OTExQzg0LjMwNjEgNjMuMTE2NSA4Ni43NTQ4IDY1LjA4MjggODguMDAwNiA2Ni40OTU1QzkwLjc5NzEgNjkuMjMxNyA5MiA3My4yODY4IDkyIDc4LjIzMDdDOTIgODIuMTk1NyA5MS4wNTExIDg1LjY5MDggODkuMDUxMSA4OC42MDk5Qzg3LjExMDMgOTEuNDU1NCA4NC40MzI2IDkzLjU2NzcgODEuMDkwNyA5NC45NTQ5TDgxLjA4MiA5NC45NTg1Qzc4LjUyNzUgOTYuMDA0NiA3NS43Mjk4IDk2LjYyNzcgNzIuNzA1NCA5Ni44NDk0TDY1LjU4OTcgOTYuOTQxNkg2MS4yMzc1SDYxLjE0MjdINTguNDc0N0w1OC41Njk1IDk2Ljk0MTZINTQuMTIyNUw1NC4wMjc4IDk2Ljk0MTZINDAuMDAwNEMzNy43OTEzIDk2Ljk0MTYgMzYuMDAwNCA5NS4xNTA4IDM2LjAwMDQgOTIuOTQxNkwzNi4wMDAyIDc2Ljk2MTNDMzYuMDAwMiA3NS44NTY3IDM2Ljg5NTYgNzQuOTYxMyAzOC4wMDAyIDc0Ljk2MTNINDUuNzIyMkM0Ni44MjY4IDc0Ljk2MTMgNDcuNzIyMiA3NS44NTY3IDQ3LjcyMjIgNzYuOTYxM1Y4NC4zNzI1QzQ3LjcyMjIgODUuNDc3IDQ4LjYxNzcgODYuMzcyNSA0OS43MjIyIDg2LjM3MjVINjkuMjMzNUM3MS42NzU0IDg2LjM3MjUgNzMuNzA4OSA4Ni4wNDA0IDc1LjM3NDQgODUuNDI5NEM3Ni45OTg3IDg0LjgxNiA3OC4xNzggODMuODk4OCA3OS4wMDYyIDgyLjdMNzkuMDEwNCA4Mi42OTRDNzkuODMxIDgxLjUxNTcgODAuMzIwOSA3OS44OTI5IDgwLjMyMDkgNzcuNjc1N0M4MC4zMjA5IDc1LjQ1NjUgNzkuODMwMiA3My44NTY0IDc5LjAyMDEgNzIuNzEzOUw3OS4wMTMxIDcyLjcwNDFMNzkuMDA2MiA3Mi42OTQyQzc4LjE4MTEgNzEuNDk5OSA3Ny4wMDgyIDcwLjU5OTUgNzUuMzkwOSA3MC4wMTM1TDc1LjM3NDUgNzAuMDA3Nkw3NS4zNTgzIDcwLjAwMTRDNzMuNjk5IDY5LjM2NjkgNzEuNjcxNiA2OS4wMjE3IDY5LjIzMzUgNjkuMDIxN0g0MFoiIGZpbGw9IiNGQUZBRkEiLz4KICAgIDxyZWN0IHg9IjU2LjY1NjMiIHk9IjIyIiB3aWR0aD0iMTIuMDgzOCIgaGVpZ2h0PSIxMy42NDI5IiByeD0iMiIgZmlsbD0iI0ZBRkFGQSIvPgogICAgPHJlY3QgeD0iNTYuNjU2MyIgeT0iOTIuMjc4MiIgd2lkdGg9IjEyLjA4MzgiIGhlaWdodD0iMTMuMzI5NyIgcng9IjIiIGZpbGw9IiNGQUZBRkEiLz4KPC9zdmc+Cg==" alt=""><svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true"><circle cx="26" cy="26" r="6" fill="#111211" style="stroke:var(--panel)" stroke-width="2"/><g transform="translate(26 26) scale(.75) translate(-31 -31)"><path d="M31 27v8M27.5 29l7 4M27.5 33l7-4" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/></g></svg></span></sc-if>
+              <span class="tk">{{ a.name }}</span>
+              <span class="val {{ a.cls }}"><b>{{ a.num }}</b> <span class="u">{{ a.unit }}</span><span class="fx">{{ a.fiat }}</span></span>
+              <span class="pills"><a class="pill fill" href="P-Send.dc.html" onClick="{{ a.toSend }}" aria-label="{{ a.sendLabel }}">Send</a><a class="pill out" href="P-Receive.dc.html" onClick="{{ a.toRecv }}" aria-label="{{ a.recvLabel }}">Receive</a></span>
+            </div>
+          </sc-for>
         </div>
-                <div class="sec">
-          <h2>Recent activity</h2>
-          <div class="rows">
+        <div class="sec">
+          <div class="sech"><h2>Recent activity</h2><a href="P-Activity.dc.html">See all Spark activity</a></div>
+          <div class="acts5"><div class="cols" aria-hidden="true"><span>Time</span><span>Wallet</span><span>Details</span><span class="r">Amount</span><span>Status</span></div>
             <sc-for list="{{ sparkAct }}" as="t" hint-placeholder-count="4">
-              <a class="tr" href="P-Activity.dc.html" title="Open in Activity">
-                <span class="tm">{{ t.when }}</span>
-                <span class="cell"><sc-if value="{{ t.inbound }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M13 5 5 13M5 7v6h6"/></svg></sc-if><sc-if value="{{ t.outbound }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M5 13 13 5M7 5h6v6"/></svg></sc-if><span class="ell">{{ t.desc }}</span></span>
+              <sc-if value="{{ t.dayHead }}" hint-placeholder-val="{{ false }}"><h3 class="dayh">{{ t.day }}<span class="dn">{{ t.date }}</span></h3></sc-if>
+              <a class="tr w5" href="P-Activity.dc.html" title="Open in Activity">
+                <span class="tm">{{ t.time }}</span>
+                <span class="cell"><sc-if value="{{ t.spark }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path stroke-width="2" d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/></svg></sc-if><sc-if value="{{ t.vault }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg></sc-if><span class="wn ell">{{ t.wname }}</span></span>
+                <span class="cell"><sc-if value="{{ t.inbound }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M13 5 5 13M5 7v6h6"/></svg></sc-if><sc-if value="{{ t.outbound }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M5 13 13 5M7 5h6v6"/></svg></sc-if><sc-if value="{{ t.swap }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 6.5h11.5M11.5 3.5l3 3-3 3M15 11.5H3.5M6.5 8.5l-3 3 3 3"/></svg></sc-if><span class="ell">{{ t.desc }}</span></span>
                 <span class="amt r">{{ t.amt }}<span class="fx">{{ t.fiat }}</span></span>
                 <span class="stc {{ t.stCls }}"><sc-if value="{{ t.sOk }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg></sc-if><sc-if value="{{ t.sPend }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2.5 1.5"/></svg></sc-if><sc-if value="{{ t.sSig }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="m3 15 1-4 8-8 3 3-8 8z"/></svg></sc-if><span class="ell">{{ t.st }}</span></span>
               </a>
             </sc-for>
           </div>
-          <p class="cap" style="margin-top:10px"><a href="P-Activity.dc.html" style="color:var(--accent)">View all transactions</a></p>
         </div>
-<div class="rows" style="margin-top:28px">
+        <div class="rows" style="margin-top:28px">
           <div class="row">
             <svg class="ic lead-ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="3"/><path d="M12 9v1.2a2.2 2.2 0 0 0 4.4 0V9A7.4 7.4 0 1 0 13 15.2"/></svg>
             <span class="tx"><span class="lb" style="display:block">Lightning Address</span><span class="ds" style="display:block">{{ ln.text }}</span></span>
@@ -408,18 +476,11 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
               </div>
             </div>
           </sc-if>
-          <div class="row">
-            <svg class="ic lead-ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="4" width="13" height="10" rx="2"/><path d="M2.5 7.5h13"/></svg>
-            <span class="tx"><span class="lb" style="display:block" id="sb-l">Stable Balance · {{ sb.state }}</span><span class="ds" style="display:block">Keep a portion of your Bitcoin balance pegged to USD. Set per device; not restored with the seed. No guaranteed peg.</span></span>
-            <button type="button" class="tog" aria-labelledby="sb-l" aria-pressed="{{ sb.on }}" onClick="{{ sb.toggle }}"><span class="kn"></span>{{ sb.text }}</button>
-          </div>
         </div>
       </sc-if>
 
       <!-- LIQUID (reached from the sidebar) -->
       <sc-if value="{{ pg.liquid }}" hint-placeholder-val="{{ false }}">
-        <h1 class="ph">Liquid · Travel</h1>
-        <p class="idl"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg>{{ cubeName }} · Liquid network</p>
         <div class="bal" style="align-items:flex-start">
           <div><p class="big">{{ liquid.fiat }}</p><p class="sats"><b>{{ liquid.sats }}</b> <span class="u">SATS</span></p></div>
         </div>
@@ -439,8 +500,6 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 
       <!-- ACTIVITY -->
       <sc-if value="{{ pg.activity }}" hint-placeholder-val="{{ false }}">
-        <h1 class="ph">Activity</h1>
-        <p class="idl"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">{{ cubeName }} · Bitcoin mainnet</p>
         <div class="rows" style="margin-top:24px">
           <sc-for list="{{ activity }}" as="t" hint-placeholder-count="5">
               <a class="tr" href="P-Activity.dc.html" title="Open in Activity">
@@ -455,8 +514,6 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 
       <!-- BACKUP & PROTECTION -->
       <sc-if value="{{ pg.backup }}" hint-placeholder-val="{{ false }}">
-        <h1 class="ph">Backup &amp; protection</h1>
-        <p class="idl"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">{{ cubeName }} · Bitcoin mainnet</p>
         <div class="lead">
           <div class="tx">
             <span class="st warn"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5 16 15H2z"/><path d="M9 7.5v3M9 12.75v.01"/></svg>Backup not confirmed</span>
@@ -481,8 +538,6 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 
       <!-- SETTINGS (index; reached from the sidebar foot) -->
       <sc-if value="{{ pg.settings }}" hint-placeholder-val="{{ false }}">
-        <h1 class="ph">Settings</h1>
-        <p class="idl"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">{{ cubeName }} · Bitcoin mainnet</p>
         <div class="rows" style="margin-top:24px">
           <sc-for list="{{ scopes }}" as="s" hint-placeholder-count="5">
             <button type="button" class="row"><span class="tx"><span class="lb" style="display:block">{{ s.label }}</span><span class="ds" style="display:block">{{ s.desc }}</span></span><svg class="ic cv" aria-hidden="true" viewBox="0 0 18 18"><path d="m7 4.5 4.5 4.5L7 13.5"/></svg></button>
@@ -506,28 +561,56 @@ class Component extends DCLogic {
     try { const o = localStorage.getItem('tenshu.proto.open'); if (o) localStorage.setItem('tenshu.proto.seen', o); } catch (e) {}
     const P=this.props,S=this.state,self=this;
     const rs=P.reviewState||'normal', signedOut=rs==='signedOut', disc=rs==='cubeDisconnected', longN=rs==='longNames';
-    const propPage=P.page||'overview';
+    // prototype-only: another board can land this one on a wallet page (P-Swap writes {"page":"spark"}); read once, then cleared
+    if (this._land===undefined) { this._land=null; try { const l=JSON.parse(localStorage.getItem('tenshu.proto.land')||'null'); localStorage.removeItem('tenshu.proto.land'); if (l&&l.page) this._land=l.page; } catch (e) {} }
+    const propPage=this._land||P.page||'overview';
     const page=(S.nav&&S.nav.for===propPage)?S.nav.page:propPage;
     const hb=!!P.hideBalances;
     const hide=(S.hide&&S.hide.for===hb)?S.hide:{for:hb,total:hb,wallets:hb};
     const go=(pg)=>()=>self.setState({nav:{for:propPage,page:pg},menu:false});
-    const cubeName=longN?'A very long Cube name that keeps going to test wrapping behaviour':'Everyday';
+    // prototype-only: the Cube opened from the Launcher (P-Launcher writes tenshu.proto.openCube); Everyday when arriving any other way
+    let OC=null; try { OC=JSON.parse(localStorage.getItem('tenshu.proto.openCube')||'null'); } catch (e) {}
+    const cubeName=longN?'A very long Cube name that keeps going to test wrapping behaviour':((OC&&OC.name)||'Everyday');
+    const netName=(OC&&OC.net)||'Bitcoin mainnet';
+    const coinSrc=OC&&OC.logo==='b2b'?'/_blob/c39785504daaef5633099a8ae196c784':'/_blob/dbbfc88f16f7cc27510d81f434c268ea';
+    const avPath=(OC&&OC.av)||'M12 4.2c4.6-.4 7.9 3.1 7.6 7.4-.3 4.6-4.2 8.2-8.6 7.6-4.2-.6-6.9-4.4-6.3-8.5.5-3.3 3-5.9 6.2-6.4';
     const vaultAlias=longN?'Family savings for the grandchildren and the house fund':'Family savings';
     const D='••••••', hw=hide.wallets;
     const m=(v,h)=>h?D:v;
-    const nvi=(pg)=>({cls:page===pg?'on kf':'',cur:page===pg?'page':'false',pick:go(pg)});
-    const asset=(wn,a)=>({tick:a.tick,num:m(a.num,hw),unit:a.unit,fiat:hw?'':a.fiat,cls:a.zero?'zero':'',btc:a.coin==='btc',lbtc:a.coin==='lbtc',usdt:a.coin==='usdt',sendLabel:'Send '+a.tick+' from '+wn,recvLabel:'Receive '+a.tick+' to '+wn});
+    const nvi=(pg)=>({cls:page===pg?'on':'',cur:page===pg?'page':'false',pick:go(pg)});
+    const asset=(wn,a)=>({usdb:a.coin==='usdb',tick:a.tick,num:m(a.num,hw),unit:a.unit,fiat:hw?'':a.fiat,cls:a.zero?'zero':'',btc:a.coin==='btc',lbtc:a.coin==='lbtc',usdt:a.coin==='usdt',sendLabel:'Send '+a.tick+' from '+wn,recvLabel:'Receive '+a.tick+' to '+wn});
     const card=(wn,fiat,sats,assets)=>({fiat:m(fiat,hw),sats:m(sats,hw),assets:assets.map(a=>asset(wn,a))});
     const flow=(r)=>Object.assign({},r,{inbound:r.dir==='in',outbound:r.dir==='out',amt:m(r.amt,hw),fiat:m(r.fx||'',hw),
       st:r.st||'Confirmed',stCls:r.st&&/signature/.test(r.st)?'warn':(r.st&&/pending/i.test(r.st)?'warn':'ok'),sOk:!r.st||r.st==='Confirmed',sPend:!!r.st&&/pending/i.test(r.st),sSig:!!r.st&&/signature/.test(r.st)});
     const vName='Vault · '+vaultAlias;
+    // prototype-only: tenshu.proto.sendFrom / recvTo tell P-Send / P-Receive which wallet and asset the pill came from
+    const hand=(k,v)=>()=>{ try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
+    const row5=(r)=>({btc:r.coin==='btc',usdb:r.coin==='usdb',name:r.name,num:m(r.num,hw),unit:r.unit,fiat:hw?'':r.fiat,cls:r.zero?'zero':'',
+      toSend:hand('tenshu.proto.sendFrom',{wallet:r.w,asset:r.as}),toRecv:hand('tenshu.proto.recvTo',{wallet:r.w,asset:r.as}),
+      sendLabel:'Send '+r.name+' from '+(r.w==='spark'?'Spark':'Vault'),recvLabel:'Receive '+r.name+' to '+(r.w==='spark'?'Spark':'Vault')});
+    // Activity-style rows: a day heading before the first row of each day
+    const days=(list,wk)=>list.map((r,i)=>Object.assign(flow(r),{dayHead:i===0||list[i-1].date!==r.date,spark:wk==='spark',vault:wk==='vault',wname:wk==='spark'?'Daily spending':vaultAlias,swap:r.dir==='swap'}));
+    const SA=[
+        {dir:'in',desc:'Spark transfer',day:'Today',date:'Thu 29 Oct 2026',time:'14:32',amt:'+2 SATS',fx:'$0.00',st:'Pending'},
+        {dir:'swap',desc:'Swap · bitcoin to USDB',day:'Yesterday',date:'Wed 28 Oct 2026',time:'20:05',amt:'+50.00 USDB',fx:'−60,460 SATS'},
+        {dir:'out',desc:'Lightning payment · Example Coffee Co.',day:'Yesterday',date:'Wed 28 Oct 2026',time:'19:47',amt:'\u22123,000 SATS',fx:'$2.48'},
+        {dir:'in',desc:'Lightning address · received',day:'Earlier',date:'Mon 19 Oct 2026',time:'13:40',amt:'+25,000 SATS',fx:'$20.70'}
+      ];
+    const VA=[
+        {dir:'out',desc:'Roof repair deposit',day:'Today',date:'Thu 29 Oct 2026',time:'09:18',amt:'−40,000 SATS',fx:'$33.12',st:'2 of 3 signatures'},
+        {dir:'in',desc:'Received',day:'Earlier',date:'Mon 19 Oct 2026',time:'21:15',amt:'+30,000 SATS',fx:'$24.84'},
+        {dir:'in',desc:'Received',day:'Earlier',date:'Thu 15 Oct 2026',time:'10:02',amt:'+10,000 SATS',fx:'$8.28'}
+      ];
+    // Overview's Recent activity: both wallets' rows, newest first, regrouped by day
+    const ts=r=>Date.parse(r.date.slice(4)+' '+r.time)||0;
+    const mix=()=>{const all=SA.map(r=>[r,'spark']).concat(VA.map(r=>[r,'vault'])).sort((a,b)=>ts(b[0])-ts(a[0])).slice(0,5);return all.map(([r,wk],i)=>Object.assign(days([r],wk)[0],{dayHead:i===0||all[i-1][0].date!==r.date}));};
     const kit=signedOut?{status:'Sign in required',text:'Needs your Connect account'}:disc?{status:'Reconnect required',text:'Needs this Cube’s service connection'}:{status:'Not set up',text:'Encrypted copy in your Connect account'};
     const ln=signedOut?{ready:false,blocked:true,text:'Sign in to claim an address',action:'Sign in'}:disc?{ready:false,blocked:true,text:'Reconnect this Cube to check your address',action:'Reconnect'}:{ready:true,blocked:false,text:'Receive to a readable address',action:''};
     const attn=disc?{text:'Reconnect required',pick:go('settings')}:{text:'Backup not confirmed',pick:go('backup')};
     return {
       lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
       themeClass:this.props.forceTheme?(this.props.forceTheme==='light'?'light':''):((THEME==='light'||(THEME!=='dark'&&(P.theme||'dark')==='light'))?'light':''), motionClass:P.reducedMotion?'reduced':'',
-      cubeName:cubeName, vaultAlias:vaultAlias,
+      cubeName:cubeName, netName:netName, coinSrc:coinSrc, avPath:avPath, vaultAlias:vaultAlias,
       menuOpen:S.menu, toggleMenu:()=>self.setState({menu:!S.menu,lock:false}),
       lockAsk:!!S.lock, lockIdle:!S.lock, askLock:()=>self.setState({lock:true}), cancelLock:()=>self.setState({lock:false}),
       chipTitle:{acct:signedOut?'Connect account · Signed out':'alex@example.test · Signed in',conn:'Cube service · '+(disc?'Reconnect required':signedOut?'Not checked':'Connected')},
@@ -541,23 +624,21 @@ class Component extends DCLogic {
       toggleAll:()=>{const all=!(hide.total&&hide.wallets);self.setState({hide:{for:hb,total:all,wallets:all}});},
       toggleTotal:()=>self.setState({hide:{for:hb,total:!hide.total,wallets:hide.wallets}}),
       toggleWallets:()=>self.setState({hide:{for:hb,total:hide.total,wallets:!hide.wallets}}),
-      total:{fiat:m('$41.70',hide.total),sats:m('50,360',hide.total)},
-      spark:card('Spark · Daily spending','$20.74','25,053',[{coin:'btc',tick:'BTC',num:'25,053',unit:'SATS',fiat:'20.74 USD'}]),
+      total:{fiat:m('$277.70',hide.total),sats:m('335,452',hide.total)},
+      spark:card('Spark · Daily spending','$70.74','85,452',[{coin:'btc',tick:'BTC',num:'25,053',unit:'SATS',fiat:'20.74 USD'},{coin:'usdb',tick:'USDB',num:'50.00',unit:'USDB',fiat:'≈ 60,399 SATS'}]),
+      // wallet-page asset rows (same fixtures as P-Swap: 1 BTC ≈ $82,783); Send/Receive tell P-Send/P-Receive which wallet and asset
+      sparkRows:[{coin:'btc',name:'Bitcoin',num:'25,053',unit:'SATS',fiat:'$20.74',w:'spark',as:'bitcoin'},{coin:'usdb',name:'US Dollar',num:'50.00',unit:'USDB',fiat:'≈ 60,399 SATS',w:'spark',as:'usdb'}].map(r=>row5(r)),
+      vaultRows:[{coin:'btc',name:'Bitcoin',num:'250,000',unit:'SATS',fiat:'$206.96',w:'vault',as:'bitcoin'}].map(r=>row5(r)),
+      toNode:()=>{ try { localStorage.setItem('tenshu.proto.settingsScope', JSON.stringify({scope:'vault',tab:'node'})); } catch (e) {} },
+      toSparkSettings:()=>{ try { localStorage.setItem('tenshu.proto.settingsScope', JSON.stringify({scope:'spark',tab:'balances'})); } catch (e) {} },
+      toVaultSettings:()=>{ try { localStorage.setItem('tenshu.proto.settingsScope', JSON.stringify({scope:'vault',tab:'keys'})); } catch (e) {} },
       liquid:card('Liquid · Travel','$20.95','25,307',[{coin:'lbtc',tick:'L-BTC',num:'12,784',unit:'SATS',fiat:'10.58 USD'},{coin:'usdt',tick:'USDt',num:'10.37',unit:'USDt',fiat:''}]),
-      vault:card(vName,'$0.00','0',[{coin:'btc',tick:'BTC',num:'0',unit:'SATS',fiat:'0.00 USD',zero:true}]),
+      vault:card(vName,'$206.96','250,000',[{coin:'btc',tick:'BTC',num:'250,000',unit:'SATS',fiat:'206.96 USD'}]),
       goVault:go('vault'), goBackup:go('backup'),
-      sparkAct:[
-        {dir:'in',desc:'Spark transfer',when:'Today 14:32',amt:'+2 SATS',fx:'$0.00',st:'Pending'},
-        {dir:'out',desc:'Lightning payment · Example Coffee Co.',when:'Yesterday 19:47',amt:'\u22123,000 SATS',fx:'$2.48'},
-        {dir:'in',desc:'Spark transfer',when:'Oct 20, 08:30',amt:'+3 SATS',fx:'$0.00'},
-        {dir:'in',desc:'Lightning address · received',when:'Oct 19, 13:40',amt:'+25,000 SATS',fx:'$20.70'}
-      ].map(flow),
+      sparkAct:days(SA,'spark'),
       sb:{on:S.sb?'true':'false',state:S.sb?'On on this device':'Off on this device',text:S.sb?'On':'Off',toggle:()=>self.setState({sb:!S.sb})},
-      vaultAct:[
-        {dir:'out',desc:'Roof repair deposit',when:'Today 09:18',amt:'−40,000 SATS',fx:'$33.12',st:'2 of 3 signatures'},
-        {dir:'in',desc:'Received',when:'Oct 19, 21:15',amt:'+30,000 SATS',fx:'$24.84'},
-        {dir:'in',desc:'Received',when:'Oct 15, 10:02',amt:'+10,000 SATS',fx:'$8.28'}
-      ].map(flow),
+      vaultAct:days(VA,'vault'),
+      allAct:mix(),
       activity:[
         {dir:'in',desc:'Received',wallet:'Spark · Daily spending',when:'Today 14:32',amt:'+25,053 SATS',fx:'$20.74'},
         {dir:'in',desc:'Received L-BTC',wallet:'Liquid · Travel',when:'Yesterday 11:05',amt:'+12,784 SATS',fx:'$10.58'},

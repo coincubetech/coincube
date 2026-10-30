@@ -54,8 +54,8 @@ a{color:#f3821d}a:hover{color:#ffa54d}
 .lockask{display:flex;align-items:center;gap:8px;font-size:13px;white-space:nowrap}
 .chips{margin-left:auto;display:flex;gap:8px;align-items:center;flex:none}
 .chip{display:flex;align-items:center;gap:8px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:8px;font-size:13px;white-space:nowrap;text-decoration:none}
-.tenshu a.chip{color:var(--ink)}
-a.chip:hover{background:var(--hover)}
+.tenshu a.chip,.tenshu button.chip{color:var(--ink)}.tenshu button.chip{background:transparent;cursor:pointer}
+a.chip:hover,.tenshu button.chip:hover{background:var(--hover)}
 .mini{height:24px;padding:0 8px;border:1px solid var(--line);border-radius:6px;background:transparent;cursor:pointer;font-size:12px;font-weight:500;margin-right:-6px}
 .eye{width:32px;height:32px;display:grid;place-items:center;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}
 .eye:hover{background:var(--hover);color:var(--ink)}
@@ -72,6 +72,9 @@ a.chip:hover{background:var(--hover)}
 .ni:hover{background:var(--hover)}
 .ni.on{background:var(--selected);font-weight:600}
 .ni.on .ic{color:var(--acc-ink)}
+/* left-aligned nav labels (Robert, 2026-10-29): the label fills the row after the icon and starts at its left edge */
+.ni{justify-content:flex-start}
+.ni>span{flex:1 1 auto;min-width:0;text-align:left}
 .attn{display:flex;align-items:center;gap:6px;margin:0 6px 8px;padding:9px 8px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-size:12.5px;line-height:1.3;cursor:pointer;text-align:left;color:var(--ink)}
 .attn .go{margin-left:auto;color:var(--acc-ink);font-weight:600}
 .foot{border-top:1px solid var(--line);padding:10px}
@@ -203,6 +206,37 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 /* page shell (Robert, 2026-10-27): every Cube page starts one gutter from the side menu; only its right edge varies. Reading pages cap at --page-max; Activity is wide. */
 .tenshu{--gutter:clamp(24px,3vw,48px);--page-max:1120px}
 .main .pg{margin:0;max-width:calc(var(--page-max) + 2 * var(--gutter));padding:28px var(--gutter) 48px}
+/* page head (Robert, 2026-10-29): every Cube page pins its head as Activity does: title and Cube line left, page actions right, tabs sitting on a rule that spans the content pane; the page scrolls under it. */
+.main>.phead{position:sticky;top:0;z-index:6;flex:none;background:var(--bg);border-bottom:1px solid var(--line)}
+.phead>.in{max-width:calc(var(--page-max) + 2 * var(--gutter));padding:24px var(--gutter) 20px;height:auto;width:auto;border:0;border-radius:0;background:none}
+/* Settings head (Robert, 2026-10-29): scope switch is a segmented control right of the title, as in the page-header study. */
+.phead .scopes{margin-top:0;flex-wrap:nowrap}
+.phead .scopes .sb{height:30px;padding:0 12px;border:0;border-radius:6px;color:var(--muted);font-weight:500}
+.phead .scopes .sb[aria-pressed="true"]{background:var(--selected);color:var(--ink);font-weight:600}
+.phead h1,.phead .ph{margin-top:0;font-size:22px;font-weight:600;line-height:1.25}
+.phead .back{margin-bottom:8px}.phead a.back{text-decoration:none}
+.phead .crumbs{margin-bottom:8px}.phead .crumbs .back{margin-bottom:0}
+.phead .hrow{display:flex;align-items:flex-end;justify-content:space-between;gap:16px}
+.phead .hrow>div:first-child{min-width:0}
+.phead .hact{display:flex;align-items:center;gap:8px;flex:none}
+.phead .tabs,.phead .subnav{border-bottom:0;margin-bottom:-20px}
+.phead .hd,.phead .ttl{margin:0}
+.main .pg{padding-top:24px}
+/* App preferences (Robert, 2026-10-29): a sliders icon button at the right end of the top bar (the gear stays with Cube Settings), styled like the eye, with an "App preferences" tooltip on hover or focus. */
+.tenshu .top{position:relative;z-index:8}
+.tenshu a.apg{position:relative;text-decoration:none;color:var(--muted)}.tenshu a.apg:hover{color:var(--ink)}
+.apg::after{content:attr(data-tip);position:absolute;top:calc(100% + 8px);right:0;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--muted);font-size:13px;font-weight:400;line-height:1.3;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .12s ease .25s}
+.apg:hover::after,.apg:focus-visible::after{opacity:1}
+/* shared top bar (Robert, 2026-10-29): the same bar on every screen, Launcher and Cube: 64px on the rail colour; on the right the hide-balances eye first, then the status chips, then App preferences; the eye and App preferences are borderless icons. */
+.tenshu .top{height:64px;padding:0 24px;gap:16px;background:var(--rail)}
+.top .brand .ic{width:20px;height:20px}
+.top .chips .eye:not(.apg){order:-1}
+.top .chips .eye{width:32px;height:32px;border:0;background:transparent}
+.top .chips .eye:hover{background:var(--hover);color:var(--ink)}
+/* Spark balances (Robert, 2026-10-29, page-header study H-Settings-Spark): USDB is a separate balance; auto-convert replaces the Stable Balance mode. */
+.rc .state{font-size:13px;color:var(--muted);white-space:nowrap}
+.note.cv{border-color:var(--line);background:var(--bg)}
+.note.cv .acts{display:flex;gap:8px}
 </style>
 </helmet>
 <div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
@@ -215,17 +249,17 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
         <span class="sr">{{ chip.acctSr }}</span>
         <span class="st {{ chip.acct.cls }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle class="gc" cx="9" cy="9" r="6.5"/><path class="g gk" d="m6.25 9.25 1.9 1.9 3.6-3.9"/><path class="g gw" d="M9 5.5v4M9 12.25v.01"/><path class="g gx" d="m6.75 6.75 4.5 4.5m0-4.5-4.5 4.5"/><path class="g gu" d="M7.2 7.2a1.9 1.9 0 1 1 2.6 1.75c-.5.25-.8.6-.8 1.15v.4M9 12.6v.01"/><path class="g go" d="M6 9h6"/><path class="g gb" d="M6 9h.01M9 9h.01M12 9h.01"/></svg>{{ chip.acct.text }}</span>
       </a>
-      <div class="chip" title="{{ chip.connTitle }}">
+      <button type="button" class="chip" onClick="{{ goNode }}" title="{{ chip.connTitle }}" aria-label="{{ chip.connTitle }}. Open Node settings">
         <svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M7.5 10.5a3 3 0 0 0 4.2 0l2.3-2.3a3 3 0 0 0-4.2-4.2l-.9.9"/><path d="M10.5 7.5a3 3 0 0 0-4.2 0L4 9.8A3 3 0 0 0 8.2 14l.9-.9"/></svg>
         <span class="sr">Cube service:</span>
         <span class="st {{ chip.conn.cls }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle class="gc" cx="9" cy="9" r="6.5"/><path class="g gk" d="m6.25 9.25 1.9 1.9 3.6-3.9"/><path class="g gw" d="M9 5.5v4M9 12.25v.01"/><path class="g gx" d="m6.75 6.75 4.5 4.5m0-4.5-4.5 4.5"/><path class="g gu" d="M7.2 7.2a1.9 1.9 0 1 1 2.6 1.75c-.5.25-.8.6-.8 1.15v.4M9 12.6v.01"/><path class="g go" d="M6 9h6"/><path class="g gb" d="M6 9h.01M9 9h.01M12 9h.01"/></svg>{{ chip.conn.text }}</span>
-        <sc-if value="{{ chip.reconnect }}" hint-placeholder-val="{{ false }}"><button type="button" class="mini" onClick="{{ go.conn }}">Reconnect</button></sc-if>
-      </div>
+        <sc-if value="{{ chip.reconnect }}" hint-placeholder-val="{{ false }}"><span class="mini">Reconnect</span></sc-if>
+      </button>
       <button type="button" class="eye" aria-pressed="{{ hideP }}" aria-label="Hide balances" onClick="{{ toggleHide }}">
         <sc-if value="{{ shown }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/></svg></sc-if>
         <sc-if value="{{ hidden }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/><path d="M3 3l12 12"/></svg></sc-if>
       </button>
-      <a class="chip" href="P-AppPrefs-InCube.dc.html" title="App preferences" aria-label="App preferences" style="padding:0 10px"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 5h12M3 9h12M3 13h12"/><circle cx="7" cy="5" r="1.6" fill="var(--panel)"/><circle cx="12" cy="9" r="1.6" fill="var(--panel)"/><circle cx="6" cy="13" r="1.6" fill="var(--panel)"/></svg></a>
+      <a class="eye apg" href="P-AppPrefs-InCube.dc.html" aria-label="App preferences" data-tip="App preferences"><svg class="ic s" aria-hidden="true" viewBox="0 0 24 24" style="stroke-width:1.75"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg></a>
     </div>
   </header>
 
@@ -255,9 +289,8 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
       </div>
       <div class="mid">
         <h2 class="gh">Wallets</h2>
-        <sc-if value="{{ has.spark }}" hint-placeholder-val="{{ true }}"><a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg><span>Spark · Daily spending</span></a></sc-if>
-        <sc-if value="{{ has.vault }}" hint-placeholder-val="{{ true }}"><a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg><span>Vault · {{ vaultAlias }}</span></a></sc-if>
-        <sc-if value="{{ has.liquid }}" hint-placeholder-val="{{ true }}"><a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg><span>Liquid · Travel</span></a></sc-if>
+        <sc-if value="{{ has.spark }}" hint-placeholder-val="{{ true }}"><a class="ni" href="P-Overview.dc.html" onClick="{{ landSpark }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path stroke-width="2" d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/></svg><span>Spark · Daily spending</span></a></sc-if>
+        <sc-if value="{{ has.vault }}" hint-placeholder-val="{{ true }}"><a class="ni" href="P-Overview.dc.html" onClick="{{ landVault }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg><span>Vault · {{ vaultAlias }}</span></a></sc-if>
       </div>
       <button type="button" class="attn" onClick="{{ attn.pick }}"><span class="st {{ attn.cls }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle class="gc" cx="9" cy="9" r="6.5"/><path class="g gk" d="m6.25 9.25 1.9 1.9 3.6-3.9"/><path class="g gw" d="M9 5.5v4M9 12.25v.01"/><path class="g gx" d="m6.75 6.75 4.5 4.5m0-4.5-4.5 4.5"/><path class="g gu" d="M7.2 7.2a1.9 1.9 0 1 1 2.6 1.75c-.5.25-.8.6-.8 1.15v.4M9 12.6v.01"/><path class="g go" d="M6 9h6"/><path class="g gb" d="M6 9h.01M9 9h.01M12 9h.01"/></svg>{{ attn.text }}</span><span class="go">Review</span></button>
       <div class="foot">
@@ -266,28 +299,32 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
     </nav>
 
     <main class="main">
-      <div class="pg">
-        <h1 class="ph">Settings</h1>
-        <p class="idl"><sc-if value="{{ scopeHasNet }}" hint-placeholder-val="{{ true }}"><span class="mk {{ cube.mkCls }}"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></sc-if>{{ scopeLine }}</p>
-
-        <div class="scopes" role="group" aria-label="Settings scope">
-          <sc-for list="{{ scopes }}" as="s" hint-placeholder-count="4">
-            <button type="button" class="sb" aria-pressed="{{ s.pressed }}" title="{{ s.label }}" onClick="{{ s.pick }}">
-              <sc-if value="{{ s.cube }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg></sc-if>
-              <sc-if value="{{ s.vault }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg></sc-if>
-              <sc-if value="{{ s.spark }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg></sc-if>
-              <span>{{ s.label }}</span>
-            </button>
-          </sc-for>
-        </div>
-
-        <sc-if value="{{ showTabs }}" hint-placeholder-val="{{ true }}">
-          <nav class="tabs" aria-label="Sections in {{ scopeLabel }}">
-            <sc-for list="{{ tabs }}" as="t" hint-placeholder-count="4">
-              <button type="button" class="tab {{ t.cls }}" aria-current="{{ t.cur }}" onClick="{{ t.pick }}">{{ t.label }}</button>
+      <div class="phead"><div class="in">
+          <div class="hrow"><div>
+          <h1 class="ph">Settings</h1>
+          <p class="idl"><sc-if value="{{ scopeHasNet }}" hint-placeholder-val="{{ true }}"><span class="mk {{ cube.mkCls }}"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></sc-if>{{ scopeLine }}</p>
+          </div><div class="hact">
+          <div class="scopes seg" role="group" aria-label="Settings scope">
+            <sc-for list="{{ scopes }}" as="s" hint-placeholder-count="4">
+              <button type="button" class="sb" aria-pressed="{{ s.pressed }}" title="{{ s.label }}" onClick="{{ s.pick }}">
+                <sc-if value="{{ s.cube }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg></sc-if>
+                <sc-if value="{{ s.vault }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg></sc-if>
+                <sc-if value="{{ s.spark }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path stroke-width="2" d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/></svg></sc-if>
+                <span>{{ s.short }}</span>
+              </button>
             </sc-for>
-          </nav>
-        </sc-if>
+          </div>
+          </div></div>
+  
+          <sc-if value="{{ showTabs }}" hint-placeholder-val="{{ true }}">
+            <nav class="tabs" aria-label="Sections in {{ scopeLabel }}">
+              <sc-for list="{{ tabs }}" as="t" hint-placeholder-count="4">
+                <button type="button" class="tab {{ t.cls }}" aria-current="{{ t.cur }}" onClick="{{ t.pick }}">{{ t.label }}</button>
+              </sc-for>
+            </nav>
+          </sc-if>
+      </div></div>
+      <div class="pg">
 
         <sc-if value="{{ loading }}" hint-placeholder-val="{{ false }}">
           <div class="grp" aria-busy="true">
@@ -645,13 +682,24 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
         <!-- ======== SPARK ======== -->
         <sc-if value="{{ sec.spark }}" hint-placeholder-val="{{ false }}">
           <section class="grp" aria-labelledby="h-sb">
-            <h3 id="h-sb">Stable Balance</h3>
-            <p class="intro">A device preference. It doesn't travel with the seed.</p>
+            <h3 id="h-sb">US dollar balance (USDB)</h3>
+            <p class="intro">Spark holds bitcoin and USDB as two balances. Swap moves value between them.</p>
             <div class="rows">
-              <div class="row"><div class="rl"><p class="lb" id="sb-l">Stable Balance · {{ sb.state }}</p><p class="ds">Keeps your spendable balance pegged to USD as USDB. Turning it on converts sats above a small threshold to USDB; turning it off converts USDB back to bitcoin. Conversions can retry after a failure and the amount can differ slightly from the estimate. No peg is guaranteed.</p></div><div class="rc"><button type="button" class="tog" aria-labelledby="sb-l" aria-pressed="{{ sb.on }}" onClick="{{ sb.toggle }}"><span class="kn"></span>{{ sb.text }}</button></div></div>
-              <sc-if value="{{ sb.holdsOff }}" hint-placeholder-val="{{ true }}"><div class="note" role="status"><div><p><b>Holds {{ usdb }} · Stable Balance is off on this device</b></p><p>Restored here. Nothing converts until you turn it on.</p></div></div></sc-if>
+              <div class="row"><div class="rl"><p class="lb" id="sb-l">Auto-convert received bitcoin · {{ sb.state }}</p><p class="ds">Bitcoin that arrives in Spark is converted to USDB, so the whole wallet holds its dollar value. Saved on this device only: restoring the Cube elsewhere starts with it off. Conversions can retry after a failure and the amount can differ slightly from the estimate. No peg is guaranteed.</p></div><div class="rc"><button type="button" class="tog" aria-labelledby="sb-l" aria-pressed="{{ sb.on }}" onClick="{{ sb.toggle }}"><span class="kn"></span>{{ sb.text }}</button></div></div>
+              <sc-if value="{{ sb.asking }}" hint-placeholder-val="{{ false }}"><div class="note cv" role="alertdialog" aria-labelledby="sbq-t" aria-describedby="sbq-d"><div><p id="sbq-t"><b>Turn off auto-convert?</b></p><p id="sbq-d">Your whole USDB balance, {{ usdb }}, converts back to bitcoin at the current rate. From then on the price of bitcoin moves this wallet's value. The conversion fee and max price change apply.</p></div><div class="acts"><button type="button" class="btn" onClick="{{ sb.keep }}">Keep auto-convert</button><button type="button" class="btn pri" onClick="{{ sb.confirmOff }}">Turn off and convert</button></div></div></sc-if>
+              <sc-if value="{{ sb.holdsOff }}" hint-placeholder-val="{{ true }}"><div class="note" role="status"><div><p><b>Holds {{ usdb }} · auto-convert is off on this device</b></p><p>Your USDB stays USDB, and new bitcoin you receive stays bitcoin.</p></div></div></sc-if>
+              <div class="row"><div class="rl"><p class="lb">Pay from USDB when bitcoin runs short</p><p class="ds">A send uses bitcoin first, then converts just enough USDB to cover the rest. Review shows the conversion before you confirm.</p></div><div class="rc"><span class="state">Always on</span></div></div>
             </div>
           </section>
+          <section class="grp" aria-labelledby="h-cv">
+            <h3 id="h-cv">Conversion</h3>
+            <div class="rows">
+              <div class="row"><div class="rl"><p class="lb">Max price change</p><p class="ds">A conversion that would fill worse than this fails instead, and nothing moves.</p></div><div class="rc"><button type="button" class="btn">0.5% <svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="m5 7 4 4 4-4"/></svg></button></div></div>
+              <div class="row"><div class="rl"><p class="lb">Swap by hand</p><p class="ds">Move any amount between bitcoin and USDB. Also in the Spark page head.</p></div><div class="rc"><a class="btn" href="P-Swap.dc.html" style="text-decoration:none;color:var(--ink)">Swap BTC ⇄ USDB</a></div></div>
+            </div>
+          </section>
+        </sc-if>
+        <sc-if value="{{ sec.sparkLn }}" hint-placeholder-val="{{ false }}">
           <section class="grp" aria-labelledby="h-ln">
             <h3 id="h-ln">Lightning Address</h3>
             <p class="intro" style="display:flex;gap:16px;flex-wrap:wrap"><span class="st {{ ln.acctCls }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle class="gc" cx="9" cy="9" r="6.5"/><path class="g gk" d="m6.25 9.25 1.9 1.9 3.6-3.9"/><path class="g gu" d="M7.2 7.2a1.9 1.9 0 1 1 2.6 1.75c-.5.25-.8.6-.8 1.15v.4M9 12.6v.01"/></svg>Account {{ ln.acct }}</span></p>
@@ -707,15 +755,18 @@ class Component extends DCLogic {
     const SC={
       cube:{label:'Cube · '+cubeName,line:'Cube · '+cubeName+' · '+net,tabs:[['display','Display & appearance'],['backup','Backup & protection'],['payments','Payment checks'],['ai','AI access'],['data','Data & exports']]},
       vault:{label:noVault?'Vault · none':'Vault · '+vaultAlias,line:(noVault?'Vault · none in this Cube':'Vault · '+vaultAlias)+' · '+net,tabs:[['wallet','Wallet & signers'],['node','Node'],['pair','Pair with Keychain'],['connections','Connections'],['data','Data & exports']]},
-      spark:{label:hasSpark?'Spark · Daily spending':'Spark · unavailable',line:(hasSpark?'Spark · Daily spending':'Spark · unavailable')+' · '+net,tabs:[['spark','Spark'],['connections','Connections']]}
+      spark:{label:hasSpark?'Spark · Daily spending':'Spark · unavailable',line:(hasSpark?'Spark · Daily spending':'Spark · unavailable')+' · '+net,tabs:[['spark','Balances & conversion'],['lnaddr','Lightning address'],['connections','Connections']]}
     };
-    const key=(P.scope||'cube')+'|'+(P.section||'display')+'|'+rs;
+    // prototype-only: another board can open a scope and tab (Wallet settings writes tenshu.proto.settingsScope); read once, then cleared
+    if (this._ss===undefined) { this._ss=null; try { this._ss=JSON.parse(localStorage.getItem('tenshu.proto.settingsScope')||'null'); localStorage.removeItem('tenshu.proto.settingsScope'); } catch (e) {} }
+    const SS=this._ss||{}, TABMAP={balances:'spark',lnaddr:'lnaddr',keys:'wallet',signers:'wallet'};
+    const key=(SS.scope||P.scope||'cube')+'|'+(SS.tab?(TABMAP[SS.tab]||SS.tab):(P.section||'display'))+'|'+rs;
     const fit=(sc,tb)=>{const t=SC[sc].tabs;return t.some(x=>x[0]===tb)?tb:(t[0]?t[0][0]:'');};
-    const lever={scope:P.scope||'cube'};lever.tab=fit(lever.scope,P.section||'display');
+    const lever={scope:SS.scope||P.scope||'cube'};lever.tab=fit(lever.scope,SS.tab?(TABMAP[SS.tab]||SS.tab):(P.section||'display'));
     const sel=(S.sel&&S.sel.for===key)?S.sel:lever;
     const scope=sel.scope,tab=sel.tab,cs=SC[scope];
     const setTo=(sc,tb)=>()=>self.setState({sel:{for:key,scope:sc,tab:fit(sc,tb||'')}});
-    const scopes=['cube','vault','spark'].map(k=>({label:SC[k].label,pressed:k===scope?'true':'false',pick:setTo(k),cube:k==='cube',vault:k==='vault',spark:k==='spark'}));
+    const scopes=['cube','vault','spark'].map(k=>({label:SC[k].label,short:k==='cube'?'Cube':k==='vault'?'Vault':'Spark',pressed:k===scope?'true':'false',pick:setTo(k),cube:k==='cube',vault:k==='vault',spark:k==='spark'}));
     const emptyScope=(scope==='vault'&&noVault)||(scope==='spark'&&!hasSpark);
     const tabs=cs.tabs.map(t=>({label:t[1],cur:t[0]===tab?'page':'false',cls:t[0]===tab?'on':'',pick:setTo(scope,t[0])}));
     const goNode=setTo('vault','node');
@@ -726,7 +777,7 @@ class Component extends DCLogic {
       display:on('cube','display'),dataVault:on('vault','data')&&hasVault,backup:on('cube','backup'),payments:on('cube','payments'),ai:on('cube','ai'),dataCube:on('cube','data'),
       wallet:on('vault','wallet')&&hasVault,node:on('vault','node')&&hasVault,pair:on('vault','pair')&&hasVault,connVault:on('vault','connections')&&hasVault,
       vaultNone:!loading&&scope==='vault'&&noVault,
-      spark:on('spark','spark')&&hasSpark,connSpark:on('spark','connections')&&hasSpark,sparkNone:!loading&&scope==='spark'&&!hasSpark
+      spark:on('spark','spark')&&hasSpark,sparkLn:on('spark','lnaddr')&&hasSpark,connSpark:on('spark','connections')&&hasSpark,sparkNone:!loading&&scope==='spark'&&!hasSpark
     };
     sec.conn=sec.connVault||sec.connSpark;
 
@@ -872,12 +923,16 @@ class Component extends DCLogic {
 
     const tg=(k)=>{const o=!!S.open[k];return {on:o,exp:pr(o),tog:()=>{const n=Object.assign({},S.open);n[k]=!o;self.setState({open:n});}};};
 
-    const sbOn=!!this.state.sbOn, sb={on:sbOn?'true':'false',state:sbOn?'On on this device':'Off on this device',text:sbOn?'On':'Off',holdsOff:!sbOn,toggle:()=>self.setState({sbOn:!sbOn})};
+    // turning auto-convert off asks first: it converts the USDB balance back to bitcoin
+    const sbOn=!!this.state.sbOn, sbAsk=!!this.state.sbAsk, sb={on:sbOn?'true':'false',state:sbOn?'On on this device':'Off on this device',text:sbOn?'On':'Off',holdsOff:!sbOn,asking:sbOn&&sbAsk,
+      toggle:()=>sbOn?self.setState({sbAsk:true}):self.setState({sbOn:true,sbAsk:false}),keep:()=>self.setState({sbAsk:false}),confirmOff:()=>self.setState({sbOn:false,sbAsk:false})};
     return {
       lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
       menuOpen: !!this.state.menuOpen, toggleMenu: () => { this.setState({ menuOpen: !this.state.menuOpen }); },
       goNode:goNode,
       sb:sb,
+      landSpark:()=>{ try { localStorage.setItem('tenshu.proto.land', JSON.stringify({page:'spark'})); } catch (e) {} },
+      landVault:()=>{ try { localStorage.setItem('tenshu.proto.land', JSON.stringify({page:'vault'})); } catch (e) {} },
       themeClass:this.props.forceTheme?(this.props.forceTheme==='light'?'light':''):((THEME==='light'||(THEME!=='dark'&&(P.theme||'dark')==='light'))?'light':''),motionClass:P.reducedMotion?'reduced':'',
       cube:cube,vaultAlias:vaultAlias,setVaultAlias:(e)=>self.setState({vaultAlias:{for:rs,v:ev(e)}}),
       lock:{idle:!S.lockAsk,asking:!!S.lockAsk,ask:()=>self.setState({lockAsk:true}),cancel:()=>self.setState({lockAsk:false})},
@@ -890,7 +945,7 @@ class Component extends DCLogic {
       dataVaultText:noVault?'No Vault in this Cube.':'Exported per Vault.',
       signers:signers,aliasMsg:(S.aliasSaved&&S.aliasSaved.for===rs)?'Saved':'',
       pair:pair,pairKeys:pairKeys,phones:phones,noop:()=>{},
-      acctLine:acctLine,health:health,ln:ln,usdb:hide?'••••••':'25.00 USDB',
+      acctLine:acctLine,health:health,ln:ln,usdb:hide?'••••••':'50.00 USDB',
       open:{wx:tg('wx'),nx:tg('nx'),bx:tg('bx')},nd:nd
     };
   }

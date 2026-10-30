@@ -19,7 +19,7 @@ body{margin:0}
 .tenshu.reduced *{animation:none!important;transition:none!important}
 a{color:#f3821d}a:hover{color:#ffa54d}
 
-.tenshu{--on-accent:#201407;--accent-ink:#f3821d;--hover:rgba(245,240,232,.06);font-variant-numeric:tabular-nums}
+.tenshu{--on-accent:#1a1208;--accent-ink:#f3821d;--hover:rgba(245,240,232,.06);font-variant-numeric:tabular-nums}
 .tenshu.light{--accent-ink:#8a4304;--hover:rgba(32,32,32,.05)}
 .tenshu *{box-sizing:border-box}
 .tenshu button,.tenshu input,.tenshu select{font:inherit;color:inherit}
@@ -180,6 +180,24 @@ textarea.inp{height:72px;padding:10px 12px;resize:none;font-family:'IBM Plex Mon
 
 .foot{height:28px;flex:none;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--muted);border-top:1px solid var(--line);background:var(--bg)}
 a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color:var(--acc-ink)}
+/* shared top bar (Robert, 2026-10-29): the same bar on every screen, Launcher and Cube: 64px on the rail colour; on the right the hide-balances eye, the Connect account chip, then App preferences as an icon with a tooltip. tbx- names keep it clear of page classes. */
+.top{height:64px;padding:0 24px;gap:16px;background:var(--rail)}
+.tbx-r{display:flex;align-items:center;gap:8px;flex:none}
+.tbx-ico{position:relative;width:32px;height:32px;display:grid;place-items:center;padding:0;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer;text-decoration:none}
+.tbx-ico:hover{background:var(--hover,rgba(245,240,232,.06));color:var(--ink)}
+.tbx-ico[aria-pressed="true"],.tbx-ico[aria-current="page"]{background:var(--selected);color:var(--ink)}
+.tbx-ico svg{width:16px;height:16px}
+.tbx-ico[data-tip]::after{content:attr(data-tip);position:absolute;top:calc(100% + 8px);right:0;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--muted);font-size:13px;font-weight:400;line-height:1.3;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .12s ease .25s;z-index:20}
+.tbx-ico[data-tip]:hover::after,.tbx-ico[data-tip]:focus-visible::after{opacity:1}
+.tbx-chip{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--ink);font:inherit;font-size:13px;white-space:nowrap;text-decoration:none;cursor:pointer}
+a.tbx-chip{color:var(--ink)}
+.tbx-chip:hover{background:var(--hover,rgba(245,240,232,.06))}
+.tbx-chip[aria-current="page"]{border-color:var(--accent);background:var(--selected)}
+.tbx-chip svg{width:16px;height:16px;flex:none}
+.tbx-chip .pi{color:var(--muted)}
+.tbx-st{display:inline-flex;align-items:center;gap:5px}
+.tbx-st.ok{color:var(--good)}.tbx-st.out{color:var(--muted)}.tbx-st.warn{color:var(--warn)}
+.tbx-mini{font-weight:600;color:var(--acc-ink,var(--accent))}
 </style>
 </helmet>
 <div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:1100px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
@@ -197,11 +215,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
       <button type="button" class="chip on" aria-pressed="true" aria-haspopup="true" aria-expanded="false"><span>{{ netChip }}</span><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5"></path></svg></button>
     </sc-if>
     <span class="grow"></span>
-    <a class="tbtn" href="P-SignIn.dc.html" aria-label="{{ connAria }}" title="{{ connTitle }}">
-      <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8.5" r="3.5"></circle><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"></path></svg>
-      <span>Connect</span><span class="stw">{{ connWord }}</span>
-    </a>
-    <a class="tbtn" href="P-AppPrefs.dc.html"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg><span>App preferences</span></a>
+    <div class="tbx-r"><a class="tbx-chip" href="P-SignIn.dc.html" aria-label="{{ connAria }}" title="{{ connTitle }}"><svg class="pi" aria-hidden="true" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="6.5" r="3"/><path d="M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg><span class="tbx-st {{ connStCls }}">{{ connWord }}</span></a><a class="tbx-ico" href="P-AppPrefs.dc.html" aria-label="App preferences" data-tip="App preferences"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg></a></div>
   </header>
 
   <main class="stage">
@@ -795,7 +809,7 @@ class Component extends DCLogic {
       themeClass: this.props.forceTheme ? (this.props.forceTheme === 'light' ? 'light' : '') : ((THEME === 'light' || (THEME !== 'dark' && (P.theme ?? 'dark') === 'light')) ? 'light' : ''),
       motionClass: P.reducedMotion ? 'reduced' : '',
       topBack: !launcher, topNet: launcher, netChip: isB2bNet ? 'Network: Bitcoin Blake2b' : 'Network: Bitcoin',
-      connWord: signedOut ? 'Signed out' : 'Signed in',
+      connWord: signedOut ? 'Signed out' : 'Signed in', connStCls: signedOut ? 'out' : 'ok',
       connAria: signedOut ? 'Connect, signed out' : 'Connect, alex@example.test, signed in',
       connTitle: signedOut ? 'Signed out' : 'alex@example.test',
       regionTitle: TITLE[scr], route: ROUTE[scr], cubeName,

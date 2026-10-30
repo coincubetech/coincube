@@ -1,0 +1,460 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Launcher with Connect ghosts</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--accent-ink:#f3821d;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--focus:#8fc1ff;--on-accent:#1a1208}
+.tenshu{--floor:#1b1c1a;--floor-rule:#2b2c29;--face-t:#41423e;--face-l:#2e2f2c;--face-r:#262724;--edge-btc:rgba(243,130,29,.6);--edge-test:rgba(185,187,181,.6);--shadow:rgba(0,0,0,.6);--ghost-fill:rgba(245,240,232,.04);--ghost-btc:rgba(243,130,29,.5);--ghost-test:rgba(185,187,181,.5);--face-b:#2a2b28;--spin:cubic-bezier(0.22,1,0.36,1);font-variant-numeric:tabular-nums}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--accent-ink:#8a4304;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--focus:#1d5fb8;--floor:#efebe3;--floor-rule:#e0d9cd;--face-t:#e6e0d5;--face-l:#d6cfc2;--face-r:#c9c1b2;--edge-test:rgba(87,90,84,.6);--shadow:rgba(70,52,30,.3);--ghost-fill:rgba(32,32,32,.035);--ghost-btc:rgba(176,86,8,.55);--ghost-test:rgba(87,90,84,.5);--face-b:#e6e0d5}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.tenshu button{font:inherit;color:inherit}
+@media (prefers-reduced-motion: reduce){.tenshu *{transition:none!important}}
+a{color:#f3821d}a:hover{color:#ffa54d}
+svg{flex:none}
+.grow{flex:1}
+.top{height:64px;flex:none;display:flex;align-items:center;gap:16px;padding:0 24px;border-bottom:1px solid var(--line);background:var(--rail)}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px;color:var(--ink);text-decoration:none}
+.brand svg{width:20px;height:20px}
+.vsep{width:1px;height:20px;background:var(--line)}
+.chip{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border-radius:8px;border:1px solid var(--line);background:none;cursor:pointer;font-size:13px}
+.chip.on{background:var(--selected);border-color:var(--accent);font-weight:500}
+.chip svg{width:14px;height:14px}
+.count{font-size:13px;color:var(--muted)}
+.count b{font-weight:500;color:var(--ink)}
+.tbtn{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 10px;border-radius:6px;border:1px solid transparent;background:none;cursor:pointer;font-size:13px;color:var(--ink);text-decoration:none}
+.tbtn svg{width:16px;height:16px}
+.tbtn .dot,.tbtn .stw{color:var(--muted)}
+.tbtn .stw{font-size:12px}
+
+.stage{flex:1;min-height:0;position:relative;overflow:hidden}
+.floor{position:absolute;left:0;right:0;top:50%;bottom:0;background:var(--floor);clip-path:polygon(14% 0,86% 0,100% 100%,0 100%)}
+.brail{position:absolute;left:50%;top:22px;transform:translateX(-50%);width:600px;display:flex;flex-direction:column;align-items:center;gap:6px}
+.brow{display:flex;align-items:flex-end;gap:3px;height:12px}
+.brow span{display:block;width:20px;height:7px;border-radius:1px;background:var(--line)}
+.brow span.tip{background:var(--edge-btc)}
+.bbase{width:100%;height:1px;margin-top:-6px;background:linear-gradient(90deg,transparent,var(--line) 18%,var(--line) 82%,transparent)}
+.bstats{display:flex;gap:40px;margin:14px 0 0;padding:0;list-style:none}
+.bstats li{display:flex;flex-direction:column;align-items:center;gap:2px}
+.bstats .bl{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.bstats .bv{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:13px}
+.bstats .bs{font-size:11px;color:var(--muted)}
+
+.row{position:absolute;left:0;right:0;top:206px;display:flex;justify-content:center;gap:24px}
+.cb{position:relative;display:flex;flex-direction:column;align-items:center;width:200px;height:300px;padding-top:8px;box-sizing:border-box}
+.hit{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;padding:0 4px 8px;border:0;background:none;border-radius:12px;text-decoration:none;color:var(--ink);cursor:pointer;box-sizing:border-box}
+.hit:hover .nm{text-decoration:underline;text-decoration-color:var(--line);text-underline-offset:3px}
+/* the same motion as the local Cubes (P-Launcher): 820ms spin on the cube and the scene's perspective-origin; dimming 500ms */
+.scene{position:relative;width:calc(var(--s) * 1.5);height:calc(var(--s) * 1.72);perspective:1100px;pointer-events:none;transition:perspective-origin 820ms var(--spin),opacity 500ms var(--spin),transform 500ms var(--spin)}
+.shadow{position:absolute;left:50%;top:calc(47.5% + var(--s) * .5);width:calc(var(--s) * 1.45);height:calc(var(--s) * .62);transform:translate(-46%,-46%);border-radius:50%;background:var(--shadow);filter:blur(calc(var(--s) * .055))}
+.cube{position:absolute;left:50%;top:47.5%;width:var(--s);height:var(--s);margin:calc(var(--s) / -2) 0 0 calc(var(--s) / -2);transform-style:preserve-3d;transition:transform 820ms var(--spin)}
+.cube.btc{--edge:var(--edge-btc);--gedge:var(--ghost-btc)}
+.cube.test{--edge:var(--edge-test);--gedge:var(--ghost-test)}
+.f{position:absolute;inset:0;box-sizing:border-box;border:1.5px solid var(--edge);display:flex;align-items:center;justify-content:center;color:var(--ink);backface-visibility:hidden}
+.cube.test .f{border-style:dashed}
+.f.t{background:var(--face-t);transform:rotateX(90deg) translateZ(calc(var(--s) / 2))}
+.f.l{background:var(--face-l);transform:rotateY(-90deg) translateZ(calc(var(--s) / 2))}
+.f.r{background:var(--face-r);transform:translateZ(calc(var(--s) / 2))}
+.f.bt{transform:rotateX(-90deg) translateZ(calc(var(--s) / 2))}
+.f.bl{transform:rotateY(180deg) translateZ(calc(var(--s) / 2))}
+.f.br{transform:rotateY(90deg) translateZ(calc(var(--s) / 2))}
+.tc{display:flex;flex-direction:column;align-items:center;gap:4px;transform:rotate(45deg)}
+.coin{display:inline-flex;width:calc(var(--s) * .34);height:calc(var(--s) * .34);box-sizing:border-box;border-radius:50%}
+.coin img{display:block;width:100%;height:100%;border-radius:50%}
+.coin.tn{border:1.5px dashed currentColor;padding:calc(var(--s) * .018)}
+.coin.tn img{opacity:.6}
+.ftag{font-size:calc(var(--s) * .095);font-weight:600;line-height:1.2;padding:0 .35em;border:1px dashed var(--edge);border-radius:.3em;white-space:nowrap}
+.lc{display:flex;align-items:center;gap:4px}
+.wi{width:calc(var(--s) * .25);height:calc(var(--s) * .25)}
+.rc{display:flex;align-items:flex-start;gap:2px}
+.pad{width:calc(var(--s) * .36);height:calc(var(--s) * .36)}
+.bdg{width:calc(var(--s) * .21);height:calc(var(--s) * .21);margin-top:calc(var(--s) * -.03);color:var(--warn)}
+
+/* GHOST: a Cube registered in Connect but not on this device.
+   wire  = see-through: faint or no fill, all six edges drawn so the back corner shows through, no floor shadow, a dashed footprint instead.
+   faded = the solid Cube at low opacity (alternative, for comparison). */
+.cube.ghost .f{background:transparent;border-color:var(--gedge);color:var(--muted);backface-visibility:visible}
+.cube.ghost.kit .f{background:var(--ghost-fill)}
+.cube.ghost.nokit .f{border-style:dotted;border-width:2px}
+.cube.ghost .coin img{filter:grayscale(1);opacity:.55}
+.cube.ghost .bdg{color:var(--warn)}
+.foot{position:absolute;left:50%;top:calc(47.5% + var(--s) * .5);width:calc(var(--s) * 1.3);height:calc(var(--s) * .5);transform:translate(-46%,-46%);border-radius:50%;border:1px dashed var(--line);box-sizing:border-box}
+.cb.ghostcb .scene{opacity:.85}
+.cb.ghostcb .hit:hover ~ .scene{opacity:1}
+.cb.faded .scene{opacity:.34}
+.cb.faded .hit:hover ~ .scene{opacity:.6}
+/* spin-to-face: the selected ghost turns its back-left face to the viewer; the others dim and shrink in place */
+.cb.prev{z-index:3}
+.cb.lead{z-index:4}
+.cb.handoff .cube{transition-delay:160ms}
+.cb.handoff .scene{transition-delay:160ms,0ms,0ms}
+.shadow,.foot{transition:opacity 500ms var(--spin)}
+.cb.active .shadow,.cb.active .foot{opacity:0}
+.cb.active .lbl{visibility:hidden}
+.cb.active .scene,.cb.active .hit:hover ~ .scene{opacity:1}
+.cb.dim .scene,.cb.dim .hit:hover ~ .scene{opacity:.4;transform:scale(.92)}
+.cb.dim .nm{color:var(--muted);font-weight:500}
+.cube .f.bl.panel,.cube.ghost .f.bl.panel{background:var(--face-b);color:var(--ink);overflow:visible}
+.f[aria-hidden="true"] .fc{pointer-events:none}
+.fc{position:absolute;left:0;top:0;width:420px;height:420px;box-sizing:border-box;padding:28px;display:flex;flex-direction:column;transform-origin:0 0;text-align:left;color:var(--ink);font-size:14px;line-height:1.45;pointer-events:auto}
+.pn{display:flex;align-items:center;gap:10px;margin:0;font-size:20px;font-weight:600;line-height:1.3}
+.pnet{display:flex;align-items:center;gap:6px;margin:8px 0 0;font-size:14px}
+.pnet img{width:18px;height:18px;border-radius:50%;filter:grayscale(1);opacity:.6}
+.pdl{margin:20px 0 0;padding:16px 0 0;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:10px}
+.pdl div{display:flex;align-items:flex-start;gap:12px}
+.pdl dt{width:64px;flex:none;font-size:13px;color:var(--muted);line-height:22px}
+.pdl dd{margin:0;display:flex;align-items:center;gap:6px;font-size:14px;line-height:22px}
+.pdl dd svg{width:16px;height:16px}
+.pdl .good{color:var(--good)}.pdl .warn{color:var(--warn)}.pdl .muted{color:var(--muted)}
+.pnote{margin:14px 0 0;font-size:13px;color:var(--muted);line-height:1.45}
+.pact{display:flex;align-items:center;gap:14px}
+.linkbtn{border:0;background:none;padding:2px;color:var(--ink);text-decoration:underline;text-decoration-color:var(--accent);text-underline-offset:3px;cursor:pointer;font-size:14px}
+.linkbtn.del{text-decoration-color:var(--warn)}
+.pfoot{margin:10px 0 0;font-size:12px;color:var(--muted)}
+
+.lbl{display:flex;align-items:center;justify-content:center;gap:8px;width:100%}
+.lblt{display:flex;flex-direction:column;align-items:flex-start;gap:2px;min-width:0}
+.av{display:inline-grid;place-items:center;width:32px;height:32px;border-radius:50%;background:var(--panel);flex:none;font-size:12px;font-weight:600;box-sizing:border-box}
+.av.ghost{background:none;border:1px dashed var(--muted);color:var(--muted)}
+.av svg{width:16px;height:16px}
+.nm{font-weight:600;font-size:14px;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:140px}
+.ghostcb .nm{color:var(--muted)}
+.st{display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--muted)}
+.st svg{width:13px;height:13px}
+.st.warn{color:var(--warn)}
+
+.bottom{height:64px;flex:none;display:flex;align-items:center;gap:16px;padding:0 24px;border-top:1px solid var(--line);background:var(--rail);position:relative;z-index:8}
+.btn{display:inline-flex;align-items:center;gap:8px;height:36px;padding:0 16px;border-radius:8px;border:1px solid var(--line);background:none;font-size:14px;font-weight:500;text-decoration:none;color:var(--ink);white-space:nowrap;cursor:pointer}
+.btn svg{width:16px;height:16px}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.newnet{font-size:12px;color:var(--muted)}
+.src{display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--muted)}
+.src i{width:8px;height:8px;border-radius:2px;background:var(--edge-btc)}
+.keywrap{position:relative}
+.keybtn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 10px;border-radius:6px;border:1px solid transparent;background:none;cursor:pointer;font-size:13px}
+.keybtn[aria-expanded="true"]{border-color:var(--line);background:var(--panel)}
+.keybtn svg{width:16px;height:16px}
+.keycard{position:absolute;right:0;bottom:calc(100% + 8px);width:380px;box-sizing:border-box;padding:14px 16px;background:var(--panel);border:1px solid var(--line);border-radius:8px;box-shadow:0 18px 40px -12px rgba(0,0,0,.5)}
+.legend{display:flex;flex-direction:column;gap:10px;margin:0;padding:0;list-style:none;font-size:13px}
+.lg{display:flex;align-items:center;gap:6px}
+.lg svg{width:16px;height:16px}
+.lg .coin{width:16px;height:16px}
+.sw{width:12px;height:12px;box-sizing:border-box;border:1.5px solid;border-radius:2px;background:var(--face-t)}
+.sw.btc{border-color:var(--edge-btc)}
+.sw.test{border-color:var(--edge-test);border-style:dashed}
+.lgh{margin:4px 0 0;padding-top:10px;border-top:1px solid var(--line);font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.lgh.first{margin-top:0;padding-top:0;border-top:0}
+.lgnote{margin:-4px 0 0;font-size:12px;color:var(--muted)}
+.tenshu{--edge-b2b:rgba(212,166,42,.75)}
+.lg.two,.lg.net{align-items:flex-start}
+.lg svg.gc{width:22px;height:22px;margin-top:-2px}
+.lg svg.kit{width:18px;height:18px}
+.lg svg.kit.good{color:var(--good)}
+.lg svg.kit.warnc{color:var(--warn)}
+.lg .gt{display:flex;flex-direction:column;gap:1px}
+.lg .gt span{font-size:12px;color:var(--muted)}
+.new{display:inline-block;margin-left:6px;padding:0 5px;border-radius:4px;background:var(--selected);color:var(--accent-ink);font-size:10px;font-weight:600;letter-spacing:.04em;vertical-align:1px}
+.cap{height:28px;flex:none;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--muted);border-top:1px solid var(--line);background:var(--bg)}
+/* shared top bar (Robert, 2026-10-29): the same bar on every screen, Launcher and Cube: 64px on the rail colour; on the right the hide-balances eye, the Connect account chip, then App preferences as an icon with a tooltip. tbx- names keep it clear of page classes. */
+.top{height:64px;padding:0 24px;gap:16px;background:var(--rail)}
+.tbx-r{display:flex;align-items:center;gap:8px;flex:none}
+.tbx-ico{position:relative;width:32px;height:32px;display:grid;place-items:center;padding:0;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer;text-decoration:none}
+.tbx-ico:hover{background:var(--hover,rgba(245,240,232,.06));color:var(--ink)}
+.tbx-ico[aria-pressed="true"],.tbx-ico[aria-current="page"]{background:var(--selected);color:var(--ink)}
+.tbx-ico svg{width:16px;height:16px}
+.tbx-ico[data-tip]::after{content:attr(data-tip);position:absolute;top:calc(100% + 8px);right:0;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--muted);font-size:13px;font-weight:400;line-height:1.3;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .12s ease .25s;z-index:20}
+.tbx-ico[data-tip]:hover::after,.tbx-ico[data-tip]:focus-visible::after{opacity:1}
+.tbx-chip{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--ink);font:inherit;font-size:13px;white-space:nowrap;text-decoration:none;cursor:pointer}
+a.tbx-chip{color:var(--ink)}
+.tbx-chip:hover{background:var(--hover,rgba(245,240,232,.06))}
+.tbx-chip[aria-current="page"]{border-color:var(--accent);background:var(--selected)}
+.tbx-chip svg{width:16px;height:16px;flex:none}
+.tbx-chip .pi{color:var(--muted)}
+.tbx-st{display:inline-flex;align-items:center;gap:5px}
+.tbx-st.ok{color:var(--good)}.tbx-st.out{color:var(--muted)}.tbx-st.warn{color:var(--warn)}
+.tbx-mini{font-weight:600;color:var(--acc-ink,var(--accent))}
+</style>
+</helmet>
+<div class="tenshu {{ themeCls }}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+
+  <header class="top">
+    <a class="brand" href="P-Launcher.dc.html">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path></svg>
+      <span>Tenshu</span>
+    </a>
+    <span class="vsep"></span>
+    <button type="button" class="chip on" aria-pressed="true">All networks</button>
+    <button type="button" class="chip" aria-pressed="false">Live networks</button>
+    <button type="button" class="chip" aria-pressed="false">Test networks</button>
+    <button type="button" class="chip" aria-pressed="false"><span>Network</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 10l5 5 5-5"></path></svg></button>
+    <span class="count"><b>4 Cubes</b> on this device · <b>2</b> in Connect only</span>
+    <span class="grow"></span>
+    <div class="tbx-r"><a href="P-Connect.dc.html" class="tbx-chip" aria-label="Connect account alex@example.test: signed in"><svg class="pi" aria-hidden="true" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="6.5" r="3"/><path d="M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg><span class="tbx-st ok"><svg aria-hidden="true" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Signed in</span></a><a class="tbx-ico" href="P-AppPrefs.dc.html" aria-label="App preferences" data-tip="App preferences"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg></a></div>
+  </header>
+
+  <main class="stage" aria-label="Cubes">
+    <div class="floor" aria-hidden="true"></div>
+    <div class="brail" aria-hidden="true">
+      <div class="brow"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span class="tip"></span></div>
+      <div class="bbase"></div>
+      <ul class="bstats">
+        <li><span class="bl">Block</span><span class="bv">#973,655</span><span class="bs">from your node</span></li>
+        <li><span class="bl">Mempool</span><span class="bv">≈ 0.1 blocks</span><span class="bs">waiting to confirm</span></li>
+        <li><span class="bl">Fee rate</span><span class="bv">≈ 1.0 sat/vB</span><span class="bs">next block</span></li>
+        <li><span class="bl">Hashrate</span><span class="bv">1.01 ZH/s</span><span class="bs">from difficulty</span></li>
+      </ul>
+    </div>
+
+    <div class="row">
+      <sc-for list="{{ cubes }}" as="c" hint-placeholder-count="6">
+        <div class="cb {{ c.cbCls }}">
+          <sc-if value="{{ c.local }}" hint-placeholder-val="{{ true }}"><a class="hit" href="P-Launcher.dc.html" tabIndex="{{ c.tab }}" aria-label="{{ c.aria }}"><span class="lbl"><span class="av" aria-hidden="true">{{ c.init }}</span><span class="lblt"><span class="nm">{{ c.name }}</span><span class="st"><span>{{ c.state }}</span></span></span></span></a></sc-if>
+          <sc-if value="{{ c.ghost }}" hint-placeholder-val="{{ false }}"><button type="button" class="hit" tabIndex="{{ c.tab }}" aria-expanded="{{ c.expanded }}" aria-label="{{ c.aria }}" onClick="{{ c.pick }}">
+            <span class="lbl">
+              <span class="av ghost" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18h10a4 4 0 0 0 .6-7.95A5.5 5.5 0 0 0 6.9 9.2 4.4 4.4 0 0 0 7 18z"></path></svg></span>
+              <span class="lblt">
+                <span class="nm">{{ c.name }}</span>
+                <span class="st {{ c.stCls }}">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ c.stIcon }}"></path></svg>
+                  <span>{{ c.state }}</span>
+                </span>
+              </span>
+            </span>
+          </button></sc-if>
+          <div class="scene" style="{{ c.sceneStyle }}">
+            <sc-if value="{{ c.local }}" hint-placeholder-val="{{ true }}"><div class="shadow" aria-hidden="true"></div></sc-if>
+            <sc-if value="{{ c.wire }}" hint-placeholder-val="{{ false }}"><div class="foot" aria-hidden="true"></div></sc-if>
+            <div class="cube {{ c.cubeCls }}" style="{{ c.cubeStyle }}">
+              <sc-if value="{{ c.wire }}" hint-placeholder-val="{{ false }}">
+                <div class="f bt" aria-hidden="true"></div>
+                <div class="f br" aria-hidden="true"></div>
+              </sc-if>
+              <!-- back-left face: the ghost's details, on the geometry (the face a local Cube shows its details on) -->
+              <sc-if value="{{ c.ghost }}" hint-placeholder-val="{{ false }}">
+                <div class="f bl {{ c.blCls }}" aria-hidden="{{ c.blHidden }}">
+                  <sc-if value="{{ c.showKit }}" hint-placeholder-val="{{ false }}">
+                    <section class="fc" style="{{ c.fcStyle }}" aria-labelledby="gk-title">
+                      <h2 class="pn" id="gk-title"><span class="av ghost" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18h10a4 4 0 0 0 .6-7.95A5.5 5.5 0 0 0 6.9 9.2 4.4 4.4 0 0 0 7 18z"></path></svg></span>{{ c.name }}</h2>
+                      <p class="pnet"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""><span>Bitcoin mainnet</span></p>
+                      <dl class="pdl">
+                        <div><dt>Where</dt><dd class="muted">In Connect, not on this device</dd></div>
+                        <div><dt>Backup</dt><dd class="good"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg><span>Recovery Kit available</span></dd></div>
+                      </dl>
+                      <p class="pnote">Restore brings this Cube onto this device from its Recovery Kit. You'll set a PIN for it here.</p>
+                      <div class="grow"></div>
+                      <div class="pact">
+                        <button type="button" class="btn primary" tabIndex="{{ c.dTab }}">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19h14"></path></svg>
+                          <span>Restore to this device</span>
+                        </button>
+                        <button type="button" class="linkbtn" tabIndex="{{ c.dTab }}" onClick="{{ c.back }}">Back</button>
+                        <a class="linkbtn del" tabIndex="{{ c.dTab }}" href="P-Delete.dc.html">Delete</a>
+                      </div>
+                      <p class="pfoot">Restore, then the PIN face, then network checks.</p>
+                    </section>
+                  </sc-if>
+                  <sc-if value="{{ c.showNoKit }}" hint-placeholder-val="{{ false }}">
+                    <section class="fc" style="{{ c.fcStyle }}" aria-labelledby="gn-title">
+                      <h2 class="pn" id="gn-title"><span class="av ghost" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18h10a4 4 0 0 0 .6-7.95A5.5 5.5 0 0 0 6.9 9.2 4.4 4.4 0 0 0 7 18z"></path></svg></span>{{ c.name }}</h2>
+                      <p class="pnet"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""><span>Bitcoin mainnet</span></p>
+                      <dl class="pdl">
+                        <div><dt>Where</dt><dd class="muted">In Connect, not on this device</dd></div>
+                        <div><dt>Backup</dt><dd class="warn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7.5v5.5M12 16.2v.3"></path></svg><span>No Recovery Kit in Connect</span></dd></div>
+                      </dl>
+                      <p class="pnote">Connect has this Cube's registration but not its keys, so it can't be restored from here. Open it on the device that holds it and add a Recovery Kit, or import it with its recovery phrase.</p>
+                      <div class="grow"></div>
+                      <div class="pact">
+                        <a class="btn" tabIndex="{{ c.dTab }}" href="P-Restore.dc.html">Import with recovery phrase…</a>
+                        <button type="button" class="linkbtn" tabIndex="{{ c.dTab }}" onClick="{{ c.back }}">Back</button>
+                        <a class="linkbtn del" tabIndex="{{ c.dTab }}" href="P-Delete.dc.html">Delete</a>
+                      </div>
+                      <p class="pfoot">Delete removes the registration only; no funds are touched.</p>
+                    </section>
+                  </sc-if>
+                </div>
+              </sc-if>
+              <div class="f t" aria-hidden="true"><div class="tc">
+                <span class="coin {{ c.coinCls }}"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span>
+                <sc-if value="{{ c.hasTag }}" hint-placeholder-val="{{ false }}"><span class="ftag">{{ c.tag }}</span></sc-if>
+              </div></div>
+              <div class="f l" aria-hidden="true"><div class="lc">
+                <sc-for list="{{ c.left }}" as="w" hint-placeholder-count="2"><svg class="wi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="{{ w }}"></path></svg></sc-for>
+              </div></div>
+              <div class="f r" aria-hidden="true"><div class="rc">
+                <svg class="pad" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="{{ c.right }}"></path></svg>
+                <sc-if value="{{ c.warn }}" hint-placeholder-val="{{ false }}"><svg class="bdg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 7.5v5.5M12 16.2v.3"></path></svg></sc-if>
+              </div></div>
+            </div>
+          </div>
+        </div>
+      </sc-for>
+    </div>
+  </main>
+
+  <div class="bottom">
+    <a class="btn primary" href="P-Create.dc.html">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
+      <span>Create Cube</span>
+    </a>
+    <a class="btn" href="P-Restore.dc.html">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19h14"></path></svg>
+      <span>Import Bitcoin wallet</span>
+    </a>
+    <span class="newnet">New Cubes: Bitcoin mainnet</span>
+    <span class="grow"></span>
+    <span class="src"><i aria-hidden="true"></i>Block 973,655 · Local node</span>
+    <div class="keywrap">
+      <button type="button" class="keybtn" aria-expanded="{{ keyOpenStr }}" aria-controls="cube-key" onClick="{{ toggleKey }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="15" r="4"></circle><path d="M11 12l8-8M16 7l2 2M14 9l2 2"></path></svg>
+        <span>Key</span>
+      </button>
+      <sc-if value="{{ keyOpen }}" hint-placeholder-val="{{ true }}">
+        <div class="keycard">
+          <ul class="legend" id="cube-key" aria-label="How to read a Cube">
+            <li class="lgh first">Faces</li>
+            <li class="lg">
+              <span class="coin" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span>
+              <span>Top: network coin (and name tag on test networks)</span>
+            </li>
+            <li class="lg">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v5.5c0 4.3-3 7.6-7 9.5-4-1.9-7-5.2-7-9.5V6z"></path></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M13 3L5 13.5h6L10 21l8-10.5h-6z"></path></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5c3.5 4.2 6 7.6 6 10.5a6 6 0 0 1-12 0c0-2.9 2.5-6.3 6-10.5z"></path></svg>
+              <span>Left: wallets (Vault, Spark, Liquid)</span>
+            </li>
+            <li class="lg">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 11h10v9H7zM9 11V8a3 3 0 0 1 6 0v3"></path></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true" style="color:var(--warn)"><circle cx="12" cy="12" r="9"></circle><path d="M12 7.5v5.5M12 16.2v.3"></path></svg>
+              <span>Right: lock, backup needs attention</span>
+            </li>
+
+            <li class="lgh">Edges: network</li>
+            <li class="lg net">
+              <svg class="gc" viewBox="0 0 24 24" fill="none" stroke="var(--edge-btc)" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z" fill="var(--face-t)"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path></svg>
+              <span class="gt">Bitcoin mainnet<span>Solid orange edge</span></span>
+            </li>
+            <li class="lg net">
+                <svg class="gc" viewBox="0 0 24 24" fill="none" stroke="var(--edge-b2b)" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z" fill="var(--face-t)"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path></svg>
+                <span class="gt">Bitcoin Blake2b mainnet<span>Solid gold edge</span></span>
+            </li>
+            <li class="lg net">
+              <svg class="gc" viewBox="0 0 24 24" fill="none" stroke="var(--edge-test)" stroke-width="1.6" stroke-linejoin="round" stroke-dasharray="2.2 1.6" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z" fill="var(--face-t)"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path></svg>
+              <span class="gt">Test networks<span>Dashed grey edge · Testnet4, Signet, Regtest; the top names which</span></span>
+            </li>
+
+            <li class="lgh">Ghosts: in Connect, not on this device<span class="new">NEW</span></li>
+            <li class="lgnote">Drawn see-through in the network's edge colour. The left face shows a cloud.</li>
+            <li class="lg two">
+              <svg class="gc" viewBox="0 0 24 24" fill="none" stroke="var(--ghost-btc)" stroke-width="1.3" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z" fill="var(--ghost-fill)"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path><path d="M12 3v9M4 16.5l8-4.5 8 4.5" stroke-dasharray="1.5 1.5" opacity=".7"></path></svg>
+              <svg class="kit good" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8.5h16V19H4zM9 8.5V6.5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M8.8 13.6l2.2 2.2 4.2-4.3"></path></svg>
+              <span class="gt">Solid edge, kit with a tick: Recovery Kit in Connect<span>Select it to restore it on this device.</span></span>
+            </li>
+            <li class="lg two">
+              <svg class="gc" viewBox="0 0 24 24" fill="none" stroke="var(--ghost-btc)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="0.1 2.4" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path><path d="M12 3v9M4 16.5l8-4.5 8 4.5" opacity=".7"></path></svg>
+              <svg class="kit warnc" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8.5h16V19H4zM9 8.5V6.5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M3 4l18 18"></path></svg>
+              <span class="gt">Dotted edge, kit struck through: no Recovery Kit<span>Registered only. It can't be restored from Connect.</span></span>
+            </li>
+          </ul>
+        </div>
+      </sc-if>
+    </div>
+  </div>
+  <div class="cap">Study · Connect-only Cubes shown as ghosts beside local Cubes; replaces the "Available in Connect" list · synthetic data</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"ghostLook":{"editor":"enum","options":["wire","faded"],"default":"wire","section":"Ghosts"},"keyOpen":{"editor":"boolean","default":true,"section":"Ghosts"},"blake2b":{"editor":"boolean","default":false,"section":"Ghosts"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Ghosts"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  constructor(p) { super(p); this.state = { key: null, sel: null, prev: null, handoff: false }; }
+  renderVals() {
+    const look = this.props.ghostLook || 'wire';
+    const LOCK = 'M7 11h10v9H7zM9 11V8a3 3 0 0 1 6 0v3';
+    const VAULT = 'M12 3l7 3v5.5c0 4.3-3 7.6-7 9.5-4-1.9-7-5.2-7-9.5V6z';
+    const SPARK = 'M13 3L5 13.5h6L10 21l8-10.5h-6z';
+    const CLOUD = 'M7 18h10a4 4 0 0 0 .6-7.95A5.5 5.5 0 0 0 6.9 9.2 4.4 4.4 0 0 0 7 18z';
+    // Recovery Kit: a case; with a tick when Connect holds one, struck through when it doesn't
+    const KIT = 'M4 8.5h16V19H4zM9 8.5V6.5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M8.8 13.6l2.2 2.2 4.2-4.3';
+    const NOKIT = 'M4 8.5h16V19H4zM9 8.5V6.5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M3 4l18 18';
+    const ST_KIT = 'M5 12.5l4.5 4.5L19 7.5';
+    const ST_WARN = 'M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3';
+    const local = (name, net, left) => ({
+      name, init: name[0].toUpperCase(), local: true, ghost: false, wire: false,
+      cbCls: '', cubeCls: net, coinCls: net === 'test' ? 'tn' : '', hasTag: net === 'test', tag: 'Testnet4',
+      left, right: LOCK, warn: true, state: 'PIN prompt', stCls: '', stIcon: '', href: 'P-Launcher.dc.html',
+      aria: name + ', on this device, locked. Show details'
+    });
+    const st = this.state;
+    const go = (patch) => this.setState(Object.assign({ key: st.key, sel: st.sel, prev: null, handoff: false }, patch));
+    const ghost = (name, kit) => ({
+      name, init: '', local: false, ghost: true, wire: look === 'wire',
+      cbCls: 'ghostcb' + (look === 'faded' ? ' faded' : ''),
+      cubeCls: 'btc' + (look === 'wire' ? ' ghost ' + (kit ? 'kit' : 'nokit') : ''),
+      coinCls: '', hasTag: false, tag: '',
+      left: [CLOUD], right: kit ? KIT : NOKIT, warn: !kit,
+      state: kit ? 'In Connect · Restore' : 'In Connect · No Recovery Kit',
+      stCls: kit ? '' : 'warn', stIcon: kit ? ST_KIT : ST_WARN,
+      kit,
+      aria: name + ', in Connect, not on this device, ' + (kit ? 'Recovery Kit available. Show restore options' : 'no Recovery Kit. Show options')
+    });
+    const cubes = [
+      local('Allen Family', 'btc', [VAULT, SPARK]),
+      local('Family', 'btc', [VAULT, SPARK]),
+      local('Apple Demo', 'btc', [SPARK]),
+      local('testnet4 time', 'test', [VAULT]),
+      ghost('Passkey', true),
+      ghost('Everyday', false)
+    ];
+    // spin target, as P-Launcher: face centre at stage (720, 372), projected face = 420px.
+    // The scene's perspective-origin travels with the Cube so the face sits square on the optical axis.
+    // Slots: 6 x 200px, 24px gaps, centred in 1440px from x0 = 60; row top 206px, slot padding 8px.
+    const SZ = 128, D = 1100, FACE = 420, TX = 720, TY = 372;
+    const k = (FACE * D / (D + FACE / 2)) / SZ;
+    const px = (v) => v.toFixed(2) + 'px';
+    const REST = 'translate3d(0px,0px,0px) scale(1) rotateX(-35deg) rotateY(45deg)';
+    const browsing = st.sel === null;
+    cubes.forEach((c, i) => {
+      const isSel = st.sel === c.name;
+      const active = isSel && c.ghost;
+      const cx = 60 + i * 224 + 100, cy = 206 + 8 + 1.72 * SZ * 0.475;
+      const sx = 0.75 * SZ, sy = 1.72 * SZ * 0.475, dx = TX - cx, dy = TY - cy;
+      const origin = active ? px(sx + dx) + ' ' + px(sy + dy) : px(sx) + ' ' + px(1.72 * SZ * 0.5);
+      c.sceneStyle = '--s:' + SZ + 'px;perspective-origin:' + origin;
+      // yaw 45 -> 180 turns the back-left face to the viewer, the same face a local Cube shows its details on
+      c.cubeStyle = 'transform:' + (active ? 'translate3d(' + px(dx) + ',' + px(dy) + ',0px) scale(' + k.toFixed(4) + ') rotateX(0deg) rotateY(180deg)' : REST);
+      c.cbCls += (isSel ? ' lead' : '') + (!browsing && st.prev === c.name && !isSel ? ' prev' : '') + (active ? ' active' : '') + (active && st.handoff ? ' handoff' : '') + (!browsing && !isSel ? ' dim' : '');
+      c.tab = browsing ? '0' : '-1';
+      c.expanded = String(active);
+      c.showKit = active && c.kit; c.showNoKit = active && !c.kit;
+      c.blCls = active ? 'panel' : '';
+      c.blHidden = String(!active);
+      c.dTab = active ? '0' : '-1';
+      // 420x420 layout scaled into the face's padding box (s minus the edges; the dotted edge is 2px)
+      c.fcStyle = 'transform:scale(' + ((SZ - (c.kit ? 3 : 4)) / FACE).toFixed(5) + ')';
+      c.back = () => go({ sel: null });
+      c.pick = (e) => {
+        if (e && e.target && e.target.closest && e.target.closest('.fc')) return;
+        if (active) return;
+        const switching = !browsing && !isSel;
+        go({ sel: c.name, prev: switching ? st.sel : null, handoff: switching });
+      };
+    });
+    const open = this.state.key === null ? this.props.keyOpen !== false : this.state.key;
+    return {
+      cubes,
+      b2b: !!this.props.blake2b,
+      themeCls: this.props.theme === 'light' ? 'light' : '',
+      keyOpen: open, keyOpenStr: String(open),
+      toggleKey: () => this.setState({ key: !open })
+    };
+  }
+}
+</script>
+</body>
+</html>

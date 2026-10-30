@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Swap · Spark</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--acc-ink:#f59a45;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--focus:#8fc1ff;--hover:rgba(245,240,232,.06);--on-accent:#1a1208;--gutter:clamp(24px,3vw,48px);--page-max:1120px;color-scheme:dark}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--acc-ink:#a14d00;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--focus:#1d5fb8;--hover:rgba(32,32,32,.05);color-scheme:light}
+a{color:#f3821d}a:hover{color:#ffa54d}
+.tenshu *{box-sizing:border-box}
+.tenshu{font-variant-numeric:tabular-nums}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.tenshu button{font:inherit;color:inherit}
+.tenshu h1,.tenshu h2,.tenshu h3,.tenshu p,.tenshu ul,.tenshu ol{margin:0}
+.tenshu ul,.tenshu ol{padding:0;list-style:none}
+.ic{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.ic.s{width:16px;height:16px}
+.muted{color:var(--muted)}.ok{color:var(--good)}
+.top{height:56px;flex:none;display:flex;align-items:center;gap:12px;padding:0 16px;background:var(--panel);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px}
+.chips{margin-left:auto;display:flex;gap:8px;align-items:center}
+.chip{display:flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:8px;font-size:13px;white-space:nowrap}
+.body{flex:1;display:flex;min-height:0}
+.side{width:248px;flex:none;display:flex;flex-direction:column;background:var(--rail);border-right:1px solid var(--line)}
+.navp{padding:12px 10px 0;display:flex;flex-direction:column;gap:2px}
+.mid{flex:1;padding:0 10px 12px;display:flex;flex-direction:column;gap:2px}
+.gh{font-size:13px;font-weight:600;color:var(--muted);padding:22px 10px 6px}
+.ni{display:flex;align-items:center;gap:10px;min-height:38px;padding:8px 10px;border-radius:8px;font-size:14px;line-height:1.3;color:var(--ink);text-decoration:none}
+.tenshu a.ni{color:var(--ink)}
+.ni .ic{color:var(--muted)}
+.ni.on{background:var(--selected);font-weight:600}.ni.on .ic{color:var(--acc-ink)}
+.ni{justify-content:flex-start}
+.ni>span{flex:1 1 auto;min-width:0;text-align:left}
+.foot{border-top:1px solid var(--line);padding:10px}
+.cubeid{display:flex;align-items:center;gap:10px;padding:6px 8px 10px;margin-bottom:4px;border-bottom:1px solid var(--line)}
+.av{display:inline-grid;place-items:center;width:36px;height:36px;border-radius:50%;background:var(--panel);color:var(--acc-ink);flex:none}
+.cubeidt{flex:1;display:flex;flex-direction:column;min-width:0}
+.cubeidt b{font-weight:600;font-size:14px;line-height:1.3}
+.cubeidt span{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)}
+.cubeidt img{width:14px;height:14px;border-radius:50%}
+/* page head: shared pattern. A sub-page (Send, Receive) puts its Back button last in the head's action group, on the right. */
+.main{flex:1;min-width:0;display:flex;flex-direction:column}
+.phead{flex:none;background:var(--bg);border-bottom:1px solid var(--line)}
+.phead .in{max-width:calc(var(--page-max) + 2 * var(--gutter));padding:28px var(--gutter) 20px}
+.phead.ctl .in{padding-bottom:0}
+.back{display:inline-flex;align-items:center;gap:6px;height:36px;padding:0 12px 0 8px;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--ink);font-size:13px;font-weight:500;line-height:1;text-decoration:none;white-space:nowrap}
+.tenshu a.back{color:var(--ink)}.back:hover{background:var(--hover)}.back .ic{color:var(--muted)}
+.hrow{display:flex;align-items:flex-end;justify-content:space-between;gap:16px}
+.hrow h1{font-size:22px;font-weight:600;line-height:1.25}
+.idl{color:var(--muted);font-size:13px;margin-top:4px;display:flex;align-items:center;gap:6px}
+.idl img{width:16px;height:16px;display:block;border-radius:50%}
+.hact{display:flex;align-items:center;gap:8px;white-space:nowrap}
+.steps{display:flex;gap:4px;margin-top:16px}
+.step{display:inline-flex;align-items:center;gap:8px;padding:10px 12px;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-1px;font-size:14px}
+.step .n{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;border:1px solid var(--line);font-size:12px;font-weight:600}
+.step.on{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}
+.step.on .n{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.scroll{flex:1;min-height:0;overflow:hidden}
+.pg{max-width:calc(var(--page-max) + 2 * var(--gutter));padding:24px var(--gutter) 40px}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;padding:2px}
+.seg button{height:30px;padding:0 12px;border:0;border-radius:6px;background:transparent;cursor:pointer;font-size:13px;font-weight:500;color:var(--muted);display:inline-flex;align-items:center;gap:6px}
+.seg button[aria-pressed="true"]{background:var(--selected);color:var(--ink);font-weight:600}
+.lay{display:grid;grid-template-columns:minmax(0,1fr) 260px;gap:32px;align-items:start}
+.form{border:1px solid var(--line);border-radius:16px;background:var(--panel)}
+.fs{padding:20px 24px;border-top:1px solid var(--line)}
+.fs:first-child{border-top:0}
+.pair{display:grid;grid-template-columns:minmax(0,1fr) 24px minmax(0,1fr);gap:16px;align-items:center}
+.blk{padding:14px 16px;border:1px solid var(--line);border-radius:12px;background:var(--bg)}
+.blk .k{font-size:13px;color:var(--muted)}
+.asset{display:flex;align-items:center;gap:10px;margin-top:8px;font-weight:600;font-size:16px}
+.coin{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;background:#f7931a;color:#1a1208;font-weight:700;font-size:13px}
+.tag{display:inline-flex;align-items:center;height:20px;padding:0 8px;margin-top:8px;border:1px solid var(--accent);border-radius:999px;font-size:11.5px;font-weight:600;color:var(--acc-ink)}
+.lbl{display:block;font-weight:600;margin-bottom:8px}
+.inp{width:100%;height:44px;padding:0 14px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink);font:inherit;font-size:15px}
+.inp::placeholder{color:var(--muted)}
+.ff{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.btn{display:inline-flex;align-items:center;gap:6px;height:36px;padding:0 16px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font-weight:500;font-size:14px;color:var(--ink)}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.aside .k{font-size:13px;color:var(--muted)}
+.aside .v{font-size:18px;font-weight:600;margin-top:4px}
+.ic.spk{stroke-width:2}
+.coin.usd{background:var(--panel);color:var(--ink);border:1px solid var(--line);font-size:10px;letter-spacing:.02em}
+.blk .bal{display:block;margin-top:6px;font-size:13px;color:var(--muted)}
+.swap{width:36px;height:36px;display:grid;place-items:center;border:1px solid var(--line);border-radius:50%;background:var(--bg);color:var(--ink);cursor:pointer}.swap:hover{background:var(--hover)}
+.pair.cv{grid-template-columns:minmax(0,1fr) 36px minmax(0,1fr)}
+.amtw{position:relative;display:flex;gap:8px}
+.amtw .inp{padding-right:64px;font-size:18px;font-weight:600;height:52px}
+.amtw .u{position:absolute;right:96px;top:0;height:52px;display:flex;align-items:center;color:var(--muted);font-size:13px}
+.amtw .btn{height:52px}
+.hint{margin-top:8px;font-size:13px;color:var(--muted)}
+.kv{display:grid;grid-template-columns:minmax(0,1fr) auto;row-gap:10px;column-gap:24px}
+.kv dt{color:var(--muted)}.kv dd{margin:0;text-align:right;font-weight:500}
+.kv .tot{font-weight:600;font-size:16px;color:var(--ink)}
+.kv .sep{grid-column:1/-1;border-top:1px solid var(--line);margin:4px 0}
+.sum{display:grid;grid-template-columns:minmax(0,1fr) 24px minmax(0,1fr);gap:16px;align-items:center}
+.sum .k{font-size:13px;color:var(--muted)}.sum .v{font-size:22px;font-weight:600;margin-top:4px}.sum .v .u{font-size:13px;color:var(--muted);font-weight:400;margin-left:4px}.sum .f{font-size:13px;color:var(--muted)}
+.note{display:flex;gap:10px;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:var(--bg);font-size:13px;color:var(--muted)}
+.note .ic{color:var(--warn);margin-top:1px}
+.aside{display:flex;flex-direction:column;gap:20px}
+.bx{border-top:1px solid var(--line);padding-top:14px}
+.bx .r{display:flex;justify-content:space-between;gap:12px;font-size:13px;margin-top:8px}.bx .r b{font-weight:600}
+.bx .r .ar{color:var(--muted)}
+.bx p.d{font-size:13px;color:var(--muted);margin-top:6px}
+.eye{width:36px;height:36px;display:grid;place-items:center;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}
+.eye.tb{width:32px;height:32px}.eye:hover{background:var(--hover);color:var(--ink)}
+/* App preferences (Robert, 2026-10-29): a sliders icon button at the right end of the top bar (the gear stays with Cube Settings), styled like the eye, with an "App preferences" tooltip on hover or focus. */
+.tenshu .top{position:relative;z-index:8}
+.tenshu a.apg{position:relative;text-decoration:none;color:var(--muted)}.tenshu a.apg:hover{color:var(--ink)}
+.apg::after{content:attr(data-tip);position:absolute;top:calc(100% + 8px);right:0;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--muted);font-size:13px;font-weight:400;line-height:1.3;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .12s ease .25s}
+.apg:hover::after,.apg:focus-visible::after{opacity:1}
+/* coins (Robert, 2026-10-29): the Bitcoin and USDB logos (USDB from Flashnet's token list), network badge at bottom right. */
+.coin.btc,.coin.usd{background:none;border:0;padding:0;overflow:hidden}
+.coin>img{width:100%;height:100%;display:block;border-radius:50%}
+.coinw{position:relative;width:32px;height:32px;flex:none}
+.coinw .coin{width:32px;height:32px}
+.bdg{position:absolute;right:-4px;bottom:-4px;width:16px;height:16px;border-radius:50%;display:grid;place-items:center;border:2px solid var(--bg)}
+.bdg svg{width:10px;height:10px;fill:none;stroke:currentColor;stroke-width:2.25;stroke-linecap:round;stroke-linejoin:round}
+.bdg.spark{background:#111;color:#fff}.bdg.ln{background:#f5c33b;color:#1a1208}.bdg.ln svg{fill:currentColor;stroke-width:1}.bdg.oc{background:#f7931a;color:#1a1208}
+/* shared top bar (Robert, 2026-10-29): the same bar on every screen, Launcher and Cube: 64px on the rail colour; on the right the hide-balances eye first, then the status chips, then App preferences; the eye and App preferences are borderless icons. */
+.tenshu .top{height:64px;padding:0 24px;gap:16px;background:var(--rail)}
+.top .brand .ic{width:20px;height:20px}
+.top .chips .eye:not(.apg){order:-1}
+.top .chips .eye{width:32px;height:32px;border:0;background:transparent}
+.top .chips .eye:hover{background:var(--hover);color:var(--ink)}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}}" style="width:1440px;height:900px;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+  <header class="top">
+    <span class="brand"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg>Tenshu</span>
+    <div class="chips">
+      <button type="button" class="eye tb" aria-label="Hide balances" aria-pressed="false"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"></path><circle cx="9" cy="9" r="2.25"></circle></svg></button>
+      <span class="chip"><span class="ok" style="display:inline-flex;align-items:center;gap:5px"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Signed in</span></span>
+      <span class="chip"><span class="ok" style="display:inline-flex;align-items:center;gap:5px"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Connected</span></span>
+      <a class="eye apg" href="P-AppPrefs-InCube.dc.html" aria-label="App preferences" data-tip="App preferences"><svg class="ic s" aria-hidden="true" viewBox="0 0 24 24" style="stroke-width:1.75"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg></a>
+    </div>
+  </header>
+  <div class="body">
+    <nav class="side" aria-label="Cube navigation">
+      <div class="navp">
+        <div class="cubeid"><span class="av" aria-hidden="true"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg></span><span class="cubeidt"><b>Everyday</b><span><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Bitcoin mainnet</span></span><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="m5 7 4 4 4-4"/></svg></div>
+        <a class="ni" href="#"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"/><rect x="10.5" y="2.5" width="5" height="5" rx="1"/><rect x="2.5" y="10.5" width="5" height="5" rx="1"/><rect x="10.5" y="10.5" width="5" height="5" rx="1"/></svg><span>Overview</span></a><a class="ni" href="#"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2.5 1.5"/></svg><span>Activity</span></a><a class="ni" href="#"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/><path d="m6.5 9 1.8 1.8 3.5-3.5"/></svg><span>Backup &amp; protection</span></a>
+      </div>
+      <div class="mid">
+        <h2 class="gh">Wallets</h2>
+        <a class="ni {{sparkOn}}" href="#"><svg class="ic spk" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"></path></svg><span>Spark · Daily spending</span></a><a class="ni {{vaultOn}}" href="#"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg><span>Vault · Family savings</span></a>
+      </div>
+      <div class="foot"><a class="ni" href="#"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="2.25"/><circle cx="9" cy="9" r="5"/><path d="M9 2v2M9 14v2M2 9h2M14 9h2M4.05 4.05l1.41 1.41M12.54 12.54l1.41 1.41M4.05 13.95l1.41-1.41M12.54 5.46l1.41-1.41"/></svg><span>Settings</span></a></div>
+    </nav>
+    <main class="main">
+      <div class="phead sub ctl"><div class="in">
+        <div class="hrow">
+          <div><h1>Swap BTC ⇄ USDB</h1><p class="idl"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Spark · Daily spending · Everyday · Bitcoin mainnet</p></div>
+          <div class="hact"><a class="back" href="#" aria-label="Back to Spark"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M11 4.5 6.5 9l4.5 4.5"/></svg>Back to Spark</a></div>
+        </div>
+        <ol class="steps" aria-label="Progress">
+          <sc-for list="{{steps}}" as="s" hint-placeholder-count="3"><li class="step {{s.cls}}"><span class="n">{{s.n}}</span>{{s.label}}</li></sc-for>
+        </ol>
+      </div></div>
+      <div class="scroll">
+        <div class="pg" style="{{shift}}">
+          <div class="lay">
+            <sc-if value="{{details}}" hint-placeholder-val="{{ true }}">
+            <section class="form" aria-label="Conversion details">
+              <div class="fs">
+                <div class="pair cv">
+                  <div class="blk"><span class="k">From</span><div class="asset"><span class="coinw"><span class="coin {{d.fromCoinCls}}" aria-hidden="true"><img src="{{d.fromImg}}" alt=""></span><span class="bdg spark"><svg viewBox="0 0 18 18" aria-hidden="true"><path d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/></svg></span></span>{{d.fromName}}</div><span class="bal">Available {{d.fromBal}}</span></div>
+                  <button type="button" class="swap" aria-label="Swap direction"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 6.5h11.5M11.5 3.5l3 3-3 3M15 11.5H3.5M6.5 8.5l-3 3 3 3"></path></svg></button>
+                  <div class="blk"><span class="k">To</span><div class="asset"><span class="coinw"><span class="coin {{d.toCoinCls}}" aria-hidden="true"><img src="{{d.toImg}}" alt=""></span><span class="bdg spark"><svg viewBox="0 0 18 18" aria-hidden="true"><path d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/></svg></span></span>{{d.toName}}</div><span class="bal">Balance {{d.toBal}}</span></div>
+                </div>
+              </div>
+              <div class="fs"><label class="lbl" for="camt">Amount to swap</label>
+                <div class="amtw"><input id="camt" class="inp" type="text" value="{{d.amt}}" inputmode="decimal"><span class="u">{{d.unit}}</span><button type="button" class="btn">Max</button></div>
+                <p class="hint">{{d.limits}}</p>
+              </div>
+              <div class="fs"><dl class="kv"><dt>You get about</dt><dd class="tot">{{d.get}}</dd><dt>Indicative rate</dt><dd>1 BTC ≈ $80,220.00</dd><dt>Conversion fee</dt><dd class="muted">Shown with the quote</dd></dl></div>
+              <div class="fs ff"><span class="muted">Get quote fetches the exact rate and fee. Nothing is swapped yet.</span><button type="button" class="btn pri">Get quote</button></div>
+            </section>
+            </sc-if>
+            <sc-if value="{{review}}" hint-placeholder-val="{{ false }}">
+            <section class="form" aria-label="Review conversion">
+              <div class="fs">
+                <div class="sum">
+                  <div><p class="k">You swap</p><p class="v">{{r.out}}<span class="u">{{r.outU}}</span></p><p class="f">{{r.outF}}</p></div>
+                  <svg class="ic muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 9h12M11 5l4 4-4 4"/></svg>
+                  <div><p class="k">You get</p><p class="v">{{r.in}}<span class="u">{{r.inU}}</span></p><p class="f">{{r.inF}}</p></div>
+                </div>
+              </div>
+              <div class="fs"><dl class="kv"><dt>Quoted rate</dt><dd>1 BTC = $80,140.00</dd><dt>Conversion fee</dt><dd>{{r.fee}}</dd><dt>Max price change</dt><dd>0.5%</dd><div class="sep"></div><dt>Settles in</dt><dd>Usually under a minute</dd></dl></div>
+              <div class="fs"><p class="note"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.75v3.75M9 12.25v.01"/></svg><span>If the price moves more than 0.5% before the conversion settles, nothing is swapped and both balances stay as they are.</span></p></div>
+              <div class="fs ff"><button type="button" class="btn">Edit amount</button><button type="button" class="btn pri">{{r.cta}}</button></div>
+            </section>
+            </sc-if>
+            <aside class="aside">
+              <div class="bx"><p class="k">After the swap</p>
+                <p class="r"><span>Bitcoin</span><span><span class="ar">{{a.btcNow}} →</span> <b>{{a.btcAfter}}</b></span></p>
+                <p class="r"><span>US Dollar</span><span><span class="ar">{{a.usdNow}} →</span> <b>{{a.usdAfter}}</b></span></p>
+              </div>
+              <div class="bx"><p class="k">Auto-convert is off</p><p class="d">Bitcoin you receive stays bitcoin. <a href="#">Change in Wallet settings</a></p></div>
+            </aside>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"direction":{"editor":"enum","options":["toUsdb","toBtc"],"default":"toUsdb"},"step":{"editor":"enum","options":["details","review"],"default":"details"},"light":{"editor":"boolean","default":false},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+renderVals() {
+const toBtc = this.props.direction === 'toBtc';
+const review = this.props.step === 'review';
+const steps = ['Details','Review','Swapped'].map((label, i) => ({label, n: i + 1, cls: i === (review ? 1 : 0) ? 'on' : ''}));
+const btc = {img:'/_blob/dbbfc88f16f7cc27510d81f434c268ea',cls:'btc',name:'Bitcoin',bal:'5,000,000 SATS'};
+const usd = {img:'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTI4IiBoZWlnaHQ9IjEyOCIgdmlld0JveD0iMCAwIDEyOCAxMjgiIGZpbGw9Im5vbmUiCiAgICB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPgogICAgPHJlY3Qgd2lkdGg9IjEyOCIgaGVpZ2h0PSIxMjgiIGZpbGw9IiMwMDg3NUEiLz4KICAgIDxwYXRoIGQ9Ik00MCA2OS4wMjE3QzM3Ljc5MDkgNjkuMDIxNyAzNiA2Ny4yMzA4IDM2IDY1LjAyMTdMMzYuMDAwNCAzNS41MTQ1QzM2LjAwMDQgMzMuMzA1NCAzNy43OTEzIDMxLjUxNDUgNDAuMDAwNCAzMS41MTQ1SDU0LjAyNTZINTguNDcyNUg2MS4xNDA1SDY1LjU4NzVINjguMjU2TDcyLjcwMyAzMS42MzE5Qzc1LjQ4NTYgMzEuODY1OCA3OC4wNTUzIDMyLjQ1MTkgODAuMzk2MSAzMy40MTExQzgzLjU4NiAzNC43MDY2IDg2LjE1IDM2LjY4MiA4OC4wMDk4IDM5LjM1MjVDODkuOTM3MSA0Mi4wNDk2IDkwLjg0NzMgNDUuMjk5NiA5MC44NDczIDQ4Ljk4NzRDOTAuODQ3MyA1MC4xOTA5IDkwLjc2NTYgNTEuMzM2NiA5MC41OTY0IDUyLjQyMDdDOTAuNDQ2MiA1My4zODI4IDg5LjYxNzcgNTQuMDkyIDg4LjY0NCA1NC4wOTJIODEuMTk1N0M3OS45OTgyIDU0LjA5MiA3OS4wNzYgNTMuMDM1NSA3OS4yMzc4IDUxLjg0OTFDNzkuMzA0MSA1MS4zNjI0IDc5LjMzOSA1MC44MzYxIDc5LjMzOSA1MC4yNjgxQzc5LjMzOSA0Ny4xOTA5IDc4LjM3MzkgNDUuMzA1MiA3Ni43NTMxIDQ0LjE1MDRMNzYuNzQzNSA0NC4xNDM1Qzc0LjkzNSA0Mi44Mzg2IDcyLjM2ODEgNDIuMDgzNyA2OC44NDkyIDQyLjA4MzdINDkuNzIyMkM0OC42MTc3IDQyLjA4MzcgNDcuNzIyMiA0Mi45NzkxIDQ3LjcyMjIgNDQuMDgzN1Y1Ni40NTI1QzQ3LjcyMjIgNTcuNTU3MSA0OC42MTc3IDU4LjQ1MjUgNDkuNzIyMiA1OC40NTI1SDY4Ljg0OTJDNzMuNTc5IDU4LjQ1MjUgNzcuODAxNSA1OS44MjYgODEuMDkzMSA2MS40OTExQzg0LjMwNjEgNjMuMTE2NSA4Ni43NTQ4IDY1LjA4MjggODguMDAwNiA2Ni40OTU1QzkwLjc5NzEgNjkuMjMxNyA5MiA3My4yODY4IDkyIDc4LjIzMDdDOTIgODIuMTk1NyA5MS4wNTExIDg1LjY5MDggODkuMDUxMSA4OC42MDk5Qzg3LjExMDMgOTEuNDU1NCA4NC40MzI2IDkzLjU2NzcgODEuMDkwNyA5NC45NTQ5TDgxLjA4MiA5NC45NTg1Qzc4LjUyNzUgOTYuMDA0NiA3NS43Mjk4IDk2LjYyNzcgNzIuNzA1NCA5Ni44NDk0TDY1LjU4OTcgOTYuOTQxNkg2MS4yMzc1SDYxLjE0MjdINTguNDc0N0w1OC41Njk1IDk2Ljk0MTZINTQuMTIyNUw1NC4wMjc4IDk2Ljk0MTZINDAuMDAwNEMzNy43OTEzIDk2Ljk0MTYgMzYuMDAwNCA5NS4xNTA4IDM2LjAwMDQgOTIuOTQxNkwzNi4wMDAyIDc2Ljk2MTNDMzYuMDAwMiA3NS44NTY3IDM2Ljg5NTYgNzQuOTYxMyAzOC4wMDAyIDc0Ljk2MTNINDUuNzIyMkM0Ni44MjY4IDc0Ljk2MTMgNDcuNzIyMiA3NS44NTY3IDQ3LjcyMjIgNzYuOTYxM1Y4NC4zNzI1QzQ3LjcyMjIgODUuNDc3IDQ4LjYxNzcgODYuMzcyNSA0OS43MjIyIDg2LjM3MjVINjkuMjMzNUM3MS42NzU0IDg2LjM3MjUgNzMuNzA4OSA4Ni4wNDA0IDc1LjM3NDQgODUuNDI5NEM3Ni45OTg3IDg0LjgxNiA3OC4xNzggODMuODk4OCA3OS4wMDYyIDgyLjdMNzkuMDEwNCA4Mi42OTRDNzkuODMxIDgxLjUxNTcgODAuMzIwOSA3OS44OTI5IDgwLjMyMDkgNzcuNjc1N0M4MC4zMjA5IDc1LjQ1NjUgNzkuODMwMiA3My44NTY0IDc5LjAyMDEgNzIuNzEzOUw3OS4wMTMxIDcyLjcwNDFMNzkuMDA2MiA3Mi42OTQyQzc4LjE4MTEgNzEuNDk5OSA3Ny4wMDgyIDcwLjU5OTUgNzUuMzkwOSA3MC4wMTM1TDc1LjM3NDUgNzAuMDA3Nkw3NS4zNTgzIDcwLjAwMTRDNzMuNjk5IDY5LjM2NjkgNzEuNjcxNiA2OS4wMjE3IDY5LjIzMzUgNjkuMDIxN0g0MFoiIGZpbGw9IiNGQUZBRkEiLz4KICAgIDxyZWN0IHg9IjU2LjY1NjMiIHk9IjIyIiB3aWR0aD0iMTIuMDgzOCIgaGVpZ2h0PSIxMy42NDI5IiByeD0iMiIgZmlsbD0iI0ZBRkFGQSIvPgogICAgPHJlY3QgeD0iNTYuNjU2MyIgeT0iOTIuMjc4MiIgd2lkdGg9IjEyLjA4MzgiIGhlaWdodD0iMTMuMzI5NyIgcng9IjIiIGZpbGw9IiNGQUZBRkEiLz4KPC9zdmc+Cg==',cls:'usd',name:'US Dollar',bal:'10,376.19 USDB'};
+const f = toBtc ? usd : btc, t = toBtc ? btc : usd;
+const d = {fromImg:f.img,fromCoinCls:f.cls,fromName:f.name,fromBal:f.bal,toImg:t.img,toCoinCls:t.cls,toName:t.name,toBal:t.bal,
+  amt: toBtc ? '1,000.00' : '1,000,000', unit: toBtc ? 'USDB' : 'SATS',
+  limits: toBtc ? '$1,000.00 · minimum 1.00 USDB' : '$802.20 · minimum 10,000 SATS',
+  get: toBtc ? '1,246,570 SATS' : '802.20 USDB'};
+const r = toBtc
+  ? {out:'1,000.00',outU:'USDB',outF:'≈ 1,247,800 SATS',in:'1,246,560',inU:'SATS',inF:'$999.00',fee:'1.00 USDB (0.10%)',cta:'Swap to bitcoin'}
+  : {out:'1,000,000',outU:'SATS',outF:'$801.40',in:'800.60',inU:'USDB',inF:'≈ 999,000 SATS',fee:'1,000 SATS (0.10%)',cta:'Swap to USDB'};
+const a = toBtc
+  ? {btcNow:'5,000,000',btcAfter:'6,246,560 SATS',usdNow:'10,376.19',usdAfter:'9,376.19 USDB'}
+  : {btcNow:'5,000,000',btcAfter:'4,000,000 SATS',usdNow:'10,376.19',usdAfter:'11,176.79 USDB'};
+return {steps, d, r, a, details: !review, review, themeClass: this.props.light ? 'light' : ''};
+}
+}
+</script>
+</body>
+</html>

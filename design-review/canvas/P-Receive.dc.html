@@ -43,6 +43,7 @@ a{color:#f3821d}a:hover{color:#ffa54d}
 .tbtn:hover{background:var(--hover)}
 .chips{margin-left:auto;display:flex;gap:8px;align-items:center}
 .chip{display:flex;align-items:center;gap:8px;height:32px;padding:0 6px 0 12px;border:1px solid var(--line);border-radius:8px;font-size:13px;white-space:nowrap}
+.tenshu a.chip{color:var(--ink);text-decoration:none}.tenshu a.chip:hover{background:var(--hover,var(--selected))}
 .chip .end{padding-right:6px}
 .st{display:inline-flex;align-items:center;gap:5px;font-weight:500}
 .ok{color:var(--good)}.warn{color:var(--warn)}.unk{color:var(--muted)}.bad{color:var(--bad)}
@@ -65,6 +66,9 @@ a{color:#f3821d}a:hover{color:#ffa54d}
 .ni:hover{background:var(--hover)}
 .ni.on{background:var(--selected);font-weight:600}
 .ni.on .ic{color:var(--acc-ink)}
+/* left-aligned nav labels (Robert, 2026-10-29): the label fills the row after the icon and starts at its left edge */
+.ni{justify-content:flex-start}
+.ni>span{flex:1 1 auto;min-width:0;text-align:left}
 .ni:disabled{cursor:not-allowed;background:transparent}
 .ni:disabled .ds{display:block;font-size:12px;color:var(--muted);font-weight:400}
 .attn{display:flex;align-items:center;gap:6px;width:calc(100% - 12px);margin:0 6px 8px;padding:9px 8px;border:1px solid var(--line);border-radius:8px;background:var(--panel);cursor:pointer;text-align:left;font-size:12.5px;text-decoration:none}
@@ -74,8 +78,8 @@ a{color:#f3821d}a:hover{color:#ffa54d}
 .main{flex:1;min-width:0;overflow:auto}
 .pg{display:grid;grid-template-columns:minmax(0,680px) 240px;column-gap:40px;justify-content:center;padding:28px 40px 48px}
 .hd{grid-column:1 / -1;margin-bottom:20px}
-.back{display:inline-flex;align-items:center;gap:4px;font-size:13px;font-weight:500;text-decoration:none;padding:2px 0;border-radius:4px}
-.ph{font-size:24px;font-weight:600;line-height:1.25;margin-top:8px}
+.back{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px 0 8px;margin-bottom:16px;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--ink);font-size:13px;font-weight:500;line-height:1;text-decoration:none;white-space:nowrap}.tenshu a.back{color:var(--ink)}.back:hover{background:var(--hover)}.back .ic{color:var(--muted)}.back:focus-visible{outline:2px solid var(--focus);outline-offset:2px}.back.inline{height:auto;padding:2px 0;margin:0;border:0;color:var(--acc-ink)}.tenshu a.back.inline{color:var(--acc-ink)}.back.inline:hover{background:none;text-decoration:underline}
+.ph{font-size:24px;font-weight:600;line-height:1.25;margin-top:0}
 .idl{color:var(--muted);font-size:13px;margin-top:4px;display:flex;align-items:center;gap:6px}
 /* the one bounded form region (matches Send) */
 .form{border:1px solid var(--line);border-radius:16px;background:var(--panel);min-width:0}
@@ -180,6 +184,41 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 .tenshu{--gutter:clamp(24px,3vw,48px);--page-max:1120px}
 .main .pg{margin:0;max-width:calc(var(--page-max) + 2 * var(--gutter));padding:28px var(--gutter) 48px}
 .main .pg{justify-content:start}
+/* page head (Robert, 2026-10-29): every Cube page pins its head as Activity does: title and Cube line left, page actions right, tabs sitting on a rule that spans the content pane; the page scrolls under it. */
+.main>.phead{position:sticky;top:0;z-index:6;flex:none;background:var(--bg);border-bottom:1px solid var(--line)}
+.phead>.in{max-width:calc(var(--page-max) + 2 * var(--gutter));padding:24px var(--gutter) 20px}
+.phead h1,.phead .ph{margin-top:0;font-size:22px;font-weight:600;line-height:1.25}
+.phead .back{margin-bottom:8px}.phead a.back{text-decoration:none}
+.phead .crumbs{margin-bottom:8px}.phead .crumbs .back{margin-bottom:0}
+.phead .hrow{display:flex;align-items:flex-end;justify-content:space-between;gap:16px}
+.phead .hrow>div:first-child{min-width:0}
+.phead .hact{display:flex;align-items:center;gap:8px;flex:none}
+.phead .tabs,.phead .subnav{border-bottom:0;margin-bottom:-20px}
+.phead .hd,.phead .ttl{margin:0}
+.main .pg{padding-top:24px}
+/* App preferences (Robert, 2026-10-29): a sliders icon button at the right end of the top bar (the gear stays with Cube Settings), styled like the eye, with an "App preferences" tooltip on hover or focus. */
+.tenshu .top{position:relative;z-index:8}
+.tenshu a.apg{position:relative;text-decoration:none;color:var(--muted)}.tenshu a.apg:hover{color:var(--ink)}
+.apg::after{content:attr(data-tip);position:absolute;top:calc(100% + 8px);right:0;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--muted);font-size:13px;font-weight:400;line-height:1.3;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .12s ease .25s}
+.apg:hover::after,.apg:focus-visible::after{opacity:1}
+/* shared top bar (Robert, 2026-10-29): the same bar on every screen, Launcher and Cube: 64px on the rail colour; on the right the hide-balances eye first, then the status chips, then App preferences; the eye and App preferences are borderless icons. */
+.tenshu .top{height:64px;padding:0 24px;gap:16px;background:var(--rail)}
+.top .brand .ic{width:20px;height:20px}
+.top .chips .eye:not(.apg){order:-1}
+.top .chips .eye{width:32px;height:32px;border:0;background:transparent}
+.top .chips .eye:hover{background:var(--hover);color:var(--ink)}
+/* sub-page head (Robert, 2026-10-29, from the page-header study): Back is the last action on the right of the head; steps sit on the rule. */
+.phead .hact .back{display:inline-flex;align-items:center;gap:6px;height:36px;margin:0;padding:0 12px 0 8px;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--ink);font-size:13px;font-weight:500;line-height:1;text-decoration:none;white-space:nowrap}
+.phead .hact .back:hover{background:var(--hover)}.phead .hact .back .ic{color:var(--muted)}
+.phead .hsteps{display:flex;gap:4px;margin:16px 0 -20px;padding:0;list-style:none}
+.phead .hsteps li{display:inline-flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:2px solid transparent;color:var(--muted);font-size:14px}
+.phead .hsteps .n{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;border:1px solid var(--line);font-size:12px;font-weight:600}
+.phead .hsteps li.cur{color:var(--ink);font-weight:600;border-bottom-color:var(--accent)}
+.phead .hsteps li.cur .n{background:var(--accent);border-color:var(--accent);color:var(--on-accent,#1a1208)}
+.phead .hsteps li.done .n{border-color:var(--good);color:var(--good)}
+.cvn{display:flex;gap:10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--bg);font-size:13px;color:var(--muted)}
+.cvn .ic{color:var(--acc-ink);margin-top:1px;flex:none}.cvn a{color:var(--accent)}
+.ab2 .r{display:flex;justify-content:space-between;gap:12px;margin-top:8px}.ab2 .r b{font-weight:600}.ab2 .r .u{font-size:12px;color:var(--muted);font-weight:400;margin-left:3px}
 </style>
 </helmet>
 <div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
@@ -191,15 +230,15 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
         <sc-if value="{{ signedIn }}" hint-placeholder-val="{{ true }}"><a href="P-Connect-InCube.dc.html" style="color:inherit;text-decoration:none;display:inline-flex;align-items:center;gap:6px"><span class="srl">Connect account alex@example.test:</span><span class="st ok end"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Signed in</span></a></sc-if>
         <sc-if value="{{ signedOut }}" hint-placeholder-val="{{ false }}"><span class="srl">Connect account:</span><span class="st unk"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M6 9h6"/></svg>Signed out</span><a class="mini" href="P-Connect-InCube.dc.html" style="display:inline-flex;align-items:center;text-decoration:none;color:#1a1208">Sign in</a></sc-if>
       </div>
-      <div class="chip" title="{{ chipTitle.conn }}"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M7.5 10.5a3 3 0 0 0 4.2 0l2.3-2.3a3 3 0 0 0-4.2-4.2l-.9.9"/><path d="M10.5 7.5a3 3 0 0 0-4.2 0L4 9.8A3 3 0 0 0 8.2 14l.9-.9"/></svg><span class="srl">Cube service:</span>
+      <a class="chip" href="P-Settings.dc.html" onClick="{{ toNode }}" title="{{ chipTitle.conn }}" aria-label="{{ chipTitle.conn }}. Open Node settings"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M7.5 10.5a3 3 0 0 0 4.2 0l2.3-2.3a3 3 0 0 0-4.2-4.2l-.9.9"/><path d="M10.5 7.5a3 3 0 0 0-4.2 0L4 9.8A3 3 0 0 0 8.2 14l.9-.9"/></svg><span class="srl">Cube service:</span>
         <sc-if value="{{ signedIn }}" hint-placeholder-val="{{ true }}"><span class="st ok end"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Connected</span></sc-if>
         <sc-if value="{{ signedOut }}" hint-placeholder-val="{{ false }}"><span class="st unk end"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M7.2 7.2a1.9 1.9 0 1 1 2.6 1.75c-.5.25-.8.6-.8 1.15v.4M9 12.6v.01"/></svg>Not checked</span></sc-if>
-      </div>
+      </a>
       <button type="button" class="eye" aria-pressed="{{ hideP }}" aria-label="Hide balances" onClick="{{ toggleHide }}">
         <sc-if value="{{ shown }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/></svg></sc-if>
         <sc-if value="{{ hidden }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/><path d="M3 3l12 12"/></svg></sc-if>
       </button>
-      <a class="chip" href="P-AppPrefs-InCube.dc.html" title="App preferences" aria-label="App preferences" style="padding:0 10px"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 5h12M3 9h12M3 13h12"/><circle cx="7" cy="5" r="1.6" fill="var(--panel)"/><circle cx="12" cy="9" r="1.6" fill="var(--panel)"/><circle cx="6" cy="13" r="1.6" fill="var(--panel)"/></svg></a>
+      <a class="eye apg" href="P-AppPrefs-InCube.dc.html" aria-label="App preferences" data-tip="App preferences"><svg class="ic s" aria-hidden="true" viewBox="0 0 24 24" style="stroke-width:1.75"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg></a>
     </div>
   </header>
 
@@ -222,14 +261,13 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
       <div class="mid">
         <h2 class="gh">Wallets</h2>
         <sc-if value="{{ cube.main }}" hint-placeholder-val="{{ true }}">
-          <a class="ni {{ nv.spark.cls }}" aria-current="{{ nv.spark.cur }}" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg><span>Spark · Daily spending</span></a>
+          <a class="ni {{ nv.spark.cls }}" aria-current="{{ nv.spark.cur }}" href="P-Overview.dc.html" onClick="{{ landSpark }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path stroke-width="2" d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/></svg><span>Spark · Daily spending</span></a>
         </sc-if>
-        <a class="ni {{ nv.vault.cls }}" aria-current="{{ nv.vault.cur }}" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg><span>{{ cube.vault }}</span></a>
+        <a class="ni {{ nv.vault.cls }}" aria-current="{{ nv.vault.cur }}" href="P-Overview.dc.html" onClick="{{ landVault }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg><span>{{ cube.vault }}</span></a>
         <sc-if value="{{ cube.main }}" hint-placeholder-val="{{ true }}">
-          <a class="ni {{ nv.liquid.cls }}" aria-current="{{ nv.liquid.cur }}" href="P-Liquid.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg><span>Liquid · Travel</span></a>
         </sc-if>
         <sc-if value="{{ cube.test }}" hint-placeholder-val="{{ false }}">
-          <button type="button" class="ni" disabled><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg><span><span>Spark</span><span class="ds">Not available on Testnet4</span></span></button>
+          <button type="button" class="ni" disabled><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path stroke-width="2" d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/></svg><span><span>Spark</span><span class="ds">Not available on Testnet4</span></span></button>
         </sc-if>
       </div>
       <a class="attn" href="P-Overview.dc.html"><svg class="ic s warn" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5 16 15H2z"/><path d="M9 7.5v3M9 12.75v.01"/></svg><span class="warn" style="font-weight:500">Backup not confirmed</span><span class="go">Review</span></a>
@@ -239,12 +277,12 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
     </nav>
 
     <main class="main">
+      <div class="phead"><div class="in">
+          <div class="hrow"><div><h1 class="ph">Receive</h1>
+            <p class="idl"><sc-if value="{{ w.btcNet }}" hint-placeholder-val="{{ true }}"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></sc-if><sc-if value="{{ w.liqNet }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg></sc-if>{{ w.name }} · {{ w.ctx }}</p></div>
+            <div class="hact"><a class="back" href="P-Overview.dc.html" onClick="{{ landBack }}" aria-label="Back to {{ w.name }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M11 4.5 6.5 9l4.5 4.5"/></svg>Back to {{ w.short }}</a></div></div>
+      </div></div>
       <div class="pg">
-        <div class="hd">
-          <a class="back" href="P-Overview.dc.html"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M11 4.5 6.5 9l4.5 4.5"/></svg>{{ w.name }}</a>
-          <h1 class="ph">Receive</h1>
-          <p class="idl"><sc-if value="{{ w.btcNet }}" hint-placeholder-val="{{ true }}"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></sc-if><sc-if value="{{ w.liqNet }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg></sc-if>{{ w.ctx }}</p>
-        </div>
 
         <section class="form" aria-labelledby="form-h" aria-busy="{{ busyA }}">
           <div class="fh">
@@ -265,6 +303,9 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
             </div>
           </sc-if>
 
+          <sc-if value="{{ usdbNote }}" hint-placeholder-val="{{ false }}">
+            <div class="fs"><p class="cvn"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 6.5h11.5M11.5 3.5l3 3-3 3M15 11.5H3.5M6.5 8.5l-3 3 3 3"/></svg><span>Payments arrive as bitcoin. To hold them in US Dollar, <a href="P-Swap.dc.html">swap to USDB</a> afterwards or turn on auto-convert in <a href="P-Settings.dc.html" onClick="{{ toSparkSettings }}">Wallet settings</a>.</span></p></div>
+          </sc-if>
           <sc-if value="{{ v.main }}" hint-placeholder-val="{{ true }}">
             <!-- secondary selector: Bitcoin methods -->
             <sc-if value="{{ v.methodRow }}" hint-placeholder-val="{{ true }}">
@@ -454,10 +495,10 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
         <aside class="aside" aria-label="Wallet">
           <p class="cap">Receiving into</p>
           <p style="font-weight:600;margin-top:4px">{{ w.name }}</p>
-          <sc-for list="{{ bal }}" as="b" hint-placeholder-count="1"><p class="bv">{{ b.num }} <span class="u">{{ b.unit }}</span></p></sc-for>
+          <div class="ab2"><sc-for list="{{ bal }}" as="b" hint-placeholder-count="1"><p class="r"><span>{{ b.name }}</span><b>{{ b.num }}<span class="u">{{ b.unit }}</span></b></p></sc-for></div>
           <div class="ab">
             <sc-for list="{{ notes }}" as="n" hint-placeholder-count="1"><p class="cap" style="margin-bottom:10px">{{ n.t }}</p></sc-for>
-            <a class="back" href="P-Activity.dc.html">See all in Activity</a>
+            <a class="back inline" href="P-Activity.dc.html">See all in Activity</a>
           </div>
           <p class="cap" style="margin-top:24px">Prototype · synthetic addresses, invoices and QR · stablecoin rails, limits and rates subject to SDK validation</p>
         </aside>
@@ -473,7 +514,10 @@ class Component extends DCLogic {
     // prototype-only: Appearance (App preferences) is a device setting shared across artboards: system follows the review lever
     let THEME = 'system'; try { THEME = localStorage.getItem('tenshu.proto.theme') || 'system'; } catch (e) {}
     const P=this.props,self=this;
-    const pw=P.wallet||'spark',pk=P.kind||'bitcoin',pm=P.method||'invoice',pst=P.state||'ready',hb=!!P.hideBalances;
+    // prototype-only: a Receive pill on another board says which wallet and asset (P-Overview writes tenshu.proto.recvTo); read once, then cleared
+    if (this._rt===undefined) { this._rt=null; try { this._rt=JSON.parse(localStorage.getItem('tenshu.proto.recvTo')||'null'); localStorage.removeItem('tenshu.proto.recvTo'); } catch (e) {} }
+    const RT=this._rt||{};
+    const pw=RT.wallet||P.wallet||'spark',pk=P.kind||'bitcoin',pm=P.method||'invoice',pst=P.state||'ready',hb=!!P.hideBalances;
     const key=[pw,pk,pm,pst,hb].join('|');
     const RATE=0.00082784,D='••••••';
     const fmt=n=>Math.round(n).toLocaleString('en-US');
@@ -609,7 +653,7 @@ class Component extends DCLogic {
     const kinds=[['bitcoin','Bitcoin'],['stablecoin','Stablecoin']].map(x=>({label:x[1],p:k===x[0]?'true':'false',pick:()=>{const kk=fixKind(w,x[0]);set({kd:kk,m:fixM(w,kk,''),copied:false,shift:'none',refund:'',samt:''});}}));
     const methods=BM[w].map(x=>({label:x[1],p:m===x[0]?'true':'false',pick:()=>set({m:x[0],copied:false})}));
     const nvi=x=>({cls:w===x?'on':'',cur:w===x?'page':'false',pick:()=>self.setState(Object.assign(init(x,x==='vault'?'bitcoin':k,'',st),{k:key,hide:S.hide,lockAsk:false}))});
-    const balRaw=isL?[{num:'12,784',unit:'SATS L-BTC'},{num:'10.37',unit:'USDt'}]:isV?[{num:'250,000',unit:'SATS'}]:[{num:'25,053',unit:'SATS'}];
+    const balRaw=isL?[{name:'L-BTC',num:'12,784',unit:'SATS'},{name:'USDt',num:'10.37',unit:'USDt'}]:isV?[{name:'Bitcoin',num:'250,000',unit:'SATS'}]:[{name:'Bitcoin',num:'25,053',unit:'SATS'},{name:'US Dollar',num:'50.00',unit:'USDB'}];
 
     // the method's note (aside); safety wording quoted from source
     let notes=[];
@@ -634,7 +678,7 @@ class Component extends DCLogic {
       signedIn:!signedOut,signedOut:signedOut,
       cube:{name:test?'Lab':'Everyday',net:test?'Testnet4':'Bitcoin mainnet',main:!test,test:test,vault:test?'Vault · Lab':'Vault · Family savings'},
       nv:{spark:nvi('spark'),vault:nvi('vault'),liquid:nvi('liquid')},
-      w:{name:gated?(isS?'Spark':'Liquid'):CFG.name,ctx:gated?'Lab · Testnet4':CFG.ctx,btcNet:CFG.btcNet,liqNet:!CFG.btcNet},
+      w:{name:gated?(isS?'Spark':'Liquid'):CFG.name,short:isS?'Spark':isL?'Liquid':'Vault',ctx:gated?'Lab · Testnet4':CFG.ctx,btcNet:CFG.btcNet,liqNet:!CFG.btcNet},
       gate:isS?{title:'Spark isn’t available on Testnet4',text:'Spark supports Bitcoin mainnet and Regtest only.'}:{title:'Lab has no Liquid wallet',text:'Liquid · Travel lives in the Everyday Cube.'},
       toVault:()=>self.setState(Object.assign(init('vault','bitcoin','address',st),{k:key,hide:S.hide,lockAsk:false})),
       kinds:kinds,methods:methods,rails:rails,route:route,v:v,busyA:loading?'true':'false',
@@ -645,7 +689,13 @@ class Component extends DCLogic {
       out:out,copyLabel:S.copied?'Copied':'Copy',copiedSr:S.copied?out.label+' copied':'',copy:()=>set({copied:true}),
       ver:ver,label:S.label,onLabel:e=>set({label:e.target.value}),
       foot:foot,
-      bal:balRaw.map(b=>hide?{num:D,unit:''}:b),notes:notes.map(t=>({t:t}))
+      bal:balRaw.map(b=>hide?{name:b.name,num:D,unit:''}:b),
+      usdbNote:isS&&RT.asset==='usdb',
+      landSpark:()=>{ try { localStorage.setItem('tenshu.proto.land', JSON.stringify({page:'spark'})); } catch (e) {} },
+      landVault:()=>{ try { localStorage.setItem('tenshu.proto.land', JSON.stringify({page:'vault'})); } catch (e) {} },
+      toNode:()=>{ try { localStorage.setItem('tenshu.proto.settingsScope', JSON.stringify({scope:'vault',tab:'node'})); } catch (e) {} },
+      toSparkSettings:()=>{ try { localStorage.setItem('tenshu.proto.settingsScope', JSON.stringify({scope:'spark',tab:'balances'})); } catch (e) {} },
+      landBack:()=>{ try { localStorage.setItem('tenshu.proto.land', JSON.stringify({page:isV?'vault':'spark'})); } catch (e) {} },notes:notes.map(t=>({t:t}))
     };
   }
 }
