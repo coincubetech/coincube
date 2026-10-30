@@ -781,6 +781,72 @@ fn vault_settings_for_cube(
         .find(|wallet| wallet.wallet_id() == *vault_id)
 }
 
+type SecondSlotResult = Result<
+    Result<
+        (crate::services::unlock::MigrationOutcome, Option<String>),
+        crate::services::unlock::UnlockError,
+    >,
+    tokio::task::JoinError,
+>;
+
+/// Bring the Cube's seed files up to the current wire version, give it its
+/// second slot if it has none, and record that slot's name in
+/// `settings.json`.
+///
+/// The slot and its name are one step, so the work runs in a task of its
+/// own, spawned at the call. Cancel may drop the returned future mid-way; a
+/// decoy written without its name recorded is unreachable, and the next
+/// unlock would mint another. The spawned task runs to the end regardless.
+fn migrate_and_record_second_slot(
+    root: std::path::PathBuf,
+    network_dir: NetworkDirectory,
+    cube: app::settings::CubeSettings,
+    pin: zeroize::Zeroizing<String>,
+) -> impl std::future::Future<Output = SecondSlotResult> {
+    let task = tokio::spawn(migrate_and_record_second_slot_now(
+        root,
+        network_dir,
+        cube,
+        pin,
+    ));
+    async move { task.await.unwrap_or_else(Err) }
+}
+
+async fn migrate_and_record_second_slot_now(
+    root: std::path::PathBuf,
+    network_dir: NetworkDirectory,
+    cube: app::settings::CubeSettings,
+    pin: zeroize::Zeroizing<String>,
+) -> SecondSlotResult {
+    let cube_id = cube.id.clone();
+    let joined = tokio::task::spawn_blocking(move || {
+        let loc = crate::services::unlock::CubeLocation::new(&root, &cube);
+        let outcome = crate::services::unlock::migrate_seed_files(&loc, &pin)?;
+        // Give this Cube its second slot if it arrived without one — restored
+        // from a Recovery Kit, or minted before unit 6b. Same blocking task:
+        // it costs one Argon2 pass and must not run on the UI thread.
+        let slot = crate::services::unlock::ensure_second_slot(&loc)?;
+        Ok::<_, crate::services::unlock::UnlockError>((outcome, slot))
+    })
+    .await;
+    // Persist the backfilled slot name. Without this the decoy just written
+    // is unreachable and the next unlock mints another one.
+    if let Ok(Ok((_, Some(name)))) = &joined {
+        let name = name.clone();
+        if let Err(e) = app::settings::update_settings_file(&network_dir, |mut s| {
+            if let Some(c) = s.cubes.iter_mut().find(|c| c.id == cube_id) {
+                c.duress_slot_file = Some(name);
+            }
+            Some(s)
+        })
+        .await
+        {
+            error!("could not record the second slot for cube {cube_id}: {e}");
+        }
+    }
+    joined
+}
+
 /// Resolve either local Bitcoin wallet attached to this exact Cube. Imported
 /// wallets keep the same WalletSettings/daemon directory lifecycle as Vaults,
 /// while their descriptor and signing capabilities remain distinct.
@@ -3650,31 +3716,15 @@ impl Tab {
                                     // only runs after an unlock has already
                                     // succeeded. Logs a count, never content.
                                     {
-                                        let root = datadir_clone.path().to_path_buf();
-                                        let cube_for_migration = cube.clone();
-                                        let pin_for_migration = pin.clone();
-                                        let joined = tokio::task::spawn_blocking(move || {
-                                            let loc = crate::services::unlock::CubeLocation::new(
-                                                &root,
-                                                &cube_for_migration,
-                                            );
-                                            let outcome =
-                                                crate::services::unlock::migrate_seed_files(
-                                                    &loc,
-                                                    &pin_for_migration,
-                                                )?;
-                                            // Give this Cube its second slot if
-                                            // it arrived without one — restored
-                                            // from a Recovery Kit, or minted
-                                            // before unit 6b. Same blocking
-                                            // task: it costs one Argon2 pass and
-                                            // must not run on the UI thread.
-                                            let slot =
-                                                crate::services::unlock::ensure_second_slot(&loc)?;
-                                            Ok::<_, crate::services::unlock::UnlockError>((
-                                                outcome, slot,
-                                            ))
-                                        })
+                                        // Its own task: a Cancel that drops
+                                        // this future cannot separate the
+                                        // second slot from its recorded name.
+                                        let joined = migrate_and_record_second_slot(
+                                            datadir_clone.path().to_path_buf(),
+                                            datadir_clone.network_directory(network_val),
+                                            cube.clone(),
+                                            pin.clone(),
+                                        )
                                         .await;
 
                                         // Do not discard this. `let _ = …` threw
@@ -3684,38 +3734,8 @@ impl Tab {
                                         // trace at all.
                                         match joined {
                                             Ok(Ok((outcome, new_slot))) => {
-                                                // Persist the backfilled slot
-                                                // name. Without this the decoy
-                                                // just written is unreachable
-                                                // and the next unlock mints
-                                                // another one.
                                                 if let Some(name) = new_slot {
-                                                    cube.duress_slot_file = Some(name.clone());
-                                                    let cube_id = cube.id.clone();
-                                                    let network_dir = datadir_clone
-                                                        .network_directory(network_val);
-                                                    if let Err(e) =
-                                                        app::settings::update_settings_file(
-                                                            &network_dir,
-                                                            |mut s| {
-                                                                if let Some(c) = s
-                                                                    .cubes
-                                                                    .iter_mut()
-                                                                    .find(|c| c.id == cube_id)
-                                                                {
-                                                                    c.duress_slot_file = Some(name);
-                                                                }
-                                                                Some(s)
-                                                            },
-                                                        )
-                                                        .await
-                                                    {
-                                                        error!(
-                                                            "could not record the second slot for \
-                                                             cube {}: {e}",
-                                                            cube.id
-                                                        );
-                                                    }
+                                                    cube.duress_slot_file = Some(name);
                                                 }
                                                 if outcome.did_work() {
                                                     info!(
@@ -4855,18 +4875,24 @@ impl Tab {
     /// `Some(None)` keeps it but has no stage (a loader error page).
     fn opening_stage(&self) -> Option<Option<home::launcher_opening::Stage>> {
         use home::launcher_opening::Stage;
-        // Without a Vault there is no daemon to start: the wallets load and
-        // the Cube is almost there.
-        let unlocked = |cube: &app::settings::CubeSettings| {
-            Some(if cube.vault_wallet_id.is_some() {
+        // The unlock routes to the Loader exactly when it carries Bitcoin
+        // wallet settings (a Vault or an imported wallet). Without them there
+        // is no daemon to start: the wallets load and the Cube is almost there.
+        let unlocked = |on_success: &crate::pin_entry::PinEntrySuccess| {
+            let crate::pin_entry::PinEntrySuccess::LoadApp {
+                wallet_settings, ..
+            } = on_success;
+            Some(if wallet_settings.is_some() {
                 Stage::Connecting
             } else {
                 Stage::AlmostThere
             })
         };
         match &self.state {
-            State::PinEntry(pin) if pin.is_loading() => Some(unlocked(pin.cube())),
-            State::PasskeyUnlock(passkey) if passkey.is_opening() => Some(unlocked(passkey.cube())),
+            State::PinEntry(pin) if pin.is_loading() => Some(unlocked(&pin.on_success)),
+            State::PasskeyUnlock(passkey) if passkey.is_opening() => {
+                Some(unlocked(&passkey.on_success))
+            }
             State::Loader(loader) => Some(loader.opening_stage()),
             State::App(_) => Some(Some(Stage::Ready)),
             _ => None,
@@ -8645,6 +8671,13 @@ mod opening_tests {
     /// A tab on a PIN screen that was opened from the floor and has just
     /// had its PIN submitted: the loading view is up, classification runs.
     fn submitted(root: &std::path::Path) -> Tab {
+        submitted_with(root, None)
+    }
+
+    fn submitted_with(
+        root: &std::path::Path,
+        wallet_settings: Option<crate::app::settings::WalletSettings>,
+    ) -> Tab {
         let cube = CubeSettings::new("Everyday".into(), ChainId::Bitcoin);
         let state = unlock_state(
             cube,
@@ -8655,7 +8688,7 @@ mod opening_tests {
                 network: Network::Bitcoin,
                 internal_bitcoind: None,
                 backup: None,
-                wallet_settings: None,
+                wallet_settings,
                 connect_client: None,
             },
             None,
@@ -8691,6 +8724,126 @@ mod opening_tests {
         );
         assert!(tab.unlock_floor.is_none());
         drop(result);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A Cube whose Bitcoin wallet is imported has no Vault id, but its
+    /// unlock carries wallet settings and routes to the Loader. The opening
+    /// has to start where the Loader does, or the stage line and the light
+    /// step back when the Loader takes over.
+    #[test]
+    fn an_imported_wallet_opens_at_the_loaders_first_stage() {
+        let root = datadir();
+        let imported: crate::app::settings::WalletSettings =
+            serde_json::from_value(serde_json::json!({
+                "name": "imported", "alias": null, "descriptor_checksum": "imported",
+                "pinned_at": null
+            }))
+            .unwrap();
+        let mut tab = submitted_with(&root, Some(imported));
+        let State::PinEntry(pin) = &tab.state else {
+            unreachable!("a PIN Cube");
+        };
+        assert!(pin.cube().vault_wallet_id.is_none());
+        drop(tab.track_opening(true, Task::none()));
+        let opening = tab.opening.as_ref().expect("a verified PIN opens the Cube");
+        assert_eq!(
+            opening.scene.stage(),
+            home::launcher_opening::Stage::Connecting
+        );
+        assert_eq!(
+            loader_at_connecting(&root).opening_stage(),
+            Some(home::launcher_opening::Stage::Connecting)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Cancel drops the unlock's load mid-way. If that lands after the second
+    /// slot is written but before its name is recorded, the slot is
+    /// unreachable and the next unlock mints another. The backfill's future
+    /// is polled once, so the work has started, then dropped as Cancel drops
+    /// it; the name must still reach `settings.json`, and the next unlock
+    /// must reuse that slot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancel_mid_backfill_still_records_the_second_slot() {
+        use crate::app::settings::{update_settings_file, Settings};
+        use coincube_core::miniscript::bitcoin::secp256k1::Secp256k1;
+        use coincube_core::signer::{MasterSigner, MASTER_SEED_LABEL};
+        use std::future::Future;
+
+        let root = datadir();
+        let secp = Secp256k1::signing_only();
+        let signer = MasterSigner::generate(Network::Bitcoin).unwrap();
+        let mut cube = CubeSettings::new("Everyday".into(), ChainId::Bitcoin);
+        cube.created_at = 1000;
+        cube.master_signer_fingerprint = Some(signer.fingerprint(&secp));
+        signer
+            .store_encrypted(
+                &root,
+                Network::Bitcoin,
+                &secp,
+                Some((format!("{}{}", MASTER_SEED_LABEL, 1000), 1000)),
+                "1234",
+                &cube.id,
+                None,
+            )
+            .unwrap();
+        let network_dir =
+            crate::dir::CoincubeDirectory::new(root.clone()).network_directory(ChainId::Bitcoin);
+        network_dir.init().unwrap();
+        let listed = cube.clone();
+        update_settings_file(&network_dir, |_| {
+            Some(Settings {
+                cubes: vec![listed],
+                ..Default::default()
+            })
+        })
+        .await
+        .unwrap();
+        let folder = MasterSigner::mnemonics_folder(&root, Network::Bitcoin);
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1);
+
+        let mut load = Box::pin(super::migrate_and_record_second_slot(
+            root.clone(),
+            network_dir.clone(),
+            cube.clone(),
+            zeroize::Zeroizing::new("1234".to_string()),
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(
+                load.as_mut().poll(cx).is_pending(),
+                "one Argon2 pass is not instant"
+            );
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(load);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let recorded = loop {
+            let settings = Settings::from_file(&network_dir).unwrap();
+            if settings.cubes[0].duress_slot_file.is_some() {
+                break settings.cubes[0].clone();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the cancelled backfill never recorded its slot ({} files)",
+                std::fs::read_dir(&folder).unwrap().count()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 2);
+
+        // The next unlock finds the recorded slot and mints nothing.
+        let again = super::migrate_and_record_second_slot(
+            root.clone(),
+            network_dir.clone(),
+            recorded,
+            zeroize::Zeroizing::new("1234".to_string()),
+        )
+        .await;
+        assert!(matches!(again, Ok(Ok((_, None)))));
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 2);
         std::fs::remove_dir_all(root).unwrap();
     }
 
