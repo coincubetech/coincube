@@ -4614,26 +4614,61 @@ impl App {
             .iter()
             .map(|record| record.txid)
             .collect();
+        let chain = wallet.chain;
+        let twin_records = crate::services::split_coins::journal::twin_data_dir(
+            &self.cache.datadir_path,
+            chain,
+            &wallet.descriptor_checksum,
+        )
+        .zip(crate::services::entangled::twin_chain(chain))
+        .map(|(dir, twin)| crate::services::split_coins::journal::load(&dir, twin))
+        .unwrap_or_default();
+        // The twin journal only nominates splits; Connect must show each one
+        // deep on the twin chain now before its coins count as separated.
+        let candidates = crate::services::split_coins::twin_candidates(&twin_records);
+        let client = (!candidates.is_empty()
+            && crate::services::chain_status::checks_enabled(chain))
+        .then(|| self.authenticated_coincube_client())
+        .flatten();
+        let generation = *self.panels.claim_generation.borrow();
+        let live = self.panels.claim_generation.subscribe();
         Task::perform(
             async move {
-                if txids.is_empty() {
-                    return std::collections::HashMap::new();
-                }
-                daemon
-                    .list_txs(&txids)
-                    .await
-                    .map(|found| {
-                        found
-                            .transactions
-                            .into_iter()
-                            .map(|info| (info.tx.compute_txid(), info.tx))
-                            .collect()
-                    })
-                    .unwrap_or_default()
+                let transactions = async {
+                    if txids.is_empty() {
+                        return std::collections::HashMap::new();
+                    }
+                    daemon
+                        .list_txs(&txids)
+                        .await
+                        .map(|found| {
+                            found
+                                .transactions
+                                .into_iter()
+                                .map(|info| (info.tx.compute_txid(), info.tx))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+                let confirmed = async {
+                    match client {
+                        Some(client) => {
+                            crate::services::split_coins::twin_confirmed(
+                                client, chain, candidates, generation, live,
+                            )
+                            .await
+                        }
+                        None => std::collections::HashSet::new(),
+                    }
+                };
+                let (transactions, twin_confirmed) = tokio::join!(transactions, confirmed);
+                (transactions, twin_records, twin_confirmed)
             },
-            move |transactions| Message::SplitTransactions {
+            move |(transactions, twin_records, twin_confirmed)| Message::SplitTransactions {
                 origin,
                 transactions,
+                twin_records,
+                twin_confirmed,
             },
         )
     }
@@ -9439,6 +9474,8 @@ impl App {
             Message::SplitTransactions {
                 origin,
                 transactions,
+                twin_records,
+                twin_confirmed,
             } => {
                 let Some(wallet) = self.wallet.as_ref() else {
                     return Task::none();
@@ -9446,14 +9483,6 @@ impl App {
                 if !self.cache.issued_here(origin) || origin.chain != wallet.chain {
                     return Task::none();
                 }
-                let twin_records = crate::services::split_coins::journal::twin_data_dir(
-                    &self.cache.datadir_path,
-                    wallet.chain,
-                    &wallet.descriptor_checksum,
-                )
-                .zip(crate::services::entangled::twin_chain(wallet.chain))
-                .map(|(dir, chain)| crate::services::split_coins::journal::load(&dir, chain))
-                .unwrap_or_default();
                 let coins = self.cache.coins().to_vec();
                 let tip = self.cache.blockheight();
                 let derived = crate::services::split_coins::derive(
@@ -9467,7 +9496,10 @@ impl App {
                 self.cache.separated = derived.signed_outputs;
                 self.cache
                     .separated
-                    .extend(crate::services::split_coins::twin_separated(&twin_records));
+                    .extend(crate::services::split_coins::twin_separated(
+                        &twin_records,
+                        &twin_confirmed,
+                    ));
                 let mut proved = false;
                 for (outpoint, entry) in derived.proofs {
                     if !matches!(
