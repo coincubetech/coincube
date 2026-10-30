@@ -272,6 +272,17 @@ fn exact_bindings_and_explicit_clock_bounds_are_required() {
     }
 }
 #[test]
+fn served_at_measures_age_on_the_connect_clock() {
+    // Connect's clock is an hour ahead of this desktop's (now = 10000).
+    let skewed = |observed_at: i64, served_at: i64| {
+        let mut body = response(ChainId::BitcoinBlake2b, observed_at);
+        body["data"]["served_at"] = json!(served_at);
+        parse_value(StatusCode::OK, body)
+    };
+    assert_eq!(skewed(13600, 13601).unwrap().observed_at(), 9999);
+    assert_eq!(skewed(13500, 13601), Err(Error::Stale));
+}
+#[test]
 fn rejection_is_evidence_but_arbitrary_diagnostics_are_refused() {
     let mut body = response(ChainId::BitcoinBlake2b, 10000);
     body["data"]["result"]["allowed"] = json!(false);

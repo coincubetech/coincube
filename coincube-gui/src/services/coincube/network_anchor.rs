@@ -122,8 +122,19 @@ pub struct NetworkAnchor {
     pub tip_hash: BlockHash,
     pub tip_height: u64,
     pub tip_median_time_past: i64,
+    /// Unix seconds on this desktop's clock once returned by `network_anchor`.
     pub observed_at: i64,
     pub observation: NetworkObservation,
+}
+
+/// Re-expresses a Connect `observed_at` on this desktop's clock, so freshness
+/// checks measure the evidence's age and not the skew between the two clocks.
+/// Without `served_at` (an older API) the server's stamp is kept as is.
+pub(crate) fn local_observed_at(observed_at: i64, served_at: Option<i64>, now: i64) -> i64 {
+    match served_at {
+        Some(served_at) => now.saturating_sub(served_at.saturating_sub(observed_at)),
+        None => observed_at,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,6 +155,7 @@ struct WireStatus {
     network: String,
     state: AnchorState,
     anchor: Option<NetworkAnchor>,
+    served_at: Option<i64>,
 }
 #[derive(Deserialize)]
 struct ErrorBody {
@@ -262,10 +274,20 @@ impl CoincubeClient {
         {
             return Err(NetworkStatusError::InvalidResponse);
         }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|d| i64::try_from(d.as_secs()).ok())
+            .unwrap_or(-1);
+        let mut anchor = envelope.data.anchor;
+        if let Some(anchor) = &mut anchor {
+            anchor.observed_at =
+                local_observed_at(anchor.observed_at, envelope.data.served_at, now);
+        }
         Ok(NetworkAnchorStatus {
             network: chain,
             state: envelope.data.state,
-            anchor: envelope.data.anchor,
+            anchor,
         })
     }
 
@@ -510,6 +532,34 @@ mod tests {
         client.base_url = server.base_url();
         client.set_token("synthetic-test-token");
         client
+    }
+    #[tokio::test]
+    async fn served_at_measures_anchor_age_on_the_connect_clock() {
+        // Connect's clock is an hour ahead of this desktop's.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let mut response = body(ChainId::BitcoinBlake2b);
+        response["data"]["anchor"]["observed_at"] = json!(now + 3600);
+        response["data"]["served_at"] = json!(now + 3601);
+        let server = MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.method(GET);
+                then.status(200).json_body(response);
+            })
+            .await;
+        let anchor = client(&server)
+            .network_anchor(ChainId::BitcoinBlake2b)
+            .await
+            .unwrap()
+            .anchor
+            .unwrap();
+        assert!((now - 1..=now + 1).contains(&anchor.observed_at));
+        assert!(anchor
+            .trusted(ChainId::BitcoinBlake2b, SystemTime::now())
+            .is_ok());
     }
     #[tokio::test]
     async fn both_chains_use_authenticated_dedicated_anchor_and_preserve_inactive_rdts() {

@@ -1,7 +1,8 @@
 //! Dormant anonymous operator-node policy evidence, never spend permission.
 pub mod direct;
 use crate::services::{
-    claim_observation::CollectionContext, coincube::network_anchor::AnchorState,
+    claim_observation::CollectionContext,
+    coincube::network_anchor::{local_observed_at, AnchorState},
 };
 use coincube_core::{
     chain::ChainId,
@@ -231,6 +232,7 @@ struct Data {
     network: String,
     state: AnchorState,
     result: Option<WireResult>,
+    served_at: Option<i64>,
 }
 #[derive(Deserialize)]
 struct WireResult {
@@ -615,7 +617,8 @@ fn parse(
     {
         return Err(Error::InvalidResponse);
     }
-    if !policy.fresh(result.observed_at, now) {
+    let observed_at = local_observed_at(result.observed_at, data.served_at, now);
+    if !policy.fresh(observed_at, now) {
         return Err(Error::Stale);
     }
     let policy = match (result.allowed, result.reject_reason) {
@@ -636,7 +639,7 @@ fn parse(
         txid: result.txid,
         wtxid: result.wtxid,
         tip: result.tip_hash,
-        observed_at: result.observed_at,
+        observed_at,
         generation,
         policy,
     })
