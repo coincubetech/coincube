@@ -65,9 +65,9 @@ pub struct CoinEvidence {
     pub proof: Option<ProofOutcome>,
     /// Confirmations of the split of this Cube that spends this coin.
     pub splitting: Option<u32>,
-    /// The twin copy was spent by a split this Cube recorded and that split
-    /// has [`SPLIT_CONFIRMATIONS`] on the twin chain.
-    pub twin_split: bool,
+    /// A split-key split on the twin Cube spent this coin's twin copy, and
+    /// Connect showed it [`SPLIT_CONFIRMATIONS`] deep on the twin chain.
+    pub separated: bool,
 }
 
 /// The display-relevant part of an ancestry check.
@@ -86,7 +86,7 @@ pub fn classify(evidence: CoinEvidence) -> ChainStatus {
             confirmations: confirmations.min(SPLIT_CONFIRMATIONS),
         };
     }
-    if evidence.twin_split {
+    if evidence.separated {
         return ChainStatus::OnlyHere;
     }
     if evidence.entanglement == Some(Entanglement::Entangled) {
@@ -140,8 +140,8 @@ impl ChainStatus {
                 SPLIT_CONFIRMATIONS
             ),
             Self::OnlyHere => format!(
-                "Its history proves it exists only on {}. It can serve as a split key.",
-                chain_name(here)
+                "It can no longer be copied to or from {}.",
+                chain_name(twin)
             ),
             Self::NotSeen => format!(
                 "Its transaction wasn't found on {}. That alone doesn't prove anything, so its history is being checked.",
@@ -166,12 +166,6 @@ impl ChainStatus {
     /// Whether the Split coins overlay offers this coin as one to split.
     pub fn needs_split(self) -> bool {
         matches!(self, Self::BothChains)
-    }
-
-    /// Whether this coin can serve as a split key, subject to re-qualification
-    /// before signing.
-    pub fn is_key(self) -> bool {
-        matches!(self, Self::OnlyHere)
     }
 }
 
@@ -352,7 +346,6 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(status, ChainStatus::NotSeen);
-        assert!(!status.is_key());
         assert_eq!(
             status.label(ChainId::Bitcoin),
             "Not seen on Blake2b · checking"
@@ -371,14 +364,13 @@ mod tests {
     }
 
     #[test]
-    fn verified_path_is_a_key_on_either_chain() {
+    fn verified_path_is_only_here_on_either_chain() {
         let status = classify(CoinEvidence {
             entanglement: Some(Entanglement::NotEntangled),
             proof: Some(ProofOutcome::Verified),
             ..Default::default()
         });
         assert_eq!(status, ChainStatus::OnlyHere);
-        assert!(status.is_key());
         assert_eq!(status.label(ChainId::Bitcoin), "Bitcoin only · verified");
         assert_eq!(
             status.label(ChainId::BitcoinBlake2b),
@@ -402,7 +394,7 @@ mod tests {
     fn recorded_twin_split_separates_a_both_chain_coin() {
         let status = classify(CoinEvidence {
             entanglement: Some(Entanglement::Entangled),
-            twin_split: true,
+            separated: true,
             ..Default::default()
         });
         assert_eq!(status, ChainStatus::OnlyHere);

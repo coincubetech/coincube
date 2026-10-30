@@ -284,6 +284,13 @@ pub struct Cache {
         coincube_core::miniscript::bitcoin::OutPoint,
         crate::services::chain_status::ProofEntry,
     >,
+    /// This Vault's split records ([`crate::services::split_coins::journal`]).
+    pub split_records: Vec<crate::services::split_coins::SplitRecord>,
+    /// Outputs of this Vault's splits still short of their confirmations.
+    pub splitting: std::collections::HashMap<coincube_core::miniscript::bitcoin::OutPoint, u32>,
+    /// Coins whose twin copy a split-key split on the twin Cube spent, as
+    /// Connect last showed it deep on the twin chain.
+    pub separated: std::collections::HashSet<coincube_core::miniscript::bitcoin::OutPoint>,
     /// Current theme mode (dark/light) — used for theme-aware widget rendering
     pub theme_mode: coincube_ui::theme::palette::ThemeMode,
     /// Presentation input for the shared top-bar balance eye. `None` until the
@@ -449,6 +456,9 @@ impl std::default::Default for Cache {
             liquid_gate: crate::app::features::LiquidGate::HIDDEN,
             entangled: std::collections::HashMap::new(),
             chain_proofs: std::collections::HashMap::new(),
+            split_records: Vec::new(),
+            splitting: std::collections::HashMap::new(),
+            separated: std::collections::HashSet::new(),
             split_deposit: None,
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
             balance_privacy: None,
@@ -614,7 +624,8 @@ impl Cache {
                 .chain_proofs
                 .get(outpoint)
                 .and_then(|entry| entry.outcome()),
-            ..Default::default()
+            splitting: self.splitting.get(outpoint).copied(),
+            separated: self.separated.contains(outpoint),
         }
     }
 
@@ -624,6 +635,45 @@ impl Cache {
         outpoint: &coincube_core::miniscript::bitcoin::OutPoint,
     ) -> crate::services::chain_status::ChainStatus {
         crate::services::chain_status::classify(self.chain_evidence(outpoint))
+    }
+
+    /// Vault coins that can serve as a split key: unspent, with a verified
+    /// ancestry path, and not spent by a pending split. A coin shown as
+    /// separated by the twin Cube's split is not one: its twin copy is gone
+    /// but it still descends from a both-chain coin. The split builder
+    /// re-qualifies the chosen key before anything is built.
+    pub fn split_keys(
+        &self,
+    ) -> Vec<(
+        &Coin,
+        &coincube_core::claim_ancestry::retained::RetainedPath,
+    )> {
+        let pending: std::collections::HashSet<_> = self
+            .split_records
+            .iter()
+            .filter(|record| record.confirmations == 0)
+            .flat_map(|record| record.inputs.iter().chain(record.key.iter()).copied())
+            .collect();
+        let mut keys: Vec<_> = self
+            .coins()
+            .iter()
+            .filter(|coin| {
+                coin.spend_info.is_none() && !coin.is_immature && coin.block_height.is_some()
+            })
+            .filter(|coin| !pending.contains(&coin.outpoint))
+            .filter_map(|coin| match self.chain_proofs.get(&coin.outpoint) {
+                Some(crate::services::chain_status::ProofEntry::Verified(path))
+                    if self.entanglement_of(&coin.outpoint.txid)
+                        != crate::services::entangled::Entanglement::Entangled =>
+                {
+                    Some((coin, path))
+                }
+                _ => None,
+            })
+            .collect();
+        // The smallest key wastes the least when it is spent with the coins.
+        keys.sort_by_key(|(coin, _)| (coin.amount, coin.outpoint));
+        keys
     }
 
     /// An ancestry check batch landed. Like [`Self::entangled_batch_landed`],
@@ -979,6 +1029,69 @@ mod entangled_cache_tests {
         ));
         assert!(in_flight.is_empty());
         assert_eq!(b.chain_status(&outpoint), ChainStatus::CouldntVerify);
+    }
+
+    /// Only a coin with a verified ancestry path is a split key; a coin the
+    /// twin Cube's split separated shows as one-chain but is not a key.
+    #[test]
+    fn split_keys_need_a_verified_path_not_a_separated_status() {
+        use crate::services::chain_status::{ChainStatus, ProofEntry};
+        use coincube_core::{
+            claim_ancestry::{retained::RetainedPath, search::OwnedLink},
+            miniscript::bitcoin::{
+                absolute, bip32::ChildNumber, consensus::serialize, script::Builder, transaction,
+                Address, Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
+            },
+        };
+        use std::str::FromStr;
+        let coinbase = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: Builder::new().push_int(962_000).push_int(1).into_script(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(30_000),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        };
+        let key = OutPoint::new(coinbase.compute_txid(), 0);
+        let separated = OutPoint::new(txid(5), 0);
+        let coin = |outpoint| Coin {
+            amount: Amount::from_sat(30_000),
+            outpoint,
+            address: Address::from_str("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")
+                .unwrap()
+                .assume_checked(),
+            block_height: Some(100),
+            derivation_index: ChildNumber::from_normal_idx(0).unwrap(),
+            spend_info: None,
+            is_immature: false,
+            is_change: false,
+            is_from_self: false,
+        };
+        let mut cache = Cache::default();
+        cache.daemon_cache.coins = vec![coin(key), coin(separated)];
+        cache.chain_proofs.insert(
+            key,
+            ProofEntry::Verified(
+                RetainedPath::new(
+                    key,
+                    vec![OwnedLink {
+                        transaction: serialize(&coinbase),
+                        parent_input: None,
+                    }],
+                )
+                .unwrap(),
+            ),
+        );
+        cache.separated.insert(separated);
+        assert_eq!(cache.chain_status(&separated), ChainStatus::OnlyHere);
+        let keys: Vec<_> = cache.split_keys().iter().map(|(c, _)| c.outpoint).collect();
+        assert_eq!(keys, vec![key]);
     }
 
     /// `#393`: a reply issued by App instance A, arriving after the tab has

@@ -344,6 +344,23 @@ pub enum Message {
         claimed: Vec<coincube_core::miniscript::bitcoin::Txid>,
         answers: Vec<crate::services::entangled::LookupAnswer>,
     },
+    /// The daemon's copies of this Vault's recorded split transactions, for
+    /// the Chains column ([`crate::services::split_coins::derive`]).
+    SplitTransactions {
+        origin: crate::app::cache::LookupOrigin,
+        transactions: std::collections::HashMap<
+            coincube_core::miniscript::bitcoin::Txid,
+            coincube_core::miniscript::bitcoin::Transaction,
+        >,
+        /// The pass's number; only a newer pass than the last applied one
+        /// is applied ([`crate::services::split_coins::newer_pass`]).
+        seq: u64,
+        /// The twin Cube's split journal as read for this pass.
+        twin_records: Vec<crate::services::split_coins::SplitRecord>,
+        /// The twin splits checked through Connect in this pass, and whether
+        /// each was deep enough on the twin chain.
+        twin_checked: Vec<(coincube_core::miniscript::bitcoin::Txid, bool)>,
+    },
     /// A sync-driven ancestry check batch for the Chains column finished
     /// ([`crate::services::chain_status::check_ancestry`]). `claimed` is the
     /// batch's single-flight claim; see [`crate::app::cache::Cache::chain_proofs_landed`].
