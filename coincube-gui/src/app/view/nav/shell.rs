@@ -8,7 +8,11 @@ use super::{marketplace, NavContext, SubItem};
 use crate::{
     app::{
         features,
-        menu::{CubeSettingsOption, CubeSubMenu, LiquidSubMenu, Menu, SparkSubMenu, VaultSubMenu},
+        menu::{
+            CubeSettingsOption, CubeSubMenu, LiquidSubMenu, Menu, SettingsOption, SparkSubMenu,
+            VaultSubMenu,
+        },
+        settings::preferences::PreferenceChange,
         state::preferences::{BalancePrivacy, BalancePrivacyChrome},
         view::{shared::glyph, Message},
         ConnectionStatus,
@@ -16,12 +20,14 @@ use crate::{
     chain::{ChainId, ChainIdExt},
 };
 use coincube_ui::{
+    component::tenshu::top_bar as bar,
     font,
-    icon::{cube_icon, eye_icon, eye_slash_icon, settings_icon, shop_icon},
+    icon::{cube_icon, shop_icon},
     theme,
     widget::{action::Action, floating::Floating, Column, ColumnExt, Element, Row, Text},
 };
 use iced::{
+    advanced::widget::Id,
     widget::{column, container, row, rule, scrollable, text, Space},
     Alignment, Length,
 };
@@ -32,13 +38,15 @@ pub const DEVICE_REJECTED_ROUTE: Menu =
 
 pub const FULL_WIDTH: f32 = 248.0;
 pub const COMPACT_WIDTH: f32 = 208.0;
-pub const TOP_BAR_HEIGHT: f32 = 56.0;
+pub const TOP_BAR_HEIGHT: f32 = bar::HEIGHT;
 pub const LAUNCHER_RETURN_ID: &str = "tenshu.launcher.return";
 pub const CUBE_SWITCHER_ID: &str = "tenshu.cube.switcher";
 pub const CUBE_LOCK_ID: &str = "tenshu.cube.lock.ask";
 pub const CUBE_LOCK_CANCEL_ID: &str = "tenshu.cube.lock.cancel";
 pub const SETTINGS_ID: &str = "tenshu.shell.settings";
-pub const CONNECT_REREGISTER_ID: &str = "tenshu.connect.reregister";
+/// The Cube connection chip. One id in every state, so a status change while
+/// it has focus keeps focus on it.
+pub const CONNECTION_ID: &str = "tenshu.connect.status";
 pub const MIDDLE_SCROLL_ID: &str = "tenshu.shell.middle-scroll";
 pub const BALANCE_PRIVACY_ID: &str = "tenshu.balance-privacy.toggle";
 pub const APP_PREFERENCES_ID: &str = "tenshu.shell.app-preferences";
@@ -110,6 +118,19 @@ fn muted<'a>(label: impl Into<String>, size: u32) -> Text<'a> {
         })
 }
 
+/// `theme::container::shell_chip`'s pill radius.
+const CHIP_RADIUS: f32 = 16.0;
+
+/// A chip's press target: the shell's hover fill, kept inside the pill.
+fn chip_button(
+    theme: &theme::Theme,
+    status: iced::widget::button::Status,
+) -> iced::widget::button::Style {
+    let mut style = theme::button::shell_nav(theme, status);
+    style.border.radius = CHIP_RADIUS.into();
+    style
+}
+
 fn status<'a>(label: impl Into<String>, good: bool) -> Text<'a> {
     text(label.into())
         .size(13)
@@ -142,21 +163,46 @@ pub fn balance_privacy_label(chrome: BalancePrivacyChrome) -> &'static str {
     }
 }
 
+/// The balances eye on every bar: shut while amounts are masked, pressed
+/// while the choice is to hide them, and inert while a change is saving. It
+/// emits only the existing device-preference intent.
+pub fn balance_privacy_eye<'a, M: Clone + 'static>(
+    id: impl Into<Id>,
+    chrome: BalancePrivacyChrome,
+    focus_intent: fn(Id) -> M,
+    on_change: fn(PreferenceChange) -> M,
+) -> bar::IconAction<'a, M> {
+    let glyph = if chrome.privacy.masks_amounts() {
+        bar::EYE_SHUT
+    } else {
+        bar::EYE_OPEN
+    };
+    bar::icon_action(id, glyph, balance_privacy_label(chrome), focus_intent)
+        .on_press_maybe(chrome.intent().map(on_change))
+        .pressed(matches!(
+            chrome.privacy,
+            BalancePrivacy::Hidden | BalancePrivacy::HiddenLocally
+        ))
+}
+
+/// Where the connection chip leads. A rejected device goes to About, where
+/// its one fix is. Otherwise the chip opens Node settings, which only the
+/// Vault scope has (an imported Bitcoin wallet takes that scope too); a Cube
+/// without one gets Settings' first tab.
+pub fn connection_route(status: &ConnectionStatus, has_vault_scope: bool) -> Menu {
+    if matches!(status, ConnectionStatus::DeviceRejected) {
+        DEVICE_REJECTED_ROUTE
+    } else if has_vault_scope {
+        Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::Node)))
+    } else {
+        Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::General))
+    }
+}
+
 pub fn top_bar_with_privacy<'a>(
     ctx: &NavContext<'a>,
     privacy: Option<BalancePrivacyChrome>,
 ) -> Element<'a, Message> {
-    let brand = Action::new(
-        LAUNCHER_RETURN_ID,
-        row![cube_icon().size(17), text("Tenshu").size(15)]
-            .spacing(8)
-            .align_y(Alignment::Center),
-        Message::FocusAction,
-    )
-    .padding([7, 8])
-    .style(theme::button::shell_brand)
-    .on_press(Message::OpenLauncher);
-
     let account: Element<'a, Message> = if ctx.connect_authenticated {
         container(
             Action::new(
@@ -165,7 +211,8 @@ pub fn top_bar_with_privacy<'a>(
                 Message::FocusAction,
             )
             .padding([6, 11])
-            .style(theme::button::shell_nav)
+            .style(chip_button)
+            .focus_radius(CHIP_RADIUS)
             .on_press(Message::OpenConnectSignIn),
         )
         .style(theme::container::shell_chip)
@@ -178,7 +225,8 @@ pub fn top_bar_with_privacy<'a>(
                 Message::FocusAction,
             )
             .padding([6, 11])
-            .style(theme::button::shell_nav)
+            .style(chip_button)
+            .focus_radius(CHIP_RADIUS)
             .on_press(Message::OpenConnectSignIn),
         )
         .style(theme::container::shell_chip)
@@ -206,28 +254,22 @@ pub fn top_bar_with_privacy<'a>(
         ConnectionStatus::DeviceRejected => ("Device not recognized", false),
         ConnectionStatus::Inactive => ("Not checked", false),
     };
-    // A rejected device has one fix, re-registering it, and its only button
-    // is on the About page. The chip is the way there.
-    let connection_chip: Element<'a, Message> =
-        if *ctx.connect_stream_status == ConnectionStatus::DeviceRejected {
-            container(
-                Action::new(
-                    CONNECT_REREGISTER_ID,
-                    status(connection, healthy),
-                    Message::FocusAction,
-                )
-                .padding([6, 11])
-                .style(theme::button::shell_nav)
-                .on_press(Message::Menu(DEVICE_REJECTED_ROUTE)),
-            )
-            .style(theme::container::shell_chip)
-            .into()
-        } else {
-            container(status(connection, healthy))
-                .padding([7, 11])
-                .style(theme::container::shell_chip)
-                .into()
-        };
+    let route = connection_route(
+        ctx.connect_stream_status,
+        ctx.has_vault || ctx.has_imported_bitcoin,
+    );
+    let connection_chip = container(
+        Action::new(
+            CONNECTION_ID,
+            status(connection, healthy),
+            Message::FocusAction,
+        )
+        .padding([6, 11])
+        .style(chip_button)
+        .focus_radius(CHIP_RADIUS)
+        .on_press(Message::Menu(route)),
+    )
+    .style(theme::container::shell_chip);
     let connection = iced::widget::tooltip(
         connection_chip,
         container(muted(
@@ -244,51 +286,31 @@ pub fn top_bar_with_privacy<'a>(
         iced::widget::tooltip::Position::Bottom,
     );
 
-    let eye = privacy.map(|chrome| {
-        let glyph = if chrome.privacy.masks_amounts() {
-            eye_slash_icon()
-        } else {
-            eye_icon()
-        };
-        let action = Action::new(BALANCE_PRIVACY_ID, glyph.size(16), Message::FocusAction)
-            .padding([7, 9])
-            .style(theme::button::shell_nav)
-            .on_press_maybe(chrome.intent().map(Message::ChangeDevicePreference));
-        iced::widget::tooltip(
-            action,
-            container(muted(balance_privacy_label(chrome), 12))
-                .padding([6, 10])
-                .style(theme::container::shell_menu),
-            iced::widget::tooltip::Position::Bottom,
-        )
-    });
-    let preferences = iced::widget::tooltip(
-        Action::new(
-            APP_PREFERENCES_ID,
-            settings_icon().size(16),
+    let top: Element<'a, Message> = bar::top_bar(
+        bar::brand_action(
+            LAUNCHER_RETURN_ID,
             Message::FocusAction,
-        )
-        .padding([7, 9])
-        .style(theme::button::shell_nav)
-        .on_press(Message::OpenAppPreferences),
-        container(muted("App preferences", 12))
-            .padding([6, 10])
-            .style(theme::container::shell_menu),
-        iced::widget::tooltip::Position::Bottom,
-    );
-    container(
-        row![brand, Space::new().width(Length::Fill), account, connection]
-            .push(eye)
-            .push(preferences)
-            .spacing(8)
-            .align_y(Alignment::Center)
-            .padding([0, 16]),
+            Message::OpenLauncher,
+        ),
+        bar::preferences(
+            APP_PREFERENCES_ID,
+            Message::FocusAction,
+            Message::OpenAppPreferences,
+        ),
     )
-    .height(Length::Fixed(TOP_BAR_HEIGHT))
-    .align_y(iced::alignment::Vertical::Center)
-    .width(Length::Fill)
-    .style(theme::container::shell_top)
-    .into()
+    .eye(privacy.map(|chrome| {
+        balance_privacy_eye(
+            BALANCE_PRIVACY_ID,
+            chrome,
+            Message::FocusAction,
+            Message::ChangeDevicePreference,
+        )
+    }))
+    .chip(account)
+    .chip(connection)
+    .into();
+    // `.top { border-bottom: 1px }`, under the bar as on the Launcher.
+    column![top, rule::horizontal(1)].into()
 }
 
 /// A rail icon: the canvas's stroke glyph, or a font icon where the canvas
@@ -871,6 +893,9 @@ pub(crate) fn test_draw(
         });
     }
 }
+
+#[cfg(test)]
+pub(crate) mod capture_tests;
 
 #[cfg(test)]
 mod keyboard_tests;

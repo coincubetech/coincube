@@ -20,6 +20,7 @@ pub mod setting_row;
 pub mod surface;
 pub mod text;
 pub mod toggle;
+pub mod top_bar;
 
 #[cfg(test)]
 mod gallery;
@@ -40,6 +41,7 @@ pub use setting_row::{setting_row, SettingRow};
 pub use surface::{card, panel};
 pub use text::{body, caption, label, mono, section, title};
 pub use toggle::{toggle, Toggle, ToggleForm};
+pub use top_bar::{top_bar, TopBar};
 
 pub use crate::theme::tenshu::button::ActionKind;
 pub use crate::theme::tenshu::Tone;
