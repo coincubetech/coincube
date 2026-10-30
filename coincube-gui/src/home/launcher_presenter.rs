@@ -17,7 +17,7 @@ use coincube_ui::{
 };
 
 use super::{
-    launcher_catalog::{self, CatalogMessage, LauncherMode, Projection},
+    launcher_catalog::{self, CatalogMessage, Projection},
     launcher_chrome, launcher_coin, launcher_gpu, launcher_scene, CubeCatalogKey,
     DeleteCubeMessage, Home, ViewMessage,
 };
@@ -796,6 +796,257 @@ fn floor_details<'a>(
     .into()
 }
 
+/// `.btn`: the outlined 36px button, hovering to `--hover`.
+fn face_secondary_style(theme: &theme::Theme, status: iced_button::Status) -> iced_button::Style {
+    let shell = theme.colors.shell;
+    iced_button::Style {
+        background: matches!(
+            status,
+            iced_button::Status::Hovered | iced_button::Status::Pressed
+        )
+        .then_some(iced::Background::Color(shell.hover)),
+        text_color: shell.ink,
+        border: iced::Border {
+            color: shell.line,
+            width: 1.0,
+            radius: 8.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+/// `.av.ghost`: a dashed ring holding the cloud.
+fn ghost_avatar<'a, M: 'a>(size: f32) -> Element<'a, M> {
+    let ring = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 32 32\"><circle cx=\"16\" cy=\"16\" r=\"15.5\" fill=\"none\" stroke=\"#fff\" stroke-dasharray=\"3 2\"/><g transform=\"translate(8 8) scale(.6667)\"><path d=\"{}\" fill=\"none\" stroke=\"#fff\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></g></svg>",
+        launcher_scene::CLOUD
+    );
+    iced::widget::svg(iced::widget::svg::Handle::from_memory(ring.into_bytes()))
+        .width(Length::Fixed(size))
+        .height(Length::Fixed(size))
+        .style(|theme: &theme::Theme, _| iced::widget::svg::Style {
+            color: Some(theme.colors.shell.muted),
+        })
+        .into()
+}
+
+/// The Backup fact on a ghost's face, and the note under the facts.
+fn ghost_copy(cube: &super::RemoteCube) -> (&'static str, tenshu::Tone, &'static str) {
+    let restore = launcher_catalog::remote_restore(cube);
+    match restore.action {
+        Some((ViewMessage::RestoreWithPhone { .. }, _)) => (
+            restore.status,
+            tenshu::Tone::Good,
+            "Restore brings this Cube onto this device with your phone. You'll set a PIN for it here.",
+        ),
+        Some(_) => (
+            restore.status,
+            tenshu::Tone::Good,
+            "Restore brings this Cube onto this device from its Recovery Kit. You'll set a PIN for it here.",
+        ),
+        None if cube.has_recovery_kit => (
+            "Recovery Kit has no Master Seed",
+            tenshu::Tone::Warn,
+            "Its Recovery Kit holds no Master Seed, so it can't be restored from here. Restore it on the device where it was backed up, or import it with its recovery phrase.",
+        ),
+        None => (
+            "No Recovery Kit in Connect",
+            tenshu::Tone::Warn,
+            "Connect has this Cube's registration but not its keys, so it can't be restored from here. Open it on the device that holds it and add a Recovery Kit, or import it with its recovery phrase.",
+        ),
+    }
+}
+
+/// G-Ghost-Details: the one face a ghost turns to. Restore when Connect can
+/// restore it here, else the recovery phrase; Back; and Delete from Connect,
+/// which removes only the registration.
+fn ghost_details<'a>(
+    cube: &super::RemoteCube,
+    network: ChainId,
+    light: bool,
+) -> Element<'a, ViewMessage> {
+    use coincube_ui::font;
+    let key = launcher_catalog::ghost_key(cube);
+    let (backup_text, backup_tone, note) = ghost_copy(cube);
+    let facts = Column::new()
+        .spacing(10)
+        .push(face_fact(
+            "Where",
+            face_words("In Connect, not on this device", 14.0, font::REGULAR, true).into(),
+        ))
+        .push(face_fact(
+            "Backup",
+            face_words(backup_text, 14.0, font::REGULAR, false)
+                .style(text_tone(backup_tone))
+                .into(),
+        ));
+    // The primary action's ID is the details Open ID, so the face's arrival
+    // focuses it as it focuses Open on a local Cube.
+    let primary: Element<'a, ViewMessage> = match launcher_catalog::remote_restore(cube).action {
+        Some((message, _)) => face_primary(
+            launcher_catalog::details_open_id(&key),
+            "Restore to this device",
+            message,
+        ),
+        None => Action::new(
+            launcher_catalog::details_open_id(&key),
+            face_button_label("Import with recovery phrase…"),
+            focus,
+        )
+        .height(Length::Fixed(36.0))
+        .padding([0.0, 16.0])
+        .style(face_secondary_style)
+        .on_press(ViewMessage::ImportGhostWithPhrase(cube.uuid.clone()))
+        .into(),
+    };
+    let actions = Row::new()
+        .spacing(14)
+        .align_y(Alignment::Center)
+        .push(primary)
+        .push(face_link(
+            launcher_catalog::close_details_id(),
+            "Back",
+            ViewMessage::Catalog(CatalogMessage::ClearSelection),
+        ));
+    // Three actions overrun the 364px face, so Delete takes its own line,
+    // next to what it removes.
+    let delete = Row::new()
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .push(face_link(
+            launcher_catalog::remote_delete_id(&cube.uuid),
+            "Delete from Connect…",
+            ViewMessage::DeleteCube(DeleteCubeMessage::ShowRemoteModal(cube.uuid.clone())),
+        ))
+        .push(face_words(
+            "Removes the registration only; no funds are touched.",
+            12.0,
+            font::REGULAR,
+            true,
+        ));
+    Container::new(
+        Column::new()
+            .push(
+                Row::new()
+                    .spacing(10)
+                    .align_y(Alignment::Center)
+                    .push(ghost_avatar(32.0))
+                    .push(
+                        face_words(
+                            super::catalog_display_name(&cube.name),
+                            20.0,
+                            font::SEMIBOLD,
+                            false,
+                        )
+                        .width(Length::Fill),
+                    ),
+            )
+            .push(Space::new().height(Length::Fixed(8.0)))
+            .push(
+                Row::new()
+                    .spacing(6)
+                    .align_y(Alignment::Center)
+                    .height(Length::Fixed(20.0))
+                    .push(network_coin(network, 18.0, light).opacity(0.6_f32))
+                    .push(face_words(
+                        super::launcher_chrome::network_name(network),
+                        14.0,
+                        font::REGULAR,
+                        false,
+                    )),
+            )
+            .push(Space::new().height(Length::Fixed(20.0)))
+            .push(rule::horizontal(1))
+            .push(Space::new().height(Length::Fixed(16.0)))
+            .push(facts)
+            .push(Space::new().height(Length::Fixed(14.0)))
+            .push(face_words(note, 13.0, font::REGULAR, true))
+            .push(Space::new().height(Length::Fill))
+            .push(actions)
+            .push(Space::new().height(Length::Fixed(12.0)))
+            .push(delete),
+    )
+    .width(Length::Fixed(420.0))
+    .height(Length::Fixed(420.0))
+    .padding(28)
+    .into()
+}
+
+/// A ghost's slot: the dashed cloud avatar, its muted name and its Connect
+/// state, over a hit area that turns it to its details face.
+fn ghost_slot<'a>(
+    cube: &super::RemoteCube,
+    layout: &launcher_scene::Layout,
+    active: bool,
+) -> Element<'a, ViewMessage> {
+    let key = launcher_catalog::ghost_key(cube);
+    let label = Row::new()
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .push(ghost_avatar(32.0))
+        .push(
+            Column::new()
+                .spacing(2)
+                .push(
+                    iced::widget::text(super::catalog_display_name(&cube.name))
+                        .size(14)
+                        .font(coincube_ui::font::MEDIUM)
+                        .wrapping(Wrapping::WordOrGlyph)
+                        .style(|theme: &theme::Theme| iced::widget::text::Style {
+                            color: Some(theme.colors.shell.muted),
+                        }),
+                )
+                .push({
+                    // `.st.warn`: nothing restores it here.
+                    let warn =
+                        launcher_catalog::ghost_kind(cube) == launcher_scene::Ghost::Unrestorable;
+                    iced::widget::text(launcher_catalog::ghost_status(cube))
+                        .size(13)
+                        .style(move |theme: &theme::Theme| iced::widget::text::Style {
+                            color: Some(if warn {
+                                theme.colors.shell.warn
+                            } else {
+                                theme.colors.shell.muted
+                            }),
+                        })
+                }),
+        );
+    let content: Element<'a, ViewMessage> = if active {
+        Space::new().width(Length::Fill).height(Length::Fill).into()
+    } else {
+        Column::new()
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .push(Space::new().height(Length::Fill))
+            .push(
+                Container::new(label)
+                    .width(Length::Fill)
+                    .center_x(Length::Fill),
+            )
+            .into()
+    };
+    let slot = Action::new(launcher_catalog::select_id(&key), content, focus)
+        .width(Length::Fixed(layout.slot()))
+        .height(Length::Fixed(layout.slot_height()))
+        .padding(iced::Padding {
+            top: 0.0,
+            right: 4.0,
+            bottom: 10.0,
+            left: 4.0,
+        })
+        .style(floor_style())
+        .on_press(ViewMessage::Catalog(CatalogMessage::SelectFloor(
+            key.clone(),
+        )));
+    iced::widget::mouse_area(slot)
+        .on_enter(ViewMessage::Catalog(CatalogMessage::CubeHover(
+            key.clone(),
+            true,
+        )))
+        .on_exit(ViewMessage::Catalog(CatalogMessage::CubeHover(key, false)))
+        .into()
+}
+
 fn remote_row<'a>(cube: &super::RemoteCube) -> Element<'a, ViewMessage> {
     let restore = launcher_catalog::remote_restore(cube);
     Row::new()
@@ -962,12 +1213,8 @@ pub(super) fn list_body(home: &Home) -> Element<'_, ViewMessage> {
         home.theme_mode,
         coincube_ui::theme::palette::ThemeMode::Light
     );
-    let fallback = (home.catalog.mode == LauncherMode::Cubes
-        && projection.filtered_total > launcher_catalog::FLOOR_MAX_CUBES)
-        .then(|| tenshu::caption("List view for more than 20 Cubes."));
     Column::new()
         .spacing(8)
-        .push(fallback)
         .push(
             responsive(move |size: Size| list_layout(&projection, &scene, size.width, light))
                 .height(Length::Shrink),
@@ -1333,7 +1580,8 @@ fn floor_layout<'a>(
     hover: &[launcher_catalog::FloorHover],
     activity: Option<&super::launcher_activity::Band>,
 ) -> Element<'a, ViewMessage> {
-    debug_assert!(!projection.locals.is_empty());
+    debug_assert!(projection.floor_len() > 0);
+    use launcher_catalog::FloorEntry;
     let hover = |key: &CubeCatalogKey, now| {
         hover
             .iter()
@@ -1343,17 +1591,20 @@ fn floor_layout<'a>(
     let stage_height = stage_height(available);
     let layout = launcher_scene::Layout::new(width, stage_height);
     let per_page = launcher_catalog::floor_page_size(width);
-    let pages = launcher_catalog::floor_pages(projection.locals.len(), per_page);
+    let pages = launcher_catalog::floor_pages(projection.floor_len(), per_page);
     let page = page.min(pages - 1);
+    let entries = projection.floor_entries();
     let selected = projection
-        .selected
-        .and_then(|index| projection.locals.get(index));
-    let selected_key = selected.map(|row| &row.key);
-    let visible: Vec<_> = projection
-        .locals
+        .floor_selected()
+        .and_then(|index| entries.get(index).copied());
+    let selected_key = selected.map(|entry| entry.key());
+    let selected_key = selected_key.as_ref();
+    let visible: Vec<_> = entries
         .iter()
+        .copied()
         .skip(page * per_page)
         .take(per_page)
+        .map(|entry| (entry.key(), entry))
         .collect();
     let now = std::time::Instant::now();
     let pose = |key: &CubeCatalogKey| {
@@ -1380,15 +1631,41 @@ fn floor_layout<'a>(
         }
     };
     let mut order: Vec<usize> = (0..visible.len()).collect();
-    order.sort_by_key(|index| rank(&visible[*index].key));
+    order.sort_by_key(|index| rank(&visible[*index].0));
     let count = visible.len();
+    let ghost_text: Vec<_> = visible
+        .iter()
+        .map(|(_, entry)| match entry {
+            FloorEntry::Ghost(cube) => Some((
+                super::catalog_display_name(&cube.name),
+                ghost_copy(cube).0,
+                launcher_catalog::ghost_kind(cube) == launcher_scene::Ghost::Restorable,
+            )),
+            FloorEntry::Local(_) => None,
+        })
+        .collect();
     let cubes = order.iter().map(|index| {
-        let row = visible[*index];
+        let (key, entry) = &visible[*index];
+        let (marks, details, ghost_details) = match entry {
+            FloorEntry::Local(row) => (launcher_gpu::marks(row.cube), Some(face_text(row)), None),
+            FloorEntry::Ghost(cube) => (
+                launcher_catalog::ghost_marks(cube),
+                None,
+                ghost_text[*index]
+                    .as_ref()
+                    .map(|(name, backup, restorable)| launcher_scene::GhostText {
+                        name,
+                        backup,
+                        restorable: *restorable,
+                    }),
+            ),
+        };
         launcher_gpu::StageCube {
             rest: layout.rest_center(*index, count),
-            pose: pose(&row.key),
-            marks: launcher_gpu::marks(row.cube),
-            details: Some(face_text(row)),
+            pose: pose(key),
+            marks,
+            details,
+            ghost_details,
             unlock_name: None,
         }
     });
@@ -1420,24 +1697,24 @@ fn floor_layout<'a>(
     let covers: Vec<_> = visible
         .iter()
         .enumerate()
-        .filter_map(|(index, row)| {
-            let pose = pose(&row.key);
+        .filter_map(|(index, (key, _))| {
+            let pose = pose(key);
             (pose.spin > 0.0)
                 .then(|| launcher_scene::bounds(&layout, layout.rest_center(index, count), pose))
         })
         .collect();
     let mut slots = Row::new().spacing(layout.gap()).align_y(Alignment::Start);
-    for (index, row) in visible.iter().enumerate() {
-        let pose = pose(&row.key);
+    for (index, (key, entry)) in visible.iter().enumerate() {
+        let pose = pose(key);
         let covered = covers.iter().any(|cover| {
             launcher_scene::overlaps(*cover, launcher_scene::label_rect(&layout, index, count))
         });
-        slots = slots.push(floor_slot(
-            row,
-            &layout,
-            pose.spin > 0.0 || covered,
-            pose.dim > 0.5,
-        ));
+        slots = slots.push(match entry {
+            FloorEntry::Local(row) => {
+                floor_slot(row, &layout, pose.spin > 0.0 || covered, pose.dim > 0.5)
+            }
+            FloorEntry::Ghost(cube) => ghost_slot(cube, &layout, pose.spin > 0.0 || covered),
+        });
     }
     stage = stage.push(
         Column::new()
@@ -1450,19 +1727,25 @@ fn floor_layout<'a>(
             ),
     );
 
-    if let Some(row) = selected {
+    if let (Some(entry), Some(key)) = (selected, selected_key) {
         // The selected Cube becomes the centered face. Its controls arrive
         // once it is square to the camera and remain real Iced widgets.
-        if pose(&row.key) == launcher_scene::Pose::DETAILS {
+        if pose(key) == launcher_scene::Pose::DETAILS {
             let face = layout.face();
             let (_, target_y) = layout.target();
+            let details = match entry {
+                FloorEntry::Local(row) => floor_details(row, light),
+                FloorEntry::Ghost(cube) => {
+                    ghost_details(cube, launcher_catalog::ghost_key(cube).chain, light)
+                }
+            };
             stage = stage.push(
                 Column::new()
                     .width(Length::Fill)
                     .push(Space::new().height(Length::Fixed(target_y - face / 2.0)))
                     .push(
                         // Clicks on the face never reach the Cubes behind it.
-                        Container::new(iced::widget::opaque(floor_details(row, light)))
+                        Container::new(iced::widget::opaque(details))
                             .width(Length::Fill)
                             .center_x(Length::Fill),
                     ),
@@ -1485,26 +1768,36 @@ fn floor_layout<'a>(
             page_caption(page, pages),
         );
     }
-    let mut content = Column::new()
+    // `.gintro`: a new device with nothing local yet, but Connect has Cubes.
+    // The ghosts stand in the row; this line says what they are.
+    if projection.locals.is_empty() && selected.is_none() && motion.is_none() {
+        stage = stage.push(
+            Column::new()
+                .width(Length::Fill)
+                .push(Space::new().height(Length::Fixed(GHOST_INTRO_TOP)))
+                .push(
+                    Container::new(
+                        Container::new(
+                            face_words(GHOST_INTRO, 14.0, coincube_ui::font::REGULAR, true)
+                                .align_x(Alignment::Center),
+                        )
+                        .max_width(520.0),
+                    )
+                    .width(Length::Fill)
+                    .center_x(Length::Fill),
+                ),
+        );
+    }
+    Column::new()
         .spacing(0)
         .width(Length::Fill)
-        .push(stage.clip(true));
-    if !projection.remotes.is_empty() {
-        let mut remote = Column::new()
-            .spacing(16)
-            .width(Length::Fill)
-            .padding([24, 24])
-            .push(section_heading(
-                "Available in Connect",
-                projection.remotes.len(),
-            ));
-        for cube in projection.remotes.iter().copied() {
-            remote = remote.push(remote_row(cube));
-        }
-        content = content.push(remote);
-    }
-    content.into()
+        .push(stage.clip(true))
+        .into()
 }
+
+/// `.gintro { top: 118px }` and its copy.
+const GHOST_INTRO_TOP: f32 = 118.0;
+pub(super) const GHOST_INTRO: &str = "These Cubes are in COINCUBE | Connect. Select one with a Recovery Kit to restore it here, or create a new Cube.";
 
 #[cfg(test)]
 pub(super) fn floor_body(home: &Home) -> Element<'_, ViewMessage> {
@@ -1517,13 +1810,9 @@ pub(super) fn floor_body_in(home: &Home, available: f32) -> Element<'_, ViewMess
     if !projection.floor_eligible(home.catalog.mode) {
         return list_body(home);
     }
-    // Only Connect restore rows are left: the List shows them.
-    if projection.locals.is_empty() && !projection.no_matches() {
-        return list_body(home);
-    }
     // P-Launcher's `.empty` state: every Cube is filtered out. Placed at
     // `top: 32%` of the stage, where the floor would be.
-    if projection.locals.is_empty() {
+    if projection.floor_len() == 0 {
         let height = if available.is_finite() {
             available
         } else {
@@ -1630,6 +1919,7 @@ fn lone_cube<'a, M: 'a>(
                     wallets: &wallets,
                     passkey: cube.is_passkey_cube(),
                 }),
+                ghost_details: None,
                 unlock_name: Some(&name),
             }],
         ))
@@ -1749,6 +2039,7 @@ fn unlock_floor_stage<'a, M: 'a + 'static>(
                 wallets: &context.wallets,
                 passkey: cube.is_passkey_cube(),
             }),
+            ghost_details: None,
             unlock_name: selected.then_some(name.as_str()),
         }
     });
@@ -1959,6 +2250,7 @@ mod tests {
         Layout,
     };
     use iced::Rectangle;
+    use launcher_catalog::LauncherMode;
     use std::path::PathBuf;
 
     fn floor_context(
@@ -2545,7 +2837,7 @@ mod tests {
     }
 
     #[test]
-    fn floor_pages_four_real_cubes_and_never_hides_connect_restore() {
+    fn floor_pages_local_cubes_then_their_ghosts() {
         let mut home = home_with_cubes();
         home.catalog.selected = None;
         if let super::super::State::Cubes { cubes, .. } = &mut home.state {
@@ -2572,6 +2864,8 @@ mod tests {
             has_encrypted_seed: true,
             phone_recoverable: false,
             phone_full_cube: false,
+            encryption_pubkey: None,
+            has_vault: None,
         });
         for (page, visible, hidden) in [
             (0, "Everyday", "Cube 5"),
@@ -2599,7 +2893,129 @@ mod tests {
                 assert!(mounted.contains(visible));
                 assert!(!mounted.contains(hidden));
                 assert!(mounted.contains(&format!("Page {} of 3", page + 1)));
-                assert!(mounted.has_focus(launcher_catalog::restore_id("restore-me")));
+                // The Connect-only Cube stands after the local ones, on the
+                // last page, as a ghost the floor can select.
+                let ghost = launcher_catalog::select_id(&launcher_catalog::ghost_key(
+                    &home.remote_cubes[0],
+                ));
+                assert_eq!(mounted.has_focus(ghost), page == 2);
+                assert_eq!(mounted.contains("In Connect · Restore"), page == 2);
+                assert!(!mounted.contains("Available in Connect"));
+            }
+        }
+    }
+
+    fn ghost_fixture(uuid: &str, name: &str, kit: bool) -> super::super::RemoteCube {
+        super::super::RemoteCube {
+            id: 9,
+            uuid: uuid.into(),
+            name: name.into(),
+            network: crate::app::settings::network_to_api_string(ChainId::Bitcoin),
+            has_recovery_kit: kit,
+            has_encrypted_seed: kit,
+            phone_recoverable: false,
+            phone_full_cube: false,
+            encryption_pubkey: None,
+            has_vault: None,
+        }
+    }
+
+    #[test]
+    fn a_new_device_stands_its_ghosts_on_the_floor_with_the_intro_line() {
+        let mut home = home_with_cubes();
+        home.state = super::super::State::NoCube { create_cube: false };
+        home.catalog.selected = None;
+        home.catalog.mode = LauncherMode::Cubes;
+        home.remote_cubes = vec![
+            ghost_fixture("kit", "Passkey", true),
+            ghost_fixture("nokit", "Old laptop", false),
+        ];
+        for (size, appearance, palette) in [
+            ((1024, 768), "dark", theme::Theme::dark()),
+            ((1440, 900), "light", theme::Theme::light()),
+        ] {
+            let mounted = capture::inspect_full_window(
+                "ghost-floor-new-device",
+                floor_body(&home),
+                size,
+                appearance,
+                palette,
+            );
+            assert!(mounted.contains(GHOST_INTRO));
+            assert!(mounted.contains("In Connect · Restore"));
+            assert!(mounted.contains("In Connect · No Recovery Kit"));
+            assert!(!mounted.contains("Available in Connect"));
+            for cube in &home.remote_cubes {
+                let key = launcher_catalog::ghost_key(cube);
+                assert!(mounted.has_focus(launcher_catalog::select_id(&key)));
+            }
+        }
+        // With a local Cube on the row, the intro line has nothing to explain.
+        home.state = home_with_cubes().state;
+        home.catalog.selected = None;
+        let mounted = capture::inspect_full_window(
+            "ghost-floor-with-locals",
+            floor_body(&home),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(!mounted.contains(GHOST_INTRO));
+        assert!(mounted.contains("Everyday") && mounted.contains("Old laptop"));
+    }
+
+    #[test]
+    fn a_selected_ghost_shows_restore_or_the_recovery_phrase_on_its_face() {
+        let mut home = home_with_cubes();
+        home.catalog.mode = LauncherMode::Cubes;
+        home.remote_cubes = vec![
+            ghost_fixture("kit", "Passkey", true),
+            ghost_fixture("nokit", "Old laptop", false),
+        ];
+        let peer = CubeCatalogKey {
+            chain: ChainId::Bitcoin,
+            cube_id: "first".into(),
+        };
+        for (uuid, primary, absent, backup) in [
+            (
+                "kit",
+                "Restore to this device",
+                "Import with recovery phrase…",
+                "Recovery Kit available",
+            ),
+            (
+                "nokit",
+                "Import with recovery phrase…",
+                "Restore to this device",
+                "No Recovery Kit in Connect",
+            ),
+        ] {
+            let cube = home.remote_cubes.iter().find(|c| c.uuid == uuid).unwrap();
+            let key = launcher_catalog::ghost_key(cube);
+            home.catalog.selected = Some(key.clone());
+            for (size, appearance, palette) in [
+                ((1024, 768), "dark", theme::Theme::dark()),
+                ((1440, 900), "light", theme::Theme::light()),
+            ] {
+                let mounted = capture::inspect_full_window(
+                    "ghost-face",
+                    floor_body(&home),
+                    size,
+                    appearance,
+                    palette,
+                );
+                assert!(mounted.contains(primary), "{}: {}", uuid, primary);
+                assert!(!mounted.contains(absent), "{}: {}", uuid, absent);
+                assert!(mounted.contains(backup));
+                assert!(mounted.contains("In Connect, not on this device"));
+                assert!(mounted.contains("Delete from Connect…"));
+                assert!(mounted.has_focus(launcher_catalog::details_open_id(&key)));
+                assert!(mounted.has_focus(launcher_catalog::remote_delete_id(uuid)));
+                assert!(mounted.has_focus(launcher_catalog::close_details_id()));
+                // The local Cubes stay reachable as dimmed peers.
+                assert!(mounted.has_focus(launcher_catalog::select_id(&peer)));
+                // A ghost has no Open, rename or local delete.
+                assert!(!mounted.contains("Next step"));
             }
         }
     }
@@ -3270,6 +3686,8 @@ mod tests {
             has_encrypted_seed: true,
             phone_recoverable: false,
             phone_full_cube: false,
+            encryption_pubkey: None,
+            has_vault: None,
         });
         home.catalog.query = "Travel".into();
         let mounted = capture::inspect(
@@ -3399,7 +3817,10 @@ mod tests {
             remotes: Vec::new(),
             local_total: 3,
             remote_total: 2,
+            ghosts: Vec::new(),
+            ghost_total: 0,
             selected: None,
+            selected_ghost: None,
             query: "hidden".into(),
             network: ChainId::Bitcoin,
             total_count: 5,
