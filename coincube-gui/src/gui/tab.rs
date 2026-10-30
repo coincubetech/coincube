@@ -858,6 +858,11 @@ pub struct Tab {
     pending_seed_export_trials: usize,
     closed_seed_export_origin: Option<usize>,
     claim_open: Option<home::ClaimOpenIntent>,
+    /// The source App that launched this tab's Bitcoin Blake2b copy
+    /// installer. The pane keeps that App open in its own tab; cancelling
+    /// returns to it and closing it closes this installer. Cleared once the
+    /// copy is saved, so the copy then opens as an ordinary Cube.
+    copy_owner: Option<app::cache::AppGeneration>,
     fork_session_generation: u64,
     fork_save_task: Option<iced::task::Handle>,
     fork_tasks: HashMap<u64, iced::task::Handle>,
@@ -921,6 +926,7 @@ impl Tab {
             pending_seed_export_trials: 0,
             closed_seed_export_origin: None,
             claim_open: None,
+            copy_owner: None,
             fork_session_generation: 0,
             fork_save_task: None,
             fork_tasks: HashMap::new(),
@@ -932,14 +938,20 @@ impl Tab {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn set_claim_open(&mut self, intent: home::ClaimOpenIntent) {
         self.claim_open = Some(intent);
+    }
+
+    pub(crate) fn set_copy_owner(&mut self, owner: app::cache::AppGeneration) {
+        self.copy_owner = Some(owner);
     }
 
     pub(crate) fn claim_open_owner(&self) -> Option<app::cache::AppGeneration> {
         self.claim_open
             .as_ref()
             .map(|intent| intent.owner)
+            .or(self.copy_owner)
             .or_else(|| match &self.state {
                 State::Home(home) => home.claim_owner(),
                 _ => None,
@@ -1300,6 +1312,7 @@ impl Tab {
         if let Some(state) = replacement {
             if matches!(state, State::Home(_)) {
                 self.claim_open = None;
+                self.copy_owner = None;
                 self.pending_split_intent = None;
             }
             self.state = state;
@@ -2649,7 +2662,11 @@ impl Tab {
                         // and the persisted target before entering step one.
                         if let Some(source) = &i.source_cube {
                             i.claim_target_saved = true;
-                            if self.claim_open.is_none() {
+                            // A copy launched from a retained source App opens
+                            // as its own Cube: the source is still open in
+                            // its tab, so it is not reopened here.
+                            let owned_copy = self.copy_owner.take().is_some();
+                            if !owned_copy && self.claim_open.is_none() {
                                 match reopen_claim_source(&i.datadir, source) {
                                     Ok((state, task)) => {
                                         app::claim_intent::arm(source.settings.id.clone());
@@ -2855,7 +2872,7 @@ impl Tab {
                 } else if let installer::Message::BackToApp(network) = msg {
                     self.pending_split_after_install = false;
                     self.pending_imported_claim = None;
-                    if self.claim_open.take().is_some() {
+                    if self.claim_open.take().is_some() || self.copy_owner.take().is_some() {
                         return Task::done(Message::ClaimInstallCancelled);
                     }
                     // A claim was launched from a *different* Cube than the one
@@ -4820,6 +4837,7 @@ impl Tab {
     pub fn stop(&mut self) {
         self.pending_split_intent = None;
         self.claim_open = None;
+        self.copy_owner = None;
         self.unlock_motion = None;
         self.unlock_floor = None;
         match &mut self.state {

@@ -1645,35 +1645,29 @@ async fn cancelling_a_claim_restores_the_vault_the_source_cube_points_at() {
     let _ = std::fs::remove_dir_all(root.path());
 }
 
-/// Successful target setup returns to the Bitcoin source for step one.
-/// Its existing unlocked session stays scoped to that source; the fork is
-/// not unlocked or given signing authority by completing setup.
+/// "Create copy" (Tools › Split coins) runs this installer in a tab the
+/// source App's pane owns. Saving the copy opens the copy's own unlock
+/// screen: no Claim handoff is armed and the source is not reopened in this
+/// tab (it is still open in its own). The ownership ends with the save, so
+/// closing the source no longer closes the copy.
 #[tokio::test]
-async fn completing_claim_setup_returns_to_the_source_session_for_step_one() {
+async fn completing_copy_setup_opens_the_copy_without_a_claim_handoff() {
     let _guard = crate::app::session::test_guard();
     let server = MockServer::start_async().await;
     let (source, source_fingerprint) = source("Savings");
     let source_id = source.cube_id().to_string();
-    let root = temp_root("session-handoff");
-    let source_dir = root.network_directory(ChainId::Bitcoin);
-    source_dir.init().unwrap();
-    crate::app::Config::new(false)
-        .to_file(
-            &source_dir
-                .path()
-                .join(crate::app::config::DEFAULT_FILE_NAME),
-        )
-        .unwrap();
-
-    // The unlocked signer a live source Cube holds.
+    let root = temp_root("copy-handoff");
+    for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+        let dir = root.network_directory(chain);
+        dir.init().unwrap();
+        crate::app::Config::new(false)
+            .to_file(&dir.path().join(crate::app::config::DEFAULT_FILE_NAME))
+            .unwrap();
+    }
     crate::app::session::store_unlocked_signer(
         &source_id,
         source_fingerprint,
         coincube_core::signer::MasterSigner::generate(Network::Bitcoin).unwrap(),
-    );
-    assert!(
-        crate::app::session::unlocked_signer(&source_id, source_fingerprint).is_some(),
-        "the source Cube is unlocked before the claim completes"
     );
 
     let (installer, _) = Installer::try_new_for_chain(
@@ -1697,24 +1691,86 @@ async fn completing_claim_setup_returns_to_the_source_session_for_step_one() {
         "Savings · BTCB2".to_string(),
         ChainId::BitcoinBlake2b,
     );
+    let owner = crate::app::cache::AppGeneration::next();
     let mut tab =
         crate::gui::tab::Tab::new(0, crate::gui::tab::State::Installer(Box::new(installer)));
+    tab.set_copy_owner(owner);
+    assert_eq!(tab.claim_open_owner(), Some(owner));
     let _ = tab.update(crate::gui::tab::Message::Install(Message::CubeSaved(
-        Ok((target, None, None)),
+        Ok((target.clone(), None, None)),
         None,
         None,
     )));
 
+    match &tab.state {
+        crate::gui::tab::State::PinEntry(pin) => assert_eq!(pin.cube().id, target.id),
+        other => panic!(
+            "a saved copy opens its own unlock screen, not {:?}",
+            std::mem::discriminant(other)
+        ),
+    }
+    assert_eq!(tab.claim_open_owner(), None, "the save ends the ownership");
     assert!(
-        matches!(tab.state, crate::gui::tab::State::Loader(_)),
-        "target setup returns to the source's Vault loader"
+        !crate::app::claim_intent::take(&source_id),
+        "no Claim handoff is armed"
     );
     assert!(
         crate::app::session::unlocked_signer(&source_id, source_fingerprint).is_some(),
-        "the source remains open for the Bitcoin split; the fork is not unlocked"
+        "the source stays unlocked in its own tab"
     );
-    assert!(crate::app::claim_intent::take(&source_id));
     crate::app::session::close();
+    let _ = std::fs::remove_dir_all(root.path());
+}
+
+/// Backing out of an owned copy installer hands control back to the pane,
+/// which closes this tab and focuses the source App.
+#[tokio::test]
+async fn backing_out_of_an_owned_copy_returns_to_the_pane() {
+    let _guard = crate::app::session::test_guard();
+    let server = MockServer::start_async().await;
+    let (source, _) = source("Savings");
+    let root = temp_root("copy-cancel");
+    let (installer, _) = Installer::try_new_for_chain(
+        root.clone(),
+        ChainId::BitcoinBlake2b,
+        None,
+        UserFlow::ClaimBlake2b {
+            from_cube: Box::new(source),
+        },
+        true,
+        None,
+        None,
+        None,
+        false,
+        Some(authenticated_client(&server)),
+    )
+    .unwrap();
+    let mut tab =
+        crate::gui::tab::Tab::new(0, crate::gui::tab::State::Installer(Box::new(installer)));
+    tab.set_copy_owner(crate::app::cache::AppGeneration::next());
+    let task = tab.update(crate::gui::tab::Message::Install(Message::BackToApp(
+        Network::Bitcoin,
+    )));
+    use iced_runtime::futures::futures::StreamExt;
+    let messages: Vec<crate::gui::tab::Message> = match iced_runtime::task::into_stream(task) {
+        Some(stream) => {
+            stream
+                .filter_map(|action| async move {
+                    match action {
+                        iced_runtime::Action::Output(msg) => Some(msg),
+                        _ => None,
+                    }
+                })
+                .collect()
+                .await
+        }
+        None => Vec::new(),
+    };
+    assert!(messages
+        .iter()
+        .any(|m| matches!(m, crate::gui::tab::Message::ClaimInstallCancelled)));
+    assert_eq!(tab.claim_open_owner(), None);
+    assert!(matches!(tab.state, crate::gui::tab::State::Installer(_)));
     let _ = std::fs::remove_dir_all(root.path());
 }
 

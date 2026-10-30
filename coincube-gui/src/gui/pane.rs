@@ -262,35 +262,21 @@ impl Pane {
                         app.authenticated_coincube_client(),
                     )
                     .map_err(|error| error.to_string())?;
-                    let fork_cube = installer.context.cube_id.clone().ok_or_else(|| {
-                        "The Claim installer did not reserve a destination Cube.".to_string()
-                    })?;
-                    let handoff = app::claim_intent::ForkHandoff::new(
-                        &root,
-                        cube.id.clone(),
-                        fork_cube.clone(),
-                    )?;
-                    let intent = crate::home::ClaimOpenIntent::new(
-                        app.cache().app_generation,
-                        &root,
-                        cube.id,
-                        fork_cube,
-                        crate::home::ClaimRoute::Begin(handoff),
-                    );
-                    Ok((installer, task, intent))
+                    let owner = app.cache().app_generation;
+                    Ok((installer, task, owner))
                 })())
             });
         let Some(prepared) = prepared else {
             return Task::none();
         };
-        let (installer, task, intent) = match prepared {
+        let (installer, task, owner) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => return self.show_app_error(source_tab, error),
         };
         self.tabs_created += 1;
         let id = self.tabs_created;
         let mut tab = tab::Tab::new(id, tab::State::Installer(Box::new(installer)));
-        tab.set_claim_open(intent);
+        tab.set_copy_owner(owner);
         tab.set_theme_mode(self.theme_mode);
         tab.set_balance_privacy(self.balance_privacy);
         self.tabs.push(tab);
