@@ -168,6 +168,7 @@ impl CreateSpendPanel {
                         bitcoin_unit,
                     )
                     .with_preselected_coins(preselected_coins)
+                    .with_user_coin_selection()
                     .with_coins_sorted(blockheight),
                 ),
                 Box::new(step::SaveSpend::new(wallet)),

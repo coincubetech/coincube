@@ -341,6 +341,10 @@ pub enum Message {
             coincube_core::miniscript::bitcoin::Txid,
             coincube_core::miniscript::bitcoin::Transaction,
         >,
+        /// The twin Cube's split journal as read for this pass.
+        twin_records: Vec<crate::services::split_coins::SplitRecord>,
+        /// Which of those Connect showed deep enough on the twin chain now.
+        twin_confirmed: std::collections::HashSet<coincube_core::miniscript::bitcoin::Txid>,
     },
     /// A sync-driven ancestry check batch for the Chains column finished
     /// ([`crate::services::chain_status::check_ancestry`]). `claimed` is the

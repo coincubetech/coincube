@@ -337,6 +337,11 @@ impl ReplayReview {
         }
     }
 
+    /// The input marked as spending a split key, if any.
+    pub fn split_key(&self) -> Option<(usize, coincube_core::miniscript::bitcoin::OutPoint)> {
+        self.split_key
+    }
+
     /// Mark the input (index, outpoint) that spends a verified split key.
     pub fn with_split_key(
         mut self,

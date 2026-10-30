@@ -3891,6 +3891,9 @@ impl Tab {
                             ..
                         } = &unlock.on_success;
                         let cube = unlock.cube().clone();
+                        // Every way out below that does not open the Vault
+                        // closes the session the assertion just opened, so a
+                        // copy that looks locked holds no seed.
                         let requires_connect = !crate::chain::has_managed_local_fork(
                             datadir,
                             cube.network,
@@ -3898,6 +3901,7 @@ impl Tab {
                         );
                         let client = connect_client.clone().filter(|c| c.token().is_some());
                         if requires_connect && client.is_none() {
+                            crate::app::session::close_cube(&cube.id);
                             unlock.fail_open(
                                 "Sign in to Connect from Home before opening this Bitcoin Blake2b Cube"
                                     .into(),
@@ -3908,6 +3912,7 @@ impl Tab {
                             .clone()
                             .filter(|w| w.remote_backend_auth.is_none())
                         else {
+                            crate::app::session::close_cube(&cube.id);
                             unlock.fail_open(
                                 "Bitcoin Blake2b requires a local Connect-backed Vault".into(),
                             );
@@ -3920,6 +3925,7 @@ impl Tab {
                         let Some(signer) =
                             crate::app::session::unlocked_signer(&cube.id, fingerprint)
                         else {
+                            crate::app::session::close_cube(&cube.id);
                             unlock.relocked();
                             return Task::none();
                         };
@@ -4149,7 +4155,9 @@ impl Tab {
                     )
                 }
                 crate::passkey_unlock::Message::Back => {
-                    // As for PIN Back: abandoning the unlock clears Split.
+                    // A failed open stays on this screen with the session the
+                    // assertion opened; leaving closes it.
+                    crate::app::session::close_cube(&unlock.cube().id);
                     // Dropping the screen drops any in-flight ceremony, which
                     // cancels the system prompt.
                     let network = unlock.cube().network.bitcoin_network();
@@ -7044,6 +7052,57 @@ mod unlock_routing_tests {
             matches!(state, State::PasskeyUnlock(_)),
             "a passkey Cube must unlock with its passkey, not a PIN keypad"
         );
+    }
+
+    /// #947 review: after the assertion parked the seed, a refused open
+    /// (here: no Connect sign-in) must close the session, and so must Back.
+    #[test]
+    fn a_refused_passkey_copy_open_closes_the_session() {
+        use crate::chain::ChainId;
+        use coincube_core::{miniscript::bitcoin::secp256k1::Secp256k1, signer::MasterSigner};
+        let _guard = crate::app::session::test_guard();
+        crate::app::session::close();
+        let signer = MasterSigner::generate(Network::Bitcoin).unwrap();
+        let fingerprint = signer.fingerprint(&Secp256k1::signing_only());
+        let cube = CubeSettings::new("Copy".to_string(), ChainId::BitcoinBlake2b).with_passkey(
+            PasskeyMetadata {
+                credential_id: "Y3JlZC1pZA==".to_string(),
+                rp_id: "coincube.io".to_string(),
+                created_at: 1_786_122_245,
+                label: None,
+            },
+        );
+        let id = cube.id.clone();
+        let mut tab = super::Tab::new(
+            1,
+            unlock_state(
+                cube,
+                std::path::PathBuf::from("/tmp/unused"),
+                on_success(),
+                None,
+            ),
+        );
+        crate::app::session::open_without_pin(id.clone());
+        crate::app::session::store_unlocked_signer(&id, fingerprint, signer);
+        let _ = tab.update(super::Message::PasskeyUnlock(
+            crate::passkey_unlock::Message::Unlocked { fingerprint },
+        ));
+        assert!(
+            matches!(tab.state, State::PasskeyUnlock(_)),
+            "the open was refused"
+        );
+        assert!(crate::app::session::unlocked_signer(&id, fingerprint).is_none());
+        assert!(!crate::app::session::is_open());
+
+        // Back from a failed open closes it too.
+        let signer = MasterSigner::generate(Network::Bitcoin).unwrap();
+        let fingerprint = signer.fingerprint(&Secp256k1::signing_only());
+        crate::app::session::open_without_pin(id.clone());
+        crate::app::session::store_unlocked_signer(&id, fingerprint, signer);
+        let _ = tab.update(super::Message::PasskeyUnlock(
+            crate::passkey_unlock::Message::Back,
+        ));
+        assert!(!crate::app::session::is_open());
     }
 
     fn blake2b_error_loader() -> super::State {
