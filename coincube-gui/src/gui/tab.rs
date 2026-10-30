@@ -4117,10 +4117,80 @@ impl Tab {
             (State::PasskeyUnlock(unlock), Message::PasskeyUnlock(msg)) => match msg {
                 crate::passkey_unlock::Message::Unlocked { fingerprint } => {
                     if unlock.cube().network.is_blake2b() {
-                        // Fork passkey creation is unavailable; do not route a
-                        // forged/stale callback into legacy SDK initialization.
-                        unlock.relocked();
-                        return Task::none();
+                        // A Bitcoin Blake2b copy of a passkey Cube unlocks with
+                        // the same passkey (decision 2026-10-29). It has a
+                        // Vault only: open it through the fork loader, as the
+                        // PIN path does, and never start Liquid or Spark.
+                        let crate::pin_entry::PinEntrySuccess::LoadApp {
+                            datadir,
+                            config,
+                            wallet_settings,
+                            connect_client,
+                            ..
+                        } = &unlock.on_success;
+                        let cube = unlock.cube().clone();
+                        if self.claim_open.is_some() {
+                            // A scoped Claim reopen is PIN-only.
+                            unlock.relocked();
+                            return Task::none();
+                        }
+                        let requires_connect = !crate::chain::has_managed_local_fork(
+                            datadir,
+                            cube.network,
+                            wallet_settings.as_ref(),
+                        );
+                        let client = connect_client.clone().filter(|c| c.token().is_some());
+                        if requires_connect && client.is_none() {
+                            unlock.fail_open(
+                                "Sign in to Connect from Home before opening this Bitcoin Blake2b Cube"
+                                    .into(),
+                            );
+                            return Task::none();
+                        }
+                        let Some(wallet_settings) = wallet_settings
+                            .clone()
+                            .filter(|w| w.remote_backend_auth.is_none())
+                        else {
+                            unlock.fail_open(
+                                "Bitcoin Blake2b requires a local Connect-backed Vault".into(),
+                            );
+                            return Task::none();
+                        };
+                        // The assertion parked the derived master seed in the
+                        // session under this Cube; the Vault's seed file opens
+                        // with the password derived from it
+                        // (`app::session::seed_file_password`).
+                        let Some(signer) =
+                            crate::app::session::unlocked_signer(&cube.id, fingerprint)
+                        else {
+                            unlock.relocked();
+                            return Task::none();
+                        };
+                        let cek =
+                            Arc::new(crate::services::connect::crypto::CubeEncryptionKey::derive(
+                                &signer,
+                                cube.network.bitcoin_network(),
+                            ));
+                        let (loader, command) = if requires_connect {
+                            Loader::new_for_chain(
+                                datadir.clone(),
+                                config.clone(),
+                                wallet_settings,
+                                cube,
+                                client.expect("authenticated backend checked"),
+                                cek,
+                            )
+                        } else {
+                            Loader::new_local_fork(
+                                datadir.clone(),
+                                config.clone(),
+                                wallet_settings,
+                                cube,
+                                cek,
+                            )
+                        };
+                        self.state = State::Loader(loader);
+                        return command.map(Message::Load);
                     }
                     // The assertion succeeded and `passkey_unlock` has already
                     // parked the derived signer in `app::session`. What follows
@@ -4858,6 +4928,12 @@ pub(crate) struct RestoreCubeSeed {
     pub(crate) pin: zeroize::Zeroizing<String>,
     pub(crate) master_signer_fingerprint: bitcoin::bip32::Fingerprint,
     pub(crate) seed_backed_up: bool,
+    /// For a Bitcoin Blake2b copy of a passkey Cube: the source's passkey,
+    /// which the copy unlocks with. Its seed file was written under the
+    /// password derived from that passkey's seed, and `pin` is empty and
+    /// never read: a copy is a Blake2b Cube, and every use of `pin` at the
+    /// exit seam is on a Bitcoin-family Cube.
+    pub(crate) passkey: Option<app::settings::PasskeyMetadata>,
 }
 
 /// The deleted Cube's original identity, carried out of the decrypted
@@ -4959,10 +5035,23 @@ pub(crate) fn installer_exit_seed(i: &Installer) -> Option<RestoreCubeSeed> {
         // under the source Cube's PIN (`Context::cube_pin`, resolved from the
         // source session at admission) — not a `restore_pin`, because nothing
         // was restored and no PIN was chosen.
+        if let Some(passkey) = source.cube.passkey_metadata.clone() {
+            return i
+                .context
+                .passkey_seed_password
+                .as_ref()
+                .map(|_| RestoreCubeSeed {
+                    pin: zeroize::Zeroizing::new(String::new()),
+                    master_signer_fingerprint: source.master_signer_fingerprint(),
+                    seed_backed_up: source.seed_backed_up(),
+                    passkey: Some(passkey),
+                });
+        }
         return i.context.cube_pin.clone().map(|pin| RestoreCubeSeed {
             pin,
             master_signer_fingerprint: source.master_signer_fingerprint(),
             seed_backed_up: source.seed_backed_up(),
+            passkey: None,
         });
     }
     match (
@@ -4981,6 +5070,7 @@ pub(crate) fn installer_exit_seed(i: &Installer) -> Option<RestoreCubeSeed> {
             pin,
             master_signer_fingerprint: fp,
             seed_backed_up: i.context.fresh_fork_seed_backed_up,
+            passkey: None,
         }),
         _ => None,
     }
@@ -5115,6 +5205,9 @@ pub(crate) async fn find_or_create_cube<C: Into<crate::chain::ChainId>>(
                 // what verifies that PIN from now on (I1).
                 cube = cube.with_master_signer(seed.master_signer_fingerprint);
                 cube.backed_up |= seed.seed_backed_up;
+                if let Some(passkey) = &seed.passkey {
+                    cube = cube.with_passkey(passkey.clone());
+                }
             }
             Ok(cube)
         };
@@ -6250,6 +6343,7 @@ mod find_or_create_cube_tests {
         let seed = RestoreCubeSeed {
             pin: zeroize::Zeroizing::new("246810".to_string()),
             master_signer_fingerprint: fp,
+            passkey: None,
             seed_backed_up: false,
         };
         let mut cube = app::settings::CubeSettings::new(
@@ -6311,6 +6405,7 @@ mod find_or_create_cube_tests {
         let wrong_seed = RestoreCubeSeed {
             pin: zeroize::Zeroizing::new("246810".to_string()),
             master_signer_fingerprint: bitcoin::bip32::Fingerprint::from([9, 9, 9, 9]),
+            passkey: None,
             seed_backed_up: false,
         };
         let mismatch = find_or_create_cube_for_imported_restore(
@@ -6512,6 +6607,7 @@ mod find_or_create_cube_tests {
         let seed = RestoreCubeSeed {
             pin: zeroize::Zeroizing::new("synthetic-pin".into()),
             master_signer_fingerprint: fp,
+            passkey: None,
             seed_backed_up: true,
         };
         let cube = find_or_create_cube(
@@ -6912,6 +7008,7 @@ mod find_or_create_cube_tests {
         let seed = RestoreCubeSeed {
             pin: zeroize::Zeroizing::new("135790".to_string()),
             master_signer_fingerprint: fp,
+            passkey: None,
             seed_backed_up: false,
         };
         let mut settings = app::settings::Settings::default();
@@ -7109,6 +7206,7 @@ mod find_or_create_cube_tests {
         let seed = RestoreCubeSeed {
             pin: zeroize::Zeroizing::new("246810".to_string()),
             master_signer_fingerprint: fp,
+            passkey: None,
             seed_backed_up: false,
         };
 

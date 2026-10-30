@@ -393,6 +393,15 @@ impl PasskeyUnlock {
         };
     }
 
+    /// Stop opening with a plain reason the tab knows and the unlock does not,
+    /// such as a Bitcoin Blake2b Cube that needs Connect first. None of the
+    /// reasons say the Cube is lost (**I12**).
+    pub fn fail_open(&mut self, reason: String) {
+        self.phase = Phase::Idle {
+            error: Some(reason),
+        };
+    }
+
     /// Land a classified failure on the screen. **I12**: the copy comes from
     /// [`PasskeyError::user_message`], and none of it says the Cube is lost.
     ///

@@ -411,24 +411,15 @@ impl Installer {
                 "Installer chain differs from the Cube chain".to_string(),
             ));
         }
-        // A claim target is opened with the source Cube's PIN (its seed file is
-        // the source Cube's mnemonic). No PIN in this session means either a
-        // passkey source Cube — which the fork refuses to unlock at all — or a
-        // session that has gone; both would mint a Cube nothing can open, so
-        // the refusal belongs here rather than at the seed write.
+        // A claim target unlocks the same way as its source Cube (decision
+        // 2026-10-29): its seed file is the source Cube's mnemonic, written
+        // under the source's PIN, or for a passkey source under the password
+        // derived from the passkey's seed. With neither in this session the
+        // target could not be opened, so refuse here rather than at the write.
         if let UserFlow::ClaimBlake2b { from_cube } = &user_flow {
-            if crate::app::session::pin_for(from_cube.cube_id()).is_none() {
-                // Two audiences behind one condition, and only one of them has
-                // something to do about it. A passkey Cube has no PIN by
-                // design, so telling its owner to reopen it would send them
-                // round a loop that cannot end — and a fork Cube cannot be
-                // unlocked by passkey at all (`gui::tab::unlock_state`), so the
-                // target would be unopenable. A PIN Cube whose session lapsed
-                // gets the advice that actually works.
+            if crate::app::session::seed_file_password(&from_cube.cube).is_none() {
                 return Err(Error::Unexpected(if from_cube.cube.is_passkey_cube() {
-                    "Bitcoin Blake2b Cubes unlock with a PIN, and this Cube uses a passkey. \
-                         Claiming from a passkey Cube isn't supported yet."
-                        .to_string()
+                    "Unlock this Cube with its passkey again, then create the copy.".to_string()
                 } else {
                     "Reopen this Cube and try again — its PIN isn't available in this session."
                         .to_string()
@@ -646,6 +637,13 @@ impl Installer {
         // has already refused a source with no PIN in this session.
         if let UserFlow::ClaimBlake2b { from_cube } = &user_flow {
             context.cube_pin = crate::app::session::pin_for(from_cube.cube_id());
+            // A passkey source has no PIN; its copy's seed file is written
+            // under the password derived from the passkey's seed, the same
+            // one the copy derives when it is unlocked with that passkey.
+            if from_cube.cube.is_passkey_cube() {
+                context.passkey_seed_password =
+                    crate::app::session::seed_file_password(&from_cube.cube);
+            }
         }
         // A passkey Cube has no PIN, so the line above is `None` for it *by
         // design* — `session::pin_for` refuses rather than hand back an empty
@@ -662,10 +660,12 @@ impl Installer {
         //
         // Filtered on shape so a PIN Cube whose session has gone still fails
         // loudly at the seed write, rather than quietly taking some other path.
-        context.passkey_seed_password = cube_settings
-            .as_ref()
-            .filter(|cs| cs.is_passkey_cube())
-            .and_then(crate::app::session::seed_file_password);
+        if context.passkey_seed_password.is_none() {
+            context.passkey_seed_password = cube_settings
+                .as_ref()
+                .filter(|cs| cs.is_passkey_cube())
+                .and_then(crate::app::session::seed_file_password);
+        }
         // Connect blinding (PR D3): the Vault builder opens Contacts' xpub
         // envelopes with the Cube's seed-derived encryption key. The master
         // signer behind the Breez client is that seed, already unlocked — same
@@ -720,8 +720,12 @@ impl Installer {
                     // is by construction already backed up by the source Cube;
                     // showing it again would produce a second physical copy of
                     // one secret for no recovery benefit.
-                    UserFlow::ClaimBlake2b { .. } => vec![
-                        ClaimOverview.into(),
+                    UserFlow::ClaimBlake2b { from_cube } => vec![
+                        ClaimOverview {
+                            source_name: from_cube.cube.name.clone(),
+                            passkey: from_cube.cube.is_passkey_cube(),
+                        }
+                        .into(),
                         RegisterDescriptor::new_import_wallet().into(),
                         CoincubeConnectStep::new().into(),
                         SelectBitcoindTypeStep::new().into(),
