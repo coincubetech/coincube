@@ -1667,6 +1667,7 @@ fn floor_layout<'a>(
             details,
             ghost_details,
             unlock_name: None,
+            glow: None,
         }
     });
     let mut stage = Stack::new()
@@ -1921,6 +1922,7 @@ fn lone_cube<'a, M: 'a>(
                 }),
                 ghost_details: None,
                 unlock_name: Some(&name),
+                glow: None,
             }],
         ))
     })
@@ -2008,30 +2010,81 @@ fn unlock_floor_stage<'a, M: 'a + 'static>(
     controls: Option<Element<'a, M>>,
     progress: Option<f32>,
 ) -> Element<'a, M> {
-    let width = size.width;
+    let layout = floor_stage_layout(size);
+    let overlay = match (progress, controls) {
+        (None, Some(controls)) => {
+            let face = layout.face();
+            let (_, target_y) = layout.target();
+            Some((
+                target_y - face / 2.0,
+                iced::widget::opaque(unlock_controls(cube, controls)),
+            ))
+        }
+        _ => None,
+    };
+    floor_stage(
+        context,
+        cube,
+        mode,
+        size,
+        FloorLead {
+            pose: launcher_scene::Pose::unlock(progress.unwrap_or(1.0)),
+            peer: launcher_scene::Pose::DIMMED,
+            glow: None,
+            faces: true,
+            paging: true,
+            overlay,
+        },
+    )
+}
+
+/// The Launcher body the stage fills: the window less both bars and their
+/// 1px rules, so the floor does not move at the handoff.
+fn floor_stage_layout(size: Size) -> launcher_scene::Layout {
+    launcher_scene::Layout::new(
+        size.width,
+        stage_height(size.height - 2.0 * launcher_chrome::BAR_HEIGHT - 2.0),
+    )
+}
+
+/// The Cube on its way into the Cube, over the page it was picked on.
+struct FloorLead<'a, M> {
+    pose: launcher_scene::Pose,
+    peer: launcher_scene::Pose,
+    glow: Option<launcher_gpu::Glow>,
+    /// The details and unlock face art, while those faces are in view.
+    faces: bool,
+    /// The page arrows and dots stay up under the unlock face.
+    paging: bool,
+    /// Live widgets over the lead's face, from this many pixels down.
+    overlay: Option<(f32, Element<'a, M>)>,
+}
+
+fn floor_stage<'a, M: 'a + 'static>(
+    context: &launcher_catalog::LauncherSceneContext,
+    cube: &crate::app::settings::CubeSettings,
+    mode: coincube_ui::theme::palette::ThemeMode,
+    size: Size,
+    lead: FloorLead<'a, M>,
+) -> Element<'a, M> {
     let light = matches!(mode, coincube_ui::theme::palette::ThemeMode::Light);
-    // The same body the Launcher gives its stage: the window less both bars
-    // and their 1px rules, so the floor does not move at the handoff.
-    let stage_height = stage_height(size.height - 2.0 * launcher_chrome::BAR_HEIGHT - 2.0);
-    let layout = launcher_scene::Layout::new(width, stage_height);
+    let layout = floor_stage_layout(size);
+    let stage_height = layout.height;
     let count = context.peers.len();
     let name = crate::cube_display::name(&cube.name);
-    let selected_pose = launcher_scene::Pose::unlock(progress.unwrap_or(1.0));
+    let selected_pose = lead.pose;
     // Peers first, the turning Cube last, as on the Launcher page.
     let mut order: Vec<usize> = (0..count).collect();
     order.sort_by_key(|index| *index == context.selected_slot);
     let cubes = order.into_iter().map(|index| {
         let peer = &context.peers[index];
         let selected = index == context.selected_slot && peer.key == context.selected;
+        let faces = selected && lead.faces;
         launcher_gpu::StageCube {
             rest: layout.rest_center(index, count),
-            pose: if selected {
-                selected_pose
-            } else {
-                launcher_scene::Pose::DIMMED
-            },
+            pose: if selected { selected_pose } else { lead.peer },
             marks: peer.marks,
-            details: selected.then_some(launcher_scene::FaceText {
+            details: faces.then_some(launcher_scene::FaceText {
                 name: &name,
                 lock: lock_state(false),
                 backup: context.backup,
@@ -2040,7 +2093,8 @@ fn unlock_floor_stage<'a, M: 'a + 'static>(
                 passkey: cube.is_passkey_cube(),
             }),
             ghost_details: None,
-            unlock_name: selected.then_some(name.as_str()),
+            unlock_name: faces.then_some(name.as_str()),
+            glow: lead.glow.filter(|_| selected),
         }
     });
     let mut stage = Stack::new()
@@ -2093,21 +2147,19 @@ fn unlock_floor_stage<'a, M: 'a + 'static>(
                     .center_x(Length::Fill),
             ),
     );
-    if let (None, Some(controls)) = (progress, controls) {
-        let face = layout.face();
-        let (_, target_y) = layout.target();
+    if let Some((top, overlay)) = lead.overlay {
         stage = stage.push(
             Column::new()
                 .width(Length::Fill)
-                .push(Space::new().height(Length::Fixed(target_y - face / 2.0)))
+                .push(Space::new().height(Length::Fixed(top)))
                 .push(
-                    Container::new(iced::widget::opaque(unlock_controls(cube, controls)))
+                    Container::new(overlay)
                         .width(Length::Fill)
                         .center_x(Length::Fill),
                 ),
         );
     }
-    if context.pages > 1 {
+    if lead.paging && context.pages > 1 {
         let page = context.page;
         let pages = context.pages;
         stage = paging_layers(
@@ -2176,25 +2228,299 @@ pub(crate) fn unlock_turn_with_floor_controls<'a, M: 'a + 'static>(
         .into()
 }
 
-fn opening_rail_style(theme: &theme::Theme) -> container::Style {
-    container::Style {
-        background: Some(iced::Background::Color(theme.colors.shell.rail)),
-        text_color: Some(theme.colors.shell.ink),
-        ..Default::default()
-    }
+/// What the loading face says: its heading, the loader's quote, the stage
+/// line and, once a stage has held past the wait, Cancel.
+pub(crate) struct OpeningFace<'a, M> {
+    pub cube: &'a crate::app::settings::CubeSettings,
+    pub quote: &'a Quote,
+    pub stage: super::launcher_opening::Stage,
+    pub stalled: bool,
+    pub cancel: fn() -> M,
 }
 
-/// Places the real loader stage under the quiet Opening rail. The loader body
-/// owns scan guidance, backend diagnostics and the error action set; rendering
-/// it from the same Step prevents this scene from granting a new Retry route.
-pub(crate) fn opening_body<'a>(
-    scene: OpeningScene,
-    step: &'a loader::Step,
-    quote: &'a Quote,
-    image: &'a iced::widget::image::Handle,
-    restricted_claim: bool,
-) -> Element<'a, loader::ViewMessage> {
-    let rail = Container::new(
+#[derive(Debug, Clone, Copy)]
+enum Tone {
+    Ink,
+    Muted,
+    Good,
+}
+
+/// Face text that fades in with the loading face.
+fn opening_words<'a>(
+    value: impl Into<String>,
+    size: f32,
+    weight: iced::Font,
+    tone: Tone,
+    alpha: f32,
+) -> iced::widget::Text<'a, theme::Theme> {
+    iced::widget::text(value.into())
+        .size(size)
+        .font(weight)
+        .wrapping(Wrapping::WordOrGlyph)
+        .style(move |theme: &theme::Theme| iced::widget::text::Style {
+            color: Some(
+                match tone {
+                    Tone::Ink => theme.colors.shell.ink,
+                    Tone::Muted => theme.colors.shell.muted,
+                    Tone::Good => theme.colors.shell.good,
+                }
+                .scale_alpha(alpha),
+            ),
+        })
+}
+
+/// `.lhead`, `.lquote`, `.lstage` and `.lslow`: the loading face's content.
+fn opening_content<'a, M: 'a>(
+    face: &OpeningFace<'a, M>,
+    light: bool,
+    alpha: f32,
+    quote_width: f32,
+) -> (Element<'a, M>, Element<'a, M>) {
+    use coincube_ui::font;
+    let network = face.cube.network;
+    let heading = Row::new()
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .push(opening_words(
+            "Opening",
+            14.0,
+            font::REGULAR,
+            Tone::Muted,
+            alpha,
+        ))
+        .push(opening_words(
+            crate::cube_display::name(&face.cube.name),
+            14.0,
+            font::SEMIBOLD,
+            Tone::Ink,
+            alpha,
+        ))
+        .push(opening_words("·", 14.0, font::REGULAR, Tone::Muted, alpha))
+        .push(network_coin(network, 18.0, light).opacity(alpha))
+        .push(opening_words(
+            launcher_chrome::network_name(network),
+            14.0,
+            font::REGULAR,
+            Tone::Muted,
+            alpha,
+        ));
+    let ready = face.stage == super::launcher_opening::Stage::Ready;
+    let mut body = Column::new()
+        .align_x(Alignment::Center)
+        .push(
+            Container::new(
+                opening_words(
+                    face.quote.text.clone(),
+                    22.0,
+                    font::REGULAR,
+                    Tone::Ink,
+                    alpha,
+                )
+                .line_height(1.5)
+                .align_x(iced::alignment::Horizontal::Center),
+            )
+            .max_width(quote_width),
+        )
+        .push(Space::new().height(Length::Fixed(12.0)))
+        .push(
+            opening_words(
+                format!("— {}, {}", face.quote.author, face.quote.source),
+                13.0,
+                font::REGULAR,
+                Tone::Muted,
+                alpha,
+            )
+            .align_x(iced::alignment::Horizontal::Center),
+        )
+        .push(Space::new().height(Length::Fixed(40.0)))
+        .push(
+            opening_words(
+                face.stage.text(),
+                15.0,
+                if ready { font::MEDIUM } else { font::REGULAR },
+                if ready { Tone::Good } else { Tone::Muted },
+                alpha,
+            )
+            .line_height(iced::widget::text::LineHeight::Absolute(22.0.into())),
+        );
+    if face.stalled {
+        body = body.push(Space::new().height(Length::Fixed(18.0))).push(
+            Row::new()
+                .spacing(4)
+                .align_y(Alignment::Center)
+                .push(opening_words(
+                    "Taking longer than usual.",
+                    13.0,
+                    font::REGULAR,
+                    Tone::Muted,
+                    alpha,
+                ))
+                .push({
+                    // A button's message must be `Clone`; the caller's need
+                    // not be, so the press maps through `cancel`.
+                    let cancel = face.cancel;
+                    let press: Element<'a, ()> = iced::widget::button(face_link_label("Cancel"))
+                        .padding([2.0, 4.0])
+                        .style(face_link_style)
+                        .on_press(())
+                        .into();
+                    press.map(move |()| cancel())
+                }),
+        );
+    }
+    (heading.into(), body.into())
+}
+
+/// The loading face laid out 1:1 over the GPU face: the heading 44px from its
+/// top, the quote and stage line centred, `padding: 56px 72px`.
+fn opening_face_content<'a, M: 'a>(
+    face: &OpeningFace<'a, M>,
+    light: bool,
+    alpha: f32,
+    side: f32,
+) -> Element<'a, M> {
+    let (heading, body) = opening_content(face, light, alpha, 520.0);
+    let k = side / launcher_scene::OPEN_FACE_SIZE;
+    Stack::new()
+        .width(Length::Fixed(side))
+        .height(Length::Fixed(side))
+        .push(
+            Container::new(body)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .padding([56.0 * k, 72.0 * k])
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
+        )
+        .push(
+            Column::new()
+                .width(Length::Fill)
+                .push(Space::new().height(Length::Fixed(44.0 * k)))
+                .push(
+                    Container::new(heading)
+                        .width(Length::Fill)
+                        .center_x(Length::Fill),
+                ),
+        )
+        .into()
+}
+
+/// O-Launcher's loading phase: the unlocked Cube tumbles to its bottom face
+/// on the page it was picked from, grows to the loading face and powers on.
+pub(crate) fn opening_on_floor<'a, M: 'a + 'static>(
+    context: &'a launcher_catalog::LauncherSceneContext,
+    face: OpeningFace<'a, M>,
+    mode: coincube_ui::theme::palette::ThemeMode,
+    opening: &'a super::launcher_opening::Opening,
+    now: std::time::Instant,
+) -> Element<'a, M> {
+    let light = matches!(mode, coincube_ui::theme::palette::ThemeMode::Light);
+    responsive(move |size: Size| {
+        let layout = floor_stage_layout(size);
+        let side = layout.open_face();
+        let alpha = opening.content(now);
+        let overlay = (alpha > 0.0).then(|| {
+            (
+                layout.open_target().1 - side / 2.0,
+                opening_face_content(&face, light, alpha, side),
+            )
+        });
+        floor_stage(
+            context,
+            face.cube,
+            mode,
+            size,
+            FloorLead {
+                pose: opening.pose(now),
+                peer: opening.peer_pose(now),
+                glow: Some(opening.glow(launcher_scene::glow(face.cube.network), now)),
+                faces: false,
+                paging: false,
+                overlay,
+            },
+        )
+    })
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
+
+/// O-List: the same content full screen under the Opening rail, inside the
+/// stage's own glowing frame. No tumble, and no finale.
+pub(crate) fn opening_full_screen<'a, M: 'a + 'static>(
+    face: OpeningFace<'a, M>,
+    mode: coincube_ui::theme::palette::ThemeMode,
+    opening: &'a super::launcher_opening::Opening,
+    now: std::time::Instant,
+) -> Element<'a, M> {
+    let light = matches!(mode, coincube_ui::theme::palette::ThemeMode::Light);
+    let glow = opening.glow(launcher_scene::glow(face.cube.network), now);
+    let alpha = opening.content(now);
+    let (heading, body) = opening_content(&face, light, alpha, 640.0);
+    let frame = responsive(move |size: Size| {
+        launcher_gpu::stage(launcher_gpu::StageData::frame(
+            size.width,
+            size.height,
+            light,
+            glow,
+        ))
+    })
+    .width(Length::Fill)
+    .height(Length::Fill);
+    let stage = Stack::new()
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .push(frame)
+        .push(
+            Container::new(body)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .padding([0.0, 48.0])
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
+        )
+        .push(
+            Column::new()
+                .width(Length::Fill)
+                .push(Space::new().height(Length::Fixed(64.0)))
+                .push(
+                    Container::new(heading)
+                        .width(Length::Fill)
+                        .center_x(Length::Fill),
+                ),
+        );
+    Column::new()
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .push(opening_rail(&project_opening(
+            &face.cube.name,
+            face.cube.network,
+        )))
+        .push(rule::horizontal(1))
+        .push(stage)
+        .into()
+}
+
+/// `.flash.flat`: the whole window washed in the edge colour. It takes the
+/// pointer while it shows, so nothing under it is clicked mid-finale.
+pub(crate) fn opening_wash<'a, M: 'a>(network: ChainId, alpha: f32) -> Element<'a, M> {
+    let [r, g, b] = launcher_scene::glow(network);
+    iced::widget::opaque(
+        Container::new(Space::new().width(Length::Fill).height(Length::Fill))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_: &theme::Theme| container::Style {
+                background: Some(iced::Background::Color(
+                    iced::Color::from_rgb8(r, g, b).scale_alpha(alpha),
+                )),
+                ..Default::default()
+            }),
+    )
+}
+
+/// The quiet Opening rail: Tenshu, "Opening <name>", the network.
+fn opening_rail<'a, M: 'a>(scene: &OpeningScene) -> Element<'a, M> {
+    Container::new(
         Row::new()
             .spacing(16)
             .align_y(Alignment::Center)
@@ -2216,7 +2542,29 @@ pub(crate) fn opening_body<'a>(
     .width(Length::Fill)
     .height(Length::Fixed(64.0))
     .padding([0.0, 24.0])
-    .style(opening_rail_style);
+    .style(opening_rail_style)
+    .into()
+}
+
+fn opening_rail_style(theme: &theme::Theme) -> container::Style {
+    container::Style {
+        background: Some(iced::Background::Color(theme.colors.shell.rail)),
+        text_color: Some(theme.colors.shell.ink),
+        ..Default::default()
+    }
+}
+
+/// Places the real loader stage under the quiet Opening rail. The loader body
+/// owns scan guidance, backend diagnostics and the error action set; rendering
+/// it from the same Step prevents this scene from granting a new Retry route.
+pub(crate) fn opening_body<'a>(
+    scene: OpeningScene,
+    step: &'a loader::Step,
+    quote: &'a Quote,
+    image: &'a iced::widget::image::Handle,
+    restricted_claim: bool,
+) -> Element<'a, loader::ViewMessage> {
+    let rail = opening_rail(&scene);
     let stage = Container::new(loader::view_with_retry(
         step,
         quote,

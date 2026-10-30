@@ -922,6 +922,20 @@ impl Loader {
         .map(Message::View)
     }
 
+    /// The stage line the opening Cube shows for this step, quoted from
+    /// [`view_with_retry`]. An error has none: its page owns Back and Retry.
+    pub(crate) fn opening_stage(&self) -> Option<crate::home::launcher_opening::Stage> {
+        use crate::home::launcher_opening::Stage;
+        Some(match &self.step {
+            Step::Connecting => Stage::Connecting,
+            Step::StartingDaemon { .. } => Stage::StartingDaemon,
+            Step::FullScan { .. } => Stage::Scanning,
+            Step::Syncing { progress, .. } if *progress > 0.98 => Stage::AlmostThere,
+            Step::Syncing { .. } => Stage::Syncing,
+            Step::Error(_) => return None,
+        })
+    }
+
     fn can_retry(&self) -> bool {
         !self.restricted_claim && !self.fork_session_revoked
     }
@@ -2388,6 +2402,31 @@ mod tests {
         assert!(
             matches!(&loader.step, Step::Error(error) if error.to_string().contains("session changed"))
         );
+    }
+
+    #[test]
+    fn the_opening_cube_quotes_the_loader_stage_and_leaves_errors_to_its_page() {
+        use crate::home::launcher_opening::Stage;
+        let mut loader = loader_without_wallet(true);
+        for (step, stage) in [
+            (Step::Connecting, Some(Stage::Connecting)),
+            (
+                Step::StartingDaemon { progress: 0.4 },
+                Some(Stage::StartingDaemon),
+            ),
+            (Step::FullScan { progress: 0.4 }, Some(Stage::Scanning)),
+            (
+                Step::Error(Box::new(Error::Unexpected("refused".into()))),
+                None,
+            ),
+        ] {
+            loader.step = step;
+            assert_eq!(loader.opening_stage(), stage);
+        }
+        // The stage line reads exactly as the loader page's own status.
+        assert_eq!(Stage::Connecting.text(), "Connecting to daemon...");
+        assert_eq!(Stage::StartingDaemon.text(), "Starting daemon...");
+        assert_eq!(Stage::Scanning.text(), "Scanning the blockchain...");
     }
 
     #[test]

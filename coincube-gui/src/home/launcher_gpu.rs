@@ -140,7 +140,39 @@ pub(super) struct StageCube<'a> {
     /// A ghost's details face, in place of `details`.
     pub ghost_details: Option<GhostText<'a>>,
     pub unlock_name: Option<&'a str>,
+    /// The loading face's edge light, on an opening Cube.
+    pub glow: Option<Glow>,
 }
+
+/// `.glow-bright .f.bt::before` and `::after`: the light on the loading
+/// face's edge, and on the List view's screen frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct Glow {
+    /// `--glow`, the network family hue.
+    pub color: [u8; 3],
+    /// `::before { opacity: var(--lvl) }`: the steady light.
+    pub level: f32,
+    /// `::after`: the ignition flicker, then the breath.
+    pub pulse: f32,
+}
+
+/// One edge light: the shape's own corners (TL, TR, BR, BL), their `w`, and
+/// its half extents and corner radius in its own pixels.
+#[derive(Debug, Clone, Copy)]
+struct GlowDraw {
+    corners: [(f32, f32); 4],
+    w: [f32; 4],
+    half: (f32, f32),
+    radius: f32,
+    /// The light's own size: the loading face's edge scales with the Cube,
+    /// as CSS scales the 152px Cube's border and shadows; the frame is 1:1.
+    scale: f32,
+    glow: Glow,
+}
+
+/// The widest halo, `0 0 34px` (sigma 17), fades out within this margin,
+/// in the light's own pixels.
+const GLOW_MARGIN: f32 = 56.0;
 
 #[derive(Debug)]
 struct FaceDraw {
@@ -160,6 +192,7 @@ struct SceneLayer {
     border: f32,
     /// A ghost's dashed footprint, `.gfoot`, and its opacity.
     footprint: Option<f32>,
+    glow: Option<GlowDraw>,
 }
 
 /// Everything one frame of the stage needs, independent of the GPU.
@@ -174,7 +207,49 @@ pub(super) struct StageData {
     layers: Vec<SceneLayer>,
 }
 
+/// `background: linear-gradient(rgba(glow, a), ...), base`, in sRGB.
+fn mix(base: [u8; 3], over: [u8; 3], a: f32) -> [u8; 3] {
+    let a = a.clamp(0.0, 1.0);
+    [0, 1, 2].map(|i| (base[i] as f32 + (over[i] as f32 - base[i] as f32) * a).round() as u8)
+}
+
 impl StageData {
+    /// The List view's opening: no Cubes, the glowing frame inset 20px from
+    /// the stage with 14px corners, `.lframe`.
+    pub fn frame(width: f32, height: f32, light: bool, glow: Glow) -> Self {
+        const INSET: f32 = 20.0;
+        let (x0, y0, x1, y1) = (INSET, INSET, width - INSET, height - INSET);
+        Self {
+            width,
+            height,
+            horizon: 0.0,
+            palette: Palette::new(light),
+            floor: false,
+            layers: vec![SceneLayer {
+                frame: SceneFrame {
+                    opacity: 1.0,
+                    shadow_center: (0.0, 0.0),
+                    shadow_radii: (0.0, 0.0),
+                    shadow_sigma: 0.0,
+                    shadow_opacity: 0.0,
+                },
+                faces: Vec::new(),
+                edge: [0; 4],
+                dashed: false,
+                border: 0.0,
+                footprint: None,
+                glow: Some(GlowDraw {
+                    corners: [(x0, y0), (x1, y0), (x1, y1), (x0, y1)],
+                    w: [1.0; 4],
+                    half: ((x1 - x0) / 2.0, (y1 - y0) / 2.0),
+                    radius: 14.0,
+                    scale: 1.0,
+                    glow,
+                }),
+            }],
+        }
+    }
+
     /// Pose every Cube and choose its face art. Callers pass Cubes in paint
     /// order: peers in page order, then the outgoing Cube, then the lead.
     pub fn new<'a>(
@@ -216,6 +291,14 @@ impl StageData {
                                 let [r, g, b, a] = launcher_scene::ghost_fill(ghost, light);
                                 ([r, g, b], a as f32 / 255.0)
                             }
+                            // `.glow-bright .f.bt.on`: the loading face warms
+                            // by `--lvl * .09` of the glow with each stage.
+                            _ if projected.face == Face::Bottom => (
+                                cube.glow.map_or(palette.face(Face::Bottom), |glow| {
+                                    mix(palette.face(Face::Bottom), glow.color, glow.level * 0.09)
+                                }),
+                                1.0,
+                            ),
                             _ => (palette.face(projected.face), 1.0),
                         };
                         let art = if ghost.is_some() && !facing {
@@ -259,6 +342,8 @@ impl StageData {
                                             PANEL_ART_PX,
                                         )
                                     }),
+                                // The live loading content owns it.
+                                Face::Bottom => None,
                             }
                         };
                         FaceDraw {
@@ -268,8 +353,24 @@ impl StageData {
                             art,
                         }
                     })
-                    .collect();
+                    .collect::<Vec<FaceDraw>>();
+                let glow = cube.glow.and_then(|glow| {
+                    let face = faces
+                        .iter()
+                        .find(|face| face.projected.face == Face::Bottom)?;
+                    let [a, b, _, _] = face.projected.corners;
+                    let half = ((b.0 - a.0).hypot(b.1 - a.1) / 2.0).max(1.0);
+                    Some(GlowDraw {
+                        corners: face.projected.corners,
+                        w: face.projected.w,
+                        half: (half, half),
+                        radius: 0.0,
+                        scale: 2.0 * half / launcher_scene::REST_SIZE,
+                        glow,
+                    })
+                });
                 SceneLayer {
+                    glow,
                     frame,
                     faces,
                     edge: match ghost {
@@ -502,9 +603,38 @@ fn erf(x: f32) -> f32 {
     return select(-r, r, x >= 0.0);
 }
 
+// A blurred step: `box-shadow` of a large box, `sd` pixels outside it.
+fn blurred(sd: f32, blur: f32) -> f32 {
+    return 0.5 * (1.0 - erf(sd / (0.5 * blur * 1.4142135)));
+}
+
+// One `::before` or `::after` of `.glow-bright .f.bt`: a 2px border just
+// outside the shape, three outer shadows and one inset, by blur radius.
+fn edge_light(d: f32, b: vec4<f32>, a: vec4<f32>, inset: vec2<f32>) -> f32 {
+    let line = clamp(d + 0.5, 0.0, 1.0) * clamp(2.5 - d, 0.0, 1.0);
+    let out = d - 2.0;
+    let o1 = select(0.0, a.x * blurred(out, b.x), out > 0.0);
+    let o2 = select(0.0, a.y * blurred(out, b.y), out > 0.0);
+    let o3 = select(0.0, a.z * blurred(out, b.z), out > 0.0);
+    let i1 = select(0.0, inset.y * blurred(-d, inset.x), d < 0.0);
+    return 1.0 - (1.0 - line) * (1.0 - o1) * (1.0 - o2) * (1.0 - o3) * (1.0 - i1);
+}
+
 @fragment
 fn fs_scene(v: VsOut) -> @location(0) vec4<f32> {
     let kind = v.p0.w;
+    if (kind > 3.5) {
+        // The loading face's edge light: the signed distance from the
+        // rounded box (half extents p1.xy, radius p1.z), then the steady
+        // `::before` at `--lvl` and the flickering `::after`, combined.
+        let r = v.p1.z;
+        let q = abs(v.uv) - (v.p1.xy - vec2<f32>(r));
+        let d = (length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r) / max(v.p0.z, 1e-3);
+        let before = edge_light(d, vec4<f32>(2.0, 8.0, 22.0, 0.0), vec4<f32>(1.0, 0.75, 0.4, 0.0), vec2<f32>(12.0, 0.35));
+        let after = edge_light(d, vec4<f32>(3.0, 12.0, 34.0, 0.0), vec4<f32>(1.0, 0.85, 0.5, 0.0), vec2<f32>(20.0, 0.45));
+        let a = 1.0 - (1.0 - clamp(v.p0.x, 0.0, 1.0) * before) * (1.0 - clamp(v.p0.y, 0.0, 1.0) * after);
+        return vec4<f32>(v.color.rgb * a, a);
+    }
     if (kind > 2.5) {
         // A 1px dashed ellipse outline: `border: 1px dashed`.
         let r = v.p1.zw;
@@ -1119,6 +1249,44 @@ impl shader::Primitive for StagePrimitive {
                     art: face.art.clone(),
                 });
             }
+            if let Some(glow) = layer.glow {
+                // The shape grown by the halo margin along its own edges, with
+                // UVs in its own pixels from its centre.
+                let start = v.count();
+                let [c0, c1, _, c3] = glow.corners;
+                let unit = |(x, y): (f32, f32)| {
+                    let n = x.hypot(y).max(1e-3);
+                    (x / n, y / n)
+                };
+                let along = unit((c1.0 - c0.0, c1.1 - c0.1));
+                let down = unit((c3.0 - c0.0, c3.1 - c0.1));
+                let signs = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
+                let margin = GLOW_MARGIN * glow.scale;
+                let (hx, hy) = (glow.half.0 + margin, glow.half.1 + margin);
+                let corners = [0, 1, 2, 3].map(|i| {
+                    let (sx, sy): (f32, f32) = signs[i];
+                    let (x, y) = glow.corners[i];
+                    (
+                        x + (along.0 * sx + down.0 * sy) * margin,
+                        y + (along.1 * sx + down.1 * sy) * margin,
+                    )
+                });
+                let color = srgb(glow.glow.color);
+                v.quad(
+                    corners,
+                    glow.w,
+                    signs.map(|(sx, sy)| (sx * hx, sy * hy)),
+                    size,
+                    [color[0], color[1], color[2], 1.0],
+                    none,
+                    [glow.glow.level, glow.glow.pulse, glow.scale, 4.0],
+                    [glow.half.0, glow.half.1, glow.radius, 0.0],
+                );
+                draws.push(Draw {
+                    range: start..v.count(),
+                    art: None,
+                });
+            }
             // Bounds of this layer's vertices, back in stage pixels.
             let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
             for vertex in v.0[first..].chunks(FLOATS) {
@@ -1408,6 +1576,7 @@ mod tests {
                     details: None,
                     ghost_details: None,
                     unlock_name: None,
+                    glow: None,
                 },
                 StageCube {
                     rest: layout.rest_center(1, 2),
@@ -1416,6 +1585,7 @@ mod tests {
                     details: Some(text),
                     ghost_details: None,
                     unlock_name: Some("Everyday"),
+                    glow: None,
                 },
             ]
         };
@@ -1461,6 +1631,7 @@ mod tests {
             details: None,
             ghost_details: None,
             unlock_name: None,
+            glow: None,
         };
         let data = StageData::new(&layout, false, true, [cube(local, 0), cube(ghost, 1)]);
         assert_eq!(data.visible()[0].len(), 3);

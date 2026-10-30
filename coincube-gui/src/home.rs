@@ -64,6 +64,7 @@ mod launcher_catalog;
 mod launcher_chrome;
 pub(crate) mod launcher_coin;
 mod launcher_gpu;
+pub(crate) mod launcher_opening;
 pub(crate) mod launcher_presenter;
 pub(crate) mod launcher_scene;
 pub(crate) use launcher_catalog::LauncherSceneContext;
@@ -1658,6 +1659,16 @@ impl Home {
     }
 
     /// Update the purely visual Launcher mode when macOS Accessibility changes.
+    /// Whether the saved motion preference, against the system's, reduces
+    /// motion: the opening that follows an unlock then holds still.
+    pub(crate) fn reduces_motion(&self) -> bool {
+        use crate::app::settings::global::GlobalSettings;
+        GlobalSettings::load_preferences(&GlobalSettings::path(&self.datadir_path))
+            .unwrap_or_default()
+            .resolve(None, self.system_reduces_motion)
+            .reduce_motion
+    }
+
     pub(crate) fn set_system_reduces_motion(&mut self, observed: Option<bool>) {
         if self.system_reduces_motion != observed {
             self.system_reduces_motion = observed;

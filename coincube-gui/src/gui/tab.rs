@@ -435,6 +435,11 @@ pub enum Message {
     /// Frame clock only while a selected Launcher details face turns toward
     /// the existing PIN/passkey screen. It never changes unlock authority.
     UnlockMotionTick(Instant),
+    /// Clock for the opening on the Cube: every frame while the Cube moves,
+    /// slower while only its edge light breathes. Presentation only.
+    OpeningTick(Instant),
+    /// Cancel on a stalled opening: back to the Launcher, the Cube locked.
+    CancelOpening,
     /// Messages from the cryptic "Duress Mode Activated" screen.
     Duress(crate::app::view::duress::active_screen::Message),
     /// The background activation-queue drainer finished (queue emptied). No-op
@@ -830,6 +835,15 @@ impl std::fmt::Debug for AuthChange {
     }
 }
 
+/// The opening on the Cube, from a verified unlock to the App.
+struct CubeOpening {
+    scene: home::launcher_opening::Opening,
+    /// The unlock screen's quote, kept for the whole opening.
+    quote: coincube_ui::component::quote_display::Quote,
+    /// The unlock's wallet loads, aborted by Cancel before the Loader exists.
+    loads: Vec<iced::task::Handle>,
+}
+
 pub struct Tab {
     pub id: usize,
     pub state: State,
@@ -840,6 +854,13 @@ pub struct Tab {
     unlock_motion: Option<Instant>,
     /// Safe, owned Launcher geometry retained only through this unlock.
     unlock_floor: Option<home::LauncherSceneContext>,
+    /// Whether motion is reduced for the unlock under way.
+    unlock_reduced: bool,
+    /// The verified Cube opening, until the App shows.
+    opening: Option<CubeOpening>,
+    /// An opening was cancelled before the Loader: its wallet load may still
+    /// answer, and must not open the Cube.
+    opening_cancelled: bool,
     /// A seed-migration warning waiting for a surface to show it on.
     ///
     /// Held rather than dispatched because only `State::App` handles
@@ -915,6 +936,9 @@ impl Tab {
             balance_privacy: None,
             unlock_motion: None,
             unlock_floor: None,
+            unlock_reduced: false,
+            opening: None,
+            opening_cancelled: false,
             pending_unlock_warnings: Vec::new(),
             app_generation: 0,
             seed_export_origins: Vec::new(),
@@ -1487,6 +1511,17 @@ impl Tab {
             Message::Run(app::Message::View(app::view::Message::DuressActivateLocal(proof))) => {
                 return self.activate_verified_seed_export_duress(proof);
             }
+            Message::OpeningTick(now) => {
+                self.sync_opening(now);
+                return Task::none();
+            }
+            Message::CancelOpening => return self.cancel_opening(),
+            message @ Message::BreezClientLoadedAfterPin { .. } if self.opening_cancelled => {
+                // A load the user cancelled finished anyway: drop it and
+                // stop anything it started, as for a closed loader.
+                discard_closed_loader_result(message);
+                return Task::none();
+            }
             Message::UnlockMotionTick(now) => {
                 if self.unlock_motion.is_some_and(|started| {
                     home::launcher_presenter::unlock_turn_progress(started, now) >= 1.0
@@ -1553,13 +1588,20 @@ impl Tab {
         let was_app = matches!(&self.state, State::App(_));
         let was_fork_app =
             matches!(&self.state, State::App(app) if app.cube_settings().network.is_blake2b());
+        // The PIN screen's loading view also covers classification, which a
+        // wrong or duress PIN ends; the opening starts only once it passed.
+        let pin_verified = matches!(
+            message,
+            Message::PinEntry(crate::pin_entry::Message::PinVerified)
+        );
         let mut result = self.update_inner(message);
         if preserve_seed_export_trial && result.units() > 0 {
             self.pending_seed_export_trials += 1;
         }
+        result = self.track_opening(pin_verified, result);
         if !matches!(self.state, State::PinEntry(_) | State::PasskeyUnlock(_))
-            || matches!(&self.state, State::PinEntry(pin) if pin.is_loading())
             || matches!(&self.state, State::PasskeyUnlock(passkey) if passkey.is_opening())
+            || self.opening.is_some()
         {
             self.unlock_motion = None;
             self.unlock_floor = None;
@@ -2142,6 +2184,7 @@ impl Tab {
                     let unlock_floor = spin_from_details
                         .then(|| l.launcher_scene_context(&cube))
                         .flatten();
+                    let reduced = l.reduces_motion();
                     let mut state = unlock_state(cube, datadir_root, on_success, duress_account_id);
                     if let State::PinEntry(pin) = &mut state {
                         pin.set_connect_provider(&l.connect_account.client.base_url);
@@ -2154,6 +2197,7 @@ impl Tab {
                             *connect_client = None;
                         }
                     }
+                    self.unlock_reduced = reduced;
                     self.state = state;
                     self.unlock_motion = unlock_floor.as_ref().map(|_| Instant::now());
                     self.unlock_floor = unlock_floor;
@@ -4655,12 +4699,73 @@ impl Tab {
             && matches!(self.state, State::PinEntry(_) | State::PasskeyUnlock(_))
         {
             Subscription::batch([base, iced::window::frames().map(Message::UnlockMotionTick)])
+        } else if let (true, Some(opening)) = (foreground, self.opening.as_ref()) {
+            let clock = if opening.scene.needs_frames(Instant::now()) {
+                iced::window::frames()
+            } else if opening.scene.breathes() {
+                iced::time::every(std::time::Duration::from_millis(50))
+            } else {
+                // Still the stall wait to count.
+                iced::time::every(std::time::Duration::from_secs(1))
+            };
+            Subscription::batch([base, clock.map(Message::OpeningTick)])
         } else {
             base
         }
     }
 
     pub fn view(&self) -> Element<Message> {
+        let Some(opening) = self.opening.as_ref() else {
+            return self.state_view();
+        };
+        let now = Instant::now();
+        let (cube, app) = match &self.state {
+            State::PinEntry(pin) if pin.is_loading() => (pin.cube(), false),
+            State::PasskeyUnlock(passkey) if passkey.is_opening() => (passkey.cube(), false),
+            State::Loader(loader) if loader.opening_stage().is_some() => {
+                (&loader.cube_settings, false)
+            }
+            State::App(app) => (app.cube_settings(), opening.scene.shows_app(now)),
+            _ => return self.state_view(),
+        };
+        let base = if app {
+            self.state_view()
+        } else {
+            let face = home::launcher_presenter::OpeningFace {
+                cube,
+                quote: &opening.quote,
+                stage: opening.scene.stage(),
+                stalled: opening.scene.stalled(now),
+                cancel: || Message::CancelOpening,
+            };
+            match opening.scene.floor() {
+                Some(floor) => home::launcher_presenter::opening_on_floor(
+                    floor,
+                    face,
+                    self.theme_mode,
+                    &opening.scene,
+                    now,
+                ),
+                None => home::launcher_presenter::opening_full_screen(
+                    face,
+                    self.theme_mode,
+                    &opening.scene,
+                    now,
+                ),
+            }
+        };
+        let wash = opening.scene.wash(now);
+        if wash > 0.0 {
+            iced::widget::Stack::new()
+                .push(base)
+                .push(home::launcher_presenter::opening_wash(cube.network, wash))
+                .into()
+        } else {
+            base
+        }
+    }
+
+    fn state_view(&self) -> Element<Message> {
         match &self.state {
             State::Installer(v) => v.view().map(Message::Install),
             State::App(v) if v.cube_settings().network.is_blake2b() => {
@@ -4747,11 +4852,130 @@ impl Tab {
         )
     }
 
+    /// The opening's stage for the current state. `None` ends the opening;
+    /// `Some(None)` keeps it but has no stage (a loader error page).
+    fn opening_stage(&self) -> Option<Option<home::launcher_opening::Stage>> {
+        use home::launcher_opening::Stage;
+        // Without a Vault there is no daemon to start: the wallets load and
+        // the Cube is almost there.
+        let unlocked = |cube: &app::settings::CubeSettings| {
+            Some(if cube.vault_wallet_id.is_some() {
+                Stage::Connecting
+            } else {
+                Stage::AlmostThere
+            })
+        };
+        match &self.state {
+            State::PinEntry(pin) if pin.is_loading() => Some(unlocked(pin.cube())),
+            State::PasskeyUnlock(passkey) if passkey.is_opening() => Some(unlocked(passkey.cube())),
+            State::Loader(loader) => Some(loader.opening_stage()),
+            State::App(_) => Some(Some(Stage::Ready)),
+            _ => None,
+        }
+    }
+
+    /// Start the opening once an unlock is verified, keep its abort handles
+    /// while the unlock screen still owns the load, and follow its stage.
+    fn track_opening(&mut self, pin_verified: bool, result: Task<Message>) -> Task<Message> {
+        let now = Instant::now();
+        let verified = match &self.state {
+            State::PinEntry(pin) if pin_verified && pin.is_loading() => {
+                Some(pin.loading_quote().clone())
+            }
+            State::PasskeyUnlock(passkey) if passkey.is_opening() => {
+                Some(passkey.loading_quote().clone())
+            }
+            _ => None,
+        };
+        if let (None, Some(quote)) = (self.opening.as_ref(), verified) {
+            if let Some(Some(stage)) = self.opening_stage() {
+                self.opening_cancelled = false;
+                self.opening = Some(CubeOpening {
+                    scene: home::launcher_opening::Opening::new(
+                        self.unlock_floor.take(),
+                        self.unlock_reduced,
+                        stage,
+                        now,
+                    ),
+                    quote,
+                    loads: Vec::new(),
+                });
+            }
+        }
+        let preloader = matches!(&self.state, State::PinEntry(pin) if pin.is_loading())
+            || matches!(&self.state, State::PasskeyUnlock(passkey) if passkey.is_opening());
+        let result = match self.opening.as_mut() {
+            Some(opening) if preloader && result.units() > 0 => {
+                let (task, handle) = result.abortable();
+                opening.loads.push(handle);
+                task
+            }
+            _ => result,
+        };
+        self.sync_opening(now);
+        result
+    }
+
+    fn sync_opening(&mut self, now: Instant) {
+        let stage = self.opening_stage();
+        let Some(opening) = self.opening.as_mut() else {
+            return;
+        };
+        match stage {
+            None => self.opening = None,
+            Some(stage) => {
+                if let Some(stage) = stage {
+                    opening.scene.set_stage(stage, now);
+                }
+                if !matches!(self.state, State::PinEntry(_) | State::PasskeyUnlock(_)) {
+                    // The Loader or App owns its work now; Cancel uses its routes.
+                    opening.loads.clear();
+                }
+                if opening.scene.done(now) {
+                    self.opening = None;
+                }
+            }
+        }
+    }
+
+    /// Cancel from a stalled loading face. Before the Loader, the unlock's
+    /// own loads are aborted and its Back route taken; in the Loader, its
+    /// Back. Either way the session for this Cube is closed: it is locked.
+    fn cancel_opening(&mut self) -> Task<Message> {
+        let Some(opening) = self.opening.take() else {
+            return Task::none();
+        };
+        let cube_id = match &self.state {
+            State::PinEntry(pin) => pin.cube().id.clone(),
+            State::PasskeyUnlock(passkey) => passkey.cube().id.clone(),
+            State::Loader(loader) => loader.cube_settings.id.clone(),
+            _ => return Task::none(),
+        };
+        for load in opening.loads {
+            load.abort();
+        }
+        let back = match &self.state {
+            State::PinEntry(_) => {
+                self.opening_cancelled = true;
+                Message::PinEntry(crate::pin_entry::Message::Back)
+            }
+            State::PasskeyUnlock(_) => {
+                self.opening_cancelled = true;
+                Message::PasskeyUnlock(crate::passkey_unlock::Message::Back)
+            }
+            _ => Message::Load(loader::Message::View(loader::ViewMessage::SwitchNetwork)),
+        };
+        let task = self.update_inner(back);
+        app::session::close_cube(&cube_id);
+        task
+    }
+
     pub fn stop(&mut self) {
         self.pending_split_intent = None;
         self.claim_open = None;
         self.unlock_motion = None;
         self.unlock_floor = None;
+        self.opening = None;
         match &mut self.state {
             State::Loader(s) => s.stop(),
             State::Home(s) => s.stop(),
@@ -8368,5 +8592,125 @@ mod mcp_proposal_routing_tests {
         let _retry = crate::installer::proposal::reserve(&ctx)
             .expect("same-context retry must regain the reservation");
         crate::app::session::close();
+    }
+}
+
+#[cfg(test)]
+mod opening_tests {
+    use super::{home, unlock_state, Message, State, Tab};
+    use crate::app::settings::CubeSettings;
+    use crate::chain::ChainId;
+    use coincube_core::miniscript::bitcoin::Network;
+    use iced::Task;
+
+    fn datadir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "coincube-opening-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn floor() -> home::LauncherSceneContext {
+        home::LauncherSceneContext {
+            selected: home::CubeCatalogKey {
+                chain: ChainId::Bitcoin,
+                cube_id: "everyday".into(),
+            },
+            page: 0,
+            selected_slot: 0,
+            backup: "Status unknown",
+            connect: String::new(),
+            wallets: "Not yet known".into(),
+            peers: Vec::new(),
+            pages: 1,
+            chrome: Default::default(),
+        }
+    }
+
+    /// A tab on a PIN screen that was opened from the floor and has just
+    /// had its PIN submitted: the loading view is up, classification runs.
+    fn submitted(root: &std::path::Path) -> Tab {
+        let cube = CubeSettings::new("Everyday".into(), ChainId::Bitcoin);
+        let state = unlock_state(
+            cube,
+            root.to_path_buf(),
+            crate::pin_entry::PinEntrySuccess::LoadApp {
+                datadir: crate::dir::CoincubeDirectory::new(root.to_path_buf()),
+                config: crate::app::Config::new(false),
+                network: Network::Bitcoin,
+                internal_bitcoind: None,
+                backup: None,
+                wallet_settings: None,
+                connect_client: None,
+            },
+            None,
+        );
+        let mut tab = Tab::new(1, state);
+        let State::PinEntry(pin) = &mut tab.state else {
+            unreachable!("a PIN Cube");
+        };
+        pin.start_loading_for_test();
+        tab.unlock_floor = Some(floor());
+        tab
+    }
+
+    #[test]
+    fn the_cube_opens_only_once_its_pin_is_verified() {
+        let root = datadir();
+        let mut tab = submitted(&root);
+        // Classifying: a wrong or duress PIN can still end it, so the Cube
+        // keeps its unlock face and the floor it stands on.
+        let result = tab.track_opening(false, Task::none());
+        drop(result);
+        assert!(tab.opening.is_none());
+        assert!(tab.unlock_floor.is_some());
+        // Verified: the opening takes the floor and holds the load's handle.
+        let result = tab.track_opening(true, Task::done(Message::CancelOpening));
+        let opening = tab.opening.as_ref().expect("a verified PIN opens the Cube");
+        assert!(opening.scene.floor().is_some());
+        assert_eq!(opening.loads.len(), 1);
+        // Without a Vault there is no daemon: the wallets load next.
+        assert_eq!(
+            opening.scene.stage(),
+            home::launcher_opening::Stage::AlmostThere
+        );
+        assert!(tab.unlock_floor.is_none());
+        drop(result);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cancel_aborts_the_load_and_returns_to_the_launcher_locked() {
+        let _session = crate::app::session::test_guard();
+        let root = datadir();
+        let mut tab = submitted(&root);
+        let cube_id = match &tab.state {
+            State::PinEntry(pin) => pin.cube().id.clone(),
+            _ => unreachable!(),
+        };
+        crate::app::session::open(cube_id.clone(), zeroize::Zeroizing::new("1234".into()));
+        let (load, handle) = Task::<Message>::none().abortable();
+        drop(load);
+        let result = tab.track_opening(true, Task::none());
+        drop(result);
+        tab.opening.as_mut().unwrap().loads.push(handle.clone());
+        drop(tab.update(Message::CancelOpening));
+        assert!(matches!(tab.state, State::Home(_)));
+        assert!(tab.opening.is_none());
+        assert!(tab.opening_cancelled, "a late load result is dropped");
+        assert!(handle.is_aborted());
+        assert_ne!(
+            crate::app::session::current_cube_id().as_deref(),
+            Some(cube_id.as_str()),
+            "the Cube is locked"
+        );
+        // Cancel with nothing opening does nothing.
+        drop(tab.update(Message::CancelOpening));
+        assert!(matches!(tab.state, State::Home(_)));
+        crate::app::session::close();
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

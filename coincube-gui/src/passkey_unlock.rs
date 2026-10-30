@@ -418,6 +418,11 @@ impl PasskeyUnlock {
         matches!(self.phase, Phase::Opening)
     }
 
+    /// The quote this screen's opening view shows.
+    pub(crate) fn loading_quote(&self) -> &Quote {
+        &self.loading_quote
+    }
+
     pub fn view_with_theme(
         &self,
         mode: coincube_ui::theme::palette::ThemeMode,
