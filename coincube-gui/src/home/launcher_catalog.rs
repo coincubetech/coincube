@@ -123,7 +123,6 @@ pub(super) fn floor_pages(cubes: usize, per_page: usize) -> usize {
 pub(super) fn floor_page_keeping(anchor: usize, per_page: usize, cubes: usize) -> usize {
     (anchor / per_page.max(1)).min(floor_pages(cubes, per_page) - 1)
 }
-pub(super) const FLOOR_MAX_CUBES: usize = 20;
 
 /// Only presentation data from the page that contained the selected Cube.
 /// The unlock state must not retain Home, Connect credentials, or wallet data.
@@ -714,10 +713,7 @@ impl Home {
                     key: ghost_key(cube),
                     name: catalog_display_name(&cube.name),
                     status: ghost_status(cube),
-                    marks: super::launcher_scene::CubeMarks::ghost(
-                        ghost_key(cube).chain,
-                        ghost_kind(cube),
-                    ),
+                    marks: ghost_marks(cube),
                 },
             })
             .collect::<Vec<_>>();
@@ -1416,6 +1412,12 @@ pub(super) fn ghost_kind(cube: &RemoteCube) -> super::launcher_scene::Ghost {
     }
 }
 
+/// A ghost's face marks: its chain, its kind and the wallets Connect knows.
+pub(super) fn ghost_marks(cube: &RemoteCube) -> super::launcher_scene::CubeMarks {
+    super::launcher_scene::CubeMarks::ghost(ghost_key(cube).chain, ghost_kind(cube))
+        .with_vault(cube.has_vault == Some(true))
+}
+
 /// The state line under a ghost on the floor.
 pub(super) fn ghost_status(cube: &RemoteCube) -> &'static str {
     match ghost_kind(cube) {
@@ -1425,14 +1427,15 @@ pub(super) fn ghost_status(cube: &RemoteCube) -> &'static str {
 }
 
 impl Projection<'_> {
-    /// Search belongs to the List; the floor has no query control. Use the
-    /// pre-query counts so narrowing 21 Cubes cannot silently switch a
-    /// searched List into a floor. Cubes in Connect only stand on the floor
-    /// as ghosts after the local Cubes, and are the whole row on a new device.
+    /// The floor shows whenever the Launcher style is Cubes, however many
+    /// Cubes there are: it pages, four or six to a page (Robert, 2026-10-30).
+    /// Search belongs to the List; the floor has no query control, so a query
+    /// typed there keeps the List until it is cleared. Cubes in Connect only
+    /// stand on the floor as ghosts after the local Cubes, and are the whole
+    /// row on a new device.
     pub(super) fn floor_eligible(&self, mode: LauncherMode) -> bool {
         mode == LauncherMode::Cubes
             && self.local_total + self.ghost_total > 0
-            && self.filtered_total + self.ghost_total <= FLOOR_MAX_CUBES
             && self.query.is_empty()
     }
 
@@ -2322,6 +2325,7 @@ mod tests {
             phone_recoverable: phone,
             phone_full_cube: full,
             encryption_pubkey: None,
+            has_vault: None,
         }
     }
 
@@ -2539,6 +2543,10 @@ mod tests {
     fn floor_fallback_keeps_search_and_clear_visible_after_filter_or_mode_change() {
         let mut many = rows(21);
         many.catalog.mode = LauncherMode::Cubes;
+        assert!(
+            project(&many).floor_eligible(many.catalog.mode),
+            "no Cube count takes the floor away"
+        );
         catalog(&mut many, CatalogMessage::Query("Cube 20".into()));
         let filtered = project(&many);
         assert_eq!(filtered.local_total, 21);
@@ -2553,7 +2561,6 @@ mod tests {
         );
         assert!(tree.has(&search_id()));
         assert!(tree.has(&Id::from("tenshu.launcher.catalog:control:clear-query")));
-        assert!(tree.contains("List view for more than 20 Cubes"));
         assert!(tree.has(&select_id(&key("cube-20"))));
 
         let mut small = rows(4);
@@ -3278,6 +3285,40 @@ mod tests {
             .find(|cube| cube.uuid == uuid)
             .expect("fixture ghost");
         ghost_key(cube)
+    }
+
+    #[test]
+    fn no_cube_count_pushes_the_floor_into_the_list() {
+        // Eight local Cubes and thirteen in Connect only: 21 in all, but
+        // the floor keeps them, local Cubes first, ghosts paged after.
+        let names: Vec<(String, String)> = (0..8)
+            .map(|i| (format!("l{}", i), format!("Local {}", i)))
+            .collect();
+        let refs: Vec<(&str, &str)> = names
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        let mut home = home_with(&refs);
+        home.remote_cubes = (0..13)
+            .map(|i| remote(&format!("g{}", i), "Ghost", true, true, false, false))
+            .collect();
+        home.catalog.mode = LauncherMode::Cubes;
+        let projection = project(&home);
+        assert!(projection.floor_eligible(LauncherMode::Cubes));
+        assert_eq!(projection.floor_len(), 21);
+        // Nor do many local Cubes: the floor pages them.
+        let names: Vec<(String, String)> = (0..40)
+            .map(|i| (format!("l{}", i), format!("Local {}", i)))
+            .collect();
+        let refs: Vec<(&str, &str)> = names
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        let mut home = home_with(&refs);
+        home.catalog.mode = LauncherMode::Cubes;
+        let projection = project(&home);
+        assert!(projection.floor_eligible(LauncherMode::Cubes));
+        assert_eq!(projection.floor_len(), 40);
     }
 
     #[test]
@@ -5171,7 +5212,7 @@ mod tests {
     }
 
     #[test]
-    fn the_floor_cap_counts_only_the_cubes_on_screen() {
+    fn many_cubes_across_networks_still_stand_on_the_floor() {
         let mut home = all_networks();
         let many = |prefix: &str, n: usize, chain| -> Vec<CubeSettings> {
             (0..n)
@@ -5191,8 +5232,8 @@ mod tests {
         };
         home.network_catalog = vec![(ChainId::Testnet4, many("t", 10, ChainId::Testnet4))];
         assert!(
-            !project(&home).floor_eligible(home.catalog.mode),
-            "25 shown: List"
+            project(&home).floor_eligible(home.catalog.mode),
+            "25 shown: still the floor, paged"
         );
         home.catalog.filter = NetworkFilter::Live;
         let projection = project(&home);
@@ -5204,6 +5245,7 @@ mod tests {
             projection.floor_eligible(home.catalog.mode),
             "15 shown: floor"
         );
+        assert_eq!(projection.floor_len(), 15);
     }
 
     #[test]

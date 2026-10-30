@@ -80,17 +80,23 @@ pub(crate) struct CubeMarks {
 }
 
 impl CubeMarks {
-    /// A ghost knows only its network and whether it can be restored here.
+    /// A ghost knows its network, whether it can be restored here, and the
+    /// wallets Connect knows of: Spark from its network, as on a local Cube,
+    /// and a Vault once a device reported one ([`CubeMarks::with_vault`]).
     pub(crate) fn ghost(network: ChainId, ghost: Ghost) -> Self {
         Self {
             network,
             vault: false,
             imported_bitcoin: false,
-            spark: false,
+            spark: crate::app::features::spark(network).is_available(),
             passkey: false,
             backup: BackupMark::Confirmed,
             ghost: Some(ghost),
         }
+    }
+
+    pub(crate) fn with_vault(self, vault: bool) -> Self {
+        Self { vault, ..self }
     }
 }
 
@@ -824,7 +830,7 @@ pub(super) fn rest_face_svg(face: Face, marks: CubeMarks, light: bool) -> Option
         "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {s} {s}\" width=\"{s}\" height=\"{s}\" color=\"{ink}\">"
     );
     if let Some(ghost) = marks.ghost {
-        return ghost_face_svg(svg, face, marks.network, ghost, light);
+        return ghost_face_svg(svg, face, marks, ghost, light);
     }
     match face {
         Face::Top => {
@@ -943,18 +949,20 @@ pub(super) const KIT: &str =
 pub(super) const NOKIT: &str =
     "M4 8.5h16V19H4zM9 8.5V6.5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M3 4l18 18";
 
-/// A ghost's resting faces: `.cube.ghost .coin img { filter: grayscale(1);
-/// opacity: .55 }` on top, no wallet marks (this device never saw them), and
-/// the Recovery Kit mark where a local Cube shows its lock, in `--good` when
-/// the kit restores it and muted when nothing does.
+/// A ghost's resting faces, P-Launcher's `.cube.ghost`: the coin greyed on
+/// top (`filter: grayscale(1); opacity: .55`); on the left its wallet marks
+/// and the cloud that says it lives in Connect, all muted; and the Recovery
+/// Kit mark where a local Cube shows its lock, in `--good` when the kit
+/// restores it, else muted beside the `--warn` badge.
 fn ghost_face_svg(
     mut svg: String,
     face: Face,
-    network: ChainId,
+    marks: CubeMarks,
     ghost: Ghost,
     light: bool,
 ) -> Option<String> {
     let s = REST_SIZE;
+    let network = marks.network;
     let muted = if light { "#575a54" } else { "#b9bbb5" };
     match face {
         Face::Top => {
@@ -975,15 +983,51 @@ fn ghost_face_svg(
             ));
             svg.push_str("</g>");
         }
+        Face::Left => {
+            // `.lc`: the local Cube's row of `.wi` marks, then the cloud.
+            let mut paths = Vec::new();
+            if marks.vault {
+                paths.push(SHIELD);
+            }
+            if marks.spark {
+                paths.push(SPARK);
+            }
+            paths.push(CLOUD);
+            let size = s * 0.25;
+            let gap = s * 0.04;
+            let row = paths.len() as f32 * size + (paths.len() - 1) as f32 * gap;
+            for (i, path) in paths.into_iter().enumerate() {
+                let x = (s - row) / 2.0 + i as f32 * (size + gap);
+                let y = (s - size) / 2.0;
+                if path == SPARK {
+                    spark(&mut svg, x, y, size, muted);
+                } else {
+                    icon(&mut svg, path, x, y, size, muted);
+                }
+            }
+        }
         Face::Right => {
+            // As a local Cube's `.rc`: `.pad` (.36s), then for a ghost no
+            // kit restores, the `.bdg` (.21s) in `--warn`.
             let pad = s * 0.36;
+            let badge = s * 0.21;
+            let gap = s * 0.02;
             let (path, tone) = match ghost {
                 Ghost::Restorable => (KIT, if light { "#23613b" } else { "#8bdfab" }),
                 Ghost::Unrestorable => (NOKIT, muted),
             };
-            icon(&mut svg, path, (s - pad) / 2.0, (s - pad) / 2.0, pad, tone);
+            let warn = ghost == Ghost::Unrestorable;
+            let row = if warn { pad + gap + badge } else { pad };
+            let x = (s - row) / 2.0;
+            let y = (s - pad) / 2.0;
+            icon(&mut svg, path, x, y, pad, tone);
+            if warn {
+                let tone = if light { "#77450b" } else { "#f3b465" };
+                let path = format!("{CIRCLE}{ATTENTION}");
+                icon(&mut svg, &path, x + pad + gap, y - s * 0.03, badge, tone);
+            }
         }
-        Face::Left | Face::BackLeft | Face::BackRight => return None,
+        Face::BackLeft | Face::BackRight => return None,
     }
     svg.push_str("</svg>");
     Some(svg)
@@ -1422,7 +1466,7 @@ mod tests {
     }
 
     #[test]
-    fn ghost_faces_grey_the_coin_drop_the_wallets_and_mark_the_kit() {
+    fn ghost_faces_grey_the_coin_show_wallets_and_cloud_and_mark_the_kit() {
         for (ghost, mark, absent) in [
             (Ghost::Restorable, KIT, NOKIT),
             (Ghost::Unrestorable, NOKIT, KIT),
@@ -1430,10 +1474,22 @@ mod tests {
             let marks = CubeMarks::ghost(ChainId::Bitcoin, ghost);
             let top = rest_face_svg(Face::Top, marks, false).unwrap();
             assert!(top.contains("feColorMatrix") && top.contains("opacity=\".55\""));
-            assert!(rest_face_svg(Face::Left, marks, false).is_none());
+            // The cloud always; a Vault only once Connect reports one.
+            let left = rest_face_svg(Face::Left, marks, false).unwrap();
+            assert!(left.contains(CLOUD) && !left.contains(SHIELD));
+            assert!(left.contains("#b9bbb5"), "muted, not ink");
+            let vault = rest_face_svg(Face::Left, marks.with_vault(true), false).unwrap();
+            assert!(vault.contains(SHIELD) && vault.contains(CLOUD));
             let right = rest_face_svg(Face::Right, marks, true).unwrap();
             assert!(right.contains(mark) && !right.contains(absent));
             assert!(!right.contains(LOCKED), "a ghost has no lock to show");
+            // Only a ghost nothing restores carries the warning badge.
+            assert_eq!(
+                right.contains(ATTENTION),
+                ghost == Ghost::Unrestorable,
+                "{:?}",
+                ghost
+            );
         }
         assert!(rest_face_svg(
             Face::Right,

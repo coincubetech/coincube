@@ -17,7 +17,7 @@ use coincube_ui::{
 };
 
 use super::{
-    launcher_catalog::{self, CatalogMessage, LauncherMode, Projection},
+    launcher_catalog::{self, CatalogMessage, Projection},
     launcher_chrome, launcher_coin, launcher_gpu, launcher_scene, CubeCatalogKey,
     DeleteCubeMessage, Home, ViewMessage,
 };
@@ -996,13 +996,20 @@ fn ghost_slot<'a>(
                             color: Some(theme.colors.shell.muted),
                         }),
                 )
-                .push(
+                .push({
+                    // `.st.warn`: nothing restores it here.
+                    let warn =
+                        launcher_catalog::ghost_kind(cube) == launcher_scene::Ghost::Unrestorable;
                     iced::widget::text(launcher_catalog::ghost_status(cube))
                         .size(13)
-                        .style(|theme: &theme::Theme| iced::widget::text::Style {
-                            color: Some(theme.colors.shell.muted),
-                        }),
-                ),
+                        .style(move |theme: &theme::Theme| iced::widget::text::Style {
+                            color: Some(if warn {
+                                theme.colors.shell.warn
+                            } else {
+                                theme.colors.shell.muted
+                            }),
+                        })
+                }),
         );
     let content: Element<'a, ViewMessage> = if active {
         Space::new().width(Length::Fill).height(Length::Fill).into()
@@ -1206,12 +1213,8 @@ pub(super) fn list_body(home: &Home) -> Element<'_, ViewMessage> {
         home.theme_mode,
         coincube_ui::theme::palette::ThemeMode::Light
     );
-    let fallback = (home.catalog.mode == LauncherMode::Cubes
-        && projection.filtered_total > launcher_catalog::FLOOR_MAX_CUBES)
-        .then(|| tenshu::caption("List view for more than 20 Cubes."));
     Column::new()
         .spacing(8)
-        .push(fallback)
         .push(
             responsive(move |size: Size| list_layout(&projection, &scene, size.width, light))
                 .height(Length::Shrink),
@@ -1646,10 +1649,7 @@ fn floor_layout<'a>(
         let (marks, details, ghost_details) = match entry {
             FloorEntry::Local(row) => (launcher_gpu::marks(row.cube), Some(face_text(row)), None),
             FloorEntry::Ghost(cube) => (
-                launcher_scene::CubeMarks::ghost(
-                    launcher_catalog::ghost_key(cube).chain,
-                    launcher_catalog::ghost_kind(cube),
-                ),
+                launcher_catalog::ghost_marks(cube),
                 None,
                 ghost_text[*index]
                     .as_ref()
@@ -2250,6 +2250,7 @@ mod tests {
         Layout,
     };
     use iced::Rectangle;
+    use launcher_catalog::LauncherMode;
     use std::path::PathBuf;
 
     fn floor_context(
@@ -2864,6 +2865,7 @@ mod tests {
             phone_recoverable: false,
             phone_full_cube: false,
             encryption_pubkey: None,
+            has_vault: None,
         });
         for (page, visible, hidden) in [
             (0, "Everyday", "Cube 5"),
@@ -2914,6 +2916,7 @@ mod tests {
             phone_recoverable: false,
             phone_full_cube: false,
             encryption_pubkey: None,
+            has_vault: None,
         }
     }
 
@@ -3684,6 +3687,7 @@ mod tests {
             phone_recoverable: false,
             phone_full_cube: false,
             encryption_pubkey: None,
+            has_vault: None,
         });
         home.catalog.query = "Travel".into();
         let mounted = capture::inspect(

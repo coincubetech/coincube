@@ -342,6 +342,9 @@ pub struct RemoteCube {
     /// from its seed. A recovery phrase typed for this Cube must derive the
     /// same key before the import takes the Cube's identity.
     pub encryption_pubkey: Option<String>,
+    /// Whether Connect reports a Vault on this Cube; `None` when no device
+    /// has reported it, or the API predates the field.
+    pub has_vault: Option<bool>,
 }
 
 /// A ghost the recovery-phrase import is restoring: Connect's record of the
@@ -1073,6 +1076,7 @@ impl Home {
                             phone_recoverable,
                             phone_full_cube,
                             encryption_pubkey: sc.encryption_pubkey,
+                            has_vault: sc.has_vault,
                         }
                     }),
                 )
@@ -10202,6 +10206,7 @@ mod tests {
             phone_recoverable: false,
             phone_full_cube: false,
             encryption_pubkey: None,
+            has_vault: None,
         }
     }
 
