@@ -1679,6 +1679,14 @@ fn floor_layout<'a>(
             .width(Length::Fill)
             .center_x(Length::Fill),
         );
+    // A press on the stage away from an open face closes it, as Back does.
+    // It sits under the slots, so a peer's slot still selects that peer.
+    if selected_key.is_some_and(|key| pose(key) == launcher_scene::Pose::DETAILS) {
+        stage = stage.push(
+            iced::widget::mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
+                .on_press(ViewMessage::Catalog(CatalogMessage::ClearSelection)),
+        );
+    }
 
     // Network activity fills the sky above a browsing floor. An open face
     // rises into that sky, so a selection or a turn clears it.

@@ -6080,4 +6080,40 @@ mod tests {
         );
         assert!(home.catalog.motion.is_none());
     }
+
+    #[test]
+    fn a_press_beside_an_open_face_closes_it_and_a_press_on_it_does_not() {
+        let mut home = home_with(&[("a", "Alpha"), ("b", "Beta")]);
+        home.catalog.mode = LauncherMode::Cubes;
+        catalog(&mut home, CatalogMessage::SelectFloor(key("a")));
+        let settled = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        catalog(&mut home, CatalogMessage::MotionTick(settled));
+        assert!(home.catalog.motion.is_none());
+
+        let open = bounds_of(
+            &focus_bounds_window(launcher_view(&home), 1440.0, 900.0),
+            &details_open_id(&key("a")),
+        );
+        let press = |point: iced::Point| {
+            let cursor = iced::mouse::Cursor::Available(point);
+            let mut mounted = mount_window(launcher_view(&home), 1440.0, 900.0);
+            [
+                iced::mouse::Event::CursorMoved { position: point },
+                iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+                iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left),
+            ]
+            .iter()
+            .flat_map(|event| mounted.send(iced::Event::Mouse(*event), cursor))
+            .any(|message| {
+                matches!(
+                    message,
+                    ViewMessage::Catalog(CatalogMessage::ClearSelection)
+                )
+            })
+        };
+        // The face's facts, above its Open button, are not a way out.
+        assert!(!press(iced::Point::new(open.x + 4.0, open.y - 80.0)));
+        // The stage beside the face, above the peers' labels, is.
+        assert!(press(iced::Point::new(open.x - 80.0, open.y - 240.0)));
+    }
 }
