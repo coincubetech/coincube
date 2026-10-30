@@ -215,7 +215,7 @@ pub const MAX_TWIN_LOOKUPS: usize = 8;
 /// confirmation count is not consulted: it may be stale by any amount.
 pub fn twin_candidates(twin_records: &[SplitRecord]) -> Vec<Txid> {
     let mut records: Vec<&SplitRecord> = twin_records.iter().collect();
-    records.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    records.sort_by_key(|record| std::cmp::Reverse(record.created_at));
     records
         .into_iter()
         .map(|record| record.txid)
@@ -806,10 +806,13 @@ mod tests {
 
         #[tokio::test]
         async fn unconfirmed_or_absent_has_no_depth() {
-            for tx in vec![
+            for tx in [
                 TransactionObservation::Absent,
                 TransactionObservation::Unconfirmed { txid: txid() },
-            ] {
+            ]
+            .iter()
+            .copied()
+            {
                 let source = Source {
                     tip: 105,
                     tx,
