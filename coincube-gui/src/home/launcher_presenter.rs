@@ -17,7 +17,7 @@ use coincube_ui::{
 };
 
 use super::{
-    launcher_catalog::{self, CatalogMessage, LauncherMode, Projection},
+    launcher_catalog::{self, CatalogMessage, Projection},
     launcher_chrome, launcher_coin, launcher_gpu, launcher_scene, CubeCatalogKey,
     DeleteCubeMessage, Home, ViewMessage,
 };
@@ -1206,12 +1206,8 @@ pub(super) fn list_body(home: &Home) -> Element<'_, ViewMessage> {
         home.theme_mode,
         coincube_ui::theme::palette::ThemeMode::Light
     );
-    let fallback = (home.catalog.mode == LauncherMode::Cubes
-        && projection.filtered_total > launcher_catalog::FLOOR_MAX_CUBES)
-        .then(|| tenshu::caption("List view for more than 20 Cubes."));
     Column::new()
         .spacing(8)
-        .push(fallback)
         .push(
             responsive(move |size: Size| list_layout(&projection, &scene, size.width, light))
                 .height(Length::Shrink),
@@ -2250,6 +2246,7 @@ mod tests {
         Layout,
     };
     use iced::Rectangle;
+    use launcher_catalog::LauncherMode;
     use std::path::PathBuf;
 
     fn floor_context(
