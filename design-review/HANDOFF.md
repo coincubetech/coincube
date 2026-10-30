@@ -7,7 +7,7 @@ Read this file first, then the review doc, then the inventory.
 | What | Where |
 | --- | --- |
 | Live prototype (clickable, needs a signed-in claude.ai browser) | https://claude.ai/artifact/4DkSWQshpyXVu2kVrbneRz (canvas v175; the sources below were exported from it on 2026-10-30, artifact version `1793315838-41d9`) |
-| Exported screenshots of every screen, dark and light (open without a browser session) | `screens/dark/`, `screens/light/`, index in `screens/README.md`. These still show canvas v121; for v175 read the sources or the live link |
+| Exported screenshots of every screen, dark and light (open without a browser session) | `screens/dark/`, `screens/light/`, `screens/studies/`, index in `screens/README.md` (canvas v175) |
 | Artboard sources (canvas v175: the linked `P-*` prototype and its light twins, plus the v175 studies `H-*` page head, `G-*` ghost Cubes and `O-*` opening; plain HTML + CSS + a small script each) | `canvas/*.dc.html`, index and canvas pages in `canvas/canvas.json` |
 | Earlier exploration boards the prototype was distilled from (superseded) | `archive/explorations/` |
 | Every decision Robert made, in order, with reasons | `tenshu-launcher-and-settings-review.md` |
@@ -25,7 +25,9 @@ Precedence when sources disagree: review doc > artboard source > brief.
   per-screen state. `data-props` on that script lists the review "levers" (the
   states Robert reviewed). `{{ holes }}` are filled from `renderVals()`.
 - The files reference `./support.js` and the Claude Design runtime, which are not
-  in this repo. They do not render standalone. Use `screens/` (or the live link)
+  in this repo, so they do not open on their own in a browser.
+  `screens/render/` has a local stand-in that renders their default states
+  (see `screens/README.md`). Use `screens/` (or the live link)
   for pixels and the files for exact copy, spacing, colours and state logic. Each
   screenshot shows the board's default state with the device settings at their
   defaults (Dark, Developer mode off, Bitcoin Blake2b off, Launcher style Cubes);
