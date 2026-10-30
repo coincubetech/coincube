@@ -138,6 +138,9 @@ pub enum VaultSubMenu {
     /// panel, claim step 1 (Lane B1.5). The App decides which on arrival,
     /// from what is on disk — see [`crate::app::features::claim_entry`].
     Claim,
+    /// Tools › Split coins: the checklist of what is still on both chains
+    /// ([`crate::app::state::vault::split_hub`]).
+    SplitCoins,
     Settings(Option<SettingsOption>),
 }
 

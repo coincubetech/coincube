@@ -243,6 +243,9 @@ pub enum Message {
     /// (Lane B1.4). Creates the target Cube only — nothing is claimed,
     /// poisoned, swept or broadcast by this flow.
     StartClaimBlake2b,
+    /// Tools › Split coins › Create copy. The App re-checks the disk for an
+    /// existing copy before it starts [`Self::StartClaimBlake2b`].
+    CreateBlake2bCopy,
     /// Start the imported Bitcoin policy claim flow after App rechecks the
     /// live attachment, completed scan, and current Connect feature grant.
     StartImportedClaim,

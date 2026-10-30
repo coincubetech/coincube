@@ -282,7 +282,7 @@ impl CoinsPanel {
             CoinControlMessage::CloseWarning => self.send_warning = None,
             CoinControlMessage::OpenSplit => {
                 self.send_warning = None;
-                if self.split.is_some() || self.both_chain_coins(cache).next().is_none() {
+                if self.split.is_some() {
                     return Task::none();
                 }
                 let method = if self.signature_available() {
@@ -291,6 +291,14 @@ impl CoinsPanel {
                     Method::SplitKey
                 };
                 let needs_address = cache.split_keys().is_empty();
+                // With nothing on both chains the overlay still opens to get
+                // a split key (Tools › Split coins' "Get a split key"), but
+                // not when there is neither a coin to split nor a key to get.
+                if self.both_chain_coins(cache).next().is_none()
+                    && !(method == Method::SplitKey && needs_address)
+                {
+                    return Task::none();
+                }
                 self.split = Some(SplitState {
                     previous: self.chosen.clone(),
                     excluded: BTreeSet::new(),
@@ -791,6 +799,33 @@ mod tests {
             let overlay = panel.split_overlay(&cache).unwrap();
             assert!(overlay.key_needed);
             assert_eq!(overlay.blocked(), Some("Waiting for a split key"));
+        }
+
+        /// Tools › Split coins' "Get a split key" opens the overlay even
+        /// with nothing on both chains, to show where to send a key; with a
+        /// key already in hand there is nothing to open.
+        #[test]
+        fn with_nothing_to_split_the_overlay_opens_only_to_get_a_key() {
+            let (mut panel, mut cache, [a, b, _, _]) = fixture();
+            // Both shared coins are spent: nothing left on both chains.
+            cache
+                .daemon_cache
+                .coins
+                .retain(|coin| ![a, b].contains(&coin.outpoint));
+            panel
+                .coins
+                .list
+                .retain(|coin| ![a, b].contains(&coin.outpoint));
+            assert!(panel.both_chain_coins(&cache).next().is_none());
+
+            let _ = panel.update_split(&cache, CoinControlMessage::OpenSplit);
+            assert!(panel.split.is_none(), "a key is in hand: nothing to do");
+
+            cache.chain_proofs.clear();
+            let _ = panel.update_split(&cache, CoinControlMessage::OpenSplit);
+            let overlay = panel.split_overlay(&cache).expect("opens to get a key");
+            assert!(overlay.key_needed);
+            assert_eq!(overlay.blocked(), Some("No coins to split yet"));
         }
 
         #[test]
