@@ -21,7 +21,6 @@ use coincube_gui::{
 enum Arg {
     DatadirPath(CoincubeDirectory),
     Network(bitcoin::Network),
-    EnableBtcb2Split,
 }
 
 fn parse_args(args: Vec<String>) -> Result<Vec<Arg>, Box<dyn Error>> {
@@ -45,7 +44,6 @@ Options:
     --testnet           Use testnet network
     --signet            Use signet network
     --regtest           Use regtest network
-    --enable-btcb2-split Enable paired BTCB2 signing and broadcast reviews for this run
         "#
         );
         process::exit(1);
@@ -58,8 +56,6 @@ Options:
             } else {
                 return Err("missing arg to --datadir".into());
             }
-        } else if arg == "--enable-btcb2-split" {
-            res.push(Arg::EnableBtcb2Split);
         } else if arg.contains("--") {
             let network = bitcoin::Network::from_str(args[i].trim_start_matches("--"))?;
             res.push(Arg::Network(network));
@@ -91,9 +87,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     #[cfg(target_os = "linux")]
     coincube_gui::linux_backend::prefer_x11_over_wayland();
 
-    let mut args = parse_args(std::env::args().collect())?;
-    let live_split = args.contains(&Arg::EnableBtcb2Split);
-    args.retain(|arg| *arg != Arg::EnableBtcb2Split);
+    let args = parse_args(std::env::args().collect())?;
     let config = match args.as_slice() {
         [] => {
             let datadir_path = CoincubeDirectory::new_default().unwrap();
@@ -119,10 +113,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     // GUI's strict load will keep the first view masked and offer a retry.
     if let Err(error) = config.coincube_directory.bootstrap_privacy()? {
         eprintln!("{}", error);
-    }
-
-    if live_split {
-        coincube_gui::live_split::enable_for_this_process();
     }
 
     let log_level = if let Ok(l) = std::env::var("LOG_LEVEL") {
@@ -261,22 +251,11 @@ mod tests {
         assert_eq!(settings.min_size, Some(Size::new(1024.0, 768.0)));
     }
 
+    /// The removed live-testing launch gate no longer exists: Split coins
+    /// follows Bitcoin Blake2b being on, not a launch flag.
     #[test]
-    fn live_split_option_preserves_default_wallet_directory_and_network() {
-        for input in [
-            "coincube --enable-btcb2-split",
-            "coincube --enable-btcb2-split --bitcoin",
-            "coincube --bitcoin --enable-btcb2-split",
-        ] {
-            let mut args =
-                parse_args(input.split_whitespace().map(str::to_owned).collect()).unwrap();
-            assert!(args.contains(&Arg::EnableBtcb2Split));
-            args.retain(|arg| *arg != Arg::EnableBtcb2Split);
-            assert!(args.is_empty() || args == vec![Arg::Network(bitcoin::Network::Bitcoin)]);
-        }
-        assert!(!parse_args(vec!["coincube".into()])
-            .unwrap()
-            .contains(&Arg::EnableBtcb2Split));
+    fn the_removed_split_launch_flag_is_not_an_option() {
+        assert!(parse_args(vec!["coincube".into(), "--enable-btcb2-split".into()]).is_err());
     }
 
     #[test]

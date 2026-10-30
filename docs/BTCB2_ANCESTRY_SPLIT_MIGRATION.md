@@ -889,6 +889,13 @@ against the deployed node and indexer builds.
   persist to subsequent launches or enable the retired OP_RETURN route.
   Two-chain ancestry, confirmation, ownership, unspent-input, fee, session,
   exact-transaction and separate broadcast-confirmation checks remain active.
+- Superseded (2026-10-29, Robert's instruction): the paired Claim and
+  foreign-wallet Split wizards are removed from the desktop in favour of the
+  per-chain Split coins feature, and its launch gate is gone. There is no
+  `--enable-btcb2-split` flag; Split coins (ancestry checks and building a
+  split) is available whenever Bitcoin Blake2b is on for the Cube, the same
+  condition that shows the Chains column and Tools › Split coins. This
+  replaces the #547 acceptance gate below for the desktop.
 - Keep the default production gate closed until these checks and an independent review
   pass. Then enable discovery, signing and durable completion together. Confirm
   Connect serves the block, transaction, UTXO and tip endpoints needed for

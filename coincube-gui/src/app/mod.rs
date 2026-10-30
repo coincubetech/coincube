@@ -3921,17 +3921,15 @@ impl App {
     }
 
     /// Ancestry checks for the Chains column: only coins whose funding
-    /// transaction the twin chain lacks, a few per pass, behind the ancestry
-    /// launch gate. Saved results are read in on the first pass, gate or not,
-    /// so a status verified under the gate still shows.
+    /// transaction the twin chain lacks, a few per pass, whenever Bitcoin
+    /// Blake2b is on ([`Self::blake2b_on`]). Saved results are read in on the
+    /// first pass.
     fn chain_proof_task(&mut self) -> Task<Message> {
         let Some(wallet) = self.wallet.as_ref() else {
             return Task::none();
         };
         let chain = wallet.chain;
-        if crate::services::entangled::twin_chain(chain).is_none()
-            || (!chain.is_blake2b() && !self.panels.connect.account.bitcoin_blake2b_enabled())
-        {
+        if crate::services::entangled::twin_chain(chain).is_none() || !self.blake2b_on() {
             return Task::none();
         }
         if !self.chain_proofs_loaded {
@@ -4626,6 +4624,14 @@ impl App {
     /// This Cube as a candidate Bitcoin Blake2b claim source — the single
     /// input to [`crate::app::features::claim_blake2b`], so the Vault rail and
     /// the message handler cannot drift apart.
+    /// Whether Bitcoin Blake2b is on for this Cube: a Bitcoin Blake2b Cube,
+    /// or any other Cube whose account has the Bitcoin Blake2b grant and
+    /// opt-in. The same answer that shows the Chains column and Tools ›
+    /// Split coins; it is what lets ancestry checks run and a split be built.
+    pub(crate) fn blake2b_on(&self) -> bool {
+        self.cache.chain().is_blake2b() || self.panels.connect.account.bitcoin_blake2b_enabled()
+    }
+
     /// Re-read from the disk whether this Bitcoin Cube's Vault already has a
     /// Bitcoin Blake2b copy (`Cache::btcb2_already_claimed`).
     pub(crate) fn refresh_copy_exists(&mut self) {
@@ -7292,6 +7298,9 @@ impl App {
                 else {
                     return failed("This Vault isn't loaded.");
                 };
+                if !self.blake2b_on() {
+                    return failed("Split coins needs Bitcoin Blake2b to be on for this account.");
+                }
                 let Some(client) = self.authenticated_coincube_client() else {
                     return failed("Sign in to COINCUBE Connect to split coins.");
                 };
@@ -15092,6 +15101,55 @@ pub(crate) mod shell_tests {
             }
         }
         out
+    }
+
+    /// Split coins has no launch gate (Robert, 2026-10-29): with Bitcoin
+    /// Blake2b on for the account, a split request reaches the split builder
+    /// (here refused for its own reason, a replay-protected signature on
+    /// Bitcoin); with it off, the request is refused before anything runs.
+    #[tokio::test]
+    async fn split_coins_follows_blake2b_being_on_not_a_launch_gate() {
+        let root_path = std::env::temp_dir().join(format!("split-on-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = {
+            let _guard = crate::app::session::test_guard();
+            bitcoin_app(&root_path)
+        };
+        let mut client =
+            crate::services::coincube::CoincubeClient::for_test("https://connect.example.invalid");
+        client.set_token("fixture-token");
+        app.panels.connect.account.client = client;
+        app.panels.connect.account.user = Some(crate::services::coincube::User {
+            id: 7,
+            email: "7@example.invalid".into(),
+            email_verified: Some(true),
+        });
+        app.panels.connect.account.step =
+            crate::app::state::connect::account::ConnectFlowStep::Dashboard;
+        assert!(crate::services::chain_status::checks_enabled(
+            crate::chain::ChainId::Bitcoin
+        ));
+        let request = || Message::SplitRequest {
+            method: crate::services::split_coins::Method::Signature,
+            coins: vec![bitcoin::OutPoint::null()],
+            key: None,
+            feerate_vb: 2,
+        };
+        let refusal = |messages: Vec<Message>| {
+            messages.into_iter().find_map(|message| match message {
+                Message::SplitPrepared(Err(error)) => Some(error),
+                _ => None,
+            })
+        };
+
+        assert!(app.blake2b_on());
+        let on = refusal(outputs(app.update(request())).await).expect("a refusal");
+        assert!(on.contains("replay-protected signature"), "{}", on);
+
+        app.panels.connect.account.bitcoin_blake2b_opt_in = false;
+        assert!(!app.blake2b_on());
+        let off = refusal(outputs(app.update(request())).await).expect("a refusal");
+        assert!(off.contains("Bitcoin Blake2b"), "{}", off);
+        let _ = std::fs::remove_dir_all(&root_path);
     }
 
     /// Whether a copy exists is read from the disk whenever Tools › Split
