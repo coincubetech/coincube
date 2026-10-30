@@ -8694,6 +8694,62 @@ mod opening_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    fn loader_at_connecting(root: &std::path::Path) -> super::Loader {
+        let (loader, startup) = super::Loader::new(
+            crate::dir::CoincubeDirectory::new(root.to_path_buf()),
+            crate::app::Config::new(false),
+            Network::Bitcoin,
+            None,
+            None,
+            None,
+            CubeSettings::new("Everyday".into(), ChainId::Bitcoin),
+            None,
+            None,
+        );
+        // Not polled: no daemon starts in this test.
+        drop(startup);
+        loader
+    }
+
+    #[test]
+    fn a_retry_from_a_background_error_page_waits_afresh_before_cancel() {
+        use home::launcher_opening::{Opening, Stage, STALL};
+        let root = datadir();
+        let t0 = std::time::Instant::now();
+        let mut tab = Tab::new(1, State::Loader(loader_at_connecting(&root)));
+        tab.opening = Some(super::CubeOpening {
+            scene: Opening::new(None, false, Stage::Connecting, t0),
+            quote: coincube_ui::component::quote_display::Quote {
+                id: "test".into(),
+                text: "A quote.".into(),
+                author: "Someone".into(),
+                source: "Somewhere".into(),
+                category: String::new(),
+                length: String::new(),
+                contexts: Vec::new(),
+            },
+            loads: Vec::new(),
+        });
+        // The loader fails; the error page holds the wait once, then the
+        // tab goes to the background and gets no more ticks.
+        let State::Loader(loader) = &mut tab.state else {
+            unreachable!()
+        };
+        loader.fail(crate::loader::Error::Unexpected("refused".into()));
+        tab.sync_opening(t0 + std::time::Duration::from_secs(2));
+        assert!(tab.opening.is_some(), "an error keeps the opening");
+        // A minute later the user is back and presses Retry: the Loader is
+        // at Connecting again, the very stage it failed on.
+        let retry = t0 + std::time::Duration::from_secs(62);
+        tab.state = State::Loader(loader_at_connecting(&root));
+        tab.sync_opening(retry);
+        let opening = &tab.opening.as_ref().unwrap().scene;
+        assert_eq!(opening.stage(), Stage::Connecting);
+        assert!(!opening.stalled(retry), "no Cancel straight after Retry");
+        assert!(opening.stalled(retry + STALL));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn an_unlock_without_the_launcher_still_honours_reduced_motion() {
         // Auto-lock and a freshly created Cube reach the PIN screen without

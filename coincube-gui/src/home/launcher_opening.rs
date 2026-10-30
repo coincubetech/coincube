@@ -112,6 +112,9 @@ pub(crate) struct Opening {
     level_from: f32,
     level_since: Instant,
     ready_since: Option<Instant>,
+    /// An error page held the stall wait; the next stage set, even the same
+    /// one after a Retry, starts it afresh.
+    held: bool,
 }
 
 impl Opening {
@@ -130,6 +133,7 @@ impl Opening {
             level_from: 0.0,
             level_since: now,
             ready_since: None,
+            held: false,
         };
         if stage == Stage::Ready {
             opening.ready_since = Some(now);
@@ -151,7 +155,13 @@ impl Opening {
     }
 
     pub fn set_stage(&mut self, stage: Stage, now: Instant) {
+        let held = std::mem::take(&mut self.held);
         if stage == self.stage {
+            // Back from an error page, however long ago its last hold was
+            // (a background tab gets no ticks), the wait starts now.
+            if held {
+                self.stage_since = now;
+            }
             return;
         }
         self.level_from = self.level(now);
@@ -170,6 +180,7 @@ impl Opening {
     /// shows an error, nothing is stalled.
     pub fn hold(&mut self, now: Instant) {
         self.stage_since = now;
+        self.held = true;
     }
 
     fn since(&self, at: Instant, now: Instant) -> Duration {
@@ -470,6 +481,15 @@ mod tests {
         opening.set_stage(Stage::Connecting, t0 + ms(40_000));
         assert!(!opening.stalled(t0 + ms(40_000)));
         assert!(opening.stalled(t0 + ms(40_000) + STALL));
+        // A last hold long before the Retry (no ticks in the background)
+        // still restarts the wait at the Retry itself.
+        opening.hold(t0 + ms(60_000));
+        opening.set_stage(Stage::Connecting, t0 + ms(200_000));
+        assert!(!opening.stalled(t0 + ms(200_000)));
+        assert!(opening.stalled(t0 + ms(200_000) + STALL));
+        // Without a hold, the same stage keeps its wait.
+        opening.set_stage(Stage::Connecting, t0 + ms(210_000));
+        assert!(opening.stalled(t0 + ms(200_000) + STALL));
     }
 
     #[test]
