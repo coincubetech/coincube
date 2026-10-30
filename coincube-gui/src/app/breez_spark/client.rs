@@ -803,9 +803,9 @@ impl SparkClient {
     /// [`Self::prepare_send`] with an explicit balance to pay from. The
     /// preview's handle executes through [`Self::send_payment`].
     ///
-    /// A preview that doesn't disclose its conversion is refused, so Review
-    /// can never commit a conversion it hasn't shown. See
-    /// [`PrepareSendFromOk::conversion`] for the rules.
+    /// A preview whose token leg isn't a disclosed conversion is refused, so
+    /// Review can never commit a conversion or a token spend it hasn't shown.
+    /// See [`PrepareSendFromOk::conversion`] for the rules.
     pub async fn prepare_send_from(
         &self,
         input: String,
@@ -1206,18 +1206,22 @@ fn check_send_from(ok: &PrepareSendFromOk, pay_from: WalletAsset) -> Result<(), 
             ok.pay_from
         ));
     }
-    match ok.conversion.as_deref() {
-        // A conversion is a token leg. The converse doesn't hold: a direct
-        // token transfer is a token leg with no conversion.
-        Some(_) if ok.prepare.has_token_leg != Some(true) => {
-            Err("a conversion without a token leg".to_string())
-        }
+    // A conversion is the only token leg these methods prepare, so the two
+    // come together.
+    match (ok.prepare.has_token_leg, ok.conversion.as_deref()) {
         // Every conversion that funds a send turns USDB into bitcoin.
-        Some(quote) => check_quote(quote, WalletAsset::Usdb),
-        None if pay_from == WalletAsset::Usdb => {
+        (Some(true), Some(quote)) => check_quote(quote, WalletAsset::Usdb),
+        (Some(false), None) if pay_from == WalletAsset::Usdb => {
             Err("paying from USDB without a conversion".to_string())
         }
-        None => Ok(()),
+        (Some(false), None) => Ok(()),
+        // A direct token transfer, or a quote the bridge dropped: Review
+        // would show a bitcoin payment while a token moves.
+        (Some(true), None) => Err("a token leg without a conversion".to_string()),
+        // A conversion the retry guard can't see: the gui would trust an
+        // idempotency key the bridge drops.
+        (_, Some(_)) => Err("a conversion without a token leg".to_string()),
+        (None, None) => Err("no token-leg flag".to_string()),
     }
 }
 
@@ -2032,14 +2036,12 @@ mod p0_contract_tests {
     fn a_pay_from_preview_must_disclose_its_conversion() {
         use WalletAsset::{Bitcoin, Usdb};
 
-        // Accepted: USDB pays through a conversion; bitcoin pays plainly, with
-        // a shortfall conversion, or as a direct token transfer (a token leg
-        // with no conversion).
+        // Accepted: USDB pays through a conversion; bitcoin pays plainly or
+        // with a shortfall conversion.
         for ok in [
             send_from(Usdb, Some(true), Some(quote(Usdb))),
             send_from(Bitcoin, Some(false), None),
             send_from(Bitcoin, Some(true), Some(quote(Usdb))),
-            send_from(Bitcoin, Some(true), None),
         ] {
             assert_eq!(check_send_from(&ok, ok.pay_from), Ok(()), "{:?}", ok);
         }
@@ -2054,13 +2056,21 @@ mod p0_contract_tests {
             (
                 send_from(Usdb, Some(true), None),
                 Usdb,
-                "without a conversion",
+                "token leg without a conversion",
             ),
             (
                 send_from(Usdb, Some(false), None),
                 Usdb,
-                "without a conversion",
+                "paying from USDB without a conversion",
             ),
+            // A direct token transfer (a token invoice) or a dropped shortfall
+            // quote: a token would move under a bitcoin Review.
+            (
+                send_from(Bitcoin, Some(true), None),
+                Bitcoin,
+                "token leg without a conversion",
+            ),
+            (send_from(Bitcoin, None, None), Bitcoin, "no token-leg flag"),
             // A conversion the retry guard can't see: the gui would trust an
             // idempotency key the bridge drops.
             (
@@ -2306,6 +2316,55 @@ mod p0_contract_tests {
             panic!("expected a protocol error, got {:?}", result);
         };
         assert!(message.contains("prepare_send_from"), "{}", message);
+
+        // Paying from bitcoin, a token leg with no quote, through either
+        // method: a direct token transfer or a dropped shortfall quote.
+        let (result, _) = tokio::join!(
+            client.prepare_send_from("spark1".to_string(), Some(1_500), WalletAsset::Bitcoin),
+            bridge_answers(
+                &client,
+                &mut requests,
+                Some(OkPayload::PrepareSendFrom(send_from(
+                    WalletAsset::Bitcoin,
+                    Some(true),
+                    None
+                )))
+            )
+        );
+        let Err(SparkClientError::Protocol(message)) = result else {
+            panic!("expected a protocol error, got {:?}", result);
+        };
+        assert!(
+            message.contains("token leg without a conversion"),
+            "{}",
+            message
+        );
+        let (result, _) = tokio::join!(
+            client.prepare_lnurl_pay_from(
+                "shop@example.test".to_string(),
+                1_500,
+                None,
+                WalletAsset::Bitcoin
+            ),
+            bridge_answers(
+                &client,
+                &mut requests,
+                Some(OkPayload::PrepareSendFrom(send_from(
+                    WalletAsset::Bitcoin,
+                    Some(true),
+                    None
+                )))
+            )
+        );
+        let Err(SparkClientError::Protocol(message)) = result else {
+            panic!("expected a protocol error, got {:?}", result);
+        };
+        assert!(message.contains("prepare_lnurl_pay_from"), "{}", message);
+        assert!(
+            message.contains("token leg without a conversion"),
+            "{}",
+            message
+        );
 
         // Asked to swap out of bitcoin, estimated a swap out of USDB.
         let (result, _) = tokio::join!(

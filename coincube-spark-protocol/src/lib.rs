@@ -303,6 +303,12 @@ pub enum Method {
     /// stale bridge fails closed: one that predates this method can't parse
     /// the request and drops it, where it would silently ignore an unknown
     /// `pay_from` field and prepare a bitcoin send instead.
+    ///
+    /// Refuses a Spark invoice that requests a token, with
+    /// [`ErrorKind::BadRequest`] and before preparing anything (S4b implements
+    /// the refusal). Paying one spends that token directly, which neither
+    /// `pay_from` describes. So every token leg this method prepares is a
+    /// conversion; see [`PrepareSendFromOk::conversion`].
     PrepareSendFrom(PrepareSendFromParams),
     /// [`Method::PrepareLnurlPay`] with an explicit balance to pay from: the
     /// LNURL / Lightning-address twin of [`Method::PrepareSendFrom`], and a
@@ -681,7 +687,8 @@ pub struct SwapParams {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrepareSendFromParams {
-    /// Same as [`PrepareSendParams::input`].
+    /// Same as [`PrepareSendParams::input`], except that a Spark invoice
+    /// requesting a token is refused (see [`Method::PrepareSendFrom`]).
     pub input: String,
     /// Same as [`PrepareSendParams::amount_sat`].
     #[serde(default)]
@@ -939,11 +946,14 @@ pub struct PrepareSendFromOk {
     ///
     /// - paying from USDB always attaches one; paying from bitcoin attaches
     ///   one only to cover a shortfall;
-    /// - a conversion is a token leg, so `Some` here means
-    ///   `prepare.has_token_leg` is `Some(true)`. Not the other way round: a
-    ///   direct token transfer is a token leg with no conversion.
+    /// - a conversion is the only token leg these methods prepare, because
+    ///   [`Method::PrepareSendFrom`] refuses a token invoice and LNURL has
+    ///   none. So `prepare.has_token_leg` is exactly
+    ///   `Some(conversion.is_some())`.
     ///
-    /// The gui client rejects a response that breaks either rule.
+    /// The gui client rejects a response that breaks either rule, including
+    /// a token leg with no conversion: Review would show a bitcoin payment
+    /// while a token moves, and couldn't tell it from a dropped quote.
     ///
     /// Boxed for the same reason as [`PrepareSendOk::cross_chain`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2504,7 +2514,10 @@ mod tests {
 
         // Paying from bitcoin with no shortfall conversion: omitted, `None`.
         let value = serde_json::to_value(PrepareSendFromOk {
-            prepare: legacy_prepare(),
+            prepare: PrepareSendOk {
+                has_token_leg: Some(false),
+                ..legacy_prepare()
+            },
             pay_from: WalletAsset::Bitcoin,
             conversion: None,
         })
