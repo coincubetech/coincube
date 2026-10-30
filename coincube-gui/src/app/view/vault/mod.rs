@@ -1,7 +1,5 @@
 pub(crate) mod label;
 
-pub mod ancestry_coins;
-pub mod claim;
 pub mod coins;
 pub mod export;
 pub mod fiat;
@@ -13,7 +11,6 @@ pub mod receive;
 pub mod recovery;
 pub mod settings;
 pub mod spend;
-pub mod split;
 pub mod split_coins;
 pub mod tools;
 pub mod transactions;

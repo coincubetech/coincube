@@ -14,7 +14,6 @@ pub mod help;
 pub mod home;
 pub mod hw;
 pub mod hw_advisory;
-pub mod imported_claim;
 pub mod installer;
 #[cfg(target_os = "linux")]
 pub mod linux_backend;
@@ -32,7 +31,6 @@ pub mod recover_vault;
 pub mod services;
 pub mod signer;
 pub mod split_hardware;
-pub mod split_wallet;
 pub mod user_error;
 pub mod utils;
 pub mod wallet_source_form;

@@ -162,26 +162,6 @@ pub struct RecipientIdentities {
     pub results: Vec<(usize, crate::services::branta::LookupResult)>,
 }
 
-/// Actual signer requests, rather than opening or dismissing the picker.
-/// The Claim panel uses this same boundary to collect fresh checks before
-/// forwarding a request. The picker consumes that check immediately below.
-pub(crate) fn claim_signing_dispatch(message: &Message) -> bool {
-    matches!(
-        message,
-        Message::View(view::Message::ExportPsbt | view::Message::ImportPsbt)
-            | Message::Export(ImportExportMessage::Progress(Progress::Psbt(_)))
-            | Message::View(view::Message::SelectHardwareWallet(_))
-            | Message::View(view::Message::SelectPsbtHardwareWallet(_))
-            | Message::View(view::Message::Spend(
-                view::SpendTxMessage::SelectMasterSigner
-                    | view::SpendTxMessage::SelectKeychainSigner(_)
-                    | view::SpendTxMessage::RequestFromEveryone
-                    | view::SpendTxMessage::RetryKeychainSigner(_)
-                    | view::SpendTxMessage::BorderWalletRecon(BorderWalletReconMessage::Next)
-            ))
-    )
-}
-
 pub struct PsbtState {
     action_scope: u64,
     /// A direct signer choice may remove the focused row when its result lands.
@@ -199,16 +179,6 @@ pub struct PsbtState {
     /// Recomputed from the verified witness after every
     /// signature merge ([`Self::refresh_replay`]).
     pub replay: Option<ReplayReview>,
-    /// Claim signing uses the ordinary picker, but all submission stays with
-    /// the Claim coordinator. Each signer dispatch consumes a fresh check.
-    claim_signing: bool,
-    claim_dispatch: Option<Arc<replay::SplitEvidence>>,
-    /// The ordinary two-chain Claim path uses a distinct, exact-PSBT
-    /// one-use permit after a fresh wallet and ancestry requalification.
-    paired_dispatch:
-        Option<crate::services::claim_workflow::paired_signing_permit::PairedSigningPermit>,
-    /// A claim signed with local devices has no Connect Keychain vault to fetch.
-    keychain_signing_enabled: bool,
     /// The spend screen's own re-check of a replayable spend's inputs
     /// against the twin chain (`#276` I13, cache lifecycle): a sync-time
     /// *not entangled* has a shelf life, so it is asked again at the moment
@@ -283,10 +253,6 @@ impl PsbtState {
             tx,
             saved,
             replay,
-            claim_signing: false,
-            claim_dispatch: None,
-            paired_dispatch: None,
-            keychain_signing_enabled: true,
             entangled_check: EntangledCheck::Idle,
             revalidated_for: None,
             bitcoin_finalization: std::sync::Mutex::new(None),
@@ -566,102 +532,11 @@ impl PsbtState {
     /// unified finalizer's verdict, the I13 requirement on known-entangled inputs,
     /// and the acknowledgement.
     pub fn broadcast_ready(&self, cache: &Cache) -> bool {
-        if self.claim_signing {
-            return false;
-        }
         replay::broadcast_ready(
             self.bitcoin_signatures_complete(),
             self.replay.as_ref(),
             &self.entangled_inputs(cache),
         ) && !self.entangled_check.in_flight()
-    }
-
-    /// Put the picker into Claim mode before showing it. Without a fresh
-    /// coordinator check every signing dispatch is refused, including retries.
-    pub fn require_claim_signing_checks(&mut self) -> bool {
-        if !self.wallet.chain.is_blake2b() {
-            return false;
-        }
-        self.claim_signing = true;
-        self.claim_dispatch = None;
-        self.paired_dispatch = None;
-        true
-    }
-
-    /// A paired ordinary Claim has a Bitcoin and a BTCB2 signer. Neither side
-    /// may dispatch without a one-use permit issued after a fresh pair check.
-    pub(crate) fn require_paired_signing_checks(&mut self) -> bool {
-        if !matches!(
-            self.wallet.chain,
-            coincube_core::chain::ChainId::Bitcoin | coincube_core::chain::ChainId::BitcoinBlake2b
-        ) {
-            return false;
-        }
-        self.claim_signing = true;
-        self.claim_dispatch = None;
-        self.paired_dispatch = None;
-        true
-    }
-
-    /// The paired ancestry wizard owns submission and asks for a new permit
-    /// before every actual signer request. This also works for its Bitcoin
-    /// PSBT; the old Claim replay evidence is BTCB2-only.
-    #[allow(dead_code)] // The paired signer panel is staged behind the migration gate.
-    pub(crate) fn set_paired_signing_permit(
-        &mut self,
-        permit: crate::services::claim_workflow::paired_signing_permit::PairedSigningPermit,
-    ) -> bool {
-        if !permit.matches(self.wallet.chain, &self.tx.psbt) {
-            return false;
-        }
-        self.claim_signing = true;
-        self.claim_dispatch = None;
-        self.paired_dispatch = Some(permit);
-        true
-    }
-
-    /// Keep the ordinary hardware picker while omitting Connect Keychain lookups.
-    pub fn disable_keychain_signing(&mut self) {
-        self.keychain_signing_enabled = false;
-    }
-
-    pub(crate) fn consume_claim_signing_permit(&mut self) -> bool {
-        if !self.claim_signing {
-            return true;
-        }
-        if let Some(permit) = self.paired_dispatch.take() {
-            return permit.consume(self.wallet.chain, &self.tx.psbt);
-        }
-        let Some(proof) = self.claim_dispatch.take() else {
-            return false;
-        };
-        coincube_core::psbt_unified::UnifiedPsbt::from_psbt(self.tx.psbt.clone())
-            .is_ok_and(|psbt| proof.consume_for_signing(&psbt))
-    }
-
-    /// Attach only live Claim evidence for this exact owned fork construction.
-    /// Signature changes still run the ordinary verified replay refresh, while
-    /// every display/readiness read checks the evidence's current lifetime.
-    pub fn set_claim_split_evidence(&mut self, evidence: Arc<replay::SplitEvidence>) -> bool {
-        if !self.wallet.chain.is_blake2b() {
-            return false;
-        }
-        let Ok(unified) = coincube_core::psbt_unified::UnifiedPsbt::from_psbt(self.tx.psbt.clone())
-        else {
-            return false;
-        };
-        if !evidence.matches(&unified) {
-            return false;
-        }
-        self.claim_signing = true;
-        self.paired_dispatch = None;
-        self.claim_dispatch = Some(evidence.clone());
-        self.replay = Some(ReplayReview::with_split(
-            &self.tx.psbt,
-            &secp256k1::Secp256k1::verification_only(),
-            evidence,
-        ));
-        true
     }
 
     pub fn with_recipient_identities(mut self, identities: Option<RecipientIdentities>) -> Self {
@@ -855,29 +730,6 @@ impl PsbtState {
         cache: &Cache,
         message: Message,
     ) -> Task<Message> {
-        if self.claim_signing {
-            let forbidden = matches!(
-                &message,
-                Message::View(view::Message::Spend(
-                    view::SpendTxMessage::Broadcast
-                        | view::SpendTxMessage::Save
-                        | view::SpendTxMessage::Delete
-                        | view::SpendTxMessage::Confirm
-                ))
-            );
-            if forbidden
-                || (claim_signing_dispatch(&message) && !self.consume_claim_signing_permit())
-            {
-                return Task::done(Message::View(view::Message::ShowError(
-                    if forbidden {
-                        "Return to the Claim review to submit this transaction."
-                    } else {
-                        "Check both chains again before requesting this signature."
-                    }
-                    .into(),
-                )));
-            }
-        }
         if self
             .recipient_identities
             .as_ref()
@@ -1028,11 +880,8 @@ impl PsbtState {
                 // labels by the time the user reads the picker. When Connect
                 // isn't ready this is `None` and the picker shows keychain
                 // rows derived from the descriptor, disabled with a hint.
-                let (keychain, kc_launch) = if self.keychain_signing_enabled {
-                    build_keychain_if_ready(cache, &self.wallet, &self.tx.psbt)
-                } else {
-                    (None, Task::none())
-                };
+                let (keychain, kc_launch) =
+                    build_keychain_if_ready(cache, &self.wallet, &self.tx.psbt);
                 let modal = SignModal::new(
                     self.tx.signers(),
                     self.wallet.clone(),
@@ -1041,7 +890,7 @@ impl PsbtState {
                     self.saved,
                     self.tx.recovery_timelock(),
                     keychain,
-                    self.keychain_signing_enabled,
+                    true,
                 )
                 .with_connect_account(ConnectAccountStatus::from_cache(cache));
                 let cmd = modal.load(daemon);
@@ -3476,43 +3325,6 @@ mod tests {
     }
 
     #[test]
-    fn claim_signing_does_not_fetch_a_connect_keychain_vault() {
-        let fixture = crate::app::state::vault::test_support::unified::fixture();
-        let wallet = Arc::new(Wallet::new(fixture.descriptor.clone()));
-        let tx = SpendTx::new(
-            None,
-            fixture.psbt,
-            Vec::new(),
-            wallet.inheritance_descriptor().unwrap(),
-            &secp256k1::Secp256k1::verification_only(),
-            Network::Signet,
-        );
-        let mut state = PsbtState::new(wallet, tx, false);
-        state.disable_keychain_signing();
-        let ready = Cache {
-            connect_grpc_url: Some("https://grpc.example.test".to_string()),
-            connect_tokens: Some(tokens()),
-            connect_device_id: Some("device-1".to_string()),
-            current_cube_server_id: Some(42),
-            cube_id: "cube-local".to_string(),
-            ..Cache::default()
-        };
-        assert!(keychain_connect_missing(&ready).is_empty());
-        let daemon: Arc<dyn crate::daemon::Daemon + Sync + Send> =
-            Arc::new(Coincubed::new(Daemon::new(vec![]).run()));
-        let _ = state.update(
-            daemon,
-            &ready,
-            Message::View(view::Message::Spend(view::SpendTxMessage::Sign)),
-        );
-        let Some(PsbtModal::Sign(sign)) = state.modal.as_ref() else {
-            panic!("claim signing picker should open");
-        };
-        assert!(!sign.keychain_enabled);
-        assert!(sign.keychain.is_none());
-    }
-
-    #[test]
     fn counted_signers_drive_the_signed_row_state() {
         use view::vault::psbt::SigningKeyState;
 
@@ -4980,7 +4792,7 @@ mod tests {
             assert_eq!(records[0].signature.last(), Some(&0x21));
             // Verified by the same verifier the status reads.
             assert_eq!(
-                replay::replay_status(&signed, &secp256k1::Secp256k1::verification_only(), None),
+                replay::replay_status(&signed, &secp256k1::Secp256k1::verification_only()),
                 ReplayStatus::Unknown(UnknownReason::Incomplete)
             );
         }
@@ -6210,184 +6022,6 @@ mod tests {
             messages.iter().any(|m| {
                 matches!(m, Message::View(view::Message::ShowError(text)) if text.contains(needle))
             })
-        }
-
-        #[tokio::test]
-        async fn claim_picker_requires_a_fresh_permit_for_every_signer_and_never_submits() {
-            let f = fixture();
-            let wallet = wallet_with_hot_signer(&f);
-            let tx = SpendTx::new(
-                None,
-                f.psbt.clone(),
-                Vec::new(),
-                &f.descriptor,
-                &secp256k1::Secp256k1::new(),
-                Network::Bitcoin,
-            );
-            let mut state = PsbtState::new(wallet.clone(), tx, false);
-            assert!(state.consume_claim_signing_permit()); // ordinary picker is unaffected
-            assert!(state.require_claim_signing_checks());
-            let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
-                crate::daemon::client::Coincubed::new(MockDaemon::new(vec![]).run()),
-            );
-            let fingerprint = wallet.signer.as_ref().unwrap().fingerprint();
-            let requests = vec![
-                Message::View(view::Message::ExportPsbt),
-                Message::View(view::Message::ImportPsbt),
-                Message::Export(ImportExportMessage::Progress(Progress::Psbt(
-                    f.psbt.clone(),
-                ))),
-                Message::View(view::Message::SelectHardwareWallet(0)),
-                Message::View(view::Message::Spend(
-                    view::SpendTxMessage::SelectMasterSigner,
-                )),
-                Message::View(view::Message::Spend(
-                    view::SpendTxMessage::SelectKeychainSigner(fingerprint),
-                )),
-                Message::View(view::Message::Spend(
-                    view::SpendTxMessage::RequestFromEveryone,
-                )),
-                Message::View(view::Message::Spend(
-                    view::SpendTxMessage::RetryKeychainSigner(0),
-                )),
-                Message::View(view::Message::Spend(
-                    view::SpendTxMessage::BorderWalletRecon(BorderWalletReconMessage::Next),
-                )),
-            ];
-            for request in requests {
-                assert!(claim_signing_dispatch(&request));
-                let out = drive(state.update(daemon.clone(), &Cache::default(), request)).await;
-                assert!(shows_error(&out, "Check both chains again"));
-            }
-            for intent in [
-                view::SpendTxMessage::Broadcast,
-                view::SpendTxMessage::Confirm,
-                view::SpendTxMessage::Save,
-                view::SpendTxMessage::Delete,
-            ] {
-                let out = drive(state.update(
-                    daemon.clone(),
-                    &Cache::default(),
-                    Message::View(view::Message::Spend(intent)),
-                ))
-                .await;
-                assert!(shows_error(&out, "Claim review"));
-            }
-            for intent in [
-                view::SpendTxMessage::Sign,
-                view::SpendTxMessage::Cancel,
-                view::SpendTxMessage::CancelKeychainSign,
-                view::SpendTxMessage::AcknowledgeReplay(true),
-            ] {
-                assert!(!claim_signing_dispatch(&Message::View(
-                    view::Message::Spend(intent)
-                )));
-            }
-            assert!(!state.broadcast_ready(&Cache::default()));
-            assert!(state.modal.is_none());
-        }
-
-        #[tokio::test]
-        async fn paired_claim_picker_consumes_exact_one_use_permit_on_both_chains() {
-            use crate::services::claim_workflow::paired_signing_permit::PairedSigningPermit;
-            use iced::futures::StreamExt;
-            use iced_runtime::{task::into_stream, Action};
-            use tokio::sync::watch;
-
-            let f = fixture();
-            let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
-                crate::daemon::client::Coincubed::new(MockDaemon::new(vec![]).run()),
-            );
-            let sign = || {
-                Message::View(view::Message::Spend(
-                    view::SpendTxMessage::SelectMasterSigner,
-                ))
-            };
-            for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
-                let mut wallet = Wallet::new(f.descriptor.clone()).with_chain(chain);
-                wallet.signer = Some(Arc::new(crate::signer::Signer::new(signer(21))));
-                let wallet = Arc::new(wallet);
-                let tx = SpendTx::new(
-                    None,
-                    f.psbt.clone(),
-                    Vec::new(),
-                    &f.descriptor,
-                    &secp256k1::Secp256k1::new(),
-                    Network::Bitcoin,
-                );
-                let mut state = PsbtState::new(wallet, tx, false);
-                assert!(state.require_paired_signing_checks());
-                state.modal = Some(PsbtModal::Sign(SignModal::new(
-                    HashSet::new(),
-                    state.wallet.clone(),
-                    CoincubeDirectory::new(PathBuf::new()),
-                    Network::Bitcoin,
-                    true,
-                    None,
-                    None,
-                    false,
-                )));
-                let (sender, receiver) = watch::channel(7);
-                let permit =
-                    PairedSigningPermit::for_test(chain, &state.tx.psbt, receiver.clone(), 7);
-                assert!(state.set_paired_signing_permit(permit));
-
-                let task = state.update(daemon.clone(), &Cache::default(), sign());
-                let mut signed = false;
-                if let Some(mut stream) = into_stream(task) {
-                    while let Some(action) = stream.next().await {
-                        if let Action::Output(Message::Signed(_, Ok(_))) = action {
-                            signed = true;
-                        }
-                    }
-                }
-                assert!(signed, "the exact {:?} permit must reach the signer", chain);
-
-                let task = state.update(daemon.clone(), &Cache::default(), sign());
-                let mut refused = false;
-                if let Some(mut stream) = into_stream(task) {
-                    while let Some(action) = stream.next().await {
-                        if let Action::Output(Message::View(view::Message::ShowError(reason))) =
-                            action
-                        {
-                            refused |= reason.contains("Check both chains again");
-                        }
-                    }
-                }
-                assert!(refused, "the {:?} permit must be one-use", chain);
-
-                let stale = PairedSigningPermit::for_test(chain, &state.tx.psbt, receiver, 7);
-                sender.send(7).unwrap();
-                assert!(!state.set_paired_signing_permit(stale));
-
-                let (_fresh_sender, fresh_receiver) = watch::channel(8);
-                let changed =
-                    PairedSigningPermit::for_test(chain, &state.tx.psbt, fresh_receiver, 8);
-                assert!(state.set_paired_signing_permit(changed));
-                state.tx.psbt.unknown.insert(
-                    coincube_core::miniscript::bitcoin::psbt::raw::Key {
-                        type_value: 0xfc,
-                        key: vec![1],
-                    },
-                    vec![2],
-                );
-                let task = state.update(daemon.clone(), &Cache::default(), sign());
-                let mut refused = false;
-                if let Some(mut stream) = into_stream(task) {
-                    while let Some(action) = stream.next().await {
-                        if let Action::Output(Message::View(view::Message::ShowError(reason))) =
-                            action
-                        {
-                            refused |= reason.contains("Check both chains again");
-                        }
-                    }
-                }
-                assert!(
-                    refused,
-                    "changed {:?} PSBT must not reach the signer",
-                    chain
-                );
-            }
         }
 
         /// Final Confirm is gated on the **current** cache (`#276` I13): a

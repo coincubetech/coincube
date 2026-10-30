@@ -263,9 +263,8 @@ pub enum UserFlow {
     /// the running one, which is why it is its own flow rather than a flag on
     /// that one.
     ///
-    /// Creates the target only. Nothing in this flow claims, poisons, sweeps or
-    /// broadcasts; `services::claim_workflow::Step2Authorization` stays
-    /// uninhabited.
+    /// Creates the copy only (Tools › Split coins → Create copy). Nothing in
+    /// this flow splits, sweeps or broadcasts.
     ClaimBlake2b {
         from_cube: Box<ClaimSource>,
     },

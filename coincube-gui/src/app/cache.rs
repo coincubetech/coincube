@@ -92,10 +92,6 @@ impl AppGeneration {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
     }
-
-    pub(crate) fn value(self) -> u64 {
-        self.0
-    }
 }
 
 /// Where an entanglement lookup was issued from: the `App` instance, and the
@@ -257,11 +253,6 @@ pub struct Cache {
     /// not about the session, and a Connect outage must not make an existing
     /// claim target look absent.
     pub btcb2_already_claimed: bool,
-    /// A local paired Claim can be resumed from this fork Vault; not authority.
-    pub btcb2_claim_resume: bool,
-    /// Display-only evidence from the open Claim panel. Never spend authority;
-    /// removed when that panel no longer has a current paired review.
-    pub split_deposit: Option<(coincube_core::miniscript::bitcoin::OutPoint, Instant)>,
     /// Other-chain transaction presence for either side of the fork,
     /// keyed by the deposit's txid: whether the same transaction exists on
     /// the twin Bitcoin chain, and when that was resolved. Only *resolved*
@@ -452,14 +443,12 @@ impl std::default::Default for Cache {
             marketplace_flags: crate::app::features::MarketplaceServerFlags::OFF,
             btcb2_server_enabled: false,
             btcb2_already_claimed: false,
-            btcb2_claim_resume: false,
             liquid_gate: crate::app::features::LiquidGate::HIDDEN,
             entangled: std::collections::HashMap::new(),
             chain_proofs: std::collections::HashMap::new(),
             split_records: Vec::new(),
             splitting: std::collections::HashMap::new(),
             separated: std::collections::HashSet::new(),
-            split_deposit: None,
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
             balance_privacy: None,
             cube_switcher_open: false,

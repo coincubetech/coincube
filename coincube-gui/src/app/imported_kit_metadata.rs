@@ -161,7 +161,7 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
-            let (cube, _, _) = crate::imported_claim::tests::fixture();
+            let cube = crate::services::bitcoin_import::pairing::tests::imported_cube();
             let wallet = cube
                 .bitcoin_import
                 .as_ref()
