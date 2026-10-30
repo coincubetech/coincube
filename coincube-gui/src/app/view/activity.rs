@@ -2277,7 +2277,8 @@ mod tests {
     };
     use crate::chain::ChainId;
 
-    /// Activity fills the shell's content area below the 56px top bar.
+    /// Activity fills the shell's content area below the top bar and its
+    /// 1px rule.
     fn mount<M: 'static>(
         scenario: &str,
         content: Element<'_, M>,
@@ -2292,7 +2293,10 @@ mod tests {
             outer,
             appearance,
             theme,
-            (width, outer.1 - 56),
+            (
+                width,
+                outer.1 - crate::app::view::nav::shell::TOP_BAR_HEIGHT as u32 - 1,
+            ),
         )
     }
 

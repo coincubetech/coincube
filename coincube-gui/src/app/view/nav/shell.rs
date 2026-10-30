@@ -118,6 +118,19 @@ fn muted<'a>(label: impl Into<String>, size: u32) -> Text<'a> {
         })
 }
 
+/// `theme::container::shell_chip`'s pill radius.
+const CHIP_RADIUS: f32 = 16.0;
+
+/// A chip's press target: the shell's hover fill, kept inside the pill.
+fn chip_button(
+    theme: &theme::Theme,
+    status: iced::widget::button::Status,
+) -> iced::widget::button::Style {
+    let mut style = theme::button::shell_nav(theme, status);
+    style.border.radius = CHIP_RADIUS.into();
+    style
+}
+
 fn status<'a>(label: impl Into<String>, good: bool) -> Text<'a> {
     text(label.into())
         .size(13)
@@ -198,7 +211,8 @@ pub fn top_bar_with_privacy<'a>(
                 Message::FocusAction,
             )
             .padding([6, 11])
-            .style(theme::button::shell_nav)
+            .style(chip_button)
+            .focus_radius(CHIP_RADIUS)
             .on_press(Message::OpenConnectSignIn),
         )
         .style(theme::container::shell_chip)
@@ -211,7 +225,8 @@ pub fn top_bar_with_privacy<'a>(
                 Message::FocusAction,
             )
             .padding([6, 11])
-            .style(theme::button::shell_nav)
+            .style(chip_button)
+            .focus_radius(CHIP_RADIUS)
             .on_press(Message::OpenConnectSignIn),
         )
         .style(theme::container::shell_chip)
@@ -250,7 +265,8 @@ pub fn top_bar_with_privacy<'a>(
             Message::FocusAction,
         )
         .padding([6, 11])
-        .style(theme::button::shell_nav)
+        .style(chip_button)
+        .focus_radius(CHIP_RADIUS)
         .on_press(Message::Menu(route)),
     )
     .style(theme::container::shell_chip);

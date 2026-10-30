@@ -751,6 +751,87 @@ mod tests {
         assert_eq!(released, vec![Message::Brand]);
     }
 
+    /// `.brand:hover` tints the whole mark. The pointer rests on the word, so
+    /// the cube's own SVG hover is idle: only the button's hover can tint it.
+    #[test]
+    fn hovering_the_brand_word_tints_the_cube_too() {
+        let theme = Theme::dark();
+        let accent = theme.colors.shell.accent_ink;
+        // Warm pixels (red well above blue) are the accent; the ink is grey.
+        assert!(accent.r - accent.b > 0.3, "{accent:?}");
+        let warm_cube_pixels = |hovered: bool| -> usize {
+            let mut renderer = renderer();
+            let size = Size::new(120.0, 40.0);
+            let mut element: Element<'static, Message> =
+                Container::new(brand_action("brand", Message::Focus, Message::Brand))
+                    .padding(10)
+                    .into();
+            let mut tree = Tree::new(element.as_widget());
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, size),
+            );
+            // The cube is the 20px square at the padding; the word follows
+            // after an 8px gap.
+            let cursor = if hovered {
+                mouse::Cursor::Available(iced::Point::new(60.0, 20.0))
+            } else {
+                mouse::Cursor::Unavailable
+            };
+            let viewport = Rectangle::with_size(size);
+            for event in [
+                Event::Mouse(mouse::Event::CursorMoved {
+                    position: iced::Point::new(60.0, 20.0),
+                }),
+                Event::Window(iced::window::Event::RedrawRequested(
+                    std::time::Instant::now(),
+                )),
+            ] {
+                element.as_widget_mut().update(
+                    &mut tree,
+                    &event,
+                    Layout::new(&node),
+                    cursor,
+                    &renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut Shell::new(&mut Vec::new()),
+                    &viewport,
+                );
+            }
+            element.as_widget().draw(
+                &tree,
+                &mut renderer,
+                &theme,
+                &renderer::Style {
+                    text_color: theme.colors.shell.ink,
+                },
+                Layout::new(&node),
+                cursor,
+                &viewport,
+            );
+            let pixels = iced::advanced::renderer::Headless::screenshot(
+                &mut renderer,
+                Size::new(120, 40),
+                1.0,
+                theme.colors.shell.rail,
+            );
+            let mut warm = 0;
+            for y in 10..30 {
+                for x in 10..30 {
+                    let at = (y * 120 + x) * 4;
+                    let (r, b) = (i32::from(pixels[at]), i32::from(pixels[at + 2]));
+                    if r - b > 60 {
+                        warm += 1;
+                    }
+                }
+            }
+            warm
+        };
+        assert_eq!(warm_cube_pixels(false), 0);
+        assert!(warm_cube_pixels(true) > 10);
+    }
+
     #[test]
     fn an_icon_control_without_an_intent_leaves_the_tab_order_but_keeps_its_label() {
         let renderer = renderer();

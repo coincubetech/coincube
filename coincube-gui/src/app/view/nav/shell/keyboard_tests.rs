@@ -494,8 +494,9 @@ fn signed_in_connect_chip_opens_account_sheet_intent() {
 
 /// The connection chip is the third control (after the brand and the account
 /// chip) in every state, under one id. A rejected device's only fix is the
-/// Re-register button on Cube Settings → About, so that state routes there;
-/// every other state opens the Vault's Node settings.
+/// Re-register button on Cube Settings → About, so that state routes there.
+/// Every other state opens Node settings where the Cube has the Vault scope
+/// (a Vault or an imported Bitcoin wallet), else Settings' first tab.
 #[test]
 fn connection_chip_routes_to_reregistration_or_node_settings() {
     load_fonts();
@@ -507,13 +508,16 @@ fn connection_chip_routes_to_reregistration_or_node_settings() {
     .unwrap();
     static REJECTED: ConnectionStatus = ConnectionStatus::DeviceRejected;
     static CONNECTING: ConnectionStatus = ConnectionStatus::Connecting;
+    static CONNECTED: ConnectionStatus = ConnectionStatus::Connected;
     let size = Size::new(1024.0, 768.0);
     // Focus after brand and account chip: the third shell control.
-    let third_focus = |status: &'static ConnectionStatus| {
+    let third_focus = |status: &'static ConnectionStatus, has_vault, has_imported_bitcoin| {
         let mut ctx = fixture_context();
         ctx.connect_authenticated = true;
         ctx.connect_email = Some("shell@example.invalid");
         ctx.connect_stream_status = status;
+        ctx.has_vault = has_vault;
+        ctx.has_imported_bitcoin = has_imported_bitcoin;
         let mut element = shell_tree(&ctx, ShellState::default());
         let mut tree = Tree::new(element.as_widget());
         let node = element.as_widget_mut().layout(
@@ -549,25 +553,31 @@ fn connection_chip_routes_to_reregistration_or_node_settings() {
         (focused, sent)
     };
 
-    let (focused, sent) = third_focus(&REJECTED);
-    assert_eq!(focused, Some(Id::new(CONNECTION_ID)));
-    assert!(matches!(
-        sent.as_slice(),
-        [Message::Menu(to)] if to == &DEVICE_REJECTED_ROUTE
-    ));
     assert_eq!(
         DEVICE_REJECTED_ROUTE,
         Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::About))
     );
-
-    let (focused, sent) = third_focus(&CONNECTING);
-    assert_eq!(focused, Some(Id::new(CONNECTION_ID)));
-    assert!(matches!(
-        sent.as_slice(),
-        [Message::Menu(Menu::Vault(VaultSubMenu::Settings(Some(
-            SettingsOption::Node
-        ))))]
-    ));
+    let node = Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::Node)));
+    let first_tab = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::General));
+    for (status, has_vault, has_imported_bitcoin, to) in [
+        (&REJECTED, true, false, &DEVICE_REJECTED_ROUTE),
+        (&REJECTED, false, false, &DEVICE_REJECTED_ROUTE),
+        (&CONNECTING, true, false, &node),
+        (&CONNECTED, true, false, &node),
+        (&CONNECTED, false, true, &node),
+        (&CONNECTED, false, false, &first_tab),
+    ] {
+        let (focused, sent) = third_focus(status, has_vault, has_imported_bitcoin);
+        assert_eq!(focused, Some(Id::new(CONNECTION_ID)));
+        assert!(
+            matches!(sent.as_slice(), [Message::Menu(menu)] if menu == to),
+            "{:?} vault={} imported={}: {:?}",
+            status,
+            has_vault,
+            has_imported_bitcoin,
+            sent
+        );
+    }
 }
 
 /// The chip keeps one id, so a status change while it has focus keeps focus
@@ -619,32 +629,18 @@ fn connection_chip_keeps_focus_across_a_status_change() {
 fn connection_route_prefers_node_settings_and_keeps_the_rejected_device_fix() {
     let node = Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::Node)));
     let first_tab = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::General));
-    let route = |status: &ConnectionStatus, has_vault, has_imported_bitcoin| {
-        let mut ctx = fixture_context();
-        ctx.has_vault = has_vault;
-        ctx.has_imported_bitcoin = has_imported_bitcoin;
-        connection_route(status, ctx.has_vault || ctx.has_imported_bitcoin)
-    };
     for status in [
         ConnectionStatus::Connected,
         ConnectionStatus::Connecting,
         ConnectionStatus::Error("socket closed".to_string()),
         ConnectionStatus::Inactive,
     ] {
-        // A Vault.
-        assert_eq!(route(&status, true, false), node, "{status:?}");
-        // An imported Bitcoin wallet takes the Vault scope and its Node tab.
-        assert_eq!(route(&status, false, true), node, "{status:?}");
-        // Neither: Settings' first tab.
-        assert_eq!(route(&status, false, false), first_tab, "{status:?}");
+        assert_eq!(connection_route(&status, true), node, "{status:?}");
+        assert_eq!(connection_route(&status, false), first_tab, "{status:?}");
     }
-    for (has_vault, has_imported_bitcoin) in [(true, false), (false, true), (false, false)] {
+    for has_vault_scope in [true, false] {
         assert_eq!(
-            route(
-                &ConnectionStatus::DeviceRejected,
-                has_vault,
-                has_imported_bitcoin
-            ),
+            connection_route(&ConnectionStatus::DeviceRejected, has_vault_scope),
             DEVICE_REJECTED_ROUTE
         );
     }

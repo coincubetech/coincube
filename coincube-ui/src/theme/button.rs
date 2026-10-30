@@ -196,22 +196,6 @@ fn shell_nav_with_state(theme: &Theme, status: Status, selected: bool) -> Style 
     }
 }
 
-pub fn shell_brand(theme: &Theme, status: Status) -> Style {
-    Style {
-        background: Some(Background::Color(Color::TRANSPARENT)),
-        text_color: if matches!(status, Status::Hovered | Status::Pressed) {
-            theme.colors.shell.accent_ink
-        } else {
-            theme.colors.shell.ink
-        },
-        border: Border {
-            radius: 6.0.into(),
-            ..Default::default()
-        },
-        ..Default::default()
-    }
-}
-
 /// Inactive primary-rail item. Square corners, no border, transparent
 /// background with the standard menu text color — hover darkens the
 /// background to the content-area tone to give click feedback.
