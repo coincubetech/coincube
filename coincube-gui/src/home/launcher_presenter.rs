@@ -2518,7 +2518,9 @@ pub(crate) fn opening_wash<'a, M: 'a>(network: ChainId, alpha: f32) -> Element<'
     )
 }
 
-/// The quiet Opening rail: Tenshu, "Opening <name>", the network.
+/// The widest the Opening rail's "Opening <name>" may grow before it wraps.
+const OPENING_RAIL_NAME: f32 = 560.0;
+
 /// `.top.quiet` while a Cube opens: the shared bar, at rest, with the Cube's
 /// name after the brand. Nothing on it is a control until the Cube is open.
 fn opening_rail<'a, M: 'a>(scene: &OpeningScene) -> Element<'a, M> {
@@ -2526,7 +2528,15 @@ fn opening_rail<'a, M: 'a>(scene: &OpeningScene) -> Element<'a, M> {
         top_bar::brand_mark(true),
         top_bar::resting_icon(top_bar::SLIDERS, top_bar::APP_PREFERENCES),
     )
-    .lead(tenshu::body(format!("Opening {}", scene.cube_name)).wrapping(Wrapping::WordOrGlyph))
+    // Capped, so a long name wraps inside the bar instead of pushing the
+    // network and the glyph out of it. Not Fill: the bar's spacer would
+    // split the row with it and strand the network mid-bar.
+    .lead(
+        Container::new(
+            tenshu::body(format!("Opening {}", scene.cube_name)).wrapping(Wrapping::WordOrGlyph),
+        )
+        .max_width(OPENING_RAIL_NAME),
+    )
     .lead(tenshu::caption(scene.network.label()))
     .into()
 }

@@ -2190,6 +2190,9 @@ pub(crate) async fn persist_duress_enrollment(
         // its job. Cleared in the same write that sets `enrolled`, so the two
         // can never disagree.
         st.arming = false;
+        // A pending "migration turned duress off" notice is false from here
+        // on: the user has just turned it back on.
+        st.migration_disarm_notice = false;
         st.account_id = account_id;
         if !duress_code.is_empty() {
             let key = crate::services::duress::cipher::DeviceKey::load_or_create(&root)
@@ -18142,6 +18145,40 @@ mod duress_chain_identity_tests {
         assert_eq!(
             DuressLocalState::load(&root).unwrap(),
             DuressLocalState::default()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A seed-file upgrade that turned duress off leaves a notice for the next
+    /// unlock. Enrolling again before it is shown makes it false: it must go
+    /// in the same write that records the enrolment.
+    #[test]
+    fn enrolling_again_clears_a_pending_duress_off_notice() {
+        let root = temp_root("re-enrol");
+        let mut bitcoin =
+            CubeSettings::new_with_raw_id("btc".to_string(), "btc".to_string(), ChainId::Bitcoin);
+        bitcoin.created_at = 1_700_000_000;
+        write_settings(&root, "bitcoin", vec![bitcoin]);
+        DuressLocalState {
+            migration_disarm_notice: true,
+            ..DuressLocalState::default()
+        }
+        .save(&root)
+        .unwrap();
+
+        block_on(persist_duress_enrollment(
+            CoincubeDirectory::new(root.clone()),
+            zeroize::Zeroizing::new("4321".to_string()),
+            zeroize::Zeroizing::new("code".to_string()),
+            None,
+        ))
+        .expect("enrolment succeeds");
+
+        let st = DuressLocalState::load(&root).unwrap();
+        assert!(st.enrolled);
+        assert!(
+            !st.migration_disarm_notice,
+            "a re-enrolled device would be told its duress PIN no longer works"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
