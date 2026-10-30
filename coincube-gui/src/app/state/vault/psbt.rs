@@ -299,26 +299,49 @@ impl PsbtState {
     /// transaction whatever its signatures, so the review shows it as split
     /// rather than blocking it.
     pub fn with_split_key(mut self, cache: &Cache) -> Self {
+        let key = self.split_key_input(cache);
         if let Some(review) = self.replay.take() {
-            let key = self
-                .tx
-                .psbt
-                .unsigned_tx
-                .input
-                .iter()
-                .enumerate()
-                .find(|(_, input)| {
-                    let outpoint = input.previous_output;
-                    matches!(
-                        cache.chain_proofs.get(&outpoint),
-                        Some(crate::services::chain_status::ProofEntry::Verified(_))
-                    ) && cache.entanglement_of(&outpoint.txid)
-                        != crate::services::entangled::Entanglement::Entangled
-                })
-                .map(|(index, input)| (index, input.previous_output));
             self.replay = Some(review.with_split_key(key));
         }
         self
+    }
+
+    /// The input that spends a split key according to `cache` now: a coin
+    /// with a path verified by a check in this session, not seen on the twin
+    /// chain.
+    fn split_key_input(
+        &self,
+        cache: &Cache,
+    ) -> Option<(usize, coincube_core::miniscript::bitcoin::OutPoint)> {
+        self.tx
+            .psbt
+            .unsigned_tx
+            .input
+            .iter()
+            .enumerate()
+            .find(|(_, input)| {
+                let outpoint = input.previous_output;
+                matches!(
+                    cache.chain_proofs.get(&outpoint),
+                    Some(crate::services::chain_status::ProofEntry::Verified(_))
+                ) && cache.entanglement_of(&outpoint.txid)
+                    != crate::services::entangled::Entanglement::Entangled
+            })
+            .map(|(index, input)| (index, input.previous_output))
+    }
+
+    /// The replay review as of `cache` now. The split key it was opened with
+    /// counts only while the cache still holds it as one: a reorg, a twin
+    /// sighting or a reload that drops its proof takes the *Split* status
+    /// away, so the entangled-coin block applies again.
+    pub fn current_review(&self, cache: &Cache) -> Option<std::borrow::Cow<'_, ReplayReview>> {
+        let review = self.replay.as_ref()?;
+        let key = self.split_key_input(cache);
+        Some(if review.split_key() == key {
+            std::borrow::Cow::Borrowed(review)
+        } else {
+            std::borrow::Cow::Owned(review.clone().with_split_key(key))
+        })
     }
 
     pub(crate) fn action_scope(&self) -> u64 {
@@ -371,7 +394,7 @@ impl PsbtState {
     /// which the app caches and routes back here. A *Protected* spend checks
     /// nothing — no answer could change it.
     fn revalidate_entanglement(&mut self, cache: &Cache) -> Task<Message> {
-        let Some(review) = &self.replay else {
+        let Some(review) = self.current_review(cache).map(std::borrow::Cow::into_owned) else {
             return Task::none();
         };
         if !review.status().needs_acknowledgement() {
@@ -492,13 +515,13 @@ impl PsbtState {
 
     /// Why this spend is not ready for a broadcast attempt.
     fn not_ready_reason(&self, cache: &Cache) -> Option<String> {
-        let Some(review) = self.replay.as_ref() else {
+        let Some(review) = self.current_review(cache) else {
             return (!self.bitcoin_signatures_complete()).then(||
                 "This transaction needs valid signatures for every input before it can be broadcast.".to_string()
             );
         };
         Some(replay::not_ready_reason(
-            review,
+            &review,
             &self.entangled_inputs(cache),
             self.entangled_check.in_flight(),
         ))
@@ -571,7 +594,7 @@ impl PsbtState {
         }
         replay::broadcast_ready(
             self.bitcoin_signatures_complete(),
-            self.replay.as_ref(),
+            self.current_review(cache).as_deref(),
             &self.entangled_inputs(cache),
         ) && !self.entangled_check.in_flight()
     }
@@ -1293,8 +1316,7 @@ impl PsbtState {
     /// spend an entangled (or unchecked) deposit, resolved from the cache at
     /// render time. `None` on a Bitcoin-family Cube.
     pub fn replay_presentation(&self, cache: &Cache) -> Option<view::vault::psbt::ReplayPill<'_>> {
-        self.replay
-            .as_ref()
+        self.current_review(cache)
             .map(|review| view::vault::psbt::ReplayPill {
                 review,
                 entangled: self.entangled_inputs(cache),
@@ -5584,6 +5606,47 @@ mod tests {
             let _ = state.reconcile_and_maybe_close(&Cache::default());
             assert!(!state.replay.as_ref().unwrap().acknowledged());
             assert!(!state.broadcast_ready(&Cache::default()));
+        }
+
+        /// A split key marked when the PSBT opened counts only while the
+        /// cache still holds its proof. Once the proof is gone (a reorg, a
+        /// reload, a twin sighting) the spend is replayable again and the
+        /// entangled-coin rules apply, at render and at broadcast.
+        #[test]
+        fn a_split_key_without_a_current_proof_is_not_split() {
+            let f = fixture();
+            let wallet = wallet_with_hot_signer(&f);
+            let secp = secp256k1::Secp256k1::new();
+            let signed = legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]);
+            let key = (0, signed.unsigned_tx.input[0].previous_output);
+            let tx = SpendTx::new(
+                None,
+                signed,
+                Vec::new(),
+                &f.descriptor,
+                &secp,
+                Network::Bitcoin,
+            );
+            let mut state = PsbtState::new(wallet, tx, true);
+            let review = state.replay.take().unwrap().with_split_key(Some(key));
+            assert_eq!(review.status(), ReplayStatus::Split, "as opened");
+            state.replay = Some(review);
+
+            let cache = Cache::default();
+            let current = state.current_review(&cache).unwrap();
+            assert_eq!(current.split_key(), None);
+            assert_eq!(
+                current.status(),
+                ReplayStatus::Replayable { inputs: vec![0] }
+            );
+            assert!(
+                !state.broadcast_ready(&cache),
+                "no Split bypass once the key's proof is gone"
+            );
+            assert_eq!(
+                state.replay_presentation(&cache).unwrap().review.status(),
+                ReplayStatus::Replayable { inputs: vec![0] }
+            );
         }
 
         #[test]
