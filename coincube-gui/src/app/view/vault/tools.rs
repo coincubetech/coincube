@@ -25,7 +25,7 @@ fn is_tool(menu: &Menu) -> bool {
             VaultSubMenu::Coins(_)
                 | VaultSubMenu::PSBTs(_)
                 | VaultSubMenu::Recovery
-                | VaultSubMenu::Claim
+                | VaultSubMenu::SplitCoins
         )
     )
 }
@@ -122,7 +122,7 @@ mod tests {
             Menu::Vault(VaultSubMenu::Coins(None)),
             Menu::Vault(VaultSubMenu::PSBTs(None)),
             Menu::Vault(VaultSubMenu::Recovery),
-            Menu::Vault(VaultSubMenu::Claim),
+            Menu::Vault(VaultSubMenu::SplitCoins),
         ] {
             assert!(in_content_navigation(&menu, &cache).is_some(), "{:?}", menu);
         }
@@ -174,7 +174,7 @@ mod tests {
         );
         assert!(!same_tab(
             &Menu::Vault(VaultSubMenu::Recovery),
-            &Menu::Vault(VaultSubMenu::Claim)
+            &Menu::Vault(VaultSubMenu::SplitCoins)
         ));
     }
 }

@@ -136,6 +136,7 @@ struct Panels {
     // Vault-only panels - None when no vault exists
     vault_overview: Option<VaultOverview>,
     coins: Option<CoinsPanel>,
+    split_hub: Option<state::vault::split_hub::SplitHubPanel>,
     transactions: Option<VaultTransactionsPanel>,
     psbts: Option<PsbtsPanel>,
     recovery: Option<CreateSpendPanel>,
@@ -290,6 +291,7 @@ impl Panels {
             // All vault panels are None - no vault exists
             vault_overview: None,
             coins: None,
+            split_hub: None,
             transactions: None,
             psbts: None,
             recovery: None,
@@ -421,6 +423,7 @@ impl Panels {
                 CoinsPanel::new(cache.coins(), wallet.recovery_timelock(), wallet.chain)
                     .with_wallet(wallet.clone()),
             ),
+            split_hub: Some(state::vault::split_hub::SplitHubPanel::new(wallet.clone())),
             transactions: Some(VaultTransactionsPanel::new(wallet.clone())),
             psbts: wallet
                 .supports_inheritance()
@@ -570,6 +573,7 @@ impl Panels {
             CoinsPanel::new(cache.coins(), wallet.recovery_timelock(), wallet.chain)
                 .with_wallet(wallet.clone()),
         );
+        self.split_hub = Some(state::vault::split_hub::SplitHubPanel::new(wallet.clone()));
         self.transactions = Some(VaultTransactionsPanel::new(wallet.clone()));
         self.psbts = wallet
             .supports_inheritance()
@@ -716,6 +720,9 @@ impl Panels {
                 crate::app::menu::VaultSubMenu::Recovery => {
                     self.recovery.as_ref().map(|v| v as &dyn State)
                 }
+                crate::app::menu::VaultSubMenu::SplitCoins => {
+                    self.split_hub.as_ref().map(|v| v as &dyn State)
+                }
                 crate::app::menu::VaultSubMenu::Settings(_) => {
                     self.vault_settings.as_ref().map(|v| v as &dyn State)
                 }
@@ -815,6 +822,9 @@ impl Panels {
                 }
                 crate::app::menu::VaultSubMenu::Recovery => {
                     self.recovery.as_mut().map(|v| v as &mut dyn State)
+                }
+                crate::app::menu::VaultSubMenu::SplitCoins => {
+                    self.split_hub.as_mut().map(|v| v as &mut dyn State)
                 }
                 crate::app::menu::VaultSubMenu::Settings(_) => {
                     self.vault_settings.as_mut().map(|v| v as &mut dyn State)
