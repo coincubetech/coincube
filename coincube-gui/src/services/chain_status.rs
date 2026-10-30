@@ -186,8 +186,13 @@ fn chain_name(chain: ChainId) -> &'static str {
 /// One coin's ancestry check result as the cache holds it.
 #[derive(Debug, Clone)]
 pub enum ProofEntry {
-    /// A structurally re-verified path to a qualifying coinbase.
+    /// A path to a qualifying coinbase found by a check in this session.
     Verified(coincube_core::claim_ancestry::retained::RetainedPath),
+    /// A path loaded from `chain-proofs.json`. It decodes, but decoding only
+    /// proves its links fit together, not that the chain still holds them
+    /// (a reorg or a restart in between). Shown as checking and never used as
+    /// a split key until a fresh check turns it into [`Self::Verified`].
+    Saved(coincube_core::claim_ancestry::retained::RetainedPath),
     /// The bounded search found no qualifying path at `checked_at`.
     NoQualifyingAncestry { checked_at: SystemTime },
     /// The check could not finish at `failed_at`. Shown as not checked.
@@ -199,13 +204,14 @@ impl ProofEntry {
         match self {
             Self::Verified(_) => Some(ProofOutcome::Verified),
             Self::NoQualifyingAncestry { .. } => Some(ProofOutcome::NoQualifyingAncestry),
-            Self::Failed { .. } => None,
+            Self::Saved(_) | Self::Failed { .. } => None,
         }
     }
 
     fn retry_due(&self, now: SystemTime) -> bool {
         let (at, after) = match self {
             Self::Verified(_) => return false,
+            Self::Saved(_) => return true,
             Self::NoQualifyingAncestry { checked_at } => (*checked_at, NO_PATH_RETRY),
             Self::Failed { failed_at } => (*failed_at, FAILED_RETRY),
         };

@@ -3,8 +3,10 @@
 //!
 //! Only display state lives here. Each verified path is decoded against the
 //! outpoint it is filed under and structurally re-verified on load; a record
-//! that fails either check is dropped, never trusted. A failed check is not
-//! kept, so a restart retries it.
+//! that fails either check is dropped. One that passes loads as
+//! [`ProofEntry::Saved`], not verified: decoding proves the links fit, not
+//! that the chain still holds them, so it waits for a fresh check. A failed
+//! check is not kept, so a restart retries it.
 
 use std::{
     collections::HashMap,
@@ -89,7 +91,7 @@ pub fn load(data_dir: &Path) -> HashMap<OutPoint, ProofEntry> {
             .and_then(|bytes| RetainedPath::decode(entry.outpoint, &bytes).ok());
         match decoded {
             Some(path) => {
-                proofs.insert(entry.outpoint, ProofEntry::Verified(path));
+                proofs.insert(entry.outpoint, ProofEntry::Saved(path));
             }
             None => tracing::warn!("dropping an invalid ancestry record for {}", entry.outpoint),
         }
@@ -110,10 +112,12 @@ pub fn save(
     };
     for (outpoint, entry) in proofs.iter().filter(|(outpoint, _)| keep(outpoint)) {
         match entry {
-            ProofEntry::Verified(path) => record.verified.push(VerifiedRecord {
-                outpoint: *outpoint,
-                path: hex::encode(path.encode()),
-            }),
+            ProofEntry::Verified(path) | ProofEntry::Saved(path) => {
+                record.verified.push(VerifiedRecord {
+                    outpoint: *outpoint,
+                    path: hex::encode(path.encode()),
+                })
+            }
             ProofEntry::NoQualifyingAncestry { checked_at } => record.no_path.push(NoPathRecord {
                 outpoint: *outpoint,
                 checked_at: checked_at
@@ -241,9 +245,12 @@ mod tests {
         save(&dir, &proofs, |_| true).unwrap();
         let loaded = load(&dir);
         assert_eq!(loaded.len(), 2, "failed checks are not kept");
+        let saved = loaded.get(&selected).expect("the path is kept");
         assert!(
-            matches!(loaded.get(&selected), Some(ProofEntry::Verified(p)) if p.selected() == selected)
+            matches!(saved, ProofEntry::Saved(p) if p.selected() == selected),
+            "a loaded path is never verified until a fresh check"
         );
+        assert_eq!(saved.outcome(), None, "shown as checking");
         assert!(matches!(
             loaded.get(&other),
             Some(ProofEntry::NoQualifyingAncestry { checked_at: at }) if *at == checked_at
@@ -254,6 +261,28 @@ mod tests {
             let mode = std::fs::metadata(path(&dir)).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_saved_path_is_checked_again_and_saved_again() {
+        let dir = temp_dir();
+        let (selected, retained) = verified_path();
+        let mut proofs = HashMap::new();
+        proofs.insert(selected, ProofEntry::Saved(retained));
+        let candidates = crate::services::chain_status::proof_candidates(
+            vec![selected],
+            |_| crate::services::entangled::Entanglement::NotEntangled,
+            &proofs,
+            &std::collections::HashSet::new(),
+            SystemTime::now(),
+        );
+        assert_eq!(candidates, vec![selected], "due for a fresh check at once");
+        save(&dir, &proofs, |_| true).unwrap();
+        assert!(matches!(
+            load(&dir).get(&selected),
+            Some(ProofEntry::Saved(_))
+        ));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
