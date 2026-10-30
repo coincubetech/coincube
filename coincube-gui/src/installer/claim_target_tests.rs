@@ -520,62 +520,6 @@ fn an_existing_target_is_found_by_descriptor_on_the_fork_chain_only() {
     let _ = std::fs::remove_dir_all(root.path());
 }
 
-/// Every path that opens a Cube consumes an armed intent, and every path that
-/// ends a session drops it. Both are asserted against the *production*
-/// functions rather than against `claim_intent` alone: the module's guarantee
-/// is only as wide as its call sites, and one of them was missing.
-#[test]
-fn an_armed_intent_does_not_survive_an_unrelated_open_or_a_revoked_session() {
-    let _guard = crate::app::session::test_guard();
-
-    // A walletless Cube open, driven through the production function rather
-    // than through `claim_intent` directly — the guarantee is only as wide as
-    // its call sites, and this one was missing. The take is the first line of
-    // `new_without_wallet`, ahead of every other branch, so a Cube this build
-    // refuses still consumes: that is the point, since a refused open is still
-    // an open the user performed.
-    crate::app::claim_intent::arm("cube-a");
-    let refused = crate::app::App::new_without_wallet(
-        std::sync::Arc::new(crate::app::breez_liquid::BreezClient::disconnected(
-            Network::Bitcoin,
-        )),
-        None,
-        crate::app::Config {
-            log_level: None,
-            debug: None,
-            start_internal_bitcoind: false,
-        },
-        temp_root("walletless"),
-        Network::Bitcoin,
-        crate::app::settings::CubeSettings::new_with_raw_id(
-            "walletless-cube-b".to_string(),
-            "Walletless".to_string(),
-            ChainId::BitcoinBlake2b,
-        ),
-    );
-    assert!(
-        refused.is_err(),
-        "this build refuses a walletless fork Cube"
-    );
-    assert!(
-        !crate::app::claim_intent::take("cube-a"),
-        "an intent must not survive the open of another Cube"
-    );
-
-    // The per-Cube revocation path (`invalidate_fork_session` → `close_cube`).
-    crate::app::claim_intent::arm("cube-a");
-    crate::app::session::close_cube("some-other-cube");
-    assert!(
-        !crate::app::claim_intent::take("cube-a"),
-        "a revoked session must not leave a claim intent armed"
-    );
-
-    // And a lock / duress close.
-    crate::app::claim_intent::arm("cube-a");
-    crate::app::session::close();
-    assert!(!crate::app::claim_intent::take("cube-a"));
-}
-
 /// **The end-to-end producer path.** Every other test here asserts a piece;
 /// this one runs the install the user's press actually triggers, then the exit
 /// seam that mints the Cube, and checks the two ends agree.
@@ -1351,29 +1295,6 @@ async fn an_install_interrupted_between_the_wallet_and_the_cube_stays_retryable(
          the user can open"
     );
 
-    // Home is the other consumer and it answers from its own refresh. Driven
-    // through `Home::update` into the state a real listing produces; the
-    // account gate in front of the refresh is an optimisation, so the refresh
-    // is called directly rather than faked through a Connect session.
-    let mut source_cube = source.cube.clone();
-    source_cube.vault_wallet_id = Some(WalletId::new(checksum.clone(), Some(1)));
-    let (mut home, _) = crate::home::Home::new(root.clone(), Some(Network::Bitcoin));
-    let _ = home.update(crate::home::Message::Checked {
-        for_chain: ChainId::Bitcoin,
-        res: Ok(crate::home::State::Cubes {
-            cubes: vec![source_cube],
-            create_cube: false,
-            source: ChainId::Bitcoin,
-        }),
-    });
-    home.refresh_claim_targets();
-    assert!(
-        !home
-            .claim_source_cube(0)
-            .expect("the source Cube is in Home's list")
-            .already_claimed,
-        "Home must offer the claim too — a wallet with no Cube is not a claim"
-    );
     assert!(
         crate::app::features::claim_blake2b(crate::app::features::ClaimSourceCube {
             chain: ChainId::Bitcoin,
@@ -1417,18 +1338,6 @@ async fn an_install_interrupted_between_the_wallet_and_the_cube_stays_retryable(
     assert!(
         crate::app::claim_target_exists(&root, &checksum),
         "and only now is the source Cube claimed"
-    );
-
-    // Home asks the same question its own way. It read `settings.wallets`
-    // while the App read `settings.cubes`, so the two disagreed across exactly
-    // this window — Home hiding the card for a target that did not exist. They
-    // now share one definition, and this drives Home's refresh, not the App's.
-    home.refresh_claim_targets();
-    assert!(
-        home.claim_source_cube(0)
-            .expect("the source Cube is in Home's list")
-            .already_claimed,
-        "Home must see the completed claim"
     );
 
     // Finish where the user would: the Cube reloaded from disk, and the seed
@@ -1645,35 +1554,47 @@ async fn cancelling_a_claim_restores_the_vault_the_source_cube_points_at() {
     let _ = std::fs::remove_dir_all(root.path());
 }
 
-/// Successful target setup returns to the Bitcoin source for step one.
-/// Its existing unlocked session stays scoped to that source; the fork is
-/// not unlocked or given signing authority by completing setup.
+async fn tab_outputs(task: iced::Task<crate::gui::tab::Message>) -> Vec<crate::gui::tab::Message> {
+    use iced_runtime::futures::futures::StreamExt;
+    match iced_runtime::task::into_stream(task) {
+        Some(stream) => {
+            stream
+                .filter_map(|action| async move {
+                    match action {
+                        iced_runtime::Action::Output(msg) => Some(msg),
+                        _ => None,
+                    }
+                })
+                .collect()
+                .await
+        }
+        None => Vec::new(),
+    }
+}
+
+/// "Create copy" (Tools › Split coins) runs this installer in a tab the
+/// source App's pane owns. Saving the copy hands control back to the pane
+/// for that source App (which closes this tab and returns to Tools › Split
+/// coins); nothing is unlocked here, the source is not reopened in this tab
+/// and no Claim step follows. The copy opens later from the Launcher.
 #[tokio::test]
-async fn completing_claim_setup_returns_to_the_source_session_for_step_one() {
+async fn completing_copy_setup_returns_to_the_source_without_a_claim_handoff() {
     let _guard = crate::app::session::test_guard();
     let server = MockServer::start_async().await;
     let (source, source_fingerprint) = source("Savings");
     let source_id = source.cube_id().to_string();
-    let root = temp_root("session-handoff");
-    let source_dir = root.network_directory(ChainId::Bitcoin);
-    source_dir.init().unwrap();
-    crate::app::Config::new(false)
-        .to_file(
-            &source_dir
-                .path()
-                .join(crate::app::config::DEFAULT_FILE_NAME),
-        )
-        .unwrap();
-
-    // The unlocked signer a live source Cube holds.
+    let root = temp_root("copy-handoff");
+    for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+        let dir = root.network_directory(chain);
+        dir.init().unwrap();
+        crate::app::Config::new(false)
+            .to_file(&dir.path().join(crate::app::config::DEFAULT_FILE_NAME))
+            .unwrap();
+    }
     crate::app::session::store_unlocked_signer(
         &source_id,
         source_fingerprint,
         coincube_core::signer::MasterSigner::generate(Network::Bitcoin).unwrap(),
-    );
-    assert!(
-        crate::app::session::unlocked_signer(&source_id, source_fingerprint).is_some(),
-        "the source Cube is unlocked before the claim completes"
     );
 
     let (installer, _) = Installer::try_new_for_chain(
@@ -1697,29 +1618,83 @@ async fn completing_claim_setup_returns_to_the_source_session_for_step_one() {
         "Savings · BTCB2".to_string(),
         ChainId::BitcoinBlake2b,
     );
+    let owner = crate::app::cache::AppGeneration::next();
     let mut tab =
         crate::gui::tab::Tab::new(0, crate::gui::tab::State::Installer(Box::new(installer)));
-    let _ = tab.update(crate::gui::tab::Message::Install(Message::CubeSaved(
-        Ok((target, None, None)),
-        None,
-        None,
-    )));
-
+    tab.set_copy_owner(owner);
+    assert_eq!(tab.copy_owner(), Some(owner));
+    let messages = tab_outputs(
+        tab.update(crate::gui::tab::Message::Install(Message::CubeSaved(
+            Ok((target.clone(), None, None)),
+            None,
+            None,
+        ))),
+    )
+    .await;
     assert!(
-        matches!(tab.state, crate::gui::tab::State::Loader(_)),
-        "target setup returns to the source's Vault loader"
+        messages.iter().any(|m| matches!(
+            m,
+            crate::gui::tab::Message::CopyInstallFinished { owner: o, created: true } if *o == owner
+        )),
+        "the pane is told the copy exists, for the exact source App"
     );
+    assert!(
+        matches!(tab.state, crate::gui::tab::State::Installer(_)),
+        "nothing is unlocked or loaded in this tab"
+    );
+    assert_eq!(tab.copy_owner(), None, "the save ends the ownership");
     assert!(
         crate::app::session::unlocked_signer(&source_id, source_fingerprint).is_some(),
-        "the source remains open for the Bitcoin split; the fork is not unlocked"
+        "the source stays unlocked in its own tab"
     );
-    assert!(crate::app::claim_intent::take(&source_id));
     crate::app::session::close();
     let _ = std::fs::remove_dir_all(root.path());
 }
 
-/// `claim_target_checksums` runs on every Home message, and the fork settings
-/// file does not exist until the first claim completes.
+/// Backing out of an owned copy installer hands control back to the pane,
+/// which closes this tab and focuses the source App.
+#[tokio::test]
+async fn backing_out_of_an_owned_copy_returns_to_the_pane() {
+    let _guard = crate::app::session::test_guard();
+    let server = MockServer::start_async().await;
+    let (source, _) = source("Savings");
+    let root = temp_root("copy-cancel");
+    let (installer, _) = Installer::try_new_for_chain(
+        root.clone(),
+        ChainId::BitcoinBlake2b,
+        None,
+        UserFlow::ClaimBlake2b {
+            from_cube: Box::new(source),
+        },
+        true,
+        None,
+        None,
+        None,
+        false,
+        Some(authenticated_client(&server)),
+    )
+    .unwrap();
+    let mut tab =
+        crate::gui::tab::Tab::new(0, crate::gui::tab::State::Installer(Box::new(installer)));
+    let owner = crate::app::cache::AppGeneration::next();
+    tab.set_copy_owner(owner);
+    let messages = tab_outputs(
+        tab.update(crate::gui::tab::Message::Install(Message::BackToApp(
+            Network::Bitcoin,
+        ))),
+    )
+    .await;
+    assert!(messages.iter().any(|m| matches!(
+        m,
+        crate::gui::tab::Message::CopyInstallFinished { owner: o, created: false } if *o == owner
+    )));
+    assert_eq!(tab.copy_owner(), None);
+    assert!(matches!(tab.state, crate::gui::tab::State::Installer(_)));
+    let _ = std::fs::remove_dir_all(root.path());
+}
+
+/// `claim_target_exists` runs whenever Tools › Split coins opens, and the
+/// fork settings file does not exist until the first copy is created.
 ///
 /// `Settings::from_file` treats `NotFound` as possibly-transient and sleeps
 /// between five attempts — right for a file that is supposed to exist, wrong
@@ -1739,10 +1714,10 @@ fn an_absent_fork_settings_file_answers_immediately_rather_than_retrying() {
     );
 
     let started = std::time::Instant::now();
-    let answered = crate::app::claim_target_checksums(&root);
+    let answered = crate::app::claim_target_exists(&root, "any-checksum");
     let elapsed = started.elapsed();
 
-    assert!(answered.is_empty());
+    assert!(!answered);
     assert!(
         elapsed < std::time::Duration::from_millis(100),
         "answering \"no targets\" took {:?} — the NotFound retry budget is at \

@@ -23,9 +23,9 @@
 //!   ([`blocked_entangled_inputs`]). An input whose entanglement is *Unknown*
 //!   is amber and acknowledgeable, never blocked — a lookup that has not
 //!   happened is not evidence either way.
-//! - *Split — cannot replay*: positive poison-split evidence for every input.
-//!   Minted only by fresh Claim checks, bound to the owned construction and
-//!   current session; it never substitutes for verified final signatures.
+//! - *Split — cannot replay*: the spend's inputs include a verified split key
+//!   (a coin whose ancestry exists only on this chain), so Bitcoin rejects the
+//!   whole transaction; set by [`ReplayReview::with_split_key`].
 //! - *Unknown / not yet checked*: no signatures, not enough of them, or the
 //!   verifier refused the PSBT.
 
@@ -74,8 +74,6 @@ pub enum UnknownReason {
     Refused(String),
 }
 
-pub use crate::services::claim_coordinator::fork::SplitEvidence;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplayStatus {
     Unknown(UnknownReason),
@@ -105,16 +103,11 @@ impl ReplayStatus {
 
 /// Derive the replay status of a Bitcoin Blake2b spend from its signatures.
 ///
-/// `split` is fresh, transaction-bound poison evidence. A Split result still
-/// requires successful retained-witness finalization; stale or mismatched
-/// evidence refuses the Claim review instead of opening an acknowledgement path.
-///
 /// Callers must gate on the chain: this is meaningless — and never shown —
 /// for a Bitcoin-family Cube.
 pub fn replay_status(
     psbt: &Psbt,
     secp: &secp256k1::Secp256k1<impl secp256k1::Verification>,
-    split: Option<&SplitEvidence>,
 ) -> ReplayStatus {
     let unified = match UnifiedPsbt::from_psbt(psbt.clone()) {
         Ok(unified) => unified,
@@ -137,13 +130,6 @@ pub fn replay_status(
     }
     match finalize_p2wsh_all_unified(&unified, secp) {
         Ok(finalized) => {
-            if let Some(evidence) = split {
-                return if evidence.matches(&unified) {
-                    ReplayStatus::Split
-                } else {
-                    expired_split_status()
-                };
-            }
             let inputs: Vec<usize> = finalized
                 .inputs
                 .iter()
@@ -162,12 +148,6 @@ pub fn replay_status(
         }
         Err(e) => ReplayStatus::Unknown(UnknownReason::Refused(e.to_string())),
     }
-}
-
-fn expired_split_status() -> ReplayStatus {
-    ReplayStatus::Unknown(UnknownReason::Refused(
-        "Claim checks expired or changed. Check both chains again.".to_string(),
-    ))
 }
 
 /// Why a Bitcoin Blake2b PSBT must not be handed to any signer.
@@ -319,7 +299,6 @@ pub(crate) fn counting_projection(psbt: &Psbt) -> Psbt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayReview {
     status: ReplayStatus,
-    split: Option<std::sync::Arc<SplitEvidence>>,
     /// The input that spends a split key: a coin whose verified ancestry
     /// proves it exists only on this chain, so Bitcoin rejects the whole
     /// transaction whatever its signatures. Set from the cache when the PSBT
@@ -340,35 +319,16 @@ pub struct ReplayReview {
 impl ReplayReview {
     pub fn new(psbt: &Psbt, secp: &secp256k1::Secp256k1<impl secp256k1::Verification>) -> Self {
         Self {
-            status: replay_status(psbt, secp, None),
-            split: None,
+            status: replay_status(psbt, secp),
             split_key: None,
             psbt_digest: psbt_digest(psbt),
             acknowledged_for: None,
         }
     }
 
-    pub fn with_split(
-        psbt: &Psbt,
-        secp: &secp256k1::Secp256k1<impl secp256k1::Verification>,
-        evidence: std::sync::Arc<SplitEvidence>,
-    ) -> Self {
-        Self {
-            status: replay_status(psbt, secp, Some(&evidence)),
-            split: Some(evidence),
-            split_key: None,
-            psbt_digest: psbt_digest(psbt),
-            acknowledged_for: None,
-        }
-    }
-
-    /// Signature verification may be cached; the Claim evidence's lifetime may
-    /// not. Views and dispatch gates must use this accessor on every read.
+    /// Views and dispatch gates must use this accessor on every read.
     pub fn status(&self) -> ReplayStatus {
-        if self.split.as_ref().is_some_and(|proof| !proof.is_live()) {
-            expired_split_status()
-        } else if self.split_key.is_some() && matches!(self.status, ReplayStatus::Replayable { .. })
-        {
+        if self.split_key.is_some() && matches!(self.status, ReplayStatus::Replayable { .. }) {
             // Finalisable with legacy signatures, but it spends a coin
             // Bitcoin doesn't have: Bitcoin rejects it.
             ReplayStatus::Split
@@ -398,10 +358,7 @@ impl ReplayReview {
         psbt: &Psbt,
         secp: &secp256k1::Secp256k1<impl secp256k1::Verification>,
     ) -> Self {
-        let mut next = match &self.split {
-            Some(evidence) => Self::with_split(psbt, secp, evidence.clone()),
-            None => Self::new(psbt, secp),
-        };
+        let mut next = Self::new(psbt, secp);
         // The same transaction spends the same key; only signatures change.
         next.split_key = self.split_key.filter(|(index, outpoint)| {
             psbt.unsigned_tx
@@ -650,7 +607,7 @@ mod tests {
         let f = fixture();
         let signed = legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]);
         assert!(!matches!(
-            replay_status(&signed, &secp(), None),
+            replay_status(&signed, &secp()),
             ReplayStatus::Split
         ));
         assert_eq!(
@@ -700,27 +657,27 @@ mod tests {
         let secp = secp();
 
         assert_eq!(
-            replay_status(&f.psbt, &secp, None),
+            replay_status(&f.psbt, &secp),
             ReplayStatus::Unknown(UnknownReason::NotYetChecked)
         );
         let one = unified(&f.psbt, &f.signers[0]);
         assert_eq!(
-            replay_status(&one, &secp, None),
+            replay_status(&one, &secp),
             ReplayStatus::Unknown(UnknownReason::Incomplete)
         );
         let two = unified(&one, &f.signers[1]);
-        assert_eq!(replay_status(&two, &secp, None), ReplayStatus::Protected);
+        assert_eq!(replay_status(&two, &secp), ReplayStatus::Protected);
 
         // Legacy signatures alone finalise but are replayable.
         let legacy_only = legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]);
         assert_eq!(
-            replay_status(&legacy_only, &secp, None),
+            replay_status(&legacy_only, &secp),
             ReplayStatus::Replayable { inputs: vec![0] }
         );
         // One unified + one legacy (different keys): protected — a legacy
         // signature alongside is fine.
         let mixed = legacy(&one, &f.signers[1]);
-        assert_eq!(replay_status(&mixed, &secp, None), ReplayStatus::Protected);
+        assert_eq!(replay_status(&mixed, &secp), ReplayStatus::Protected);
         // Unified on the *third* key with two legacy ones: the finaliser would
         // keep the unified signature, but the retained legacy pair can also
         // satisfy the input. Local policy refuses the alternate set instead of
@@ -730,7 +687,7 @@ mod tests {
             &f.signers[1],
         );
         assert!(matches!(
-            replay_status(&third, &secp, None),
+            replay_status(&third, &secp),
             ReplayStatus::Unknown(UnknownReason::Refused(reason))
                 if reason.contains("independently satisfy")
         ));
@@ -750,7 +707,7 @@ mod tests {
             .unwrap();
         let value = tampered.inputs[0].proprietary.get_mut(&key).unwrap();
         value[10] ^= 0x01;
-        match replay_status(&tampered, &secp, None) {
+        match replay_status(&tampered, &secp) {
             ReplayStatus::Unknown(UnknownReason::Refused(reason)) => {
                 assert!(reason.contains("unified"), "{}", reason)
             }
@@ -800,7 +757,7 @@ mod tests {
             Err(DispatchRefused::AnyoneCanPay { input: 0, .. })
         ));
         assert!(matches!(
-            replay_status(&carried, &secp(), None),
+            replay_status(&carried, &secp()),
             ReplayStatus::Unknown(UnknownReason::Refused(_))
         ));
     }
@@ -1206,7 +1163,7 @@ mod tests {
 
         // Both inputs signed by two keys the unified way: protected.
         let both = unified(&unified(&f.psbt, &f.signers[0]), &f.signers[1]);
-        assert_eq!(replay_status(&both, &secp, None), ReplayStatus::Protected);
+        assert_eq!(replay_status(&both, &secp), ReplayStatus::Protected);
 
         // Now assemble a PSBT whose inputs disagree: input 0 keeps its unified
         // signatures, input 1 carries legacy ones only. Built per input rather
@@ -1219,22 +1176,22 @@ mod tests {
         assert!(mixed.inputs[1].proprietary.is_empty());
         assert_eq!(mixed.inputs[1].partial_sigs.len(), 2);
         assert_eq!(
-            replay_status(&mixed, &secp, None),
+            replay_status(&mixed, &secp),
             ReplayStatus::Replayable { inputs: vec![1] }
         );
         assert!(!matches!(
-            replay_status(&mixed, &secp, None),
+            replay_status(&mixed, &secp),
             ReplayStatus::Protected
         ));
 
         // The copy names the input the user has to act on, not just "some".
-        let (copy, tone) = pill_copy(&replay_status(&mixed, &secp, None), &[]);
+        let (copy, tone) = pill_copy(&replay_status(&mixed, &secp), &[]);
         assert!(copy.contains("input 1"), "{}", copy);
         assert_eq!(tone, PillTone::Warning);
 
         // And the acknowledgement gate follows the same per-input answer.
-        assert!(replay_status(&mixed, &secp, None).needs_acknowledgement());
-        assert!(!replay_status(&both, &secp, None).needs_acknowledgement());
+        assert!(replay_status(&mixed, &secp).needs_acknowledgement());
+        assert!(!replay_status(&both, &secp).needs_acknowledgement());
     }
 
     /// B4.2 replay matrix — the tampered-signature row. A signature that is
@@ -1246,7 +1203,7 @@ mod tests {
         let f = fixture();
         let secp = secp();
         let signed = unified(&unified(&f.psbt, &f.signers[0]), &f.signers[1]);
-        assert_eq!(replay_status(&signed, &secp, None), ReplayStatus::Protected);
+        assert_eq!(replay_status(&signed, &secp), ReplayStatus::Protected);
 
         // Flip bits inside the signature bytes of one unified record, leaving
         // the record's shape and the PSBT's structure intact. Every byte offset
@@ -1259,7 +1216,7 @@ mod tests {
         for offset in 0..original.len() {
             let mut tampered = signed.clone();
             tampered.inputs[0].proprietary.get_mut(&key).unwrap()[offset] ^= 0x01;
-            let status = replay_status(&tampered, &secp, None);
+            let status = replay_status(&tampered, &secp);
             assert_ne!(
                 status,
                 ReplayStatus::Protected,
@@ -1288,8 +1245,8 @@ mod tests {
             signature: parsed,
             sighash_type: EcdsaSighashType::All,
         };
-        let clean = replay_status(&legacy_signed, &secp, None);
-        let tampered = replay_status(&bad_legacy, &secp, None);
+        let clean = replay_status(&legacy_signed, &secp);
+        let tampered = replay_status(&bad_legacy, &secp);
         assert_eq!(clean, ReplayStatus::Replayable { inputs: vec![0] });
         assert!(
             matches!(
@@ -1317,7 +1274,7 @@ mod tests {
             vec![0x30, 0x00],
         );
         assert!(matches!(
-            replay_status(&bad, &secp(), None),
+            replay_status(&bad, &secp()),
             ReplayStatus::Unknown(UnknownReason::Refused(_))
         ));
     }

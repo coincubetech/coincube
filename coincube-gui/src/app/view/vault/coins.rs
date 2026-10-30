@@ -200,10 +200,6 @@ pub fn coins_view<'a>(
                                     blake2b.then(|| {
                                         (cache.chain_status(&coin.outpoint), cache.chain())
                                     }),
-                                    cache.split_deposit.is_some_and(|(outpoint, expires)| {
-                                        outpoint == coin.outpoint
-                                            && std::time::Instant::now() < expires
-                                    }),
                                 ))
                         },
                     )),
@@ -246,7 +242,6 @@ fn coin_list_view<'a>(
     bitcoin_unit: BitcoinDisplayUnit,
     mask_amounts: bool,
     chain: Option<(ChainStatus, ChainId)>,
-    verified_deposit: bool,
 ) -> Container<'a, Message> {
     let outpoint = coin.outpoint.to_string();
     let address = coin.address.to_string();
@@ -276,14 +271,6 @@ fn coin_list_view<'a>(
         Some(badge::badge_pill(
             "Spendable",
             "This confirmed coin can use the primary spending path with its required signatures.",
-        ))
-    } else {
-        None
-    };
-    let replay = if verified_deposit {
-        Some(badge::badge_pill(
-            "  Replay-protected split deposit  ",
-            "The open split wizard verified this exact coin's chain-specific ancestry. It will be combined with the shared coins in a self-transfer. The app rechecks it before signing.",
         ))
     } else {
         None
@@ -367,10 +354,7 @@ fn coin_list_view<'a>(
                                     )
                                     .width(Length::FillPortion(1)),
                                 )
-                                .push(
-                                    Container::new(Row::new().push_maybe(replay))
-                                        .width(Length::FillPortion(1)),
-                                ),
+                                .push(Container::new(Row::new()).width(Length::FillPortion(1))),
                         ),
                 )
                 .style(theme::button::transparent_border)

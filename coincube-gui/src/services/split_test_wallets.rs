@@ -1,28 +1,25 @@
-//! Test-only foreign wallets of every Split step-1 shape, with scan reports
-//! of the same coins on both chains.
+//! Test-only public wallets of every supported imported shape, with two
+//! pre-fork coins usable as signing fixtures (`split_hardware`).
 
 use std::str::FromStr;
 
-use coincube_core::{
-    chain::ChainId,
-    miniscript::bitcoin::{
-        self, absolute,
-        bip32::{DerivationPath, Xpriv, Xpub},
-        hashes::Hash,
-        secp256k1::Secp256k1,
-        transaction, Amount, BlockHash, Network, OutPoint, Transaction, TxIn, TxOut, Txid,
-    },
+use coincube_core::miniscript::bitcoin::{
+    self, absolute,
+    bip32::{DerivationPath, Xpriv, Xpub},
+    hashes::Hash,
+    secp256k1::Secp256k1,
+    transaction, Amount, BlockHash, Network, OutPoint, Transaction, TxIn, TxOut, Txid,
 };
 
-use super::{
-    foreign_scan::{Branch, BranchCoverage, DiscoveredCoin, ScanDescriptor, ScanReport},
-    foreign_split_inventory::SplitInventory,
+use coincube_core::{
+    claim::BlockRef,
+    foreign_split::{SplitBranch, SplitCoin},
 };
+
+use super::foreign_scan::{Branch, DiscoveredCoin, ScanDescriptor};
 
 pub const FORK: u64 = 900;
-pub const GENERATION: u64 = 5;
 pub const BITCOIN_TIP_HEIGHT: u32 = 960;
-pub const BTCB2_TIP_HEIGHT: u32 = 950;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shape {
@@ -44,8 +41,6 @@ pub const SHAPES: [Shape; 5] = [
 pub struct Wallet {
     pub external: ScanDescriptor,
     pub internal: ScanDescriptor,
-    /// Enough keys to satisfy every input.
-    pub signers: Vec<Xpriv>,
 }
 
 pub fn master(seed: u8) -> Xpriv {
@@ -66,19 +61,10 @@ fn account(master: &Xpriv, path: &str) -> String {
 }
 
 pub fn wallet(shape: Shape) -> Wallet {
-    let (template, signers) = match shape {
-        Shape::Wpkh => (
-            format!("wpkh({}/{{b}}/*)", account(&master(1), "m/84'/0'/0'")),
-            vec![master(1)],
-        ),
-        Shape::ShWpkh => (
-            format!("sh(wpkh({}/{{b}}/*))", account(&master(1), "m/49'/0'/0'")),
-            vec![master(1)],
-        ),
-        Shape::Pkh => (
-            format!("pkh({}/{{b}}/*)", account(&master(1), "m/44'/0'/0'")),
-            vec![master(1)],
-        ),
+    let template = match shape {
+        Shape::Wpkh => format!("wpkh({}/{{b}}/*)", account(&master(1), "m/84'/0'/0'")),
+        Shape::ShWpkh => format!("sh(wpkh({}/{{b}}/*))", account(&master(1), "m/49'/0'/0'")),
+        Shape::Pkh => format!("pkh({}/{{b}}/*)", account(&master(1), "m/44'/0'/0'")),
         Shape::WshSortedMulti | Shape::WshMulti => {
             let keys: Vec<_> = [1, 2, 3]
                 .iter()
@@ -89,10 +75,7 @@ pub fn wallet(shape: Shape) -> Wallet {
             } else {
                 "sortedmulti"
             };
-            (
-                format!("wsh({name}(2,{}))", keys.join(",")),
-                vec![master(1), master(2)],
-            )
+            format!("wsh({name}(2,{}))", keys.join(","))
         }
     };
     let parse = |branch, step: u32| {
@@ -101,7 +84,6 @@ pub fn wallet(shape: Shape) -> Wallet {
     Wallet {
         external: parse(Branch::External, 0),
         internal: parse(Branch::Internal, 1),
-        signers,
     }
 }
 
@@ -157,36 +139,6 @@ pub fn coin(
     }
 }
 
-pub fn walk(end_exclusive: u32, last_used: Option<u32>) -> Vec<BranchCoverage> {
-    [Branch::External, Branch::Internal]
-        .iter()
-        .map(|branch| BranchCoverage {
-            branch: *branch,
-            start: 0,
-            end_exclusive,
-            last_used,
-        })
-        .collect()
-}
-
-pub fn report(chain: ChainId, coins: Vec<DiscoveredCoin>) -> ScanReport {
-    let (tip, height) = match chain {
-        ChainId::Bitcoin => (
-            block_hash(u64::from(BITCOIN_TIP_HEIGHT)),
-            BITCOIN_TIP_HEIGHT,
-        ),
-        _ => (block_hash(u64::from(BTCB2_TIP_HEIGHT)), BTCB2_TIP_HEIGHT),
-    };
-    let report = ScanReport::for_test(chain, GENERATION, tip, coins)
-        .with_coverage(walk(30, Some(3)))
-        .with_tip_height(height);
-    if chain == ChainId::BitcoinBlake2b {
-        report.with_fork_height(Some(FORK))
-    } else {
-        report
-    }
-}
-
 /// The two pre-fork coins of `wallet` on both chains, joined.
 pub fn shared_coins(wallet: &Wallet) -> Vec<DiscoveredCoin> {
     vec![
@@ -195,13 +147,31 @@ pub fn shared_coins(wallet: &Wallet) -> Vec<DiscoveredCoin> {
     ]
 }
 
-pub fn inventory(wallet: &Wallet) -> SplitInventory {
-    let coins = shared_coins(wallet);
-    SplitInventory::join(
-        &report(ChainId::BitcoinBlake2b, coins.clone()),
-        &report(ChainId::Bitcoin, coins),
-        GENERATION,
-        true,
-    )
-    .unwrap()
+/// An unused receive index of every fixture wallet: the walk's last used
+/// index is 3 on both branches.
+pub const FRESH_RECEIVE: u32 = 4;
+
+/// The two pre-fork coins of `wallet` as step-1 inputs: each confirmed in the
+/// same block on both chains, below [`FORK`].
+pub fn splittable_coins(wallet: &Wallet) -> Vec<SplitCoin> {
+    shared_coins(wallet)
+        .into_iter()
+        .map(|coin| {
+            let block = BlockRef {
+                height: u64::from(coin.block_height.expect("confirmed fixture coin")),
+                hash: coin.block_hash.expect("confirmed fixture coin"),
+            };
+            SplitCoin {
+                outpoint: coin.outpoint,
+                branch: match coin.branch {
+                    Branch::External => SplitBranch::External,
+                    Branch::Internal => SplitBranch::Internal,
+                },
+                index: coin.index,
+                previous: coin.previous,
+                bitcoin_block: Some(block),
+                btcb2_block: Some(block),
+            }
+        })
+        .collect()
 }

@@ -1,19 +1,12 @@
 pub mod bitcoin_import;
 pub mod branta;
-pub(crate) mod claim_ancestry_gate;
-pub mod claim_coordinator;
-pub mod claim_inventory;
 pub mod claim_observation;
-#[allow(dead_code)] // Kept behind the paired ancestry gate until GUI admission is wired.
-pub(crate) mod claim_pair_signing;
 pub mod connect;
+pub mod connect_esplora;
 pub(crate) mod esplora_backoff;
 pub mod feeestimation;
 pub mod fiat;
-pub mod foreign_psbt;
 pub mod foreign_scan;
-pub mod foreign_split_inventory;
-pub mod foreign_wallet_source;
 // The signer API is staged behind the external inventory anchor/recovery gate.
 // Only owner-verified import removal calls it in production at this head.
 #[allow(dead_code)]
@@ -27,12 +20,12 @@ pub(crate) mod imported_signer;
 pub mod psbt_file;
 pub mod public_account_source;
 pub mod public_hardware_source;
-pub mod public_wallet_pair;
-pub mod split_evidence;
+// Test fixtures for the imported-wallet hardware binder (`split_hardware`).
+#[cfg(test)]
+pub(crate) mod public_wallet_pair;
 pub mod split_fees;
-pub mod split_psbt_file;
-pub mod split_seed;
-pub mod split_source;
+#[cfg(test)]
+pub(crate) mod split_source;
 #[cfg(test)]
 pub(crate) mod split_test_connect;
 #[cfg(test)]
@@ -101,6 +94,3 @@ fn default_base_url() -> String {
         env!("COINCUBE_API_URL").to_string()
     }
 }
-
-pub mod claim_preflight;
-pub mod claim_workflow;

@@ -80,40 +80,6 @@ pub fn items(ctx: &NavContext) -> Vec<SubItem> {
             ),
         );
     }
-    // Bitcoin Blake2b claim entry. Hidden rather than disabled when the
-    // account has no fork grant: an account without it has no BTCB2 at all,
-    // which is not a per-Cube state the user can act on. Inserted before
-    // Settings so the rail keeps Settings last.
-    let resume_fork = ctx.network == crate::chain::ChainId::BitcoinBlake2b
-        && ctx.has_vault
-        && ctx.btcb2_server_enabled
-        && ctx.btcb2_claim_resume;
-    let imported_claim = crate::app::features::imported_claim_blake2b(
-        ctx.network,
-        ctx.has_imported_bitcoin,
-        ctx.btcb2_server_enabled,
-    )
-    .is_available();
-    if imported_claim
-        || (!ctx.has_imported_bitcoin
-            && (resume_fork
-                || crate::app::features::claim_blake2b(ctx.claim_source_cube()).is_available()))
-    {
-        let settings_at = items.len().saturating_sub(1);
-        items.insert(
-            settings_at,
-            SubItem::new(
-                if !imported_claim && resume_fork {
-                    "Resume Claim"
-                } else {
-                    "Claim BTCB2"
-                },
-                claim_icon,
-                Menu::Vault(VaultSubMenu::Claim),
-                |m| matches!(m, Menu::Vault(VaultSubMenu::Claim)),
-            ),
-        );
-    }
     items
 }
 
@@ -163,7 +129,6 @@ mod tests {
             connect_stream_status: status,
             btcb2_server_enabled,
             btcb2_already_claimed,
-            btcb2_claim_resume: false,
         }
     }
 
@@ -240,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn imported_wallet_has_claim_without_inheritance_actions() {
+    fn imported_wallet_has_no_inheritance_or_split_actions() {
         let status = crate::app::ConnectionStatus::default();
         let mut context = ctx(&status, crate::chain::ChainId::Bitcoin, true, false);
         context.has_vault = false;
@@ -254,7 +219,6 @@ mod tests {
                 "Coins",
                 "Transactions",
                 "PSBTs",
-                "Claim BTCB2",
                 "Settings"
             ]
         );
@@ -279,17 +243,14 @@ mod tests {
             ]
         );
         assert!(settings[2].disabled_reason.is_some());
-        context.btcb2_server_enabled = false;
-        assert!(!labels(&items(&context)).contains(&"Claim BTCB2"));
-        context.btcb2_server_enabled = true;
         context.network = crate::chain::ChainId::BitcoinBlake2b;
-        assert!(!labels(&items(&context)).contains(&"Claim BTCB2"));
+        assert!(!labels(&items(&context)).contains(&"Split coins"));
     }
 
-    /// With the account grant the claim entry appears, immediately before
+    /// With the account grant Split coins appears, immediately before
     /// Settings — and without it the rail is byte-for-byte what it was.
     #[test]
-    fn the_claim_entry_appears_only_with_the_account_grant_and_keeps_settings_last() {
+    fn split_coins_appears_only_with_the_account_grant_and_keeps_settings_last() {
         let status = crate::app::ConnectionStatus::default();
         let granted = items(&ctx(&status, crate::chain::ChainId::Bitcoin, true, false));
         assert_eq!(
@@ -303,7 +264,6 @@ mod tests {
                 "PSBTs",
                 "Recovery",
                 "Split coins",
-                "Claim BTCB2",
                 "Settings",
             ]
         );
@@ -324,10 +284,7 @@ mod tests {
             ]
         );
 
-        // Already claimed: the item stays — the claim itself (step 1, the
-        // poison self-transfer) happens after the target exists, and the App
-        // routes the item to the step-1 panel instead of the installer
-        // (`features::claim_entry`).
+        // A copy already exists: the hub still shows (it checks it off).
         assert_eq!(
             labels(&items(&ctx(
                 &status,
@@ -337,8 +294,7 @@ mod tests {
             ))),
             labels(&granted)
         );
-        // A Blake2b Cube: no claim surface (`features::claim_blake2b`), but
-        // its own Split coins checklist.
+        // A Blake2b Cube: its own Split coins checklist.
         assert_eq!(
             labels(&items(&ctx(
                 &status,
@@ -358,15 +314,5 @@ mod tests {
                 "Settings",
             ]
         );
-    }
-    #[test]
-    fn fork_resume_entry_requires_an_existing_pair_and_account_grant() {
-        let status = crate::app::ConnectionStatus::default();
-        let mut context = ctx(&status, crate::chain::ChainId::BitcoinBlake2b, true, false);
-        assert!(!labels(&items(&context)).contains(&"Resume Claim"));
-        context.btcb2_claim_resume = true;
-        assert!(labels(&items(&context)).contains(&"Resume Claim"));
-        context.btcb2_server_enabled = false;
-        assert!(!labels(&items(&context)).contains(&"Resume Claim"));
     }
 }

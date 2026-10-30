@@ -273,61 +273,6 @@ async fn spent_history_is_not_an_unused_address_and_limits_are_incomplete() {
     ));
 }
 
-#[tokio::test]
-async fn imported_paired_target_stays_unused_after_higher_funding_history() {
-    use crate::services::foreign_split_inventory::SplitInventory;
-    let address = |index| {
-        bitcoin::Address::from_script(
-            &ScanDescriptor::parse(Branch::External, &ranged())
-                .unwrap()
-                .script(index)
-                .unwrap(),
-            bitcoin::Network::Bitcoin,
-        )
-        .unwrap()
-        .to_string()
-    };
-    let mut fork_source = Fake::empty();
-    fork_source.spent_addresses.insert(address(208));
-    let mut bitcoin_source = Fake::empty();
-    bitcoin_source.spent_addresses.insert(address(207));
-    let fork = collect_mode(&fork_source, &imported_plan(212), 7, ScanMode::FullImported)
-        .await
-        .unwrap();
-    let mut bitcoin_plan = imported_plan(212);
-    bitcoin_plan.chain = ChainId::Bitcoin;
-    let bitcoin = collect_mode(&bitcoin_source, &bitcoin_plan, 7, ScanMode::FullImported)
-        .await
-        .unwrap();
-    let inventory = SplitInventory::join(&fork, &bitcoin, 7, true).unwrap();
-    assert!(inventory.is_fresh_external(206));
-    assert!(!inventory.is_fresh_external(207));
-    assert!(!inventory.is_fresh_external(208));
-    assert!(!inventory.is_fresh_external(212));
-    assert!(inventory.is_fresh_external(209));
-
-    // Fully spent destination history on either chain must still refuse,
-    // despite neither scan retaining an unspent coin at that index.
-    for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
-        let mut used_source = Fake::empty();
-        used_source.spent_addresses.insert(address(206));
-        used_source.spent_addresses.insert(address(209));
-        let mut used_plan = imported_plan(212);
-        used_plan.chain = chain;
-        let used = collect_mode(&used_source, &used_plan, 7, ScanMode::FullImported)
-            .await
-            .unwrap();
-        assert!(used.coins().is_empty());
-        let inventory = if chain == ChainId::Bitcoin {
-            SplitInventory::join(&fork, &used, 7, true)
-        } else {
-            SplitInventory::join(&used, &bitcoin, 7, true)
-        }
-        .unwrap();
-        assert!(!inventory.is_fresh_external(206));
-    }
-}
-
 fn imported_plan(end: u32) -> ScanPlan {
     let external = ScanDescriptor::parse(Branch::External, &ranged()).unwrap();
     let internal =
@@ -455,49 +400,6 @@ async fn imported_full_window_finds_both_branches_after_an_early_gap() {
     for branch in [Branch::External, Branch::Internal] {
         assert_eq!(full.coverage(branch).unwrap().end_exclusive, 40);
     }
-}
-
-#[test]
-fn imported_plan_requires_matching_bounded_full_branches() {
-    assert_eq!(validate_imported_plan(&imported_plan(10_000)), Ok(10_000));
-    for mut bad in [imported_plan(0), imported_plan(10_001), imported_plan(40)] {
-        if bad.branches[0].end_exclusive == 40 {
-            bad.branches[1].end_exclusive = 39;
-        }
-        assert_eq!(validate_imported_plan(&bad), Err(ScanError::InvalidLimits));
-    }
-    let mut bad = imported_plan(40);
-    bad.branches[1].start = 1;
-    assert_eq!(validate_imported_plan(&bad), Err(ScanError::InvalidLimits));
-    let mut bad = imported_plan(40);
-    bad.branches.pop();
-    assert_eq!(validate_imported_plan(&bad), Err(ScanError::InvalidLimits));
-}
-
-#[test]
-fn imported_deadline_scales_with_validated_full_window_and_stays_bounded() {
-    assert_eq!(imported_scan_duration(1), CLAIM_SCAN_DURATION);
-    assert_eq!(imported_scan_duration(360), CLAIM_SCAN_DURATION);
-    assert_eq!(imported_scan_duration(361), Duration::from_secs(91));
-    let windows = [1, 360, 361, 1_000, MAX_IMPORTED_BRANCH_END];
-    let deadlines = windows.map(imported_scan_duration);
-    assert!(deadlines.windows(2).all(|pair| pair[0] <= pair[1]));
-    assert_eq!(deadlines[4], Duration::from_secs(2_500));
-    assert!(deadlines
-        .iter()
-        .all(|duration| *duration <= Duration::from_secs(2_500)));
-}
-
-#[tokio::test]
-async fn imported_full_window_respects_generation_cancellation() {
-    let (sender, receiver) = watch::channel(7);
-    sender.send(8).unwrap();
-    let mut client = CoincubeClient::new();
-    client.set_token("synthetic-test-session");
-    assert!(matches!(
-        scan_imported_window(client, imported_plan(40), 7, receiver).await,
-        Err(ScanError::Cancelled)
-    ));
 }
 
 struct SpentEverywhere;

@@ -281,13 +281,6 @@ impl PinEntry {
         Arc::try_unwrap(self.take_fork_signer()?).ok()
     }
 
-    /// The Connect identity rechecked by the successful fork classification.
-    /// This is carried into a scoped Claim load so a rotated bearer can still
-    /// be admitted for the same account without trusting a Home label.
-    pub(crate) fn verified_connect_user(&self) -> Option<u32> {
-        self.connect_expected_user
-    }
-
     pub fn fail_open(&mut self, reason: String) {
         self.loading = false;
         self.error = Some(reason);
@@ -778,7 +771,7 @@ mod fork_handoff_tests {
             let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::new();
             let mut cube = CubeSettings::new("Pending fork".into(), chain);
             if case == "imported" {
-                let (source, _, _) = crate::imported_claim::tests::fixture();
+                let source = crate::services::bitcoin_import::pairing::tests::imported_cube();
                 let import = source.bitcoin_import.unwrap();
                 let source_wallet = import.active_attachment().unwrap().clone();
                 let wallet = crate::app::settings::ImportedWalletAttachment::new(

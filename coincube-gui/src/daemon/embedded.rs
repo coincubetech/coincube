@@ -137,16 +137,6 @@ impl EmbeddedDaemon {
         }
     }
 
-    /// Swap actual disposable controllers while preserving the selected endpoint.
-    #[cfg(all(test, feature = "regtest-harness"))]
-    pub(crate) async fn replace_regtest_handle(&self, replacement: DaemonHandle) {
-        let mut handle = self.handle.lock().await;
-        if let Some(previous) = handle.take() {
-            previous.stop_for_cleanup().unwrap();
-        }
-        *handle = Some(replacement);
-    }
-
     pub fn start(config: Config) -> Result<EmbeddedDaemon, DaemonError> {
         let handle =
             DaemonHandle::start_default(config.clone(), false).map_err(DaemonError::Start)?;
