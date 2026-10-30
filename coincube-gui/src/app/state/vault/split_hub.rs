@@ -71,8 +71,9 @@ pub struct HubFacts {
     pub both_chains: usize,
     pub both_total: Amount,
     pub splitting: usize,
-    /// Unspent coins with no answer yet: not checked, still checking, or a
-    /// check that failed. Only positive evidence makes a coin done.
+    /// Unspent coins with no answer yet: not checked, still checking, a
+    /// check that failed, or a signature split nothing has confirmed. Only
+    /// positive evidence makes a coin done.
     pub unverified: usize,
     pub key: Option<Amount>,
     pub signature_available: bool,
@@ -257,7 +258,10 @@ impl SplitHubPanel {
             .filter(|coin| {
                 matches!(
                     cache.chain_status(&coin.outpoint),
-                    ChainStatus::NotChecked | ChainStatus::NotSeen | ChainStatus::CouldntVerify
+                    ChainStatus::NotChecked
+                        | ChainStatus::NotSeen
+                        | ChainStatus::CouldntVerify
+                        | ChainStatus::SplitUnconfirmed
                 )
             })
             .count();
