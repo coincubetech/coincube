@@ -131,7 +131,7 @@ pub fn save(
 
 /// Write through a sibling temp file, owner-only, and fsync the directory so
 /// the rename survives a crash.
-fn write_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
+pub(crate) fn write_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
     use std::io::Write;
 
     let tmp = path.with_extension("tmp");

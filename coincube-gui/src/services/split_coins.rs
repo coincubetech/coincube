@@ -1,0 +1,582 @@
+//! One-sided splits from Coin control (`decisions/2026-10-29-coincube-desktop-
+//! btcb2-split-protection-in-coin-control.md`).
+//!
+//! A split is an ordinary self-send of the selected both-chain coins back to
+//! a fresh change address in the same Vault, made so the twin chain rejects
+//! it:
+//!
+//! - [`Method::SplitKey`] adds one coin proven to exist only on this chain
+//!   (the split key). The twin chain has no such coin, so the transaction is
+//!   invalid there. The key's proof is re-qualified against both canonical
+//!   chains immediately before the transaction is built.
+//! - [`Method::Signature`] (Bitcoin Blake2b only) relies on the Vault's
+//!   replay-protected signature, which Bitcoin rejects. The signing screen's
+//!   replay check still has to pass before broadcast.
+//!
+//! Either way one side is enough: once the split has depth, neither copy can
+//! be replayed onto the other chain. The transaction is handed to the Vault's
+//! normal PSBT screen for signing and broadcast, and recorded in a small
+//! journal ([`journal`]) from which the Chains column derives *Splitting*,
+//! the split outputs' proofs, and the twin Cube's separated coins.
+
+pub mod journal;
+
+use std::{
+    collections::{BTreeSet, HashMap, HashSet},
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use coincube_core::{
+    claim_ancestry::{retained::RetainedPath, search::OwnedLink},
+    miniscript::bitcoin::{consensus::serialize, psbt::Psbt, OutPoint, Transaction, Txid},
+};
+use coincubed::commands::CoinStatus;
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    app::wallet::Wallet,
+    chain::ChainId,
+    daemon::{
+        model::{Coin, CreateSpendResult},
+        Daemon,
+    },
+    services::chain_status::{ProofEntry, SPLIT_CONFIRMATIONS},
+};
+
+/// How the split is made rejectable on the twin chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Method {
+    SplitKey,
+    Signature,
+}
+
+/// One split this Cube built. The Chains column is derived from it; nothing
+/// here authorizes signing or broadcast.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SplitRecord {
+    pub txid: Txid,
+    pub chain: ChainId,
+    pub method: Method,
+    /// The both-chain coins being split, without the key.
+    pub inputs: Vec<OutPoint>,
+    /// The split key, for [`Method::SplitKey`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<OutPoint>,
+    /// The key's [`RetainedPath::encode`], hex, so the split's outputs can be
+    /// proven by extending it by one link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_path: Option<String>,
+    /// Unix seconds.
+    pub created_at: u64,
+    /// The most confirmations this Cube has seen the split reach. The twin
+    /// Cube reads it; it only ever grows while the split is seen confirmed.
+    #[serde(default)]
+    pub confirmations: u32,
+}
+
+/// A record whose transaction never showed up is dropped after this long.
+pub const UNSEEN_RECORD_LIFETIME_SECONDS: u64 = 14 * 24 * 60 * 60;
+
+/// The split key a split is built with.
+#[derive(Debug, Clone)]
+pub struct KeyChoice {
+    pub outpoint: OutPoint,
+    pub path: RetainedPath,
+}
+
+/// A built, stored, unsigned split ready for the PSBT screen.
+#[derive(Debug, Clone)]
+pub struct Prepared {
+    pub psbt: Psbt,
+    pub record: SplitRecord,
+}
+
+/// What the Chains column learns from the journals.
+#[derive(Debug, Default)]
+pub struct Derived {
+    /// Outputs of splits still short of [`SPLIT_CONFIRMATIONS`].
+    pub splitting: HashMap<OutPoint, u32>,
+    /// Outputs of confirmed split-key splits, proven by the key's extended path.
+    pub proofs: Vec<(OutPoint, ProofEntry)>,
+    /// Outputs of confirmed signature splits: one-chain by their signatures.
+    pub signed_outputs: HashSet<OutPoint>,
+    /// Whether any record changed (confirmations grew or it was pruned).
+    pub changed: bool,
+}
+
+/// Derive the Chains column's split facts from this Cube's records, updating
+/// each record's confirmation count and pruning records whose transaction
+/// never appeared. `coins` are the Vault's coins, `tip` the daemon's tip and
+/// `transactions` the raw split transactions the daemon knows about.
+pub fn derive(
+    records: &mut Vec<SplitRecord>,
+    coins: &[Coin],
+    tip: i32,
+    transactions: &HashMap<Txid, Transaction>,
+    now: SystemTime,
+) -> Derived {
+    let now = now.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let mut derived = Derived::default();
+    let before = records.len();
+    records.retain(|record| {
+        coins.iter().any(|coin| coin.outpoint.txid == record.txid)
+            || now.saturating_sub(record.created_at) < UNSEEN_RECORD_LIFETIME_SECONDS
+    });
+    derived.changed |= records.len() != before;
+    for record in records.iter_mut() {
+        let outputs: Vec<&Coin> = coins
+            .iter()
+            .filter(|coin| coin.outpoint.txid == record.txid)
+            .collect();
+        let Some(height) = outputs.iter().find_map(|coin| coin.block_height) else {
+            for coin in &outputs {
+                derived.splitting.insert(coin.outpoint, 0);
+            }
+            continue;
+        };
+        let confirmations = if height >= 0 && height <= tip {
+            (tip - height + 1) as u32
+        } else {
+            0
+        };
+        if confirmations > record.confirmations {
+            record.confirmations = confirmations;
+            derived.changed = true;
+        }
+        if confirmations < SPLIT_CONFIRMATIONS {
+            for coin in &outputs {
+                derived.splitting.insert(coin.outpoint, confirmations);
+            }
+            continue;
+        }
+        match record.method {
+            Method::Signature => {
+                derived
+                    .signed_outputs
+                    .extend(outputs.iter().map(|coin| coin.outpoint));
+            }
+            Method::SplitKey => {
+                let Some(tx) = transactions.get(&record.txid) else {
+                    continue;
+                };
+                for coin in &outputs {
+                    if let Some(path) = extended_path(record, tx, coin.outpoint) {
+                        derived
+                            .proofs
+                            .push((coin.outpoint, ProofEntry::Verified(path)));
+                    }
+                }
+            }
+        }
+    }
+    derived
+}
+
+/// The proof of a split-key split's output: the split transaction, linked
+/// through the key's input, followed by the key's own path. Structurally
+/// verified by [`RetainedPath::new`]; `None` if anything does not line up.
+pub fn extended_path(
+    record: &SplitRecord,
+    tx: &Transaction,
+    output: OutPoint,
+) -> Option<RetainedPath> {
+    let key = record.key?;
+    if tx.compute_txid() != record.txid || output.txid != record.txid {
+        return None;
+    }
+    let key_path = RetainedPath::decode(key, &hex::decode(record.key_path.as_ref()?).ok()?).ok()?;
+    let parent_input = tx
+        .input
+        .iter()
+        .position(|input| input.previous_output == key)?;
+    let mut links = vec![OwnedLink {
+        transaction: serialize(tx),
+        parent_input: Some(parent_input),
+    }];
+    links.extend(key_path.links().iter().cloned());
+    RetainedPath::new(output, links).ok()
+}
+
+/// Coins of this Cube whose twin copy a split on the twin Cube has separated:
+/// the inputs of the twin's splits that reached [`SPLIT_CONFIRMATIONS`].
+pub fn twin_separated(twin_records: &[SplitRecord]) -> HashSet<OutPoint> {
+    twin_records
+        .iter()
+        .filter(|record| record.confirmations >= SPLIT_CONFIRMATIONS)
+        .flat_map(|record| record.inputs.iter().copied())
+        .collect()
+}
+
+/// Build the split, store it with the daemon, and return it for the PSBT
+/// screen. The caller records it in the journal. For [`Method::SplitKey`]
+/// the key is re-qualified against both chains first; nothing is built if
+/// that fails.
+#[allow(clippy::too_many_arguments)]
+pub async fn prepare(
+    daemon: Arc<dyn Daemon + Send + Sync>,
+    wallet: Arc<Wallet>,
+    method: Method,
+    coins: Vec<OutPoint>,
+    key: Option<KeyChoice>,
+    feerate_vb: u64,
+    client: crate::services::coincube::CoincubeClient,
+    generation: u64,
+    live: tokio::sync::watch::Receiver<u64>,
+) -> Result<Prepared, String> {
+    let chain = wallet.chain;
+    if !crate::services::chain_status::checks_enabled(chain) {
+        return Err("Splitting coins isn't available in this version.".into());
+    }
+    if coins.is_empty() {
+        return Err("Select at least one coin to split.".into());
+    }
+    let key = match (method, key) {
+        (Method::SplitKey, Some(key)) => Some(key),
+        (Method::SplitKey, None) => return Err("This split needs a split key.".into()),
+        (Method::Signature, _) if !chain.is_blake2b() => {
+            return Err("Bitcoin can't split with a replay-protected signature.".into())
+        }
+        (Method::Signature, _) => None,
+    };
+    if let Some(key) = &key {
+        requalify(&client, chain, key, generation, live.clone()).await?;
+    }
+    let mut requested: BTreeSet<OutPoint> = coins.iter().copied().collect();
+    if requested.len() != coins.len() {
+        return Err("The split lists a coin twice.".into());
+    }
+    if let Some(key) = &key {
+        if !requested.insert(key.outpoint) {
+            return Err("The split key can't also be a coin to split.".into());
+        }
+    }
+    let requested: Vec<OutPoint> = requested.into_iter().collect();
+    let mut fresh = daemon
+        .list_coins(&[CoinStatus::Confirmed], &requested)
+        .await
+        .map_err(|e| e.to_string())?
+        .coins;
+    wallet.apply_coin_overrides(&mut fresh);
+    let found: BTreeSet<OutPoint> = fresh.iter().map(|coin| coin.outpoint).collect();
+    if found.len() != requested.len()
+        || requested.iter().any(|outpoint| !found.contains(outpoint))
+        || fresh.iter().any(|coin| {
+            coin.spend_info.is_some() || coin.is_immature || coin.block_height.is_none()
+        })
+    {
+        return Err(
+            "Some of these coins changed, are spent or aren't confirmed yet. Read the Vault again."
+                .into(),
+        );
+    }
+    if !crate::services::claim_observation::session_current(&live, generation) {
+        return Err("The session changed. Try again.".into());
+    }
+    let psbt = match daemon
+        .create_spend_tx(&requested, &HashMap::new(), feerate_vb, None)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        CreateSpendResult::Success { psbt, .. } => psbt,
+        CreateSpendResult::InsufficientFunds { missing } => {
+            return Err(format!(
+                "These coins don't cover the fee. {} sats short.",
+                missing
+            ))
+        }
+    };
+    check_construction(&psbt, &requested)?;
+    daemon
+        .update_spend_tx(&psbt)
+        .await
+        .map_err(|e| e.to_string())?;
+    let record = SplitRecord {
+        txid: psbt.unsigned_tx.compute_txid(),
+        chain,
+        method,
+        inputs: coins,
+        key: key.as_ref().map(|key| key.outpoint),
+        key_path: key.as_ref().map(|key| hex::encode(key.path.encode())),
+        created_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs()),
+        confirmations: 0,
+    };
+    Ok(Prepared { psbt, record })
+}
+
+/// The daemon's self-send must spend exactly the requested coins into one
+/// output back into this Vault.
+fn check_construction(psbt: &Psbt, requested: &[OutPoint]) -> Result<(), String> {
+    let spent: BTreeSet<OutPoint> = psbt
+        .unsigned_tx
+        .input
+        .iter()
+        .map(|input| input.previous_output)
+        .collect();
+    let wanted: BTreeSet<OutPoint> = requested.iter().copied().collect();
+    let owned = |i: usize| {
+        psbt.outputs.get(i).is_some_and(|output| {
+            !output.bip32_derivation.is_empty() || !output.tap_key_origins.is_empty()
+        })
+    };
+    if spent != wanted || psbt.unsigned_tx.input.len() != requested.len() {
+        return Err("The split doesn't spend exactly the selected coins.".into());
+    }
+    if psbt.unsigned_tx.output.len() != 1 || !owned(0) {
+        return Err("The split must pay back into this Vault only.".into());
+    }
+    Ok(())
+}
+
+/// Re-qualify the key's proof against both canonical chains now.
+async fn requalify(
+    client: &crate::services::coincube::CoincubeClient,
+    chain: ChainId,
+    key: &KeyChoice,
+    generation: u64,
+    live: tokio::sync::watch::Receiver<u64>,
+) -> Result<(), String> {
+    use crate::services::claim_observation::{http::HttpObservationSource, CollectionContext};
+    if key.path.selected() != key.outpoint {
+        return Err("The split key's proof doesn't match it.".into());
+    }
+    let source = HttpObservationSource::new(
+        client.clone(),
+        ChainId::Bitcoin,
+        ChainId::BitcoinBlake2b,
+        CollectionContext {
+            expected_generation: generation,
+            generation: live,
+        },
+    )
+    .map_err(|e| format!("Couldn't check the split key: {:?}", e))?;
+    let policy = coincube_core::claim::Policy {
+        max_observation_age_seconds: 60,
+        expiry_margin_seconds: 600,
+    };
+    let refreshed = if chain.is_blake2b() {
+        source.requalify_fork_ancestry(&key.path, policy).await
+    } else {
+        source.requalify_ancestry(&key.path, policy).await
+    }
+    .map_err(|e| format!("The split key couldn't be verified right now: {:?}", e))?;
+    let path = refreshed
+        .retained_path()
+        .map_err(|e| format!("The split key's proof is invalid: {:?}", e))?;
+    if path.selected() != key.outpoint {
+        return Err("The split key's proof doesn't match it.".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use coincube_core::miniscript::bitcoin::{
+        absolute, bip32::ChildNumber, script::Builder, transaction, Address, Amount, ScriptBuf,
+        Sequence, TxIn, TxOut, Witness,
+    };
+    use std::str::FromStr;
+
+    fn tx(inputs: Vec<OutPoint>, coinbase_height: Option<i64>) -> Transaction {
+        Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: match coinbase_height {
+                Some(height) => vec![TxIn {
+                    previous_output: OutPoint::null(),
+                    script_sig: Builder::new().push_int(height).push_int(1).into_script(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                }],
+                None => inputs
+                    .into_iter()
+                    .map(|previous_output| TxIn {
+                        previous_output,
+                        script_sig: ScriptBuf::new(),
+                        sequence: Sequence::MAX,
+                        witness: Witness::new(),
+                    })
+                    .collect(),
+            },
+            output: vec![TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        }
+    }
+
+    fn coin(outpoint: OutPoint, height: Option<i32>) -> Coin {
+        Coin {
+            amount: Amount::from_sat(50_000),
+            outpoint,
+            address: Address::from_str("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")
+                .unwrap()
+                .assume_checked(),
+            block_height: height,
+            derivation_index: ChildNumber::from_normal_idx(0).unwrap(),
+            spend_info: None,
+            is_immature: false,
+            is_change: true,
+            is_from_self: true,
+        }
+    }
+
+    /// A key with a one-link path to a coinbase, a shared coin, and the split
+    /// spending both.
+    fn split_fixture() -> (SplitRecord, Transaction) {
+        let coinbase = tx(vec![], Some(962_000));
+        let key = OutPoint::new(coinbase.compute_txid(), 0);
+        let key_path = RetainedPath::new(
+            key,
+            vec![OwnedLink {
+                transaction: serialize(&coinbase),
+                parent_input: None,
+            }],
+        )
+        .unwrap();
+        let shared = OutPoint::new(Txid::from_str(&"11".repeat(32)).unwrap(), 3);
+        let split = tx(vec![shared, key], None);
+        let record = SplitRecord {
+            txid: split.compute_txid(),
+            chain: ChainId::Bitcoin,
+            method: Method::SplitKey,
+            inputs: vec![shared],
+            key: Some(key),
+            key_path: Some(hex::encode(key_path.encode())),
+            created_at: 0,
+            confirmations: 0,
+        };
+        (record, split)
+    }
+
+    #[test]
+    fn split_output_is_splitting_until_six_confirmations_then_proven() {
+        let (record, split) = split_fixture();
+        let output = OutPoint::new(record.txid, 0);
+        let transactions: HashMap<_, _> = [(record.txid, split)].into();
+        let mut records = vec![record];
+
+        let derived = derive(
+            &mut records,
+            &[coin(output, Some(100))],
+            102,
+            &transactions,
+            UNIX_EPOCH,
+        );
+        assert_eq!(derived.splitting.get(&output), Some(&3));
+        assert!(derived.proofs.is_empty());
+        assert_eq!(records[0].confirmations, 3);
+        assert!(derived.changed);
+
+        let derived = derive(
+            &mut records,
+            &[coin(output, Some(100))],
+            105,
+            &transactions,
+            UNIX_EPOCH,
+        );
+        assert!(derived.splitting.is_empty());
+        assert_eq!(derived.proofs.len(), 1);
+        assert!(
+            matches!(&derived.proofs[0], (o, ProofEntry::Verified(p)) if *o == output && p.selected() == output)
+        );
+        assert_eq!(records[0].confirmations, 6);
+    }
+
+    #[test]
+    fn unconfirmed_split_output_is_splitting_at_zero() {
+        let (record, _) = split_fixture();
+        let output = OutPoint::new(record.txid, 0);
+        let mut records = vec![record];
+        let derived = derive(
+            &mut records,
+            &[coin(output, None)],
+            100,
+            &HashMap::new(),
+            UNIX_EPOCH,
+        );
+        assert_eq!(derived.splitting.get(&output), Some(&0));
+    }
+
+    #[test]
+    fn signature_split_outputs_are_one_chain_without_a_path() {
+        let (mut record, _) = split_fixture();
+        record.method = Method::Signature;
+        record.key = None;
+        record.key_path = None;
+        let output = OutPoint::new(record.txid, 0);
+        let mut records = vec![record];
+        let derived = derive(
+            &mut records,
+            &[coin(output, Some(10))],
+            20,
+            &HashMap::new(),
+            UNIX_EPOCH,
+        );
+        assert!(derived.signed_outputs.contains(&output));
+        assert!(derived.proofs.is_empty());
+    }
+
+    #[test]
+    fn unseen_records_expire_and_seen_ones_stay() {
+        let (record, _) = split_fixture();
+        let later = UNIX_EPOCH + std::time::Duration::from_secs(UNSEEN_RECORD_LIFETIME_SECONDS);
+        let mut records = vec![record.clone()];
+        assert!(derive(&mut records, &[], 1, &HashMap::new(), later).changed);
+        assert!(records.is_empty());
+        let mut records = vec![record.clone()];
+        derive(
+            &mut records,
+            &[coin(OutPoint::new(record.txid, 0), None)],
+            1,
+            &HashMap::new(),
+            later,
+        );
+        assert_eq!(records.len(), 1);
+    }
+
+    #[test]
+    fn a_path_through_a_different_key_is_refused() {
+        let (mut record, split) = split_fixture();
+        let output = OutPoint::new(record.txid, 0);
+        assert!(extended_path(&record, &split, output).is_some());
+        record.key = Some(OutPoint::new(record.txid, 9));
+        assert!(extended_path(&record, &split, output).is_none());
+    }
+
+    #[test]
+    fn twin_coins_separate_only_after_six_confirmations() {
+        let (mut record, _) = split_fixture();
+        record.confirmations = 5;
+        assert!(twin_separated(&[record.clone()]).is_empty());
+        record.confirmations = 6;
+        assert_eq!(
+            twin_separated(&[record.clone()]),
+            record.inputs.iter().copied().collect()
+        );
+    }
+
+    #[test]
+    fn construction_must_spend_exactly_the_request_into_one_owned_output() {
+        let (_, split) = split_fixture();
+        let requested: Vec<_> = split.input.iter().map(|i| i.previous_output).collect();
+        let mut psbt = Psbt::from_unsigned_tx(split).unwrap();
+        assert!(
+            check_construction(&psbt, &requested).is_err(),
+            "output not owned"
+        );
+        psbt.outputs[0].bip32_derivation.insert(
+            coincube_core::miniscript::bitcoin::secp256k1::PublicKey::from_str(
+                "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+            )
+            .unwrap(),
+            (Default::default(), Default::default()),
+        );
+        assert!(check_construction(&psbt, &requested).is_ok());
+        assert!(check_construction(&psbt, &requested[..1]).is_err());
+    }
+}

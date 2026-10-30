@@ -51,6 +51,7 @@ pub mod meld;
 pub mod passkey;
 pub mod recovery;
 pub mod sideshift;
+pub mod split_coins;
 pub mod unlock;
 
 /// Resolves the Coincube API base URL with this precedence:

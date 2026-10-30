@@ -4559,6 +4559,7 @@ impl App {
                 for (outpoint, entry) in saved {
                     self.cache.chain_proofs.entry(outpoint).or_insert(entry);
                 }
+                self.cache.split_records = crate::services::split_coins::journal::load(&dir, chain);
             }
         }
         if !crate::services::chain_status::checks_enabled(chain) {
@@ -4593,6 +4594,90 @@ impl App {
                 results,
             },
         )
+    }
+
+    /// Refresh the Chains column's split facts: read the daemon's copies of
+    /// the recorded split transactions, then derive *Splitting*, the split
+    /// outputs' proofs and the coins a split separated.
+    fn split_refresh_task(&mut self) -> Task<Message> {
+        let (Some(wallet), Some(daemon)) = (self.wallet.as_ref(), self.daemon.clone()) else {
+            return Task::none();
+        };
+        if !self.chain_proofs_loaded {
+            return Task::none();
+        }
+        let origin = cache::LookupOrigin {
+            app: self.cache.app_generation,
+            chain: wallet.chain,
+        };
+        let txids: Vec<bitcoin::Txid> = self
+            .cache
+            .split_records
+            .iter()
+            .map(|record| record.txid)
+            .collect();
+        Task::perform(
+            async move {
+                if txids.is_empty() {
+                    return std::collections::HashMap::new();
+                }
+                daemon
+                    .list_txs(&txids)
+                    .await
+                    .map(|found| {
+                        found
+                            .transactions
+                            .into_iter()
+                            .map(|info| (info.tx.compute_txid(), info.tx))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            },
+            move |transactions| Message::SplitTransactions {
+                origin,
+                transactions,
+            },
+        )
+    }
+
+    /// Record a split this Cube just built and stored with the daemon, so the
+    /// Chains column follows it.
+    #[allow(dead_code)] // Called by the Split coins overlay (next slice).
+    pub(crate) fn record_split(
+        &mut self,
+        record: crate::services::split_coins::SplitRecord,
+    ) -> Task<Message> {
+        self.cache.split_records.push(record);
+        self.save_split_records();
+        self.split_refresh_task()
+    }
+
+    fn save_split_records(&self) {
+        if let Some(dir) = self.vault_data_dir() {
+            if let Err(e) =
+                crate::services::split_coins::journal::save(&dir, &self.cache.split_records)
+            {
+                tracing::warn!("couldn't save split records: {}", e);
+            }
+        }
+    }
+
+    fn save_chain_proofs(&self) {
+        if let Some(dir) = self.vault_data_dir() {
+            let held: HashSet<bitcoin::OutPoint> = self
+                .cache
+                .coins()
+                .iter()
+                .map(|coin| coin.outpoint)
+                .collect();
+            if let Err(e) = crate::services::chain_status::store::save(
+                &dir,
+                &self.cache.chain_proofs,
+                |outpoint| held.contains(outpoint),
+            ) {
+                tracing::warn!("couldn't save Chains-column results: {}", e);
+            }
+        }
     }
 
     /// The chain of this Cube's Vault, `None` without one — what a lookup
@@ -9228,20 +9313,56 @@ impl App {
                 if !changed {
                     return Task::none();
                 }
-                if let Some(dir) = self.vault_data_dir() {
-                    let held: HashSet<bitcoin::OutPoint> = self
-                        .cache
-                        .coins()
-                        .iter()
-                        .map(|coin| coin.outpoint)
-                        .collect();
-                    if let Err(e) = crate::services::chain_status::store::save(
-                        &dir,
-                        &self.cache.chain_proofs,
-                        |outpoint| held.contains(outpoint),
+                self.save_chain_proofs();
+                return Task::done(Message::CacheUpdated);
+            }
+            Message::SplitTransactions {
+                origin,
+                transactions,
+            } => {
+                let Some(wallet) = self.wallet.as_ref() else {
+                    return Task::none();
+                };
+                if !self.cache.issued_here(origin) || origin.chain != wallet.chain {
+                    return Task::none();
+                }
+                let twin_records = crate::services::split_coins::journal::twin_data_dir(
+                    &self.cache.datadir_path,
+                    wallet.chain,
+                    &wallet.descriptor_checksum,
+                )
+                .zip(crate::services::entangled::twin_chain(wallet.chain))
+                .map(|(dir, chain)| crate::services::split_coins::journal::load(&dir, chain))
+                .unwrap_or_default();
+                let coins = self.cache.coins().to_vec();
+                let tip = self.cache.blockheight();
+                let derived = crate::services::split_coins::derive(
+                    &mut self.cache.split_records,
+                    &coins,
+                    tip,
+                    &transactions,
+                    std::time::SystemTime::now(),
+                );
+                self.cache.splitting = derived.splitting;
+                self.cache.separated = derived.signed_outputs;
+                self.cache
+                    .separated
+                    .extend(crate::services::split_coins::twin_separated(&twin_records));
+                let mut proved = false;
+                for (outpoint, entry) in derived.proofs {
+                    if !matches!(
+                        self.cache.chain_proofs.get(&outpoint),
+                        Some(crate::services::chain_status::ProofEntry::Verified(_))
                     ) {
-                        tracing::warn!("couldn't save Chains-column results: {}", e);
+                        self.cache.chain_proofs.insert(outpoint, entry);
+                        proved = true;
                     }
+                }
+                if derived.changed {
+                    self.save_split_records();
+                }
+                if proved {
+                    self.save_chain_proofs();
                 }
                 return Task::done(Message::CacheUpdated);
             }
@@ -9611,11 +9732,13 @@ impl App {
                         // `Task::none()` on every Bitcoin-family Cube.
                         let entangled = self.entangled_lookup_task();
                         let chain_proofs = self.chain_proof_task();
+                        let splits = self.split_refresh_task();
                         let unswept = self.unswept_notice_task();
                         return Task::batch([
                             heartbeat,
                             entangled,
                             chain_proofs,
+                            splits,
                             unswept,
                             retire_obligation.unwrap_or_else(Task::none),
                             Task::done(Message::CacheUpdated),

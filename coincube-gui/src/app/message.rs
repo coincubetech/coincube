@@ -344,6 +344,15 @@ pub enum Message {
         claimed: Vec<coincube_core::miniscript::bitcoin::Txid>,
         answers: Vec<crate::services::entangled::LookupAnswer>,
     },
+    /// The daemon's copies of this Vault's recorded split transactions, for
+    /// the Chains column ([`crate::services::split_coins::derive`]).
+    SplitTransactions {
+        origin: crate::app::cache::LookupOrigin,
+        transactions: std::collections::HashMap<
+            coincube_core::miniscript::bitcoin::Txid,
+            coincube_core::miniscript::bitcoin::Transaction,
+        >,
+    },
     /// A sync-driven ancestry check batch for the Chains column finished
     /// ([`crate::services::chain_status::check_ancestry`]). `claimed` is the
     /// batch's single-flight claim; see [`crate::app::cache::Cache::chain_proofs_landed`].
