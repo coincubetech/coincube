@@ -396,6 +396,31 @@ impl PasskeyUnlock {
     /// Stop opening with a plain reason the tab knows and the unlock does not,
     /// such as a Bitcoin Blake2b Cube that needs Connect first. None of the
     /// reasons say the Cube is lost (**I12**).
+    /// A Bitcoin Blake2b copy that opens through Connect, as
+    /// [`crate::pin_entry::PinEntry::requires_connect`].
+    pub(crate) fn requires_connect(&self) -> bool {
+        let PinEntrySuccess::LoadApp {
+            datadir,
+            wallet_settings,
+            ..
+        } = &self.on_success;
+        self.cube.network.is_blake2b()
+            && !crate::chain::has_managed_local_fork(
+                datadir,
+                self.cube.network,
+                wallet_settings.as_ref(),
+            )
+    }
+
+    /// The reason shown on the idle screen, if any.
+    #[cfg(test)]
+    pub(crate) fn error_for_test(&self) -> Option<&str> {
+        match &self.phase {
+            Phase::Idle { error } => error.as_deref(),
+            _ => None,
+        }
+    }
+
     pub fn fail_open(&mut self, reason: String) {
         self.phase = Phase::Idle {
             error: Some(reason),

@@ -7470,6 +7470,23 @@ impl App {
                 }
                 return Task::batch(tasks);
             }
+            Message::View(view::Message::CreateBlake2bCopy) => {
+                // From the disk, not the cache (#503): a copy made earlier in
+                // this session leaves the cached flag stale, and the hub would
+                // otherwise start a second installer for the same Vault.
+                let Some(wallet) = self.wallet.as_ref() else {
+                    return Task::none();
+                };
+                if self.cube_settings.network != crate::chain::ChainId::Bitcoin {
+                    return Task::none();
+                }
+                self.cache.btcb2_already_claimed =
+                    claim_target_exists(&self.datadir, &wallet.descriptor_checksum);
+                if self.cache.btcb2_already_claimed {
+                    return Task::none();
+                }
+                return Task::done(Message::View(view::Message::StartClaimBlake2b));
+            }
             Message::View(view::Message::SplitFirst) => {
                 let menu = Menu::Vault(menu::VaultSubMenu::Coins(None));
                 let load = self.set_current_panel(menu);
@@ -13672,6 +13689,67 @@ pub(crate) mod shell_tests {
             .unwrap(),
         );
         (app, wallet)
+    }
+
+    #[test]
+    fn create_copy_starts_the_installer_only_while_no_copy_is_on_disk() {
+        let root = std::env::temp_dir().join(format!("create-copy-{}", uuid::Uuid::new_v4()));
+        let (mut app, wallet) = {
+            let _guard = crate::app::session::test_guard();
+            bitcoin_app(&root)
+        };
+        let starts = |task: Task<Message>| {
+            use iced::futures::StreamExt;
+            let Some(stream) = iced_runtime::task::into_stream(task) else {
+                return false;
+            };
+            iced::futures::executor::block_on(stream.collect::<Vec<_>>())
+                .into_iter()
+                .any(|action| {
+                    matches!(
+                        action,
+                        iced_runtime::Action::Output(Message::View(
+                            view::Message::StartClaimBlake2b
+                        ))
+                    )
+                })
+        };
+        assert!(!app.cache.btcb2_already_claimed);
+        assert!(
+            starts(app.update(Message::View(view::Message::CreateBlake2bCopy))),
+            "no copy yet: the installer starts"
+        );
+
+        // A copy made since the Cube opened; the cached flag is stale.
+        let fork_dir = app
+            .datadir
+            .network_directory(crate::chain::ChainId::BitcoinBlake2b);
+        std::fs::create_dir_all(fork_dir.path()).unwrap();
+        let mut copy = settings::CubeSettings::new_with_raw_id(
+            uuid::Uuid::new_v4().to_string(),
+            "Fixture · BTCB2".to_string(),
+            crate::chain::ChainId::BitcoinBlake2b,
+        );
+        copy.vault_wallet_id = Some(crate::app::settings::WalletId::new(
+            wallet.descriptor_checksum.clone(),
+            Some(1),
+        ));
+        std::fs::write(
+            fork_dir.path().join(settings::SETTINGS_FILE_NAME),
+            serde_json::to_vec(&settings::Settings {
+                cubes: vec![copy],
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(!app.cache.btcb2_already_claimed, "stale by construction");
+        assert!(
+            !starts(app.update(Message::View(view::Message::CreateBlake2bCopy))),
+            "a second installer must not start"
+        );
+        assert!(app.cache.btcb2_already_claimed, "corrected from the disk");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

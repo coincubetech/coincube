@@ -230,6 +230,9 @@ pub enum Message {
     /// copy (Tools › Split coins). Creates the copy Cube only — nothing is
     /// split, swept or broadcast by this flow.
     StartClaimBlake2b,
+    /// Tools › Split coins › Create copy. The App re-checks the disk for an
+    /// existing copy before it starts [`Self::StartClaimBlake2b`].
+    CreateBlake2bCopy,
     /// Collapse the firmware-advisory detail panel on one device row. Carries
     /// the device fingerprint and the advisory id; the badge itself stays.
     DismissHwAdvisory(Fingerprint, &'static str),
