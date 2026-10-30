@@ -12,7 +12,7 @@ use coincube_core::miniscript::bitcoin::{
     address,
     bip32::{ChildNumber, Fingerprint},
     psbt::Psbt,
-    secp256k1, Address, Network, OutPoint, Txid,
+    secp256k1, Address, BlockHash, Network, OutPoint, Txid,
 };
 use coincubed::bip329::Labels;
 use coincubed::commands::UpdateDerivIndexesResult;
@@ -126,6 +126,11 @@ pub trait Daemon: Debug {
     ) -> Result<(), DaemonError>;
     async fn stop(&self) -> Result<(), DaemonError>;
     async fn get_info(&self) -> Result<model::GetInfoResult, DaemonError>;
+    /// The embedded wallet's actual tip hash. Other backends fail closed for
+    /// local MCP prepared-draft freshness checks.
+    async fn chain_tip_hash(&self) -> Result<BlockHash, DaemonError> {
+        Err(DaemonError::NotImplemented)
+    }
     /// Ask the daemon's poller to run a sync now, bypassing both
     /// the remaining sleep on the poll-interval timer and the
     /// Esplora backend's smart-poll tip-guard. Fire-and-forget —

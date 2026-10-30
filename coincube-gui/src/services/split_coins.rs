@@ -13,8 +13,9 @@
 //!   replay-protected signature, which Bitcoin rejects. The signing screen's
 //!   replay check still has to pass before broadcast. Its confirmed
 //!   transaction is not yet checked for those signatures, so it is not
-//!   counted as evidence: neither side's Chains column treats it as a split
-//!   (decision open item 1).
+//!   counted as evidence (decision open item 1): past the threshold its
+//!   outputs show *Split · unconfirmed*, never verified, and the twin Cube
+//!   does not treat its inputs as separated.
 //!
 //! Either way one side is enough: once the split has depth, neither copy can
 //! be replayed onto the other chain. The transaction is handed to the Vault's
@@ -108,6 +109,9 @@ pub struct Prepared {
 pub struct Derived {
     /// Outputs of splits still short of [`SPLIT_CONFIRMATIONS`].
     pub splitting: HashMap<OutPoint, u32>,
+    /// Outputs of signature splits past [`SPLIT_CONFIRMATIONS`], whose
+    /// signatures nothing has checked.
+    pub unconfirmed: HashSet<OutPoint>,
     /// Outputs of confirmed split-key splits, proven by the key's extended path.
     pub proofs: Vec<(OutPoint, ProofEntry)>,
     /// Whether any record changed (its confirmations moved or it was pruned).
@@ -165,9 +169,13 @@ pub fn derive(
             // transaction carries a replay-protected signature on every input
             // (it could have been signed elsewhere, legacy). Until that check
             // exists (decision open item 1) a signature split separates
-            // nothing; its outputs stay unproven and its inputs stay on both
-            // chains in the twin Cube.
-            Method::Signature => {}
+            // nothing; its outputs are shown as split but unconfirmed, never
+            // proven, and its inputs stay on both chains in the twin Cube.
+            Method::Signature => {
+                derived
+                    .unconfirmed
+                    .extend(outputs.iter().map(|coin| coin.outpoint));
+            }
             Method::SplitKey => {
                 let Some(tx) = transactions.get(&record.txid) else {
                     continue;
@@ -726,6 +734,11 @@ mod tests {
         assert!(
             derived.splitting.is_empty(),
             "past the threshold, so not splitting"
+        );
+        assert_eq!(
+            derived.unconfirmed,
+            vec![output].into_iter().collect::<HashSet<_>>(),
+            "shown as split but unconfirmed instead"
         );
         let checks: HashMap<Txid, TwinCheck> = vec![(
             records[0].txid,
