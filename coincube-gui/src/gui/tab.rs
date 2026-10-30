@@ -435,6 +435,11 @@ pub enum Message {
     /// Frame clock only while a selected Launcher details face turns toward
     /// the existing PIN/passkey screen. It never changes unlock authority.
     UnlockMotionTick(Instant),
+    /// Clock for the opening on the Cube: every frame while the Cube moves,
+    /// slower while only its edge light breathes. Presentation only.
+    OpeningTick(Instant),
+    /// Cancel on a stalled opening: back to the Launcher, the Cube locked.
+    CancelOpening,
     /// Messages from the cryptic "Duress Mode Activated" screen.
     Duress(crate::app::view::duress::active_screen::Message),
     /// The background activation-queue drainer finished (queue emptied). No-op
@@ -776,6 +781,135 @@ fn vault_settings_for_cube(
         .find(|wallet| wallet.wallet_id() == *vault_id)
 }
 
+/// What the unlock's seed-file step did, once it has finished.
+struct UnlockMigration {
+    outcome: crate::services::unlock::MigrationOutcome,
+    /// The second slot this unlock wrote, already recorded in `settings.json`.
+    new_slot: Option<String>,
+}
+
+/// Told to the user once migration has turned duress off on this device. A
+/// log line is not telling the user: they believe a PIN still wipes this
+/// device, and it no longer does.
+const DURESS_DISARM_NOTICE: &str = "Upgrading this Cube's files turned duress mode off — your \
+     duress PIN no longer erases this device. Turn duress mode on again to set it up.";
+
+/// The duress-off warning, if a migration disarmed this device and the user
+/// has not seen it yet.
+fn duress_disarm_notice(root: &std::path::Path) -> Option<String> {
+    crate::services::duress::DuressLocalState::load(root)
+        .ok()
+        .filter(|st| st.migration_disarm_notice)
+        .map(|_| DURESS_DISARM_NOTICE.to_string())
+}
+
+/// The duress-off warning is on screen: stop repeating it.
+fn acknowledge_duress_disarm_notice(root: &std::path::Path) {
+    if let Ok(mut st) = crate::services::duress::DuressLocalState::load(root) {
+        if st.migration_disarm_notice {
+            st.migration_disarm_notice = false;
+            if let Err(e) = st.save(root) {
+                error!("could not clear the duress-off notice: {e}");
+            }
+        }
+    }
+}
+
+type UnlockMigrationResult =
+    Result<Result<UnlockMigration, crate::services::unlock::UnlockError>, tokio::task::JoinError>;
+
+/// Bring the Cube's seed files up to the current wire version, give it its
+/// second slot if it has none, and make the device's settings and duress
+/// state agree with what was written.
+///
+/// Each file write and the record that makes it reachable are one step, so
+/// the work runs in a task of its own, spawned at the call. Cancel may drop
+/// the returned future mid-way: a decoy written without its name recorded is
+/// unreachable, and the next unlock would mint another; a marker replaced
+/// without the disarm leaves an enrolment that nothing triggers. The spawned
+/// task runs to the end regardless.
+fn migrate_seed_files_on_unlock(
+    root: std::path::PathBuf,
+    network_dir: NetworkDirectory,
+    cube: app::settings::CubeSettings,
+    pin: zeroize::Zeroizing<String>,
+) -> impl std::future::Future<Output = UnlockMigrationResult> {
+    let task = tokio::spawn(migrate_seed_files_on_unlock_now(
+        root,
+        network_dir,
+        cube,
+        pin,
+    ));
+    async move { task.await.unwrap_or_else(Err) }
+}
+
+async fn migrate_seed_files_on_unlock_now(
+    root: std::path::PathBuf,
+    network_dir: NetworkDirectory,
+    cube: app::settings::CubeSettings,
+    pin: zeroize::Zeroizing<String>,
+) -> UnlockMigrationResult {
+    let cube_id = cube.id.clone();
+    let blocking_root = root.clone();
+    let joined = tokio::task::spawn_blocking(move || {
+        let loc = crate::services::unlock::CubeLocation::new(&blocking_root, &cube);
+        let outcome = crate::services::unlock::migrate_seed_files(&loc, &pin)?;
+        // Give this Cube its second slot if it arrived without one — restored
+        // from a Recovery Kit, or minted before unit 6b. Same blocking task:
+        // it costs one Argon2 pass and must not run on the UI thread.
+        let slot = crate::services::unlock::ensure_second_slot(&loc)?;
+        Ok::<_, crate::services::unlock::UnlockError>((outcome, slot))
+    })
+    .await;
+    let (outcome, new_slot) = match joined {
+        Ok(Ok(done)) => done,
+        Ok(Err(e)) => return Ok(Err(e)),
+        Err(e) => return Err(e),
+    };
+    // Persist the backfilled slot name. Without this the decoy just written
+    // is unreachable and the next unlock mints another one.
+    if let Some(name) = new_slot.clone() {
+        if let Err(e) = app::settings::update_settings_file(&network_dir, |mut s| {
+            if let Some(c) = s.cubes.iter_mut().find(|c| c.id == cube_id) {
+                c.duress_slot_file = Some(name);
+            }
+            Some(s)
+        })
+        .await
+        {
+            error!("could not record the second slot for cube {cube_id}: {e}");
+        }
+    }
+    // Migration cannot re-seal a duress marker — that needs the duress PIN,
+    // and this path holds the regular one — so it replaces the slot with a
+    // decoy and the enrolment is gone. Make the device's own state agree
+    // rather than keep claiming an enrolment whose trigger no longer exists.
+    //
+    // Acceptable only because duress is feature-gated and unreleased.
+    // Revisit before it ships.
+    if outcome.duress_was_cleared() {
+        log::warn!(
+            "migration: duress enrolment on cube {cube_id} was cleared — its marker could not \
+             be carried across the upgrade. Re-enroll to arm it again."
+        );
+        if let Ok(mut st) = crate::services::duress::DuressLocalState::load(&root) {
+            // Only here, inside the enrolled check: the slot is rewritten
+            // whenever its wire version is stale, so `duress_was_cleared` is
+            // true for most Cubes and says nothing on its own about whether
+            // there was an enrolment to lose. This branch is where one
+            // demonstrably was.
+            if st.enrolled || st.arming {
+                st.disarm();
+                // Saved with the disarm, so the warning survives a Cancel
+                // that drops the unlock before it can show one.
+                st.migration_disarm_notice = true;
+                let _ = st.save(&root);
+            }
+        }
+    }
+    Ok(Ok(UnlockMigration { outcome, new_slot }))
+}
+
 /// Resolve either local Bitcoin wallet attached to this exact Cube. Imported
 /// wallets keep the same WalletSettings/daemon directory lifecycle as Vaults,
 /// while their descriptor and signing capabilities remain distinct.
@@ -830,6 +964,15 @@ impl std::fmt::Debug for AuthChange {
     }
 }
 
+/// The opening on the Cube, from a verified unlock to the App.
+struct CubeOpening {
+    scene: home::launcher_opening::Opening,
+    /// The unlock screen's quote, kept for the whole opening.
+    quote: coincube_ui::component::quote_display::Quote,
+    /// The unlock's wallet loads, aborted by Cancel before the Loader exists.
+    loads: Vec<iced::task::Handle>,
+}
+
 pub struct Tab {
     pub id: usize,
     pub state: State,
@@ -840,6 +983,13 @@ pub struct Tab {
     unlock_motion: Option<Instant>,
     /// Safe, owned Launcher geometry retained only through this unlock.
     unlock_floor: Option<home::LauncherSceneContext>,
+    /// The system's reduce-motion setting, as last observed.
+    system_reduces_motion: Option<bool>,
+    /// The verified Cube opening, until the App shows.
+    opening: Option<CubeOpening>,
+    /// An opening was cancelled before the Loader: its wallet load may still
+    /// answer, and must not open the Cube.
+    opening_cancelled: bool,
     /// A seed-migration warning waiting for a surface to show it on.
     ///
     /// Held rather than dispatched because only `State::App` handles
@@ -848,6 +998,9 @@ pub struct Tab {
     /// to show them. `Loader` and `Login` cannot toast, so anything raised
     /// before the Cube is up waits here.
     pending_unlock_warnings: Vec<String>,
+    /// The datadir whose duress-off notice is among
+    /// `pending_unlock_warnings`; cleared on disk once `App` shows it.
+    pending_duress_notice: Option<std::path::PathBuf>,
     app_generation: u64,
     seed_export_origins: Vec<(
         crate::app::cache::AppGeneration,
@@ -915,7 +1068,11 @@ impl Tab {
             balance_privacy: None,
             unlock_motion: None,
             unlock_floor: None,
+            system_reduces_motion: None,
+            opening: None,
+            opening_cancelled: false,
             pending_unlock_warnings: Vec::new(),
+            pending_duress_notice: None,
             app_generation: 0,
             seed_export_origins: Vec::new(),
             pending_seed_export_trials: 0,
@@ -965,6 +1122,7 @@ impl Tab {
 
     /// Feed the current native motion observation to a retained Launcher.
     pub fn set_system_reduces_motion(&mut self, observed: Option<bool>) {
+        self.system_reduces_motion = observed;
         if let State::Home(home) = &mut self.state {
             home.set_system_reduces_motion(observed);
         }
@@ -1050,6 +1208,9 @@ impl Tab {
     fn flush_migration_warning(&mut self) -> Task<Message> {
         if !matches!(self.state, State::App(_)) {
             return Task::none();
+        }
+        if let Some(root) = self.pending_duress_notice.take() {
+            acknowledge_duress_disarm_notice(&root);
         }
         let queued = std::mem::take(&mut self.pending_unlock_warnings);
         if queued.is_empty() {
@@ -1487,6 +1648,17 @@ impl Tab {
             Message::Run(app::Message::View(app::view::Message::DuressActivateLocal(proof))) => {
                 return self.activate_verified_seed_export_duress(proof);
             }
+            Message::OpeningTick(now) => {
+                self.sync_opening(now);
+                return Task::none();
+            }
+            Message::CancelOpening => return self.cancel_opening(),
+            message @ Message::BreezClientLoadedAfterPin { .. } if self.opening_cancelled => {
+                // A load the user cancelled finished anyway: drop it and
+                // stop anything it started, as for a closed loader.
+                discard_closed_loader_result(message);
+                return Task::none();
+            }
             Message::UnlockMotionTick(now) => {
                 if self.unlock_motion.is_some_and(|started| {
                     home::launcher_presenter::unlock_turn_progress(started, now) >= 1.0
@@ -1553,13 +1725,20 @@ impl Tab {
         let was_app = matches!(&self.state, State::App(_));
         let was_fork_app =
             matches!(&self.state, State::App(app) if app.cube_settings().network.is_blake2b());
+        // The PIN screen's loading view also covers classification, which a
+        // wrong or duress PIN ends; the opening starts only once it passed.
+        let pin_verified = matches!(
+            message,
+            Message::PinEntry(crate::pin_entry::Message::PinVerified)
+        );
         let mut result = self.update_inner(message);
         if preserve_seed_export_trial && result.units() > 0 {
             self.pending_seed_export_trials += 1;
         }
+        result = self.track_opening(pin_verified, result);
         if !matches!(self.state, State::PinEntry(_) | State::PasskeyUnlock(_))
-            || matches!(&self.state, State::PinEntry(pin) if pin.is_loading())
             || matches!(&self.state, State::PasskeyUnlock(passkey) if passkey.is_opening())
+            || self.opening.is_some()
         {
             self.unlock_motion = None;
             self.unlock_floor = None;
@@ -3607,31 +3786,16 @@ impl Tab {
                                     // only runs after an unlock has already
                                     // succeeded. Logs a count, never content.
                                     {
-                                        let root = datadir_clone.path().to_path_buf();
-                                        let cube_for_migration = cube.clone();
-                                        let pin_for_migration = pin.clone();
-                                        let joined = tokio::task::spawn_blocking(move || {
-                                            let loc = crate::services::unlock::CubeLocation::new(
-                                                &root,
-                                                &cube_for_migration,
-                                            );
-                                            let outcome =
-                                                crate::services::unlock::migrate_seed_files(
-                                                    &loc,
-                                                    &pin_for_migration,
-                                                )?;
-                                            // Give this Cube its second slot if
-                                            // it arrived without one — restored
-                                            // from a Recovery Kit, or minted
-                                            // before unit 6b. Same blocking
-                                            // task: it costs one Argon2 pass and
-                                            // must not run on the UI thread.
-                                            let slot =
-                                                crate::services::unlock::ensure_second_slot(&loc)?;
-                                            Ok::<_, crate::services::unlock::UnlockError>((
-                                                outcome, slot,
-                                            ))
-                                        })
+                                        // Its own task: a Cancel that drops
+                                        // this future cannot separate a file
+                                        // write from the record that makes
+                                        // the device agree with it.
+                                        let joined = migrate_seed_files_on_unlock(
+                                            datadir_clone.path().to_path_buf(),
+                                            datadir_clone.network_directory(network_val),
+                                            cube.clone(),
+                                            pin.clone(),
+                                        )
                                         .await;
 
                                         // Do not discard this. `let _ = …` threw
@@ -3640,39 +3804,9 @@ impl Tab {
                                         // that rewrites seed files — left no
                                         // trace at all.
                                         match joined {
-                                            Ok(Ok((outcome, new_slot))) => {
-                                                // Persist the backfilled slot
-                                                // name. Without this the decoy
-                                                // just written is unreachable
-                                                // and the next unlock mints
-                                                // another one.
+                                            Ok(Ok(UnlockMigration { outcome, new_slot })) => {
                                                 if let Some(name) = new_slot {
-                                                    cube.duress_slot_file = Some(name.clone());
-                                                    let cube_id = cube.id.clone();
-                                                    let network_dir = datadir_clone
-                                                        .network_directory(network_val);
-                                                    if let Err(e) =
-                                                        app::settings::update_settings_file(
-                                                            &network_dir,
-                                                            |mut s| {
-                                                                if let Some(c) = s
-                                                                    .cubes
-                                                                    .iter_mut()
-                                                                    .find(|c| c.id == cube_id)
-                                                                {
-                                                                    c.duress_slot_file = Some(name);
-                                                                }
-                                                                Some(s)
-                                                            },
-                                                        )
-                                                        .await
-                                                    {
-                                                        error!(
-                                                            "could not record the second slot for \
-                                                             cube {}: {e}",
-                                                            cube.id
-                                                        );
-                                                    }
+                                                    cube.duress_slot_file = Some(name);
                                                 }
                                                 if outcome.did_work() {
                                                     info!(
@@ -3686,67 +3820,6 @@ impl Tab {
                                                          has a backup",
                                                         cube.id
                                                     );
-                                                }
-                                                // Migration cannot re-seal a
-                                                // duress marker — that needs
-                                                // the duress PIN, and this
-                                                // path holds the regular one —
-                                                // so it replaces the slot with
-                                                // a decoy and the enrolment is
-                                                // gone. Say so, and make the
-                                                // device's own state agree
-                                                // rather than keep claiming an
-                                                // enrolment whose trigger no
-                                                // longer exists.
-                                                //
-                                                // Acceptable only because
-                                                // duress is feature-gated and
-                                                // unreleased. Revisit before
-                                                // it ships.
-                                                if outcome.duress_was_cleared() {
-                                                    log::warn!(
-                                                        "migration: duress enrolment on cube {} was \
-                                                         cleared — its marker could not be carried \
-                                                         across the upgrade. Re-enroll to arm it \
-                                                         again.",
-                                                        cube.id
-                                                    );
-                                                    let root = datadir_clone.path().to_path_buf();
-                                                    if let Ok(mut st) =
-                                                        crate::services::duress::DuressLocalState::load(
-                                                            &root,
-                                                        )
-                                                    {
-                                                        if st.enrolled || st.arming {
-                                                            st.disarm();
-                                                            let _ = st.save(&root);
-                                                            // Only here, inside the
-                                                            // enrolled check: the slot
-                                                            // is rewritten whenever its
-                                                            // wire version is stale, so
-                                                            // `duress_was_cleared` is
-                                                            // true for most Cubes and
-                                                            // says nothing on its own
-                                                            // about whether there was an
-                                                            // enrolment to lose. This
-                                                            // branch is where one
-                                                            // demonstrably was.
-                                                            //
-                                                            // A log line is not telling
-                                                            // the user: they believe a
-                                                            // PIN still wipes this
-                                                            // device, and it no longer
-                                                            // does.
-                                                            migration_error = Some(
-                                                                "Upgrading this Cube's files \
-                                                                 turned duress mode off — your \
-                                                                 duress PIN no longer erases \
-                                                                 this device. Turn duress mode \
-                                                                 on again to set it up."
-                                                                    .to_string(),
-                                                            );
-                                                        }
-                                                    }
                                                 }
                                             }
                                             // The keystore was reachable-but-broken.
@@ -3773,6 +3846,15 @@ impl Tab {
                                                         .to_string(),
                                                 );
                                             }
+                                        }
+                                        // Read from disk rather than from this
+                                        // unlock's migration: a Cancel may have
+                                        // dropped the unlock that disarmed. A
+                                        // failure above takes the one slot; the
+                                        // notice waits for the next unlock.
+                                        if migration_error.is_none() {
+                                            migration_error =
+                                                duress_disarm_notice(datadir_clone.path());
                                         }
                                     }
 
@@ -4521,6 +4603,10 @@ impl Tab {
                 // Two of the three branches below land in `Loader` or `Login`,
                 // which cannot show a toast, so park it and let
                 // `flush_migration_warning` deliver it when `App` arrives.
+                // The duress-off notice stays on disk until `App` shows it.
+                self.pending_duress_notice = (migration_error.as_deref()
+                    == Some(DURESS_DISARM_NOTICE))
+                .then(|| datadir.path().to_path_buf());
                 self.pending_unlock_warnings =
                     migration_error.into_iter().chain(enc_key_error).collect();
                 // The Vault is independent of Liquid: any Breez load failure
@@ -4655,12 +4741,73 @@ impl Tab {
             && matches!(self.state, State::PinEntry(_) | State::PasskeyUnlock(_))
         {
             Subscription::batch([base, iced::window::frames().map(Message::UnlockMotionTick)])
+        } else if let (true, Some(opening)) = (foreground, self.opening.as_ref()) {
+            let clock = if opening.scene.needs_frames(Instant::now()) {
+                iced::window::frames()
+            } else if opening.scene.breathes() {
+                iced::time::every(std::time::Duration::from_millis(50))
+            } else {
+                // Still the stall wait to count.
+                iced::time::every(std::time::Duration::from_secs(1))
+            };
+            Subscription::batch([base, clock.map(Message::OpeningTick)])
         } else {
             base
         }
     }
 
     pub fn view(&self) -> Element<Message> {
+        let Some(opening) = self.opening.as_ref() else {
+            return self.state_view();
+        };
+        let now = Instant::now();
+        let (cube, app) = match &self.state {
+            State::PinEntry(pin) if pin.is_loading() => (pin.cube(), false),
+            State::PasskeyUnlock(passkey) if passkey.is_opening() => (passkey.cube(), false),
+            State::Loader(loader) if loader.opening_stage().is_some() => {
+                (&loader.cube_settings, false)
+            }
+            State::App(app) => (app.cube_settings(), opening.scene.shows_app(now)),
+            _ => return self.state_view(),
+        };
+        let base = if app {
+            self.state_view()
+        } else {
+            let face = home::launcher_presenter::OpeningFace {
+                cube,
+                quote: &opening.quote,
+                stage: opening.scene.stage(),
+                stalled: opening.scene.stalled(now),
+                cancel: || Message::CancelOpening,
+            };
+            match opening.scene.floor() {
+                Some(floor) => home::launcher_presenter::opening_on_floor(
+                    floor,
+                    face,
+                    self.theme_mode,
+                    &opening.scene,
+                    now,
+                ),
+                None => home::launcher_presenter::opening_full_screen(
+                    face,
+                    self.theme_mode,
+                    &opening.scene,
+                    now,
+                ),
+            }
+        };
+        let wash = opening.scene.wash(now);
+        if wash > 0.0 {
+            iced::widget::Stack::new()
+                .push(base)
+                .push(home::launcher_presenter::opening_wash(cube.network, wash))
+                .into()
+        } else {
+            base
+        }
+    }
+
+    fn state_view(&self) -> Element<Message> {
         match &self.state {
             State::Installer(v) => v.view().map(Message::Install),
             State::App(v) if v.cube_settings().network.is_blake2b() => {
@@ -4747,11 +4894,150 @@ impl Tab {
         )
     }
 
+    /// The opening's stage for the current state. `None` ends the opening;
+    /// `Some(None)` keeps it but has no stage (a loader error page).
+    fn opening_stage(&self) -> Option<Option<home::launcher_opening::Stage>> {
+        use home::launcher_opening::Stage;
+        // The unlock routes past its screen (to the Loader, or to Login for a
+        // remote backend) exactly when it carries Bitcoin wallet settings: a
+        // Vault or an imported wallet. Without them there is no daemon to
+        // start: the wallets load and the Cube is almost there.
+        let unlocked = |on_success: &crate::pin_entry::PinEntrySuccess| {
+            let crate::pin_entry::PinEntrySuccess::LoadApp {
+                wallet_settings, ..
+            } = on_success;
+            Some(if wallet_settings.is_some() {
+                Stage::Connecting
+            } else {
+                Stage::AlmostThere
+            })
+        };
+        match &self.state {
+            State::PinEntry(pin) if pin.is_loading() => Some(unlocked(&pin.on_success)),
+            State::PasskeyUnlock(passkey) if passkey.is_opening() => {
+                Some(unlocked(&passkey.on_success))
+            }
+            State::Loader(loader) => Some(loader.opening_stage()),
+            State::App(_) => Some(Some(Stage::Ready)),
+            _ => None,
+        }
+    }
+
+    /// Start the opening once an unlock is verified, keep its abort handles
+    /// while the unlock screen still owns the load, and follow its stage.
+    fn track_opening(&mut self, pin_verified: bool, result: Task<Message>) -> Task<Message> {
+        let now = Instant::now();
+        // Every unlock reads the motion preference afresh, whichever route
+        // (Launcher, auto-lock, a new Cube) brought it here.
+        let datadir = |on_success: &crate::pin_entry::PinEntrySuccess| {
+            let crate::pin_entry::PinEntrySuccess::LoadApp { datadir, .. } = on_success;
+            datadir.clone()
+        };
+        let verified = match &self.state {
+            State::PinEntry(pin) if pin_verified && pin.is_loading() => {
+                Some((pin.loading_quote().clone(), datadir(&pin.on_success)))
+            }
+            State::PasskeyUnlock(passkey) if passkey.is_opening() => Some((
+                passkey.loading_quote().clone(),
+                datadir(&passkey.on_success),
+            )),
+            _ => None,
+        };
+        if let (None, Some((quote, root))) = (self.opening.as_ref(), verified) {
+            if let Some(Some(stage)) = self.opening_stage() {
+                self.opening_cancelled = false;
+                let reduced = home::motion_reduced(&root, self.system_reduces_motion);
+                self.opening = Some(CubeOpening {
+                    scene: home::launcher_opening::Opening::new(
+                        self.unlock_floor.take(),
+                        reduced,
+                        stage,
+                        now,
+                    ),
+                    quote,
+                    loads: Vec::new(),
+                });
+            }
+        }
+        let preloader = matches!(&self.state, State::PinEntry(pin) if pin.is_loading())
+            || matches!(&self.state, State::PasskeyUnlock(passkey) if passkey.is_opening());
+        let result = match self.opening.as_mut() {
+            Some(opening) if preloader && result.units() > 0 => {
+                let (task, handle) = result.abortable();
+                opening.loads.push(handle);
+                task
+            }
+            _ => result,
+        };
+        self.sync_opening(now);
+        result
+    }
+
+    fn sync_opening(&mut self, now: Instant) {
+        let stage = self.opening_stage();
+        let Some(opening) = self.opening.as_mut() else {
+            return;
+        };
+        match stage {
+            None => self.opening = None,
+            Some(stage) => {
+                match stage {
+                    Some(stage) => opening.scene.set_stage(stage, now),
+                    // The error page owns the screen; a Retry starts the
+                    // stall wait from when it leaves.
+                    None => opening.scene.hold(now),
+                }
+                if !matches!(self.state, State::PinEntry(_) | State::PasskeyUnlock(_)) {
+                    // The Loader or App owns its work now; Cancel uses its routes.
+                    opening.loads.clear();
+                }
+                if opening.scene.done(now) {
+                    self.opening = None;
+                }
+            }
+        }
+    }
+
+    /// Cancel from a stalled loading face. Before the Loader, the unlock's
+    /// own loads are aborted and its Back route taken; in the Loader, its
+    /// Back. Either way the session for this Cube is closed: it is locked.
+    fn cancel_opening(&mut self) -> Task<Message> {
+        // A press that lands after the Cube is ready changes nothing: the
+        // opening carries on to its finale.
+        let cube_id = match &self.state {
+            State::PinEntry(pin) => pin.cube().id.clone(),
+            State::PasskeyUnlock(passkey) => passkey.cube().id.clone(),
+            State::Loader(loader) => loader.cube_settings.id.clone(),
+            _ => return Task::none(),
+        };
+        let Some(opening) = self.opening.take() else {
+            return Task::none();
+        };
+        for load in opening.loads {
+            load.abort();
+        }
+        let back = match &self.state {
+            State::PinEntry(_) => {
+                self.opening_cancelled = true;
+                Message::PinEntry(crate::pin_entry::Message::Back)
+            }
+            State::PasskeyUnlock(_) => {
+                self.opening_cancelled = true;
+                Message::PasskeyUnlock(crate::passkey_unlock::Message::Back)
+            }
+            _ => Message::Load(loader::Message::View(loader::ViewMessage::SwitchNetwork)),
+        };
+        let task = self.update_inner(back);
+        app::session::close_cube(&cube_id);
+        task
+    }
+
     pub fn stop(&mut self) {
         self.pending_split_intent = None;
         self.claim_open = None;
         self.unlock_motion = None;
         self.unlock_floor = None;
+        self.opening = None;
         match &mut self.state {
             State::Loader(s) => s.stop(),
             State::Home(s) => s.stop(),
@@ -6093,6 +6379,33 @@ mod migration_warning_tests {
             vec!["seed files were not upgraded".to_string()],
             "the warning was consumed by a state that cannot display it"
         );
+    }
+
+    /// The duress-off notice is cleared on disk only by the `App` that shows
+    /// it. A tab still loading holds the toast in memory, and a Cancel or
+    /// close from there must leave the next unlock to say it.
+    #[test]
+    fn the_duress_notice_stays_on_disk_until_the_app_shows_it() {
+        let root = std::env::temp_dir().join(format!("duress-notice-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        crate::services::duress::DuressLocalState {
+            migration_disarm_notice: true,
+            ..Default::default()
+        }
+        .save(&root)
+        .unwrap();
+        let mut tab = non_app_tab();
+        tab.pending_unlock_warnings = vec![DURESS_DISARM_NOTICE.to_string()];
+        tab.pending_duress_notice = Some(root.clone());
+
+        let _ = tab.flush_migration_warning();
+
+        assert_eq!(tab.pending_duress_notice.as_ref(), Some(&root));
+        assert_eq!(
+            duress_disarm_notice(&root).as_deref(),
+            Some(DURESS_DISARM_NOTICE)
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// Nothing pending must not manufacture a toast.
@@ -8368,5 +8681,409 @@ mod mcp_proposal_routing_tests {
         let _retry = crate::installer::proposal::reserve(&ctx)
             .expect("same-context retry must regain the reservation");
         crate::app::session::close();
+    }
+}
+
+#[cfg(test)]
+mod opening_tests {
+    use super::{home, unlock_state, Message, State, Tab};
+    use crate::app::settings::CubeSettings;
+    use crate::chain::ChainId;
+    use coincube_core::miniscript::bitcoin::Network;
+    use iced::Task;
+
+    fn datadir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "coincube-opening-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn floor() -> home::LauncherSceneContext {
+        home::LauncherSceneContext {
+            selected: home::CubeCatalogKey {
+                chain: ChainId::Bitcoin,
+                cube_id: "everyday".into(),
+            },
+            page: 0,
+            selected_slot: 0,
+            backup: "Status unknown",
+            connect: String::new(),
+            wallets: "Not yet known".into(),
+            peers: Vec::new(),
+            pages: 1,
+            chrome: Default::default(),
+        }
+    }
+
+    /// A tab on a PIN screen that was opened from the floor and has just
+    /// had its PIN submitted: the loading view is up, classification runs.
+    fn submitted(root: &std::path::Path) -> Tab {
+        submitted_with(root, None)
+    }
+
+    fn submitted_with(
+        root: &std::path::Path,
+        wallet_settings: Option<crate::app::settings::WalletSettings>,
+    ) -> Tab {
+        let cube = CubeSettings::new("Everyday".into(), ChainId::Bitcoin);
+        let state = unlock_state(
+            cube,
+            root.to_path_buf(),
+            crate::pin_entry::PinEntrySuccess::LoadApp {
+                datadir: crate::dir::CoincubeDirectory::new(root.to_path_buf()),
+                config: crate::app::Config::new(false),
+                network: Network::Bitcoin,
+                internal_bitcoind: None,
+                backup: None,
+                wallet_settings,
+                connect_client: None,
+            },
+            None,
+        );
+        let mut tab = Tab::new(1, state);
+        let State::PinEntry(pin) = &mut tab.state else {
+            unreachable!("a PIN Cube");
+        };
+        pin.start_loading_for_test();
+        tab.unlock_floor = Some(floor());
+        tab
+    }
+
+    #[test]
+    fn the_cube_opens_only_once_its_pin_is_verified() {
+        let root = datadir();
+        let mut tab = submitted(&root);
+        // Classifying: a wrong or duress PIN can still end it, so the Cube
+        // keeps its unlock face and the floor it stands on.
+        let result = tab.track_opening(false, Task::none());
+        drop(result);
+        assert!(tab.opening.is_none());
+        assert!(tab.unlock_floor.is_some());
+        // Verified: the opening takes the floor and holds the load's handle.
+        let result = tab.track_opening(true, Task::done(Message::CancelOpening));
+        let opening = tab.opening.as_ref().expect("a verified PIN opens the Cube");
+        assert!(opening.scene.floor().is_some());
+        assert_eq!(opening.loads.len(), 1);
+        // Without a Vault there is no daemon: the wallets load next.
+        assert_eq!(
+            opening.scene.stage(),
+            home::launcher_opening::Stage::AlmostThere
+        );
+        assert!(tab.unlock_floor.is_none());
+        drop(result);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A Cube whose Bitcoin wallet is imported has no Vault id, but its
+    /// unlock carries wallet settings and routes to the Loader. The opening
+    /// has to start where the Loader does, or the stage line and the light
+    /// step back when the Loader takes over.
+    #[test]
+    fn an_imported_wallet_opens_at_the_loaders_first_stage() {
+        let root = datadir();
+        let imported: crate::app::settings::WalletSettings =
+            serde_json::from_value(serde_json::json!({
+                "name": "imported", "alias": null, "descriptor_checksum": "imported",
+                "pinned_at": null
+            }))
+            .unwrap();
+        let mut tab = submitted_with(&root, Some(imported));
+        let State::PinEntry(pin) = &tab.state else {
+            unreachable!("a PIN Cube");
+        };
+        assert!(pin.cube().vault_wallet_id.is_none());
+        drop(tab.track_opening(true, Task::none()));
+        let opening = tab.opening.as_ref().expect("a verified PIN opens the Cube");
+        assert_eq!(
+            opening.scene.stage(),
+            home::launcher_opening::Stage::Connecting
+        );
+        assert_eq!(
+            loader_at_connecting(&root).opening_stage(),
+            Some(home::launcher_opening::Stage::Connecting)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A PIN Cube on disk (seed under "1234") and listed in `settings.json`,
+    /// with `slot` as its recorded second slot.
+    async fn cube_on_disk(
+        root: &std::path::Path,
+        slot: Option<String>,
+    ) -> (CubeSettings, crate::dir::NetworkDirectory) {
+        use crate::app::settings::{update_settings_file, Settings};
+        use coincube_core::miniscript::bitcoin::secp256k1::Secp256k1;
+        use coincube_core::signer::{MasterSigner, MASTER_SEED_LABEL};
+
+        let secp = Secp256k1::signing_only();
+        let signer = MasterSigner::generate(Network::Bitcoin).unwrap();
+        let mut cube = CubeSettings::new("Everyday".into(), ChainId::Bitcoin);
+        cube.created_at = 1000;
+        cube.master_signer_fingerprint = Some(signer.fingerprint(&secp));
+        cube.duress_slot_file = slot;
+        signer
+            .store_encrypted(
+                root,
+                Network::Bitcoin,
+                &secp,
+                Some((format!("{}{}", MASTER_SEED_LABEL, 1000), 1000)),
+                "1234",
+                &cube.id,
+                None,
+            )
+            .unwrap();
+        let network_dir = crate::dir::CoincubeDirectory::new(root.to_path_buf())
+            .network_directory(ChainId::Bitcoin);
+        network_dir.init().unwrap();
+        let listed = cube.clone();
+        update_settings_file(&network_dir, |_| {
+            Some(Settings {
+                cubes: vec![listed],
+                ..Default::default()
+            })
+        })
+        .await
+        .unwrap();
+        (cube, network_dir)
+    }
+
+    /// Start the unlock's seed-file step, poll it once so the work has
+    /// begun, then drop it the way Cancel drops the unlock's load.
+    async fn start_then_cancel(
+        root: &std::path::Path,
+        network_dir: &crate::dir::NetworkDirectory,
+        cube: &CubeSettings,
+    ) {
+        use std::future::Future;
+        let mut load = Box::pin(super::migrate_seed_files_on_unlock(
+            root.to_path_buf(),
+            network_dir.clone(),
+            cube.clone(),
+            zeroize::Zeroizing::new("1234".to_string()),
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(
+                load.as_mut().poll(cx).is_pending(),
+                "one Argon2 pass is not instant"
+            );
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(load);
+    }
+
+    /// Wait for `done`, or fail with `what` after two minutes.
+    async fn eventually(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while !done() {
+            assert!(std::time::Instant::now() < deadline, "{}", what);
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Cancel drops the unlock's load mid-way. If that lands after the second
+    /// slot is written but before its name is recorded, the slot is
+    /// unreachable and the next unlock mints another. The name must still
+    /// reach `settings.json`, and the next unlock must reuse that slot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancel_mid_backfill_still_records_the_second_slot() {
+        use crate::app::settings::Settings;
+        use coincube_core::signer::MasterSigner;
+
+        let root = datadir();
+        let (cube, network_dir) = cube_on_disk(&root, None).await;
+        let folder = MasterSigner::mnemonics_folder(&root, Network::Bitcoin);
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1);
+
+        start_then_cancel(&root, &network_dir, &cube).await;
+        let recorded = || Settings::from_file(&network_dir).unwrap().cubes[0].clone();
+        eventually("the cancelled backfill never recorded its slot", || {
+            recorded().duress_slot_file.is_some()
+        })
+        .await;
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 2);
+
+        // The next unlock finds the recorded slot and mints nothing.
+        let again = super::migrate_seed_files_on_unlock(
+            root.clone(),
+            network_dir.clone(),
+            recorded(),
+            zeroize::Zeroizing::new("1234".to_string()),
+        )
+        .await;
+        assert!(matches!(
+            again,
+            Ok(Ok(super::UnlockMigration { new_slot: None, .. }))
+        ));
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The same Cancel, on an enrolled Cube whose slot migration replaces.
+    /// The marker is gone once the slot is rewritten; if the disarm did not
+    /// follow, `duress.json` would keep claiming an enrolment nothing
+    /// triggers, and the next unlock, with current files, would never notice.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancel_mid_migration_still_disarms_a_replaced_duress_marker() {
+        use crate::services::duress::DuressLocalState;
+        use crate::services::unlock::marker;
+
+        let root = datadir();
+        // A slot at the wrong wire version: an ungated Cube with no device
+        // secret targets v2, so this v3 slot is rewritten as a decoy.
+        let slot = marker::new_file_name(1000);
+        let (cube, network_dir) = cube_on_disk(&root, Some(slot.clone())).await;
+        let secret: coincube_core::seed_crypt::DeviceSecret = zeroize::Zeroizing::new([0x33; 32]);
+        marker::write_decoy(&root, ChainId::Bitcoin, &cube.id, &slot, Some(&secret)).unwrap();
+        DuressLocalState {
+            enrolled: true,
+            ..Default::default()
+        }
+        .save(&root)
+        .unwrap();
+
+        start_then_cancel(&root, &network_dir, &cube).await;
+        eventually("the cancelled migration never disarmed duress", || {
+            !DuressLocalState::load(&root).unwrap().enrolled
+        })
+        .await;
+
+        // The next unlock: its files are current, so its own migration has
+        // nothing to report. The warning the cancelled one never showed has
+        // to come from disk, and it stays there until it is shown.
+        let again = super::migrate_seed_files_on_unlock(
+            root.clone(),
+            network_dir.clone(),
+            cube.clone(),
+            zeroize::Zeroizing::new("1234".to_string()),
+        )
+        .await;
+        assert!(matches!(&again, Ok(Ok(m)) if !m.outcome.duress_was_cleared()));
+        assert_eq!(
+            super::duress_disarm_notice(&root).as_deref(),
+            Some(super::DURESS_DISARM_NOTICE),
+            "the duress-off warning was lost with the cancelled unlock"
+        );
+        assert_eq!(
+            super::duress_disarm_notice(&root).as_deref(),
+            Some(super::DURESS_DISARM_NOTICE),
+            "reading the notice must not clear it"
+        );
+        super::acknowledge_duress_disarm_notice(&root);
+        assert_eq!(super::duress_disarm_notice(&root), None);
+        assert!(!DuressLocalState::load(&root).unwrap().enrolled);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn loader_at_connecting(root: &std::path::Path) -> super::Loader {
+        let (loader, startup) = super::Loader::new(
+            crate::dir::CoincubeDirectory::new(root.to_path_buf()),
+            crate::app::Config::new(false),
+            Network::Bitcoin,
+            None,
+            None,
+            None,
+            CubeSettings::new("Everyday".into(), ChainId::Bitcoin),
+            None,
+            None,
+        );
+        // Not polled: no daemon starts in this test.
+        drop(startup);
+        loader
+    }
+
+    #[test]
+    fn a_retry_from_a_background_error_page_waits_afresh_before_cancel() {
+        use home::launcher_opening::{Opening, Stage, STALL};
+        let root = datadir();
+        let t0 = std::time::Instant::now();
+        let mut tab = Tab::new(1, State::Loader(loader_at_connecting(&root)));
+        tab.opening = Some(super::CubeOpening {
+            scene: Opening::new(None, false, Stage::Connecting, t0),
+            quote: coincube_ui::component::quote_display::Quote {
+                id: "test".into(),
+                text: "A quote.".into(),
+                author: "Someone".into(),
+                source: "Somewhere".into(),
+                category: String::new(),
+                length: String::new(),
+                contexts: Vec::new(),
+            },
+            loads: Vec::new(),
+        });
+        // The loader fails; the error page holds the wait once, then the
+        // tab goes to the background and gets no more ticks.
+        let State::Loader(loader) = &mut tab.state else {
+            unreachable!()
+        };
+        loader.fail(crate::loader::Error::Unexpected("refused".into()));
+        tab.sync_opening(t0 + std::time::Duration::from_secs(2));
+        assert!(tab.opening.is_some(), "an error keeps the opening");
+        // A minute later the user is back and presses Retry: the Loader is
+        // at Connecting again, the very stage it failed on.
+        let retry = t0 + std::time::Duration::from_secs(62);
+        tab.state = State::Loader(loader_at_connecting(&root));
+        tab.sync_opening(retry);
+        let opening = &tab.opening.as_ref().unwrap().scene;
+        assert_eq!(opening.stage(), Stage::Connecting);
+        assert!(!opening.stalled(retry), "no Cancel straight after Retry");
+        assert!(opening.stalled(retry + STALL));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_unlock_without_the_launcher_still_honours_reduced_motion() {
+        // Auto-lock and a freshly created Cube reach the PIN screen without
+        // the Launcher; the system setting alone must still be read.
+        let root = datadir();
+        let mut tab = submitted(&root);
+        tab.unlock_floor = None;
+        tab.set_system_reduces_motion(Some(true));
+        drop(tab.track_opening(true, Task::none()));
+        let opening = tab.opening.as_ref().expect("a verified PIN opens the Cube");
+        assert!(opening.scene.floor().is_none());
+        assert!(!opening.scene.breathes(), "no flicker or breath");
+
+        let mut tab = submitted(&root);
+        tab.set_system_reduces_motion(Some(false));
+        drop(tab.track_opening(true, Task::none()));
+        assert!(tab.opening.as_ref().unwrap().scene.breathes());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cancel_aborts_the_load_and_returns_to_the_launcher_locked() {
+        let _session = crate::app::session::test_guard();
+        let root = datadir();
+        let mut tab = submitted(&root);
+        let cube_id = match &tab.state {
+            State::PinEntry(pin) => pin.cube().id.clone(),
+            _ => unreachable!(),
+        };
+        crate::app::session::open(cube_id.clone(), zeroize::Zeroizing::new("1234".into()));
+        let (load, handle) = Task::<Message>::none().abortable();
+        drop(load);
+        let result = tab.track_opening(true, Task::none());
+        drop(result);
+        tab.opening.as_mut().unwrap().loads.push(handle.clone());
+        drop(tab.update(Message::CancelOpening));
+        assert!(matches!(tab.state, State::Home(_)));
+        assert!(tab.opening.is_none());
+        assert!(tab.opening_cancelled, "a late load result is dropped");
+        assert!(handle.is_aborted());
+        assert_ne!(
+            crate::app::session::current_cube_id().as_deref(),
+            Some(cube_id.as_str()),
+            "the Cube is locked"
+        );
+        // Cancel with nothing opening does nothing.
+        drop(tab.update(Message::CancelOpening));
+        assert!(matches!(tab.state, State::Home(_)));
+        crate::app::session::close();
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

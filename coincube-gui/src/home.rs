@@ -64,6 +64,7 @@ mod launcher_catalog;
 mod launcher_chrome;
 pub(crate) mod launcher_coin;
 mod launcher_gpu;
+pub(crate) mod launcher_opening;
 pub(crate) mod launcher_presenter;
 pub(crate) mod launcher_scene;
 pub(crate) use launcher_catalog::LauncherSceneContext;
@@ -345,6 +346,16 @@ pub struct RemoteCube {
     /// Whether Connect reports a Vault on this Cube; `None` when no device
     /// has reported it, or the API predates the field.
     pub has_vault: Option<bool>,
+}
+
+/// Whether the motion preference saved under `root`, against the system's,
+/// reduces motion: the opening that follows an unlock then holds still.
+pub(crate) fn motion_reduced(root: &CoincubeDirectory, system: Option<bool>) -> bool {
+    use crate::app::settings::global::GlobalSettings;
+    GlobalSettings::load_preferences(&GlobalSettings::path(root))
+        .unwrap_or_default()
+        .resolve(None, system)
+        .reduce_motion
 }
 
 /// A ghost the recovery-phrase import is restoring: Connect's record of the

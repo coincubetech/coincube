@@ -29,6 +29,10 @@ pub(super) const REST_SIZE: f32 = 152.0;
 pub(super) const PERSPECTIVE: f32 = 1100.0;
 /// The details and unlock faces project to this many pixels on screen.
 pub(super) const FACE_SIZE: f32 = 420.0;
+/// `.fc.load`: the loading face, 1.67x the credentials face.
+pub(super) const OPEN_FACE_SIZE: f32 = 700.0;
+/// The finale's `scale(x3.6)` of the loading face.
+const RUSH_SCALE: f32 = 3.6;
 /// `.f { border: 1.5px }`, in face-local CSS pixels.
 const BORDER: f32 = 1.5;
 
@@ -216,6 +220,8 @@ impl Motion {
                         dim: if handoff { 1.0 - fade } else { 0.0 },
                         shadow: 1.0 - fade,
                         lift: 0.0,
+                        open: 0.0,
+                        rush: 0.0,
                     }
                 } else if previous.as_ref() == Some(key) {
                     Pose {
@@ -224,6 +230,8 @@ impl Motion {
                         dim: fade,
                         shadow: fade,
                         lift: 0.0,
+                        open: 0.0,
+                        rush: 0.0,
                     }
                 } else {
                     Pose {
@@ -240,6 +248,8 @@ impl Motion {
                         dim: 0.0,
                         shadow: fade,
                         lift: 0.0,
+                        open: 0.0,
+                        rush: 0.0,
                     }
                 } else {
                     Pose {
@@ -273,6 +283,11 @@ pub(super) struct Pose {
     pub dim: f32,
     pub shadow: f32,
     pub lift: f32,
+    /// The tumble from the unlock face to the loading face (0..1, eased).
+    /// On a peer it steps the scene further back, `.cb.dim.deep`.
+    pub open: f32,
+    /// The finale: the loading face rushing toward the viewer (0..1, eased).
+    pub rush: f32,
 }
 
 impl Pose {
@@ -282,6 +297,8 @@ impl Pose {
         dim: 0.0,
         shadow: 1.0,
         lift: 0.0,
+        open: 0.0,
+        rush: 0.0,
     };
     pub const DETAILS: Self = Self {
         spin: 1.0,
@@ -289,6 +306,8 @@ impl Pose {
         dim: 0.0,
         shadow: 0.0,
         lift: 0.0,
+        open: 0.0,
+        rush: 0.0,
     };
     pub const DIMMED: Self = Self {
         spin: 0.0,
@@ -296,6 +315,8 @@ impl Pose {
         dim: 1.0,
         shadow: 1.0,
         lift: 0.0,
+        open: 0.0,
+        rush: 0.0,
     };
 
     pub fn unlock(second: f32) -> Self {
@@ -307,6 +328,24 @@ impl Pose {
 
     pub fn lifted(self, lift: f32) -> Self {
         Self { lift, ..self }
+    }
+
+    /// The unlocked Cube on its way to, or on, the loading face: `open` is
+    /// the tumble, `rush` the finale.
+    pub fn opening(open: f32, rush: f32) -> Self {
+        Self {
+            open: open.clamp(0.0, 1.0),
+            rush: rush.clamp(0.0, 1.0),
+            ..Self::unlock(1.0)
+        }
+    }
+
+    /// A peer behind an opening Cube: `.cb.dim.deep`.
+    pub fn deep(open: f32) -> Self {
+        Self {
+            open: open.clamp(0.0, 1.0),
+            ..Self::DIMMED
+        }
     }
 }
 
@@ -346,6 +385,31 @@ pub(super) fn ease(t: f32) -> f32 {
 pub(super) fn second_turn_progress(started: Instant, now: Instant) -> f32 {
     ease(now.saturating_duration_since(started).as_secs_f32() / TURN.as_secs_f32())
 }
+
+/// `cubic-bezier(x1, y1, x2, y2)` at `t`, inverted from x to y like CSS.
+pub(super) fn bezier(t: f32, (x1, y1, x2, y2): (f32, f32, f32, f32)) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    if t == 0.0 || t == 1.0 {
+        return t;
+    }
+    let curve = |u: f32, a: f32, b: f32| {
+        3.0 * (1.0 - u).powi(2) * u * a + 3.0 * (1.0 - u) * u * u * b + u.powi(3)
+    };
+    let (mut lo, mut hi) = (0.0_f32, 1.0_f32);
+    for _ in 0..24 {
+        let u = (lo + hi) * 0.5;
+        if curve(u, x1, x2) < t {
+            lo = u;
+        } else {
+            hi = u;
+        }
+    }
+    curve((lo + hi) * 0.5, y1, y2)
+}
+
+/// `.cb.finale .cube { transition: transform 950ms cubic-bezier(.55,0,.9,.4) }`:
+/// ease-in, so the face accelerates toward the viewer.
+pub(super) const RUSH_EASE: (f32, f32, f32, f32) = (0.55, 0.0, 0.9, 0.4);
 
 /// Stage geometry for a width. The prototype only defines the 1440px board;
 /// narrower windows scale the row and Cube uniformly so a page of Cubes still
@@ -437,6 +501,17 @@ impl Layout {
     pub fn face(&self) -> f32 {
         FACE_SIZE.min(self.height - 48.0).max(200.0)
     }
+
+    /// The loading face: 700px, the most that fits between the bars, and
+    /// never smaller than the unlock face it grows from.
+    pub fn open_face(&self) -> f32 {
+        OPEN_FACE_SIZE.min(self.height - 44.0).max(self.face())
+    }
+
+    /// The loading face is centred on the stage.
+    pub fn open_target(&self) -> (f32, f32) {
+        (self.width / 2.0, self.height / 2.0)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -479,6 +554,9 @@ pub(super) enum Face {
     BackLeft,
     /// `.f.br`: `rotateY(90deg) translateZ(s/2)`, unlock.
     BackRight,
+    /// `.f.bt`: `rotateX(-90deg) translateZ(s/2)`, loading. Only an opening
+    /// Cube draws it: at rest it faces the floor.
+    Bottom,
 }
 
 impl Face {
@@ -498,6 +576,7 @@ impl Face {
             Face::Right => pushed,
             Face::BackLeft => pushed.rotate_y(180.0_f32.to_radians()),
             Face::BackRight => pushed.rotate_y(90.0_f32.to_radians()),
+            Face::Bottom => pushed.rotate_x((-90.0_f32).to_radians()),
         }
     }
 
@@ -567,7 +646,13 @@ pub(super) fn project_faces(
     // A resting Cube never reads the target, which is placed from the
     // resting Cubes' own bounds (`Layout::rows_top`).
     let (tx, ty) = if p > 0.0 { layout.target() } else { rest };
-    let face = layout.face();
+    // The tumble moves the face to the stage centre and grows it to the
+    // loading face; the finale scales that on toward the viewer.
+    let open = pose.open.clamp(0.0, 1.0);
+    let (ox, oy) = layout.open_target();
+    let (tx, ty) = (tx + (ox - tx) * open, ty + (oy - ty) * open);
+    let face = layout.face() + (layout.open_face() - layout.face()) * open;
+    let face = face * (1.0 + (RUSH_SCALE - 1.0) * pose.rush.clamp(0.0, 1.0));
     // translate3d(dx, dy, 0) scale(k). CSS `scale(k)` is two-dimensional:
     // it never stretches z, so the zoomed face still sits only s/2 in front
     // of the cube center. The prototype solved k as if z scaled, which makes
@@ -578,14 +663,18 @@ pub(super) fn project_faces(
     let dx = (tx - rest.0) * p;
     let dy = (ty - rest.1) * p;
     let k = 1.0 + (k_end - 1.0) * p;
-    let pitch = (-35.0_f32 * (1.0 - p)).to_radians();
-    let yaw = (45.0 + (180.0 + 90.0 * pose.second - 45.0) * p).to_radians();
+    // `rotateX(90deg) rotateY(360deg)`: the bottom face tips up to the
+    // viewer while the yaw squares it, so the Cube tumbles diagonally.
+    let pitch = (-35.0_f32 * (1.0 - p) + 90.0 * open * p).to_radians();
+    let yaw = (45.0 + (180.0 + 90.0 * pose.second + 90.0 * open - 45.0) * p).to_radians();
     // perspective-origin moves from the scene center (cube center + .043s)
     // to the translated cube center with the same easing and delay.
     let origin = (rest.0 + dx, rest.1 + 0.043 * s * (1.0 - p) + dy);
     // `.cb.dim .scene { opacity: .4; transform: scale(.92) }` about the
     // scene's own center, after the perspective projection is flattened.
     let dim = pose.dim.clamp(0.0, 1.0);
+    // `.cb.dim.deep .scene { opacity: .12 }` behind an opening Cube.
+    let deep = if p > 0.0 { 0.0 } else { open * dim };
     let scene_scale = 1.0 - 0.08 * dim;
     let scene_center = (rest.0, rest.1 + 0.043 * s);
     let dimmed = |(x, y): (f32, f32)| {
@@ -600,7 +689,8 @@ pub(super) fn project_faces(
     let center = (rest.0 + dx, rest.1 + dy - lift);
     let mut faces = Vec::with_capacity(3);
     let mut back = Vec::new();
-    for which in Face::ALL {
+    let bottom = (p > 0.0 && open > 0.0).then_some(Face::Bottom);
+    for which in Face::ALL.iter().copied().chain(bottom) {
         let mut corners = [(0.0, 0.0); 4];
         let mut w = [1.0; 4];
         for (i, point) in which.corners().iter().copied().enumerate() {
@@ -631,7 +721,7 @@ pub(super) fn project_faces(
     let rise = (pose.lift / BOB_HEIGHT).clamp(0.0, 1.0) * (1.0 - p);
     let shadow = |v: f32| v * scene_scale * (1.0 - 0.08 * rise);
     let frame = SceneFrame {
-        opacity: 1.0 - 0.6 * dim,
+        opacity: 1.0 - 0.6 * dim - 0.28 * deep,
         shadow_center: dimmed((rest.0 + 0.058 * s, rest.1 + 0.525 * s)),
         shadow_radii: (shadow(0.725 * s), shadow(0.31 * s)),
         shadow_sigma: shadow(0.055 * s),
@@ -721,9 +811,17 @@ impl Palette {
             Face::Top => self.top,
             Face::Left => self.left,
             Face::Right => self.right,
-            Face::BackLeft | Face::BackRight => self.back,
+            // `--face-b` is the back faces' colour.
+            Face::BackLeft | Face::BackRight | Face::Bottom => self.back,
         }
     }
+}
+
+/// `--glow`: the opening face's edge light, the network family hue at full
+/// strength in both themes.
+pub(crate) fn glow(network: ChainId) -> [u8; 3] {
+    let [r, g, b, _] = edge(network, false);
+    [r, g, b]
 }
 
 /// `--edge-btc`, `--edge-b2b`, `--edge-test`: the network family hue at 60%.
@@ -936,7 +1034,7 @@ pub(super) fn rest_face_svg(face: Face, marks: CubeMarks, light: bool) -> Option
                 icon(&mut svg, &path, x + pad + gap, y - s * 0.03, badge, tone);
             }
         }
-        Face::BackLeft | Face::BackRight => return None,
+        Face::BackLeft | Face::BackRight | Face::Bottom => return None,
     }
     svg.push_str("</svg>");
     Some(svg)
@@ -1027,7 +1125,7 @@ fn ghost_face_svg(
                 icon(&mut svg, &path, x + pad + gap, y - s * 0.03, badge, tone);
             }
         }
-        Face::BackLeft | Face::BackRight => return None,
+        Face::BackLeft | Face::BackRight | Face::Bottom => return None,
     }
     svg.push_str("</svg>");
     Some(svg)

@@ -211,6 +211,12 @@ impl PinEntry {
         &self.cube
     }
 
+    /// The loading view a submitted PIN puts up, without classifying one.
+    #[cfg(test)]
+    pub(crate) fn start_loading_for_test(&mut self) {
+        self.loading = true;
+    }
+
     #[cfg(test)]
     pub(crate) fn reviewer_trial_generation(&self) -> u64 {
         self.fork_generation
@@ -525,6 +531,11 @@ impl PinEntry {
 
     pub(crate) fn is_loading(&self) -> bool {
         self.loading
+    }
+
+    /// The quote this screen's loading view shows.
+    pub(crate) fn loading_quote(&self) -> &Quote {
+        &self.loading_quote
     }
 
     pub fn view_with_theme(

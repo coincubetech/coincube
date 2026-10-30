@@ -153,6 +153,12 @@ pub struct DuressLocalState {
     /// healthy enrolment.
     #[serde(default)]
     pub arming: bool,
+    /// A seed-file upgrade replaced this device's duress marker and disarmed
+    /// it, and the user has not been told yet. Saved with the disarm and
+    /// cleared only once the warning is on screen, so an unlock cancelled in
+    /// between still leaves the next one to say so.
+    #[serde(default)]
+    pub migration_disarm_notice: bool,
 }
 
 /// A durably-enqueued activation `POST` that must eventually reach Connect.
@@ -202,6 +208,7 @@ impl DuressLocalState {
         let sensitive = self.enrolled
             || self.active
             || self.arming
+            || self.migration_disarm_notice
             || self.duress_code.is_some()
             || self.account_id.is_some()
             || self.pending_activation.is_some()
@@ -271,6 +278,7 @@ mod tests {
             duress_code: Some("enc:cafebabe".to_string()),
             account_id: Some("acct_123".to_string()),
             arming: false,
+            migration_disarm_notice: false,
         }
     }
 

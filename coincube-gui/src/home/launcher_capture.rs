@@ -562,3 +562,107 @@ fn launcher_capture() {
         );
     }
 }
+
+/// O-Launcher's opening: the tumble, the settled loading face as the edge
+/// brightens, a stalled stage with Cancel, the Flash finale, and the List
+/// view's full-screen frame.
+#[test]
+#[ignore = "writes PNG frames; needs a GPU adapter"]
+fn launcher_capture_opening() {
+    use super::launcher_opening::{Opening, Stage};
+    let Ok(directory) = std::env::var("LAUNCHER_CAPTURE_DIR") else {
+        return;
+    };
+    let directory = PathBuf::from(directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let mut renderer = renderer().expect("wgpu headless renderer");
+    let size = Size::new(1440.0, 900.0);
+    let quote = coincube_ui::component::quote_display::Quote {
+        id: "capture".into(),
+        text: "Trusted third parties are security holes.".into(),
+        author: "Nick Szabo".into(),
+        source: "Trusted Third Parties Are Security Holes, 2001".into(),
+        category: String::new(),
+        length: String::new(),
+        contexts: Vec::new(),
+    };
+    for light in [false, true] {
+        let appearance = if light { "light" } else { "dark" };
+        let palette = if light {
+            theme::Theme::light()
+        } else {
+            theme::Theme::dark()
+        };
+        let mode = if light {
+            coincube_ui::theme::palette::ThemeMode::Light
+        } else {
+            coincube_ui::theme::palette::ThemeMode::Dark
+        };
+        let mut home = home(light);
+        home.catalog.selected = Some(key(1));
+        let cube = match &home.state {
+            State::Cubes { cubes, .. } => cubes[1].clone(),
+            _ => unreachable!(),
+        };
+        let floor = home
+            .launcher_scene_context(&cube)
+            .expect("the selected Cube's floor");
+        let t0 = Instant::now();
+        let mut shot = |opening: &Opening, now: Instant, stage: Stage, name: &str| {
+            let face = launcher_presenter::OpeningFace {
+                cube: &cube,
+                quote: &quote,
+                stage,
+                stalled: opening.stalled(now),
+                cancel: || (),
+            };
+            let base: Element<'_, ()> = match opening.floor() {
+                Some(floor) => {
+                    launcher_presenter::opening_on_floor(floor, face, mode, opening, now)
+                }
+                None => launcher_presenter::opening_full_screen(face, mode, opening, now),
+            };
+            let wash = opening.wash(now);
+            let element: Element<'_, ()> = if wash > 0.0 {
+                iced::widget::Stack::new()
+                    .push(base)
+                    .push(launcher_presenter::opening_wash(cube.network, wash))
+                    .into()
+            } else {
+                base
+            };
+            save(
+                &mut renderer,
+                element,
+                size,
+                &palette,
+                directory.join(format!("{appearance}-opening-{name}.png")),
+            );
+        };
+        let ms = Duration::from_millis;
+        let mut opening = Opening::new(Some(floor.clone()), false, Stage::Connecting, t0);
+        shot(&opening, t0 + ms(300), Stage::Connecting, "1-tumbling");
+        shot(&opening, t0 + ms(1300), Stage::Connecting, "2-connecting");
+        opening.set_stage(Stage::Syncing, t0 + ms(3000));
+        shot(&opening, t0 + ms(4500), Stage::Syncing, "3-syncing");
+        shot(
+            &opening,
+            t0 + ms(3000) + super::launcher_opening::STALL,
+            Stage::Syncing,
+            "4-stalled",
+        );
+        opening.set_stage(Stage::Ready, t0 + ms(30_000));
+        shot(&opening, t0 + ms(30_300), Stage::Ready, "5-ready");
+        shot(&opening, t0 + ms(31_000), Stage::Ready, "6-finale-rush");
+        shot(&opening, t0 + ms(31_400), Stage::Ready, "7-finale-wash");
+        let list = Opening::new(None, false, Stage::Syncing, t0);
+        shot(&list, t0 + ms(2400), Stage::Syncing, "8-list-frame");
+        let reduced = Opening::new(None, true, Stage::StartingDaemon, t0);
+        shot(
+            &reduced,
+            t0 + ms(100),
+            Stage::StartingDaemon,
+            "9-reduced-frame",
+        );
+    }
+}
