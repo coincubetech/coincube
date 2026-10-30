@@ -127,6 +127,11 @@ pub enum CoinControlMessage {
     ToggleSplitCoin(coincube_core::miniscript::bitcoin::OutPoint),
     SplitMethod(crate::services::split_coins::Method),
     SignSplit,
+    /// The send warning's acknowledgement checkbox.
+    AcknowledgeBothChains(bool),
+    /// Send the selected coins despite the warning.
+    SendAnyway,
+    CloseWarning,
 }
 
 #[derive(Debug, Clone)]
@@ -185,6 +190,8 @@ pub enum Message {
     Select(usize),
     /// Coin control's checkbox selection and Split coins overlay.
     CoinControl(CoinControlMessage),
+    /// Go to Coin control and open the Split coins overlay.
+    SplitFirst,
     SelectRefundable(usize),
     RefundAddressEdited(String),
     RefundAddressValidated(bool),

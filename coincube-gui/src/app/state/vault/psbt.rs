@@ -293,6 +293,34 @@ impl PsbtState {
         }
     }
 
+    /// On Bitcoin Blake2b, note the input that spends a split key: a coin
+    /// whose verified ancestry proves it exists only on this chain and that
+    /// the twin chain has not been seen to have. Bitcoin rejects such a
+    /// transaction whatever its signatures, so the review shows it as split
+    /// rather than blocking it.
+    pub fn with_split_key(mut self, cache: &Cache) -> Self {
+        if let Some(review) = self.replay.take() {
+            let key = self
+                .tx
+                .psbt
+                .unsigned_tx
+                .input
+                .iter()
+                .enumerate()
+                .find(|(_, input)| {
+                    let outpoint = input.previous_output;
+                    matches!(
+                        cache.chain_proofs.get(&outpoint),
+                        Some(crate::services::chain_status::ProofEntry::Verified(_))
+                    ) && cache.entanglement_of(&outpoint.txid)
+                        != crate::services::entangled::Entanglement::Entangled
+                })
+                .map(|(index, input)| (index, input.previous_output));
+            self.replay = Some(review.with_split_key(key));
+        }
+        self
+    }
+
     pub(crate) fn action_scope(&self) -> u64 {
         self.action_scope
     }

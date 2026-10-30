@@ -108,7 +108,12 @@ fn replay_status_view<'a>(pill: &ReplayPill<'a>) -> Element<'a, Message> {
     if let Some(required) = replay::blocked_entangled_copy(&blocked) {
         // No checkbox: the acknowledgement does not apply to a required
         // signature, and showing one would suggest it does.
-        column = column.push(p2_regular(required).style(theme::text::warning));
+        column = column
+            .push(p2_regular(required).style(theme::text::warning))
+            .push(
+                coincube_ui::component::button::secondary(None, "Split first")
+                    .on_press(Message::SplitFirst),
+            );
     } else if pill.review.status().needs_acknowledgement() {
         if pill.checking {
             column = column.push(p2_regular(replay::CHECKING_COPY).style(theme::text::secondary));

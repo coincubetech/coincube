@@ -320,6 +320,11 @@ pub(crate) fn counting_projection(psbt: &Psbt) -> Psbt {
 pub struct ReplayReview {
     status: ReplayStatus,
     split: Option<std::sync::Arc<SplitEvidence>>,
+    /// The input that spends a split key: a coin whose verified ancestry
+    /// proves it exists only on this chain, so Bitcoin rejects the whole
+    /// transaction whatever its signatures. Set from the cache when the PSBT
+    /// is opened ([`crate::app::state::vault::psbt::PsbtState::with_split_key`]).
+    split_key: Option<(usize, coincube_core::miniscript::bitcoin::OutPoint)>,
     /// SHA-256 of the serialised PSBT the status was derived from: the exact
     /// signatures the user is looking at.
     psbt_digest: [u8; 32],
@@ -337,6 +342,7 @@ impl ReplayReview {
         Self {
             status: replay_status(psbt, secp, None),
             split: None,
+            split_key: None,
             psbt_digest: psbt_digest(psbt),
             acknowledged_for: None,
         }
@@ -350,6 +356,7 @@ impl ReplayReview {
         Self {
             status: replay_status(psbt, secp, Some(&evidence)),
             split: Some(evidence),
+            split_key: None,
             psbt_digest: psbt_digest(psbt),
             acknowledged_for: None,
         }
@@ -360,9 +367,23 @@ impl ReplayReview {
     pub fn status(&self) -> ReplayStatus {
         if self.split.as_ref().is_some_and(|proof| !proof.is_live()) {
             expired_split_status()
+        } else if self.split_key.is_some() && matches!(self.status, ReplayStatus::Replayable { .. })
+        {
+            // Finalisable with legacy signatures, but it spends a coin
+            // Bitcoin doesn't have: Bitcoin rejects it.
+            ReplayStatus::Split
         } else {
             self.status.clone()
         }
+    }
+
+    /// Mark the input (index, outpoint) that spends a verified split key.
+    pub fn with_split_key(
+        mut self,
+        input: Option<(usize, coincube_core::miniscript::bitcoin::OutPoint)>,
+    ) -> Self {
+        self.split_key = input;
+        self
     }
 
     /// Recompute for the current PSBT, carrying an acknowledgement over
@@ -376,6 +397,13 @@ impl ReplayReview {
             Some(evidence) => Self::with_split(psbt, secp, evidence.clone()),
             None => Self::new(psbt, secp),
         };
+        // The same transaction spends the same key; only signatures change.
+        next.split_key = self.split_key.filter(|(index, outpoint)| {
+            psbt.unsigned_tx
+                .input
+                .get(*index)
+                .is_some_and(|input| input.previous_output == *outpoint)
+        });
         if self.acknowledged_for == Some(next.psbt_digest) {
             next.acknowledged_for = self.acknowledged_for;
         }
@@ -519,9 +547,9 @@ pub fn not_ready_reason(
 }
 
 /// The remedy line shown under the pill when [`blocked_entangled_inputs`] is
-/// non-empty: what is true in this build (a replay-capable signature — the
-/// Cube key or a Border Wallet key), and that splitting first is not yet
-/// available rather than offering a tool that does not exist (Lane B1.5).
+/// non-empty: a replay-capable signature (the Cube key or a Border Wallet
+/// key), or splitting the coins first in Coin control (Lane B1.5), which
+/// the view offers as **Split first**.
 pub fn blocked_entangled_copy(blocked: &[usize]) -> Option<String> {
     if blocked.is_empty() {
         return None;
@@ -541,7 +569,7 @@ pub fn blocked_entangled_copy(blocked: &[usize]) -> Option<String> {
          signature on {pronoun} (the Cube key or a Border Wallet key). If enough legacy \
          signatures were already collected to form a Bitcoin witness, create a new spend and \
          collect the replay-capable signature first; Coincube refuses to retain both complete \
-         alternatives. Splitting the coins first is not available in this version."
+         alternatives. Or split the coins first in Coin control."
     ))
 }
 
@@ -626,6 +654,39 @@ mod tests {
         );
         assert!(ReplayStatus::Split.is_finalisable());
         assert!(!ReplayStatus::Split.needs_acknowledgement());
+    }
+
+    /// A spend through a verified split key is split, not replayable: Bitcoin
+    /// has no such coin. The mark follows the same input across refreshes and
+    /// is dropped if the transaction no longer spends it.
+    #[test]
+    fn a_split_key_input_makes_a_legacy_spend_split() {
+        let f = fixture();
+        let secp = secp();
+        let signed = legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]);
+        let key = (0, signed.unsigned_tx.input[0].previous_output);
+        let plain = ReplayReview::new(&signed, &secp);
+        assert!(matches!(plain.status(), ReplayStatus::Replayable { .. }));
+        let review = plain.with_split_key(Some(key));
+        assert_eq!(review.status(), ReplayStatus::Split);
+        assert!(review.broadcast_ready(&[(0, Entanglement::Entangled)]));
+        assert_eq!(
+            review.refreshed(&signed, &secp).status(),
+            ReplayStatus::Split
+        );
+        let mut other = signed.clone();
+        other.unsigned_tx.input[0].previous_output.vout += 1;
+        assert!(matches!(
+            review.refreshed(&other, &secp).status(),
+            ReplayStatus::Unknown(_) | ReplayStatus::Replayable { .. }
+        ));
+        // Unsigned stays unchecked: the key never manufactures a status.
+        assert!(matches!(
+            ReplayReview::new(&f.psbt, &secp)
+                .with_split_key(Some(key))
+                .status(),
+            ReplayStatus::Unknown(_)
+        ));
     }
 
     #[test]
@@ -963,7 +1024,7 @@ mod tests {
         assert!(one.contains("Cube key or a Border Wallet key"), "{}", one);
         assert!(one.contains("create a new spend"), "{}", one);
         assert!(
-            one.contains("Splitting the coins first is not available in this version"),
+            one.ends_with("Or split the coins first in Coin control."),
             "{}",
             one
         );
