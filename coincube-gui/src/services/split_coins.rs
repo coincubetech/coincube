@@ -209,6 +209,61 @@ pub fn twin_separated(twin_records: &[SplitRecord]) -> HashSet<OutPoint> {
         .collect()
 }
 
+/// Whether this Vault can split with a replay-protected signature: Bitcoin
+/// Blake2b, and every primary-path signer either signs in process or is a
+/// recorded Keychain key. Any other signer is treated as a hardware device,
+/// which can't make the signature (decision item 3).
+pub fn signature_available(wallet: &Wallet) -> bool {
+    if !wallet.chain.is_blake2b() {
+        return false;
+    }
+    let Some(descriptor) = wallet.inheritance_descriptor() else {
+        return false;
+    };
+    let mut in_process: HashSet<_> = wallet.border_wallet_fingerprints.iter().copied().collect();
+    if let Some(signer) = &wallet.signer {
+        in_process.insert(signer.fingerprint());
+    }
+    descriptor
+        .policy()
+        .primary_path()
+        .thresh_origins()
+        .1
+        .keys()
+        .all(|fingerprint| {
+            in_process.contains(fingerprint)
+                || (wallet.keychain_keys_recorded
+                    && wallet.keychain_key_ids.contains_key(fingerprint))
+        })
+}
+
+/// The split's fee rate: the six-block estimate of Connect's Esplora for
+/// this chain only, failing closed (`services::split_fees`). Never another
+/// chain's estimate and never a local guess.
+pub async fn fee_rate(
+    client: Option<crate::services::coincube::CoincubeClient>,
+    chain: ChainId,
+) -> Option<u64> {
+    use crate::services::{foreign_psbt::SweepFeeSource, split_fees};
+    let client = client?;
+    let rate = match chain {
+        ChainId::Bitcoin => {
+            split_fees::ConnectBitcoinFees::new(&client)?
+                .mid_priority_sat_vb()
+                .await
+        }
+        ChainId::BitcoinBlake2b => {
+            split_fees::ConnectBtcb2Fees::new(client)?
+                .mid_priority_sat_vb()
+                .await
+        }
+        _ => None,
+    }?;
+    (1..=coincube_core::spend::MAX_FEERATE)
+        .contains(&rate)
+        .then_some(rate)
+}
+
 /// Build the split, store it with the daemon, and return it for the PSBT
 /// screen. The caller records it in the journal. For [`Method::SplitKey`]
 /// the key is re-qualified against both chains first; nothing is built if

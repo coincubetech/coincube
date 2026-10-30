@@ -116,6 +116,19 @@ pub trait Close {
     fn close() -> Self;
 }
 
+/// Coin control intents: choosing coins to send, and the Split coins overlay.
+#[derive(Debug, Clone)]
+pub enum CoinControlMessage {
+    Choose(coincube_core::miniscript::bitcoin::OutPoint),
+    ClearChosen,
+    SendSelected,
+    OpenSplit,
+    CancelSplit,
+    ToggleSplitCoin(coincube_core::miniscript::bitcoin::OutPoint),
+    SplitMethod(crate::services::split_coins::Method),
+    SignSplit,
+}
+
 #[derive(Debug, Clone)]
 pub enum VaultReceiveMessage {
     Copy(String),
@@ -170,6 +183,8 @@ pub enum Message {
     SetupVaultRestoreFromKit,
     Close,
     Select(usize),
+    /// Coin control's checkbox selection and Split coins overlay.
+    CoinControl(CoinControlMessage),
     SelectRefundable(usize),
     RefundAddressEdited(String),
     RefundAddressValidated(bool),
