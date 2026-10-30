@@ -10,7 +10,7 @@ use iced::{
 use coincube_ui::{
     component::{
         quote_display::Quote,
-        tenshu::{self, ActionButton, ActionKind},
+        tenshu::{self, top_bar, ActionButton, ActionKind},
     },
     icon, theme,
     widget::{action::Action, text_input, Column, Container, Element, Row, TextInput},
@@ -2519,39 +2519,16 @@ pub(crate) fn opening_wash<'a, M: 'a>(network: ChainId, alpha: f32) -> Element<'
 }
 
 /// The quiet Opening rail: Tenshu, "Opening <name>", the network.
+/// `.top.quiet` while a Cube opens: the shared bar, at rest, with the Cube's
+/// name after the brand. Nothing on it is a control until the Cube is open.
 fn opening_rail<'a, M: 'a>(scene: &OpeningScene) -> Element<'a, M> {
-    Container::new(
-        Row::new()
-            .spacing(16)
-            .align_y(Alignment::Center)
-            .height(Length::Fill)
-            .push(
-                Row::new()
-                    .spacing(8)
-                    .align_y(Alignment::Center)
-                    .push(icon::cube_icon())
-                    .push(tenshu::label("Tenshu")),
-            )
-            .push(
-                tenshu::body(format!("Opening {}", scene.cube_name))
-                    .width(Length::Fill)
-                    .wrapping(Wrapping::WordOrGlyph),
-            )
-            .push(tenshu::caption(scene.network.label())),
+    top_bar::top_bar(
+        top_bar::brand_mark(true),
+        top_bar::resting_icon(top_bar::SLIDERS, top_bar::APP_PREFERENCES),
     )
-    .width(Length::Fill)
-    .height(Length::Fixed(64.0))
-    .padding([0.0, 24.0])
-    .style(opening_rail_style)
+    .lead(tenshu::body(format!("Opening {}", scene.cube_name)).wrapping(Wrapping::WordOrGlyph))
+    .lead(tenshu::caption(scene.network.label()))
     .into()
-}
-
-fn opening_rail_style(theme: &theme::Theme) -> container::Style {
-    container::Style {
-        background: Some(iced::Background::Color(theme.colors.shell.rail)),
-        text_color: Some(theme.colors.shell.ink),
-        ..Default::default()
-    }
 }
 
 /// Places the real loader stage under the quiet Opening rail. The loader body
