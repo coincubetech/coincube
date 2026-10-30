@@ -341,10 +341,14 @@ pub enum Message {
             coincube_core::miniscript::bitcoin::Txid,
             coincube_core::miniscript::bitcoin::Transaction,
         >,
+        /// The pass's number; only a newer pass than the last applied one
+        /// is applied ([`crate::services::split_coins::newer_pass`]).
+        seq: u64,
         /// The twin Cube's split journal as read for this pass.
         twin_records: Vec<crate::services::split_coins::SplitRecord>,
-        /// Which of those Connect showed deep enough on the twin chain now.
-        twin_confirmed: std::collections::HashSet<coincube_core::miniscript::bitcoin::Txid>,
+        /// The twin splits checked through Connect in this pass, and whether
+        /// each was deep enough on the twin chain.
+        twin_checked: Vec<(coincube_core::miniscript::bitcoin::Txid, bool)>,
     },
     /// A sync-driven ancestry check batch for the Chains column finished
     /// ([`crate::services::chain_status::check_ancestry`]). `claimed` is the

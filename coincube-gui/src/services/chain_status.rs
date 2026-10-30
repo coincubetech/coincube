@@ -65,9 +65,8 @@ pub struct CoinEvidence {
     pub proof: Option<ProofOutcome>,
     /// Confirmations of the split of this Cube that spends this coin.
     pub splitting: Option<u32>,
-    /// A recorded split with [`SPLIT_CONFIRMATIONS`] separated this coin:
-    /// the twin Cube's split spent its twin copy, or it is an output of this
-    /// Cube's replay-protected-signature split.
+    /// A split-key split on the twin Cube spent this coin's twin copy, and
+    /// Connect showed it [`SPLIT_CONFIRMATIONS`] deep on the twin chain.
     pub separated: bool,
 }
 
