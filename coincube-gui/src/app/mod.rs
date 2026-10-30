@@ -7511,16 +7511,56 @@ impl App {
                     && self.cube_settings.network == crate::chain::ChainId::Regtest
                 {
                     if let Some(wallet) = &self.wallet {
-                        if let Some(native) = self
+                        if let Some(service) = self.local_mcp.transaction_service(client_id, wallet)
+                        {
+                            let client_id = client_id.clone();
+                            let draft_id = draft_id.clone();
+                            let check_id = draft_id.clone();
+                            let session_id = service.session_id();
+                            return Task::perform(
+                                async move { service.native_checked(&check_id).await },
+                                move |native| {
+                                    Message::View(view::Message::LocalMcp(
+                                        local_mcp::Message::ReviewTransactionChecked {
+                                            client_id,
+                                            draft_id,
+                                            session_id,
+                                            native,
+                                        },
+                                    ))
+                                },
+                            );
+                        }
+                    }
+                }
+                return Task::none();
+            }
+            #[cfg(feature = "mcp-transactions")]
+            if let local_mcp::Message::ReviewTransactionChecked {
+                client_id,
+                draft_id,
+                session_id,
+                native,
+            } = &message
+            {
+                if self.mcp_supported()
+                    && self.cube_settings.network == crate::chain::ChainId::Regtest
+                {
+                    if let (Some(wallet), Some(native)) = (&self.wallet, native) {
+                        if self
                             .local_mcp
-                            .prepared_transaction(client_id, draft_id, wallet)
+                            .transaction_service(client_id, wallet)
+                            .is_some_and(|service| {
+                                service.session_id() == *session_id
+                                    && service.review_eligible(draft_id)
+                            })
                         {
                             if let Some(panel) = self.panels.current_mut() {
                                 panel.interrupt();
                             }
                             self.panels.create_spend = Some(CreateSpendPanel::from_mcp_prepared(
                                 wallet.clone(),
-                                native,
+                                native.clone(),
                                 self.cache.blockheight(),
                             ));
                             self.panels.current = Menu::Vault(menu::VaultSubMenu::Send);

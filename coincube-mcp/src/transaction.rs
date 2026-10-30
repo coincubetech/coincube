@@ -96,7 +96,8 @@ pub struct Prepared {
     pub draft_id: String,
     /// Always regtest for this experiment.
     pub network: String,
-    /// Always unsigned_ready_for_native_review; not signed, saved or broadcast.
+    /// `unsigned_ready_for_native_review` while current, otherwise
+    /// `stale_requires_new_request`. Neither status means signed, saved, or broadcast.
     pub status: String,
     /// Only the addresses and amounts supplied in the request.
     pub recipients: Vec<Recipient>,
