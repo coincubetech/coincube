@@ -6116,4 +6116,58 @@ mod tests {
         // The stage beside the face, above the peers' labels, is.
         assert!(press(iced::Point::new(open.x - 80.0, open.y - 240.0)));
     }
+
+    /// The slot the open Cube left is part of the stage. A press there closes
+    /// the face like a press beside it; a peer's slot still selects the peer.
+    /// The slot stays live while its Cube is turned (`Pose::DETAILS` has
+    /// spin), and it used to send `SelectFloor` for the Cube already open,
+    /// which changes nothing.
+    #[test]
+    fn a_press_on_the_slot_the_open_cube_left_closes_its_face() {
+        let mut home = home_with(&[("a", "Alpha"), ("b", "Beta"), ("c", "Gamma")]);
+        home.catalog.mode = LauncherMode::Cubes;
+        catalog(&mut home, CatalogMessage::SelectFloor(key("a")));
+        let settled = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        catalog(&mut home, CatalogMessage::MotionTick(settled));
+        assert!(home.catalog.motion.is_none());
+
+        let bounds = focus_bounds_window(launcher_view(&home), 1440.0, 900.0);
+        let press = |point: iced::Point| {
+            let cursor = iced::mouse::Cursor::Available(point);
+            let mut mounted = mount_window(launcher_view(&home), 1440.0, 900.0);
+            [
+                iced::mouse::Event::CursorMoved { position: point },
+                iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+                iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left),
+            ]
+            .iter()
+            .flat_map(|event| mounted.send(iced::Event::Mouse(*event), cursor))
+            .collect::<Vec<_>>()
+        };
+        // Near each slot's outer edge, clear of the centred face, which
+        // covers the inner part of its neighbours.
+        let left = bounds_of(&bounds, &select_id(&key("a")));
+        let messages = press(iced::Point::new(left.x + 12.0, left.center().y));
+        assert!(
+            messages.iter().any(|message| matches!(
+                message,
+                ViewMessage::Catalog(CatalogMessage::ClearSelection)
+            )),
+            "{:?}",
+            messages
+        );
+        let right = bounds_of(&bounds, &select_id(&key("c")));
+        let peer = press(iced::Point::new(
+            right.x + right.width - 12.0,
+            right.center().y,
+        ));
+        assert!(peer.iter().any(|message| matches!(
+            message,
+            ViewMessage::Catalog(CatalogMessage::SelectFloor(k)) if *k == key("c")
+        )));
+        assert!(!peer.iter().any(|message| matches!(
+            message,
+            ViewMessage::Catalog(CatalogMessage::ClearSelection)
+        )));
+    }
 }

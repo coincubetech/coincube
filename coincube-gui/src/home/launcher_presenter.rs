@@ -978,6 +978,7 @@ fn ghost_slot<'a>(
     cube: &super::RemoteCube,
     layout: &launcher_scene::Layout,
     active: bool,
+    closes_face: bool,
 ) -> Element<'a, ViewMessage> {
     let key = launcher_catalog::ghost_key(cube);
     let label = Row::new()
@@ -1035,9 +1036,11 @@ fn ghost_slot<'a>(
             left: 4.0,
         })
         .style(floor_style())
-        .on_press(ViewMessage::Catalog(CatalogMessage::SelectFloor(
-            key.clone(),
-        )));
+        .on_press(ViewMessage::Catalog(if closes_face {
+            CatalogMessage::ClearSelection
+        } else {
+            CatalogMessage::SelectFloor(key.clone())
+        }));
     iced::widget::mouse_area(slot)
         .on_enter(ViewMessage::Catalog(CatalogMessage::CubeHover(
             key.clone(),
@@ -1229,6 +1232,7 @@ fn floor_slot<'a>(
     layout: &launcher_scene::Layout,
     active: bool,
     dimmed: bool,
+    closes_face: bool,
 ) -> Element<'a, ViewMessage> {
     let label = Container::new(floor_label(
         &row.name,
@@ -1262,10 +1266,12 @@ fn floor_slot<'a>(
             left: 4.0,
         })
         .style(floor_style())
-        .on_press_maybe(
+        .on_press_maybe(if closes_face {
+            Some(ViewMessage::Catalog(CatalogMessage::ClearSelection))
+        } else {
             row.actionable
-                .then(|| ViewMessage::Catalog(CatalogMessage::SelectFloor(row.key.clone()))),
-        );
+                .then(|| ViewMessage::Catalog(CatalogMessage::SelectFloor(row.key.clone())))
+        });
     // A resting Cube floats while the pointer is over its slot.
     iced::widget::mouse_area(slot)
         .on_enter(ViewMessage::Catalog(CatalogMessage::CubeHover(
@@ -1718,11 +1724,20 @@ fn floor_layout<'a>(
         let covered = covers.iter().any(|cover| {
             launcher_scene::overlaps(*cover, launcher_scene::label_rect(&layout, index, count))
         });
+        // The slot the open Cube left is part of the stage: a press there
+        // closes the face, as a press beside it does.
+        let closes_face = Some(key) == selected_key && pose == launcher_scene::Pose::DETAILS;
         slots = slots.push(match entry {
-            FloorEntry::Local(row) => {
-                floor_slot(row, &layout, pose.spin > 0.0 || covered, pose.dim > 0.5)
+            FloorEntry::Local(row) => floor_slot(
+                row,
+                &layout,
+                pose.spin > 0.0 || covered,
+                pose.dim > 0.5,
+                closes_face,
+            ),
+            FloorEntry::Ghost(cube) => {
+                ghost_slot(cube, &layout, pose.spin > 0.0 || covered, closes_face)
             }
-            FloorEntry::Ghost(cube) => ghost_slot(cube, &layout, pose.spin > 0.0 || covered),
         });
     }
     stage = stage.push(
