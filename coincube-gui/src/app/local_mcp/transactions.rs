@@ -41,13 +41,12 @@ struct Draft {
     result: Result<(Prepared, NativeDraft), wire::Error>,
     chain: Option<ChainSnapshot>,
 }
-/// Public daemon state available at construction. A later poll, including one
-/// which applied a reorg, invalidates the old native review identity.
+/// Wallet and chain identity available at construction. An unchanged poll
+/// leaves the draft usable; a new tip or changed selected coin invalidates it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct ChainSnapshot {
     wallet_created_at: u32,
     block_height: i32,
-    last_poll: Option<u32>,
     tip_hash: BlockHash,
 }
 impl ChainSnapshot {
@@ -55,12 +54,17 @@ impl ChainSnapshot {
         Self {
             wallet_created_at: info.timestamp,
             block_height: info.block_height,
-            last_poll: info.last_poll_timestamp,
             tip_hash,
         }
     }
 }
 const STALE_STATUS: &str = "stale_requires_new_request";
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReviewStatus {
+    Ready,
+    Stale,
+    Unavailable,
+}
 fn stale(draft: &mut Draft) {
     if let Ok((summary, _)) = &mut draft.result {
         summary.status = STALE_STATUS.into();
@@ -127,19 +131,26 @@ impl Service {
             .find(|(s, _)| s.draft_id == id && s.status != STALE_STATUS)
             .map(|(_, native)| native.clone())
     }
-    /// Check that no concurrent MCP read invalidated this identity after its
-    /// async validation completed. The native PSBT comes from that validation.
-    pub fn review_eligible(&self, id: &str) -> bool {
+    /// Check whether a concurrent MCP read invalidated this identity after its
+    /// async validation completed. Lock contention is temporary unavailability.
+    pub fn review_status(&self, id: &str) -> ReviewStatus {
         if self.revoked.load(Ordering::SeqCst) {
-            return false;
+            return ReviewStatus::Unavailable;
         }
-        self.drafts.try_lock().is_ok_and(|drafts| {
-            drafts.values().any(|draft| {
-                draft.result.as_ref().is_ok_and(|(summary, _)| {
-                    summary.draft_id == id && summary.status != STALE_STATUS
-                })
+        let Ok(drafts) = self.drafts.try_lock() else {
+            return ReviewStatus::Unavailable;
+        };
+        drafts
+            .values()
+            .filter_map(|draft| draft.result.as_ref().ok())
+            .find(|(summary, _)| summary.draft_id == id)
+            .map_or(ReviewStatus::Unavailable, |(summary, _)| {
+                if summary.status == STALE_STATUS {
+                    ReviewStatus::Stale
+                } else {
+                    ReviewStatus::Ready
+                }
             })
-        })
     }
     /// Recheck the selected coins and the daemon snapshot immediately before a
     /// native handoff. The returned PSBT is the original immutable construction.
@@ -758,7 +769,7 @@ mod tests {
                     .chain
                     .as_mut()
                     .unwrap();
-                snapshot.last_poll = Some(snapshot.last_poll.unwrap_or(0).wrapping_add(1));
+                snapshot.wallet_created_at = snapshot.wallet_created_at.wrapping_add(1);
             }
             let get = wire::Request::Transaction(DraftInput {
                 wallet_id: "wallet".into(),
@@ -769,6 +780,10 @@ mod tests {
                 panic!("expected stale summary")
             };
             assert_eq!(stale_summary.status, STALE_STATUS);
+            assert!(matches!(
+                service.review_status(&first.draft_id),
+                ReviewStatus::Stale
+            ));
             assert!(service.native_checked(&first.draft_id).await.is_none());
             assert!(service.native(&first.draft_id).is_none());
             assert_eq!(prepared(&service, input()).await, stale_summary);
@@ -789,6 +804,51 @@ mod tests {
         });
     }
     #[test]
+    fn mcp_transaction_noop_poll_keeps_prepared_draft_reviewable() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let (root, service) = fixture().await;
+            let first = prepared(&service, input()).await;
+            let before = service.daemon.get_info().await.unwrap();
+            let tip = service.daemon.chain_tip_hash().await.unwrap();
+            // The fixture uses a real poller but normally sleeps for an hour.
+            // Wake it after the whole-second timestamp can advance.
+            tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+            service.daemon.request_sync().await.unwrap();
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+            let after = loop {
+                let info = service.daemon.get_info().await.unwrap();
+                if info.last_poll_timestamp != before.last_poll_timestamp && service.ready(&info) {
+                    break info;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "no-op poll did not complete"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            };
+            assert_eq!(after.block_height, before.block_height);
+            assert_eq!(service.daemon.chain_tip_hash().await.unwrap(), tip);
+            assert_eq!(prepared(&service, input()).await, first);
+            let get = wire::Request::Transaction(DraftInput {
+                wallet_id: "wallet".into(),
+                draft_id: first.draft_id.clone(),
+            });
+            assert!(
+                matches!(service.read(get).await, Ok(wire::Response::Transaction(v)) if v == first)
+            );
+            assert!(service.native_checked(&first.draft_id).await.is_some());
+            assert!(matches!(
+                service.review_status(&first.draft_id),
+                ReviewStatus::Ready
+            ));
+            assert_eq!(
+                service.daemon.get_info().await.unwrap().change_index,
+                after.change_index
+            );
+            cleanup(root, service).await;
+        });
+    }
+    #[test]
     fn mcp_transaction_missing_input_is_stale_before_native_review() {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             let (root, service) = fixture().await;
@@ -804,6 +864,10 @@ mod tests {
                 panic!("expected transaction summary")
             };
             assert_eq!(status.status, STALE_STATUS);
+            assert!(matches!(
+                service.review_status(&summary.draft_id),
+                ReviewStatus::Stale
+            ));
             assert_eq!(prepared(&service, input()).await, status);
             cleanup(root, service).await;
         });
