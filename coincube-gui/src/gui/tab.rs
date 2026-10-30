@@ -786,9 +786,33 @@ struct UnlockMigration {
     outcome: crate::services::unlock::MigrationOutcome,
     /// The second slot this unlock wrote, already recorded in `settings.json`.
     new_slot: Option<String>,
-    /// Migration replaced an enrolled duress marker, and the device's duress
-    /// state has been disarmed to match.
-    duress_disarmed: bool,
+}
+
+/// Told to the user once migration has turned duress off on this device. A
+/// log line is not telling the user: they believe a PIN still wipes this
+/// device, and it no longer does.
+const DURESS_DISARM_NOTICE: &str = "Upgrading this Cube's files turned duress mode off — your \
+     duress PIN no longer erases this device. Turn duress mode on again to set it up.";
+
+/// The duress-off warning, if a migration disarmed this device and the user
+/// has not seen it yet.
+fn duress_disarm_notice(root: &std::path::Path) -> Option<String> {
+    crate::services::duress::DuressLocalState::load(root)
+        .ok()
+        .filter(|st| st.migration_disarm_notice)
+        .map(|_| DURESS_DISARM_NOTICE.to_string())
+}
+
+/// The duress-off warning is on screen: stop repeating it.
+fn acknowledge_duress_disarm_notice(root: &std::path::Path) {
+    if let Ok(mut st) = crate::services::duress::DuressLocalState::load(root) {
+        if st.migration_disarm_notice {
+            st.migration_disarm_notice = false;
+            if let Err(e) = st.save(root) {
+                error!("could not clear the duress-off notice: {e}");
+            }
+        }
+    }
 }
 
 type UnlockMigrationResult =
@@ -863,7 +887,6 @@ async fn migrate_seed_files_on_unlock_now(
     //
     // Acceptable only because duress is feature-gated and unreleased.
     // Revisit before it ships.
-    let mut duress_disarmed = false;
     if outcome.duress_was_cleared() {
         log::warn!(
             "migration: duress enrolment on cube {cube_id} was cleared — its marker could not \
@@ -877,16 +900,14 @@ async fn migrate_seed_files_on_unlock_now(
             // demonstrably was.
             if st.enrolled || st.arming {
                 st.disarm();
+                // Saved with the disarm, so the warning survives a Cancel
+                // that drops the unlock before it can show one.
+                st.migration_disarm_notice = true;
                 let _ = st.save(&root);
-                duress_disarmed = true;
             }
         }
     }
-    Ok(Ok(UnlockMigration {
-        outcome,
-        new_slot,
-        duress_disarmed,
-    }))
+    Ok(Ok(UnlockMigration { outcome, new_slot }))
 }
 
 /// Resolve either local Bitcoin wallet attached to this exact Cube. Imported
@@ -977,6 +998,9 @@ pub struct Tab {
     /// to show them. `Loader` and `Login` cannot toast, so anything raised
     /// before the Cube is up waits here.
     pending_unlock_warnings: Vec<String>,
+    /// The datadir whose duress-off notice is among
+    /// `pending_unlock_warnings`; cleared on disk once `App` shows it.
+    pending_duress_notice: Option<std::path::PathBuf>,
     app_generation: u64,
     seed_export_origins: Vec<(
         crate::app::cache::AppGeneration,
@@ -1048,6 +1072,7 @@ impl Tab {
             opening: None,
             opening_cancelled: false,
             pending_unlock_warnings: Vec::new(),
+            pending_duress_notice: None,
             app_generation: 0,
             seed_export_origins: Vec::new(),
             pending_seed_export_trials: 0,
@@ -1183,6 +1208,9 @@ impl Tab {
     fn flush_migration_warning(&mut self) -> Task<Message> {
         if !matches!(self.state, State::App(_)) {
             return Task::none();
+        }
+        if let Some(root) = self.pending_duress_notice.take() {
+            acknowledge_duress_disarm_notice(&root);
         }
         let queued = std::mem::take(&mut self.pending_unlock_warnings);
         if queued.is_empty() {
@@ -3759,8 +3787,9 @@ impl Tab {
                                     // succeeded. Logs a count, never content.
                                     {
                                         // Its own task: a Cancel that drops
-                                        // this future cannot separate the
-                                        // second slot from its recorded name.
+                                        // this future cannot separate a file
+                                        // write from the record that makes
+                                        // the device agree with it.
                                         let joined = migrate_seed_files_on_unlock(
                                             datadir_clone.path().to_path_buf(),
                                             datadir_clone.network_directory(network_val),
@@ -3775,11 +3804,7 @@ impl Tab {
                                         // that rewrites seed files — left no
                                         // trace at all.
                                         match joined {
-                                            Ok(Ok(UnlockMigration {
-                                                outcome,
-                                                new_slot,
-                                                duress_disarmed,
-                                            })) => {
+                                            Ok(Ok(UnlockMigration { outcome, new_slot })) => {
                                                 if let Some(name) = new_slot {
                                                     cube.duress_slot_file = Some(name);
                                                 }
@@ -3794,19 +3819,6 @@ impl Tab {
                                                         "migration: cube {} stays at v2 until it \
                                                          has a backup",
                                                         cube.id
-                                                    );
-                                                }
-                                                // A log line is not telling the
-                                                // user: they believe a PIN still
-                                                // wipes this device, and it no
-                                                // longer does.
-                                                if duress_disarmed {
-                                                    migration_error = Some(
-                                                        "Upgrading this Cube's files turned \
-                                                         duress mode off — your duress PIN no \
-                                                         longer erases this device. Turn duress \
-                                                         mode on again to set it up."
-                                                            .to_string(),
                                                     );
                                                 }
                                             }
@@ -3834,6 +3846,15 @@ impl Tab {
                                                         .to_string(),
                                                 );
                                             }
+                                        }
+                                        // Read from disk rather than from this
+                                        // unlock's migration: a Cancel may have
+                                        // dropped the unlock that disarmed. A
+                                        // failure above takes the one slot; the
+                                        // notice waits for the next unlock.
+                                        if migration_error.is_none() {
+                                            migration_error =
+                                                duress_disarm_notice(datadir_clone.path());
                                         }
                                     }
 
@@ -4582,6 +4603,10 @@ impl Tab {
                 // Two of the three branches below land in `Loader` or `Login`,
                 // which cannot show a toast, so park it and let
                 // `flush_migration_warning` deliver it when `App` arrives.
+                // The duress-off notice stays on disk until `App` shows it.
+                self.pending_duress_notice = (migration_error.as_deref()
+                    == Some(DURESS_DISARM_NOTICE))
+                .then(|| datadir.path().to_path_buf());
                 self.pending_unlock_warnings =
                     migration_error.into_iter().chain(enc_key_error).collect();
                 // The Vault is independent of Liquid: any Breez load failure
@@ -6354,6 +6379,33 @@ mod migration_warning_tests {
             vec!["seed files were not upgraded".to_string()],
             "the warning was consumed by a state that cannot display it"
         );
+    }
+
+    /// The duress-off notice is cleared on disk only by the `App` that shows
+    /// it. A tab still loading holds the toast in memory, and a Cancel or
+    /// close from there must leave the next unlock to say it.
+    #[test]
+    fn the_duress_notice_stays_on_disk_until_the_app_shows_it() {
+        let root = std::env::temp_dir().join(format!("duress-notice-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        crate::services::duress::DuressLocalState {
+            migration_disarm_notice: true,
+            ..Default::default()
+        }
+        .save(&root)
+        .unwrap();
+        let mut tab = non_app_tab();
+        tab.pending_unlock_warnings = vec![DURESS_DISARM_NOTICE.to_string()];
+        tab.pending_duress_notice = Some(root.clone());
+
+        let _ = tab.flush_migration_warning();
+
+        assert_eq!(tab.pending_duress_notice.as_ref(), Some(&root));
+        assert_eq!(
+            duress_disarm_notice(&root).as_deref(),
+            Some(DURESS_DISARM_NOTICE)
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// Nothing pending must not manufacture a toast.
@@ -8899,6 +8951,31 @@ mod opening_tests {
             !DuressLocalState::load(&root).unwrap().enrolled
         })
         .await;
+
+        // The next unlock: its files are current, so its own migration has
+        // nothing to report. The warning the cancelled one never showed has
+        // to come from disk, and it stays there until it is shown.
+        let again = super::migrate_seed_files_on_unlock(
+            root.clone(),
+            network_dir.clone(),
+            cube.clone(),
+            zeroize::Zeroizing::new("1234".to_string()),
+        )
+        .await;
+        assert!(matches!(&again, Ok(Ok(m)) if !m.outcome.duress_was_cleared()));
+        assert_eq!(
+            super::duress_disarm_notice(&root).as_deref(),
+            Some(super::DURESS_DISARM_NOTICE),
+            "the duress-off warning was lost with the cancelled unlock"
+        );
+        assert_eq!(
+            super::duress_disarm_notice(&root).as_deref(),
+            Some(super::DURESS_DISARM_NOTICE),
+            "reading the notice must not clear it"
+        );
+        super::acknowledge_duress_disarm_notice(&root);
+        assert_eq!(super::duress_disarm_notice(&root), None);
+        assert!(!DuressLocalState::load(&root).unwrap().enrolled);
         std::fs::remove_dir_all(root).unwrap();
     }
 
