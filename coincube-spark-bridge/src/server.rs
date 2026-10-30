@@ -23,14 +23,14 @@ use async_trait::async_trait;
 use breez_sdk_spark::{
     CheckLightningAddressRequest, ClaimDepositRequest, ConversionEstimate, ConversionOptions,
     ConversionType, CrossChainAddressDetails, CrossChainAddressFamily, CrossChainRouteFilter,
-    CrossChainRoutePair, EventListener, GetInfoRequest, InputType,
+    CrossChainRoutePair, EventListener, GetInfoRequest, GetInfoResponse, InputType,
     LightningAddressInfo as SdkLightningAddressInfo, ListPaymentsRequest,
     ListUnclaimedDepositsRequest, LnurlPayRequest, MaxFee, OnchainConfirmationSpeed,
     PaymentDetails, PaymentRequest, PrepareLnurlPayRequest, PrepareLnurlPayResponse,
     PrepareSendPaymentRequest, PrepareSendPaymentResponse, ReceivePaymentMethod,
     ReceivePaymentRequest, RegisterLightningAddressRequest, SdkEvent, SendOnchainFeeQuote,
     SendPaymentMethod, SendPaymentOptions, SendPaymentRequest, SparkAsset,
-    StableBalanceActiveLabel, UpdateUserSettingsRequest,
+    StableBalanceActiveLabel, TokenBalance, UpdateUserSettingsRequest,
 };
 use coincube_spark_protocol::{
     CheckLightningAddressAvailableOk, ClaimDepositOk, DepositInfo, ErrorKind,
@@ -38,7 +38,7 @@ use coincube_spark_protocol::{
     LightningAddressInfo as ProtocolLightningAddressInfo, ListPaymentsOk, ListUnclaimedDepositsOk,
     Method, OkPayload, ParseInputKind, ParseInputOk, PaymentDetailSummary, PaymentSummary,
     PrepareSendOk, ReceivePaymentOk, RegisterLightningAddressOk, Request, Response, SendPaymentOk,
-    SetStableBalanceParams, StableBalanceSnapshot,
+    SetStableBalanceParams, StableBalanceSnapshot, UsdbBalanceSnapshot,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, RwLock};
@@ -527,29 +527,55 @@ async fn handle_get_info(
         })
         .await
     {
-        Ok(info) => {
-            let stable_balance = info
-                .token_balances
-                .get(crate::sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER)
-                .filter(|tb| tb.balance > 0)
-                .map(|tb| StableBalanceSnapshot {
-                    balance: clamp_u128_to_u64(tb.balance),
-                    decimals: tb.token_metadata.decimals,
-                    ticker: tb.token_metadata.ticker.clone(),
-                });
-            Response::ok(
-                id,
-                OkPayload::GetInfo(GetInfoOk {
-                    balance_sats: info.balance_sats,
-                    identity_pubkey: info.identity_pubkey,
-                    stable_balance,
-                    // S1b reports it.
-                    usdb_balance: None,
-                }),
-            )
-        }
+        Ok(info) => Response::ok(id, OkPayload::GetInfo(get_info_ok(info))),
         Err(e) => Response::err(id, ErrorKind::Sdk, format!("get_info failed: {e}")),
     }
+}
+
+/// The `get_info` answer for an SDK [`GetInfoResponse`].
+///
+/// `balance_sats` stays the SDK's bitcoin-only figure. The USDB holding is
+/// reported twice: as the legacy [`StableBalanceSnapshot`], clamped to `u64`
+/// for callers that still read it, and as [`usdb_balance`] at full precision.
+fn get_info_ok(info: GetInfoResponse) -> GetInfoOk {
+    let stable_balance = info
+        .token_balances
+        .get(crate::sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER)
+        .filter(|tb| tb.balance > 0)
+        .map(|tb| StableBalanceSnapshot {
+            balance: clamp_u128_to_u64(tb.balance),
+            decimals: tb.token_metadata.decimals,
+            ticker: tb.token_metadata.ticker.clone(),
+        });
+    GetInfoOk {
+        balance_sats: info.balance_sats,
+        identity_pubkey: info.identity_pubkey,
+        stable_balance,
+        usdb_balance: usdb_balance(&info.token_balances),
+    }
+}
+
+/// The wallet's USDB holding at the SDK's full `u128` precision, or `None`
+/// when it holds none.
+///
+/// Only the configured USDB token counts: the entry under
+/// [`sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER`] whose own metadata names
+/// that token. The SDK keys the map by the metadata's identifier, so the
+/// second check holds today; it keeps a mis-keyed entry from being shown as
+/// USDB. Every other token the wallet holds is ignored.
+fn usdb_balance(token_balances: &HashMap<String, TokenBalance>) -> Option<UsdbBalanceSnapshot> {
+    token_balances
+        .get(sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER)
+        .filter(|tb| {
+            tb.balance > 0
+                && tb.token_metadata.identifier == sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER
+        })
+        .map(|tb| UsdbBalanceSnapshot {
+            token_identifier: tb.token_metadata.identifier.clone(),
+            balance: tb.balance,
+            decimals: tb.token_metadata.decimals,
+            ticker: tb.token_metadata.ticker.clone(),
+        })
 }
 
 async fn handle_list_payments(
@@ -3330,5 +3356,141 @@ mod p0_stub_tests {
         assert!(rx.try_recv().is_err(), "a stub emitted a frame");
         assert!(state.pending_prepares.lock().await.is_empty());
         assert!(state.pending_lnurl_prepares.lock().await.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod usdb_balance_tests {
+    use super::*;
+    use breez_sdk_spark::TokenMetadata;
+
+    const USDB: &str = sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER;
+    /// Another token the wallet could hold.
+    const OTHER: &str = "btkn1another0issuer0token0for0tests";
+
+    fn token(identifier: &str, balance: u128, decimals: u32, ticker: &str) -> TokenBalance {
+        TokenBalance {
+            balance,
+            token_metadata: TokenMetadata {
+                identifier: identifier.to_string(),
+                issuer_public_key: "02".repeat(33),
+                name: format!("{ticker} token"),
+                ticker: ticker.to_string(),
+                decimals,
+                max_supply: u128::MAX,
+                is_freezable: false,
+            },
+        }
+    }
+
+    /// A `token_balances` map, keyed the way the SDK keys it.
+    fn balances(
+        entries: impl IntoIterator<Item = (&'static str, TokenBalance)>,
+    ) -> HashMap<String, TokenBalance> {
+        entries
+            .into_iter()
+            .map(|(key, balance)| (key.to_string(), balance))
+            .collect()
+    }
+
+    fn usdb(balance: u128) -> TokenBalance {
+        token(USDB, balance, 6, "USDB")
+    }
+
+    #[test]
+    fn a_nonzero_usdb_holding_is_reported_with_its_metadata() {
+        assert_eq!(
+            usdb_balance(&balances([(USDB, usdb(50_000_000))])),
+            Some(UsdbBalanceSnapshot {
+                token_identifier: USDB.to_string(),
+                balance: 50_000_000,
+                decimals: 6,
+                ticker: "USDB".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn zero_or_missing_usdb_is_none() {
+        assert_eq!(usdb_balance(&HashMap::new()), None);
+        assert_eq!(usdb_balance(&balances([(USDB, usdb(0))])), None);
+    }
+
+    /// Only the configured USDB token is USDB. Another token that calls
+    /// itself "USDB" isn't, and neither is an entry filed under the USDB key
+    /// whose metadata names a different token.
+    #[test]
+    fn only_the_configured_usdb_token_is_usdb() {
+        let imitation = token(OTHER, 7_000_000, 6, "USDB");
+        assert_eq!(usdb_balance(&balances([(OTHER, imitation.clone())])), None);
+
+        let snapshot = usdb_balance(&balances([(OTHER, imitation), (USDB, usdb(1_250_000))]))
+            .expect("USDB is held");
+        assert_eq!(
+            (snapshot.token_identifier.as_str(), snapshot.balance),
+            (USDB, 1_250_000)
+        );
+
+        assert_eq!(
+            usdb_balance(&balances([(USDB, token(OTHER, 9_000_000, 6, "USDB"))])),
+            None
+        );
+    }
+
+    #[test]
+    fn a_balance_above_u64_max_is_not_clamped() {
+        for held in [u64::MAX as u128 + 1, u128::MAX] {
+            let snapshot = usdb_balance(&balances([(USDB, usdb(held))])).expect("USDB is held");
+            assert_eq!(snapshot.balance, held);
+        }
+    }
+
+    /// The whole `get_info` answer. `balance_sats` stays the SDK's
+    /// bitcoin-only figure, the legacy `stable_balance` is unchanged (still
+    /// clamped to `u64`), and `usdb_balance` carries the exact figure, as a
+    /// decimal string on the wire.
+    #[test]
+    fn get_info_keeps_bitcoin_and_the_legacy_field_and_adds_exact_usdb() {
+        let held = u64::MAX as u128 + 1;
+        let ok = get_info_ok(GetInfoResponse {
+            identity_pubkey: "03ab".to_string(),
+            balance_sats: 25_053,
+            token_balances: balances([(OTHER, token(OTHER, 3, 0, "XYZ")), (USDB, usdb(held))]),
+        });
+        assert_eq!(ok.balance_sats, 25_053);
+        assert_eq!(ok.identity_pubkey, "03ab");
+        let legacy = ok
+            .stable_balance
+            .as_ref()
+            .expect("the legacy field is still reported");
+        assert_eq!(
+            (legacy.balance, legacy.decimals, legacy.ticker.as_str()),
+            (u64::MAX, 6, "USDB")
+        );
+        let json = serde_json::to_value(&ok).expect("get_info serializes");
+        assert_eq!(json["balance_sats"], 25_053);
+        assert_eq!(json["stable_balance"]["balance"], u64::MAX);
+        assert_eq!(
+            json["usdb_balance"],
+            serde_json::json!({
+                "token_identifier": USDB,
+                "balance": "18446744073709551616",
+                "decimals": 6,
+                "ticker": "USDB",
+            })
+        );
+
+        // Without USDB, both fields are empty and `usdb_balance` stays off
+        // the wire, as before S1b.
+        let ok = get_info_ok(GetInfoResponse {
+            identity_pubkey: "03ab".to_string(),
+            balance_sats: 25_053,
+            token_balances: balances([(OTHER, token(OTHER, 3, 0, "XYZ"))]),
+        });
+        assert!(ok.stable_balance.is_none());
+        assert!(ok.usdb_balance.is_none());
+        let json = serde_json::to_value(&ok).expect("get_info serializes");
+        assert!(json.get("usdb_balance").is_none(), "{json}");
+        assert_eq!(json["balance_sats"], 25_053);
     }
 }
