@@ -203,7 +203,7 @@ pub fn hub_view<'a>(here: ChainId, items: Vec<HubItem>) -> Element<'a, ViewMessa
             let action = item.action.map(|(label, action)| {
                 button::secondary(None, label).on_press(match action {
                     HubAction::Split => ViewMessage::SplitFirst,
-                    HubAction::CreateCopy => ViewMessage::StartClaimBlake2b,
+                    HubAction::CreateCopy => ViewMessage::CreateBlake2bCopy,
                 })
             });
             list.push(
