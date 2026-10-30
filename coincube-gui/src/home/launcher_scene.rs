@@ -75,6 +75,38 @@ pub(crate) struct CubeMarks {
     pub spark: bool,
     pub passkey: bool,
     pub backup: BackupMark,
+    /// Set for a Cube registered in Connect with no copy on this device.
+    pub ghost: Option<Ghost>,
+}
+
+impl CubeMarks {
+    /// A ghost knows only its network and whether it can be restored here.
+    pub(crate) fn ghost(network: ChainId, ghost: Ghost) -> Self {
+        Self {
+            network,
+            vault: false,
+            imported_bitcoin: false,
+            spark: false,
+            passkey: false,
+            backup: BackupMark::Confirmed,
+            ghost: Some(ghost),
+        }
+    }
+}
+
+/// P-Launcher's `.cube.ghost`: a Cube registered in Connect but not on this
+/// device, drawn see-through in its network's edge colour after the local
+/// Cubes. Its one face is the details face; it never turns to unlock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Ghost {
+    /// `.ghost.kit`: Connect holds a Recovery Kit with the seed, so this
+    /// device can restore the Cube. The faces carry a faint fill.
+    Restorable,
+    /// `.ghost.nokit`: nothing on Connect restores it here. The faces are
+    /// empty. The prototype dots these edges, but the floor already dashes
+    /// test-network edges, so the two kinds differ by fill and mark instead
+    /// (Robert, 2026-10-29).
+    Unrestorable,
 }
 
 /// The right face's backup badge, P-Launcher's `.bdg`: "!" while the seed
@@ -512,6 +544,18 @@ pub(super) fn project(
     rest: (f32, f32),
     pose: Pose,
 ) -> (SceneFrame, Vec<ProjectedFace>) {
+    project_faces(layout, rest, pose, false)
+}
+
+/// [`project`], keeping the faces that turn away when `see_through`: a
+/// ghost's `backface-visibility: visible`, so its far edges show through.
+/// Those come first, so the near faces paint over them.
+pub(super) fn project_faces(
+    layout: &Layout,
+    rest: (f32, f32),
+    pose: Pose,
+    see_through: bool,
+) -> (SceneFrame, Vec<ProjectedFace>) {
     let s = layout.size();
     let p = pose.spin.clamp(0.0, 1.0);
     // A resting Cube never reads the target, which is placed from the
@@ -549,6 +593,7 @@ pub(super) fn project(
     let origin = (origin.0, origin.1 - lift);
     let center = (rest.0 + dx, rest.1 + dy - lift);
     let mut faces = Vec::with_capacity(3);
+    let mut back = Vec::new();
     for which in Face::ALL {
         let mut corners = [(0.0, 0.0); 4];
         let mut w = [1.0; 4];
@@ -571,8 +616,12 @@ pub(super) fn project(
         // `backface-visibility: hidden`.
         if projected.area() > 0.5 {
             faces.push(projected);
+        } else if see_through {
+            back.push(projected);
         }
     }
+    back.append(&mut faces);
+    let faces = back;
     let rise = (pose.lift / BOB_HEIGHT).clamp(0.0, 1.0) * (1.0 - p);
     let shadow = |v: f32| v * scene_scale * (1.0 - 0.08 * rise);
     let frame = SceneFrame {
@@ -619,6 +668,8 @@ pub(super) struct Palette {
     pub floor: [u8; 3],
     pub floor_rule: [u8; 3],
     pub shadow: [u8; 4],
+    /// `--line`, for a ghost's dashed footprint.
+    pub line: [u8; 3],
     pub ink: [u8; 3],
     pub top: [u8; 3],
     pub left: [u8; 3],
@@ -634,6 +685,7 @@ impl Palette {
                 floor: [0xef, 0xeb, 0xe3],
                 floor_rule: [0xe0, 0xd9, 0xcd],
                 shadow: [70, 52, 30, 77],
+                line: [0xc4, 0xbe, 0xb4],
                 ink: [0x20, 0x20, 0x20],
                 top: [0xe6, 0xe0, 0xd5],
                 left: [0xd6, 0xcf, 0xc2],
@@ -648,6 +700,7 @@ impl Palette {
                 floor: [0x24, 0x25, 0x22],
                 floor_rule: [0x3a, 0x3b, 0x37],
                 shadow: [0, 0, 0, 153],
+                line: [0x42, 0x42, 0x42],
                 ink: [0xf5, 0xf0, 0xe8],
                 top: [0x41, 0x42, 0x3e],
                 left: [0x2e, 0x2f, 0x2c],
@@ -677,6 +730,39 @@ pub(super) fn edge(network: ChainId, light: bool) -> [u8; 4] {
         [87, 90, 84, 153]
     } else {
         [185, 187, 181, 153]
+    }
+}
+
+/// `--ghost-btc`, `--ghost-test`: a ghost's edges, the family hue at 50%
+/// (55% for light Bitcoin, which darkens the hue to hold contrast).
+pub(super) fn ghost_edge(network: ChainId, light: bool) -> [u8; 4] {
+    if network.is_blake2b() && !launcher_coin::is_test_network(network) {
+        // No ghost is listed on Blake2b; keep its hue if one ever is.
+        if light {
+            [140, 104, 10, 140]
+        } else {
+            [212, 166, 42, 128]
+        }
+    } else if matches!(network, ChainId::Bitcoin) {
+        if light {
+            [176, 86, 8, 140]
+        } else {
+            [243, 130, 29, 128]
+        }
+    } else if light {
+        [87, 90, 84, 128]
+    } else {
+        [185, 187, 181, 128]
+    }
+}
+
+/// `--ghost-fill`, the faint face of a restorable ghost, and the empty face
+/// of one that cannot be restored, as sRGB plus alpha.
+pub(super) fn ghost_fill(ghost: Ghost, light: bool) -> [u8; 4] {
+    match (ghost, light) {
+        (Ghost::Unrestorable, _) => [0, 0, 0, 0],
+        (Ghost::Restorable, false) => [245, 240, 232, 10],
+        (Ghost::Restorable, true) => [32, 32, 32, 9],
     }
 }
 
@@ -737,6 +823,9 @@ pub(super) fn rest_face_svg(face: Face, marks: CubeMarks, light: bool) -> Option
     let mut svg = format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {s} {s}\" width=\"{s}\" height=\"{s}\" color=\"{ink}\">"
     );
+    if let Some(ghost) = marks.ghost {
+        return ghost_face_svg(svg, face, marks.network, ghost, light);
+    }
     match face {
         Face::Top => {
             // `.tc { transform: rotate(45deg) }`: coin, then the test tag.
@@ -846,6 +935,127 @@ pub(super) fn rest_face_svg(face: Face, marks: CubeMarks, light: bool) -> Option
     svg.push_str("</svg>");
     Some(svg)
 }
+
+/// `KIT` and `NOKIT` from P-Launcher: a case with a check, and the same case
+/// struck through.
+pub(super) const KIT: &str =
+    "M4 8.5h16V19H4zM9 8.5V6.5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M8.8 13.6l2.2 2.2 4.2-4.3";
+pub(super) const NOKIT: &str =
+    "M4 8.5h16V19H4zM9 8.5V6.5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M3 4l18 18";
+
+/// A ghost's resting faces: `.cube.ghost .coin img { filter: grayscale(1);
+/// opacity: .55 }` on top, no wallet marks (this device never saw them), and
+/// the Recovery Kit mark where a local Cube shows its lock, in `--good` when
+/// the kit restores it and muted when nothing does.
+fn ghost_face_svg(
+    mut svg: String,
+    face: Face,
+    network: ChainId,
+    ghost: Ghost,
+    light: bool,
+) -> Option<String> {
+    let s = REST_SIZE;
+    let muted = if light { "#575a54" } else { "#b9bbb5" };
+    match face {
+        Face::Top => {
+            let coin = s * 0.34;
+            let _ = write!(
+                svg,
+                "<filter id=\"g\"><feColorMatrix type=\"saturate\" values=\"0\"/></filter><g transform=\"rotate(45 {:.2} {:.2})\" filter=\"url(#g)\" opacity=\".55\">",
+                s / 2.0,
+                s / 2.0
+            );
+            svg.push_str(&launcher_coin::fragment(
+                network,
+                (s - coin) / 2.0,
+                (s - coin) / 2.0,
+                coin,
+                1.5,
+                s * 0.018,
+            ));
+            svg.push_str("</g>");
+        }
+        Face::Right => {
+            let pad = s * 0.36;
+            let (path, tone) = match ghost {
+                Ghost::Restorable => (KIT, if light { "#23613b" } else { "#8bdfab" }),
+                Ghost::Unrestorable => (NOKIT, muted),
+            };
+            icon(&mut svg, path, (s - pad) / 2.0, (s - pad) / 2.0, pad, tone);
+        }
+        Face::Left | Face::BackLeft | Face::BackRight => return None,
+    }
+    svg.push_str("</svg>");
+    Some(svg)
+}
+
+/// What a ghost's details face says, for the snapshot that rides the turn.
+#[derive(Clone, Copy)]
+pub(super) struct GhostText<'a> {
+    pub name: &'a str,
+    pub backup: &'a str,
+    pub restorable: bool,
+}
+
+/// The ghost's details face (G-Ghost-Details `.fc`) as it turns into place,
+/// before the live controls replace it: dashed cloud avatar, name, network,
+/// the Where and Backup facts and the primary action.
+pub(super) fn ghost_details_svg(network: ChainId, light: bool, text: GhostText<'_>) -> String {
+    let palette = Palette::new(light);
+    let ink = hex(palette.ink);
+    let muted = if light { "#575a54" } else { "#b9bbb5" };
+    let line = if light { "#c4beb4" } else { "#424242" };
+    let good = if light { "#23613b" } else { "#8bdfab" };
+    let warn = if light { "#77450b" } else { "#f3b465" };
+    let accent = if light { "#a14d00" } else { "#f3821d" };
+    let mut svg = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 420 420\" width=\"420\" height=\"420\" font-family=\"IBM Plex Sans\" color=\"{ink}\">"
+    );
+    let name: String = text.name.chars().take(26).collect();
+    // `.av`: a 32px dashed ring holding the cloud.
+    let _ = write!(
+        svg,
+        "<circle cx=\"44\" cy=\"44\" r=\"15.5\" fill=\"none\" stroke=\"{muted}\" stroke-dasharray=\"3 2\"/><text x=\"70\" y=\"51\" font-size=\"20\" font-weight=\"600\" fill=\"{ink}\">{}</text>",
+        xml_text(&name)
+    );
+    icon(&mut svg, CLOUD, 36.0, 36.0, 16.0, muted);
+    let _ = write!(
+        svg,
+        "<g opacity=\".6\">{}</g><text x=\"52\" y=\"83\" font-size=\"14\" fill=\"{ink}\">{}</text><path d=\"M28 108.5H392\" stroke=\"{line}\"/>",
+        launcher_coin::fragment(network, 28.0, 69.0, 18.0, 1.0, 1.5),
+        xml_text(super::launcher_chrome::network_name(network))
+    );
+    let tone = if text.restorable { good } else { warn };
+    let backup: String = text.backup.chars().take(34).collect();
+    let _ = write!(
+        svg,
+        "<text x=\"28\" y=\"141\" font-size=\"13\" fill=\"{muted}\">Where</text><text x=\"104\" y=\"141\" font-size=\"14\" fill=\"{muted}\">In Connect, not on this device</text><text x=\"28\" y=\"173\" font-size=\"13\" fill=\"{muted}\">Backup</text><text x=\"104\" y=\"173\" font-size=\"14\" fill=\"{tone}\">{}</text>",
+        xml_text(&backup)
+    );
+    let primary = if text.restorable {
+        "Restore to this device"
+    } else {
+        "Import with recovery phrase…"
+    };
+    let width = primary.chars().count() as f32 * 7.6 + 32.0;
+    let (fill, label) = if text.restorable {
+        (accent, if light { "#ffffff" } else { "#201407" })
+    } else {
+        ("none", ink.as_str())
+    };
+    let _ = write!(
+        svg,
+        "<rect x=\"28.5\" y=\"334.5\" width=\"{width:.1}\" height=\"35\" rx=\"8\" fill=\"{fill}\" stroke=\"{}\"/><text x=\"{:.1}\" y=\"357\" text-anchor=\"middle\" font-size=\"14\" font-weight=\"500\" fill=\"{label}\">{}</text></svg>",
+        if text.restorable { accent } else { line },
+        28.5 + width / 2.0,
+        xml_text(primary)
+    );
+    svg
+}
+
+/// `CLOUD` from P-Launcher: the ghost's avatar.
+pub(super) const CLOUD: &str =
+    "M7 18h10a4 4 0 0 0 .6-7.95A5.5 5.5 0 0 0 6.9 9.2 4.4 4.4 0 0 0 7 18z";
 
 /// A snapshot of the live details panel laid out in the prototype's 420px
 /// `.fc` box. It rides the turning face; the real Iced controls replace it
@@ -1088,6 +1298,7 @@ mod tests {
             spark: false,
             passkey: false,
             backup: BackupMark::NotConfirmed,
+            ghost: None,
         };
         let top = rest_face_svg(Face::Top, marks, false).unwrap();
         assert!(top.contains("rotate(45 "));
@@ -1208,5 +1419,70 @@ mod tests {
         assert_eq!(up.shadow_center, still.shadow_center);
         assert!(up.shadow_radii.0 < still.shadow_radii.0);
         assert!(up.shadow_opacity < still.shadow_opacity);
+    }
+
+    #[test]
+    fn ghost_faces_grey_the_coin_drop_the_wallets_and_mark_the_kit() {
+        for (ghost, mark, absent) in [
+            (Ghost::Restorable, KIT, NOKIT),
+            (Ghost::Unrestorable, NOKIT, KIT),
+        ] {
+            let marks = CubeMarks::ghost(ChainId::Bitcoin, ghost);
+            let top = rest_face_svg(Face::Top, marks, false).unwrap();
+            assert!(top.contains("feColorMatrix") && top.contains("opacity=\".55\""));
+            assert!(rest_face_svg(Face::Left, marks, false).is_none());
+            let right = rest_face_svg(Face::Right, marks, true).unwrap();
+            assert!(right.contains(mark) && !right.contains(absent));
+            assert!(!right.contains(LOCKED), "a ghost has no lock to show");
+        }
+        assert!(rest_face_svg(
+            Face::Right,
+            CubeMarks::ghost(ChainId::Bitcoin, Ghost::Restorable),
+            false
+        )
+        .unwrap()
+        .contains("#8bdfab"));
+        // Both ghost kinds share the edge; only the fill tells them apart.
+        assert_eq!(ghost_fill(Ghost::Unrestorable, false)[3], 0);
+        assert!(ghost_fill(Ghost::Restorable, false)[3] > 0);
+        assert_eq!(ghost_edge(ChainId::Bitcoin, false), [243, 130, 29, 128]);
+    }
+
+    #[test]
+    fn a_see_through_cube_keeps_its_far_faces_behind_the_near_ones() {
+        let layout = Layout::new(1440.0, DESIGN_STAGE_HEIGHT);
+        let rest = layout.rest_center(0, 1);
+        let (_, solid) = project(&layout, rest, Pose::REST);
+        let (_, ghost) = project_faces(&layout, rest, Pose::REST, true);
+        assert_eq!(ghost.len(), Face::ALL.len());
+        let near: Vec<_> = solid.iter().map(|f| f.face).collect();
+        let tail: Vec<_> = ghost[ghost.len() - near.len()..]
+            .iter()
+            .map(|f| f.face)
+            .collect();
+        assert_eq!(tail, near, "the near faces paint last, unchanged");
+        assert!(ghost[..ghost.len() - near.len()]
+            .iter()
+            .all(|f| f.area() <= 0.5));
+    }
+
+    #[test]
+    fn ghost_details_snapshot_escapes_its_name_and_names_its_action() {
+        for (restorable, action) in [
+            (true, "Restore to this device"),
+            (false, "Import with recovery phrase…"),
+        ] {
+            let svg = ghost_details_svg(
+                ChainId::Bitcoin,
+                false,
+                GhostText {
+                    name: "Old <laptop>",
+                    backup: "No Recovery Kit in Connect",
+                    restorable,
+                },
+            );
+            assert!(svg.contains("Old &lt;laptop&gt;") && svg.contains(action));
+            assert!(svg.contains("In Connect, not on this device"));
+        }
     }
 }
