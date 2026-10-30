@@ -81,6 +81,29 @@ struct SplitState {
 }
 
 impl CoinsPanel {
+    /// An open overlay waiting for its split to be built.
+    #[cfg(test)]
+    pub(crate) fn start_building_split_for_test(&mut self) {
+        self.split = Some(SplitState {
+            previous: BTreeSet::new(),
+            excluded: BTreeSet::new(),
+            method: Method::SplitKey,
+            feerate: Some(1),
+            fee_failed: false,
+            address: None,
+            working: true,
+            error: None,
+        });
+    }
+
+    /// The open overlay's `(working, error)`.
+    #[cfg(test)]
+    pub(crate) fn split_progress_for_test(&self) -> Option<(bool, Option<String>)> {
+        self.split
+            .as_ref()
+            .map(|split| (split.working, split.error.clone()))
+    }
+
     pub fn new(
         coins: &[Coin],
         timelock: impl Into<Option<u16>>,
