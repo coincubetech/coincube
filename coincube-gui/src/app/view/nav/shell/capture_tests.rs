@@ -46,7 +46,9 @@ pub(crate) fn renderer() -> iced::Renderer {
 }
 
 /// Lays `element` out at `size`, focuses `focus` (the ring paints, as after
-/// Tab), sends the first redraw and saves the frame to `path`.
+/// Tab), sends the first redraw and saves the frame to `path`. Panics if
+/// `focus` names no focusable control, so a frame can't be saved unfocused
+/// under a focus name.
 pub(crate) fn save<M>(
     renderer: &mut iced::Renderer,
     mut element: Element<'_, M>,
@@ -61,7 +63,8 @@ pub(crate) fn save<M>(
             .as_widget_mut()
             .layout(&mut tree, renderer, &layout::Limits::new(Size::ZERO, size));
     if let Some(id) = focus {
-        let mut focus: Box<dyn Operation<()>> = Box::new(operation::focusable::focus::<()>(id));
+        let mut focus: Box<dyn Operation<()>> =
+            Box::new(operation::focusable::focus::<()>(id.clone()));
         loop {
             element.as_widget_mut().operate(
                 &mut tree,
@@ -73,6 +76,17 @@ pub(crate) fn save<M>(
                 operation::Outcome::Chain(next) => focus = next,
                 _ => break,
             }
+        }
+        let mut focused = operation::focusable::find_focused();
+        element.as_widget_mut().operate(
+            &mut tree,
+            Layout::new(&node),
+            renderer,
+            &mut operation::black_box(&mut focused),
+        );
+        match focused.finish() {
+            operation::Outcome::Some(found) => assert_eq!(found, id, "{path:?}"),
+            _ => panic!("{:?} is not a focusable control here: {:?}", id, path),
         }
     }
     let viewport = Rectangle::with_size(size);

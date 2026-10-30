@@ -1492,6 +1492,7 @@ mod top_bar_tests {
     };
 
     use super::super::{launcher_catalog, Home, State};
+    use crate::app::state::connect::ConnectFlowStep;
     use crate::app::view::nav::shell::capture_tests::{directory, renderer, save, themes, WINDOWS};
     use crate::{app::settings::CubeSettings, chain::ChainId, dir::CoincubeDirectory};
 
@@ -1646,7 +1647,13 @@ mod top_bar_tests {
         };
         let mut renderer = renderer();
         for (appearance, palette) in themes() {
-            let home = home(appearance == "light");
+            let mut home = home(appearance == "light");
+            // Signed out, so the Connect entry is the Sign in control. A
+            // session still being checked leaves it inert and unfocusable.
+            home.connect_account.step = ConnectFlowStep::Login {
+                email: String::new(),
+                loading: false,
+            };
             for (width, height) in WINDOWS {
                 save(
                     &mut renderer,
