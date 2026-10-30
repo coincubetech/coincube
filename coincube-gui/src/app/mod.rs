@@ -6822,7 +6822,7 @@ impl App {
                                         .map(|txs| txs.first().cloned())
                                 }) {
                                     if let Some(psbts) = &mut self.panels.psbts {
-                                        psbts.preselect(spend_tx);
+                                        psbts.preselect(spend_tx, &self.cache);
                                     }
                                     self.panels.current = menu;
                                     return Task::none();
@@ -9519,6 +9519,16 @@ impl App {
                 }
                 return Task::batch(tasks);
             }
+            Message::View(view::Message::SplitFirst) => {
+                let menu = Menu::Vault(menu::VaultSubMenu::Coins(None));
+                let load = self.set_current_panel(menu);
+                return Task::batch([
+                    load,
+                    Task::done(Message::View(view::Message::CoinControl(
+                        view::CoinControlMessage::OpenSplit,
+                    ))),
+                ]);
+            }
             Message::SendSelectedCoins(outpoints) => {
                 let Some(wallet) = self.wallet.clone() else {
                     return Task::none();
@@ -10748,7 +10758,7 @@ impl App {
                             let load = self
                                 .set_current_panel(Menu::Vault(menu::VaultSubMenu::PSBTs(None)));
                             let panel = self.panels.psbts.as_mut().expect("checked above");
-                            panel.preselect(tx);
+                            panel.preselect(tx, &self.cache);
                             return load;
                         }
                     }

@@ -134,6 +134,61 @@ pub fn selection_bar<'a>(count: usize, total: Amount) -> Element<'a, Message> {
         .into()
 }
 
+/// The warning before Send selected spends coins that are on both chains.
+/// On Bitcoin it can be acknowledged; on Bitcoin Blake2b (a Vault that can't
+/// make the replay-protected signature) the only way on is to split first.
+pub fn send_warning<'a>(here: ChainId, count: usize, ack: bool) -> Element<'a, Message> {
+    let other = chain_name(twin(here));
+    let question = if count == 1 {
+        format!("1 selected coin also exists on {}", other)
+    } else {
+        format!("{} selected coins also exist on {}", count, other)
+    };
+    let body = if here.is_blake2b() {
+        "Your hardware signer can't make a replay-protected signature, so this transaction could be copied to Bitcoin and move your bitcoin too. Split these coins first."
+    } else {
+        "A Bitcoin transaction that spends them can be copied to Bitcoin Blake2b and move those coins too, to the same recipient. Split them first, or continue if that doesn't matter to you."
+    };
+    let mut column = Column::new()
+        .spacing(16)
+        .push(h4_bold(question))
+        .push(p1_regular(body).style(theme::text::secondary));
+    if !here.is_blake2b() {
+        column = column.push(
+            checkbox(ack)
+                .label("I understand the Bitcoin Blake2b copies may move too")
+                .on_toggle(|ack| {
+                    Message::CoinControl(CoinControlMessage::AcknowledgeBothChains(ack))
+                }),
+        );
+    }
+    let mut footer = Row::new()
+        .spacing(12)
+        .align_y(Alignment::Center)
+        .push(Space::new().width(Length::Fill))
+        .push(
+            button::secondary(None, "Cancel")
+                .on_press(Message::CoinControl(CoinControlMessage::CloseWarning)),
+        );
+    if !here.is_blake2b() {
+        footer = footer.push(if ack {
+            button::secondary(None, "Send anyway")
+                .on_press(Message::CoinControl(CoinControlMessage::SendAnyway))
+        } else {
+            button::secondary(None, "Send anyway")
+        });
+    }
+    footer = footer.push(
+        button::primary(None, "Split first")
+            .on_press(Message::CoinControl(CoinControlMessage::OpenSplit)),
+    );
+    Container::new(column.push(footer))
+        .padding(24)
+        .max_width(560)
+        .style(theme::card::modal)
+        .into()
+}
+
 impl SplitOverlay {
     pub fn spent(&self) -> (usize, Amount) {
         let included: Vec<_> = self.inputs.iter().filter(|row| row.included).collect();

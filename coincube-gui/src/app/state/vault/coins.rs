@@ -62,6 +62,9 @@ pub struct CoinsPanel {
     chosen: BTreeSet<OutPoint>,
     /// The open Split coins overlay.
     split: Option<SplitState>,
+    /// The warning before sending coins that are on both chains; `Some(ack)`
+    /// while shown.
+    send_warning: Option<bool>,
 }
 
 /// The Split coins overlay's own state. Which coins are on both chains and
@@ -119,6 +122,7 @@ impl CoinsPanel {
             wallet: None,
             chosen: BTreeSet::new(),
             split: None,
+            send_warning: None,
         };
         panel.update_coins(coins);
         panel
@@ -213,6 +217,18 @@ impl CoinsPanel {
         })
     }
 
+    /// Whether Send selected must warn first: Bitcoin Blake2b is on and a
+    /// chosen coin is still on both chains. On Bitcoin a send can copy to
+    /// Bitcoin Blake2b; on Bitcoin Blake2b only a Vault that can't make the
+    /// replay-protected signature is exposed (decision item 5).
+    fn send_needs_warning(&self, cache: &Cache) -> bool {
+        self.blake2b(cache)
+            && (!self.chain.is_blake2b() || !self.signature_available())
+            && self
+                .both_chain_coins(cache)
+                .any(|coin| self.chosen.contains(&coin.outpoint))
+    }
+
     /// The table's ticked coins: the overlay's inputs while it is open.
     fn effective_chosen(&self, cache: &Cache) -> BTreeSet<OutPoint> {
         match self.split_overlay(cache) {
@@ -240,12 +256,32 @@ impl CoinsPanel {
             }
             CoinControlMessage::SendSelected => {
                 if self.split.is_none() && !self.chosen.is_empty() {
+                    if self.send_needs_warning(cache) {
+                        self.send_warning = Some(false);
+                        return Task::none();
+                    }
                     return Task::done(Message::SendSelectedCoins(
                         self.chosen.iter().copied().collect(),
                     ));
                 }
             }
+            CoinControlMessage::AcknowledgeBothChains(ack) => {
+                if let Some(state) = self.send_warning.as_mut() {
+                    *state = ack;
+                }
+            }
+            CoinControlMessage::SendAnyway => {
+                // Only the Bitcoin side can be acknowledged away.
+                if self.send_warning == Some(true) && !self.chain.is_blake2b() {
+                    self.send_warning = None;
+                    return Task::done(Message::SendSelectedCoins(
+                        self.chosen.iter().copied().collect(),
+                    ));
+                }
+            }
+            CoinControlMessage::CloseWarning => self.send_warning = None,
             CoinControlMessage::OpenSplit => {
+                self.send_warning = None;
                 if self.split.is_some() || self.both_chain_coins(cache).next().is_none() {
                     return Task::none();
                 }
@@ -382,6 +418,20 @@ impl State for CoinsPanel {
                 control,
             ),
         );
+        if let Some(ack) = self.send_warning {
+            let count = self
+                .both_chain_coins(cache)
+                .filter(|coin| self.chosen.contains(&coin.outpoint))
+                .count();
+            return coincube_ui::widget::modal::Modal::new(
+                content,
+                view::vault::split_coins::send_warning(self.chain, count, ack),
+            )
+            .on_blur(Some(view::Message::CoinControl(
+                CoinControlMessage::CloseWarning,
+            )))
+            .into();
+        }
         match self.split_overlay(cache) {
             Some(overlay) => {
                 let working = overlay.working;
@@ -754,6 +804,54 @@ mod tests {
             assert!(panel.split.as_ref().unwrap().working);
             let _ = panel.update_split(&cache, CoinControlMessage::CancelSplit);
             assert!(panel.split.is_some(), "can't cancel while building");
+        }
+
+        #[test]
+        fn sending_both_chain_coins_warns_and_needs_an_acknowledgement() {
+            let (mut panel, mut cache, [a, _, _, unseen]) = fixture();
+            cache.btcb2_server_enabled = true;
+            let _ = panel.update_split(&cache, CoinControlMessage::Choose(unseen));
+            let _ = panel.update_split(&cache, CoinControlMessage::SendSelected);
+            assert_eq!(panel.send_warning, None, "a one-chain coin sends at once");
+            let _ = panel.update_split(&cache, CoinControlMessage::Choose(a));
+            let _ = panel.update_split(&cache, CoinControlMessage::SendSelected);
+            assert_eq!(panel.send_warning, Some(false));
+            let _ = panel.update_split(&cache, CoinControlMessage::SendAnyway);
+            assert_eq!(panel.send_warning, Some(false), "not without the tick");
+            let _ = panel.update_split(&cache, CoinControlMessage::AcknowledgeBothChains(true));
+            let _ = panel.update_split(&cache, CoinControlMessage::SendAnyway);
+            assert_eq!(panel.send_warning, None);
+            // Split first closes the warning and opens the overlay.
+            let _ = panel.update_split(&cache, CoinControlMessage::SendSelected);
+            let _ = panel.update_split(&cache, CoinControlMessage::OpenSplit);
+            assert_eq!(panel.send_warning, None);
+            assert!(panel.split.is_some());
+        }
+
+        #[test]
+        fn no_warning_with_bitcoin_blake2b_off() {
+            let (mut panel, cache, [a, ..]) = fixture();
+            let _ = panel.update_split(&cache, CoinControlMessage::Choose(a));
+            let _ = panel.update_split(&cache, CoinControlMessage::SendSelected);
+            assert_eq!(panel.send_warning, None);
+        }
+
+        #[test]
+        fn a_blake2b_vault_without_the_signature_cannot_send_anyway() {
+            let (_, mut cache, [a, ..]) = fixture();
+            let coins = cache.daemon_cache.coins.clone();
+            let mut panel = CoinsPanel::new(&coins, 0, crate::chain::ChainId::BitcoinBlake2b);
+            cache.fiat_chain = crate::chain::ChainId::BitcoinBlake2b;
+            let _ = panel.update_split(&cache, CoinControlMessage::Choose(a));
+            let _ = panel.update_split(&cache, CoinControlMessage::SendSelected);
+            assert_eq!(panel.send_warning, Some(false));
+            let _ = panel.update_split(&cache, CoinControlMessage::AcknowledgeBothChains(true));
+            let _ = panel.update_split(&cache, CoinControlMessage::SendAnyway);
+            assert_eq!(
+                panel.send_warning,
+                Some(true),
+                "split first is the only way on"
+            );
         }
 
         #[test]
