@@ -1070,6 +1070,7 @@ impl Tab {
             State::App(app) => app.cube_settings().network.is_blake2b(),
             State::Loader(loader) => loader.cube_settings.network.is_blake2b(),
             State::PinEntry(pin) => pin.cube().network.is_blake2b(),
+            State::PasskeyUnlock(unlock) => unlock.cube().network.is_blake2b(),
             State::Installer(installer) => installer.context.bitcoin_config.chain.is_blake2b(),
             _ => false,
         };
@@ -1213,6 +1214,14 @@ impl Tab {
                     *connect_client = None;
                     return Task::none();
                 }
+                State::PasskeyUnlock(unlock)
+                    if unlock.cube().network.is_blake2b() && !unlock.requires_connect() =>
+                {
+                    let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } =
+                        &mut unlock.on_success;
+                    *connect_client = None;
+                    return Task::none();
+                }
                 State::Installer(installer)
                     if installer.context.fresh_fork_cube
                         && !installer.context.use_coincube_connect =>
@@ -1282,6 +1291,14 @@ impl Tab {
                     &mut pin.on_success;
                 *connect_client = None;
                 pin.fail_open(if capability_revoked { "Bitcoin Blake2b is disabled. Check Global Settings before reopening this Cube." } else { "Connect session changed. Return Home and sign in again." }.into());
+            }
+            // The same for a passkey copy: its assertion must not open the
+            // copy with the previous account's client.
+            State::PasskeyUnlock(unlock) if unlock.cube().network.is_blake2b() => {
+                let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } =
+                    &mut unlock.on_success;
+                *connect_client = None;
+                unlock.fail_open(if capability_revoked { "Bitcoin Blake2b is disabled. Check Global Settings before reopening this Cube." } else { "Connect session changed. Return Home and sign in again." }.into());
             }
             State::Installer(installer) if installer.context.bitcoin_config.chain.is_blake2b() => {
                 installer.stop();
@@ -7498,6 +7515,42 @@ mod unlock_routing_tests {
             crate::passkey_unlock::Message::Back,
         ));
         assert!(!crate::app::session::is_open());
+    }
+
+    /// #947 review: a Connect change while a Connect-backed passkey copy is
+    /// at its prompt drops the old client and fails the open, as PIN entry
+    /// does, so the assertion cannot open it under the previous account.
+    #[test]
+    fn a_connect_change_fails_a_waiting_passkey_copy_open() {
+        use crate::chain::ChainId;
+        let cube = CubeSettings::new("Copy".to_string(), ChainId::BitcoinBlake2b).with_passkey(
+            PasskeyMetadata {
+                credential_id: "Y3JlZC1pZA==".to_string(),
+                rp_id: "coincube.io".to_string(),
+                created_at: 1_786_122_245,
+                label: None,
+            },
+        );
+        let mut success = on_success();
+        let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } = &mut success;
+        *connect_client = Some(crate::services::coincube::CoincubeClient::for_test(
+            "https://connect.example/",
+        ));
+        let mut tab = super::Tab::new(
+            1,
+            unlock_state(cube, std::path::PathBuf::from("/tmp/unused"), success, None),
+        );
+        drop(tab.invalidate_fork_state(super::AuthChange::LogOut, false, false));
+        let State::PasskeyUnlock(unlock) = &tab.state else {
+            panic!("still at the prompt");
+        };
+        assert!(unlock.requires_connect());
+        let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } = &unlock.on_success;
+        assert!(connect_client.is_none(), "the old client is dropped");
+        assert_eq!(
+            unlock.error_for_test(),
+            Some("Connect session changed. Return Home and sign in again.")
+        );
     }
 
     fn blake2b_error_loader() -> super::State {
