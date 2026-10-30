@@ -679,8 +679,10 @@ fn fs_scene(v: VsOut) -> @location(0) vec4<f32> {
     let inside_v = clamp((dv - v.p0.y) / fv + 0.5, 0.0, 1.0);
     var border = 1.0 - min(inside_u, inside_v);
     if (v.p0.z > 0.0) {
-        // `border-style: dashed` along each edge.
-        let along = select(v.uv.x, v.uv.y, du / fu > dv / fv);
+        // `border-style: dashed` along each edge: across the top and bottom
+        // edges the dashes run with `u`, down the left and right with `v`.
+        // Near the top or bottom `du / fu > dv / fv`, so `select` picks `u`.
+        let along = select(v.uv.y, v.uv.x, du / fu > dv / fv);
         border = border * step(fract(along * v.p0.z), 0.5);
     }
     let e = v.edge.a * border;
