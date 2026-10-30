@@ -24,7 +24,7 @@ use crate::{
     },
     chain::ChainId,
     daemon::Daemon,
-    services::split_coins,
+    services::{chain_status::ChainStatus, split_coins},
 };
 
 /// One checklist line.
@@ -71,6 +71,9 @@ pub struct HubFacts {
     pub both_chains: usize,
     pub both_total: Amount,
     pub splitting: usize,
+    /// Unspent coins with no answer yet: not checked, still checking, or a
+    /// check that failed. Only positive evidence makes a coin done.
+    pub unverified: usize,
     pub key: Option<Amount>,
     pub signature_available: bool,
     pub copy_exists: bool,
@@ -92,10 +95,19 @@ pub fn items(facts: HubFacts) -> Vec<HubItem> {
             )
         } else if facts.splitting > 0 {
             "Splitting. The coin rows show the confirmations.".into()
+        } else if facts.unverified > 0 {
+            format!(
+                "{} not verified yet. Coin control shows each coin's status.",
+                if facts.unverified == 1 {
+                    "1 coin".to_string()
+                } else {
+                    format!("{} coins", facts.unverified)
+                }
+            )
         } else {
             "None. Every coin is split.".into()
         },
-        state: if facts.both_chains > 0 {
+        state: if facts.both_chains > 0 || facts.splitting > 0 || facts.unverified > 0 {
             ItemState::ToDo
         } else {
             ItemState::Done
@@ -238,11 +250,23 @@ impl SplitHubPanel {
             .filter(|coin| coin.spend_info.is_none() && coin.block_height.is_some())
             .filter(|coin| cache.chain_status(&coin.outpoint).needs_split())
             .collect();
+        let unverified = cache
+            .coins()
+            .iter()
+            .filter(|coin| coin.spend_info.is_none())
+            .filter(|coin| {
+                matches!(
+                    cache.chain_status(&coin.outpoint),
+                    ChainStatus::NotChecked | ChainStatus::NotSeen | ChainStatus::CouldntVerify
+                )
+            })
+            .count();
         HubFacts {
             here: self.wallet.chain,
             both_chains: both.len(),
             both_total: both.iter().map(|coin| coin.amount).sum(),
             splitting: cache.splitting.len(),
+            unverified,
             key: cache.split_keys().first().map(|(coin, _)| coin.amount),
             signature_available: split_coins::signature_available(&self.wallet),
             copy_exists: cache.btcb2_already_claimed,
@@ -282,6 +306,7 @@ mod tests {
             both_chains: 3,
             both_total: Amount::from_sat(1_200_000),
             splitting: 0,
+            unverified: 0,
             key: None,
             signature_available: false,
             copy_exists: false,
@@ -333,6 +358,31 @@ mod tests {
         });
         assert!(items.iter().all(|item| item.state == ItemState::Done));
         assert!(items.iter().all(|item| item.action.is_none()));
+    }
+
+    /// No both-chain coins is not done by itself: coins without an answer
+    /// and splits still confirming keep the item open.
+    #[test]
+    fn coins_are_done_only_on_positive_evidence() {
+        let done = HubFacts {
+            both_chains: 0,
+            both_total: Amount::ZERO,
+            ..facts()
+        };
+        assert_eq!(items(done)[0].state, ItemState::Done);
+        let unverified = items(HubFacts {
+            unverified: 2,
+            ..done
+        });
+        assert_eq!(unverified[0].state, ItemState::ToDo);
+        assert!(unverified[0].detail.starts_with("2 coins not verified yet"));
+        assert_eq!(unverified[0].action, None);
+        let splitting = items(HubFacts {
+            splitting: 1,
+            ..done
+        });
+        assert_eq!(splitting[0].state, ItemState::ToDo);
+        assert_eq!(splitting[0].action, None);
     }
 
     #[test]
