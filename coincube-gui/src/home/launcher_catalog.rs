@@ -713,10 +713,7 @@ impl Home {
                     key: ghost_key(cube),
                     name: catalog_display_name(&cube.name),
                     status: ghost_status(cube),
-                    marks: super::launcher_scene::CubeMarks::ghost(
-                        ghost_key(cube).chain,
-                        ghost_kind(cube),
-                    ),
+                    marks: ghost_marks(cube),
                 },
             })
             .collect::<Vec<_>>();
@@ -1413,6 +1410,12 @@ pub(super) fn ghost_kind(cube: &RemoteCube) -> super::launcher_scene::Ghost {
     } else {
         super::launcher_scene::Ghost::Unrestorable
     }
+}
+
+/// A ghost's face marks: its chain, its kind and the wallets Connect knows.
+pub(super) fn ghost_marks(cube: &RemoteCube) -> super::launcher_scene::CubeMarks {
+    super::launcher_scene::CubeMarks::ghost(ghost_key(cube).chain, ghost_kind(cube))
+        .with_vault(cube.has_vault == Some(true))
 }
 
 /// The state line under a ghost on the floor.
@@ -2322,6 +2325,7 @@ mod tests {
             phone_recoverable: phone,
             phone_full_cube: full,
             encryption_pubkey: None,
+            has_vault: None,
         }
     }
 

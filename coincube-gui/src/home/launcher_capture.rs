@@ -251,6 +251,7 @@ fn ghost(uuid: &str, name: &str, kit: bool) -> super::RemoteCube {
         phone_recoverable: false,
         phone_full_cube: false,
         encryption_pubkey: None,
+        has_vault: Some(true),
     }
 }
 
