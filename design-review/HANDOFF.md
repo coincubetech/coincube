@@ -50,19 +50,19 @@ the live canvas. `screens/studies/H-Convert-Review.png` and
 | Spark USDB | A separate US Dollar (USDB) balance. Swap BTC ⇄ USDB in three steps (Details, Review, Swapped): an indicative rate, then Get quote, then the fee and the 0.5% max price change. Auto-convert lives in Spark Settings. Send has an explicit pay-from choice. Receive says payments arrive as bitcoin. | `P-Swap`, `H-Convert`, `H-Convert-Review`, `H-Settings-Spark`, `H-Settings-Spark-Off`, `H-Send-From`, `P-Receive` | S1–S4 |
 | Launcher | Ghost Cubes on the floor (see-through, dashed footprint, Recovery Kit state on the edges) with a details face. Opening on the Cube: it tumbles to its bottom face and grows to a 700px face whose edge glow brightens with each loader stage, then the Flash finale opens the Overview. | `G-Launcher`, `G-Ghost-Details`, `O-*` (Flash is `O-Finale-B`) | N1, N2 |
 
-Where the plan departs from the boards, the plan wins, except where an item is
-marked open:
+Where the plan departs from the boards, the plan wins:
 
-- **Open: turning auto-convert off.** Master §3 decision 5 and plan S2 keep
-  USDB when auto-convert is turned off, "as the board says", with the
-  confirmation "Your USDB stays USDB, and new bitcoin you receive stays
-  bitcoin." The v175 boards say the opposite. `P-Settings` asks "Turn off
-  auto-convert?", says the whole USDB balance converts back to bitcoin at the
-  current rate, and confirms with "Turn off and convert". `H-Settings-Spark-Off`
-  is titled "turning auto-convert off converts the USDB balance back", and its
-  render (`screens/studies/H-Settings-Spark-Off.png`) shows that dialog. The
-  "stays USDB" copy appears only in the status note shown while auto-convert is
-  off. Robert decides on #950; the plan stands until then.
+- **Turning auto-convert off keeps USDB.** Robert decided this on 2026-10-30
+  (#950): existing USDB stays USDB and only future receive conversion stops,
+  as master §3 decision 5 and plan S2 say, with the confirmation "Your USDB
+  stays USDB, and new bitcoin you receive stays bitcoin." The v175 boards'
+  turn-off copy is stale. `P-Settings` asks "Turn off auto-convert?", says the
+  whole USDB balance converts back to bitcoin at the current rate, and
+  confirms with "Turn off and convert". `H-Settings-Spark-Off` is titled
+  "turning auto-convert off converts the USDB balance back", and its render
+  (`screens/studies/H-Settings-Spark-Off.png`) shows that dialog. Build
+  neither the convert-back copy nor the conversion. The board's "stays USDB"
+  status note, shown while auto-convert is off, still applies.
 - **Liquid is hidden.** Most Cube boards still show a Liquid wallet (a side
   panel row, an Overview card, activity rows), and `P-Liquid` is still on the
   canvas. Build without them, for every account and Cube (master §3 decision 2,
@@ -161,7 +161,7 @@ navigation.
 | Activity (P-Activity) | `app/view/vault/transactions.rs`, `app/view/spark/transactions.rs`, `app/view/spark/last_tx.rs` |
 | Spark page (v175: the Spark page in P-Overview, H-Wallet): Total balance, one row per asset (Bitcoin, US Dollar), Recent activity, Lightning Address block; head actions Swap BTC ⇄ USDB and Wallet settings. The Stable Balance card and "Stable" badge leave the page; the control moves to Settings as auto-convert | `app/view/spark/overview.rs`, `app/state/spark/overview.rs`, `app/state/connect/cube.rs` (Lightning Address claim), `coincube-ui/src/component/tenshu/asset_row.rs`, `coincube-ui/src/image.rs` (`asset_network_logo`) and `coincube-ui/static/logos/` (the USDB logo) |
 | Swap BTC ⇄ USDB (v175: P-Swap, H-Convert, H-Convert-Review): Details, Review, Swapped | New `app/state/spark/swap.rs` and `app/view/spark/swap.rs`, with `Menu::Spark(SparkSubMenu::Swap)` in `app/menu.rs`. The bridge requests live in `coincube-spark-protocol` and `coincube-spark-bridge` (Track S) |
-| Spark Settings (v175: P-Settings, Spark scope; H-Settings-Spark, H-Settings-Spark-Off): tabs Balances & conversion · Lightning address · Connections. Balances & conversion holds the Auto-convert switch and its turn-off confirmation (see the open item in the v175 delta), "Pay from USDB when bitcoin runs short · Always on", Max price change 0.5% (read-only), Swap by hand, and the Spark nickname (plan only, not on the boards) | `app/view/spark/settings/**`, `app/state/spark/settings.rs`, `app/view/settings/frame.rs` (scope switch and tabs), `app/settings/mod.rs` (the nickname, next to `WalletSettings.alias`) |
+| Spark Settings (v175: P-Settings, Spark scope; H-Settings-Spark, H-Settings-Spark-Off): tabs Balances & conversion · Lightning address · Connections. Balances & conversion holds the Auto-convert switch and its turn-off confirmation (USDB stays USDB; see the v175 delta), "Pay from USDB when bitcoin runs short · Always on", Max price change 0.5% (read-only), Swap by hand, and the Spark nickname (plan only, not on the boards) | `app/view/spark/settings/**`, `app/state/spark/settings.rs`, `app/view/settings/frame.rs` (scope switch and tabs), `app/settings/mod.rs` (the nickname, next to `WalletSettings.alias`) |
 | Settings = configuration (P-Settings: Wallet & signers, Node, Pair with Keychain, Connections, Data & exports; Spark scope) | `app/view/settings/**`, `app/state/settings/**`, `app/settings/mod.rs` (`CubeSettings`), `app/view/vault/settings/**`, `app/view/spark/settings/**`, `node/**` |
 | Tools = operations (P-Advanced: Coin control, PSBT proposals, Recovery path, Split coins) | `app/view/vault/coins.rs`, `psbts.rs`, `psbt.rs`, `recovery.rs`, `split.rs`, `claim.rs` |
 | Transfer to another Cube (P-Transfer) | `app/view/vault/spend/**` + Launcher unlock-in-flow |
