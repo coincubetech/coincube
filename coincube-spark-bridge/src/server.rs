@@ -330,12 +330,34 @@ async fn handle_request(request: Request, state: Arc<ServerState>) -> Response {
         }
         Method::GetLightningAddress => handle_get_lightning_address(id, state).await,
         Method::DeleteLightningAddress => handle_delete_lightning_address(id, state).await,
+        // Wire contract only (#950 P0). Each method refuses, without touching
+        // the SDK, until the PR that implements it.
+        Method::GetAutoConvert | Method::SetAutoConvert(_) => {
+            not_implemented(id, "auto-convert", "S2b")
+        }
+        Method::GetConversionLimits(_) | Method::PrepareSwap(_) | Method::Swap(_) => {
+            not_implemented(id, "swap", "S3b")
+        }
+        Method::PrepareSendFrom(_) | Method::PrepareLnurlPayFrom(_) => {
+            not_implemented(id, "pay-from", "S4b")
+        }
         Method::Shutdown => {
             // Handled inline in the read loop — this branch exists so the
             // match is exhaustive.
             Response::ok(id, OkPayload::Shutdown {})
         }
     }
+}
+
+/// The answer to a method the protocol defines but this bridge doesn't
+/// implement yet. `BadRequest` because an older gui can't parse a new
+/// [`ErrorKind`] — its reader stops on an unparseable line.
+fn not_implemented(id: u64, feature: &str, lands_in: &str) -> Response {
+    Response::err(
+        id,
+        ErrorKind::BadRequest,
+        format!("{feature} is not implemented in this bridge yet (lands in {lands_in})"),
+    )
 }
 
 async fn handle_init(
@@ -521,6 +543,8 @@ async fn handle_get_info(
                     balance_sats: info.balance_sats,
                     identity_pubkey: info.identity_pubkey,
                     stable_balance,
+                    // S1b reports it.
+                    usdb_balance: None,
                 }),
             )
         }
@@ -680,6 +704,8 @@ fn detail_summary(details: Option<&PaymentDetails>) -> PaymentDetailSummary {
                 .and_then(|info| info.ln_address.as_deref())
                 .and_then(non_empty),
             tx_id: None,
+            // S3b reports it.
+            conversion: None,
         },
         Some(PaymentDetails::Spark {
             invoice_details,
@@ -3170,6 +3196,7 @@ mod detail_summary_tests {
                 invoice: Some("lnbc42u1synthetic".into()),
                 lightning_address: Some("shop@example.test".into()),
                 tx_id: None,
+                conversion: None,
             }
         );
         assert!(!format!("{summary:?}").contains("preimage-stays-in-the-bridge"));
@@ -3193,5 +3220,115 @@ mod detail_summary_tests {
             PaymentDetailSummary::default()
         );
         assert_eq!(detail_summary(None), PaymentDetailSummary::default());
+    }
+}
+
+#[cfg(test)]
+mod p0_stub_tests {
+    use super::*;
+    use coincube_spark_protocol::{
+        AssetAmount, ErrorPayload, GetConversionLimitsParams, ListPaymentsParams,
+        PrepareLnurlPayFromParams, PrepareSendFromParams, PrepareSwapParams, ResponseResult,
+        SetAutoConvertParams, SwapAmount, SwapParams, WalletAsset,
+    };
+
+    async fn answer(state: &Arc<ServerState>, method: Method) -> ErrorPayload {
+        let response = handle_request(Request { id: 7, method }, state.clone()).await;
+        assert_eq!(response.id, 7);
+        match response.result {
+            ResponseResult::Err(err) => err,
+            ResponseResult::Ok(ok) => panic!("a P0 stub answered ok: {ok:?}"),
+        }
+    }
+
+    /// Every method P0 adds refuses before the SDK is consulted. The state
+    /// here has no SDK, so a handler that looked for one would answer
+    /// `NotConnected`, as `list_payments` does.
+    #[tokio::test]
+    async fn p0_methods_refuse_without_touching_the_sdk() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = Arc::new(ServerState::new(tx));
+
+        let control = answer(
+            &state,
+            Method::ListPayments(ListPaymentsParams {
+                limit: None,
+                offset: None,
+            }),
+        )
+        .await;
+        assert_eq!(control.kind, ErrorKind::NotConnected);
+
+        let usdb = AssetAmount {
+            asset: WalletAsset::Usdb,
+            amount: 1_000_000,
+        };
+        for (method, lands_in) in [
+            (Method::GetAutoConvert, "S2b"),
+            (
+                Method::SetAutoConvert(SetAutoConvertParams { enabled: true }),
+                "S2b",
+            ),
+            (
+                Method::GetConversionLimits(GetConversionLimitsParams {
+                    from: WalletAsset::Bitcoin,
+                }),
+                "S3b",
+            ),
+            (
+                Method::PrepareSwap(PrepareSwapParams {
+                    amount: SwapAmount::Exact { amount_in: usdb },
+                    max_slippage_bps: None,
+                }),
+                "S3b",
+            ),
+            (
+                Method::PrepareSwap(PrepareSwapParams {
+                    amount: SwapAmount::Max {
+                        from: WalletAsset::Usdb,
+                    },
+                    max_slippage_bps: Some(50),
+                }),
+                "S3b",
+            ),
+            (
+                Method::Swap(SwapParams {
+                    prepare_handle: "swap-h".into(),
+                }),
+                "S3b",
+            ),
+            (
+                Method::PrepareSendFrom(PrepareSendFromParams {
+                    input: "lnbc1".into(),
+                    amount_sat: Some(15_000),
+                    pay_from: WalletAsset::Usdb,
+                }),
+                "S4b",
+            ),
+            (
+                Method::PrepareLnurlPayFrom(PrepareLnurlPayFromParams {
+                    input: "shop@example.test".into(),
+                    amount_sat: 15_000,
+                    comment: None,
+                    pay_from: WalletAsset::Bitcoin,
+                }),
+                "S4b",
+            ),
+        ] {
+            let label = format!("{method:?}");
+            let err = answer(&state, method).await;
+            assert_eq!(err.kind, ErrorKind::BadRequest, "{label}");
+            assert!(
+                err.message.contains("not implemented in this bridge yet")
+                    && err.message.contains(lands_in),
+                "{label}: {}",
+                err.message
+            );
+        }
+
+        // Nothing was emitted, and nothing was stored for a later send.
+        assert!(rx.try_recv().is_err(), "a stub emitted a frame");
+        assert!(state.pending_prepares.lock().await.is_empty());
+        assert!(state.pending_lnurl_prepares.lock().await.is_empty());
     }
 }
