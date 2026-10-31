@@ -29,23 +29,23 @@ use breez_sdk_spark::{
     PaymentDetails, PaymentRequest, PrepareLnurlPayRequest, PrepareLnurlPayResponse,
     PrepareSendPaymentRequest, PrepareSendPaymentResponse, ReceivePaymentMethod,
     ReceivePaymentRequest, RegisterLightningAddressRequest, SdkEvent, SendOnchainFeeQuote,
-    SendPaymentMethod, SendPaymentOptions, SendPaymentRequest, SparkAsset,
-    StableBalanceActiveLabel, TokenBalance, UpdateUserSettingsRequest,
+    SendPaymentMethod, SendPaymentOptions, SendPaymentRequest, SparkAsset, TokenBalance,
 };
 use coincube_spark_protocol::{
-    CheckLightningAddressAvailableOk, ClaimDepositOk, DepositInfo, ErrorKind,
+    AutoConvertState, CheckLightningAddressAvailableOk, ClaimDepositOk, DepositInfo, ErrorKind,
     Event as ProtocolEvent, Frame, GetInfoOk, GetLightningAddressOk, GetUserSettingsOk,
     LightningAddressInfo as ProtocolLightningAddressInfo, ListPaymentsOk, ListUnclaimedDepositsOk,
     Method, OkPayload, ParseInputKind, ParseInputOk, PaymentDetailSummary, PaymentSummary,
     PrepareSendOk, ReceivePaymentOk, RegisterLightningAddressOk, Request, Response, SendPaymentOk,
-    SetStableBalanceParams, StableBalanceSnapshot, UsdbBalanceSnapshot,
+    SetAutoConvertParams, SetStableBalanceParams, StableBalanceSnapshot, UsdbBalanceSnapshot,
+    CONVERSION_MAX_SLIPPAGE_BPS,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, OnceCell, RwLock};
 use uuid::Uuid;
 
+use crate::auto_convert::{self, AutoConvert, Receipt, SdkConverter};
 use crate::sdk_adapter::{self, SdkHandle};
-use crate::stable_balance_watch::{ConversionOutcome, FailureTracker, Verdict};
 
 /// How long a pending prepare lives before the background sweep evicts
 /// it. Picked at 5 minutes — long enough to cover human dwell time on
@@ -60,13 +60,7 @@ const PREPARE_TTL: Duration = Duration::from_secs(300);
 const PREPARE_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Run the stdin/stdout server until EOF on stdin or a `shutdown` RPC.
-///
-/// `conversion_outcomes` delivers one message per SDK auto-conversion
-/// outcome (failure or success), from the `tracing` layer installed in
-/// `main` — see [`crate::stable_balance_watch`].
-pub async fn run(
-    conversion_outcomes: tokio::sync::mpsc::UnboundedReceiver<ConversionOutcome>,
-) -> anyhow::Result<()> {
+pub async fn run() -> anyhow::Result<()> {
     // Single writer task: serializes all stdout writes so responses and
     // events never interleave mid-line. We talk to it over an unbounded
     // channel so request handlers never block on IO.
@@ -75,12 +69,6 @@ pub async fn run(
     // listener registered in `handle_init` can push `Frame::Event`s
     // onto the same stdout stream the response handlers use.
     let state = Arc::new(ServerState::new(tx.clone()));
-
-    // Stable Balance circuit breaker. Weak for the same reason as the
-    // prepare sweep below: this task must not keep the state (and its
-    // stdout sender) alive past the read loop.
-    let breaker_weak = Arc::downgrade(&state);
-    tokio::spawn(watch_conversion_failures(conversion_outcomes, breaker_weak));
 
     // Phase 4f: background sweep that evicts pending-prepare entries
     // older than `PREPARE_TTL`. Uses a Weak reference so the sweep
@@ -202,11 +190,13 @@ struct ServerState {
     /// pushes `Frame::Event`s on this channel the same way request
     /// handlers push `Frame::Response`s, so stdout stays interleave-safe.
     event_tx: tokio::sync::mpsc::UnboundedSender<Frame>,
-    /// Consecutive Stable Balance auto-conversion failures, fed by
-    /// [`watch_conversion_failures`] (which also clears it on a successful
-    /// conversion) and cleared when the user turns the feature on again
-    /// ([`handle_set_stable_balance`]).
-    conversion_failures: Mutex<FailureTracker>,
+    /// Bridge-driven auto-convert for the Cube this bridge serves, loaded
+    /// from its Spark storage directory by a successful `init`. See
+    /// [`crate::auto_convert`].
+    auto_convert: std::sync::OnceLock<Arc<Mutex<AutoConvert>>>,
+    /// The wallet's own Spark address, the destination of every
+    /// auto-convert self-transfer. Read from the SDK once.
+    own_spark_address: OnceCell<String>,
 }
 
 impl ServerState {
@@ -217,88 +207,43 @@ impl ServerState {
             pending_prepares: Mutex::new(HashMap::new()),
             pending_lnurl_prepares: Mutex::new(HashMap::new()),
             event_tx,
-            conversion_failures: Mutex::new(FailureTracker::default()),
+            auto_convert: std::sync::OnceLock::new(),
+            own_spark_address: OnceCell::new(),
         }
     }
 }
 
-/// Stable Balance circuit breaker: count the SDK's consecutive
-/// auto-conversion failures — a success in between clears the run — and,
-/// at the threshold, switch the feature off and tell the gui. Runs for
-/// the process lifetime; exits when the tracing layer's sender or the
-/// server state is gone.
+/// The auto-convert worker: counts each eligible receive the SDK reports
+/// and converts the pending sats ([`auto_convert::process`]). One task, so
+/// conversions never overlap; receipts that queue up while one runs are
+/// handled together afterwards.
 ///
-/// Deactivating is done through the same `update_user_settings` call the
-/// user's toggle uses, so the SDK persists "off" locally and the loop does
-/// not resume on the next launch either. The gui additionally records the
-/// pause in the Cube's settings on receipt of the event.
-async fn watch_conversion_failures(
-    mut outcomes: tokio::sync::mpsc::UnboundedReceiver<ConversionOutcome>,
+/// Holds the server state only weakly, and the SDK only while it works on a
+/// batch, so it doesn't keep the SDK (whose event listener holds the sending
+/// half of `receipts`) or the stdout writer alive past shutdown.
+async fn run_auto_convert(
+    mut receipts: tokio::sync::mpsc::UnboundedReceiver<Receipt>,
     state: std::sync::Weak<ServerState>,
 ) {
-    while let Some(outcome) = outcomes.recv().await {
+    while let Some(first) = receipts.recv().await {
+        let mut batch = vec![first];
+        while let Ok(next) = receipts.try_recv() {
+            batch.push(next);
+        }
         let Some(state) = state.upgrade() else {
             break;
         };
-        let reason = match outcome {
-            ConversionOutcome::Failed(reason) => reason,
-            ConversionOutcome::Succeeded => {
-                let forgotten = state.conversion_failures.lock().await.record_success();
-                if forgotten > 0 {
-                    tracing::info!(
-                        "Stable Balance auto-conversion succeeded; forgetting {forgotten} \
-                         earlier failure(s)"
-                    );
-                }
-                continue;
-            }
-        };
-        let verdict = state.conversion_failures.lock().await.record_failure();
-        let failures = match verdict {
-            Verdict::Tolerate { failures } => {
-                tracing::warn!(
-                    "Stable Balance auto-conversion failed ({failures} in a row): {reason}"
-                );
-                continue;
-            }
-            Verdict::Pause { failures } => failures,
-        };
-
-        let Some(sdk) = state.sdk.read().await.clone() else {
-            // Can't happen in practice — the SDK is what logged the
-            // failure — but there is nothing to deactivate without it.
+        let Some(auto_convert) = state.auto_convert.get().cloned() else {
             continue;
         };
-        match deactivate_stable_balance(&sdk).await {
-            Ok(()) => {
-                tracing::error!(
-                    "Stable Balance paused after {failures} consecutive auto-conversion \
-                     failures: {reason}"
-                );
-                let _ = state
-                    .event_tx
-                    .send(Frame::Event(ProtocolEvent::StableBalancePaused {
-                        reason,
-                        failures,
-                    }));
-            }
-            Err(e) => {
-                // The counter was reset by `Pause`; the next run of
-                // failures trips the breaker again.
-                tracing::error!("could not pause Stable Balance after repeated failures: {e}");
-            }
+        let sdk = state.sdk.read().await.clone();
+        let converter = sdk
+            .as_ref()
+            .map(|sdk| SdkConverter::new(sdk, &state.own_spark_address));
+        for event in auto_convert::process(&auto_convert, converter.as_ref(), &batch).await {
+            let _ = state.event_tx.send(Frame::Event(event));
         }
     }
-}
-
-async fn deactivate_stable_balance(sdk: &SdkHandle) -> Result<(), breez_sdk_spark::SdkError> {
-    sdk.sdk
-        .update_user_settings(UpdateUserSettingsRequest {
-            spark_private_mode_enabled: None,
-            stable_balance_active_label: Some(StableBalanceActiveLabel::Unset),
-            spark_master_identity_public_key: None,
-        })
-        .await
 }
 
 async fn handle_request(request: Request, state: Arc<ServerState>) -> Response {
@@ -330,11 +275,10 @@ async fn handle_request(request: Request, state: Arc<ServerState>) -> Response {
         }
         Method::GetLightningAddress => handle_get_lightning_address(id, state).await,
         Method::DeleteLightningAddress => handle_delete_lightning_address(id, state).await,
+        Method::GetAutoConvert => handle_get_auto_convert(id, state).await,
+        Method::SetAutoConvert(params) => handle_set_auto_convert(id, params, state).await,
         // Wire contract only (#950 P0). Each method refuses, without touching
         // the SDK, until the PR that implements it.
-        Method::GetAutoConvert | Method::SetAutoConvert(_) => {
-            not_implemented(id, "auto-convert", "S2b")
-        }
         Method::GetConversionLimits(_) | Method::PrepareSwap(_) | Method::Swap(_) => {
             not_implemented(id, "swap", "S3b")
         }
@@ -381,6 +325,7 @@ async fn handle_init(
         );
     }
 
+    let storage_dir = std::path::PathBuf::from(&params.storage_dir);
     match sdk_adapter::connect_mainnet(
         params.api_key,
         params.mnemonic,
@@ -390,6 +335,14 @@ async fn handle_init(
     .await
     {
         Ok(handle) => {
+            // Auto-convert's state is in place, and its worker running,
+            // before the listener can report a receive.
+            let _ = state
+                .auto_convert
+                .set(Arc::new(Mutex::new(AutoConvert::load(&storage_dir))));
+            let (receipts_tx, receipts_rx) = tokio::sync::mpsc::unbounded_channel();
+            tokio::spawn(run_auto_convert(receipts_rx, Arc::downgrade(&state)));
+
             // Register an event listener before making the handle
             // visible to other request handlers. `add_event_listener`
             // returns a listener id string (not a Result) that we could
@@ -398,6 +351,7 @@ async fn handle_init(
             // lifetime, so we drop the id.
             let listener = BridgeEventListener {
                 tx: state.event_tx.clone(),
+                receipts: receipts_tx,
             };
             let _listener_id = handle.sdk.add_event_listener(Box::new(listener)).await;
             *state.sdk.write().await = Some(handle);
@@ -417,6 +371,9 @@ async fn handle_init(
 /// `Frame::Response`s without framing ambiguity.
 struct BridgeEventListener {
     tx: tokio::sync::mpsc::UnboundedSender<Frame>,
+    /// Incoming bitcoin payments for the auto-convert worker
+    /// ([`run_auto_convert`]).
+    receipts: tokio::sync::mpsc::UnboundedSender<Receipt>,
 }
 
 #[async_trait]
@@ -424,11 +381,16 @@ impl EventListener for BridgeEventListener {
     async fn on_event(&self, event: SdkEvent) {
         let protocol_event = match event {
             SdkEvent::Synced => Some(ProtocolEvent::Synced),
-            SdkEvent::PaymentSucceeded { payment } => Some(ProtocolEvent::PaymentSucceeded {
-                amount_sat: payment.amount as i64,
-                bolt11: extract_bolt11(&payment),
-                id: payment.id,
-            }),
+            SdkEvent::PaymentSucceeded { payment } => {
+                if let Some(receipt) = auto_convert::eligible_receive(&payment) {
+                    let _ = self.receipts.send(receipt);
+                }
+                Some(ProtocolEvent::PaymentSucceeded {
+                    amount_sat: payment.amount as i64,
+                    bolt11: extract_bolt11(&payment),
+                    id: payment.id,
+                })
+            }
             SdkEvent::PaymentPending { payment } => Some(ProtocolEvent::PaymentPending {
                 id: payment.id,
                 amount_sat: payment.amount as i64,
@@ -464,11 +426,8 @@ impl EventListener for BridgeEventListener {
             // one, so there is nothing to show yet.
             SdkEvent::UnilateralExitStateChanged => None,
             // Fork-only (proposed upstream): a failed Stable Balance sweep or
-            // deactivation, with the SDK's own retry schedule. The circuit
-            // breaker still counts these off the SDK's `Auto-conversion
-            // failed` warning so it behaves the same against an upstream
-            // build that lacks the event; once upstream carries it, switch
-            // the breaker to this and drop the log-scraping layer.
+            // deactivation. The bridge configures no Stable Balance, so the
+            // SDK has no sweep to report; logged in case one ever runs.
             SdkEvent::StableBalanceConversionFailed {
                 conversion,
                 error,
@@ -776,20 +735,17 @@ fn detail_summary(details: Option<&PaymentDetails>) -> PaymentDetailSummary {
 ///
 /// **Why a plain sats send can grow a conversion leg at all.** Both
 /// [`handle_prepare_send`] and [`handle_prepare_lnurl_pay`] first prepare with
-/// `conversion_options: None` and `token_identifier: None`. A conversion on the
-/// response then came from one of two places. With Stable Balance active, the
-/// SDK auto-attaches one: when the sat balance is below `amount + fee`,
-/// `stable_balance::get_conversion_options` silently fills in a
-/// `ToBitcoin { <stable token> }` conversion so the shortfall can be covered by
-/// swapping Stable Balance back to bitcoin (SDK 0.19.0,
-/// `crates/breez-sdk/core/src/stable_balance/mod.rs`). With it inactive, the
-/// bridge attaches the same conversion itself when the wallet holds USDB —
-/// see [`usdb_shortfall_conversion`]. Either way it is a *feature*, and this
-/// function deliberately lets it through when it can work.
+/// `conversion_options: None` and `token_identifier: None`. The SDK's Stable
+/// Balance, which used to auto-attach a `ToBitcoin { <stable token> }`
+/// conversion when the sat balance was below `amount + fee`, is no longer
+/// configured (S2b). A conversion on the response is now the bridge's own,
+/// attached when the wallet holds USDB — see [`usdb_shortfall_conversion`]. It
+/// is a *feature*, and this function deliberately lets it through when it can
+/// work.
 ///
 /// **Why it needs a guard.** The SDK validates that conversion
 /// against the AMM pool, not against the wallet's own token balance. A wallet
-/// with Stable Balance on and no stable token prepares cleanly, shows a fee, and
+/// without enough of the stable token prepares cleanly, shows a fee, and
 /// then dies inside Flashnet at send time with
 /// `Wallet: Service error: generic error: Token outputs not found` — an
 /// insufficient-funds condition wearing an unreadable disguise, arriving after
@@ -810,7 +766,7 @@ async fn unfundable_conversion_error(
     } = &estimate.options.conversion_type
     else {
         // `FromBitcoin` cannot legitimately appear on these paths — the gui
-        // never requests one, and Stable Balance only ever auto-attaches
+        // never requests one, and the shortfall fallback only attaches
         // `ToBitcoin`. Refuse rather than pass an unrecognised leg through to
         // the AMM on the user's behalf.
         return Some(Response::err(
@@ -861,14 +817,12 @@ async fn unfundable_conversion_error(
 /// can't cover, when the wallet holds USDB to cover it with. `None` when the
 /// bitcoin balance is enough, or there is no USDB to draw on.
 ///
-/// This is what makes USDB spendable to any destination regardless of the
-/// Stable Balance toggle. The SDK does the same thing on its own — but only
-/// while Stable Balance is *active* (`stable_balance::get_conversion_options`);
-/// the toggle really means "auto-sweep received bitcoin into USDB", and it
-/// lives in the SDK's local cache, so a Cube recovered on another machine has
-/// it off. Without this the holding shows in the balance and can't be spent.
-/// With it, the two prepare paths ask for the conversion explicitly, which the
-/// SDK honours whether or not the sweep is on.
+/// This is what makes USDB spendable to any destination whether auto-convert
+/// is on or off. The SDK's Stable Balance did the same only while it was
+/// active (`stable_balance::get_conversion_options`), and it is no longer
+/// configured (S2b). Without this the holding shows in the balance and can't
+/// be spent. With it, the two prepare paths ask for the conversion
+/// explicitly.
 ///
 /// `needed_sats` is `amount + fee` (the SDK's own rule for when to attach).
 /// The balance read is the cached one: this runs on every prepare, and a
@@ -921,8 +875,9 @@ fn conversion_for_shortfall(
             conversion_type: ConversionType::ToBitcoin {
                 from_token_identifier: sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER.to_string(),
             },
-            // SDK defaults: 10 bps slippage, 30 s to see the converted sats.
-            max_slippage_bps: None,
+            // The cap the gui shows, on every conversion the bridge asks for.
+            max_slippage_bps: Some(CONVERSION_MAX_SLIPPAGE_BPS),
+            // SDK default: 30 s to see the converted sats.
             completion_timeout_secs: None,
         },
     })
@@ -1030,8 +985,7 @@ fn conversion_failure_reason(text: &str) -> String {
 /// for the exact amount happens inside the fee quote) instead of returning
 /// a response to read the shortfall from.
 ///
-/// A prepare that already carries a conversion (Stable Balance active — the
-/// SDK attached its own) is returned as is.
+/// A prepare that already carries a conversion is returned as is.
 async fn prepare_with_usdb_fallback<P, F, Fut, S, SFut>(
     known_amount_sat: Option<u64>,
     prepare: F,
@@ -1131,10 +1085,9 @@ async fn handle_prepare_send(
 
     match prepared {
         Ok(prepare) => {
-            // A token→BTC conversion may be attached here — by the SDK
-            // (Stable Balance active) or by the fallback above. Fail now,
-            // in the user's terms, if the wallet can't fund it — see
-            // `unfundable_conversion_error`.
+            // A token→BTC conversion may be attached here by the fallback
+            // above. Fail now, in the user's terms, if the wallet can't fund
+            // it — see `unfundable_conversion_error`.
             if let Some(response) =
                 unfundable_conversion_error(id, &sdk, prepare.conversion_estimate.as_ref()).await
             {
@@ -2063,9 +2016,9 @@ async fn handle_prepare_lnurl_pay(
 
     match prepared {
         Ok(prepare) => {
-            // Same conversion attach as the regular send path (SDK's own with
-            // Stable Balance active, the bridge's USDB fallback otherwise), and
-            // the same refusal when the holding can't fund it. This path has a
+            // Same conversion attach as the regular send path (the bridge's
+            // USDB fallback), and the same refusal when the holding can't
+            // fund it. This path has a
             // second failure mode the check also heads off: `execute_lnurl_send`
             // forwards the idempotency key, and the SDK rejects a key on a
             // payment with a token leg outright.
@@ -2225,70 +2178,114 @@ async fn handle_get_user_settings(id: u64, state: Arc<ServerState>) -> Response 
             );
         }
     };
+    let Some(auto_convert) = state.auto_convert.get() else {
+        return Response::err(
+            id,
+            ErrorKind::NotConnected,
+            "init must succeed before get_user_settings",
+        );
+    };
 
     match sdk.sdk.get_user_settings().await {
-        Ok(settings) => Response::ok(
-            id,
-            OkPayload::GetUserSettings(GetUserSettingsOk {
-                // An active label of `Some(_)` means Stable Balance is
-                // currently on. We don't surface the label itself —
-                // the gui only cares about the boolean.
-                stable_balance_active: settings.stable_balance_active_label.is_some(),
-                private_mode_enabled: settings.spark_private_mode_enabled,
-            }),
-        ),
+        Ok(settings) => {
+            let auto_convert = auto_convert.lock().await.state();
+            Response::ok(
+                id,
+                OkPayload::GetUserSettings(user_settings_ok(
+                    &auto_convert,
+                    settings.spark_private_mode_enabled,
+                )),
+            )
+        }
         Err(e) => Response::err(id, ErrorKind::Sdk, format!("get_user_settings failed: {e}")),
     }
 }
 
+/// The legacy settings answer. `stable_balance_active` has meant
+/// bridge-driven auto-convert since S2b: the gui built before it reconciles
+/// its per-Cube Stable Balance preference against this flag, and so moves
+/// that preference onto auto-convert. SDK Stable Balance is never
+/// configured, so there is no other state for it to report.
+fn user_settings_ok(auto_convert: &AutoConvertState, private_mode: bool) -> GetUserSettingsOk {
+    GetUserSettingsOk {
+        stable_balance_active: auto_convert.enabled,
+        private_mode_enabled: private_mode,
+    }
+}
+
+/// Legacy alias for [`handle_set_auto_convert`], answered the old way. The
+/// gui built before S2b drives auto-convert through it: its Settings switch
+/// and its per-Cube preference reconcile.
 async fn handle_set_stable_balance(
     id: u64,
     params: SetStableBalanceParams,
     state: Arc<ServerState>,
 ) -> Response {
-    let sdk = match state.sdk.read().await.clone() {
-        Some(s) => s,
-        None => {
-            return Response::err(
-                id,
-                ErrorKind::NotConnected,
-                "init must succeed before set_stable_balance",
-            );
-        }
-    };
-
-    if !params.enabled {
-        return match deactivate_stable_balance(&sdk).await {
-            Ok(()) => Response::ok(id, OkPayload::SetStableBalance {}),
-            Err(e) => Response::err(
-                id,
-                ErrorKind::Sdk,
-                format!("update_user_settings failed: {e}"),
-            ),
-        };
+    match set_auto_convert(&state, params.enabled, "set_stable_balance").await {
+        Ok(_) => Response::ok(id, OkPayload::SetStableBalance {}),
+        Err((kind, message)) => Response::err(id, kind, message),
     }
+}
 
-    // Turning it on is a fresh start for the circuit breaker: the
-    // failures it counted belong to the session that got paused.
-    state.conversion_failures.lock().await.reset();
-    let request = UpdateUserSettingsRequest {
-        spark_private_mode_enabled: None,
-        stable_balance_active_label: Some(StableBalanceActiveLabel::Set {
-            label: crate::sdk_adapter::STABLE_BALANCE_LABEL.to_string(),
-        }),
-        // 0.25.0: a second read-only identity for private mode. Not a
-        // feature we expose; `None` leaves it untouched.
-        spark_master_identity_public_key: None,
-    };
-
-    match sdk.sdk.update_user_settings(request).await {
-        Ok(()) => Response::ok(id, OkPayload::SetStableBalance {}),
-        Err(e) => Response::err(
+async fn handle_get_auto_convert(id: u64, state: Arc<ServerState>) -> Response {
+    match state.auto_convert.get() {
+        Some(auto_convert) => Response::ok(
             id,
-            ErrorKind::Sdk,
-            format!("update_user_settings failed: {e}"),
+            OkPayload::AutoConvert(auto_convert.lock().await.state()),
+        ),
+        None => Response::err(
+            id,
+            ErrorKind::NotConnected,
+            "init must succeed before get_auto_convert",
         ),
     }
+}
+
+async fn handle_set_auto_convert(
+    id: u64,
+    params: SetAutoConvertParams,
+    state: Arc<ServerState>,
+) -> Response {
+    match set_auto_convert(&state, params.enabled, "set_auto_convert").await {
+        Ok(auto_convert) => Response::ok(id, OkPayload::AutoConvert(auto_convert)),
+        Err((kind, message)) => Response::err(id, kind, message),
+    }
+}
+
+/// Turn auto-convert on or off, and return the state after. The change is
+/// saved before it is answered: if it can't be saved, nothing changed and
+/// the answer is an error. A change is also announced with
+/// [`ProtocolEvent::AutoConvertStateChanged`].
+///
+/// Neither direction touches the wallet's funds: off leaves the USDB
+/// balance as USDB, and on converts only bitcoin received afterwards.
+async fn set_auto_convert(
+    state: &ServerState,
+    enabled: bool,
+    method: &str,
+) -> Result<AutoConvertState, (ErrorKind, String)> {
+    let Some(auto_convert) = state.auto_convert.get() else {
+        return Err((
+            ErrorKind::NotConnected,
+            format!("init must succeed before {method}"),
+        ));
+    };
+    let mut auto_convert = auto_convert.lock().await;
+    let changed = auto_convert.set_enabled(enabled).map_err(|e| {
+        (
+            ErrorKind::Sdk,
+            format!("could not save the auto-convert setting: {e}"),
+        )
+    })?;
+    let after = auto_convert.state();
+    if changed {
+        let _ = state
+            .event_tx
+            .send(Frame::Event(ProtocolEvent::AutoConvertStateChanged {
+                state: after.clone(),
+            }));
+    }
+    Ok(after)
 }
 
 // ---------------------------------------------------------------------------
@@ -2684,8 +2681,9 @@ mod usdb_fallback_tests {
         assert!(conversion_for_shortfall(3_000_000, 0, 2_000_100).is_none());
         // Short, but nothing to convert from.
         assert!(conversion_for_shortfall(11_254, 0, 2_000_100).is_none());
-        // Short and USDB held: convert from USDB. Slippage / timeout are
-        // left to the SDK's defaults.
+        // Short and USDB held: convert from USDB, capped at the 50 bps the
+        // gui shows (not the SDK's 10 bps default). The timeout stays the
+        // SDK's.
         let shortfall = conversion_for_shortfall(11_254, 5_000_000, 2_000_100)
             .expect("usdb should fund the shortfall");
         assert_eq!(shortfall.balance_sats, 11_254);
@@ -2695,7 +2693,11 @@ mod usdb_fallback_tests {
                 from_token_identifier: sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER.to_string(),
             }
         );
-        assert_eq!(shortfall.conversion.max_slippage_bps, None);
+        assert_eq!(shortfall.conversion.max_slippage_bps, Some(50));
+        assert_eq!(
+            shortfall.conversion.max_slippage_bps,
+            Some(CONVERSION_MAX_SLIPPAGE_BPS)
+        );
         assert_eq!(shortfall.conversion.completion_timeout_secs, None);
     }
 
@@ -3255,7 +3257,7 @@ mod p0_stub_tests {
     use coincube_spark_protocol::{
         AssetAmount, ErrorPayload, GetConversionLimitsParams, ListPaymentsParams,
         PrepareLnurlPayFromParams, PrepareSendFromParams, PrepareSwapParams, ResponseResult,
-        SetAutoConvertParams, SwapAmount, SwapParams, WalletAsset,
+        SwapAmount, SwapParams, WalletAsset,
     };
 
     async fn answer(state: &Arc<ServerState>, method: Method) -> ErrorPayload {
@@ -3290,11 +3292,6 @@ mod p0_stub_tests {
             amount: 1_000_000,
         };
         for (method, lands_in) in [
-            (Method::GetAutoConvert, "S2b"),
-            (
-                Method::SetAutoConvert(SetAutoConvertParams { enabled: true }),
-                "S2b",
-            ),
             (
                 Method::GetConversionLimits(GetConversionLimitsParams {
                     from: WalletAsset::Bitcoin,
@@ -3356,6 +3353,227 @@ mod p0_stub_tests {
         assert!(rx.try_recv().is_err(), "a stub emitted a frame");
         assert!(state.pending_prepares.lock().await.is_empty());
         assert!(state.pending_lnurl_prepares.lock().await.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod auto_convert_handler_tests {
+    use super::*;
+    use coincube_spark_protocol::{AutoConvertBreaker, ResponseResult};
+
+    /// A fresh directory for one test's state file, removed on drop.
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!("cc-auto-convert-srv-{}", Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A server whose `init` loaded auto-convert from `dir`. No SDK: the
+    /// switch never needs one.
+    fn server(
+        dir: &TempDir,
+    ) -> (
+        Arc<ServerState>,
+        tokio::sync::mpsc::UnboundedReceiver<Frame>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = Arc::new(ServerState::new(tx));
+        let _ = state
+            .auto_convert
+            .set(Arc::new(Mutex::new(AutoConvert::load(&dir.0))));
+        (state, rx)
+    }
+
+    async fn call(state: &Arc<ServerState>, method: Method) -> ResponseResult {
+        handle_request(Request { id: 3, method }, state.clone())
+            .await
+            .result
+    }
+
+    fn on() -> AutoConvertState {
+        AutoConvertState {
+            enabled: true,
+            breaker: AutoConvertBreaker::Ready,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_switch_needs_init() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = Arc::new(ServerState::new(tx));
+        for method in [
+            Method::GetAutoConvert,
+            Method::SetAutoConvert(SetAutoConvertParams { enabled: true }),
+            Method::SetStableBalance(SetStableBalanceParams { enabled: true }),
+            Method::GetUserSettings,
+        ] {
+            let label = format!("{method:?}");
+            match call(&state, method).await {
+                ResponseResult::Err(e) => assert_eq!(e.kind, ErrorKind::NotConnected, "{label}"),
+                ResponseResult::Ok(ok) => panic!("{label} answered {ok:?} before init"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn set_and_get_auto_convert_report_the_saved_state() {
+        let dir = TempDir::new();
+        let (state, mut rx) = server(&dir);
+
+        assert!(matches!(
+            call(&state, Method::GetAutoConvert).await,
+            ResponseResult::Ok(OkPayload::AutoConvert(s)) if !s.enabled
+        ));
+        assert!(matches!(
+            call(&state, Method::SetAutoConvert(SetAutoConvertParams { enabled: true })).await,
+            ResponseResult::Ok(OkPayload::AutoConvert(s)) if s == on()
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Frame::Event(ProtocolEvent::AutoConvertStateChanged { state: s })) if s == on()
+        ));
+        // Saved before it was answered.
+        assert_eq!(AutoConvert::load(&dir.0).state(), on());
+
+        // The same again changes nothing and announces nothing.
+        assert!(matches!(
+            call(&state, Method::SetAutoConvert(SetAutoConvertParams { enabled: true })).await,
+            ResponseResult::Ok(OkPayload::AutoConvert(s)) if s == on()
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// The gui built before S2b drives auto-convert through the legacy
+    /// Stable Balance calls: its reconcile re-applies a recorded "on" as
+    /// `set_stable_balance(true)`, which must land on bridge auto-convert.
+    #[tokio::test]
+    async fn legacy_set_stable_balance_drives_auto_convert() {
+        let dir = TempDir::new();
+        let (state, mut rx) = server(&dir);
+
+        assert!(matches!(
+            call(
+                &state,
+                Method::SetStableBalance(SetStableBalanceParams { enabled: true })
+            )
+            .await,
+            ResponseResult::Ok(OkPayload::SetStableBalance {})
+        ));
+        assert_eq!(state.auto_convert.get().unwrap().lock().await.state(), on());
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Frame::Event(ProtocolEvent::AutoConvertStateChanged { .. }))
+        ));
+
+        assert!(matches!(
+            call(
+                &state,
+                Method::SetStableBalance(SetStableBalanceParams { enabled: false })
+            )
+            .await,
+            ResponseResult::Ok(OkPayload::SetStableBalance {})
+        ));
+        assert!(!AutoConvert::load(&dir.0).state().enabled);
+    }
+
+    /// `stable_balance_active` reports bridge auto-convert, whatever the
+    /// SDK might once have saved.
+    #[test]
+    fn legacy_user_settings_report_auto_convert() {
+        let paused = AutoConvertState {
+            enabled: false,
+            breaker: AutoConvertBreaker::Paused {
+                failures: 3,
+                reason: "Pool has no liquidity".into(),
+            },
+        };
+        let ok = user_settings_ok(&on(), true);
+        assert!(ok.stable_balance_active && ok.private_mode_enabled);
+        let ok = user_settings_ok(&paused, false);
+        assert!(!ok.stable_balance_active && !ok.private_mode_enabled);
+    }
+
+    /// A switch that can't be saved is refused, not acknowledged, and
+    /// nothing changes.
+    #[tokio::test]
+    async fn an_unsaved_switch_is_an_error() {
+        let dir = TempDir::new();
+        let blocker = dir.0.join("blocker");
+        std::fs::write(&blocker, b"").unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = Arc::new(ServerState::new(tx));
+        let _ = state
+            .auto_convert
+            .set(Arc::new(Mutex::new(AutoConvert::load(&blocker))));
+
+        for method in [
+            Method::SetAutoConvert(SetAutoConvertParams { enabled: true }),
+            Method::SetStableBalance(SetStableBalanceParams { enabled: true }),
+        ] {
+            match call(&state, method).await {
+                ResponseResult::Err(e) => {
+                    assert_eq!(e.kind, ErrorKind::Sdk);
+                    assert!(e.message.contains("could not save"), "{}", e.message);
+                }
+                ResponseResult::Ok(ok) => panic!("acknowledged an unsaved switch: {ok:?}"),
+            }
+        }
+        assert!(
+            !state
+                .auto_convert
+                .get()
+                .unwrap()
+                .lock()
+                .await
+                .state()
+                .enabled
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// Migration off SDK Stable Balance: a Cube whose gui recorded "on"
+    /// moves to bridge auto-convert with no SDK call, no request and nothing
+    /// converted. The existing USDB and bitcoin are untouched; only bitcoin
+    /// received afterwards converts.
+    #[tokio::test]
+    async fn migrating_an_sdk_active_preference_moves_no_funds() {
+        let dir = TempDir::new();
+        let (state, mut rx) = server(&dir);
+        assert!(state.sdk.read().await.is_none(), "no SDK to call");
+
+        // The gui reconcile: recorded on, bridge reports off, so re-apply.
+        let before = match call(&state, Method::GetAutoConvert).await {
+            ResponseResult::Ok(OkPayload::AutoConvert(s)) => s,
+            other => panic!("{other:?}"),
+        };
+        assert!(!before.enabled);
+        call(
+            &state,
+            Method::SetStableBalance(SetStableBalanceParams { enabled: true }),
+        )
+        .await;
+
+        // Only the state event; no conversion was started, nothing is pending.
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Frame::Event(ProtocolEvent::AutoConvertStateChanged { .. }))
+        ));
+        assert!(rx.try_recv().is_err());
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.0.join(auto_convert::STATE_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(json["enabled"], true);
+        assert_eq!(json["pending_sats"], 0);
     }
 }
 

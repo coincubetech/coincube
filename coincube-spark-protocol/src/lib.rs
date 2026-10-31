@@ -227,14 +227,18 @@ pub enum Method {
     /// state, private mode). Boolean-only view of the SDK's
     /// `UserSettings` struct; the panel exposes Stable Balance to
     /// the user as an on/off toggle without mentioning USDB.
+    ///
+    /// Since S2b [`GetUserSettingsOk::stable_balance_active`] reports
+    /// bridge-driven auto-convert ([`Method::GetAutoConvert`]). The SDK's
+    /// own Stable Balance is never configured.
     GetUserSettings,
-    /// Phase 6: enable or disable Stable Balance. The bridge
-    /// translates this into the SDK's
-    /// `UpdateUserSettingsRequest { stable_balance_active_label:
-    /// Some(Set { label: "USDB" }) | Some(Unset) }` call. The
-    /// `"USDB"` label is the integrator-defined handle configured
-    /// at init time in [`coincube-spark-bridge`]; it's internal
-    /// plumbing and never surfaces in the gui.
+    /// Phase 6: enable or disable Stable Balance.
+    ///
+    /// Since S2b, a legacy alias of [`Method::SetAutoConvert`], answered
+    /// with [`OkPayload::SetStableBalance`]. The bridge no longer touches the
+    /// SDK's Stable Balance, which stays unconfigured: turning that off
+    /// (`StableBalanceActiveLabel::Unset`) converts the whole USDB balance
+    /// back to bitcoin.
     SetStableBalance(SetStableBalanceParams),
     /// Phase 4g: check whether a Lightning Address username is
     /// available on the configured LNURL server. UX nicety during
@@ -276,12 +280,17 @@ pub enum Method {
     /// Returns [`OkPayload::AutoConvert`].
     ///
     /// Auto-convert is the bridge's own BTC → USDB conversion of incoming
-    /// bitcoin. It is not the SDK's Stable Balance, which
-    /// [`Method::SetStableBalance`] still drives until S2b migrates off it.
+    /// bitcoin, saved per Cube. It replaces the SDK's Stable Balance, which
+    /// the bridge leaves unconfigured; [`Method::SetStableBalance`] is a
+    /// legacy alias of [`Method::SetAutoConvert`].
     GetAutoConvert,
     /// Turn bridge-driven auto-convert on or off. Returns the resulting
     /// [`AutoConvertState`] in [`OkPayload::AutoConvert`]. Turning it on also
     /// resets a paused breaker.
+    ///
+    /// Neither direction moves funds: on converts only bitcoin received
+    /// afterwards, and off leaves the USDB balance as USDB. The change is
+    /// saved before it is answered, so an error answer means nothing changed.
     SetAutoConvert(SetAutoConvertParams),
     /// Minimum amounts for a conversion out of `from`. Returns
     /// [`OkPayload::GetConversionLimits`]. Lets the Swap form state the
@@ -612,7 +621,8 @@ pub struct ClaimDepositParams {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct SetStableBalanceParams {
-    /// `true` to activate Stable Balance, `false` to deactivate.
+    /// `true` to turn auto-convert on, `false` to turn it off (see
+    /// [`Method::SetStableBalance`]).
     pub enabled: bool,
 }
 
@@ -1352,7 +1362,10 @@ pub struct ClaimDepositOk {
 /// into the UI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetUserSettingsOk {
-    /// `true` when the SDK reports an active Stable Balance token.
+    /// `true` when bridge-driven auto-convert is on. Before S2b this was the
+    /// SDK's Stable Balance; the gui built before S2b reconciles its per-Cube
+    /// Stable Balance preference against it, which moves that preference
+    /// onto auto-convert.
     pub stable_balance_active: bool,
     /// Mirrors `UserSettings::spark_private_mode_enabled`.
     pub private_mode_enabled: bool,
@@ -1496,24 +1509,21 @@ pub enum Event {
     /// response; a `None` state it didn't initiate triggers
     /// auto-re-register from the DB-reserved username.
     LightningAddressChanged { info: Option<LightningAddressInfo> },
-    /// The bridge switched Stable Balance off on its own because the
-    /// SDK's auto-conversion worker kept failing. The SDK has no
-    /// backoff on a failed `AutoConvert`: each failed BTC→USDB swap is
-    /// refunded as an incoming Spark transfer, the refund is a sats
-    /// receive, and that re-queues the same conversion — one attempt
-    /// every few seconds, forever, filling the payment history with
-    /// ±N-sat pairs. The bridge counts consecutive failures and after
-    /// [`STABLE_BALANCE_PAUSE_THRESHOLD`] of them deactivates the
-    /// feature, which is the only lever that stops the loop. `reason`
-    /// is the SDK's own error text (e.g. `Pool has no liquidity`) for
-    /// the gui to show; `failures` is how many attempts were seen.
+    /// The bridge switched auto-convert off on its own after
+    /// [`STABLE_BALANCE_PAUSE_THRESHOLD`] consecutive failed conversions.
+    /// Sent with [`Event::AutoConvertStateChanged`], for the gui built
+    /// before S2b: it records "off" for the Cube on this event, so its next
+    /// reconcile doesn't turn auto-convert back on. `reason` is the last
+    /// failure's text (e.g. `Pool has no liquidity`) for the gui to show;
+    /// `failures` is how many failed in a row.
     StableBalancePaused { reason: String, failures: u32 },
     /// Bridge-driven auto-convert changed: switched on or off, or its breaker
     /// tripped. Settings re-renders from `state`.
     ///
-    /// Not emitted until S2b. A gui built before this variant can't parse
-    /// it, and its reader stops on an unparseable line, so the bridge must
-    /// only emit it to a gui that knows it.
+    /// Emitted from S2b on. A gui built before this variant (#952) can't
+    /// parse it, and its reader stops on an unparseable line. The gui and
+    /// the bridge are built and shipped together, so every gui running a
+    /// bridge that sends it can read it.
     AutoConvertStateChanged { state: AutoConvertState },
     /// A swap from [`Method::Swap`] moved to `status`. `swap_id` is
     /// [`SwapOk::swap_id`], the [`PaymentSummary::id`] of the swap's Activity
@@ -1523,13 +1533,12 @@ pub enum Event {
     SwapStatusChanged { swap_id: String, status: SwapStatus },
 }
 
-/// How many consecutive `Auto-conversion failed` warnings the bridge
-/// tolerates before it pauses Stable Balance and emits
-/// [`Event::StableBalancePaused`]. The loop fires roughly every six
-/// seconds, so three failures is under half a minute of churn — long
-/// enough to skip a one-off AMM hiccup, short enough that the history
-/// doesn't fill up. Lives in the protocol crate so the gui can name the
-/// same number in its copy.
+/// How many consecutive failed auto-convert conversions the bridge
+/// tolerates before it pauses auto-convert and emits
+/// [`Event::AutoConvertStateChanged`] and [`Event::StableBalancePaused`].
+/// Enough to skip a one-off AMM hiccup, few enough that a broken pool
+/// doesn't fail on every receive. Lives in the protocol crate so the gui
+/// can name the same number in its copy.
 pub const STABLE_BALANCE_PAUSE_THRESHOLD: u32 = 3;
 
 /// Slippage cap, in basis points, on every BTC ⇄ USDB conversion the bridge
