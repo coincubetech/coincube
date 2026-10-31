@@ -4039,6 +4039,9 @@ impl App {
         let live = self.panels.session_generation.subscribe();
         Task::perform(
             async move {
+                // Stamped before any read, so a slow pass never stretches
+                // how long its checks count.
+                let twin_checked_at = std::time::Instant::now();
                 let transactions = async {
                     if txids.is_empty() {
                         return std::collections::HashMap::new();
@@ -4072,7 +4075,6 @@ impl App {
                     }
                 };
                 let (transactions, twin_checked) = tokio::join!(transactions, confirmed);
-                let twin_checked_at = std::time::Instant::now();
                 (transactions, twin_records, twin_checked, twin_checked_at)
             },
             move |(transactions, twin_records, twin_checked, twin_checked_at)| {

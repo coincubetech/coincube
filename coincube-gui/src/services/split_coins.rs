@@ -64,7 +64,7 @@ use crate::{
 };
 
 /// How the split is made rejectable on the twin chain.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Method {
     SplitKey,
@@ -249,7 +249,8 @@ pub fn merge_proofs(
     added
 }
 
-/// At most this many of the twin Cube's splits are looked up per pass.
+/// At most this many of the twin Cube's splits of each method are looked up
+/// per pass, so signature splits never crowd out split-key ones.
 pub const MAX_TWIN_LOOKUPS: usize = 8;
 
 /// A twin split's last fresh check stops counting after this long; by then
@@ -266,11 +267,12 @@ pub struct TwinCheck {
     /// signature split's witness did not pass, a read failed, or the lookup
     /// did not run.
     pub spent: Option<HashSet<OutPoint>>,
-    /// When the pass that made the check finished.
+    /// When the pass that made the check started, before any of its reads,
+    /// so a slow pass never stretches [`TWIN_CHECK_LIFETIME`].
     pub at: std::time::Instant,
 }
 
-/// Record the twin lookups of one pass, which finished at `at`. A lookup
+/// Record the twin lookups of one pass, which started at `at`. A lookup
 /// replaces a split's previous check only if that check is older, so a pass
 /// that lands after a newer one still counts for the splits it looked up,
 /// and a pass that did not look a split up leaves its check alone. Returns
@@ -293,9 +295,9 @@ pub fn record_twin_checks(
 
 /// The twin Cube's splits to ask Connect about this pass, with how each was
 /// made: never checked first, then the longest unchecked, newest first among
-/// equals, up to [`MAX_TWIN_LOOKUPS`]. Every record is reached in turn
-/// however many there are. The twin journal's own confirmation count is not
-/// consulted.
+/// equals, up to [`MAX_TWIN_LOOKUPS`] of each method. Every record is reached
+/// in turn however many there are. The twin journal's own confirmation count
+/// is not consulted.
 pub fn twin_candidates(
     twin_records: &[SplitRecord],
     checks: &HashMap<Txid, TwinCheck>,
@@ -308,11 +310,16 @@ pub fn twin_candidates(
         )
     });
     let mut seen = HashSet::new();
+    let mut taken: HashMap<Method, usize> = HashMap::new();
     records
         .into_iter()
         .filter(|record| seen.insert(record.txid))
+        .filter(|record| {
+            let count = taken.entry(record.method).or_default();
+            *count += 1;
+            *count <= MAX_TWIN_LOOKUPS
+        })
         .map(|record| (record.txid, record.method))
-        .take(MAX_TWIN_LOOKUPS)
         .collect()
 }
 
@@ -544,19 +551,57 @@ pub async fn twin_confirmed(
 /// look up their parents; a larger one is not checked.
 pub const MAX_SIGNATURE_SPLIT_INPUTS: usize = 64;
 
+/// What a signature split's confirmed witness showed, by (chain, block,
+/// txid). The block's bytes never change, so a verdict, either way, holds
+/// for as long as that block does; only the depth is read again each pass.
+/// Failed reads are not verdicts and are never kept.
+type Verdicts = HashMap<(ChainId, BlockHash, Txid), Option<HashSet<OutPoint>>>;
+
+/// Verdicts kept at most; past this the cache starts over.
+const MAX_VERDICTS: usize = 256;
+
+fn verdicts() -> &'static std::sync::Mutex<Verdicts> {
+    static VERDICTS: std::sync::OnceLock<std::sync::Mutex<Verdicts>> = std::sync::OnceLock::new();
+    VERDICTS.get_or_init(Default::default)
+}
+
 /// The inputs of signature split `txid`, confirmed in `block` on `chain`,
-/// if the witness that block commits to is replay protected.
+/// if the witness that block commits to is replay protected. A block and
+/// its parents are fetched once per (block, txid) ([`Verdicts`]).
 async fn signature_split_on(
     source: &crate::services::claim_observation::http::HttpObservationSource,
     chain: ChainId,
     block: BlockHash,
     txid: Txid,
 ) -> Option<HashSet<OutPoint>> {
+    let key = (chain, block, txid);
+    if let Some(verdict) = verdicts().lock().ok()?.get(&key) {
+        return verdict.clone();
+    }
+    let verdict = signature_split_verdict(source, chain, block, txid).await?;
+    if let Ok(mut verdicts) = verdicts().lock() {
+        if verdicts.len() >= MAX_VERDICTS {
+            verdicts.clear();
+        }
+        verdicts.insert(key, verdict.clone());
+    }
+    verdict
+}
+
+/// [`signature_split_on`] without the cache: `None` when a read failed or
+/// the block did not authenticate (no verdict), `Some` with the verdict
+/// otherwise.
+async fn signature_split_verdict(
+    source: &crate::services::claim_observation::http::HttpObservationSource,
+    chain: ChainId,
+    block: BlockHash,
+    txid: Txid,
+) -> Option<Option<HashSet<OutPoint>>> {
     let raw = source.raw_block(chain, block).await.ok()?;
     let tx = coincube_core::btcb2_block::confirmed_transaction(&raw, block, txid).ok()?;
     drop(raw);
     if tx.input.len() > MAX_SIGNATURE_SPLIT_INPUTS {
-        return None;
+        return Some(None);
     }
     let mut parents = HashMap::new();
     for input in &tx.input {
@@ -569,7 +614,7 @@ async fn signature_split_on(
             coincube_core::miniscript::bitcoin::consensus::deserialize(&raw).ok()?;
         parents.insert(parent, parent_tx);
     }
-    signature_split_inputs(&tx, &parents)
+    Some(signature_split_inputs(&tx, &parents))
 }
 
 /// The inputs of `tx`, a confirmed signature split as its block commits to
@@ -992,6 +1037,12 @@ mod tests {
     /// A Vault-style 2-of-2 output and a signature split of two of them,
     /// signed `ALL|UNIFIED` by both keys.
     fn signature_split() -> (Transaction, HashMap<Txid, Transaction>, ScriptBuf) {
+        signed_split(false)
+    }
+
+    /// [`signature_split`], or with `legacy` the same transaction (same
+    /// txid) signed BIP 143 `SIGHASH_ALL`, as Bitcoin accepts it.
+    fn signed_split(legacy: bool) -> (Transaction, HashMap<Txid, Transaction>, ScriptBuf) {
         use coincube_core::{
             miniscript::{
                 bitcoin::{secp256k1, PublicKey},
@@ -1034,16 +1085,32 @@ mod tests {
         split.output[0].script_pubkey = script.to_p2wsh();
         let spent = parent.output.clone();
         let cache = UnifiedSighashCache::new(&split, &spent).unwrap();
+        let unsigned = split.clone();
         let witnesses: Vec<Witness> = (0..2)
             .map(|input| {
-                let digest = cache
-                    .signature_hash(input, 0x21, SCRIPT_TYPE_WITNESS_V0, &script)
-                    .unwrap();
+                let (digest, sighash) = if legacy {
+                    let digest =
+                        coincube_core::miniscript::bitcoin::sighash::SighashCache::new(&unsigned)
+                            .p2wsh_signature_hash(
+                                input,
+                                &script,
+                                spent[input].value,
+                                coincube_core::miniscript::bitcoin::sighash::EcdsaSighashType::All,
+                            )
+                            .unwrap();
+                    use coincube_core::miniscript::bitcoin::hashes::Hash;
+                    (digest.to_byte_array(), 0x01)
+                } else {
+                    let digest = cache
+                        .signature_hash(input, 0x21, SCRIPT_TYPE_WITNESS_V0, &script)
+                        .unwrap();
+                    (digest, 0x21)
+                };
                 let message = secp256k1::Message::from_digest(digest);
                 let mut stack = vec![vec![]];
                 for key in &keys {
                     let mut sig = secp.sign_ecdsa(&message, key).serialize_der().to_vec();
-                    sig.push(0x21);
+                    sig.push(sighash);
                     stack.push(sig);
                 }
                 stack.push(script.to_bytes());
@@ -1078,14 +1145,15 @@ mod tests {
     #[test]
     fn a_legacy_or_unverifiable_witness_yields_nothing() {
         let (split, parents, _) = signature_split();
-        // The same txid with a legacy sighash byte: what a second, legacy
-        // signing of the split would confirm.
-        let mut legacy = split.clone();
-        let mut stack = legacy.input[1].witness.to_vec();
-        *stack[1].last_mut().unwrap() = 0x01;
-        legacy.input[1].witness = Witness::from_slice(&stack);
+        // A second, legacy signing of the same split: Bitcoin-valid, same txid.
+        let (legacy, _, _) = signed_split(true);
         assert_eq!(legacy.compute_txid(), split.compute_txid());
+        assert_ne!(legacy.compute_wtxid(), split.compute_wtxid());
         assert_eq!(signature_split_inputs(&legacy, &parents), None);
+        // One legacy input is enough to refuse.
+        let mut mixed = split.clone();
+        mixed.input[1].witness = legacy.input[1].witness.clone();
+        assert_eq!(signature_split_inputs(&mixed, &parents), None);
         // A parent missing, or served under the wrong txid.
         assert_eq!(signature_split_inputs(&split, &HashMap::new()), None);
         let (txid, mut parent) = parents.iter().next().map(|(k, v)| (*k, v.clone())).unwrap();
@@ -1098,55 +1166,54 @@ mod tests {
         assert_eq!(signature_split_inputs(&beyond, &parents), None);
     }
 
+    /// A legacy-header block holding a coinbase with a witness commitment
+    /// and `split`.
+    fn block_with(split: &Transaction) -> coincube_core::miniscript::bitcoin::Block {
+        use coincube_core::miniscript::bitcoin::{
+            block::{Header, Version},
+            hashes::Hash,
+            Block, CompactTarget, TxMerkleNode, WitnessMerkleNode,
+        };
+        let mut coinbase = tx(vec![], Some(1));
+        coinbase.input[0].witness = Witness::from_slice(&[[0u8; 32]]);
+        let mut block = Block {
+            header: Header {
+                version: Version::TWO,
+                prev_blockhash: BlockHash::all_zeros(),
+                merkle_root: TxMerkleNode::all_zeros(),
+                time: 0,
+                bits: CompactTarget::from_consensus(0x207fffff),
+                nonce: 0,
+            },
+            txdata: vec![coinbase, split.clone()],
+        };
+        let root: WitnessMerkleNode = block.witness_root().unwrap();
+        let commitment = Block::compute_witness_commitment(&root, &[0u8; 32]);
+        let mut script = vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+        script.extend_from_slice(commitment.as_byte_array());
+        block.txdata[0].output.push(TxOut {
+            value: Amount::ZERO,
+            script_pubkey: ScriptBuf::from(script),
+        });
+        block.header.merkle_root = block.compute_merkle_root().unwrap();
+        block
+    }
+
     #[test]
     fn a_block_commits_the_witness_the_check_reads() {
         use coincube_core::{
-            btcb2_block::confirmed_transaction,
-            miniscript::bitcoin::{
-                block::{Header, Version},
-                consensus::serialize,
-                hashes::Hash,
-                Block, CompactTarget, TxMerkleNode, WitnessMerkleNode,
-            },
+            btcb2_block::confirmed_transaction, miniscript::bitcoin::consensus::serialize,
         };
         let (split, parents, _) = signature_split();
-        let block_with = |split: &Transaction| {
-            let mut coinbase = tx(vec![], Some(1));
-            coinbase.input[0].witness = Witness::from_slice(&[[0u8; 32]]);
-            let mut block = Block {
-                header: Header {
-                    version: Version::TWO,
-                    prev_blockhash: BlockHash::all_zeros(),
-                    merkle_root: TxMerkleNode::all_zeros(),
-                    time: 0,
-                    bits: CompactTarget::from_consensus(0x207fffff),
-                    nonce: 0,
-                },
-                txdata: vec![coinbase, split.clone()],
-            };
-            let root: WitnessMerkleNode = block.witness_root().unwrap();
-            let commitment = Block::compute_witness_commitment(&root, &[0u8; 32]);
-            let mut script = vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
-            script.extend_from_slice(commitment.as_byte_array());
-            block.txdata[0].output.push(TxOut {
-                value: Amount::ZERO,
-                script_pubkey: ScriptBuf::from(script),
-            });
-            block.header.merkle_root = block.compute_merkle_root().unwrap();
-            block
-        };
         let block = block_with(&split);
         let confirmed =
             confirmed_transaction(&serialize(&block), block.block_hash(), split.compute_txid())
                 .unwrap();
         assert!(signature_split_inputs(&confirmed, &parents).is_some());
 
-        // Served a unified copy while the block holds a legacy one: the
+        // Served the unified copy while the block holds a legacy one: the
         // commitment catches the swap before the witness is ever judged.
-        let mut legacy = split.clone();
-        let mut stack = legacy.input[0].witness.to_vec();
-        *stack[1].last_mut().unwrap() = 0x01;
-        legacy.input[0].witness = Witness::from_slice(&stack);
+        let (legacy, _, _) = signed_split(true);
         let held = block_with(&legacy);
         let mut served = held.clone();
         served.txdata[1] = split.clone();
@@ -1160,6 +1227,126 @@ mod tests {
             confirmed_transaction(&serialize(&held), held.block_hash(), split.compute_txid())
                 .unwrap();
         assert_eq!(signature_split_inputs(&confirmed, &parents), None);
+    }
+
+    /// Connect's BTCB2 routes for one split confirmed 11 deep in `block`,
+    /// with its parents. Returns the raw-block and parent mocks.
+    fn connect_holding<'a>(
+        server: &'a httpmock::MockServer,
+        block: &coincube_core::miniscript::bitcoin::Block,
+        parents: &HashMap<Txid, Transaction>,
+        raw_status: u16,
+    ) -> (httpmock::Mock<'a>, Vec<httpmock::Mock<'a>>) {
+        use coincube_core::miniscript::bitcoin::consensus::serialize;
+        use httpmock::prelude::*;
+        let base = "/api/v1/esplora/bitcoin-blake2b/mainnet";
+        let txid = block.txdata[1].compute_txid();
+        let hash = block.block_hash();
+        let tip = BlockHash::from_str(&"11".repeat(32)).unwrap();
+        let fresh = |path: String, body: String| {
+            server.mock(move |when, then| {
+                when.method(GET)
+                    .path(path)
+                    .header("x-coincube-observation", "fresh");
+                then.status(200)
+                    .header("X-Coincube-Observation", "fresh")
+                    .header("X-Cache", "BYPASS")
+                    .header("Cache-Control", "no-store")
+                    .body(body);
+            })
+        };
+        fresh(format!("{base}/blocks/tip/hash"), tip.to_string());
+        fresh(
+            format!("{base}/block/{tip}/status"),
+            r#"{"in_best_chain":true,"height":110}"#.into(),
+        );
+        fresh(format!("{base}/block-height/110"), tip.to_string());
+        fresh(
+            format!("{base}/tx/{txid}"),
+            format!(
+                r#"{{"txid":"{txid}","status":{{"confirmed":true,"block_height":100,"block_hash":"{hash}"}}}}"#
+            ),
+        );
+        fresh(format!("{base}/block-height/100"), hash.to_string());
+        let raw = serialize(block);
+        let raw_mock = server.mock(move |when, then| {
+            when.method(GET).path(format!("{base}/block/{hash}/raw"));
+            then.status(raw_status).body(raw);
+        });
+        let parent_mocks = parents
+            .iter()
+            .map(|(id, parent)| {
+                let hex = hex::encode(serialize(parent));
+                server.mock(move |when, then| {
+                    when.method(GET).path(format!("{base}/tx/{id}/hex"));
+                    then.status(200).body(hex);
+                })
+            })
+            .collect();
+        (raw_mock, parent_mocks)
+    }
+
+    async fn check_twin(
+        server: &httpmock::MockServer,
+        txid: Txid,
+    ) -> Vec<(Txid, Option<HashSet<OutPoint>>)> {
+        let mut client = crate::services::coincube::CoincubeClient::for_test(server.base_url());
+        client.set_token("synthetic-observation-token");
+        let (_sender, live) = tokio::sync::watch::channel(4);
+        twin_confirmed(
+            client,
+            ChainId::Bitcoin,
+            vec![(txid, Method::Signature)],
+            4,
+            live,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn the_twin_check_counts_a_confirmed_unified_split_from_one_block_read() {
+        let (split, parents, _) = signature_split();
+        let txid = split.compute_txid();
+        let server = httpmock::MockServer::start();
+        let refusal = crate::services::split_test_connect::strict(&server);
+        let (raw, parent_mocks) = connect_holding(&server, &block_with(&split), &parents, 200);
+        let inputs: HashSet<OutPoint> = split.input.iter().map(|i| i.previous_output).collect();
+        assert_eq!(
+            check_twin(&server, txid).await,
+            vec![(txid, Some(inputs.clone()))]
+        );
+        // The next pass reads the depth again but not the block or parents.
+        assert_eq!(check_twin(&server, txid).await, vec![(txid, Some(inputs))]);
+        raw.assert_hits(1);
+        for parent in parent_mocks {
+            parent.assert_hits(1);
+        }
+        refusal.assert_hits(0);
+    }
+
+    #[tokio::test]
+    async fn the_twin_check_refuses_a_legacy_split_and_retries_a_failed_read() {
+        let (legacy, parents, _) = signed_split(true);
+        let txid = legacy.compute_txid();
+        let server = httpmock::MockServer::start();
+        let refusal = crate::services::split_test_connect::strict(&server);
+        let (raw, _) = connect_holding(&server, &block_with(&legacy), &parents, 200);
+        assert_eq!(check_twin(&server, txid).await, vec![(txid, None)]);
+        assert_eq!(check_twin(&server, txid).await, vec![(txid, None)]);
+        raw.assert_hits(1);
+        refusal.assert_hits(0);
+
+        // A block Connect can't serve is no verdict: the next pass asks again.
+        // (A unified split in a block of its own, so no earlier verdict.)
+        let (mut split, parents, _) = signature_split();
+        split.lock_time =
+            coincube_core::miniscript::bitcoin::absolute::LockTime::from_height(7).unwrap();
+        let server = httpmock::MockServer::start();
+        let (raw, _) = connect_holding(&server, &block_with(&split), &parents, 503);
+        let txid = split.compute_txid();
+        assert_eq!(check_twin(&server, txid).await, vec![(txid, None)]);
+        assert_eq!(check_twin(&server, txid).await, vec![(txid, None)]);
+        raw.assert_hits(2);
     }
 
     #[test]
@@ -1389,6 +1576,33 @@ mod tests {
             ],
             "the two never checked come next"
         );
+    }
+
+    #[test]
+    fn each_method_has_its_own_lookup_budget() {
+        let (record, _) = split_fixture();
+        let records: Vec<SplitRecord> = (0..(2 * MAX_TWIN_LOOKUPS as u8 + 4))
+            .map(|n| SplitRecord {
+                txid: Txid::from_str(&format!("{:02x}", n).repeat(32)).unwrap(),
+                created_at: u64::from(n),
+                // Signature splits are the newest, so they would come first.
+                method: if usize::from(n) > MAX_TWIN_LOOKUPS + 1 {
+                    Method::Signature
+                } else {
+                    Method::SplitKey
+                },
+                ..record.clone()
+            })
+            .collect();
+        let candidates = twin_candidates(&records, &HashMap::new());
+        for method in [Method::SplitKey, Method::Signature] {
+            assert_eq!(
+                candidates.iter().filter(|(_, m)| *m == method).count(),
+                MAX_TWIN_LOOKUPS,
+                "{:?}",
+                method
+            );
+        }
     }
 
     #[test]

@@ -25,6 +25,8 @@ const BODY_LIMIT: usize = 256 * 1024;
 const TRANSACTION_METADATA_LIMIT: usize = 2 * 1024 * 1024;
 const TRANSACTION_HEX_LIMIT: usize = 2 * coincube_core::claim_ancestry::MAX_TRANSACTION_BYTES;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+// A raw block can approach 4 MB; at 5 s that would need about 6.4 Mbit/s.
+const RAW_BLOCK_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Immutable snapshot. Recreate on account/provider change; revoke its generation
 /// before dropping old consumers. No inherited authenticated client headers are
@@ -111,6 +113,13 @@ impl HttpObservationSource {
         &self,
         future: impl Future<Output = Result<T, FailureKind>>,
     ) -> Result<T, FailureKind> {
+        self.bounded_within(REQUEST_TIMEOUT, future).await
+    }
+    async fn bounded_within<T>(
+        &self,
+        deadline: Duration,
+        future: impl Future<Output = Result<T, FailureKind>>,
+    ) -> Result<T, FailureKind> {
         let mut generation = self.generation.clone();
         if !session_current(&generation, self.expected) {
             return Err(FailureKind::Cancelled);
@@ -120,7 +129,7 @@ impl HttpObservationSource {
         };
         let result = tokio::select! { biased;
             _ = cancelled => Err(FailureKind::Cancelled),
-            result = tokio::time::timeout(REQUEST_TIMEOUT, future) => result.map_err(|_| FailureKind::Deadline)?,
+            result = tokio::time::timeout(deadline, future) => result.map_err(|_| FailureKind::Deadline)?,
         };
         if !session_current(&generation, self.expected) {
             return Err(FailureKind::Cancelled);
@@ -153,6 +162,19 @@ impl HttpObservationSource {
         fresh: bool,
         body_limit: usize,
     ) -> Result<(u16, Vec<u8>, HeaderMap, i64), (FailureKind, bool)> {
+        self.get_body_within(chain, path, fresh, body_limit, REQUEST_TIMEOUT)
+            .await
+    }
+    /// [`Self::get_body_detailed`] with its own deadline for the whole
+    /// request, body included.
+    async fn get_body_within(
+        &self,
+        chain: ChainId,
+        path: &str,
+        fresh: bool,
+        body_limit: usize,
+        deadline: Duration,
+    ) -> Result<(u16, Vec<u8>, HeaderMap, i64), (FailureKind, bool)> {
         let prefix = Self::prefix(chain).map_err(|error| (error, false))?;
         let request_stage = if path.starts_with("tx/") && path.ends_with("/hex") {
             discovery::diagnostics::Stage::RawTransaction
@@ -161,7 +183,7 @@ impl HttpObservationSource {
         } else {
             discovery::diagnostics::Stage::ChainView
         };
-        self.bounded(async {
+        self.bounded_within(deadline, async {
             if crate::services::esplora_backoff::remaining(&self.base).is_some() {
                 return Err(FailureKind::Http(429));
             }
@@ -175,7 +197,8 @@ impl HttpObservationSource {
             let mut request = self
                 .anonymous
                 .get(format!("{}/api/v1/esplora/{}/{}", self.base, prefix, path))
-                .header(CACHE_CONTROL, "no-cache");
+                .header(CACHE_CONTROL, "no-cache")
+                .timeout(deadline);
             if fresh {
                 request = request.header("X-Coincube-Observation", "fresh");
             }
@@ -304,13 +327,15 @@ impl HttpObservationSource {
     /// (`coincube_core::btcb2_block::confirmed_transaction`).
     pub async fn raw_block(&self, chain: ChainId, hash: BlockHash) -> Result<Vec<u8>, FailureKind> {
         let (status, bytes, _, _) = self
-            .get_body(
+            .get_body_within(
                 chain,
                 &format!("block/{}/raw", hash),
                 false,
                 coincube_core::btcb2_block::MAX_BLOCK_BYTES,
+                RAW_BLOCK_TIMEOUT,
             )
-            .await?;
+            .await
+            .map_err(|(error, _)| error)?;
         if status != 200 {
             return Err(FailureKind::Http(status));
         }

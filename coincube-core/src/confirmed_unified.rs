@@ -160,6 +160,8 @@ pub fn verify_replay_protected<C: secp256k1::Verification>(
             input,
             reason: err.to_string(),
         })?;
+        // Sane parsing already refuses a sigless branch; this stands behind
+        // it should the parameters ever change.
         if !miniscript.ty.mall.safe {
             return Err(ConfirmedUnifiedError::UnsafeScript { input });
         }
@@ -217,7 +219,7 @@ mod tests {
     use super::*;
     use miniscript::bitcoin::{
         absolute,
-        hashes::Hash,
+        hashes::{sha256d, Hash},
         secp256k1::{Secp256k1, SecretKey},
         sighash::{EcdsaSighashType, SighashCache},
         transaction, Amount, OutPoint, Sequence, TxIn, Txid, Witness,
@@ -308,6 +310,40 @@ mod tests {
                 .unwrap();
             self.sign(digest.to_byte_array(), key, 0x01)
         }
+        /// BIP 143 with hash type `0x21`: what Bitcoin computes for a `0x21`
+        /// signature, so a signature over it would pass there.
+        fn legacy_0x21(&self, input: usize, key: usize) -> Vec<u8> {
+            // rust-bitcoin normalizes a non-standard type to `ALL`, so encode
+            // as `ALL` and put the real 4-byte type back, as Core hashes it.
+            let mut data = Vec::new();
+            SighashCache::new(&self.tx)
+                .segwit_v0_encode_signing_data_to(
+                    &mut data,
+                    input,
+                    &self.script,
+                    self.spent[input].value,
+                    EcdsaSighashType::All,
+                )
+                .unwrap();
+            // The encoding is the one Bitcoin signs for `ALL`…
+            let all = SighashCache::new(&self.tx)
+                .p2wsh_signature_hash(
+                    input,
+                    &self.script,
+                    self.spent[input].value,
+                    EcdsaSighashType::All,
+                )
+                .unwrap();
+            assert_eq!(
+                sha256d::Hash::hash(&data).to_byte_array(),
+                all.to_byte_array()
+            );
+            // …but for its last four bytes.
+            let at = data.len() - 4;
+            data[at..].copy_from_slice(&u32::from(UNIFIED_SIGHASH_ALL).to_le_bytes());
+            let digest = sha256d::Hash::hash(&data).to_byte_array();
+            self.sign(digest, key, UNIFIED_SIGHASH_ALL)
+        }
         fn sign(&self, digest: [u8; 32], key: usize, sighash: u8) -> Vec<u8> {
             let message = secp256k1::Message::from_digest(digest);
             let mut bytes = self
@@ -384,6 +420,14 @@ mod tests {
         let mut forged = f.legacy(0, 0);
         *forged.last_mut().unwrap() = UNIFIED_SIGHASH_ALL;
         let stack = vec![vec![], forged, f.unified(0, 2)];
+        f.set(0, stack);
+        assert_eq!(
+            f.verify(),
+            Err(ConfirmedUnifiedError::InvalidSignature { input: 0 })
+        );
+        // Bitcoin's own digest for hash type `0x21`.
+        let mut f = signed_multi();
+        let stack = vec![vec![], f.legacy_0x21(0, 0), f.unified(0, 2)];
         f.set(0, stack);
         assert_eq!(
             f.verify(),

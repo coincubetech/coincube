@@ -47,6 +47,9 @@ pub enum BlockError {
     MerkleRoot,
     /// The coinbase's witness commitment does not match the witnesses.
     WitnessCommitment,
+    /// An extended header's transaction count (Knots' fix for
+    /// CVE-2017-12842) does not match the transactions.
+    TxCount,
     /// The block does not contain the transaction.
     NotInBlock,
 }
@@ -59,6 +62,7 @@ impl fmt::Display for BlockError {
             Self::WrongHash => write!(f, "block does not hash to the requested block"),
             Self::MerkleRoot => write!(f, "transactions do not match the merkle root"),
             Self::WitnessCommitment => write!(f, "witnesses do not match the commitment"),
+            Self::TxCount => write!(f, "transaction count does not match the header"),
             Self::NotInBlock => write!(f, "transaction is not in the block"),
         }
     }
@@ -260,6 +264,12 @@ pub fn confirmed_transaction(
     if used != raw.len() - size || txdata.is_empty() {
         return Err(BlockError::Malformed);
     }
+    // No block within the weight limit holds more than u16::MAX transactions.
+    if let Some(extended) = &header.extended {
+        if usize::from(extended.txcount) != txdata.len() {
+            return Err(BlockError::TxCount);
+        }
+    }
     // rust-bitcoin's commitment checks read only the merkle root and the
     // transactions, so a legacy header carrying the parsed root reuses them.
     let block = Block {
@@ -432,9 +442,14 @@ mod tests {
         raw.extend(serialize(&txs));
         assert_eq!(at(&raw), Err(BlockError::WitnessCommitment));
 
-        // A transaction dropped: the merkle root no longer matches.
+        // A transaction dropped: the header's count no longer matches, and
+        // with that check out of the way, neither does the merkle root.
         let mut txs = txdata.clone();
         txs.remove(position);
+        let mut raw = LIVE_BLOCK[..HEADER_V2_SIZE].to_vec();
+        raw.extend(serialize(&txs));
+        assert_eq!(at(&raw), Err(BlockError::TxCount));
+        txs.push(txdata[0].clone());
         let mut raw = LIVE_BLOCK[..HEADER_V2_SIZE].to_vec();
         raw.extend(serialize(&txs));
         assert_eq!(at(&raw), Err(BlockError::MerkleRoot));
