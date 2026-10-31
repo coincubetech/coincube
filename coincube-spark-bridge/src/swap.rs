@@ -38,7 +38,9 @@
 //! passes are held while it is sent ([`AutoConvert::begin_swap`]), and the
 //! swap's receive is taken back out if the SDK reported it before marking it
 //! a conversion's. A swap whose send ends in an error can't say which receive
-//! was its own, so that case stays open.
+//! was its own, and the pool may have run it: every receive counted while it
+//! was sent is taken back, and none count until the switch next changes
+//! ([`SwapEnd::Unknown`]). That hold is in memory, so it ends with the bridge.
 //!
 //! [`Method::PrepareSwap`]: coincube_spark_protocol::Method::PrepareSwap
 //! [`Method::Swap`]: coincube_spark_protocol::Method::Swap
@@ -64,7 +66,7 @@ use coincube_spark_protocol::{
 use tokio::sync::Mutex;
 
 use crate::auto_convert::{
-    self, fitted_quote, AutoConvert, Converter, Limits, SdkConverter, Shortfall,
+    self, fitted_quote, AutoConvert, Converter, Limits, SdkConverter, Shortfall, SwapEnd,
 };
 use crate::sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER;
 
@@ -543,7 +545,9 @@ async fn current_price<B: SwapBackend>(
 ///
 /// A swap out of USDB holds `auto_convert`'s passes while it is sent, so the
 /// bitcoin it delivers isn't converted back ([`AutoConvert::begin_swap`]).
-/// The caller wakes the auto-convert worker afterwards.
+/// If its send ends in an error, no receive counts until the switch next
+/// changes ([`SwapEnd::Unknown`]). The caller wakes the auto-convert worker
+/// afterwards.
 pub async fn execute<B: SwapBackend>(
     backend: &B,
     swap: PreparedSwap,
@@ -590,22 +594,19 @@ pub async fn execute<B: SwapBackend>(
 
     // Only the bitcoin out of a USDB swap could count as a receive.
     let guard = auto_convert.filter(|_| swap.from == WalletAsset::Usdb);
-    let began = match guard {
-        Some(auto_convert) => Some(auto_convert.lock().await.begin_swap()),
-        None => None,
-    };
+    if let Some(auto_convert) = guard {
+        auto_convert.lock().await.begin_swap();
+    }
     let sent = backend.execute(swap.prepared).await;
-    if let (Some(auto_convert), Some(began)) = (guard, began) {
-        let delivered = sent.as_ref().ok().and_then(|payment| {
-            Some(auto_convert::Receipt {
-                payment_id: payment.id.clone(),
-                sats: u64::try_from(payment.amount).ok()?,
-            })
-        });
-        auto_convert
-            .lock()
-            .await
-            .end_swap(began, delivered.as_ref());
+    if let Some(auto_convert) = guard {
+        let end = match &sent {
+            // A self-transfer answers with the receive that delivered it.
+            Ok(payment) => SwapEnd::Delivered {
+                payment_id: &payment.id,
+            },
+            Err(_) => SwapEnd::Unknown,
+        };
+        auto_convert.lock().await.end_swap(end);
     }
     let payment = sent.map_err(Refusal::Sdk)?;
     let status = swap_status(&payment);
@@ -1873,6 +1874,38 @@ mod tests {
         assert_eq!(auto_convert.pending_sats(), 5_000);
         assert!(!auto_convert.note_receive(&receipt("recv-1", delivered)));
         assert_eq!(auto_convert.pending_sats(), 5_000);
+    }
+
+    /// The SDK can answer an error after the pool ran a USDB swap
+    /// (`flashnet.rs` at the pin), with the swap's bitcoin reported as an
+    /// ordinary receive either while it was sent or after the error. Neither
+    /// is auto-converted.
+    #[tokio::test]
+    async fn a_usdb_swap_that_errors_after_running_leaves_its_bitcoin_alone() {
+        for counted_before_the_error in [true, false] {
+            let dir = StateDir::new();
+            let auto_convert = auto_convert_on(&dir);
+            let fake = FakeSdk::new();
+            let Prepared { swap, quote, .. } =
+                prepared(&fake, exact(WalletAsset::Usdb, 10 * ONE_USDB)).await;
+            let delivered = u64::try_from(quote.amount_out.amount).unwrap();
+            let error = "Convert token failed after the swap ran, delivering 9950 via t1: timeout";
+            *fake.execute_answer.lock().unwrap() = Some(Err(error.to_string()));
+            if counted_before_the_error {
+                *fake.reports_during_send.lock().unwrap() = Some((
+                    Arc::clone(&auto_convert),
+                    vec![receipt("recv-1", delivered)],
+                ));
+            }
+            assert_eq!(
+                execute(&fake, swap, Some(&auto_convert)).await,
+                Err(Refusal::Sdk(error.to_string()))
+            );
+            let mut auto_convert = auto_convert.lock().await;
+            assert_eq!(auto_convert.pending_sats(), 0);
+            assert!(!auto_convert.note_receive(&receipt("recv-1", delivered)));
+            assert_eq!(auto_convert.pending_sats(), 0, "{counted_before_the_error}");
+        }
     }
 
     /// A swap out of bitcoin delivers USDB, which never counts, so it

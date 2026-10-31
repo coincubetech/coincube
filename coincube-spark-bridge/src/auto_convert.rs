@@ -680,6 +680,18 @@ enum Step {
     Convert { budget_sats: u64 },
 }
 
+/// How the send of a USDB → bitcoin swap ended ([`AutoConvert::end_swap`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwapEnd<'a> {
+    /// The send went through. `payment_id` is the receive that delivered the
+    /// swap's bitcoin.
+    Delivered { payment_id: &'a str },
+    /// The send ended in an error. The pool may have run the swap anyway
+    /// (`flashnet.rs` at the pin can answer an error after it ran), so its
+    /// bitcoin may already have been counted, or may arrive later.
+    Unknown,
+}
+
 /// Bridge-owned auto-convert for one Cube.
 pub struct AutoConvert {
     path: PathBuf,
@@ -701,6 +713,13 @@ pub struct AutoConvert {
     /// USDB → bitcoin swaps being sent ([`Self::begin_swap`]). While any is,
     /// no pass takes pending sats.
     swaps_in_flight: u32,
+    /// Receives counted while a swap was being sent, each with the epoch it
+    /// was counted in. Any of them may be a swap's own bitcoin.
+    counted_during_swaps: Vec<(Receipt, u64)>,
+    /// A swap's send ended in an error ([`SwapEnd::Unknown`]), so its
+    /// bitcoin may still arrive as an ordinary receive. Until the switch next
+    /// changes, receives aren't counted.
+    unresolved_swap: bool,
 }
 
 impl AutoConvert {
@@ -739,6 +758,8 @@ impl AutoConvert {
             unsaved: false,
             send_gate: Arc::new(Mutex::new(())),
             swaps_in_flight: 0,
+            counted_during_swaps: Vec::new(),
+            unresolved_swap: false,
         }
     }
 
@@ -779,6 +800,9 @@ impl AutoConvert {
     /// On resets the breaker and starts with nothing pending, so only bitcoin
     /// received from now on converts. Off drops the pending sats; the
     /// existing USDB stays USDB. Off keeps a pause's reason readable.
+    ///
+    /// Either ends the hold left by a swap whose send ended in an error
+    /// ([`SwapEnd::Unknown`]): switching is how the user resumes counting.
     pub fn set_enabled(&mut self, enabled: bool) -> io::Result<bool> {
         let before = self.state();
         let next = if enabled {
@@ -805,6 +829,7 @@ impl AutoConvert {
         };
         self.commit(next)?;
         self.epoch += 1;
+        self.unresolved_swap = false;
         if enabled {
             self.failures.reset();
         }
@@ -815,6 +840,10 @@ impl AutoConvert {
     /// while off, and the second time the same payment is seen. Returns
     /// whether it counted, i.e. whether to wake [`convert_pending`].
     ///
+    /// Seen but not counted after a swap whose send ended in an error, until
+    /// the switch next changes ([`SwapEnd::Unknown`]): it may be the swap's
+    /// bitcoin.
+    ///
     /// Called from the SDK's event listener as each payment is reported, so
     /// a receive is saved even while a conversion runs or the bridge stops:
     /// the SDK reports a payment once.
@@ -822,11 +851,23 @@ impl AutoConvert {
         if !self.saved.enabled || !self.seen.insert(&receipt.payment_id) {
             return false;
         }
+        if self.unresolved_swap {
+            tracing::info!(
+                "{} sats received aren't counted: a swap whose send failed may still deliver \
+                 its bitcoin",
+                receipt.sats
+            );
+            return false;
+        }
         let next = Saved {
             pending_sats: self.saved.pending_sats.saturating_add(receipt.sats),
             ..self.saved.clone()
         };
         self.adopt(next);
+        if self.swaps_in_flight > 0 {
+            self.counted_during_swaps
+                .push((receipt.clone(), self.epoch));
+        }
         true
     }
 
@@ -853,8 +894,8 @@ impl AutoConvert {
     }
 
     /// A USDB → bitcoin swap (`crate::swap`) is about to be sent. Until
-    /// [`Self::end_swap`], no pass takes pending sats. Returns the epoch to
-    /// hand back to `end_swap`.
+    /// [`Self::end_swap`], no pass takes pending sats, and each receive
+    /// counted is recorded with its epoch, since it may be the swap's.
     ///
     /// Why: the SDK marks the bitcoin a swap delivers as a conversion's only
     /// once the pool has answered (`update_payment_conversion_info` in
@@ -863,35 +904,61 @@ impl AutoConvert {
     /// passes keeps it unconverted until the swap says which payment it was.
     /// The SDK guards its own conversions the same way
     /// (`acquire_payment_guard`).
-    pub fn begin_swap(&mut self) -> u64 {
+    pub fn begin_swap(&mut self) {
         self.swaps_in_flight = self.swaps_in_flight.saturating_add(1);
-        self.epoch
     }
 
-    /// The swap begun at `began` was answered. When it delivered `delivered`
-    /// and that receive was counted, it is taken back out of the pending
-    /// sats: it is the swap's, not a receive. It is remembered either way,
-    /// so a later report of it can't count. Returns whether to wake
-    /// [`convert_pending`]: passes are held no longer.
+    /// A swap begun with [`Self::begin_swap`] was answered. Returns whether
+    /// to wake [`convert_pending`]: passes are held no longer.
     ///
-    /// After a switch change during the swap nothing is taken back, since
-    /// the change already dropped what was pending.
-    pub fn end_swap(&mut self, began: u64, delivered: Option<&Receipt>) -> bool {
+    /// - [`SwapEnd::Delivered`]: if that receive was counted, it is taken
+    ///   back out of the pending sats: it is the swap's, not a receive. It is
+    ///   remembered either way, so a later report of it can't count.
+    /// - [`SwapEnd::Unknown`]: any receive counted while swaps were sent may
+    ///   be this one's bitcoin, so each is taken back, and none count until
+    ///   the switch next changes ([`Self::note_receive`]). Failing closed
+    ///   leaves bitcoin as bitcoin, where the other way could convert back
+    ///   what the user just swapped for. The hold is in memory only: it ends
+    ///   with the bridge.
+    ///
+    /// Only a receive counted since the last switch change is taken back: a
+    /// change drops whatever was pending before it.
+    pub fn end_swap(&mut self, end: SwapEnd<'_>) -> bool {
         self.swaps_in_flight = self.swaps_in_flight.saturating_sub(1);
-        if let Some(receipt) = delivered {
-            let counted = !self.seen.insert(&receipt.payment_id);
-            if counted && self.epoch == began && self.saved.enabled {
-                tracing::info!(
-                    "a swap's {} sats were reported as a receive before the SDK marked them; \
-                     they won't be converted",
-                    receipt.sats
-                );
-                let next = Saved {
-                    pending_sats: self.saved.pending_sats.saturating_sub(receipt.sats),
-                    ..self.saved.clone()
-                };
-                self.adopt(next);
+        let counted = std::mem::take(&mut self.counted_during_swaps);
+        let (swaps, others): (Vec<_>, Vec<_>) = match end {
+            SwapEnd::Delivered { payment_id } => {
+                self.seen.insert(payment_id);
+                counted
+                    .into_iter()
+                    .partition(|(receipt, _)| receipt.payment_id == payment_id)
             }
+            SwapEnd::Unknown => {
+                tracing::warn!(
+                    "a swap's send failed; bitcoin received from now on isn't counted until \
+                     auto-convert is switched again"
+                );
+                self.unresolved_swap = true;
+                (counted, Vec::new())
+            }
+        };
+        if self.swaps_in_flight > 0 {
+            self.counted_during_swaps = others;
+        }
+        let sats = swaps
+            .iter()
+            .filter(|(_, counted_in)| *counted_in == self.epoch)
+            .fold(0u64, |sum, (receipt, _)| sum.saturating_add(receipt.sats));
+        if sats > 0 && self.saved.enabled {
+            tracing::info!(
+                "{sats} sats counted while a swap was sent may be its own bitcoin; they won't be \
+                 converted"
+            );
+            let next = Saved {
+                pending_sats: self.saved.pending_sats.saturating_sub(sats),
+                ..self.saved.clone()
+            };
+            self.adopt(next);
         }
         self.swaps_in_flight == 0
     }
@@ -2525,43 +2592,114 @@ mod tests {
         let ac = Mutex::new(enabled(&dir));
         let pool = FakePool::new(100_000);
         assert!(ac.lock().await.note_receive(&receipt("r1", 20_000)));
-        let began = ac.lock().await.begin_swap();
+        ac.lock().await.begin_swap();
         convert_pending(&ac, &pool, &|_| {}).await;
         assert!(pool.calls().is_empty(), "{:?}", pool.calls());
         assert_eq!(ac.lock().await.pending_sats(), 20_000);
 
-        assert!(ac.lock().await.end_swap(began, None));
+        assert!(ac.lock().await.end_swap(delivered("swap-recv")));
         convert_pending(&ac, &pool, &|_| {}).await;
         assert_eq!(pool.sends().len(), 1);
     }
 
-    /// A swap's own receive is taken back once, and only in the epoch the
-    /// swap began in: a switch change during the swap already dropped it.
-    /// Passes stay held until every swap in flight is answered.
+    fn delivered(payment_id: &str) -> SwapEnd<'_> {
+        SwapEnd::Delivered { payment_id }
+    }
+
+    /// A swap's own receive is taken back once, and not when it was counted
+    /// before a switch change during the swap: the change already dropped
+    /// it. Passes stay held until every swap in flight is answered.
     #[test]
     fn a_swaps_receive_is_taken_back_only_in_its_epoch() {
         let dir = TempDir::new();
         let mut ac = enabled(&dir);
-        let began = ac.begin_swap();
+        ac.begin_swap();
         assert!(ac.note_receive(&receipt("swap-recv", 9_950)));
         assert!(ac.note_receive(&receipt("gift", 5_000)));
-        assert!(ac.end_swap(began, Some(&receipt("swap-recv", 9_950))));
+        assert!(ac.end_swap(delivered("swap-recv")));
         assert_eq!(ac.pending_sats(), 5_000);
         assert!(!ac.note_receive(&receipt("swap-recv", 9_950)));
         // Saved, not only in memory.
         assert_eq!(AutoConvert::load(&dir.0).pending_sats(), 5_000);
 
-        let began = ac.begin_swap();
+        ac.begin_swap();
         assert!(ac.note_receive(&receipt("swap-recv-2", 9_950)));
         assert!(ac.set_enabled(false).expect("saved"));
         assert!(ac.set_enabled(true).expect("saved"));
         assert!(ac.note_receive(&receipt("gift-2", 7_000)));
-        assert!(ac.end_swap(began, Some(&receipt("swap-recv-2", 9_950))));
+        assert!(ac.end_swap(delivered("swap-recv-2")));
         assert_eq!(ac.pending_sats(), 7_000);
 
-        let first = ac.begin_swap();
-        let second = ac.begin_swap();
-        assert!(!ac.end_swap(first, None));
-        assert!(ac.end_swap(second, None));
+        ac.begin_swap();
+        ac.begin_swap();
+        assert!(!ac.end_swap(delivered("first")));
+        assert!(ac.end_swap(delivered("second")));
+    }
+
+    /// The switch can change during a swap and before its receive is
+    /// counted: off → begin → on, or on → off → on, then the receive. It
+    /// was counted in the current epoch, so it is taken back.
+    #[test]
+    fn a_swaps_receive_counted_after_a_switch_change_is_taken_back() {
+        let dir = TempDir::new();
+        let mut ac = enabled(&dir);
+        assert!(ac.set_enabled(false).expect("saved"));
+        ac.begin_swap();
+        assert!(ac.set_enabled(true).expect("saved"));
+        assert!(ac.note_receive(&receipt("swap-recv", 9_950)));
+        assert!(ac.end_swap(delivered("swap-recv")));
+        assert_eq!(ac.pending_sats(), 0);
+
+        ac.begin_swap();
+        assert!(ac.set_enabled(false).expect("saved"));
+        assert!(ac.set_enabled(true).expect("saved"));
+        assert!(ac.note_receive(&receipt("swap-recv-2", 9_950)));
+        assert!(ac.end_swap(delivered("swap-recv-2")));
+        assert_eq!(ac.pending_sats(), 0);
+    }
+
+    /// A swap whose send ended in an error may have run. Every receive
+    /// counted while it was sent may be its bitcoin, so each is taken back;
+    /// what was pending before it stays, and may still convert. Until the
+    /// switch changes, a later receive, which may be the swap's, isn't
+    /// counted, then or afterwards.
+    #[test]
+    fn after_an_unknown_swap_receives_dont_count_until_the_switch_changes() {
+        let dir = TempDir::new();
+        let mut ac = enabled(&dir);
+        assert!(ac.note_receive(&receipt("before", 3_000)));
+        ac.begin_swap();
+        assert!(ac.note_receive(&receipt("early", 9_950)));
+        assert!(ac.end_swap(SwapEnd::Unknown));
+        assert_eq!(ac.pending_sats(), 3_000);
+        assert!(ac.may_convert());
+        assert!(!ac.note_receive(&receipt("late", 9_950)));
+        assert_eq!(ac.pending_sats(), 3_000);
+        // Saved, so a restart can't convert them either.
+        assert_eq!(AutoConvert::load(&dir.0).pending_sats(), 3_000);
+
+        assert!(ac.set_enabled(false).expect("saved"));
+        assert!(ac.set_enabled(true).expect("saved"));
+        assert!(!ac.note_receive(&receipt("late", 9_950)));
+        assert!(ac.note_receive(&receipt("next", 4_000)));
+        assert_eq!(ac.pending_sats(), 4_000);
+    }
+
+    /// An unknown end takes back what was counted during a swap still in
+    /// flight too, and that swap's own end finds nothing left to take back.
+    #[test]
+    fn an_unknown_swap_takes_back_what_overlapping_swaps_counted() {
+        let dir = TempDir::new();
+        let mut ac = enabled(&dir);
+        assert!(ac.note_receive(&receipt("before", 3_000)));
+        ac.begin_swap();
+        ac.begin_swap();
+        assert!(ac.note_receive(&receipt("swap-recv", 9_950)));
+        assert!(!ac.end_swap(SwapEnd::Unknown));
+        assert_eq!(ac.pending_sats(), 3_000);
+        assert!(!ac.may_convert(), "the other swap still holds passes");
+        assert!(ac.end_swap(delivered("swap-recv")));
+        assert_eq!(ac.pending_sats(), 3_000);
+        assert!(ac.may_convert());
     }
 }

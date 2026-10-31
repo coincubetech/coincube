@@ -323,6 +323,11 @@ pub enum Method {
     /// Activity before it offers another swap. A retry can't be made safe
     /// with an idempotency key, because the bridge drops the key for any
     /// conversion leg.
+    ///
+    /// After an `Sdk` error on a swap out of USDB, auto-convert counts no
+    /// bitcoin received until its switch next changes or the bridge
+    /// restarts, since the swap's output may arrive as an ordinary receive
+    /// (S3b). [`AutoConvertState`] doesn't show this hold.
     Swap(SwapParams),
     /// [`Method::PrepareSend`] with an explicit balance to pay from. Returns
     /// [`OkPayload::PrepareSendFrom`]; the handle executes through the
