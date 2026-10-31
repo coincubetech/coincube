@@ -353,7 +353,8 @@ pub enum Message {
             coincube_core::miniscript::bitcoin::Txid,
             Option<std::collections::HashSet<coincube_core::miniscript::bitcoin::OutPoint>>,
         )>,
-        /// When the twin lookups finished; orders them against other passes'.
+        /// When the twin lookups started, before any read; orders them
+        /// against other passes'.
         twin_checked_at: std::time::Instant,
     },
     /// A sync-driven ancestry check batch for the Chains column finished

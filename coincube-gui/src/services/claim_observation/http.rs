@@ -21,6 +21,8 @@ const BODY_LIMIT: usize = 256 * 1024;
 const TRANSACTION_METADATA_LIMIT: usize = 2 * 1024 * 1024;
 const TRANSACTION_HEX_LIMIT: usize = 2 * coincube_core::claim_ancestry::MAX_TRANSACTION_BYTES;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+// A raw block can approach 4 MB; at 5 s that would need about 6.4 Mbit/s.
+const RAW_BLOCK_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Immutable snapshot. Recreate on account/provider change; revoke its generation
 /// before dropping old consumers. No inherited authenticated client headers are
@@ -100,6 +102,13 @@ impl HttpObservationSource {
         &self,
         future: impl Future<Output = Result<T, FailureKind>>,
     ) -> Result<T, FailureKind> {
+        self.bounded_within(REQUEST_TIMEOUT, future).await
+    }
+    async fn bounded_within<T>(
+        &self,
+        deadline: Duration,
+        future: impl Future<Output = Result<T, FailureKind>>,
+    ) -> Result<T, FailureKind> {
         let mut generation = self.generation.clone();
         if !session_current(&generation, self.expected) {
             return Err(FailureKind::Cancelled);
@@ -109,7 +118,7 @@ impl HttpObservationSource {
         };
         let result = tokio::select! { biased;
             _ = cancelled => Err(FailureKind::Cancelled),
-            result = tokio::time::timeout(REQUEST_TIMEOUT, future) => result.map_err(|_| FailureKind::Deadline)?,
+            result = tokio::time::timeout(deadline, future) => result.map_err(|_| FailureKind::Deadline)?,
         };
         if !session_current(&generation, self.expected) {
             return Err(FailureKind::Cancelled);
@@ -142,6 +151,19 @@ impl HttpObservationSource {
         fresh: bool,
         body_limit: usize,
     ) -> Result<(u16, Vec<u8>, HeaderMap, i64), (FailureKind, bool)> {
+        self.get_body_within(chain, path, fresh, body_limit, REQUEST_TIMEOUT)
+            .await
+    }
+    /// [`Self::get_body_detailed`] with its own deadline for the whole
+    /// request, body included.
+    async fn get_body_within(
+        &self,
+        chain: ChainId,
+        path: &str,
+        fresh: bool,
+        body_limit: usize,
+        deadline: Duration,
+    ) -> Result<(u16, Vec<u8>, HeaderMap, i64), (FailureKind, bool)> {
         let prefix = Self::prefix(chain).map_err(|error| (error, false))?;
         let request_stage = if path.starts_with("tx/") && path.ends_with("/hex") {
             discovery::diagnostics::Stage::RawTransaction
@@ -150,7 +172,7 @@ impl HttpObservationSource {
         } else {
             discovery::diagnostics::Stage::ChainView
         };
-        self.bounded(async {
+        self.bounded_within(deadline, async {
             if crate::services::esplora_backoff::remaining(&self.base).is_some() {
                 return Err(FailureKind::Http(429));
             }
@@ -164,7 +186,8 @@ impl HttpObservationSource {
             let mut request = self
                 .anonymous
                 .get(format!("{}/api/v1/esplora/{}/{}", self.base, prefix, path))
-                .header(CACHE_CONTROL, "no-cache");
+                .header(CACHE_CONTROL, "no-cache")
+                .timeout(deadline);
             if fresh {
                 request = request.header("X-Coincube-Observation", "fresh");
             }
@@ -286,6 +309,26 @@ impl HttpObservationSource {
             return Err((FailureKind::Malformed, false));
         }
         Ok(raw)
+    }
+    /// Fetch one raw block, on the same anonymous immutable-data route as
+    /// [`Self::ancestry_transaction`]. Nothing here authenticates the bytes:
+    /// the caller checks them against a block hash it read fresh
+    /// (`coincube_core::btcb2_block::confirmed_transaction`).
+    pub async fn raw_block(&self, chain: ChainId, hash: BlockHash) -> Result<Vec<u8>, FailureKind> {
+        let (status, bytes, _, _) = self
+            .get_body_within(
+                chain,
+                &format!("block/{}/raw", hash),
+                false,
+                coincube_core::btcb2_block::MAX_BLOCK_BYTES,
+                RAW_BLOCK_TIMEOUT,
+            )
+            .await
+            .map_err(|(error, _)| error)?;
+        if status != 200 {
+            return Err(FailureKind::Http(status));
+        }
+        Ok(bytes)
     }
     /// Six-block fee estimate from the paired fork provider, without account
     /// headers or Bitcoin-provider fallback. A quote never authorizes a spend.
@@ -547,6 +590,55 @@ mod tests {
             ));
             mock.assert_hits(1);
         }
+    }
+    #[tokio::test]
+    async fn raw_blocks_are_anonymous_bounded_immutable_reads() {
+        let server = MockServer::start();
+        let (source, _sender) = source(&server);
+        let hash = BlockHash::from_str(&"ab".repeat(32)).unwrap();
+        let path = format!("/api/v1/esplora/bitcoin-blake2b/mainnet/block/{}/raw", hash);
+        let mut mock = server.mock(|when, then| {
+            when.method(GET).path(path.clone()).matches(|request| {
+                request.headers.as_ref().is_none_or(|headers| {
+                    headers.iter().all(|(name, _)| {
+                        !["authorization", "cookie", "x-coincube-observation"]
+                            .iter()
+                            .any(|forbidden| name.eq_ignore_ascii_case(forbidden))
+                    })
+                })
+            });
+            then.status(200).body([1u8, 2, 3]);
+        });
+        assert_eq!(
+            source.raw_block(ChainId::BitcoinBlake2b, hash).await,
+            Ok(vec![1, 2, 3])
+        );
+        mock.assert_hits(1);
+        mock.delete();
+
+        mock = server.mock(|when, then| {
+            when.method(GET).path(path.clone());
+            then.status(200)
+                .body(vec![0u8; coincube_core::btcb2_block::MAX_BLOCK_BYTES + 1]);
+        });
+        assert_eq!(
+            source.raw_block(ChainId::BitcoinBlake2b, hash).await,
+            Err(FailureKind::Malformed)
+        );
+        mock.delete();
+
+        server.mock(|when, then| {
+            when.method(GET).path(path.clone());
+            then.status(404);
+        });
+        assert_eq!(
+            source.raw_block(ChainId::BitcoinBlake2b, hash).await,
+            Err(FailureKind::Http(404))
+        );
+        assert_eq!(
+            source.raw_block(ChainId::Testnet4, hash).await,
+            Err(FailureKind::WrongChain)
+        );
     }
     pub(super) fn ancestry_fixture() -> (Txid, Vec<u8>) {
         use coincube_core::miniscript::bitcoin::{

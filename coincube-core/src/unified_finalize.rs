@@ -584,7 +584,7 @@ fn satisfy_preferring_unified(
 /// byte — any trailing byte, so a stray `DER || 0x21` is caught as well as a
 /// `DER || 0x01`. Used only to refuse elements the finaliser did not place;
 /// script pushes (empty, `1`, hash preimages, keys) never look like this.
-fn looks_like_der_signature(element: &[u8]) -> bool {
+pub(crate) fn looks_like_der_signature(element: &[u8]) -> bool {
     match element.split_last() {
         Some((_, der)) => {
             der.len() > 8 && der[0] == 0x30 && secp256k1::ecdsa::Signature::from_der(der).is_ok()
