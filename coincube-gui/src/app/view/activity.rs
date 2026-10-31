@@ -2541,10 +2541,11 @@ mod tests {
     fn the_detail_pane_moves_the_column_only_when_it_would_cover_it() {
         // A 2560px window: the 421px pane fits in the right margin.
         assert_eq!(column_frame(2312.0, true), column_frame(2312.0, false));
-        // A 1600px window: the column slides left to clear the pane.
-        let beside = column_frame(1352.0, true);
-        assert!(beside.left < column_frame(1352.0, false).left);
-        assert_eq!(beside.left + beside.column + beside.right, 1352.0);
+        // A 2048px window: the column slides left, at full width, to clear it.
+        let (beside, closed) = (column_frame(1800.0, true), column_frame(1800.0, false));
+        assert_eq!(beside.column, closed.column);
+        assert!(super::super::page_gutter(1800.0) < beside.left && beside.left < closed.left);
+        assert_eq!(beside.left + beside.column + beside.right, 1800.0);
         assert!(beside.right >= DETAIL_SPAN);
         // 1440px: the column already starts at the gutter, so it narrows.
         let (open, closed) = (column_frame(1192.0, true), column_frame(1192.0, false));

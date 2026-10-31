@@ -246,7 +246,9 @@ In the artboards the rule is the "page shell" block at the end of each
 (Activity: `.phd`, `.filters`, `.lst`). In the app this is `coincube_ui::component::tenshu::page`, wrapped by the
 Cube shell (`coincube-gui/src/app/view/mod.rs`: `dashboard`, and
 `dashboard_activity`, which applies the same column in `view::activity`). Do not
-give a screen its own side padding, page `max_width` or centering. The artboards,
+give a screen its own side padding, page `max_width` or centering; an inner
+layout may cap its own width, as Send and Receive do, but starts at the
+column's left edge. The artboards,
 v175 included, anchor the 1120px column left (`.main .pg{margin:0}`); the app
 centres it. Follow this section, not the artboards, for the anchor.
 
