@@ -113,7 +113,11 @@ impl BuySellPanel {
         }
     }
 
-    pub fn view<'a>(&'a self, mask_amounts: bool) -> iced::Element<'a, ViewMessage, theme::Theme> {
+    pub fn view<'a>(
+        &'a self,
+        mask_amounts: bool,
+        liquid_shown: bool,
+    ) -> iced::Element<'a, ViewMessage, theme::Theme> {
         match &self.step {
             BuySellFlowState::DetectingLocation(..)
             | BuySellFlowState::Login { .. }
@@ -123,7 +127,7 @@ impl BuySellPanel {
                 Self::entry_view(&self.step, self.detected_country)
             }
             BuySellFlowState::Mavapay(state) => {
-                Self::provider_view(super::mavapay::ui::form(state, mask_amounts))
+                Self::provider_view(super::mavapay::ui::form(state, mask_amounts, liquid_shown))
             }
             BuySellFlowState::Meld(state) => Self::provider_view(state.view()),
         }

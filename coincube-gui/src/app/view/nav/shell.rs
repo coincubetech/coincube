@@ -320,6 +320,15 @@ enum NavIcon {
     Font(Text<'static>),
 }
 
+/// A wallet row's label: `Spark · Daily spending`, or plain `Spark` while the
+/// wallet has no name. The name is cut like the Cube name above it.
+pub(crate) fn wallet_label(wallet: &str, name: Option<&str>) -> String {
+    match name.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) => format!("{wallet} · {}", short_cube_name(name)),
+        None => wallet.to_owned(),
+    }
+}
+
 fn nav_row<'a>(
     label: impl Into<String>,
     icon: Option<NavIcon>,
@@ -329,6 +338,28 @@ fn nav_row<'a>(
     disabled_reason: Option<String>,
 ) -> Element<'a, Message> {
     let label = label.into();
+    nav_row_with_key(
+        label.clone(),
+        label,
+        icon,
+        active,
+        message,
+        nested,
+        disabled_reason,
+    )
+}
+
+/// A row whose focus ID comes from `key`, not its label, so a label that
+/// carries a user-chosen name keeps one ID whatever the name.
+fn nav_row_with_key<'a>(
+    key: String,
+    label: String,
+    icon: Option<NavIcon>,
+    active: bool,
+    message: Option<Message>,
+    nested: bool,
+    disabled_reason: Option<String>,
+) -> Element<'a, Message> {
     let mut body: Row<Message> = Row::new().spacing(10).align_y(Alignment::Center);
     if nested {
         body = body.push(Space::new().width(Length::Fixed(18.0)));
@@ -346,24 +377,27 @@ fn nav_row<'a>(
         }
         None => {}
     }
-    // `.ni.on { font-weight: 600 }`.
+    // `.ni.on { font-weight: 600 }`. `.ni .lbl { overflow-wrap: anywhere }`:
+    // a long wallet name wraps inside the row rather than running past it.
     body = body.push(
-        text(label.clone())
+        text(label)
             .size(if nested { 13 } else { 14 })
             .font(if active {
                 font::SEMIBOLD
             } else {
                 font::REGULAR
-            }),
+            })
+            .width(Length::Fill)
+            .wrapping(text::Wrapping::WordOrGlyph),
     );
     let id = if nested {
-        format!("tenshu.shell.sub.{label}.{message:?}")
+        format!("tenshu.shell.sub.{key}.{message:?}")
     } else {
-        match label.as_str() {
+        match key.as_str() {
             "Lock Cube" => CUBE_LOCK_ID.to_owned(),
             "Settings" => SETTINGS_ID.to_owned(),
             "All Cubes" => "tenshu.launcher.all-cubes".to_owned(),
-            _ => format!("tenshu.shell.nav.{label}"),
+            _ => format!("tenshu.shell.nav.{key}"),
         }
     };
     let mut button = Action::new(id, body, Message::FocusAction)
@@ -681,9 +715,10 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
     middle = middle.push(section("Wallets"));
     if !ctx.network.is_blake2b() {
         let spark_reason = features::spark(ctx.network).reason().map(str::to_owned);
-        middle = middle.push(nav_row(
-            "Spark",
-            Some(NavIcon::Glyph(glyph::SPARK)),
+        middle = middle.push(nav_row_with_key(
+            "Spark".to_owned(),
+            wallet_label("Spark", ctx.spark_alias),
+            Some(NavIcon::Glyph(glyph::SPARK_STROKE)),
             matches!(menu, Menu::Spark(_)),
             spark_reason
                 .is_none()
@@ -693,8 +728,9 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
         ));
     }
     if ctx.has_vault || ctx.has_imported_bitcoin {
-        middle = middle.push(nav_row(
-            "Vault",
+        middle = middle.push(nav_row_with_key(
+            "Vault".to_owned(),
+            wallet_label("Vault", ctx.vault_alias),
             Some(NavIcon::Glyph(glyph::SHIELD)),
             matches!(menu, Menu::Vault(_)),
             Some(Message::Menu(Menu::Vault(VaultSubMenu::Overview))),

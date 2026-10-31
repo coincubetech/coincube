@@ -34,6 +34,12 @@ pub const SPARK: &str = concat!(
     r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 18 18"><path transform="translate(1.5 1.75) scale(0.2229)" fill="#fff" fill-rule="evenodd" d="M39.7159 25.248L40.8727 0.570312H26.4219L27.5787 25.2483L4.46555 16.5221L0 30.2656L23.8282 36.7915L8.38717 56.0763L20.0781 64.5703L33.6483 43.9245L47.2179 64.5695L58.9089 56.0755L43.4679 36.7909L67.2937 30.2657L62.8281 16.5221L39.7159 25.248Z"/>"##,
     "</svg>"
 );
+// Spark's stroked asterisk (`.ic` at stroke 2): the canvas's Spark mark for
+// navigation and wallet rows. Coin network badges keep the filled `SPARK`.
+icon!(
+    SPARK_STROKE,
+    r#"<path stroke-width="2" d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/>"#
+);
 icon!(
     SHIELD,
     r#"<path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/>"#
@@ -134,6 +140,7 @@ mod tests {
             CLOCK,
             SHIELD_CHECK,
             BOLT,
+            SPARK_STROKE,
             SHIELD,
             DROPLET,
             GEAR,
@@ -174,5 +181,23 @@ mod tests {
         );
         assert!(SPARK.contains(r#"viewBox="0 0 18 18""#));
         assert!(resvg::usvg::Tree::from_str(SPARK, &resvg::usvg::Options::default()).is_ok());
+    }
+
+    #[test]
+    fn spark_stroke_is_the_canvas_asterisk() {
+        // The side panel's Spark row and the Activity wallet cell on the v175
+        // boards.
+        let path =
+            r#"<path stroke-width="2" d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/>"#;
+        for board in [
+            include_str!("../../../../../design-review/canvas/P-Overview.dc.html"),
+            include_str!("../../../../../design-review/canvas/P-Activity.dc.html"),
+        ] {
+            assert!(board.contains(path), "the board's Spark mark changed");
+        }
+        assert!(
+            SPARK_STROKE.contains(path),
+            "the stroked Spark glyph drifted from the boards"
+        );
     }
 }

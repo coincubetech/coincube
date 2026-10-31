@@ -74,6 +74,31 @@ pub enum SparkNotice {
     StableBalanceOffWithHolding,
 }
 
+/// The user's names for this Cube's wallets, as the side panel shows them:
+/// `Spark · ‹spark›` and `Vault · ‹vault›`. `None` shows the plain wallet
+/// name.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WalletNames {
+    /// The Spark nickname,
+    /// [`CubeSettings::spark_alias`](crate::app::settings::CubeSettings::spark_alias).
+    pub spark: Option<String>,
+    /// The Vault's alias,
+    /// [`Wallet::alias`](crate::app::wallet::Wallet::alias).
+    pub vault: Option<String>,
+}
+
+impl WalletNames {
+    pub fn new(
+        cube: &crate::app::settings::CubeSettings,
+        vault: Option<&crate::app::wallet::Wallet>,
+    ) -> Self {
+        Self {
+            spark: cube.spark_alias.clone(),
+            vault: vault.and_then(|wallet| wallet.alias.clone()),
+        }
+    }
+}
+
 /// Identity of one `App` instance — one per Cube open (`#393`).
 ///
 /// A task an `App` spawned can complete after the tab has replaced that `App`
@@ -189,6 +214,9 @@ pub struct Cache {
     pub has_imported_bitcoin: bool,
     /// Display name of the current Cube
     pub cube_name: String,
+    /// The wallet names the side panel shows after "Spark" and "Vault".
+    /// Synced from the Cube settings and the loaded Vault by the App.
+    pub wallet_names: WalletNames,
     /// The Connect account that owns this Cube
     /// ([`crate::app::settings::CubeSettings::connect_owner`]). Lets the Vault
     /// signing picker tell a user signed in under a different account to switch
@@ -234,10 +262,9 @@ pub struct Cache {
     /// account panel alongside `marketplace_flags`; and whether a Liquid wallet
     /// already exists on disk, resolved once at cube-open.
     ///
-    /// Starts [`LiquidGate::HIDDEN`](crate::app::features::LiquidGate::HIDDEN),
-    /// but note this is **not** fail-closed in the Marketplace sense — the
-    /// local-state input can't be cleared by an API response, so an existing
-    /// wallet stays reachable when Connect is down. See
+    /// Starts [`LiquidGate::HIDDEN`](crate::app::features::LiquidGate::HIDDEN).
+    /// Since Tenshu v175 the gate hides Liquid whatever these inputs say; they
+    /// are still recorded so Liquid can be reopened. See
     /// [`crate::app::features::LiquidGate`].
     pub liquid_gate: crate::app::features::LiquidGate,
     /// Whether this Cube can start a Bitcoin Blake2b **claim** — mirrored
@@ -446,6 +473,7 @@ impl std::default::Default for Cache {
             has_vault: false,
             has_imported_bitcoin: false,
             cube_name: String::new(),
+            wallet_names: WalletNames::default(),
             cube_connect_owner: None,
             cube_owned_by_other_account: false,
             current_cube_backed_up: false,

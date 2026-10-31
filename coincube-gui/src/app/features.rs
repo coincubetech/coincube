@@ -112,9 +112,10 @@ fn marketplace_off() -> Availability {
     }
 }
 
-/// Whether the Liquid wallet is shown at all. This is the sunset gate: Liquid
-/// is being wound down, so new installs don't get it, but anyone who already
-/// has a Liquid wallet keeps full access to it forever.
+/// Whether the Liquid wallet is shown at all. This is the sunset gate. Since
+/// Tenshu v175 it hides Liquid for everyone ([`Self::show`] is always
+/// `false`); the rest of this comment describes the inputs it would use if
+/// Liquid were reopened.
 ///
 /// Two independent inputs, OR'd — and note this deliberately does **not**
 /// behave like [`MarketplaceServerFlags`]:
@@ -153,10 +154,16 @@ impl LiquidGate {
     };
 
     /// The single source of truth for "should the Liquid surface exist".
-    /// Consulted by the nav rails, the route guard, global home, and the
-    /// wallet-creation entry points.
+    /// Consulted by the nav rails, the route guard, global home, Activity and
+    /// the Launcher.
+    ///
+    /// Always `false`: Liquid is hidden for everyone, including grandfathered
+    /// accounts and Cubes with a Liquid wallet on disk (Robert, 2026-10-29,
+    /// Tenshu v175 master §3 decision 2). Both inputs are still recorded, and
+    /// the Liquid signer still derives from the Cube seed, so reopening Liquid
+    /// is a change to this function alone.
     pub fn show(&self) -> bool {
-        self.server_enabled || self.local_state_exists
+        false
     }
 }
 
@@ -805,43 +812,28 @@ mod tests {
 
     // ── Liquid sunset gate ──────────────────────────────────────────────
     //
-    // The four scenarios from PLAN-liquid-sunset PR 1. The load-bearing one
-    // is the last: unlike Marketplace, an unreachable API must never hide a
-    // funded wallet.
+    // Tenshu v175 hides Liquid for everyone (master §3 decision 2). Neither
+    // the account grant nor a Liquid wallet on this machine shows it.
+
+    const LIQUID_GRANTED_AND_LOCAL: LiquidGate = LiquidGate {
+        server_enabled: true,
+        local_state_exists: true,
+    };
 
     #[test]
-    fn fresh_install_with_flag_off_hides_liquid() {
-        assert!(!LiquidGate::HIDDEN.show());
+    fn liquid_is_hidden_whatever_the_gate_records() {
         assert_eq!(LiquidGate::default(), LiquidGate::HIDDEN);
-        assert!(!avail_liquid(Network::Bitcoin, LiquidGate::HIDDEN));
-    }
-
-    #[test]
-    fn server_flag_grants_liquid_on_a_fresh_install() {
-        assert!(LIQUID_GRANTED.show());
-        assert!(avail_liquid(Network::Bitcoin, LIQUID_GRANTED));
-    }
-
-    #[test]
-    fn local_wallet_shows_liquid_even_with_the_flag_off() {
-        // The grandfather case: the server says no (or has never been asked),
-        // but this machine already has a Liquid wallet. Funds win.
-        assert!(LIQUID_LOCAL_ONLY.show());
-        assert!(avail_liquid(Network::Bitcoin, LIQUID_LOCAL_ONLY));
-    }
-
-    #[test]
-    fn unreachable_api_still_shows_a_funded_local_wallet() {
-        // An unreachable/silent API reads as `server_enabled: false` — the
-        // same value as a real "no". Local state must still surface the
-        // wallet, or a network outage strands the user's L-BTC. This is the
-        // deliberate divergence from `MarketplaceServerFlags`' fail-closed
-        // behavior; if someone "fixes" this to fail closed, that's a bug.
-        let api_down = LiquidGate {
-            server_enabled: false,
-            local_state_exists: true,
-        };
-        assert!(api_down.show());
+        for gate in [
+            LiquidGate::HIDDEN,
+            LIQUID_GRANTED,
+            LIQUID_LOCAL_ONLY,
+            LIQUID_GRANTED_AND_LOCAL,
+        ] {
+            assert!(!gate.show(), "{:?}", gate);
+            assert!(!avail_liquid(Network::Bitcoin, gate), "{:?}", gate);
+            // The Cube-home cards, the transfer picker and the Launcher.
+            assert!(!liquid_wallet_usable(Network::Bitcoin, gate), "{:?}", gate);
+        }
     }
 
     #[test]
@@ -853,32 +845,30 @@ mod tests {
 
     #[test]
     fn gated_off_liquid_route_reads_as_account_scoped_not_network_scoped() {
-        assert_eq!(
-            route_availability(
-                &Menu::Liquid(crate::app::menu::LiquidSubMenu::Overview),
-                Network::Bitcoin,
-                false,
-                MarketplaceServerFlags::OFF,
-                LiquidGate::HIDDEN,
-            )
-            .reason(),
-            Some(LIQUID_ACCOUNT_UNAVAILABLE_REASON)
-        );
+        // A restored or deep-linked Liquid route, even with the grant and a
+        // local wallet, gets the account reason rather than a live panel.
+        for gate in [LiquidGate::HIDDEN, LIQUID_GRANTED_AND_LOCAL] {
+            assert_eq!(
+                route_availability(
+                    &Menu::Liquid(crate::app::menu::LiquidSubMenu::Overview),
+                    Network::Bitcoin,
+                    false,
+                    MarketplaceServerFlags::OFF,
+                    gate,
+                )
+                .reason(),
+                Some(LIQUID_ACCOUNT_UNAVAILABLE_REASON),
+                "{gate:?}"
+            );
+        }
     }
 
     #[test]
     fn wallet_card_hides_liquid_off_mainnet_even_when_granted() {
-        // The nav greys Liquid out on a testnet cube; the Cube-home card and
-        // the transfer picker hide it outright, so a user never gets live
-        // Send/Receive buttons for a wallet with no backend behind it.
-        assert!(liquid_wallet_usable(Network::Bitcoin, LIQUID_GRANTED));
-        assert!(liquid_wallet_usable(Network::Bitcoin, LIQUID_LOCAL_ONLY));
         assert!(!liquid_wallet_usable(Network::Testnet, LIQUID_GRANTED));
         assert!(!liquid_wallet_usable(Network::Testnet4, LIQUID_LOCAL_ONLY));
         assert!(!liquid_wallet_usable(Network::Signet, LIQUID_GRANTED));
         assert!(!liquid_wallet_usable(Network::Regtest, LIQUID_GRANTED));
-        // Sunset gate still wins on mainnet.
-        assert!(!liquid_wallet_usable(Network::Bitcoin, LiquidGate::HIDDEN));
     }
 
     fn avail_liquid<C: Into<ChainId>>(net: C, gate: LiquidGate) -> bool {
