@@ -10,7 +10,7 @@ use coincube_core::{
         CellRef, GridRecoveryPhrase, OrderedPattern, WordGrid, PATTERN_LENGTH,
     },
     descriptors::CoincubePolicy,
-    miniscript::bitcoin::{bip32::Fingerprint, psbt::Psbt, secp256k1, Network, Txid},
+    miniscript::bitcoin::{bip32::Fingerprint, psbt::Psbt, secp256k1, Network, OutPoint, Txid},
     psbt_unified::UnifiedPsbt,
     unified_finalize::UnifiedFinalizeError,
 };
@@ -190,6 +190,44 @@ pub struct PsbtState {
     /// Finalization is cryptographic work: reuse it only for the identical PSBT,
     /// including signatures, prevouts, scripts and transaction bytes.
     bitcoin_finalization: std::sync::Mutex<Option<([u8; 32], bool)>>,
+    /// This screen's last re-qualification of the spend's split key. The key
+    /// counts toward *Split*, and a recorded split may be signed or
+    /// broadcast, only while it holds a fresh positive answer
+    /// ([`SPLIT_KEY_CHECK_LIFETIME`]); a proof in the cache is never enough
+    /// by itself, because nothing re-checks it after a reorg.
+    split_key_check: SplitKeyCheck,
+}
+
+/// How long a positive split-key re-qualification admits signing and
+/// broadcast. Past it the next message on the screen asks again.
+pub const SPLIT_KEY_CHECK_LIFETIME: std::time::Duration = std::time::Duration::from_secs(120);
+/// A failed re-qualification is asked again after this long, or at once when
+/// the user presses Sign or Broadcast.
+const SPLIT_KEY_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Shown while the split key is being re-qualified.
+pub const SPLIT_KEY_CHECKING_COPY: &str =
+    "Checking the split key on both chains before this split can be signed or sent…";
+/// Shown when the last positive re-qualification has lapsed.
+pub const SPLIT_KEY_STALE_COPY: &str =
+    "The split key needs checking again before this split can be signed or sent.";
+
+/// State of [`PsbtState::split_key_check`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SplitKeyCheck {
+    Idle,
+    /// A re-qualification of `key` is running; only a reply for `generation`
+    /// is accepted.
+    InFlight {
+        generation: u64,
+        key: OutPoint,
+    },
+    /// The last re-qualification of `key` finished at `at`.
+    Done {
+        key: OutPoint,
+        at: std::time::Instant,
+        result: Result<(), String>,
+    },
 }
 
 /// State of the spend screen's entanglement re-check ([`PsbtState::entangled_check`]).
@@ -256,6 +294,7 @@ impl PsbtState {
             entangled_check: EntangledCheck::Idle,
             revalidated_for: None,
             bitcoin_finalization: std::sync::Mutex::new(None),
+            split_key_check: SplitKeyCheck::Idle,
         }
     }
 
@@ -272,13 +311,11 @@ impl PsbtState {
         self
     }
 
-    /// The input that spends a split key according to `cache` now: a coin
-    /// with a path verified by a check in this session, not seen on the twin
-    /// chain.
-    fn split_key_input(
-        &self,
-        cache: &Cache,
-    ) -> Option<(usize, coincube_core::miniscript::bitcoin::OutPoint)> {
+    /// The input that may spend a split key according to `cache` now: a coin
+    /// with a proof to re-qualify ([`Cache::split_key_path`]), not seen on
+    /// the twin chain. A candidate only; see [`Self::split_key_input`].
+    fn split_key_candidate(&self, cache: &Cache) -> Option<(usize, OutPoint)> {
+        let spend = self.tx.psbt.unsigned_tx.compute_txid();
         self.tx
             .psbt
             .unsigned_tx
@@ -287,13 +324,120 @@ impl PsbtState {
             .enumerate()
             .find(|(_, input)| {
                 let outpoint = input.previous_output;
-                matches!(
-                    cache.chain_proofs.get(&outpoint),
-                    Some(crate::services::chain_status::ProofEntry::Verified(_))
-                ) && cache.entanglement_of(&outpoint.txid)
+                cache.entanglement_of(&outpoint.txid)
                     != crate::services::entangled::Entanglement::Entangled
+                    && cache.split_key_path(spend, outpoint).is_some()
             })
             .map(|(index, input)| (index, input.previous_output))
+    }
+
+    /// The input that spends a split key now: a candidate this screen has
+    /// re-qualified against both chains within [`SPLIT_KEY_CHECK_LIFETIME`].
+    fn split_key_input(&self, cache: &Cache) -> Option<(usize, OutPoint)> {
+        self.split_key_candidate(cache)
+            .filter(|(_, key)| self.split_key_qualified(*key))
+    }
+
+    fn split_key_qualified(&self, key: OutPoint) -> bool {
+        matches!(
+            &self.split_key_check,
+            SplitKeyCheck::Done { key: checked, at, result: Ok(()) }
+                if *checked == key && at.elapsed() < SPLIT_KEY_CHECK_LIFETIME
+        )
+    }
+
+    /// Why this spend may not be signed or broadcast yet because of its
+    /// split key: a split this Cube recorded as using one is admitted only
+    /// while the key is freshly re-qualified, on either chain.
+    fn split_key_refusal(&self, cache: &Cache) -> Option<String> {
+        let key = cache.recorded_split_key(self.tx.psbt.unsigned_tx.compute_txid())?;
+        if self
+            .split_key_input(cache)
+            .is_some_and(|(_, input)| input == key)
+        {
+            return None;
+        }
+        Some(match &self.split_key_check {
+            SplitKeyCheck::InFlight { key: checking, .. } if *checking == key => {
+                SPLIT_KEY_CHECKING_COPY.to_string()
+            }
+            SplitKeyCheck::Done {
+                key: checked,
+                result: Err(reason),
+                ..
+            } if *checked == key => reason.clone(),
+            _ if self.split_key_candidate(cache).is_none() => {
+                "The split key is no longer a split key. Build the split again.".to_string()
+            }
+            _ => SPLIT_KEY_STALE_COPY.to_string(),
+        })
+    }
+
+    /// Ask the app to re-qualify the split key when there is one and this
+    /// screen has no fresh answer for it: on entering the screen, once a
+    /// positive answer lapses, after [`SPLIT_KEY_RETRY`] for a failed one, or
+    /// at once for a failed one when `retry` (Sign or Broadcast pressed).
+    fn requalify_split_key(&mut self, cache: &Cache, retry: bool) -> Task<Message> {
+        let Some((_, key)) = self.split_key_candidate(cache) else {
+            return Task::none();
+        };
+        match &self.split_key_check {
+            SplitKeyCheck::InFlight { key: checking, .. } if *checking == key => {
+                return Task::none();
+            }
+            SplitKeyCheck::Done {
+                key: checked,
+                at,
+                result,
+            } if *checked == key => {
+                let fresh = match result {
+                    Ok(()) => at.elapsed() < SPLIT_KEY_CHECK_LIFETIME,
+                    Err(_) => !retry && at.elapsed() < SPLIT_KEY_RETRY,
+                };
+                if fresh {
+                    return Task::none();
+                }
+            }
+            _ => {}
+        }
+        let generation = next_check_generation();
+        self.split_key_check = SplitKeyCheck::InFlight { generation, key };
+        Task::done(Message::SplitKeyCheck {
+            spend: self.tx.psbt.unsigned_tx.compute_txid(),
+            key,
+            generation,
+        })
+    }
+
+    /// Apply a re-qualification reply for the generation in flight; anything
+    /// else is stale and ignored. A failure on a recorded split says why.
+    fn apply_split_key_reply(
+        &mut self,
+        cache: &Cache,
+        spend: Txid,
+        key: OutPoint,
+        generation: u64,
+        result: Result<(), String>,
+    ) -> Task<Message> {
+        let current = matches!(
+            &self.split_key_check,
+            SplitKeyCheck::InFlight { generation: g, key: k } if *g == generation && *k == key
+        );
+        if !current || spend != self.tx.psbt.unsigned_tx.compute_txid() {
+            return Task::none();
+        }
+        let failed = result.clone().err();
+        self.split_key_check = SplitKeyCheck::Done {
+            key,
+            at: std::time::Instant::now(),
+            result,
+        };
+        match failed {
+            Some(reason) if cache.recorded_split_key(spend) == Some(key) => {
+                Task::done(Message::View(view::Message::ShowError(reason)))
+            }
+            _ => Task::none(),
+        }
     }
 
     /// The replay review as of `cache` now. The split key it was opened with
@@ -481,6 +625,9 @@ impl PsbtState {
 
     /// Why this spend is not ready for a broadcast attempt.
     fn not_ready_reason(&self, cache: &Cache) -> Option<String> {
+        if let Some(reason) = self.split_key_refusal(cache) {
+            return Some(reason);
+        }
         let Some(review) = self.current_review(cache) else {
             return (!self.bitcoin_signatures_complete()).then(||
                 "This transaction needs valid signatures for every input before it can be broadcast.".to_string()
@@ -553,13 +700,15 @@ impl PsbtState {
     /// Broadcast handler and the view share ([`replay::broadcast_ready`]):
     /// verified finalization on a Bitcoin-family Cube; on Bitcoin Blake2b the
     /// unified finalizer's verdict, the I13 requirement on known-entangled inputs,
-    /// and the acknowledgement.
+    /// and the acknowledgement. On either chain a recorded split-key split
+    /// also needs a fresh re-qualification of its key.
     pub fn broadcast_ready(&self, cache: &Cache) -> bool {
         replay::broadcast_ready(
             self.bitcoin_signatures_complete(),
             self.current_review(cache).as_deref(),
             &self.entangled_inputs(cache),
         ) && !self.entangled_check.in_flight()
+            && self.split_key_refusal(cache).is_none()
     }
 
     pub fn with_recipient_identities(mut self, identities: Option<RecipientIdentities>) -> Self {
@@ -692,6 +841,12 @@ impl PsbtState {
         if dismissed {
             self.signer_focus_return = false;
         }
+        let retry_split_key = matches!(
+            &message,
+            Message::View(view::Message::Spend(
+                view::SpendTxMessage::Sign | view::SpendTxMessage::Broadcast
+            ))
+        );
         // Order matters: the message is applied **before** any new re-check
         // is kicked, so a pass can never start a check and then resolve it
         // with an older answer. A reply is accepted only for the generation
@@ -706,8 +861,17 @@ impl PsbtState {
                 self.apply_entangled_reply(spend, generation, answers);
                 Task::none()
             }
+            Message::SplitKeyChecked {
+                spend,
+                key,
+                generation,
+                result,
+            } => self.apply_split_key_reply(cache, spend, key, generation, result),
             message => self.update_inner(daemon, cache, message),
         };
+        // Likewise the split key: re-qualified on entering the screen, when
+        // its answer lapses, and on Sign or Broadcast after a failure.
+        let requalify = self.requalify_split_key(cache, retry_split_key);
         // Entering the screen: the first message through here starts the
         // entanglement re-check of a replayable spend (once per signature
         // set; a no-op otherwise).
@@ -744,7 +908,7 @@ impl PsbtState {
         } else {
             Task::none()
         };
-        Task::batch([task, recheck, dialog, focus])
+        Task::batch([task, requalify, recheck, dialog, focus])
     }
 
     fn update_inner(
@@ -897,6 +1061,11 @@ impl PsbtState {
                     return Task::none();
                 }
                 self.signer_focus_return = false;
+                // A recorded split is signed only with its key freshly
+                // re-qualified; [`Self::update`] asks again after this.
+                if let Some(reason) = self.split_key_refusal(cache) {
+                    return Task::done(Message::View(view::Message::ShowError(reason)));
+                }
 
                 // Build (and launch) the nested Keychain flow up front when
                 // Connect is ready, so keychain rows populate with friendly
@@ -973,6 +1142,9 @@ impl PsbtState {
                 }
             }
             Message::View(view::Message::Spend(view::SpendTxMessage::Broadcast)) => {
+                if let Some(reason) = self.split_key_refusal(cache) {
+                    return Task::done(Message::View(view::Message::ShowError(reason)));
+                }
                 // The button is disabled until `broadcast_ready`; this is the
                 // same gate for anything that reaches the handler another way.
                 if !self.broadcast_ready(cache) {
@@ -5459,6 +5631,150 @@ mod tests {
                 state.replay_presentation(&cache).unwrap().review.status(),
                 ReplayStatus::Replayable { inputs: vec![0] }
             );
+        }
+
+        /// A split prepared with a verified key, whose live ancestry then
+        /// changes before it is signed (a reorg, a twin-chain change). The
+        /// cache still holds the proof checked when the split was built and
+        /// nothing refreshes it, so the screen must not take it on trust:
+        /// the key counts only with a fresh re-qualification, and a failed or
+        /// lapsed one refuses Sign, Broadcast and the *Split* status.
+        #[tokio::test]
+        async fn a_split_key_whose_ancestry_changed_after_prepare_is_refused() {
+            use coincube_core::claim_ancestry::{retained::RetainedPath, search::OwnedLink};
+            use coincube_core::miniscript::bitcoin::consensus::serialize;
+            let f = fixture();
+            let wallet = wallet_with_hot_signer(&f);
+            let secp = secp256k1::Secp256k1::new();
+            let signed = legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]);
+            let spend = signed.unsigned_tx.compute_txid();
+            let key = signed.unsigned_tx.input[0].previous_output;
+            let funding = signed.inputs[0].non_witness_utxo.clone().unwrap();
+            let path = RetainedPath::new(
+                key,
+                vec![OwnedLink {
+                    transaction: serialize(&funding),
+                    parent_input: None,
+                }],
+            )
+            .unwrap();
+
+            // As `split_coins::prepare` leaves it: the key verified in the
+            // cache and the split recorded in the journal.
+            let mut cache = Cache::default();
+            cache.chain_proofs.insert(
+                key,
+                crate::services::chain_status::ProofEntry::Verified(path.clone()),
+            );
+            cache
+                .split_records
+                .push(crate::services::split_coins::SplitRecord {
+                    txid: spend,
+                    chain: ChainId::BitcoinBlake2b,
+                    method: crate::services::split_coins::Method::SplitKey,
+                    inputs: Vec::new(),
+                    key: Some(key),
+                    key_path: Some(hex::encode(path.encode())),
+                    created_at: 0,
+                    confirmations: 0,
+                });
+            let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
+                crate::daemon::client::Coincubed::new(MockDaemon::new(vec![]).run()),
+            );
+            let sign = || Message::View(view::Message::Spend(view::SpendTxMessage::Sign));
+            let broadcast = || Message::View(view::Message::Spend(view::SpendTxMessage::Broadcast));
+            let in_flight = |state: &PsbtState| match &state.split_key_check {
+                SplitKeyCheck::InFlight { generation, key: k } => {
+                    assert_eq!(*k, key);
+                    *generation
+                }
+                other => panic!("no split-key check in flight: {:?}", other),
+            };
+            let reply = |generation, result| Message::SplitKeyChecked {
+                spend,
+                key,
+                generation,
+                result,
+            };
+
+            let mut state = PsbtState::new(
+                wallet,
+                SpendTx::new(
+                    None,
+                    signed,
+                    Vec::new(),
+                    &f.descriptor,
+                    &secp,
+                    Network::Bitcoin,
+                ),
+                true,
+            )
+            .with_split_key(&cache);
+            // Opening the screen asks for the key; until the answer lands
+            // the cached proof admits nothing.
+            let asked = drive(state.update(daemon.clone(), &cache, Message::Reconcile)).await;
+            let first = in_flight(&state);
+            assert!(asked.iter().any(|m| matches!(
+                m,
+                Message::SplitKeyCheck { spend: s, key: k, generation }
+                    if *s == spend && *k == key && *generation == first
+            )));
+            assert!(!state.broadcast_ready(&cache));
+            assert_eq!(
+                state.current_review(&cache).unwrap().status(),
+                ReplayStatus::Replayable { inputs: vec![0] }
+            );
+            let refused = drive(state.update(daemon.clone(), &cache, sign())).await;
+            assert!(state.modal.is_none(), "Sign waits for the key check");
+            assert!(shows_error(&refused, SPLIT_KEY_CHECKING_COPY));
+
+            // The key re-qualifies: Split, and the split may be broadcast.
+            let _ = drive(state.update(daemon.clone(), &cache, reply(first, Ok(())))).await;
+            assert_eq!(
+                state.current_review(&cache).unwrap().status(),
+                ReplayStatus::Split
+            );
+            assert!(state.broadcast_ready(&cache));
+
+            // Time passes and the key's ancestry changes. The cache still
+            // says verified; the lapsed answer does not.
+            if let SplitKeyCheck::Done { at, .. } = &mut state.split_key_check {
+                *at = std::time::Instant::now()
+                    .checked_sub(SPLIT_KEY_CHECK_LIFETIME)
+                    .unwrap();
+            }
+            assert!(matches!(
+                cache.chain_proofs.get(&key),
+                Some(crate::services::chain_status::ProofEntry::Verified(_))
+            ));
+            assert!(!state.broadcast_ready(&cache));
+            let refused = drive(state.update(daemon.clone(), &cache, broadcast())).await;
+            assert!(shows_error(&refused, SPLIT_KEY_STALE_COPY));
+            assert!(state.modal.is_none(), "no Broadcast dialog");
+            let second = in_flight(&state);
+            assert!(second > first, "Broadcast asked again");
+
+            // The fresh check fails against the changed chains, and a late
+            // positive reply for the old check is ignored.
+            let changed = "The split key couldn't be verified right now: reorg".to_string();
+            let failed =
+                drive(state.update(daemon.clone(), &cache, reply(second, Err(changed.clone()))))
+                    .await;
+            assert!(shows_error(&failed, &changed));
+            let _ = drive(state.update(daemon.clone(), &cache, reply(first, Ok(())))).await;
+            assert!(!state.broadcast_ready(&cache));
+            assert_eq!(
+                state.current_review(&cache).unwrap().status(),
+                ReplayStatus::Replayable { inputs: vec![0] }
+            );
+            assert_eq!(state.not_ready_reason(&cache), Some(changed.clone()));
+
+            // Sign is refused too, and asks again. The empty mock daemon
+            // panics on any RPC, so no path reached the daemon.
+            let refused = drive(state.update(daemon.clone(), &cache, sign())).await;
+            assert!(state.modal.is_none(), "no signer picker");
+            assert!(shows_error(&refused, &changed));
+            assert!(in_flight(&state) > second);
         }
 
         #[test]

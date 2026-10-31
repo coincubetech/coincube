@@ -386,6 +386,23 @@ pub enum Message {
         generation: u64,
         answers: Vec<crate::services::entangled::LookupAnswer>,
     },
+    /// The spend screen asks for the split key `key` of the spend `spend` to
+    /// be re-qualified against both chains
+    /// ([`crate::services::split_coins::requalify`]) before it counts toward
+    /// signing or broadcast. `generation` is the screen's check generation.
+    SplitKeyCheck {
+        spend: coincube_core::miniscript::bitcoin::Txid,
+        key: coincube_core::miniscript::bitcoin::OutPoint,
+        generation: u64,
+    },
+    /// The answer to [`Self::SplitKeyCheck`], routed to the current panel.
+    /// The screen accepts it only for the generation it has in flight.
+    SplitKeyChecked {
+        spend: coincube_core::miniscript::bitcoin::Txid,
+        key: coincube_core::miniscript::bitcoin::OutPoint,
+        generation: u64,
+        result: Result<(), String>,
+    },
     /// Latest UpdateTip/blockheaders line streamed from the pending internal
     /// bitcoind's debug.log.  `None` means no matching line found yet.
     PendingBitcoindLog(Option<String>),

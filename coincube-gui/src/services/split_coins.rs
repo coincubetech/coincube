@@ -638,8 +638,11 @@ fn check_construction(psbt: &Psbt, requested: &[OutPoint]) -> Result<(), String>
     Ok(())
 }
 
-/// Re-qualify the key's proof against both canonical chains now.
-async fn requalify(
+/// Re-qualify the key's proof against both canonical chains now. Run before
+/// a split is built, and again by the PSBT screen before the split may be
+/// signed or broadcast, so a reorg in between can't leave a stale proof
+/// standing in for the key.
+pub async fn requalify(
     client: &crate::services::coincube::CoincubeClient,
     chain: ChainId,
     key: &KeyChoice,

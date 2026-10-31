@@ -7459,6 +7459,45 @@ impl App {
                     },
                 );
             }
+            Message::SplitKeyCheck {
+                spend,
+                key,
+                generation,
+            } => {
+                let reply = move |result: Result<(), String>| Message::SplitKeyChecked {
+                    spend,
+                    key,
+                    generation,
+                    result,
+                };
+                let Some(wallet) = self.wallet.as_ref() else {
+                    return Task::done(reply(Err("This Vault isn't loaded.".into())));
+                };
+                let chain = wallet.chain;
+                let Some(path) = self.cache.split_key_path(spend, key) else {
+                    return Task::done(reply(Err(
+                        "The split key has no proof to check. Build the split again.".into(),
+                    )));
+                };
+                let Some(client) = self.authenticated_coincube_client() else {
+                    return Task::done(reply(Err(
+                        "Sign in to COINCUBE Connect to check the split key.".into(),
+                    )));
+                };
+                let session = *self.panels.session_generation.borrow();
+                let live = self.panels.session_generation.subscribe();
+                return Task::perform(
+                    async move {
+                        let key = crate::services::split_coins::KeyChoice {
+                            outpoint: key,
+                            path,
+                        };
+                        crate::services::split_coins::requalify(&client, chain, &key, session, live)
+                            .await
+                    },
+                    reply,
+                );
+            }
             Message::SplitPrepared(result) => {
                 let txid = result.as_ref().ok().map(|record| record.txid);
                 let mut tasks = Vec::new();

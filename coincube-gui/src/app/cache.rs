@@ -683,6 +683,41 @@ impl Cache {
         keys
     }
 
+    /// The proof to re-qualify for `key` as a split key of the spend `spend`:
+    /// the path a check verified in this session, else the one the split's
+    /// journal record was built with (a restart leaves only a
+    /// [`crate::services::chain_status::ProofEntry::Saved`] copy). Neither
+    /// counts by itself; the PSBT screen re-qualifies it against both chains.
+    pub fn split_key_path(
+        &self,
+        spend: coincube_core::miniscript::bitcoin::Txid,
+        key: coincube_core::miniscript::bitcoin::OutPoint,
+    ) -> Option<coincube_core::claim_ancestry::retained::RetainedPath> {
+        use coincube_core::claim_ancestry::retained::RetainedPath;
+        if let Some(crate::services::chain_status::ProofEntry::Verified(path)) =
+            self.chain_proofs.get(&key)
+        {
+            return Some(path.clone());
+        }
+        self.split_records
+            .iter()
+            .find(|record| record.txid == spend && record.key == Some(key))
+            .and_then(|record| hex::decode(record.key_path.as_ref()?).ok())
+            .and_then(|bytes| RetainedPath::decode(key, &bytes).ok())
+    }
+
+    /// The split key of `spend` if this Cube's journal records it as a
+    /// split-key split.
+    pub fn recorded_split_key(
+        &self,
+        spend: coincube_core::miniscript::bitcoin::Txid,
+    ) -> Option<coincube_core::miniscript::bitcoin::OutPoint> {
+        self.split_records
+            .iter()
+            .find(|record| record.txid == spend)
+            .and_then(|record| record.key)
+    }
+
     /// An ancestry check batch landed. Like [`Self::entangled_batch_landed`],
     /// a batch issued by this `App` instance releases its whole claim first.
     /// Unlike entanglement, a result is about one Vault's coin, so a batch
