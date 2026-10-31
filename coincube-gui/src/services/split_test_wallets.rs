@@ -11,14 +11,8 @@ use coincube_core::miniscript::bitcoin::{
     transaction, Amount, BlockHash, Network, OutPoint, Transaction, TxIn, TxOut, Txid,
 };
 
-use coincube_core::{
-    claim::BlockRef,
-    foreign_split::{SplitBranch, SplitCoin},
-};
-
 use super::foreign_scan::{Branch, DiscoveredCoin, ScanDescriptor};
 
-pub const FORK: u64 = 900;
 pub const BITCOIN_TIP_HEIGHT: u32 = 960;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,28 +144,3 @@ pub fn shared_coins(wallet: &Wallet) -> Vec<DiscoveredCoin> {
 /// An unused receive index of every fixture wallet: the walk's last used
 /// index is 3 on both branches.
 pub const FRESH_RECEIVE: u32 = 4;
-
-/// The two pre-fork coins of `wallet` as step-1 inputs: each confirmed in the
-/// same block on both chains, below [`FORK`].
-pub fn splittable_coins(wallet: &Wallet) -> Vec<SplitCoin> {
-    shared_coins(wallet)
-        .into_iter()
-        .map(|coin| {
-            let block = BlockRef {
-                height: u64::from(coin.block_height.expect("confirmed fixture coin")),
-                hash: coin.block_hash.expect("confirmed fixture coin"),
-            };
-            SplitCoin {
-                outpoint: coin.outpoint,
-                branch: match coin.branch {
-                    Branch::External => SplitBranch::External,
-                    Branch::Internal => SplitBranch::Internal,
-                },
-                index: coin.index,
-                previous: coin.previous,
-                bitcoin_block: Some(block),
-                btcb2_block: Some(block),
-            }
-        })
-        .collect()
-}
