@@ -1,9 +1,11 @@
 pub mod border_wallet;
+pub mod btcb2_block;
 pub mod chain;
 pub mod claim;
 pub mod claim_ancestry;
 pub mod claim_finalize;
 pub mod claim_spend;
+pub mod confirmed_unified;
 pub mod descriptors;
 pub mod foreign_split;
 pub mod imported_key_crypt;

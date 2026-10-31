@@ -677,7 +677,10 @@ fn require_compatible_sighash(
     Ok(())
 }
 
-fn script_uses_key(miniscript: &Miniscript<PublicKey, Segwitv0>, public_key: &PublicKey) -> bool {
+pub(crate) fn script_uses_key(
+    miniscript: &Miniscript<PublicKey, Segwitv0>,
+    public_key: &PublicKey,
+) -> bool {
     miniscript.iter().any(|node| match &node.node {
         Terminal::PkK(key) | Terminal::PkH(key) => key == public_key,
         Terminal::RawPkH(hash) => public_key.pubkey_hash().as_byte_array() == hash.as_byte_array(),
