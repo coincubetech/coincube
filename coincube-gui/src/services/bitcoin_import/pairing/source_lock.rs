@@ -7,7 +7,7 @@ use std::{
     path::Path,
 };
 
-use coincube_core::foreign_split::SplitSource;
+use coincube_core::public_wallet_source::SplitSource;
 use fs4::fs_std::FileExt;
 
 use crate::{chain::ChainId, dir::CoincubeDirectory};

@@ -37,6 +37,7 @@ use std::{
 
 use coincube_core::{
     claim_ancestry::{retained::RetainedPath, search::OwnedLink},
+    descriptors::CoincubeDescriptor,
     miniscript::bitcoin::{consensus::serialize, psbt::Psbt, OutPoint, Transaction, Txid},
 };
 use coincubed::commands::CoinStatus;
@@ -351,6 +352,40 @@ pub fn is_separated(
     now: std::time::Instant,
 ) -> bool {
     separated.get(outpoint).is_some_and(|until| now <= *until)
+}
+
+/// Upper bound, in vbytes, of a split spending `shared_count` both-chain
+/// coins plus one more input (the split key, or for a signature split an
+/// overestimate by one input) to one change output of `descriptor`'s Vault.
+/// A funding estimate only, not authorization to construct, sign or
+/// broadcast anything. `None` for a Taproot Vault, no coins, or more inputs
+/// than the estimate covers. Moved from the removed Claim engine
+/// (`coincube_core::claim_spend::estimate_ancestry_self_transfer_vbytes`).
+pub fn estimate_split_vbytes(descriptor: &CoincubeDescriptor, shared_count: usize) -> Option<u64> {
+    use coincube_core::miniscript::bitcoin::{
+        absolute::LockTime, bip32::ChildNumber, secp256k1, transaction, Amount, TxIn, TxOut,
+    };
+    if descriptor.is_taproot() || shared_count == 0 {
+        return None;
+    }
+    let input_count = shared_count
+        .checked_add(1)
+        .filter(|count| *count <= 20_001)?;
+    let secp = secp256k1::Secp256k1::verification_only();
+    let change_script = descriptor
+        .change_descriptor()
+        .derive(ChildNumber::Normal { index: 0 }, &secp)
+        .script_pubkey();
+    let tx = Transaction {
+        version: transaction::Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn::default(); input_count],
+        output: vec![TxOut {
+            value: Amount::ZERO,
+            script_pubkey: change_script,
+        }],
+    };
+    Some(descriptor.unsigned_tx_max_vbytes(&tx, true))
 }
 
 /// Whether this Vault can split with a replay-protected signature: Bitcoin
@@ -687,6 +722,21 @@ mod tests {
         Sequence, TxIn, TxOut, Witness,
     };
     use std::str::FromStr;
+
+    /// The split size estimate: refused for no coins or too many, and one
+    /// more shared coin costs at least one more input.
+    #[test]
+    fn split_vbytes_estimate_bounds_and_refusals() {
+        let wsh = CoincubeDescriptor::from_str("wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#d72le4dr").unwrap();
+        assert_eq!(estimate_split_vbytes(&wsh, 0), None);
+        let one = estimate_split_vbytes(&wsh, 1).unwrap();
+        let two = estimate_split_vbytes(&wsh, 2).unwrap();
+        // Two P2WSH inputs and one P2WSH output: well above a bare skeleton.
+        assert!(one > 2 * 41 + 43, "{}", one);
+        // Each input adds at least its outpoint, sequence and a signature.
+        assert!(two >= one + 41 + 18, "{} {}", one, two);
+        assert_eq!(estimate_split_vbytes(&wsh, 20_001), None);
+    }
 
     fn tx(inputs: Vec<OutPoint>, coinbase_height: Option<i64>) -> Transaction {
         Transaction {

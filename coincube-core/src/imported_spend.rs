@@ -14,7 +14,7 @@ use miniscript::{
 };
 
 use crate::{
-    foreign_split::{self, FinalizeError},
+    public_wallet_finalize::{self, FinalizeError},
     spend::{
         self, AddrInfo, CandidateCoin, CoinSelectionRes, CreateSpendRes, CreateSpendWarning,
         InputAuthError, InsaneFeeInfo, SpendCreationError, SpendOutputAddress, SpendTxFees,
@@ -413,7 +413,7 @@ fn verified_partial_outputs<C: secp256k1::Verification>(
         .map_err(ImportedFinalizeError::Construction)?;
     check_imported_signed_construction(construction, signed)
         .map_err(ImportedFinalizeError::Signatures)?;
-    foreign_split::verify_partial_signatures_for(signed, secp, |_, input, output| {
+    public_wallet_finalize::verify_partial_signatures_for(signed, secp, |_, input, output| {
         locate_input(wallet, input, &output.script_pubkey)
     })
     .map_err(ImportedFinalizeError::Signatures)
@@ -453,7 +453,7 @@ fn check_imported_signed_construction(
             _ => return Err(FinalizeError::ConstructionChanged),
         }
     }
-    foreign_split::check_signed_construction(construction, &normalized)
+    public_wallet_finalize::check_signed_construction(construction, &normalized)
 }
 
 /// Number of cryptographically valid signatures per input on an exact partial
@@ -516,7 +516,7 @@ pub fn finalize_imported_spend<C: secp256k1::Verification>(
         .checked_sub(paid)
         .ok_or(ImportedFinalizeError::Signatures(FinalizeError::Economics))?;
     let (transaction, signatures_per_input) =
-        foreign_split::finalize_and_replay(construction, signed, &outputs, secp)
+        public_wallet_finalize::finalize_and_replay(construction, signed, &outputs, secp)
             .map_err(ImportedFinalizeError::Signatures)?;
     let actual_feerate = fee / (transaction.vsize() as u64);
     if !(1..=spend::MAX_FEERATE).contains(&actual_feerate) {
@@ -752,6 +752,60 @@ mod tests {
                 sighash_type: EcdsaSighashType::All,
             },
         );
+    }
+
+    /// The shared public-wallet finalizer accepts only implicit or explicit
+    /// `SIGHASH_ALL`: an `ALL` input request is accepted like the default,
+    /// while any other request, or an `ALL` signature whose trailing byte is
+    /// relabeled, is refused. Ported from the removed foreign-Split finalizer
+    /// tests, which covered these helpers through step 1.
+    #[test]
+    fn only_sighash_all_signatures_finalize() {
+        use miniscript::bitcoin::psbt::PsbtSighashType;
+        let secp = secp256k1::Secp256k1::new();
+        let (wallet, signers, created) = draft("wpkh");
+
+        let mut explicit = created.psbt.clone();
+        explicit.inputs[0].sighash_type = Some(PsbtSighashType::from(EcdsaSighashType::All));
+        add_signature(&mut explicit, &signers[0]);
+        assert!(finalize_imported_spend(&wallet, &created.psbt, &explicit, &secp).is_ok());
+
+        for other in [
+            EcdsaSighashType::None,
+            EcdsaSighashType::Single,
+            EcdsaSighashType::AllPlusAnyoneCanPay,
+        ] {
+            let mut requested = created.psbt.clone();
+            requested.inputs[0].sighash_type = Some(PsbtSighashType::from(other));
+            add_signature(&mut requested, &signers[0]);
+            assert!(
+                matches!(
+                    finalize_imported_spend(&wallet, &created.psbt, &requested, &secp),
+                    Err(ImportedFinalizeError::Signatures(
+                        FinalizeError::UnsupportedSighash
+                    ))
+                ),
+                "{:?}",
+                other
+            );
+
+            let mut relabeled = created.psbt.clone();
+            add_signature(&mut relabeled, &signers[0]);
+            for signature in relabeled.inputs[0].partial_sigs.values_mut() {
+                signature.sighash_type = other;
+            }
+            assert!(relabeled.inputs[0].sighash_type.is_none());
+            assert!(
+                matches!(
+                    finalize_imported_spend(&wallet, &created.psbt, &relabeled, &secp),
+                    Err(ImportedFinalizeError::Signatures(
+                        FinalizeError::UnsupportedSighash
+                    ))
+                ),
+                "{:?}",
+                other
+            );
+        }
     }
 
     #[test]

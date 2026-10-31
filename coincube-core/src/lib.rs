@@ -10,6 +10,7 @@ pub mod imported_key_crypt;
 pub mod imported_keys;
 pub mod imported_spend;
 pub mod psbt_unified;
+pub mod public_wallet_finalize;
 pub mod public_wallet_pair;
 pub mod public_wallet_source;
 pub mod random;
