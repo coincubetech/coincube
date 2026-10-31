@@ -283,8 +283,12 @@ pub struct Cache {
     /// shown as split but unconfirmed.
     pub split_unconfirmed: std::collections::HashSet<coincube_core::miniscript::bitcoin::OutPoint>,
     /// Coins whose twin copy a split-key split on the twin Cube spent, as
-    /// Connect last showed it deep on the twin chain.
-    pub separated: std::collections::HashSet<coincube_core::miniscript::bitcoin::OutPoint>,
+    /// Connect last showed it deep on the twin chain, each with the instant
+    /// that check stops counting. Read through
+    /// [`crate::services::split_coins::is_separated`], so an expired check
+    /// stops counting even if no refresh pass lands.
+    pub separated:
+        std::collections::HashMap<coincube_core::miniscript::bitcoin::OutPoint, std::time::Instant>,
     /// Current theme mode (dark/light) — used for theme-aware widget rendering
     pub theme_mode: coincube_ui::theme::palette::ThemeMode,
     /// Presentation input for the shared top-bar balance eye. `None` until the
@@ -452,7 +456,7 @@ impl std::default::Default for Cache {
             split_records: Vec::new(),
             splitting: std::collections::HashMap::new(),
             split_unconfirmed: std::collections::HashSet::new(),
-            separated: std::collections::HashSet::new(),
+            separated: std::collections::HashMap::new(),
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
             balance_privacy: None,
             cube_switcher_open: false,
@@ -608,6 +612,15 @@ impl Cache {
         &self,
         outpoint: &coincube_core::miniscript::bitcoin::OutPoint,
     ) -> crate::services::chain_status::CoinEvidence {
+        self.chain_evidence_at(outpoint, std::time::Instant::now())
+    }
+
+    /// [`Self::chain_evidence`] as of `now`.
+    pub fn chain_evidence_at(
+        &self,
+        outpoint: &coincube_core::miniscript::bitcoin::OutPoint,
+        now: std::time::Instant,
+    ) -> crate::services::chain_status::CoinEvidence {
         crate::services::chain_status::CoinEvidence {
             entanglement: self
                 .entangled
@@ -619,7 +632,7 @@ impl Cache {
                 .and_then(|entry| entry.outcome()),
             splitting: self.splitting.get(outpoint).copied(),
             signature_split: self.split_unconfirmed.contains(outpoint),
-            separated: self.separated.contains(outpoint),
+            separated: crate::services::split_coins::is_separated(&self.separated, outpoint, now),
         }
     }
 
@@ -1082,8 +1095,16 @@ mod entangled_cache_tests {
                 .unwrap(),
             ),
         );
-        cache.separated.insert(separated);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        cache.separated.insert(separated, until);
         assert_eq!(cache.chain_status(&separated), ChainStatus::OnlyHere);
+        assert_ne!(
+            crate::services::chain_status::classify(
+                cache.chain_evidence_at(&separated, until + std::time::Duration::from_secs(1))
+            ),
+            ChainStatus::OnlyHere,
+            "an expired twin check stops showing the coin as one-chain without a refresh"
+        );
         let keys: Vec<_> = cache.split_keys().iter().map(|(c, _)| c.outpoint).collect();
         assert_eq!(keys, vec![key]);
     }

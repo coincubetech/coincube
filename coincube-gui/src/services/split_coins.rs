@@ -312,28 +312,45 @@ pub fn twin_candidates(
 /// deep on the twin chain. Only inputs the journal lists *and* the confirmed
 /// transaction spends count: the journal nominates, the chain decides.
 /// Signature splits never count (see [`derive`]).
+///
+/// Each coin maps to the instant its check stops counting, so a reader can
+/// drop it then even if no later pass lands ([`is_separated`]).
 pub fn twin_separated(
     twin_records: &[SplitRecord],
     checks: &HashMap<Txid, TwinCheck>,
     now: std::time::Instant,
-) -> HashSet<OutPoint> {
-    twin_records
+) -> HashMap<OutPoint, std::time::Instant> {
+    let mut separated = HashMap::new();
+    for record in twin_records
         .iter()
         .filter(|record| record.method == Method::SplitKey)
-        .filter_map(|record| {
-            let check = checks.get(&record.txid)?;
-            let spent = check.spent.as_ref()?;
-            (now.saturating_duration_since(check.at) <= TWIN_CHECK_LIFETIME).then(|| {
-                record
-                    .inputs
-                    .iter()
-                    .copied()
-                    .filter(|input| spent.contains(input))
-                    .collect::<Vec<_>>()
-            })
-        })
-        .flatten()
-        .collect()
+    {
+        let Some(check) = checks.get(&record.txid) else {
+            continue;
+        };
+        let Some(spent) = check.spent.as_ref() else {
+            continue;
+        };
+        let until = check.at + TWIN_CHECK_LIFETIME;
+        if now > until {
+            continue;
+        }
+        for input in record.inputs.iter().filter(|input| spent.contains(input)) {
+            let entry = separated.entry(*input).or_insert(until);
+            *entry = (*entry).max(until);
+        }
+    }
+    separated
+}
+
+/// Whether `outpoint` counts as separated at `now` by a [`twin_separated`]
+/// result: its check has not expired yet.
+pub fn is_separated(
+    separated: &HashMap<OutPoint, std::time::Instant>,
+    outpoint: &OutPoint,
+    now: std::time::Instant,
+) -> bool {
+    separated.get(outpoint).is_some_and(|until| now <= *until)
 }
 
 /// Whether this Vault can split with a replay-protected signature: Bitcoin
@@ -942,7 +959,9 @@ mod tests {
                 .collect()
         };
         assert_eq!(
-            twin_separated(&[record.clone()], &check(confirmed.clone(), now), now),
+            twin_separated(&[record.clone()], &check(confirmed.clone(), now), now)
+                .into_keys()
+                .collect::<HashSet<_>>(),
             record.inputs.iter().copied().collect()
         );
         assert!(
@@ -953,6 +972,33 @@ mod tests {
         assert!(
             twin_separated(&[record.clone()], &check(confirmed, now), later).is_empty(),
             "an old check stops counting"
+        );
+    }
+
+    #[test]
+    fn a_separation_expires_without_another_pass() {
+        let (record, split) = split_fixture();
+        let at = std::time::Instant::now();
+        let checks: HashMap<Txid, TwinCheck> = [(
+            record.txid,
+            TwinCheck {
+                spent: spent_by(&serialize(&split), record.txid),
+                at,
+            },
+        )]
+        .into();
+        // Computed once, by the last pass that landed; no pass follows.
+        let separated = twin_separated(std::slice::from_ref(&record), &checks, at);
+        let coin = record.inputs[0];
+        assert!(is_separated(&separated, &coin, at));
+        assert!(is_separated(&separated, &coin, at + TWIN_CHECK_LIFETIME));
+        assert!(
+            !is_separated(
+                &separated,
+                &coin,
+                at + TWIN_CHECK_LIFETIME + std::time::Duration::from_secs(1)
+            ),
+            "the stored result stops counting when its check does"
         );
     }
 
@@ -972,7 +1018,9 @@ mod tests {
         )]
         .into();
         assert_eq!(
-            twin_separated(&[record], &checks, now),
+            twin_separated(&[record], &checks, now)
+                .into_keys()
+                .collect::<HashSet<_>>(),
             [shared].into(),
             "a journal input the confirmed transaction does not spend stays"
         );
@@ -1019,7 +1067,9 @@ mod tests {
             "an older check never replaces a newer one"
         );
         assert_eq!(
-            twin_separated(std::slice::from_ref(&record), &checks, late),
+            twin_separated(std::slice::from_ref(&record), &checks, late)
+                .into_keys()
+                .collect::<HashSet<_>>(),
             record.inputs.iter().copied().collect()
         );
 
