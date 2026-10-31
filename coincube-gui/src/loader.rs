@@ -81,11 +81,6 @@ type StartedResult = Result<
     Error,
 >;
 
-/// A single-use counterpart PIN. Deliberately neither Clone nor Debug: the
-/// source Cube's process session remains untouched while the paired Vault is
-/// loaded, and retries must go through unlock again.
-pub struct ScopedSeedPassword(zeroize::Zeroizing<String>);
-
 pub struct Loader {
     pub datadir_path: CoincubeDirectory,
     pub network: bitcoin::Network,
@@ -98,11 +93,7 @@ pub struct Loader {
     pub cube_settings: CubeSettings,
     pub breez_client: Option<std::sync::Arc<BreezClient>>,
     pub connect_client: Option<crate::services::coincube::CoincubeClient>,
-    /// Account checked by fork PIN classification for a scoped Claim load.
-    pub(crate) claim_verified_account: Option<u32>,
     pub cube_encryption_key: Option<Arc<crate::services::connect::crypto::CubeEncryptionKey>>,
-    scoped_seed_password: Option<ScopedSeedPassword>,
-    restricted_claim: bool,
     /// Optional Spark backend loaded alongside `breez_client` in the PIN
     /// flow. `None` when the cube has no Spark signer or when the bridge
     /// subprocess failed to spawn — panels that depend on Spark surface a
@@ -453,9 +444,6 @@ impl Loader {
                 spark_backend,
                 connect_client,
                 cube_encryption_key,
-                scoped_seed_password: None,
-                restricted_claim: false,
-                claim_verified_account: None,
                 quote_provider,
                 current_quote,
                 current_image_handle,
@@ -559,7 +547,6 @@ impl Loader {
                     network: self.network,
                     internal_bitcoind: self.internal_bitcoind.clone(),
                     backup: self.backup.clone(),
-                    scoped_seed_password: self.scoped_seed_password.take(),
                 }),
                 Message::Synced,
             );
@@ -698,7 +685,6 @@ impl Loader {
                                     network: self.network,
                                     internal_bitcoind: self.internal_bitcoind.clone(),
                                     backup: self.backup.clone(),
-                                    scoped_seed_password: self.scoped_seed_password.take(),
                                 }),
                                 Message::Synced,
                             );
@@ -723,9 +709,6 @@ impl Loader {
         if !self.cube_settings.network.is_blake2b() {
             return;
         }
-        if self.restricted_claim {
-            self.stop();
-        }
         if let Step::Syncing { daemon, .. } = &self.step {
             daemon.invalidate_connect_session();
         }
@@ -736,8 +719,6 @@ impl Loader {
             node.stop();
         }
         self.fork_session_revoked = true;
-        self.scoped_seed_password = None;
-        self.claim_verified_account = None;
         self.connect_client = None;
         self.cube_encryption_key = None;
         self.step = Step::Error(Box::new(Error::Unexpected(
@@ -746,9 +727,6 @@ impl Loader {
     }
 
     pub fn stop(&mut self) {
-        self.scoped_seed_password = None;
-        self.claim_verified_account = None;
-        self.restricted_claim = false;
         if let Some(handle) = self.fork_task.take() {
             handle.abort();
         }
@@ -771,57 +749,16 @@ impl Loader {
         }
     }
 
-    /// A restricted Claim load transfers its verified wallet/daemon payload
-    /// to the source App. Detach the loader's duplicate shutdown handles so
-    /// closing the temporary unlock tab cannot stop the new operation owner.
-    pub(crate) fn detach_claim_resources(&mut self) {
-        self.scoped_seed_password = None;
-        self.claim_verified_account = None;
-        self.restricted_claim = false;
-        self.fork_session_revoked = true;
-        self.fork_task.take();
-        self.internal_bitcoind.take();
-        self.step = Step::Error(Box::new(Error::Unexpected(
-            "Claim resources transferred to the source Cube".into(),
-        )));
-    }
-
-    pub(crate) fn set_scoped_seed_password(&mut self, password: zeroize::Zeroizing<String>) {
-        self.scoped_seed_password = Some(ScopedSeedPassword(password));
-        self.restricted_claim = true;
-    }
-
     /// Surface a refusal raised by the tab on this Loader's behalf (for
     /// example an installer the Cube's chain does not admit) without
     /// starting anything.
     pub(crate) fn fail(&mut self, error: Error) {
-        if self.restricted_claim {
-            self.stop();
-            self.fork_session_revoked = true;
-            // stop() clears the scoped credentials and owner handles, but this
-            // loader must remain a restricted Claim even after the refusal.
-            // Otherwise Retry would rebuild it through the generic admission path.
-            self.restricted_claim = true;
-        }
-        self.scoped_seed_password = None;
-        self.claim_verified_account = None;
         self.step = Step::Error(Box::new(error));
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::View(ViewMessage::Retry) => {
-                if self.restricted_claim {
-                    // The first attempt consumed the scoped PIN. A rebuilt loader
-                    // would fall back to the ordinary seed-file password path.
-                    self.stop();
-                    self.fork_session_revoked = true;
-                    self.restricted_claim = true;
-                    self.step = Step::Error(Box::new(Error::Unexpected(
-                        "Unlock the paired Cube again to retry this Claim".into(),
-                    )));
-                    return Task::none();
-                }
                 if self.cube_settings.network.is_blake2b() {
                     // Reopening must establish a fresh session after revocation.
                     // Keep the specific refusal instead of rebuilding without auth.
@@ -937,7 +874,7 @@ impl Loader {
     }
 
     fn can_retry(&self) -> bool {
-        !self.restricted_claim && !self.fork_session_revoked
+        !self.fork_session_revoked
     }
 }
 
@@ -1009,7 +946,6 @@ pub struct LoadApplicationConfig {
     pub network: bitcoin::Network,
     pub internal_bitcoind: Option<Bitcoind>,
     pub backup: Option<Backup>,
-    pub scoped_seed_password: Option<ScopedSeedPassword>,
 }
 
 pub async fn load_application(
@@ -1059,10 +995,7 @@ pub async fn load_application(
     } else {
         // A Vault hot signer is encrypted under the same credential the Cube
         // unlocks with. Only a strict Vault descriptor may load those seeds.
-        let seed_password = match config.scoped_seed_password {
-            Some(password) => Some(password.0),
-            None => crate::app::session::seed_file_password(&config.cube_settings),
-        };
+        let seed_password = crate::app::session::seed_file_password(&config.cube_settings);
         let descriptor = config
             .info
             .descriptors
@@ -1117,7 +1050,6 @@ pub async fn load_application(
         btcb2_server_enabled: false,
         // Resolved from disk in `App::new_inner`.
         btcb2_already_claimed: false,
-        btcb2_claim_resume: false,
         // Liquid sunset gate. Both halves are filled in later: the local half
         // in `App::new` (from whether the Liquid SDK actually connected), the
         // server half when `/connect/features` loads.
@@ -1128,7 +1060,6 @@ pub async fn load_application(
         splitting: std::collections::HashMap::new(),
         split_unconfirmed: std::collections::HashSet::new(),
         separated: std::collections::HashSet::new(),
-        split_deposit: None,
         last_poll_at_startup: config.info.last_poll_timestamp,
         daemon_cache: DaemonCache {
             blockheight: config.info.block_height,
@@ -2249,77 +2180,6 @@ mod tests {
     }
 
     #[test]
-    fn restricted_claim_retry_clears_credentials_without_starting() {
-        let mut loader = loader_without_wallet(false);
-        loader.set_scoped_seed_password(zeroize::Zeroizing::new("synthetic-pin".into()));
-        loader.claim_verified_account = Some(7);
-        let refusal = "Reopen Claim from the source Cube to retry";
-        loader.step = Step::Error(Box::new(Error::Unexpected(refusal.into())));
-
-        for _ in 0..2 {
-            assert_eq!(loader.update(Message::View(ViewMessage::Retry)).units(), 0);
-            assert!(loader.restricted_claim);
-            assert!(loader.scoped_seed_password.is_none());
-            assert!(loader.claim_verified_account.is_none());
-            assert!(loader.fork_session_revoked);
-            assert!(matches!(&loader.step, Step::Error(error)
-                if error.to_string().contains("Unlock the paired Cube again")));
-        }
-    }
-
-    #[test]
-    fn restricted_claim_error_does_not_offer_an_inert_retry() {
-        use crate::app::view::shared::landing::capture;
-
-        let mut quote_provider = QuoteProvider::new();
-        let quote = quote_provider.select("loading");
-        let image_handle = quote_display::image_handle_for_context("loading");
-        let error = Step::Error(Box::new(Error::Unexpected(
-            "Reopen Claim from the source Cube to retry".into(),
-        )));
-        let mounted = capture::inspect(
-            "restricted-claim-error",
-            view_with_retry(&error, &quote, &image_handle, false),
-            (1024, 768),
-            "dark",
-            theme::Theme::dark(),
-        );
-        assert!(mounted.contains("Back"));
-        assert!(!mounted.contains("Retry"));
-    }
-
-    #[test]
-    fn failed_restricted_claim_cleans_up_without_admitting_generic_retry() {
-        use crate::app::view::shared::landing::capture;
-
-        let mut loader = loader_without_wallet(false);
-        loader.set_scoped_seed_password(zeroize::Zeroizing::new("synthetic-pin".into()));
-        loader.claim_verified_account = Some(7);
-        let refusal = "Reopen Claim from the source Cube to retry";
-        loader.fail(Error::Unexpected(refusal.into()));
-
-        assert!(loader.restricted_claim);
-        assert!(loader.fork_session_revoked);
-        assert!(loader.scoped_seed_password.is_none());
-        assert!(loader.claim_verified_account.is_none());
-        assert_eq!(loader.update(Message::View(ViewMessage::Retry)).units(), 0);
-        assert!(!loader.daemon_started);
-        assert!(matches!(&loader.step, Step::Error(error)
-            if error.to_string().contains("Unlock the paired Cube again")));
-        assert!(loader.restricted_claim);
-
-        let mounted = capture::inspect(
-            "failed-restricted-claim",
-            loader.view(),
-            (1024, 768),
-            "dark",
-            theme::Theme::dark(),
-        );
-        assert!(mounted.contains("Back"));
-        assert!(!mounted.contains("Retry"));
-    }
-
-    #[test]
     fn fork_retry_is_user_triggered_and_rate_bounded() {
         let mut loader = loader_without_wallet(false);
         loader.cube_settings.network = crate::chain::ChainId::BitcoinBlake2b;
@@ -2330,53 +2190,6 @@ mod tests {
         );
         assert!(loader.fork_task.is_none());
         assert!(!loader.daemon_started);
-    }
-
-    #[test]
-    fn restricted_claim_error_cannot_retry_without_a_new_unlock() {
-        let mut loader = loader_without_wallet(false);
-        loader.cube_settings.network = crate::chain::ChainId::BitcoinBlake2b;
-        loader.set_scoped_seed_password(zeroize::Zeroizing::new("synthetic-pin".into()));
-        loader.claim_verified_account = Some(7);
-        // The load config takes the scoped PIN before an async load can fail.
-        drop(loader.scoped_seed_password.take());
-        assert_eq!(
-            loader
-                .update(Message::Synced(Err(Error::Unexpected(
-                    "load failed".into(),
-                ))))
-                .units(),
-            0
-        );
-        assert!(matches!(loader.step, Step::Error(_)));
-        assert!(!loader.can_retry(), "Claim error must hide Retry");
-
-        for _ in 0..2 {
-            let task = loader.update(Message::View(ViewMessage::Retry));
-            assert_eq!(task.units(), 0, "Retry must not start an ordinary load");
-            assert!(loader.fork_session_revoked);
-            assert!(loader.claim_verified_account.is_none());
-            assert!(loader.scoped_seed_password.is_none());
-            assert!(matches!(&loader.step, Step::Error(error)
-                if error.to_string().contains("Unlock the paired Cube again")));
-        }
-    }
-
-    #[test]
-    fn transferred_or_refused_claim_cannot_offer_retry() {
-        let mut transferred = loader_without_wallet(false);
-        transferred.cube_settings.network = crate::chain::ChainId::BitcoinBlake2b;
-        transferred.set_scoped_seed_password(zeroize::Zeroizing::new("synthetic-pin".into()));
-        transferred.detach_claim_resources();
-        assert!(transferred.fork_session_revoked);
-        assert!(!transferred.can_retry());
-
-        let mut refused = loader_without_wallet(false);
-        refused.cube_settings.network = crate::chain::ChainId::BitcoinBlake2b;
-        refused.set_scoped_seed_password(zeroize::Zeroizing::new("synthetic-pin".into()));
-        refused.fail(Error::Unexpected("claim refused".into()));
-        assert!(refused.fork_session_revoked);
-        assert!(!refused.can_retry());
     }
 
     #[test]
@@ -2394,14 +2207,9 @@ mod tests {
                 bitcoin::Network::Bitcoin,
             ),
         ));
-        loader.set_scoped_seed_password(zeroize::Zeroizing::new("synthetic-pin".into()));
-        loader.claim_verified_account = Some(7);
         loader.invalidate_fork_session();
         assert!(loader.connect_client.is_none());
         assert!(loader.cube_encryption_key.is_none());
-        assert!(loader.scoped_seed_password.is_none());
-        assert!(loader.claim_verified_account.is_none());
-        assert!(!loader.restricted_claim);
         let _ = loader.on_start(Err(Error::Unexpected("late startup".into())));
         assert!(
             matches!(&loader.step, Step::Error(error) if error.to_string().contains("session changed"))

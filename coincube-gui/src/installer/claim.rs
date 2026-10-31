@@ -1,10 +1,9 @@
-//! The Bitcoin Blake2b **Claim target** — the Cube a claim is made *into*.
+//! The Bitcoin Blake2b **copy** of a Bitcoin Cube (historically the "Claim
+//! target"; Tools › Split coins → Create copy).
 //!
-//! A claim reuses one Bitcoin Cube's Vault descriptor on the fork chain, so
-//! the target watches exactly the addresses the source Cube already controls.
-//! Creating it is all this module does: no poison, no sweep, no broadcast.
-//! Step two of the claim (`services::claim_workflow::Step2Authorization`)
-//! stays uninhabited.
+//! A copy reuses one Bitcoin Cube's Vault descriptor on the fork chain, so it
+//! watches exactly the addresses the source Cube already controls. Creating it
+//! is all this module does: no split, no sweep, no broadcast.
 
 use coincube_core::chain::ChainId;
 use coincube_core::miniscript::bitcoin::bip32::Fingerprint;

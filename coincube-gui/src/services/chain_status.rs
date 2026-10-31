@@ -264,12 +264,12 @@ pub fn proof_candidates(
     candidates
 }
 
-/// Whether this build may run ancestry checks for the Chains column. They
-/// share the ancestry engine's launch gate: closed in production until its
-/// owner acceptance, open under `--enable-btcb2-split`.
+/// Whether the ancestry engine runs on `chain`: Bitcoin and Bitcoin
+/// Blake2b mainnet, the pair Connect observes. There is no launch gate; the
+/// App runs checks and builds splits whenever Bitcoin Blake2b is on for the
+/// Cube (`App::blake2b_on`, on Robert's instruction of 2026-10-29).
 pub fn checks_enabled(chain: ChainId) -> bool {
     matches!(chain, ChainId::Bitcoin | ChainId::BitcoinBlake2b)
-        && crate::services::claim_ancestry_gate::authorization().is_some()
 }
 
 /// Run the ancestry check on `outpoints` of a Vault on `chain`, one at a

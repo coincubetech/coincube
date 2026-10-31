@@ -705,18 +705,12 @@ pub struct CubeSettings {
     /// Which Claim sweep the historical completion marker describes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub split_completion_txid: Option<coincube_core::miniscript::bitcoin::Txid>,
-    /// Splits (#568 B5) completed into this Cube's Vault, one record per
-    /// completed step 2: the digest of the foreign source's descriptors
-    /// (owner decision D9), the BTCB2 height of step 2's confirmation and
-    /// step 2's txid. Never a descriptor, a key, spending or replay
-    /// authority: history for the Split panel and the one predicate the
-    /// "Start split" refusal reads. Written only on the target BTCB2 Cube,
-    /// by the Split completion evidence
-    /// (`services::claim_coordinator::fork::split::step2::completion`), and
-    /// cleared by its reconciliation when the chains take the completion
-    /// back (D17); the deleted descriptors are not restored. An older build that rewrites
-    /// `settings.json` drops the field (no `deny_unknown_fields`, like every
-    /// field here); the Split journal keeps the completed step 2 regardless.
+    /// Foreign-wallet splits (#568 B5) completed into this Cube's Vault by
+    /// earlier builds, one record per completed step 2: the digest of the
+    /// foreign source's descriptors, the BTCB2 height of step 2's confirmation
+    /// and step 2's txid. Never a descriptor, a key, spending or replay
+    /// authority. The foreign Split flow that wrote it is removed; the field
+    /// is kept so existing `settings.json` files round-trip unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub split_from: Vec<SplitFromRecord>,
     pub id: String,

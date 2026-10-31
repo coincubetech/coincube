@@ -191,30 +191,6 @@ pub struct ScanDescriptor {
     branch: Branch,
 }
 impl ScanDescriptor {
-    /// Scan a known COINCUBE Vault policy without applying the narrower
-    /// foreign-wallet signing-shape filter. `CoincubeDescriptor` has already
-    /// validated the complete policy and split its public receive/change
-    /// paths. This grants only address discovery, never foreign signing or
-    /// Claim authorization.
-    pub(crate) fn for_cube(
-        branch: Branch,
-        cube: &coincube_core::descriptors::CoincubeDescriptor,
-    ) -> Result<Self, ScanError> {
-        let text = match branch {
-            Branch::External => cube.receive_descriptor().to_string(),
-            Branch::Internal => cube.change_descriptor().to_string(),
-        };
-        let descriptor = Descriptor::<DescriptorPublicKey>::from_str(&text)
-            .map_err(|_| ScanError::Descriptor)?;
-        descriptor
-            .sanity_check()
-            .map_err(|_| ScanError::Descriptor)?;
-        if descriptor.to_string() != text {
-            return Err(ScanError::Descriptor);
-        }
-        Ok(Self { descriptor, branch })
-    }
-
     pub fn parse(branch: Branch, text: &str) -> Result<Self, ScanError> {
         if text.len() > 16_384 {
             return Err(ScanError::Descriptor);
@@ -295,13 +271,15 @@ impl ScanDescriptor {
             1
         }
     }
-    /// The parsed public descriptor.
-    pub(crate) fn descriptor(&self) -> &Descriptor<DescriptorPublicKey> {
-        &self.descriptor
-    }
     pub(crate) fn canonical(&self) -> String {
         self.descriptor.to_string()
     }
+    /// The parsed public descriptor.
+    #[cfg(test)]
+    pub(crate) fn descriptor(&self) -> &Descriptor<DescriptorPublicKey> {
+        &self.descriptor
+    }
+    #[cfg(test)]
     pub(crate) fn branch(&self) -> Branch {
         self.branch
     }
@@ -350,45 +328,6 @@ impl ScanPlan {
         }
         Ok(())
     }
-}
-
-/// A full imported-wallet walk has two matching ranged branches. Its caller
-/// supplies the already-attested discovery target; a history gap cannot
-/// shorten this range.
-pub(crate) fn validate_imported_plan(plan: &ScanPlan) -> Result<u32, ScanError> {
-    plan.validate()?;
-    if plan.chain != ChainId::BitcoinBlake2b {
-        return Err(ScanError::InvalidLimits);
-    }
-    validate_imported_shape(plan)
-}
-
-fn validate_imported_shape(plan: &ScanPlan) -> Result<u32, ScanError> {
-    if plan.branches.len() != 2 {
-        return Err(ScanError::InvalidLimits);
-    }
-    let external = plan
-        .branches
-        .iter()
-        .find(|range| range.descriptor.branch() == Branch::External);
-    let internal = plan
-        .branches
-        .iter()
-        .find(|range| range.descriptor.branch() == Branch::Internal);
-    let (Some(external), Some(internal)) = (external, internal) else {
-        return Err(ScanError::InvalidLimits);
-    };
-    if external.start != 0
-        || internal.start != 0
-        || !external.descriptor.is_ranged()
-        || !internal.descriptor.is_ranged()
-        || external.end_exclusive != internal.end_exclusive
-        || external.end_exclusive == 0
-        || external.end_exclusive > MAX_IMPORTED_BRANCH_END
-    {
-        return Err(ScanError::InvalidLimits);
-    }
-    Ok(external.end_exclusive)
 }
 
 #[derive(Debug, Clone)]
@@ -458,28 +397,6 @@ impl ScanReport {
     pub fn coverage(&self, branch: Branch) -> Option<BranchCoverage> {
         self.coverage.iter().copied().find(|c| c.branch == branch)
     }
-    pub(crate) fn observed_unused(&self, branch: Branch, index: u32) -> bool {
-        self.coverage(branch)
-            .is_some_and(|range| range.contains(index))
-            && self.unused_addresses.contains(&(branch, index))
-    }
-    #[cfg(test)]
-    pub(crate) fn with_coverage(mut self, coverage: Vec<BranchCoverage>) -> Self {
-        // Synthetic coverage alone only proves the suffix above last_used.
-        self.unused_addresses = coverage
-            .iter()
-            .flat_map(|range| {
-                let start = range
-                    .last_used
-                    .and_then(|index| index.checked_add(1))
-                    .unwrap_or(range.start)
-                    .max(range.start);
-                (start..range.end_exclusive).map(move |index| (range.branch, index))
-            })
-            .collect();
-        self.coverage = coverage;
-        self
-    }
     pub fn fork_height(&self) -> Option<u64> {
         self.fork_height
     }
@@ -511,35 +428,11 @@ impl ScanReport {
     pub fn tip_height(&self) -> u32 {
         self.tip_height
     }
-    #[cfg(test)]
-    pub(crate) fn with_tip_height(mut self, tip_height: u32) -> Self {
-        self.tip_height = tip_height;
-        self
-    }
     pub fn addresses_scanned(&self) -> u32 {
         self.addresses
     }
     pub fn coins(&self) -> &[DiscoveredCoin] {
         &self.coins
-    }
-    #[cfg(test)]
-    pub(crate) fn for_test(
-        chain: ChainId,
-        generation: u64,
-        tip: BlockHash,
-        coins: Vec<DiscoveredCoin>,
-    ) -> Self {
-        Self {
-            chain,
-            generation,
-            tip,
-            tip_height: 0,
-            fork_height: None,
-            addresses: 1,
-            coverage: Vec::new(),
-            unused_addresses: BTreeSet::new(),
-            coins,
-        }
     }
 }
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -624,35 +517,6 @@ pub async fn scan_with_timeout(
     duration: Duration,
 ) -> Result<ScanReport, ScanError> {
     scan_mode_with_timeout(client, plan, expected, generation, duration, ScanMode::Gap).await
-}
-
-pub(crate) async fn scan_imported_window(
-    client: CoincubeClient,
-    plan: ScanPlan,
-    expected: u64,
-    generation: watch::Receiver<u64>,
-) -> Result<ScanReport, ScanError> {
-    plan.validate()?;
-    let branch_end = validate_imported_shape(&plan)?;
-    scan_mode_with_timeout(
-        client,
-        plan,
-        expected,
-        generation,
-        imported_scan_duration(branch_end),
-        ScanMode::FullImported,
-    )
-    .await
-}
-
-/// One second per eight requested addresses across the two branches, with
-/// Claim's 90-second floor. Validation bounds each branch at 10,000, so this
-/// deadline cannot exceed 2,500 seconds. Both chains scan concurrently and
-/// each gets this same deadline.
-fn imported_scan_duration(branch_end: u32) -> Duration {
-    CLAIM_SCAN_DURATION.max(Duration::from_secs(u64::from(
-        (branch_end * 2).div_ceil(ADDRESS_BATCH),
-    )))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

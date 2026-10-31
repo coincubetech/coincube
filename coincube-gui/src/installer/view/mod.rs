@@ -1906,15 +1906,15 @@ pub fn claim_setup_install<'a>(
     layout(
         progress,
         email,
-        "Prepare your Blake2b Cube",
+        "Bitcoin Blake2b copy",
         Column::new().spacing(20)
             .push(p1_regular(if generating {
-                "Creating the matching Blake2b Vault…"
+                "Creating the Bitcoin Blake2b copy…"
             } else {
-                "Blake2b Cube setup. The next step opens Bitcoin Claim in your original Cube."
+                "Your Bitcoin Blake2b copy is ready. Its coins aren't split yet: you can split them from either Cube's Coin control."
             }))
             .push(warning.map(|e| card::invalid(text(e))))
-            .push(p1_regular("Setup does not submit a claim transaction. You’ll review the Bitcoin split and its network fee next.")),
+            .push(p1_regular("Creating the copy didn't move or split any coins.")),
         true,
         (!generating && warning.is_some()).then_some(Message::Previous),
     )

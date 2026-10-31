@@ -144,19 +144,6 @@ pub enum Message {
     Activity(crate::app::view::activity::ActivityMessage),
     LocalMcp(crate::app::local_mcp::Message),
     ImportedBitcoin(crate::app::state::imported_bitcoin::ImportMessage),
-    /// Close the read-only foreign-wallet sweep review and destroy its
-    /// session-only evidence.
-    DismissSplitReview,
-    /// #568 B5c-2: start a split from the foreign-wallet sweep review. The
-    /// review overlay is its only sender, and it renders only under the
-    /// Review handoff; the App re-checks the server grant, the review's
-    /// context, that no Split panel is open and that this source was not
-    /// split into this Vault before (D15), in `App::start_split_from_review`.
-    StartSplit,
-    /// A Split panel intent (#568 B1b). Reachable only while a Split panel is
-    /// shown: one resumed from its journal, or one started from the review
-    /// (`StartSplit`). The panel's own intents have no "start".
-    Split(crate::app::state::vault::split::SplitMessage),
     /// Open the Branta identity at `(output_index, identity_index)` in the reviewed PSBT.
     OpenVaultRecipientIdentity(usize, usize),
     Scroll(f32),
@@ -239,23 +226,13 @@ pub enum Message {
     ExportPsbt,
     ImportPsbt,
     OpenUrl(String),
-    /// Start the Bitcoin Blake2b claim-target installer from this Cube
-    /// (Lane B1.4). Creates the target Cube only — nothing is claimed,
-    /// poisoned, swept or broadcast by this flow.
+    /// Open the installer that creates this Bitcoin Cube's Bitcoin Blake2b
+    /// copy (Tools › Split coins). Creates the copy Cube only — nothing is
+    /// split, swept or broadcast by this flow.
     StartClaimBlake2b,
     /// Tools › Split coins › Create copy. The App re-checks the disk for an
     /// existing copy before it starts [`Self::StartClaimBlake2b`].
     CreateBlake2bCopy,
-    /// Start the imported Bitcoin policy claim flow after App rechecks the
-    /// live attachment, completed scan, and current Connect feature grant.
-    StartImportedClaim,
-    ContinueForkClaim,
-    ReturnBitcoinClaim,
-    /// Claim step 1 — the poison self-transfer on Bitcoin (Lane B1.5),
-    /// handled by `state::vault::claim::ClaimStep1Panel`.
-    Claim(ClaimMessage),
-    /// Route a paired Claim signer view message to its Bitcoin or BTCB2 PSBT.
-    ClaimPairedSigner(u64, coincube_core::chain::ChainId, Box<Message>),
     /// Collapse the firmware-advisory detail panel on one device row. Carries
     /// the device fingerprint and the advisory id; the badge itself stays.
     DismissHwAdvisory(Fingerprint, &'static str),
@@ -3003,45 +2980,4 @@ mod duress_message_debug_tests {
             "DisableMethodProbed(Err(\"settings unreadable\"), 5)"
         );
     }
-}
-
-/// User intents on the claim step-1 panel. Every one is re-checked by the
-/// panel against its current stage; none is a permission on its own.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClaimMessage {
-    ReviewPairedBitcoin,
-    ConfirmPairedBitcoin,
-    BackPairedBitcoin,
-    ReviewPairedFork,
-    ConfirmPairedFork,
-    BackPairedFork,
-    /// Reserve distinct source-Vault addresses for chain-specific deposits.
-    StartFunding,
-    ToggleDepositDetails,
-    ToggleSetupDetails,
-    CheckFunding,
-    /// Copy identifier-free timing evidence from the current deposit check.
-    CopyVerificationReport,
-    /// Open the two ordinary Claim PSBTs after a fresh pair requalification.
-    SignPair,
-    ShowPairBitcoin,
-    ShowPairBtcb2,
-    /// Review the original transaction being re-mined after a reorg.
-    ReviewReconfirmation,
-    ReviewResubmission,
-    ConfirmResubmission,
-    /// Explicitly acknowledge the freshly reviewed replacement inclusion.
-    ConfirmReconfirmation,
-    /// Run the preconditions again (after a refusal, or to refresh them).
-    Recheck,
-    /// Build the poison self-transfer from the pre-fork coins shown.
-    Build,
-    /// Hand the built transaction to the Vault's own signing flow.
-    Sign,
-    /// Explicit confirmation of the review on screen: submit step 1.
-    Confirm,
-    /// Re-read the chains for the submitted transaction.
-    Refresh,
-    /// Abandon an unsubmitted attempt and return to the preconditions.
-    Cancel,
 }

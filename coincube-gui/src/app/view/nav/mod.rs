@@ -303,7 +303,6 @@ pub struct NavContext<'a> {
     pub btcb2_server_enabled: bool,
     /// Whether a Bitcoin Blake2b Cube already reuses this Cube's descriptor.
     pub btcb2_already_claimed: bool,
-    pub btcb2_claim_resume: bool,
 }
 
 impl<'a> NavContext<'a> {
@@ -320,7 +319,6 @@ impl<'a> NavContext<'a> {
             liquid_gate: cache.liquid_gate,
             btcb2_server_enabled: cache.btcb2_server_enabled,
             btcb2_already_claimed: cache.btcb2_already_claimed,
-            btcb2_claim_resume: cache.btcb2_claim_resume,
             cube_name: "",
             lightning_address: None,
             avatar: None,

@@ -762,7 +762,7 @@ mod capture_tests {
             ("Coin control", Menu::Vault(VaultSubMenu::Coins(None))),
             ("PSBT proposals", Menu::Vault(VaultSubMenu::PSBTs(None))),
             ("Recovery path", Menu::Vault(VaultSubMenu::Recovery)),
-            ("Split coins", Menu::Vault(VaultSubMenu::Claim)),
+            ("Split coins", Menu::Vault(VaultSubMenu::SplitCoins)),
         ];
         let view = |tools: &[(&'static str, Menu)]| {
             capture::inspect(

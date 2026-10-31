@@ -371,7 +371,7 @@ pub async fn fee_rate(
     client: Option<crate::services::coincube::CoincubeClient>,
     chain: ChainId,
 ) -> Option<u64> {
-    use crate::services::{foreign_psbt::SweepFeeSource, split_fees};
+    use crate::services::split_fees::{self, SweepFeeSource};
     let client = client?;
     let rate = match chain {
         ChainId::Bitcoin => {
@@ -517,7 +517,7 @@ pub async fn prepare(
 ) -> Result<Prepared, String> {
     let chain = wallet.chain;
     if !crate::services::chain_status::checks_enabled(chain) {
-        return Err("Splitting coins isn't available in this version.".into());
+        return Err("Splitting coins isn't available on this network.".into());
     }
     if coins.is_empty() {
         return Err("Select at least one coin to split.".into());
