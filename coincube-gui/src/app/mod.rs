@@ -160,6 +160,15 @@ struct Panels {
 }
 
 impl Panels {
+    /// Hand the Liquid gate to the panels that load Liquid data from a
+    /// `reload`, which gets no cache: Activity and the Cube home. Called
+    /// wherever the App sets [`Cache::liquid_gate`].
+    fn show_liquid(&mut self, gate: crate::app::features::LiquidGate) {
+        let shown = gate.show();
+        self.activity.set_liquid_shown(shown);
+        self.global_home.set_liquid_shown(shown);
+    }
+
     /// Read the cube's fiat currency preference from the settings file.
     fn default_fiat_currency(
         datadir: &CoincubeDirectory,
@@ -3885,6 +3894,7 @@ impl App {
         cache.fiat_chain = cube_settings.network;
         cache.has_vault = wallet.supports_inheritance();
         cache.has_imported_bitcoin = wallet.is_imported();
+        cache.wallet_names = cache::WalletNames::new(&cube_settings, Some(&wallet));
         if cache.fiat_chain.is_blake2b() {
             cache.clear_btcb2_fiat();
         }
@@ -4063,6 +4073,7 @@ impl App {
                 data_dir.path(),
                 cache_with_vault.network,
             );
+        panels.show_liquid(cache_with_vault.liquid_gate);
         cache_with_vault.connect_tokens = connect_auth_arc.clone();
         cache_with_vault.connect_email = connect_email.clone();
         // A restored on-disk session (or a threaded remote-backend one) means
@@ -4256,6 +4267,7 @@ impl App {
                 display_mode
             },
             cube_name: cube_settings.name.clone(),
+            wallet_names: cache::WalletNames::new(&cube_settings, None),
             cube_connect_owner: cube_settings.connect_owner.clone(),
             cube_owned_by_other_account: false,
             current_cube_backed_up: cube_settings.backed_up,
@@ -4316,6 +4328,7 @@ impl App {
         // hide the rail.
         cache.liquid_gate.local_state_exists =
             crate::app::breez_liquid::local_state_exists(datadir.path(), network);
+        panels.show_liquid(cache.liquid_gate);
         cache.p2p_test_coordinator = panels
             .p2p
             .as_ref()
@@ -7890,6 +7903,14 @@ impl App {
         // Connect" and "Sign with Connect" — never see a stale value after
         // a launch-time session restore.
         self.cache.connect_authenticated = self.panels.connect.account.is_authenticated();
+
+        // The side panel's wallet names follow the Cube settings and the
+        // loaded Vault, whichever message changed them (a Vault created or
+        // renamed mid-session, an imported wallet adopted, a settings reload).
+        self.cache.wallet_names =
+            cache::WalletNames::new(&self.cube_settings, self.wallet.as_deref());
+        // The Connect grant (one gate input) can change on any message.
+        self.panels.show_liquid(self.cache.liquid_gate);
 
         // The Kit fingerprint must include the imported wallet's durable
         // address-allocation state. A Cube seed cannot stand in for its

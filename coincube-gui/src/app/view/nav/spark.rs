@@ -49,6 +49,8 @@ mod tests {
             marketplace_flags: crate::app::features::MarketplaceServerFlags::OFF,
             liquid_gate: crate::app::features::LiquidGate::HIDDEN,
             cube_name: "test cube",
+            spark_alias: None,
+            vault_alias: None,
             lightning_address: None,
             avatar: None,
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),

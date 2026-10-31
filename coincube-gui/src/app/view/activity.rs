@@ -895,7 +895,7 @@ fn signed_amount(entry: &Entry, masked: bool) -> String {
 fn wallet_glyph(wallet: WalletFilter) -> Option<&'static str> {
     match wallet {
         WalletFilter::Vault => Some(glyph::SHIELD),
-        WalletFilter::Spark => Some(glyph::SPARK),
+        WalletFilter::Spark => Some(glyph::SPARK_STROKE),
         WalletFilter::Liquid => Some(glyph::DROPLET),
         WalletFilter::All => None,
     }
@@ -1116,17 +1116,28 @@ fn link_button<'a>(
     .into()
 }
 
+/// The wallet filter's options. Liquid is one only while the Liquid gate
+/// shows it.
+fn wallet_filters(activity: &Activity) -> Vec<WalletFilter> {
+    [
+        WalletFilter::All,
+        WalletFilter::Spark,
+        WalletFilter::Vault,
+        WalletFilter::Liquid,
+    ]
+    .iter()
+    .copied()
+    .filter(|wallet| *wallet != WalletFilter::Liquid || activity.liquid_shown())
+    .collect()
+}
+
 fn filters_bar<'a>(activity: &'a Activity, frame: Frame) -> Element<'a, Message> {
     let wallet = tenshu::select(
         "tenshu.activity.filter.wallet",
         "Wallet",
-        [
-            WalletFilter::All,
-            WalletFilter::Spark,
-            WalletFilter::Vault,
-            WalletFilter::Liquid,
-        ]
-        .map(|value| (value, value.to_string())),
+        wallet_filters(activity)
+            .into_iter()
+            .map(|value| (value, value.to_string())),
         Some(activity.filters.wallet),
         Message::FocusAction,
     )
@@ -2065,12 +2076,20 @@ fn render_at_width<'a>(
             .padding([10, 12]),
         );
     }
+    // Liquid's banners only while the Liquid gate shows it.
+    let liquid = activity.liquid_shown();
     for (wallet, error) in [
         ("Vault", activity.vault_error.as_deref()),
         ("Vault proposals", activity.psbt_error.as_deref()),
         ("Spark", activity.spark_error.as_deref()),
-        ("Liquid", activity.liquid_error.as_deref()),
-        ("Liquid refunds", activity.refundables_error.as_deref()),
+        (
+            "Liquid",
+            activity.liquid_error.as_deref().filter(|_| liquid),
+        ),
+        (
+            "Liquid refunds",
+            activity.refundables_error.as_deref().filter(|_| liquid),
+        ),
     ] {
         if error.is_none() {
             continue;
@@ -3393,6 +3412,53 @@ mod tests {
         activity
     }
 
+    /// Tenshu v175 hides Liquid, even for an account with the grant and a
+    /// Liquid wallet on disk: no Liquid wallet filter and no Liquid banner.
+    #[test]
+    fn activity_offers_no_liquid_while_liquid_is_hidden() {
+        let gate = crate::app::features::LiquidGate {
+            server_enabled: true,
+            local_state_exists: true,
+        };
+        let cache = Cache {
+            liquid_gate: gate,
+            ..Default::default()
+        };
+        let mut activity = Activity::new(None, None);
+        activity.set_liquid_shown(gate.show());
+        assert_eq!(
+            wallet_filters(&activity),
+            [WalletFilter::All, WalletFilter::Spark, WalletFilter::Vault]
+        );
+        // An error left from before Liquid was hidden draws no banner.
+        activity.liquid_error = Some("synthetic".into());
+        activity.refundables_error = Some("synthetic".into());
+        let page = mount(
+            "activity-liquid-hidden",
+            render(&activity, &cache),
+            (1440, 900),
+            "dark",
+            coincube_ui::theme::Theme::dark(),
+            1440 - crate::app::view::nav::shell::FULL_WIDTH as u32,
+        );
+        assert!(!page.contains("Liquid"));
+        assert!(page.contains("Wallet"), "the filter bar is drawn");
+
+        // Shown, both come back, so their absence above is the gate's doing.
+        activity.set_liquid_shown(true);
+        assert!(wallet_filters(&activity).contains(&WalletFilter::Liquid));
+        activity.liquid_error = Some("synthetic".into());
+        let page = mount(
+            "activity-liquid-shown",
+            render(&activity, &cache),
+            (1440, 900),
+            "dark",
+            coincube_ui::theme::Theme::dark(),
+            1440 - crate::app::view::nav::shell::FULL_WIDTH as u32,
+        );
+        assert!(page.contains("Liquid history couldn't load"));
+    }
+
     #[test]
     fn wallet_recent_activity_shows_that_wallets_newest_five_rows() {
         let cache = Cache {
@@ -3676,6 +3742,9 @@ mod tests {
 
         let cache = Cache::default();
         let mut activity = Activity::new(None, None);
+        // A refundable swap is a Liquid row, listed only while the Liquid
+        // gate shows Liquid (hidden since Tenshu v175).
+        activity.set_liquid_shown(true);
         drop(activity.update(
             None,
             &cache,

@@ -289,6 +289,10 @@ pub struct NavContext<'a> {
     /// state. See [`crate::app::features::LiquidGate`].
     pub liquid_gate: crate::app::features::LiquidGate,
     pub cube_name: &'a str,
+    /// The wallet names after "Spark" and "Vault" in the side panel. See
+    /// [`crate::app::cache::WalletNames`].
+    pub spark_alias: Option<&'a str>,
+    pub vault_alias: Option<&'a str>,
     pub lightning_address: Option<&'a str>,
     pub avatar: Option<&'a iced::widget::image::Handle>,
     pub theme_mode: coincube_ui::theme::palette::ThemeMode,
@@ -322,6 +326,8 @@ impl<'a> NavContext<'a> {
             btcb2_already_claimed: cache.btcb2_already_claimed,
             btcb2_claim_resume: cache.btcb2_claim_resume,
             cube_name: "",
+            spark_alias: cache.wallet_names.spark.as_deref(),
+            vault_alias: cache.wallet_names.vault.as_deref(),
             lightning_address: None,
             avatar: None,
             theme_mode: cache.theme_mode,

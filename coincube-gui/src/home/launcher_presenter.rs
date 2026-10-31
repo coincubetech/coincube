@@ -174,7 +174,8 @@ fn floor_style() -> impl Fn(&theme::Theme, iced_button::Status) -> iced_button::
 /// The wallets a Cube holds, read without unlocking it, in the order the
 /// Cube's sidebar lists them. Spark comes with every Cube on a network it
 /// supports. Liquid follows the same sunset gate as the sidebar
-/// ([`crate::app::features::LiquidGate`]): this Cube's persisted grant, or a
+/// ([`crate::app::features::LiquidGate`]), which hides it for everyone since
+/// Tenshu v175; the gate still records this Cube's persisted grant and a
 /// Liquid wallet already on this device (`liquid_on_disk`).
 pub(super) fn wallet_kinds(
     cube: &crate::app::settings::CubeSettings,

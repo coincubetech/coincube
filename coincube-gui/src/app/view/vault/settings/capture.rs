@@ -354,6 +354,8 @@ fn fixture_nav_context(cache: &Cache) -> crate::app::view::nav::NavContext<'_> {
         btcb2_already_claimed: cache.btcb2_already_claimed,
         btcb2_claim_resume: cache.btcb2_claim_resume,
         cube_name: &cache.cube_name,
+        spark_alias: cache.wallet_names.spark.as_deref(),
+        vault_alias: cache.wallet_names.vault.as_deref(),
         lightning_address: cache.lightning_address.as_deref(),
         avatar: cache.avatar_handle.as_ref(),
         theme_mode: cache.theme_mode,

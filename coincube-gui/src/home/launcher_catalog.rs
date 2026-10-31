@@ -2947,9 +2947,9 @@ mod tests {
         // Spark comes with every mainnet Cube; Liquid only behind its gate.
         assert_eq!(wallets(cube), "Spark");
         cube.liquid_granted = Some(true);
-        assert_eq!(wallets(cube), "Spark, Liquid");
+        assert_eq!(wallets(cube), "Spark");
         cube.liquid_granted = None;
-        assert_eq!(local_wallets(cube, true), "Spark, Liquid");
+        assert_eq!(local_wallets(cube, true), "Spark");
         cube.vault_wallet_id = Some(crate::app::settings::WalletId::new(
             "test".to_string(),
             None,

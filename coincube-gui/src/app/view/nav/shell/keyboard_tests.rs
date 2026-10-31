@@ -19,6 +19,10 @@ fn fixture_context() -> NavContext<'static> {
         marketplace_flags: features::MarketplaceServerFlags::OFF,
         liquid_gate: features::LiquidGate::HIDDEN,
         cube_name: "Synthetic QA Cube",
+        // Wallet names in the labels; the row IDs stay `…nav.Spark` and
+        // `…nav.Vault`.
+        spark_alias: Some("Daily spending"),
+        vault_alias: Some("Family savings"),
         lightning_address: None,
         avatar: None,
         theme_mode: coincube_ui::theme::palette::ThemeMode::Dark,
@@ -28,6 +32,82 @@ fn fixture_context() -> NavContext<'static> {
         btcb2_server_enabled: false,
         btcb2_already_claimed: false,
         btcb2_claim_resume: false,
+    }
+}
+
+/// The wallet rows read `Spark · ‹nickname›` and `Vault · ‹alias›`, fall back
+/// to the plain wallet name when the name is unset or blank, and keep one
+/// focus ID whatever the label. The Cube's own name differs from both
+/// wallet names, so a swapped or misrouted label can't pass.
+#[test]
+fn wallet_rows_name_each_wallet_and_keep_their_ids() {
+    use crate::app::view::shared::landing::capture;
+
+    // The texts drawn inside the focus target `id`.
+    fn row_text(inspection: &capture::Inspection, id: &'static str) -> Vec<String> {
+        let (_, row) = inspection
+            .focus
+            .iter()
+            .find(|(focus, _)| *focus == Id::new(id))
+            .unwrap_or_else(|| panic!("no {} row", id));
+        inspection
+            .text
+            .iter()
+            .filter(|(_, bounds)| row.contains(bounds.center()))
+            .map(|(value, _)| value.clone())
+            .collect()
+    }
+
+    for (spark, vault, spark_label, vault_label) in [
+        (
+            Some("Daily spending"),
+            Some("Family savings"),
+            "Spark · Daily spending",
+            "Vault · Family savings",
+        ),
+        (None, None, "Spark", "Vault"),
+        (Some("   "), Some(""), "Spark", "Vault"),
+        (
+            Some(" Daily\nspending "),
+            None,
+            "Spark · Daily spending",
+            "Vault",
+        ),
+        (
+            None,
+            Some("A very long Vault alias indeed"),
+            "Spark",
+            "Vault · A very long Vaul…",
+        ),
+    ] {
+        let mut ctx = fixture_context();
+        ctx.spark_alias = spark;
+        ctx.vault_alias = vault;
+        for menu in [
+            Menu::Cube(CubeSubMenu::Overview),
+            Menu::Spark(SparkSubMenu::Overview),
+            Menu::Vault(VaultSubMenu::Overview),
+        ] {
+            let inspection = capture::inspect_wide_content(
+                "sidebar-wallet-names",
+                sidebar(&menu, &ctx, ShellState::default()),
+                (1440, 900),
+                "dark",
+                coincube_ui::theme::Theme::dark(),
+                FULL_WIDTH as u32,
+            );
+            assert_eq!(
+                row_text(&inspection, "tenshu.shell.nav.Spark"),
+                [spark_label],
+                "{spark:?} on {menu:?}"
+            );
+            assert_eq!(
+                row_text(&inspection, "tenshu.shell.nav.Vault"),
+                [vault_label],
+                "{vault:?} on {menu:?}"
+            );
+            assert!(!inspection.contains(&format!("· {}", ctx.cube_name)));
+        }
     }
 }
 
@@ -1048,6 +1128,17 @@ async fn focused_shell_capture_uses_production_compact_and_full_split() {
                     &renderer,
                     &layout::Limits::new(Size::ZERO, size),
                 );
+                // Arrive as a keyboard user does: only keyboard navigation
+                // paints the ring (`coincube_ui::widget::action`).
+                send(
+                    &mut element,
+                    &mut tree,
+                    &node,
+                    &renderer,
+                    key(keyboard::key::Named::Tab, false, true),
+                    mouse::Cursor::Unavailable,
+                    size,
+                );
                 operate(
                     &mut element,
                     &mut tree,
@@ -1179,6 +1270,17 @@ async fn selected_successor_does_not_paint_over_focused_nav_ring() {
                     &mut tree,
                     &renderer,
                     &layout::Limits::new(Size::ZERO, size),
+                );
+                // Arrive as a keyboard user does: only keyboard navigation
+                // paints the ring (`coincube_ui::widget::action`).
+                send(
+                    &mut element,
+                    &mut tree,
+                    &node,
+                    &renderer,
+                    key(keyboard::key::Named::Tab, false, true),
+                    mouse::Cursor::Unavailable,
+                    size,
                 );
                 operate(
                     &mut element,

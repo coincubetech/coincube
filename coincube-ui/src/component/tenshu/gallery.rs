@@ -1555,7 +1555,7 @@ fn gallery_renders_overview_and_sheet_in_both_themes_and_window_sizes() {
                     scrollable::RelativeOffset::START.into(),
                 ));
             }
-            mounted.focus("spark-send");
+            mounted.keyboard_focus("spark-send");
             let send = collected
                 .focusables
                 .iter()

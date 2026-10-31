@@ -733,18 +733,14 @@ mod unavailable_panel_tests {
             server_enabled: true,
             local_state_exists: false,
         };
-        for (menu, network, expected_reason) in [
-            (
-                Menu::Liquid(LiquidSubMenu::Overview),
-                Network::Regtest,
-                "Liquid isn't available on Regtest.",
-            ),
-            (
-                Menu::Spark(SparkSubMenu::Overview),
-                Network::Signet,
-                "Spark isn't available on Signet.",
-            ),
-        ] {
+        // Liquid isn't here: it is hidden for everyone since Tenshu v175, so
+        // a Liquid route gets the account panel on every network
+        // (`features::gated_off_liquid_route_reads_as_account_scoped_not_network_scoped`).
+        for (menu, network, expected_reason) in [(
+            Menu::Spark(SparkSubMenu::Overview),
+            Network::Signet,
+            "Spark isn't available on Signet.",
+        )] {
             let reason = features::route_availability(
                 &menu,
                 network,
@@ -773,13 +769,6 @@ mod unavailable_panel_tests {
                 Network::Bitcoin,
                 LiquidGate::HIDDEN,
                 true,
-            ),
-            (
-                "liquid-network-unavailable",
-                Menu::Liquid(LiquidSubMenu::Overview),
-                Network::Regtest,
-                granted,
-                false,
             ),
             (
                 "spark-network-unavailable",

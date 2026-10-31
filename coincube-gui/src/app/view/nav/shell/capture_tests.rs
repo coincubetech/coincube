@@ -45,8 +45,8 @@ pub(crate) fn renderer() -> iced::Renderer {
     .expect("wgpu headless renderer")
 }
 
-/// Lays `element` out at `size`, focuses `focus` (the ring paints, as after
-/// Tab), sends the first redraw and saves the frame to `path`. Panics if
+/// Lays `element` out at `size`, presses Tab and focuses `focus` (so the
+/// ring paints), sends the first redraw and saves the frame to `path`. Panics if
 /// `focus` names no focusable control, so a frame can't be saved unfocused
 /// under a focus name.
 pub(crate) fn save<M>(
@@ -63,6 +63,30 @@ pub(crate) fn save<M>(
             .as_widget_mut()
             .layout(&mut tree, renderer, &layout::Limits::new(Size::ZERO, size));
     if let Some(id) = focus {
+        // Arrive as a keyboard user does, after Tab: only keyboard navigation
+        // paints the ring (`coincube_ui::widget::action`).
+        let tab = iced::keyboard::Key::Named(iced::keyboard::key::Named::Tab);
+        let viewport = Rectangle::with_size(size);
+        element.as_widget_mut().update(
+            &mut tree,
+            &iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key: tab.clone(),
+                modified_key: tab,
+                physical_key: iced::keyboard::key::Physical::Unidentified(
+                    iced::keyboard::key::NativeCode::Unidentified,
+                ),
+                location: iced::keyboard::Location::Standard,
+                modifiers: iced::keyboard::Modifiers::empty(),
+                text: None,
+                repeat: false,
+            }),
+            Layout::new(&node),
+            mouse::Cursor::Unavailable,
+            renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut Shell::new(&mut Vec::new()),
+            &viewport,
+        );
         let mut focus: Box<dyn Operation<()>> =
             Box::new(operation::focusable::focus::<()>(id.clone()));
         loop {
@@ -210,5 +234,67 @@ fn top_bar_capture_cube() {
                 directory.join(format!("cube-{appearance}-focus-{name}-1024x768.png")),
             );
         }
+    }
+}
+
+/// The side panel with both wallets named, each wallet and Settings selected
+/// in turn, for review against `P-Overview`, `P-Send` and `P-Settings`
+/// (Tenshu v175 L2). Selection alone paints no ring; the `focus-spark` frame
+/// arrives by Tab and shows the 2px ring. Synthetic fixture names only.
+/// `TOP_BAR_CAPTURE_DIR=<dir> cargo test -p coincube-gui --lib
+/// side_panel_capture -- --ignored`.
+#[test]
+#[ignore = "writes PNG frames; needs a GPU adapter"]
+fn side_panel_capture() {
+    use crate::app::menu::{CubeSettingsOption, SparkSubMenu};
+    let Some(directory) = directory() else {
+        return;
+    };
+    let mut renderer = renderer();
+    for (appearance, palette) in themes() {
+        let mut cache = cache(appearance == "light", BalancePrivacy::Shown);
+        cache.wallet_names = crate::app::cache::WalletNames {
+            spark: Some("Daily spending".into()),
+            vault: Some("Family savings".into()),
+        };
+        let pages = [
+            ("overview", Menu::Cube(CubeSubMenu::Overview)),
+            ("send", Menu::Spark(SparkSubMenu::Send)),
+            (
+                "settings",
+                Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::General)),
+            ),
+        ];
+        for (page, menu) in &pages {
+            for (width, height) in WINDOWS {
+                save(
+                    &mut renderer,
+                    crate::app::view::dashboard(
+                        menu,
+                        &cache,
+                        iced::widget::column![iced::widget::text("Synthetic page").size(24)],
+                    ),
+                    Size::new(width, height),
+                    &palette,
+                    None,
+                    directory.join(format!(
+                        "side-panel-{appearance}-{page}-{width}x{height}.png"
+                    )),
+                );
+            }
+        }
+        let (_, send) = &pages[1];
+        save(
+            &mut renderer,
+            crate::app::view::dashboard(
+                send,
+                &cache,
+                iced::widget::column![iced::widget::text("Synthetic page").size(24)],
+            ),
+            Size::new(1024.0, 768.0),
+            &palette,
+            Some(Id::new("tenshu.shell.nav.Spark")),
+            directory.join(format!("side-panel-{appearance}-focus-spark-1024x768.png")),
+        );
     }
 }

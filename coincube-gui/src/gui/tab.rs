@@ -5838,6 +5838,7 @@ pub fn create_app_with_remote_backend(
             has_vault: true,
             has_imported_bitcoin: false,
             cube_name: cube_settings.name.clone(),
+            wallet_names: Default::default(),
             cube_connect_owner: cube_settings.connect_owner.clone(),
             cube_owned_by_other_account: false,
             current_cube_backed_up: cube_settings.backed_up,

@@ -24,28 +24,30 @@ const FOCUS_RING_WIDTH: f32 = 2.0;
 const FOCUS_RING_OUTSET: f32 = FOCUS_RING_GAP + FOCUS_RING_WIDTH;
 
 thread_local! {
-    /// Whether the last input was the keyboard, as a browser's
+    /// Whether focus last moved by keyboard navigation, as a browser's
     /// `:focus-visible` decides. A click still focuses the action, so Enter
-    /// and Tab continue from it, but only keyboard use paints the ring. One
-    /// flag per UI thread: every window shares the user's current modality.
-    static KEYBOARD_MODALITY: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    /// and Tab continue from it, but only keyboard navigation paints the ring.
+    /// It starts off, so a control focused before any input (a selected
+    /// sidebar row) shows no ring. One flag per UI thread: every window
+    /// shares the user's current modality.
+    static KEYBOARD_MODALITY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn note_modality(event: &Event) {
     let keyboard = match event {
-        // Modifiers alone (the Cmd of a Cmd-click) keep the current modality.
+        // Tab and the arrow keys navigate. Other keys (Space or Escape after a
+        // click, typing, modifiers) keep the current modality.
         Event::Keyboard(keyboard::Event::KeyPressed {
             key:
                 keyboard::Key::Named(
-                    key::Named::Shift
-                    | key::Named::Control
-                    | key::Named::Alt
-                    | key::Named::Super
-                    | key::Named::Meta,
+                    key::Named::Tab
+                    | key::Named::ArrowUp
+                    | key::Named::ArrowDown
+                    | key::Named::ArrowLeft
+                    | key::Named::ArrowRight,
                 ),
             ..
-        }) => return,
-        Event::Keyboard(keyboard::Event::KeyPressed { .. }) => true,
+        }) => true,
         Event::Mouse(mouse::Event::ButtonPressed(_))
         | Event::Touch(iced::touch::Event::FingerPressed { .. }) => false,
         _ => return,
@@ -820,6 +822,15 @@ mod tests {
             );
             let control = node.children()[0].bounds();
             assert_eq!(focus_outer_bounds(control).y, control.y - 4.0);
+            // Only keyboard navigation shows the ring; Tab is how a keyboard
+            // user reaches the action.
+            send_event(
+                &mut element,
+                &mut tree,
+                &node,
+                &renderer,
+                key_event(key::Named::Tab, false, true),
+            );
             run_operation(
                 &mut element,
                 &mut tree,
@@ -869,7 +880,7 @@ mod tests {
     }
 
     #[test]
-    fn a_click_focuses_without_a_ring_until_the_keyboard_is_used() {
+    fn only_keyboard_navigation_shows_the_ring() {
         load_fonts();
         let theme = Theme::dark();
         let renderer = iced::futures::executor::block_on(<Renderer as Headless>::new(
@@ -943,50 +954,85 @@ mod tests {
             );
             messages
         };
+        let click = |renderer: &Renderer, element: &mut Element<'_, Message>, tree: &mut Tree| {
+            let pressed = dispatch(
+                renderer,
+                element,
+                tree,
+                Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            );
+            dispatch(
+                renderer,
+                element,
+                tree,
+                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+            );
+            pressed
+        };
+
+        // A control focused before any input, like the selected sidebar row
+        // of a newly opened Cube, shows no ring.
+        run_operation(
+            &mut element,
+            &mut tree,
+            &node,
+            &renderer,
+            focusable::focus::<()>(Id::new("ring")),
+        );
+        assert!(
+            !ring_painted(&element, &tree),
+            "focus without keyboard navigation paints no ring"
+        );
+
         assert_eq!(
+            click(&renderer, &mut element, &mut tree),
+            vec![Message::Focus(Id::new("ring"))]
+        );
+        assert!(!ring_painted(&element, &tree), "a click paints no ring");
+
+        // Keys that don't navigate keep the click's modality: a modifier
+        // (Cmd-click), Space (activates the action), Escape and page scrolling.
+        for named in [
+            key::Named::Super,
+            key::Named::Space,
+            key::Named::Escape,
+            key::Named::PageDown,
+        ] {
             dispatch(
                 &renderer,
                 &mut element,
                 &mut tree,
-                Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
-            ),
-            vec![Message::Focus(Id::new("ring"))]
-        );
-        dispatch(
-            &renderer,
-            &mut element,
-            &mut tree,
-            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
-        );
-        assert!(!ring_painted(&element, &tree), "a click paints no ring");
+                key_event(named, false, true),
+            );
+            dispatch(
+                &renderer,
+                &mut element,
+                &mut tree,
+                key_event(named, false, false),
+            );
+            assert!(
+                !ring_painted(&element, &tree),
+                "{named:?} after a click paints no ring"
+            );
+        }
 
-        // A modifier alone (Cmd-click) does not reveal it either.
-        dispatch(
-            &renderer,
-            &mut element,
-            &mut tree,
-            key_event(key::Named::Super, false, true),
-        );
-        assert!(!ring_painted(&element, &tree));
-
-        dispatch(
-            &renderer,
-            &mut element,
-            &mut tree,
-            key_event(key::Named::Tab, false, true),
-        );
-        assert!(ring_painted(&element, &tree), "keyboard use shows the ring");
-
-        dispatch(
-            &renderer,
-            &mut element,
-            &mut tree,
-            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
-        );
-        assert!(
-            !ring_painted(&element, &tree),
-            "the next click hides it again"
-        );
+        for named in [key::Named::Tab, key::Named::ArrowDown] {
+            dispatch(
+                &renderer,
+                &mut element,
+                &mut tree,
+                key_event(named, false, true),
+            );
+            assert!(
+                ring_painted(&element, &tree),
+                "{named:?} is keyboard navigation and shows the ring"
+            );
+            click(&renderer, &mut element, &mut tree);
+            assert!(
+                !ring_painted(&element, &tree),
+                "the next click hides it again"
+            );
+        }
     }
 
     #[test]

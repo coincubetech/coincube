@@ -46,6 +46,12 @@ pub enum ActivityTarget {
 
 pub struct Activity {
     liquid_backend: Option<Arc<LiquidBackend>>,
+    /// Whether the Liquid wallet is shown ([`LiquidGate::show`]). The App
+    /// keeps it in step with the gate, since `reload` has no cache. While it
+    /// is off, Activity loads no Liquid history or refundable swaps.
+    ///
+    /// [`LiquidGate::show`]: crate::app::features::LiquidGate::show
+    liquid_shown: bool,
     spark_backend: Option<Arc<SparkBackend>>,
     vault: Vec<HistoryTransaction>,
     psbts: Vec<SpendTx>,
@@ -99,6 +105,7 @@ impl Activity {
     ) -> Self {
         Self {
             liquid_backend,
+            liquid_shown: false,
             spark_backend,
             vault: Vec::new(),
             psbts: Vec::new(),
@@ -133,6 +140,40 @@ impl Activity {
             label_errors: HashMap::new(),
             details_open: None,
         }
+    }
+
+    /// Follow the Liquid gate. Hiding Liquid drops its rows, refundable swaps,
+    /// errors and pages at once; showing it again loads them on the next
+    /// reload.
+    pub fn set_liquid_shown(&mut self, shown: bool) {
+        if self.liquid_shown == shown {
+            return;
+        }
+        self.liquid_shown = shown;
+        if !shown {
+            // A page still in flight answers a generation that no longer
+            // matches, so it can't bring the rows back.
+            self.generation = self.generation.wrapping_add(1);
+            self.liquid.clear();
+            self.refundables.clear();
+            self.liquid_has_more = false;
+            self.liquid_loading = false;
+            self.refundables_loading = false;
+            self.liquid_error = None;
+            self.refundables_error = None;
+            if self.filters.wallet == WalletFilter::Liquid {
+                self.filters.wallet = WalletFilter::All;
+            }
+        }
+    }
+
+    pub fn liquid_shown(&self) -> bool {
+        self.liquid_shown
+    }
+
+    /// The Liquid backend, while Liquid is shown.
+    fn liquid(&self) -> Option<Arc<LiquidBackend>> {
+        self.liquid_backend.clone().filter(|_| self.liquid_shown)
     }
 
     /// The Vault screen offers Bump fee and Cancel only on a wallet with
@@ -464,7 +505,7 @@ impl Activity {
             }
         }
         if self.liquid_has_more && !self.liquid_loading {
-            if let Some(liquid) = self.liquid_backend.clone() {
+            if let Some(liquid) = self.liquid() {
                 self.liquid_loading = true;
                 let offset = self.liquid.len() as u32;
                 tasks.push(Task::perform(
@@ -628,7 +669,9 @@ impl State for Activity {
                     return self.refresh_wallet(WalletFilter::Spark, None, None);
                 }
             }
-            Message::ActivityLiquidLoaded(generation, result) if generation == self.generation => {
+            Message::ActivityLiquidLoaded(generation, result)
+                if generation == self.generation && self.liquid_shown =>
+            {
                 self.liquid_loading = false;
                 match result {
                     Ok((rows, more)) => {
@@ -644,7 +687,7 @@ impl State for Activity {
                 }
             }
             Message::ActivityRefundablesLoaded(generation, result)
-                if generation == self.generation =>
+                if generation == self.generation && self.liquid_shown =>
             {
                 self.refundables_loading = false;
                 match result {
@@ -784,8 +827,9 @@ impl State for Activity {
                 .as_ref()
                 .is_some_and(|wallet| wallet.supports_inheritance());
         self.spark_loading = self.spark_backend.is_some();
-        self.liquid_loading = self.liquid_backend.is_some();
-        self.refundables_loading = self.liquid_backend.is_some();
+        let liquid = self.liquid();
+        self.liquid_loading = liquid.is_some();
+        self.refundables_loading = liquid.is_some();
         self.vault_error = None;
         self.psbt_error = None;
         self.spark_error = None;
@@ -807,7 +851,7 @@ impl State for Activity {
         } else {
             self.spark.clear();
         }
-        if let Some(liquid) = self.liquid_backend.clone() {
+        if let Some(liquid) = liquid {
             let refund_client = liquid.clone();
             tasks.push(Task::perform(
                 async move {
@@ -858,6 +902,106 @@ mod tests {
             description: None,
             details: Default::default(),
         }
+    }
+
+    fn liquid_payment(timestamp: u32) -> DomainPayment {
+        use crate::app::wallets::{
+            DomainPaymentDetails, DomainPaymentDirection, DomainPaymentStatus,
+        };
+        DomainPayment {
+            tx_id: Some(format!("liquid-{timestamp}")),
+            destination: None,
+            timestamp,
+            amount_sat: 1_000,
+            fees_sat: 0,
+            direction: DomainPaymentDirection::Receive,
+            status: DomainPaymentStatus::Complete,
+            details: DomainPaymentDetails::LiquidAsset {
+                asset_id: crate::app::breez_liquid::assets::USDT_ASSET_ID_MAINNET.into(),
+                asset_info: None,
+                description: String::new(),
+                payer_note: None,
+            },
+        }
+    }
+
+    fn liquid_activity() -> Activity {
+        let backend = Arc::new(LiquidBackend::new(Arc::new(
+            crate::app::breez_liquid::BreezClient::disconnected(
+                coincube_core::miniscript::bitcoin::Network::Bitcoin,
+            ),
+        )));
+        Activity::new(Some(backend), None)
+    }
+
+    /// Tenshu v175 hides Liquid, even for an account with the grant and a
+    /// Liquid wallet on disk: Activity asks for no Liquid history or
+    /// refundable swaps, and a page that answers anyway lists nothing.
+    #[test]
+    fn hidden_liquid_loads_and_lists_nothing() {
+        let gate = crate::app::features::LiquidGate {
+            server_enabled: true,
+            local_state_exists: true,
+        };
+        let mut activity = liquid_activity();
+        activity.set_liquid_shown(gate.show());
+        drop(activity.reload(None, None));
+        assert!(!activity.liquid_loading && !activity.refundables_loading);
+
+        let generation = activity.generation;
+        let cache = Cache::default();
+        drop(activity.update(
+            None,
+            &cache,
+            Message::ActivityLiquidLoaded(generation, Ok((vec![liquid_payment(300)], true))),
+        ));
+        drop(activity.update(
+            None,
+            &cache,
+            Message::ActivityRefundablesLoaded(
+                generation,
+                Ok(vec![DomainRefundableSwap {
+                    swap_address: "synthetic-swap".into(),
+                    timestamp: 200,
+                    amount_sat: 5_000,
+                }]),
+            ),
+        ));
+        assert!(activity.entries().is_empty());
+        assert!(!activity.liquid_has_more);
+        assert_eq!(activity.complete_through(), None);
+    }
+
+    /// Hiding Liquid while its rows are listed drops them, its errors and its
+    /// filter at once, and a page already in flight can't bring them back.
+    #[test]
+    fn hiding_liquid_drops_its_rows_errors_and_filter() {
+        let mut activity = liquid_activity();
+        activity.set_liquid_shown(true);
+        drop(activity.reload(None, None));
+        assert!(activity.liquid_loading, "a shown Liquid loads");
+        let generation = activity.generation;
+        let cache = Cache::default();
+        drop(activity.update(
+            None,
+            &cache,
+            Message::ActivityLiquidLoaded(generation, Ok((vec![liquid_payment(300)], true))),
+        ));
+        assert_eq!(activity.entries().len(), 1);
+        activity.refundables_error = Some("synthetic".into());
+        activity.filters.wallet = WalletFilter::Liquid;
+
+        activity.set_liquid_shown(false);
+        assert!(activity.entries().is_empty());
+        assert!(!activity.liquid_has_more && !activity.liquid_loading);
+        assert_eq!(activity.refundables_error, None);
+        assert_eq!(activity.filters.wallet, WalletFilter::All);
+        drop(activity.update(
+            None,
+            &cache,
+            Message::ActivityLiquidLoaded(generation, Ok((vec![liquid_payment(100)], false))),
+        ));
+        assert!(activity.entries().is_empty(), "a late page stays out");
     }
 
     #[test]
