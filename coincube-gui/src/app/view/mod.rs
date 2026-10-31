@@ -1031,9 +1031,12 @@ mod page_tests {
 
 #[cfg(test)]
 mod page_head_tests {
-    use super::{dashboard_headed, page_head, Message};
-    use crate::app::cache::Cache;
+    use super::{
+        dashboard_headed, page_head, spark_page_head, vault_page_head, wallet_page_head, Message,
+    };
+    use crate::app::cache::{Cache, WalletNames};
     use crate::app::menu::{CubeSubMenu, Menu};
+    use coincube_ui::component::tenshu::PageHead;
     use coincube_ui::widget::{Column, Element};
     use iced::advanced::widget::operation::{Focusable, Scrollable};
     use iced::advanced::widget::{Id, Operation, Tree};
@@ -1197,5 +1200,76 @@ mod page_head_tests {
             shown_first_row,
             viewport
         );
+    }
+
+    #[test]
+    fn wallet_heads_name_the_wallet_as_the_side_panel_does() {
+        let renderer = renderer();
+        let menu = Menu::Cube(CubeSubMenu::Overview);
+        let named = Cache {
+            cube_name: "Everyday".into(),
+            wallet_names: WalletNames {
+                spark: Some("Daily spending".into()),
+                vault: Some("Family savings".into()),
+            },
+            ..Cache::default()
+        };
+        // A blank name reads as no name, as in the side panel.
+        let unnamed = Cache {
+            cube_name: "Everyday".into(),
+            wallet_names: WalletNames {
+                spark: None,
+                vault: Some("  ".into()),
+            },
+            ..Cache::default()
+        };
+        type Head = fn(&Cache) -> PageHead<'_, Message>;
+        let cases: [(&Cache, Head, &str, &str); 6] = [
+            // H-Send, H-Send-Vault, H-Receive: "‹w.name› · ‹Cube› · ‹network›".
+            (
+                &named,
+                |cache| vault_page_head(cache, "Send"),
+                "Send",
+                "Vault · Family savings · Everyday · Bitcoin mainnet",
+            ),
+            (
+                &named,
+                |cache| spark_page_head(cache, "Receive"),
+                "Receive",
+                "Spark · Daily spending · Everyday · Bitcoin mainnet",
+            ),
+            (
+                &unnamed,
+                |cache| vault_page_head(cache, "Send"),
+                "Send",
+                "Vault · Everyday · Bitcoin mainnet",
+            ),
+            (
+                &unnamed,
+                |cache| spark_page_head(cache, "Receive"),
+                "Receive",
+                "Spark · Everyday · Bitcoin mainnet",
+            ),
+            // A wallet's own page is titled with its name.
+            (
+                &named,
+                |cache| wallet_page_head(cache, "Vault", cache.wallet_names.vault.as_deref()),
+                "Vault · Family savings",
+                "Everyday · Bitcoin mainnet",
+            ),
+            (
+                &named,
+                |cache| wallet_page_head(cache, "Spark", cache.wallet_names.spark.as_deref()),
+                "Spark · Daily spending",
+                "Everyday · Bitcoin mainnet",
+            ),
+        ];
+        for (cache, head, title, line) in cases {
+            let mut element = dashboard_headed(&menu, cache, head(cache), Column::new());
+            let mut tree = Tree::new(element.as_widget());
+            let (_, probe) = frame(&mut tree, &renderer, &mut element);
+            probe.text(title);
+            probe.text(line);
+        }
     }
 }
