@@ -11,11 +11,16 @@
 //!   chains immediately before the transaction is built.
 //! - [`Method::Signature`] (Bitcoin Blake2b only) relies on the Vault's
 //!   replay-protected signature, which Bitcoin rejects. The signing screen's
-//!   replay check still has to pass before broadcast. Its confirmed
-//!   transaction is not yet checked for those signatures, so it is not
-//!   counted as evidence (decision open item 1): past the threshold its
-//!   outputs show *Split · unconfirmed*, never verified, and the twin Cube
-//!   does not treat its inputs as separated.
+//!   replay check still has to pass before broadcast. A txid commits to no
+//!   witness, and the Vault could have signed the same transaction the
+//!   legacy way too, so the twin Cube counts it only from the witness its
+//!   confirming block commits to: [`twin_confirmed`] fetches that block,
+//!   authenticates it ([`coincube_core::btcb2_block`]) and checks every
+//!   signature is a valid `ALL|UNIFIED` one
+//!   ([`coincube_core::confirmed_unified`]; decision open item 1). Its own
+//!   outputs past the threshold still show *Split · unconfirmed*: the Vault
+//!   could yet confirm a legacy copy on Bitcoin, so they are not proven
+//!   one-chain coins.
 //!
 //! Either way one side is enough: once the split has depth, neither copy can
 //! be replayed onto the other chain. The transaction is handed to the Vault's
@@ -25,7 +30,8 @@
 //! must still verify. The twin Cube's journal only nominates its splits: a
 //! coin counts as separated by one only once Connect shows that split
 //! [`SPLIT_CONFIRMATIONS`] deep on the twin chain now and its confirmed
-//! transaction spends the coin ([`twin_confirmed`]).
+//! transaction spends the coin (and, for a signature split, carries only
+//! unified signatures; [`twin_confirmed`]).
 
 pub mod journal;
 
@@ -37,7 +43,9 @@ use std::{
 
 use coincube_core::{
     claim_ancestry::{retained::RetainedPath, search::OwnedLink},
-    miniscript::bitcoin::{consensus::serialize, psbt::Psbt, OutPoint, Transaction, Txid},
+    miniscript::bitcoin::{
+        consensus::serialize, psbt::Psbt, BlockHash, OutPoint, Transaction, Txid,
+    },
 };
 use coincubed::commands::CoinStatus;
 use serde::{Deserialize, Serialize};
@@ -110,8 +118,8 @@ pub struct Prepared {
 pub struct Derived {
     /// Outputs of splits still short of [`SPLIT_CONFIRMATIONS`].
     pub splitting: HashMap<OutPoint, u32>,
-    /// Outputs of signature splits past [`SPLIT_CONFIRMATIONS`], whose
-    /// signatures nothing has checked.
+    /// Outputs of signature splits past [`SPLIT_CONFIRMATIONS`]. Never
+    /// proven: a legacy copy of the split could still confirm on Bitcoin.
     pub unconfirmed: HashSet<OutPoint>,
     /// Outputs of confirmed split-key splits with the key's extended path,
     /// as [`ProofEntry::Saved`]: the path is only structurally checked, so a
@@ -169,12 +177,11 @@ pub fn derive(
             continue;
         }
         match record.method {
-            // Not evidence yet: nothing here verifies that the confirmed
-            // transaction carries a replay-protected signature on every input
-            // (it could have been signed elsewhere, legacy). Until that check
-            // exists (decision open item 1) a signature split separates
-            // nothing; its outputs are shown as split but unconfirmed, never
-            // proven, and its inputs stay on both chains in the twin Cube.
+            // Not a proof for these outputs: the Vault holds the inputs' keys
+            // on Bitcoin too and could still confirm a legacy-signed copy of
+            // this transaction there, which would put the outputs on both
+            // chains. They are shown as split but unconfirmed, never proven.
+            // The twin Cube's inputs are another matter: see `twin_confirmed`.
             Method::Signature => {
                 derived
                     .unconfirmed
@@ -254,8 +261,10 @@ pub const TWIN_CHECK_LIFETIME: std::time::Duration = std::time::Duration::from_s
 pub struct TwinCheck {
     /// The inputs of the transaction Connect showed at least
     /// [`SPLIT_CONFIRMATIONS`] deep on the twin chain, read from its
-    /// txid-authenticated bytes. `None` when it was shallower or absent, a
-    /// read failed, or the lookup did not run.
+    /// txid-authenticated bytes (for a signature split, from its block's,
+    /// once its witness passed). `None` when it was shallower or absent, a
+    /// signature split's witness did not pass, a read failed, or the lookup
+    /// did not run.
     pub spent: Option<HashSet<OutPoint>>,
     /// When the pass that made the check finished.
     pub at: std::time::Instant,
@@ -282,36 +291,38 @@ pub fn record_twin_checks(
     changed
 }
 
-/// The twin Cube's split-key splits to ask Connect about this pass: never
-/// checked first, then the longest unchecked, newest first among equals, up
-/// to [`MAX_TWIN_LOOKUPS`]. Every record is reached in turn however many
-/// there are. The twin journal's own confirmation count is not consulted.
+/// The twin Cube's splits to ask Connect about this pass, with how each was
+/// made: never checked first, then the longest unchecked, newest first among
+/// equals, up to [`MAX_TWIN_LOOKUPS`]. Every record is reached in turn
+/// however many there are. The twin journal's own confirmation count is not
+/// consulted.
 pub fn twin_candidates(
     twin_records: &[SplitRecord],
     checks: &HashMap<Txid, TwinCheck>,
-) -> Vec<Txid> {
-    let mut records: Vec<&SplitRecord> = twin_records
-        .iter()
-        .filter(|record| record.method == Method::SplitKey)
-        .collect();
+) -> Vec<(Txid, Method)> {
+    let mut records: Vec<&SplitRecord> = twin_records.iter().collect();
     records.sort_by_key(|record| {
         (
             checks.get(&record.txid).map(|check| check.at),
             std::cmp::Reverse(record.created_at),
         )
     });
-    let mut txids: Vec<Txid> = records.into_iter().map(|record| record.txid).collect();
-    txids.dedup();
-    txids.truncate(MAX_TWIN_LOOKUPS);
-    txids
+    let mut seen = HashSet::new();
+    records
+        .into_iter()
+        .filter(|record| seen.insert(record.txid))
+        .map(|record| (record.txid, record.method))
+        .take(MAX_TWIN_LOOKUPS)
+        .collect()
 }
 
 /// Coins of this Cube whose twin copy a split on the twin Cube has separated:
-/// the inputs of the twin's split-key splits whose last fresh check, within
+/// the inputs of the twin's splits whose last fresh check, within
 /// [`TWIN_CHECK_LIFETIME`] of `now`, showed them [`SPLIT_CONFIRMATIONS`]
 /// deep on the twin chain. Only inputs the journal lists *and* the confirmed
-/// transaction spends count: the journal nominates, the chain decides.
-/// Signature splits never count (see [`derive`]).
+/// transaction spends count: the journal nominates, the chain decides. A
+/// signature split has a check with inputs only once its confirmed witness
+/// passed ([`twin_confirmed`]).
 ///
 /// Each coin maps to the instant its check stops counting, so a reader can
 /// drop it then even if no later pass lands ([`is_separated`]).
@@ -321,10 +332,7 @@ pub fn twin_separated(
     now: std::time::Instant,
 ) -> HashMap<OutPoint, std::time::Instant> {
     let mut separated = HashMap::new();
-    for record in twin_records
-        .iter()
-        .filter(|record| record.method == Method::SplitKey)
-    {
+    for record in twin_records {
         let Some(check) = checks.get(&record.txid) else {
             continue;
         };
@@ -425,6 +433,17 @@ pub fn newer_pass(applied: &mut u64, seq: u64) -> bool {
 /// unconfirmed, absent, off the best chain, the chain moved during the reads
 /// or any read fails; never a guess.
 pub async fn depth_on(source: &dyn ObservationSource, chain: ChainId, txid: Txid) -> Option<u32> {
+    confirmed_on(source, chain, txid)
+        .await
+        .map(|(depth, _)| depth)
+}
+
+/// [`depth_on`], with the hash of the block that holds `txid`.
+async fn confirmed_on(
+    source: &dyn ObservationSource,
+    chain: ChainId,
+    txid: Txid,
+) -> Option<(u32, BlockHash)> {
     let tip = source
         .tip(chain)
         .await
@@ -457,26 +476,34 @@ pub async fn depth_on(source: &dyn ObservationSource, chain: ChainId, txid: Txid
     if after.value() != tip.value() {
         return None;
     }
-    std::convert::TryFrom::try_from(tip.value().height - block.height + 1).ok()
+    let depth = std::convert::TryFrom::try_from(tip.value().height - block.height + 1).ok()?;
+    Some((depth, block.hash))
 }
 
-/// Check the twin Cube's splits (`txids`) on the twin of `here` now: for
-/// each that Connect shows at least [`SPLIT_CONFIRMATIONS`] deep, the inputs
-/// of that transaction (see [`TwinCheck::spent`]). Every txid gets an answer;
-/// a shallow or absent split, a failed read or a source that cannot be built
+/// Check the twin Cube's splits (`candidates`) on the twin of `here` now:
+/// for each that Connect shows at least [`SPLIT_CONFIRMATIONS`] deep, the
+/// inputs of that transaction (see [`TwinCheck::spent`]). A signature split
+/// answers only if its confirmed witness is replay protected
+/// ([`signature_split_inputs`]). Every txid gets an answer; a shallow or
+/// absent split, a failed read or check, or a source that cannot be built
 /// answers `None`.
 pub async fn twin_confirmed(
     client: crate::services::coincube::CoincubeClient,
     here: ChainId,
-    txids: Vec<Txid>,
+    candidates: Vec<(Txid, Method)>,
     generation: u64,
     live: tokio::sync::watch::Receiver<u64>,
 ) -> Vec<(Txid, Option<HashSet<OutPoint>>)> {
     use crate::services::claim_observation::{http::HttpObservationSource, CollectionContext};
 
-    let unchecked = |txids: Vec<Txid>| txids.into_iter().map(|txid| (txid, None)).collect();
+    let unchecked = |candidates: Vec<(Txid, Method)>| {
+        candidates
+            .into_iter()
+            .map(|(txid, _)| (txid, None))
+            .collect()
+    };
     let Some(twin) = crate::services::entangled::twin_chain(here) else {
-        return unchecked(txids);
+        return unchecked(candidates);
     };
     let Ok(source) = HttpObservationSource::new(
         client,
@@ -487,25 +514,89 @@ pub async fn twin_confirmed(
             generation: live,
         },
     ) else {
-        return unchecked(txids);
+        return unchecked(candidates);
     };
-    let mut checked = Vec::with_capacity(txids.len());
-    for txid in txids {
-        let deep = depth_on(&source, twin, txid)
+    let mut checked = Vec::with_capacity(candidates.len());
+    for (txid, method) in candidates {
+        let block = confirmed_on(&source, twin, txid)
             .await
-            .is_some_and(|depth| depth >= SPLIT_CONFIRMATIONS);
-        let spent = if deep {
-            source
+            .filter(|(depth, _)| *depth >= SPLIT_CONFIRMATIONS)
+            .map(|(_, block)| block);
+        let spent = match (block, method) {
+            (None, _) => None,
+            (Some(_), Method::SplitKey) => source
                 .ancestry_transaction(twin, txid)
                 .await
                 .ok()
-                .and_then(|raw| spent_by(&raw, txid))
-        } else {
-            None
+                .and_then(|raw| spent_by(&raw, txid)),
+            // Only Bitcoin rejects a unified signature.
+            (Some(block), Method::Signature) if twin.is_blake2b() => {
+                signature_split_on(&source, twin, block, txid).await
+            }
+            (Some(_), Method::Signature) => None,
         };
         checked.push((txid, spent));
     }
     checked
+}
+
+/// A signature split holds at most this many inputs for the twin check to
+/// look up their parents; a larger one is not checked.
+pub const MAX_SIGNATURE_SPLIT_INPUTS: usize = 64;
+
+/// The inputs of signature split `txid`, confirmed in `block` on `chain`,
+/// if the witness that block commits to is replay protected.
+async fn signature_split_on(
+    source: &crate::services::claim_observation::http::HttpObservationSource,
+    chain: ChainId,
+    block: BlockHash,
+    txid: Txid,
+) -> Option<HashSet<OutPoint>> {
+    let raw = source.raw_block(chain, block).await.ok()?;
+    let tx = coincube_core::btcb2_block::confirmed_transaction(&raw, block, txid).ok()?;
+    drop(raw);
+    if tx.input.len() > MAX_SIGNATURE_SPLIT_INPUTS {
+        return None;
+    }
+    let mut parents = HashMap::new();
+    for input in &tx.input {
+        let parent = input.previous_output.txid;
+        if parents.contains_key(&parent) {
+            continue;
+        }
+        let raw = source.ancestry_transaction(chain, parent).await.ok()?;
+        let parent_tx: Transaction =
+            coincube_core::miniscript::bitcoin::consensus::deserialize(&raw).ok()?;
+        parents.insert(parent, parent_tx);
+    }
+    signature_split_inputs(&tx, &parents)
+}
+
+/// The inputs of `tx`, a confirmed signature split as its block commits to
+/// it, if every input is signed only with valid `ALL|UNIFIED` signatures
+/// ([`coincube_core::confirmed_unified`]), so Bitcoin rejects it. `parents`
+/// holds the transactions it spends, by txid.
+fn signature_split_inputs(
+    tx: &Transaction,
+    parents: &HashMap<Txid, Transaction>,
+) -> Option<HashSet<OutPoint>> {
+    let spent_outputs = tx
+        .input
+        .iter()
+        .map(|input| {
+            let parent = parents.get(&input.previous_output.txid)?;
+            if parent.compute_txid() != input.previous_output.txid {
+                return None;
+            }
+            parent
+                .output
+                .get(input.previous_output.vout as usize)
+                .cloned()
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only();
+    coincube_core::confirmed_unified::verify_replay_protected(tx, &spent_outputs, &secp).ok()?;
+    Some(tx.input.iter().map(|input| input.previous_output).collect())
 }
 
 /// The inputs of `raw` if it is the transaction `txid`. A txid commits to
@@ -846,7 +937,7 @@ mod tests {
     }
 
     #[test]
-    fn a_signature_split_separates_nothing_on_intent_alone() {
+    fn a_signature_split_separates_only_on_a_checked_witness() {
         let (mut record, _) = split_fixture();
         record.method = Method::Signature;
         record.key = None;
@@ -860,7 +951,7 @@ mod tests {
             &HashMap::new(),
             UNIX_EPOCH,
         );
-        assert!(derived.proofs.is_empty(), "no proof from a record's intent");
+        assert!(derived.proofs.is_empty(), "no proof for its own outputs");
         assert!(
             derived.splitting.is_empty(),
             "past the threshold, so not splitting"
@@ -870,20 +961,205 @@ mod tests {
             vec![output].into_iter().collect::<HashSet<_>>(),
             "shown as split but unconfirmed instead"
         );
-        let checks: HashMap<Txid, TwinCheck> = vec![(
-            records[0].txid,
-            TwinCheck {
-                spent: Some(records[0].inputs.iter().copied().collect()),
-                at: std::time::Instant::now(),
-            },
-        )]
-        .into_iter()
-        .collect();
+        let now = std::time::Instant::now();
         assert!(
-            twin_separated(&records, &checks, std::time::Instant::now()).is_empty(),
-            "nor on the twin side, however deep"
+            twin_separated(&records, &HashMap::new(), now).is_empty(),
+            "nothing on the twin side from the journal's word"
         );
-        assert!(twin_candidates(&records, &checks).is_empty());
+        assert_eq!(
+            twin_candidates(&records, &HashMap::new()),
+            vec![(records[0].txid, Method::Signature)],
+            "so the twin Cube looks it up"
+        );
+        // A check only carries inputs once the witness passed.
+        let check = |spent| {
+            vec![(records[0].txid, TwinCheck { spent, at: now })]
+                .into_iter()
+                .collect::<HashMap<_, _>>()
+        };
+        assert!(twin_separated(&records, &check(None), now).is_empty());
+        let separated = twin_separated(
+            &records,
+            &check(Some(records[0].inputs.iter().copied().collect())),
+            now,
+        );
+        assert_eq!(
+            separated.keys().copied().collect::<HashSet<_>>(),
+            records[0].inputs.iter().copied().collect::<HashSet<_>>()
+        );
+    }
+
+    /// A Vault-style 2-of-2 output and a signature split of two of them,
+    /// signed `ALL|UNIFIED` by both keys.
+    fn signature_split() -> (Transaction, HashMap<Txid, Transaction>, ScriptBuf) {
+        use coincube_core::{
+            miniscript::{
+                bitcoin::{secp256k1, PublicKey},
+                Miniscript, Segwitv0,
+            },
+            unified_sighash::{UnifiedSighashCache, SCRIPT_TYPE_WITNESS_V0},
+        };
+        let secp = secp256k1::Secp256k1::new();
+        let keys: Vec<secp256k1::SecretKey> = (1..=2u8)
+            .map(|n| secp256k1::SecretKey::from_slice(&[n; 32]).unwrap())
+            .collect();
+        let public: Vec<String> = keys
+            .iter()
+            .map(|key| {
+                PublicKey::new(secp256k1::PublicKey::from_secret_key(&secp, key)).to_string()
+            })
+            .collect();
+        let script = Miniscript::<PublicKey, Segwitv0>::from_str(&format!(
+            "multi(2,{},{})",
+            public[0], public[1]
+        ))
+        .unwrap()
+        .encode();
+        let mut parent = tx(
+            vec![OutPoint::new(Txid::from_str(&"aa".repeat(32)).unwrap(), 0)],
+            None,
+        );
+        parent.output = vec![
+            TxOut {
+                value: Amount::from_sat(40_000),
+                script_pubkey: script.to_p2wsh(),
+            };
+            2
+        ];
+        let parent_txid = parent.compute_txid();
+        let mut split = tx(
+            vec![OutPoint::new(parent_txid, 0), OutPoint::new(parent_txid, 1)],
+            None,
+        );
+        split.output[0].script_pubkey = script.to_p2wsh();
+        let spent = parent.output.clone();
+        let cache = UnifiedSighashCache::new(&split, &spent).unwrap();
+        let witnesses: Vec<Witness> = (0..2)
+            .map(|input| {
+                let digest = cache
+                    .signature_hash(input, 0x21, SCRIPT_TYPE_WITNESS_V0, &script)
+                    .unwrap();
+                let message = secp256k1::Message::from_digest(digest);
+                let mut stack = vec![vec![]];
+                for key in &keys {
+                    let mut sig = secp.sign_ecdsa(&message, key).serialize_der().to_vec();
+                    sig.push(0x21);
+                    stack.push(sig);
+                }
+                stack.push(script.to_bytes());
+                Witness::from_slice(&stack)
+            })
+            .collect();
+        for (input, witness) in split.input.iter_mut().zip(witnesses) {
+            input.witness = witness;
+        }
+        (
+            split,
+            vec![(parent_txid, parent)].into_iter().collect(),
+            script,
+        )
+    }
+
+    #[test]
+    fn a_unified_witness_yields_the_split_inputs() {
+        let (split, parents, _) = signature_split();
+        assert_eq!(
+            signature_split_inputs(&split, &parents),
+            Some(
+                split
+                    .input
+                    .iter()
+                    .map(|input| input.previous_output)
+                    .collect()
+            )
+        );
+    }
+
+    #[test]
+    fn a_legacy_or_unverifiable_witness_yields_nothing() {
+        let (split, parents, _) = signature_split();
+        // The same txid with a legacy sighash byte: what a second, legacy
+        // signing of the split would confirm.
+        let mut legacy = split.clone();
+        let mut stack = legacy.input[1].witness.to_vec();
+        *stack[1].last_mut().unwrap() = 0x01;
+        legacy.input[1].witness = Witness::from_slice(&stack);
+        assert_eq!(legacy.compute_txid(), split.compute_txid());
+        assert_eq!(signature_split_inputs(&legacy, &parents), None);
+        // A parent missing, or served under the wrong txid.
+        assert_eq!(signature_split_inputs(&split, &HashMap::new()), None);
+        let (txid, mut parent) = parents.iter().next().map(|(k, v)| (*k, v.clone())).unwrap();
+        parent.output[1].value = Amount::from_sat(40_001);
+        let wrong: HashMap<Txid, Transaction> = vec![(txid, parent.clone())].into_iter().collect();
+        assert_eq!(signature_split_inputs(&split, &wrong), None);
+        // An output index the parent does not have.
+        let mut beyond = split.clone();
+        beyond.input[1].previous_output.vout = 2;
+        assert_eq!(signature_split_inputs(&beyond, &parents), None);
+    }
+
+    #[test]
+    fn a_block_commits_the_witness_the_check_reads() {
+        use coincube_core::{
+            btcb2_block::confirmed_transaction,
+            miniscript::bitcoin::{
+                block::{Header, Version},
+                consensus::serialize,
+                hashes::Hash,
+                Block, CompactTarget, TxMerkleNode, WitnessMerkleNode,
+            },
+        };
+        let (split, parents, _) = signature_split();
+        let block_with = |split: &Transaction| {
+            let mut coinbase = tx(vec![], Some(1));
+            coinbase.input[0].witness = Witness::from_slice(&[[0u8; 32]]);
+            let mut block = Block {
+                header: Header {
+                    version: Version::TWO,
+                    prev_blockhash: BlockHash::all_zeros(),
+                    merkle_root: TxMerkleNode::all_zeros(),
+                    time: 0,
+                    bits: CompactTarget::from_consensus(0x207fffff),
+                    nonce: 0,
+                },
+                txdata: vec![coinbase, split.clone()],
+            };
+            let root: WitnessMerkleNode = block.witness_root().unwrap();
+            let commitment = Block::compute_witness_commitment(&root, &[0u8; 32]);
+            let mut script = vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+            script.extend_from_slice(commitment.as_byte_array());
+            block.txdata[0].output.push(TxOut {
+                value: Amount::ZERO,
+                script_pubkey: ScriptBuf::from(script),
+            });
+            block.header.merkle_root = block.compute_merkle_root().unwrap();
+            block
+        };
+        let block = block_with(&split);
+        let confirmed =
+            confirmed_transaction(&serialize(&block), block.block_hash(), split.compute_txid())
+                .unwrap();
+        assert!(signature_split_inputs(&confirmed, &parents).is_some());
+
+        // Served a unified copy while the block holds a legacy one: the
+        // commitment catches the swap before the witness is ever judged.
+        let mut legacy = split.clone();
+        let mut stack = legacy.input[0].witness.to_vec();
+        *stack[1].last_mut().unwrap() = 0x01;
+        legacy.input[0].witness = Witness::from_slice(&stack);
+        let held = block_with(&legacy);
+        let mut served = held.clone();
+        served.txdata[1] = split.clone();
+        assert!(confirmed_transaction(
+            &serialize(&served),
+            held.block_hash(),
+            split.compute_txid()
+        )
+        .is_err());
+        let confirmed =
+            confirmed_transaction(&serialize(&held), held.block_hash(), split.compute_txid())
+                .unwrap();
+        assert_eq!(signature_split_inputs(&confirmed, &parents), None);
     }
 
     #[test]
@@ -1099,15 +1375,18 @@ mod tests {
         let mut checks = HashMap::new();
         let first = twin_candidates(&records, &checks);
         assert_eq!(first.len(), MAX_TWIN_LOOKUPS);
-        assert_eq!(first[0], records.last().unwrap().txid, "newest first");
+        assert_eq!(first[0].0, records.last().unwrap().txid, "newest first");
         let at = std::time::Instant::now();
-        for txid in &first {
+        for (txid, _) in &first {
             checks.insert(*txid, TwinCheck { spent: None, at });
         }
         let second = twin_candidates(&records, &checks);
         assert_eq!(
             &second[..2],
-            &[records[1].txid, records[0].txid],
+            &[
+                (records[1].txid, records[1].method),
+                (records[0].txid, records[0].method)
+            ],
             "the two never checked come next"
         );
     }

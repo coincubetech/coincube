@@ -37,9 +37,11 @@ pub enum ChainStatus {
     /// Spent by this Cube's split, which has `confirmations` of
     /// [`SPLIT_CONFIRMATIONS`].
     Splitting { confirmations: u32 },
-    /// Spent by this Cube's signature split, which is past
-    /// [`SPLIT_CONFIRMATIONS`] but whose replay-protected signatures nothing
-    /// has checked yet (decision open item 1). Not proof.
+    /// An output of this Cube's signature split, which is past
+    /// [`SPLIT_CONFIRMATIONS`]. Not proof: the Vault could still confirm a
+    /// legacy-signed copy of the split on Bitcoin. (The twin Cube counts the
+    /// split's inputs as separated once their confirmed witness is checked;
+    /// see `split_coins::twin_confirmed`.)
     SplitUnconfirmed,
     /// Proven to exist on this chain only.
     OnlyHere,

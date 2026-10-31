@@ -4065,7 +4065,10 @@ impl App {
                             )
                             .await
                         }
-                        None => candidates.into_iter().map(|txid| (txid, None)).collect(),
+                        None => candidates
+                            .into_iter()
+                            .map(|(txid, _)| (txid, None))
+                            .collect(),
                     }
                 };
                 let (transactions, twin_checked) = tokio::join!(transactions, confirmed);

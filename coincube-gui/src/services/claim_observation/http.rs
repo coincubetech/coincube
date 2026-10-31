@@ -298,6 +298,24 @@ impl HttpObservationSource {
         }
         Ok(raw)
     }
+    /// Fetch one raw block, on the same anonymous immutable-data route as
+    /// [`Self::ancestry_transaction`]. Nothing here authenticates the bytes:
+    /// the caller checks them against a block hash it read fresh
+    /// (`coincube_core::btcb2_block::confirmed_transaction`).
+    pub async fn raw_block(&self, chain: ChainId, hash: BlockHash) -> Result<Vec<u8>, FailureKind> {
+        let (status, bytes, _, _) = self
+            .get_body(
+                chain,
+                &format!("block/{}/raw", hash),
+                false,
+                coincube_core::btcb2_block::MAX_BLOCK_BYTES,
+            )
+            .await?;
+        if status != 200 {
+            return Err(FailureKind::Http(status));
+        }
+        Ok(bytes)
+    }
     /// Six-block fee estimate from the paired fork provider, without account
     /// headers or Bitcoin-provider fallback. A quote never authorizes a spend.
     pub async fn claim_fee_rate(&self) -> Result<u64, FailureKind> {
@@ -624,6 +642,55 @@ mod tests {
             ));
             mock.assert_hits(1);
         }
+    }
+    #[tokio::test]
+    async fn raw_blocks_are_anonymous_bounded_immutable_reads() {
+        let server = MockServer::start();
+        let (source, _sender) = source(&server);
+        let hash = BlockHash::from_str(&"ab".repeat(32)).unwrap();
+        let path = format!("/api/v1/esplora/bitcoin-blake2b/mainnet/block/{}/raw", hash);
+        let mut mock = server.mock(|when, then| {
+            when.method(GET).path(path.clone()).matches(|request| {
+                request.headers.as_ref().is_none_or(|headers| {
+                    headers.iter().all(|(name, _)| {
+                        !["authorization", "cookie", "x-coincube-observation"]
+                            .iter()
+                            .any(|forbidden| name.eq_ignore_ascii_case(forbidden))
+                    })
+                })
+            });
+            then.status(200).body([1u8, 2, 3]);
+        });
+        assert_eq!(
+            source.raw_block(ChainId::BitcoinBlake2b, hash).await,
+            Ok(vec![1, 2, 3])
+        );
+        mock.assert_hits(1);
+        mock.delete();
+
+        mock = server.mock(|when, then| {
+            when.method(GET).path(path.clone());
+            then.status(200)
+                .body(vec![0u8; coincube_core::btcb2_block::MAX_BLOCK_BYTES + 1]);
+        });
+        assert_eq!(
+            source.raw_block(ChainId::BitcoinBlake2b, hash).await,
+            Err(FailureKind::Malformed)
+        );
+        mock.delete();
+
+        server.mock(|when, then| {
+            when.method(GET).path(path.clone());
+            then.status(404);
+        });
+        assert_eq!(
+            source.raw_block(ChainId::BitcoinBlake2b, hash).await,
+            Err(FailureKind::Http(404))
+        );
+        assert_eq!(
+            source.raw_block(ChainId::Testnet4, hash).await,
+            Err(FailureKind::WrongChain)
+        );
     }
     pub(super) fn ancestry_fixture() -> (Txid, Vec<u8>) {
         use coincube_core::miniscript::bitcoin::{
