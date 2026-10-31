@@ -313,8 +313,8 @@ pub enum Method {
     ///
     /// The gui treats [`ErrorKind::NotConnected`] as an unknown outcome. Its
     /// client makes that answer up for every request still in flight when
-    /// the bridge dies, so it can't be told apart from the bridge's own
-    /// pre-`init` refusal; reconciling after that refusal finds nothing moved.
+    /// the bridge dies. The bridge itself refuses a swap before `init` with
+    /// `BadRequest`.
     ///
     /// An [`ErrorKind::Sdk`] error can come after the SDK has sent the input
     /// to the pool: at `a38117d` it gives up waiting for the output after
@@ -900,7 +900,9 @@ pub enum AutoConvertBreaker {
 /// minimum on that side.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ConversionLimits {
-    /// Least that can be converted, in the asset converted out of.
+    /// Least that can be converted, in the asset converted out of. Out of
+    /// bitcoin the bridge reports the least its sizing can convert, a few
+    /// sats above the pool's own minimum (S3b).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_from: Option<AssetAmount>,
     /// Least that can be received, in the asset converted into.
@@ -932,12 +934,18 @@ pub struct ConversionQuote {
     /// Estimated amount received. The least the conversion will deliver
     /// depends on the SDK's path (`flashnet.rs` at `a38117d`):
     ///
-    /// - a swap out of USDB, which is an exact input: the SDK has already taken
-    ///   [`Self::max_slippage_bps`] off the simulated output and signs this
-    ///   figure as the minimum, so this is the least it delivers;
-    /// - toward a target (a swap out of bitcoin, or a pay-from conversion):
-    ///   this is the simulated output, and the minimum is the target, about
-    ///   this figure less [`Self::max_slippage_bps`].
+    /// - a swap, which is an exact input in both directions (S3b). This is
+    ///   not a floor: the SDK prices an exact input again when it is sent and
+    ///   signs that price less [`Self::max_slippage_bps`] as the minimum. Out
+    ///   of USDB this figure already has the cap taken off the simulated
+    ///   output; out of bitcoin it is the simulated output. The bridge
+    ///   refuses a swap whose price moved against the user by more than the
+    ///   cap since this estimate, so the least it delivers is about this
+    ///   figure less the cap out of USDB, and less twice the cap out of
+    ///   bitcoin;
+    /// - toward a target (a pay-from conversion): this is the simulated
+    ///   output, and the minimum is the target, about this figure less
+    ///   [`Self::max_slippage_bps`].
     ///
     /// Below the minimum the conversion fails and is refunded.
     pub amount_out: AssetAmount,
@@ -996,6 +1004,9 @@ pub struct SwapOk {
     /// child, so the bridge reports that receive payment's id. Read from the
     /// SDK source at `a38117d`; not yet run.
     pub swap_id: String,
+    /// The swap's status as the SDK answered it, worked out as
+    /// [`PaymentConversionSummary::status`] is. In practice `Completed`: the
+    /// SDK answers a self-transfer once the converted funds have arrived.
     pub status: SwapStatus,
 }
 
@@ -1118,10 +1129,10 @@ pub struct PaymentDetailSummary {
     /// Bitcoin txid of a deposit or withdrawal, or a token transaction hash.
     #[serde(default)]
     pub tx_id: Option<String>,
-    /// The BTC ⇄ USDB conversion behind this payment, from the SDK's
-    /// `conversion_details`. Set on a swap's row and on a send funded by a
-    /// conversion. `None` from a bridge older than this field, and from every
-    /// bridge until S3b fills it in.
+    /// The BTC ⇄ USDB conversion behind this payment. Set on a swap's or an
+    /// auto-convert's row, on a refund of one, and on a send funded by a
+    /// conversion; a cross-chain provider's conversion isn't one. `None` on
+    /// every other row, and from a bridge older than S3b.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversion: Option<PaymentConversionSummary>,
 }
@@ -1129,12 +1140,18 @@ pub struct PaymentDetailSummary {
 /// A payment's conversion, as Activity shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaymentConversionSummary {
-    /// The SDK's overall `ConversionDetails.status`. Updated in place by
-    /// [`Event::SwapStatusChanged`].
+    /// The SDK's `conversion_details.status` when the payment has them,
+    /// otherwise the row's own AMM `conversion_info` status, otherwise
+    /// `Pending`. A self-transfer's row has no `conversion_details` at
+    /// `a38117d`, so a swap's status comes from its AMM information.
+    /// `Completed` only once the payment itself is completed. Updated in
+    /// place by [`Event::SwapStatusChanged`].
     pub status: SwapStatus,
     /// What the BTC ⇄ USDB step converted. `None` until the SDK fills in the
     /// steps, which it does later from child payments, or when there is no
-    /// BTC ⇄ USDB step.
+    /// BTC ⇄ USDB step. The SDK builds steps only for a payment with
+    /// `conversion_details`, so a swap's own row has none: Activity shows its
+    /// own amount.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub amounts: Option<ConversionAmounts>,
 }
@@ -1534,8 +1551,10 @@ pub enum Event {
     /// A swap from [`Method::Swap`] moved to `status`. `swap_id` is
     /// [`SwapOk::swap_id`], the [`PaymentSummary::id`] of the swap's Activity
     /// row, so the gui updates that row's
-    /// [`PaymentDetailSummary::conversion`]. Not emitted until S3b; the same
-    /// caution as [`Event::AutoConvertStateChanged`] applies.
+    /// [`PaymentDetailSummary::conversion`]. Emitted from S3b on, only for a
+    /// swap whose [`SwapOk::status`] wasn't finished: the bridge re-reads it
+    /// on each sync until it is, and only within the session that ran it.
+    /// The same caution as [`Event::AutoConvertStateChanged`] applies.
     SwapStatusChanged { swap_id: String, status: SwapStatus },
 }
 

@@ -13,7 +13,7 @@
 //!   ([`AutoConvert::note_receive`]);
 //! - one worker ([`convert_pending`]) converts the pending sats, bounded by
 //!   the bitcoin balance, once they reach the pool's minimum, with a
-//!   self-transfer to the wallet's own Spark address ([`prepare_request`]);
+//!   self-transfer to the wallet's own Spark address ([`prepare_request_at`]);
 //! - three failed conversions in a row turn auto-convert off and pause it
 //!   ([`FailureTracker`]).
 //!
@@ -279,44 +279,72 @@ fn carries_conversion(details: Option<&PaymentDetails>) -> bool {
     )
 }
 
-/// The conversion options on every auto-convert request: bitcoin to the
-/// token named by the request, with the slippage cap the gui shows.
+/// [`conversion_options_at`] at auto-convert's cap, the one the gui shows.
+#[cfg(test)]
 pub fn conversion_options() -> ConversionOptions {
+    conversion_options_at(CONVERSION_MAX_SLIPPAGE_BPS)
+}
+
+/// The conversion options on every bitcoin → USDB request: bitcoin to the
+/// token named by the request, at `max_slippage_bps`. Auto-convert uses the
+/// cap the gui shows; a swap (`crate::swap`) can ask for another.
+pub fn conversion_options_at(max_slippage_bps: u32) -> ConversionOptions {
     ConversionOptions {
         conversion_type: ConversionType::FromBitcoin,
-        max_slippage_bps: Some(CONVERSION_MAX_SLIPPAGE_BPS),
+        max_slippage_bps: Some(max_slippage_bps),
         // The SDK default: 30 s to see the converted USDB arrive.
         completion_timeout_secs: None,
     }
 }
 
+/// [`prepare_request_at`] at auto-convert's cap.
+#[cfg(test)]
+pub fn prepare_request(own_spark_address: &str, usdb_target: u128) -> PrepareSendPaymentRequest {
+    prepare_request_at(own_spark_address, usdb_target, CONVERSION_MAX_SLIPPAGE_BPS)
+}
+
 /// The prepare for an auto-convert: a self-transfer to the wallet's own Spark
-/// address that converts bitcoin into at least `usdb_target` USDB base units.
+/// address that converts bitcoin into at least `usdb_target` USDB base units,
+/// at `max_slippage_bps`.
 ///
 /// The SDK takes bitcoin → USDB only as a USDB target, never as an exact sats
 /// input (`sdk/payments/conversion.rs` at the pin), and pads the sats it
 /// spends by up to the slippage cap. [`convert`] sizes the target so the
 /// sats spent stay within what was received.
-pub fn prepare_request(own_spark_address: &str, usdb_target: u128) -> PrepareSendPaymentRequest {
+pub fn prepare_request_at(
+    own_spark_address: &str,
+    usdb_target: u128,
+    max_slippage_bps: u32,
+) -> PrepareSendPaymentRequest {
     PrepareSendPaymentRequest {
         payment_request: PaymentRequest::Input {
             input: own_spark_address.to_string(),
         },
         amount: Some(usdb_target),
         token_identifier: Some(USDB_MAINNET_TOKEN_IDENTIFIER.to_string()),
-        conversion_options: Some(conversion_options()),
+        conversion_options: Some(conversion_options_at(max_slippage_bps)),
         // Fees excluded: the SDK refuses `FeesIncluded` with `FromBitcoin`.
         fee_policy: None,
     }
 }
 
-/// The sats a prepared auto-convert spends, after checking the SDK prepared
-/// what [`prepare_request`] asked for: a self-transfer to `own_spark_address`
-/// carrying a bitcoin → USDB conversion at the 50 bps cap. Anything else is
-/// refused before it can be sent.
+/// [`checked_sats_in_at`] at auto-convert's cap.
+#[cfg(test)]
 pub fn checked_sats_in(
     prepared: &PrepareSendPaymentResponse,
     own_spark_address: &str,
+) -> Result<u128, String> {
+    checked_sats_in_at(prepared, own_spark_address, CONVERSION_MAX_SLIPPAGE_BPS)
+}
+
+/// The sats a prepared auto-convert spends, after checking the SDK prepared
+/// what [`prepare_request_at`] asked for: a self-transfer to
+/// `own_spark_address` carrying a bitcoin → USDB conversion at
+/// `max_slippage_bps`. Anything else is refused before it can be sent.
+pub fn checked_sats_in_at(
+    prepared: &PrepareSendPaymentResponse,
+    own_spark_address: &str,
+    max_slippage_bps: u32,
 ) -> Result<u128, String> {
     match &prepared.payment_method {
         SendPaymentMethod::SparkAddress { address, .. } if address == own_spark_address => {}
@@ -336,7 +364,7 @@ pub fn checked_sats_in(
     if !matches!(
         estimate.options.conversion_type,
         ConversionType::FromBitcoin
-    ) || estimate.options.max_slippage_bps != Some(CONVERSION_MAX_SLIPPAGE_BPS)
+    ) || estimate.options.max_slippage_bps != Some(max_slippage_bps)
     {
         return Err(format!(
             "the SDK prepared a different conversion: {:?}",
@@ -350,7 +378,7 @@ pub fn checked_sats_in(
 /// pool's rounding doesn't push a quote over. A send spends exactly the
 /// quote's sats ([`exact_input`]), so this margin is only for sizing. What it
 /// leaves stays bitcoin (see [`AutoConvert::record_success`]).
-fn sizing_aim(budget: u128) -> u128 {
+pub(crate) fn sizing_aim(budget: u128) -> u128 {
     budget.saturating_sub(budget / 1_000 + 1)
 }
 
@@ -360,7 +388,7 @@ fn sizing_aim(budget: u128) -> u128 {
 /// quote, and the refusal doesn't say so in a form the bridge can rely on
 /// (a Flashnet error string at the pin), so it would count as a failure.
 /// Short of that, the sats wait for the next receive.
-fn clears_min_input(budget: u128, min_sats: u128) -> bool {
+pub(crate) fn clears_min_input(budget: u128, min_sats: u128) -> bool {
     sizing_aim(sizing_aim(budget)) >= min_sats
 }
 
@@ -425,12 +453,40 @@ pub trait Converter: Send + Sync {
 pub struct SdkConverter {
     sdk: SdkHandle,
     own_address: Arc<OnceCell<String>>,
+    /// The slippage cap on every prepare: the gui's 50 bps for auto-convert,
+    /// or the one a swap asked for ([`Self::at_slippage`]).
+    max_slippage_bps: u32,
 }
 
 impl SdkConverter {
     /// `own_address` caches the wallet's Spark address across conversions.
     pub fn new(sdk: SdkHandle, own_address: Arc<OnceCell<String>>) -> Self {
-        Self { sdk, own_address }
+        Self {
+            sdk,
+            own_address,
+            max_slippage_bps: CONVERSION_MAX_SLIPPAGE_BPS,
+        }
+    }
+
+    /// The same converter, preparing at `max_slippage_bps` instead.
+    pub fn at_slippage(self, max_slippage_bps: u32) -> Self {
+        Self {
+            max_slippage_bps,
+            ..self
+        }
+    }
+
+    /// The wallet's own Spark address, read from the SDK once.
+    pub async fn own_spark_address(&self) -> Result<&str, String> {
+        self.own_address().await
+    }
+
+    pub fn sdk(&self) -> &SdkHandle {
+        &self.sdk
+    }
+
+    pub fn max_slippage_bps(&self) -> u32 {
+        self.max_slippage_bps
     }
 
     async fn own_address(&self) -> Result<&str, String> {
@@ -488,10 +544,14 @@ impl Converter for SdkConverter {
         let mut prepared = self
             .sdk
             .sdk
-            .prepare_send_payment(prepare_request(own_address, usdb_target))
+            .prepare_send_payment(prepare_request_at(
+                own_address,
+                usdb_target,
+                self.max_slippage_bps,
+            ))
             .await
             .map_err(|e| e.to_string())?;
-        let sats_in = checked_sats_in(&prepared, own_address)?;
+        let sats_in = checked_sats_in_at(&prepared, own_address, self.max_slippage_bps)?;
         exact_input(&mut prepared);
         Ok(Quote { sats_in, prepared })
     }
@@ -514,7 +574,7 @@ impl Converter for SdkConverter {
 
 /// How a conversion attempt ended short of a conversion.
 #[derive(Debug, PartialEq, Eq)]
-enum Shortfall {
+pub(crate) enum Shortfall {
     /// The pending sats buy less USDB than the pool's minimum output. Not a
     /// failure: they wait for the next receive.
     TooSmall,
@@ -533,14 +593,8 @@ fn not_sent(reason: String) -> Shortfall {
 
 /// Convert at most `budget_sats` into USDB. Returns the sats the quote spent.
 ///
-/// A quote at a probe target gives the price. The target is scaled to the
-/// budget and re-quoted, shrinking it while the pool's rounding and slippage
-/// pad overshoot, and is sent only once a quote fits the budget.
-///
-/// Flashnet states a minimum for one side of a pair only
-/// (`get_min_amounts` at the pin). With a minimum output, the probe asks for
-/// at least that. With only a minimum input, a probe that costs fewer sats is
-/// refused, so a refused probe is retried larger ([`PROBE_ESCALATIONS`]).
+/// The quote comes from [`fitted_quote`], and is sent only once it fits the
+/// budget.
 ///
 /// The send runs under the send gate ([`AutoConvert::send_gate`]), with the
 /// switch checked under the state lock once the gate is held. Every switch
@@ -554,6 +608,35 @@ async fn convert<C: Converter>(
     auto_convert: &Mutex<AutoConvert>,
     epoch: u64,
 ) -> Result<u128, Shortfall> {
+    let quote = fitted_quote(converter, budget_sats, limits).await?;
+    let gate = auto_convert.lock().await.send_gate();
+    let _sending = gate.lock().await;
+    if !auto_convert.lock().await.still_wanted(epoch) {
+        return Err(Shortfall::Cancelled);
+    }
+    converter
+        .send(quote.prepared)
+        .await
+        .map_err(|reason| Shortfall::Failed { reason, sent: true })?;
+    Ok(quote.sats_in)
+}
+
+/// A prepared bitcoin → USDB conversion whose sats fit `budget_sats`. Also
+/// sizes a swap out of bitcoin (`crate::swap`).
+///
+/// A quote at a probe target gives the price. The target is scaled to the
+/// budget and re-quoted, shrinking it while the pool's rounding and slippage
+/// pad overshoot, until a quote fits the budget.
+///
+/// Flashnet states a minimum for one side of a pair only
+/// (`get_min_amounts` at the pin). With a minimum output, the probe asks for
+/// at least that. With only a minimum input, a probe that costs fewer sats is
+/// refused, so a refused probe is retried larger ([`PROBE_ESCALATIONS`]).
+pub(crate) async fn fitted_quote<C: Converter>(
+    converter: &C,
+    budget_sats: u64,
+    limits: Limits,
+) -> Result<Quote<C::Prepared>, Shortfall> {
     let budget = u128::from(budget_sats);
     let aim = sizing_aim(budget);
     let mut probe_target = limits.min_to_units.unwrap_or(0).max(PROBE_TARGET_UNITS);
@@ -576,16 +659,7 @@ async fn convert<C: Converter>(
         }
         let quote = converter.quote(target).await.map_err(not_sent)?;
         if quote.sats_in <= budget {
-            let gate = auto_convert.lock().await.send_gate();
-            let _sending = gate.lock().await;
-            if !auto_convert.lock().await.still_wanted(epoch) {
-                return Err(Shortfall::Cancelled);
-            }
-            converter
-                .send(quote.prepared)
-                .await
-                .map_err(|reason| Shortfall::Failed { reason, sent: true })?;
-            return Ok(quote.sats_in);
+            return Ok(quote);
         }
         target = scale_target(target, quote.sats_in, aim)
             .ok_or_else(|| not_sent("the pool quoted no bitcoin input".to_string()))?;
