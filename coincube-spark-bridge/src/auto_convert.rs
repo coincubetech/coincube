@@ -9,9 +9,10 @@
 //! the bridge never sends an `update_user_settings` label, and:
 //!
 //! - every successful incoming bitcoin payment ([`eligible_receive`]) adds its
-//!   sats to the pending total;
-//! - one worker ([`process`]) converts the pending sats, bounded by the
-//!   bitcoin balance, once they reach the pool's minimum, with a
+//!   sats to the pending total as soon as the SDK reports it
+//!   ([`AutoConvert::note_receive`]);
+//! - one worker ([`convert_pending`]) converts the pending sats, bounded by
+//!   the bitcoin balance, once they reach the pool's minimum, with a
 //!   self-transfer to the wallet's own Spark address ([`prepare_request`]);
 //! - three failed conversions in a row turn auto-convert off and pause it
 //!   ([`FailureTracker`]).
@@ -324,6 +325,20 @@ pub fn checked_sats_in(
     Ok(estimate.amount_in)
 }
 
+/// The sats a conversion of `budget` aims to spend.
+///
+/// Sending re-prices a bitcoin → USDB target: the SDK resolves the
+/// conversion again and spends the sats the pool asks for then
+/// (`FlashnetTokenConverter::convert` → `resolve_conversion`,
+/// `token_conversion/flashnet.rs` at the pin), not the quote's figure. Aiming
+/// below the budget by the slippage cap keeps a price move up to the cap,
+/// plus the pool's rounding, within the budget. What this leaves stays
+/// pending and joins the next conversion.
+fn sizing_aim(budget: u128) -> u128 {
+    let margin = (budget * u128::from(CONVERSION_MAX_SLIPPAGE_BPS)).div_ceil(10_000) + 1;
+    budget.saturating_sub(margin)
+}
+
 /// `target` scaled to spend at most `budget_sats`, given that it was quoted
 /// at `sats_in`. `None` when the quote is unusable.
 fn scale_target(target: u128, sats_in: u128, budget_sats: u128) -> Option<u128> {
@@ -468,7 +483,7 @@ fn not_sent(reason: String) -> Shortfall {
     }
 }
 
-/// Convert at most `budget_sats` into USDB. Returns the sats spent.
+/// Convert at most `budget_sats` into USDB. Returns the sats the quote spent.
 ///
 /// A quote at a probe target gives the price. The target is scaled to the
 /// budget and re-quoted, shrinking it while the pool's rounding and slippage
@@ -479,9 +494,7 @@ async fn convert<C: Converter>(
     limits: Limits,
 ) -> Result<u128, Shortfall> {
     let budget = u128::from(budget_sats);
-    // Aim a little under the budget, so the sats the pool rounds up don't
-    // push a quote over it. What this leaves stays pending for next time.
-    let aim = budget - (budget / 1_000 + 1).min(budget);
+    let aim = sizing_aim(budget);
     let probe_target = limits.min_to_units.unwrap_or(0).max(PROBE_TARGET_UNITS);
     let probe = converter.quote(probe_target).await.map_err(not_sent)?;
     let mut target = scale_target(probe_target, probe.sats_in, aim)
@@ -527,6 +540,9 @@ pub struct AutoConvert {
     /// the user flipped the switch doesn't book its outcome against the new
     /// setting.
     epoch: u64,
+    /// The last [`Self::adopt`] couldn't save: memory is ahead of the file,
+    /// so the next change must be written even if it matches memory.
+    unsaved: bool,
 }
 
 impl AutoConvert {
@@ -539,6 +555,7 @@ impl AutoConvert {
             failures: FailureTracker::default(),
             seen: SeenPayments::default(),
             epoch: 0,
+            unsaved: false,
         }
     }
 
@@ -551,9 +568,10 @@ impl AutoConvert {
 
     /// Persist `next`, then adopt it. If the write fails nothing changes.
     fn commit(&mut self, next: Saved) -> io::Result<()> {
-        if next != self.saved {
+        if next != self.saved || self.unsaved {
             save(&self.path, &next)?;
             self.saved = next;
+            self.unsaved = false;
         }
         Ok(())
     }
@@ -562,9 +580,13 @@ impl AutoConvert {
     /// bridge makes on its own, which must hold for this session even when
     /// the disk refuses them.
     fn adopt(&mut self, next: Saved) {
-        if let Err(e) = save(&self.path, &next) {
-            tracing::error!("could not save {}: {e}", self.path.display());
-        }
+        self.unsaved = match save(&self.path, &next) {
+            Ok(()) => false,
+            Err(e) => {
+                tracing::error!("could not save {}: {e}", self.path.display());
+                true
+            }
+        };
         self.saved = next;
     }
 
@@ -601,8 +623,13 @@ impl AutoConvert {
         Ok(self.state() != before)
     }
 
-    /// Count an incoming payment. Ignored while off, and the second time the
-    /// same payment is seen.
+    /// Count an incoming payment, against the switch as it is now. Ignored
+    /// while off, and the second time the same payment is seen. Returns
+    /// whether it counted, i.e. whether to wake [`convert_pending`].
+    ///
+    /// Called from the SDK's event listener as each payment is reported, so
+    /// a receive is saved even while a conversion runs or the bridge stops:
+    /// the SDK reports a payment once.
     pub fn note_receive(&mut self, receipt: &Receipt) -> bool {
         if !self.saved.enabled || !self.seen.insert(&receipt.payment_id) {
             return false;
@@ -615,7 +642,7 @@ impl AutoConvert {
         true
     }
 
-    fn has_pending(&self) -> bool {
+    pub fn has_pending(&self) -> bool {
         self.saved.enabled && self.saved.pending_sats > 0
     }
 
@@ -699,38 +726,31 @@ impl AutoConvert {
     }
 }
 
-/// Count `receipts`, then convert what is pending if it is enough. Returns
-/// the events to emit: on a pause, the new state and the legacy
-/// [`ProtocolEvent::StableBalancePaused`] (the current gui records "off"
-/// from it, so its next reconcile doesn't turn auto-convert back on).
+/// Convert what is pending, if it is enough. Run after
+/// [`AutoConvert::note_receive`] counts a receive; callers run one at a time.
 ///
-/// `converter` is `None` while the SDK isn't connected yet: the receipts
-/// still count, and convert with the next receive.
+/// `emit` sends a protocol event. On a pause it gets the new state and the
+/// legacy [`ProtocolEvent::StableBalancePaused`] (the current gui records
+/// "off" from it, so its next reconcile doesn't turn auto-convert back on).
+/// Both are emitted under the lock, so they can't land after a switch the
+/// user made just after the pause.
 ///
-/// The lock is held only between SDK calls, so the user's switch and its
-/// reads never wait for a conversion. Callers run one `process` at a time.
-pub async fn process<C: Converter>(
+/// The lock is held only between SDK calls, so the user's switch, its reads
+/// and new receives never wait for a conversion.
+pub async fn convert_pending<C: Converter>(
     auto_convert: &Mutex<AutoConvert>,
-    converter: Option<&C>,
-    receipts: &[Receipt],
-) -> Vec<ProtocolEvent> {
-    {
-        let mut ac = auto_convert.lock().await;
-        let counted = receipts.iter().filter(|r| ac.note_receive(r)).count();
-        if counted == 0 || !ac.has_pending() {
-            return Vec::new();
-        }
+    converter: &C,
+    emit: &(dyn Fn(ProtocolEvent) + Send + Sync),
+) {
+    if !auto_convert.lock().await.has_pending() {
+        return;
     }
-    let Some(converter) = converter else {
-        return Vec::new();
-    };
 
     let failed = |reason: String| async move {
         let mut ac = auto_convert.lock().await;
-        if !ac.saved.enabled {
-            return Vec::new();
+        if ac.saved.enabled {
+            trip(&mut ac, 0, &reason, false, emit);
         }
-        trip_events(&mut ac, 0, &reason, false)
     };
     let limits = match converter.limits().await {
         Ok(limits) => limits,
@@ -744,7 +764,7 @@ pub async fn process<C: Converter>(
         let mut ac = auto_convert.lock().await;
         match ac.take(balance_sats, limits.min_from_sats) {
             Step::Convert { budget_sats } => (budget_sats, ac.epoch),
-            Step::Idle | Step::Defer => return Vec::new(),
+            Step::Idle | Step::Defer => return,
         }
     };
 
@@ -755,37 +775,35 @@ pub async fn process<C: Converter>(
         // pending sats and reset the breaker. This outcome belongs to the
         // old setting.
         tracing::info!("auto-convert changed during a conversion: {outcome:?}");
-        return Vec::new();
+        return;
     }
     match outcome {
         Ok(spent_sats) => {
-            tracing::info!("auto-converted {spent_sats} sats to USDB");
+            tracing::info!("auto-converted about {spent_sats} sats to USDB");
             ac.record_success(budget_sats, spent_sats);
-            Vec::new()
         }
-        Err(Shortfall::TooSmall) => {
-            ac.give_back(budget_sats);
-            Vec::new()
+        Err(Shortfall::TooSmall) => ac.give_back(budget_sats),
+        Err(Shortfall::Failed { reason, sent }) => {
+            trip(&mut ac, budget_sats, &reason, sent, emit);
         }
-        Err(Shortfall::Failed { reason, sent }) => trip_events(&mut ac, budget_sats, &reason, sent),
     }
 }
 
-fn trip_events(
+/// Record a failure and, when it pauses auto-convert, emit the pause. The
+/// caller holds the lock.
+fn trip(
     ac: &mut AutoConvert,
     budget_sats: u64,
     reason: &str,
     sent: bool,
-) -> Vec<ProtocolEvent> {
-    match ac.record_failure(budget_sats, reason, sent) {
-        None => Vec::new(),
-        Some(failures) => vec![
-            ProtocolEvent::AutoConvertStateChanged { state: ac.state() },
-            ProtocolEvent::StableBalancePaused {
-                reason: reason.to_string(),
-                failures,
-            },
-        ],
+    emit: &(dyn Fn(ProtocolEvent) + Send + Sync),
+) {
+    if let Some(failures) = ac.record_failure(budget_sats, reason, sent) {
+        emit(ProtocolEvent::AutoConvertStateChanged { state: ac.state() });
+        emit(ProtocolEvent::StableBalancePaused {
+            reason: reason.to_string(),
+            failures,
+        });
     }
 }
 
@@ -836,6 +854,25 @@ mod tests {
         ac
     }
 
+    /// What the server does: the listener counts each receipt as it
+    /// arrives, and the worker, woken by one that counted, converts. Returns
+    /// the events emitted.
+    async fn process<C: Converter>(
+        ac: &Mutex<AutoConvert>,
+        converter: Option<&C>,
+        receipts: &[Receipt],
+    ) -> Vec<ProtocolEvent> {
+        let mut woken = false;
+        for receipt in receipts {
+            woken |= ac.lock().await.note_receive(receipt);
+        }
+        let events = StdMutex::new(Vec::new());
+        if let (true, Some(converter)) = (woken, converter) {
+            convert_pending(ac, converter, &|event| events.lock().unwrap().push(event)).await;
+        }
+        events.into_inner().unwrap()
+    }
+
     /// One recorded call to the fake.
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum Call {
@@ -852,9 +889,13 @@ mod tests {
         balance_sats: u64,
         sats_per_unit_x1e6: u128,
         pad_bps: u128,
+        /// How far the price has moved by the time a send re-prices it.
+        send_drift_bps: u128,
         fail_quote: StdMutex<Script<String>>,
         fail_send: StdMutex<Script<String>>,
         calls: StdMutex<Vec<Call>>,
+        /// Sats each send actually spent, re-priced as the SDK does.
+        spent: StdMutex<Vec<u128>>,
     }
 
     impl FakePool {
@@ -868,9 +909,11 @@ mod tests {
                 // 1 USDB (10^6 units) costs 1,000 sats.
                 sats_per_unit_x1e6: 1_000,
                 pad_bps: 50,
+                send_drift_bps: 0,
                 fail_quote: StdMutex::new(Script::new()),
                 fail_send: StdMutex::new(Script::new()),
                 calls: StdMutex::new(Vec::new()),
+                spent: StdMutex::new(Vec::new()),
             }
         }
 
@@ -921,10 +964,15 @@ mod tests {
 
         async fn send(&self, prepared: u128) -> Result<(), String> {
             self.calls.lock().unwrap().push(Call::Send(prepared));
-            match self.fail_send.lock().unwrap().pop_front() {
-                Some(reason) => Err(reason),
-                None => Ok(()),
+            if let Some(reason) = self.fail_send.lock().unwrap().pop_front() {
+                return Err(reason);
             }
+            let quoted = self.sats_for(prepared);
+            self.spent
+                .lock()
+                .unwrap()
+                .push((quoted * (10_000 + self.send_drift_bps)).div_ceil(10_000));
+            Ok(())
         }
     }
 
@@ -1493,6 +1541,166 @@ mod tests {
         process(&ac, Some(&pool), &[receipt("d", 5_000)]).await;
         let events = process(&ac, Some(&pool), &[receipt("e", 5_000)]).await;
         assert!(events.is_empty(), "two failures after a resume don't pause");
+    }
+
+    /// Sending re-prices the conversion. A price move up to the slippage cap
+    /// between the quote and the send still spends no more than was received.
+    #[tokio::test]
+    async fn a_price_move_up_to_the_cap_stays_within_the_received_sats() {
+        let dir = TempDir::new();
+        let ac = Mutex::new(enabled(&dir));
+        let mut pool = FakePool::new(20_000);
+        pool.send_drift_bps = 49;
+
+        process(&ac, Some(&pool), &[receipt("a", 20_000)]).await;
+        let spent = pool.spent.lock().unwrap().clone();
+        assert_eq!(spent.len(), 1);
+        assert!(spent[0] <= 20_000, "spent {} of 20,000", spent[0]);
+    }
+
+    /// A conversion that was running when the user switched off (and on
+    /// again) books nothing: the switch already dropped what was pending,
+    /// and its prepare failure must not hand those sats back.
+    #[tokio::test]
+    async fn a_switch_flipped_mid_conversion_drops_its_outcome() {
+        struct FlipsTheSwitch<'a> {
+            pool: &'a FakePool,
+            ac: &'a Mutex<AutoConvert>,
+        }
+        #[async_trait]
+        impl Converter for FlipsTheSwitch<'_> {
+            type Prepared = u128;
+            async fn limits(&self) -> Result<Limits, String> {
+                self.pool.limits().await
+            }
+            async fn balance_sats(&self) -> Result<u64, String> {
+                self.pool.balance_sats().await
+            }
+            async fn quote(&self, target: u128) -> Result<Quote<u128>, String> {
+                let mut ac = self.ac.lock().await;
+                ac.set_enabled(false).unwrap();
+                ac.set_enabled(true).unwrap();
+                drop(ac);
+                let _ = self.pool.quote(target).await;
+                Err("Pool has no liquidity".into())
+            }
+            async fn send(&self, prepared: u128) -> Result<(), String> {
+                self.pool.send(prepared).await
+            }
+        }
+
+        let dir = TempDir::new();
+        let ac = Mutex::new(enabled(&dir));
+        let pool = FakePool::new(100_000);
+        let flips = FlipsTheSwitch {
+            pool: &pool,
+            ac: &ac,
+        };
+        process(&ac, Some(&flips), &[receipt("a", 20_000)]).await;
+        let ac = ac.lock().await;
+        assert_eq!(ac.saved.pending_sats, 0, "bitcoin from before the switch");
+        assert_eq!(
+            ac.failures.consecutive, 0,
+            "not counted against the new run"
+        );
+    }
+
+    /// A receive that lands while a conversion runs is counted (and saved)
+    /// at once, and is still pending afterwards.
+    #[tokio::test]
+    async fn a_receive_during_a_conversion_is_kept() {
+        struct ReceivesMidSend<'a> {
+            pool: &'a FakePool,
+            ac: &'a Mutex<AutoConvert>,
+        }
+        #[async_trait]
+        impl Converter for ReceivesMidSend<'_> {
+            type Prepared = u128;
+            async fn limits(&self) -> Result<Limits, String> {
+                self.pool.limits().await
+            }
+            async fn balance_sats(&self) -> Result<u64, String> {
+                self.pool.balance_sats().await
+            }
+            async fn quote(&self, target: u128) -> Result<Quote<u128>, String> {
+                self.pool.quote(target).await
+            }
+            async fn send(&self, prepared: u128) -> Result<(), String> {
+                assert!(self.ac.lock().await.note_receive(&receipt("late", 3_000)));
+                self.pool.send(prepared).await
+            }
+        }
+
+        let dir = TempDir::new();
+        let ac = Mutex::new(enabled(&dir));
+        let pool = FakePool::new(100_000);
+        let mid = ReceivesMidSend {
+            pool: &pool,
+            ac: &ac,
+        };
+        process(&ac, Some(&mid), &[receipt("a", 20_000)]).await;
+        let spent = pool.sats_for(pool.sends()[0]) as u64;
+        let pending = ac.lock().await.saved.pending_sats;
+        assert_eq!(pending, 20_000 - spent + 3_000);
+        assert_eq!(AutoConvert::load(&dir.0).saved.pending_sats, pending);
+    }
+
+    /// A pause the disk refused is written by the next switch, even when
+    /// that switch matches what is in memory.
+    #[test]
+    fn a_pause_that_could_not_be_saved_is_saved_by_the_next_switch() {
+        let dir = TempDir::new();
+        let cube = dir.0.join("cube");
+        fs::create_dir_all(&cube).unwrap();
+        let mut ac = AutoConvert::load(&cube);
+        ac.set_enabled(true).unwrap();
+
+        let moved = dir.0.join("moved");
+        fs::rename(&cube, &moved).unwrap();
+        for _ in 0..STABLE_BALANCE_PAUSE_THRESHOLD {
+            ac.record_failure(0, "busy", false);
+        }
+        assert!(!ac.state().enabled);
+        fs::rename(&moved, &cube).unwrap();
+        assert!(
+            AutoConvert::load(&cube).state().enabled,
+            "the pause wasn't saved"
+        );
+
+        assert!(!ac.set_enabled(false).unwrap(), "already off in memory");
+        assert!(
+            !AutoConvert::load(&cube).state().enabled,
+            "off is on disk now"
+        );
+    }
+
+    /// The pause events go out while the lock is held, so a switch the user
+    /// makes right after can't be overtaken by them.
+    #[tokio::test]
+    async fn the_pause_is_emitted_under_the_lock() {
+        let dir = TempDir::new();
+        let ac = Mutex::new(enabled(&dir));
+        let pool = FakePool::new(100_000);
+        for _ in 0..STABLE_BALANCE_PAUSE_THRESHOLD {
+            pool.fail_quote.lock().unwrap().push_back("busy".into());
+        }
+        let held = StdMutex::new(Vec::new());
+        for id in ["a", "b", "c"] {
+            assert!(ac.lock().await.note_receive(&receipt(id, 5_000)));
+            convert_pending(&ac, &pool, &|_| {
+                held.lock().unwrap().push(ac.try_lock().is_err())
+            })
+            .await;
+        }
+        assert_eq!(held.into_inner().unwrap(), vec![true, true]);
+    }
+
+    #[test]
+    fn the_sizing_aim_leaves_room_for_the_cap() {
+        assert_eq!(sizing_aim(20_000), 20_000 - 100 - 1);
+        assert_eq!(sizing_aim(1_300), 1_300 - 7 - 1);
+        assert_eq!(sizing_aim(1), 0);
+        assert_eq!(sizing_aim(0), 0);
     }
 
     #[test]

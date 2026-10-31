@@ -44,7 +44,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, OnceCell, RwLock};
 use uuid::Uuid;
 
-use crate::auto_convert::{self, AutoConvert, Receipt, SdkConverter};
+use crate::auto_convert::{self, AutoConvert, SdkConverter};
 use crate::sdk_adapter::{self, SdkHandle};
 
 /// How long a pending prepare lives before the background sweep evicts
@@ -213,36 +213,36 @@ impl ServerState {
     }
 }
 
-/// The auto-convert worker: counts each eligible receive the SDK reports
-/// and converts the pending sats ([`auto_convert::process`]). One task, so
-/// conversions never overlap; receipts that queue up while one runs are
-/// handled together afterwards.
+/// The auto-convert worker: woken each time the listener counts a receive
+/// ([`AutoConvert::note_receive`]), it converts the pending sats
+/// ([`auto_convert::convert_pending`]). One task, so conversions never
+/// overlap; wake-ups that queue while one runs collapse into one more pass.
 ///
-/// Holds the server state only weakly, and the SDK only while it works on a
-/// batch, so it doesn't keep the SDK (whose event listener holds the sending
-/// half of `receipts`) or the stdout writer alive past shutdown.
+/// Holds the server state only weakly, and the SDK only while it works, so
+/// it doesn't keep the SDK (whose event listener holds the sending half of
+/// `wake`) or the stdout writer alive past shutdown.
 async fn run_auto_convert(
-    mut receipts: tokio::sync::mpsc::UnboundedReceiver<Receipt>,
+    mut wake: tokio::sync::mpsc::UnboundedReceiver<()>,
     state: std::sync::Weak<ServerState>,
 ) {
-    while let Some(first) = receipts.recv().await {
-        let mut batch = vec![first];
-        while let Ok(next) = receipts.try_recv() {
-            batch.push(next);
-        }
+    while wake.recv().await.is_some() {
+        while wake.try_recv().is_ok() {}
         let Some(state) = state.upgrade() else {
             break;
         };
-        let Some(auto_convert) = state.auto_convert.get().cloned() else {
+        let (Some(auto_convert), Some(sdk)) = (
+            state.auto_convert.get().cloned(),
+            state.sdk.read().await.clone(),
+        ) else {
+            // Not connected yet: the receive is counted and saved, and
+            // converts with the next one.
             continue;
         };
-        let sdk = state.sdk.read().await.clone();
-        let converter = sdk
-            .as_ref()
-            .map(|sdk| SdkConverter::new(sdk, &state.own_spark_address));
-        for event in auto_convert::process(&auto_convert, converter.as_ref(), &batch).await {
+        let converter = SdkConverter::new(&sdk, &state.own_spark_address);
+        let emit = |event| {
             let _ = state.event_tx.send(Frame::Event(event));
-        }
+        };
+        auto_convert::convert_pending(&auto_convert, &converter, &emit).await;
     }
 }
 
@@ -337,11 +337,10 @@ async fn handle_init(
         Ok(handle) => {
             // Auto-convert's state is in place, and its worker running,
             // before the listener can report a receive.
-            let _ = state
-                .auto_convert
-                .set(Arc::new(Mutex::new(AutoConvert::load(&storage_dir))));
-            let (receipts_tx, receipts_rx) = tokio::sync::mpsc::unbounded_channel();
-            tokio::spawn(run_auto_convert(receipts_rx, Arc::downgrade(&state)));
+            let auto_convert = Arc::new(Mutex::new(AutoConvert::load(&storage_dir)));
+            let _ = state.auto_convert.set(Arc::clone(&auto_convert));
+            let (wake_tx, wake_rx) = tokio::sync::mpsc::unbounded_channel();
+            tokio::spawn(run_auto_convert(wake_rx, Arc::downgrade(&state)));
 
             // Register an event listener before making the handle
             // visible to other request handlers. `add_event_listener`
@@ -351,7 +350,8 @@ async fn handle_init(
             // lifetime, so we drop the id.
             let listener = BridgeEventListener {
                 tx: state.event_tx.clone(),
-                receipts: receipts_tx,
+                auto_convert,
+                wake_auto_convert: wake_tx,
             };
             let _listener_id = handle.sdk.add_event_listener(Box::new(listener)).await;
             *state.sdk.write().await = Some(handle);
@@ -371,9 +371,11 @@ async fn handle_init(
 /// `Frame::Response`s without framing ambiguity.
 struct BridgeEventListener {
     tx: tokio::sync::mpsc::UnboundedSender<Frame>,
-    /// Incoming bitcoin payments for the auto-convert worker
-    /// ([`run_auto_convert`]).
-    receipts: tokio::sync::mpsc::UnboundedSender<Receipt>,
+    /// Counts each incoming bitcoin payment as it is reported, so it is
+    /// saved even if a conversion is running or the bridge stops next.
+    auto_convert: Arc<Mutex<AutoConvert>>,
+    /// Wakes [`run_auto_convert`] after a receive counted.
+    wake_auto_convert: tokio::sync::mpsc::UnboundedSender<()>,
 }
 
 #[async_trait]
@@ -383,7 +385,9 @@ impl EventListener for BridgeEventListener {
             SdkEvent::Synced => Some(ProtocolEvent::Synced),
             SdkEvent::PaymentSucceeded { payment } => {
                 if let Some(receipt) = auto_convert::eligible_receive(&payment) {
-                    let _ = self.receipts.send(receipt);
+                    if self.auto_convert.lock().await.note_receive(&receipt) {
+                        let _ = self.wake_auto_convert.send(());
+                    }
                 }
                 Some(ProtocolEvent::PaymentSucceeded {
                     amount_sat: payment.amount as i64,
@@ -3541,15 +3545,17 @@ mod auto_convert_handler_tests {
         assert!(rx.try_recv().is_err());
     }
 
-    /// Migration off SDK Stable Balance: a Cube whose gui recorded "on"
-    /// moves to bridge auto-convert with no SDK call, no request and nothing
-    /// converted. The existing USDB and bitcoin are untouched; only bitcoin
-    /// received afterwards converts.
+    /// Migration off SDK Stable Balance, at the handler level: a Cube whose
+    /// gui recorded "on" moves to bridge auto-convert through the legacy
+    /// call, which needs no SDK, starts no conversion and leaves nothing
+    /// pending, so the existing USDB and bitcoin stay as they are; only
+    /// bitcoin received afterwards converts. (That the SDK itself converts
+    /// nothing back is `mainnet_config_leaves_stable_balance_off_…` plus
+    /// `nothing_calls_the_sdk_settings_setter`.)
     #[tokio::test]
     async fn migrating_an_sdk_active_preference_moves_no_funds() {
         let dir = TempDir::new();
         let (state, mut rx) = server(&dir);
-        assert!(state.sdk.read().await.is_none(), "no SDK to call");
 
         // The gui reconcile: recorded on, bridge reports off, so re-apply.
         let before = match call(&state, Method::GetAutoConvert).await {
