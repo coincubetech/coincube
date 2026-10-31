@@ -205,7 +205,7 @@ jobs:
           # node to reproduce the block-file fault in #394. The modules are
           # named explicitly: a bare `pytest tests/` here would also pull in
           # the functional suite, which this job does not set up.
-          modules="tests/test_btcb2_harness.py tests/test_btcb2_b42_matrices.py tests/test_btcb2_blockfile.py tests/test_btcb2_unified_sighash.py"
+          modules="tests/test_btcb2_harness.py tests/test_btcb2_b42_matrices.py tests/test_btcb2_blockfile.py tests/test_btcb2_unified_sighash.py tests/test_btcb2_split_coins_consensus.py"
           # The stress reproduction itself runs only when it is asked for: it
           # reproduces a node defect nothing here can fix, about one attempt in
           # eight, and a pull request is not the place to discover that. Its

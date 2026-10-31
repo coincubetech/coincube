@@ -102,6 +102,10 @@ The Claim and foreign-Split consensus modules (`test_btcb2_claim_consensus.py`,
 (`claim_regtest_vectors`, `split_regtest_vectors`) were removed with those
 flows in S7b; Split coins replaces them (company-brain decision
 `2026-10-29-coincube-desktop-btcb2-split-protection-in-coin-control.md`).
+`tests/test_btcb2_split_coins_consensus.py` checks Split coins' splits against
+both nodes: a split-key split on Bitcoin (including after a reorg), reusing a
+split output as a key, a coinbase key's maturity, and a Blake2b split signed
+`ALL|UNIFIED`. Its tests share one harness and run in file order.
 
 `fetch_knots.sh` downloads a release for the host platform and refuses to extract
 it unless its checksum is listed in the release `SHA256SUMS` *and*
