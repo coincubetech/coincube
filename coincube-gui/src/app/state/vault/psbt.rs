@@ -422,7 +422,8 @@ impl PsbtState {
     /// The signer picker is open on a recorded split whose key failed its
     /// re-qualification (or is no longer a split key): take it down, as the
     /// Broadcast dialog is, unless a local signer is mid-operation. Keychain
-    /// sessions are cancelled; a hidden picker may stay mounted to drain them.
+    /// sessions are cancelled once; a hidden picker may stay mounted to drain
+    /// them.
     fn close_picker_if_split_key_refused(&mut self, cache: &Cache) -> Task<Message> {
         if matches!(self.split_key_check, SplitKeyCheck::InFlight { .. })
             || self.split_key_refusal(cache).is_none()
@@ -432,7 +433,10 @@ impl PsbtState {
         let Some(PsbtModal::Sign(sign)) = self.modal.as_mut() else {
             return Task::none();
         };
-        if sign.is_signing() {
+        // A hidden picker takes no picks (re-showing it is gated) and may be
+        // draining an earlier dismissal; cancelling again would re-send
+        // every pending Keychain cancel on each message.
+        if sign.is_signing() || !sign.display_modal {
             return Task::none();
         }
         let (cancel, keep) = sign.begin_dismiss();
@@ -876,9 +880,10 @@ impl PsbtState {
             self.signer_focus_return = false;
         }
         // A recorded split is signed and broadcast only with its key freshly
-        // re-qualified: opening or re-showing the picker, every signer pick
-        // (including the Border Wallet steps that end in a signature) and
-        // Broadcast. Confirm is gated through `broadcast_ready`.
+        // re-qualified: opening or re-showing the picker, every signer pick,
+        // the Border Wallet wizard's Next (its last step signs; editing the
+        // phrase or pattern is not gated) and Broadcast. Confirm is gated
+        // through `broadcast_ready`.
         let admission = direct_signer
             || matches!(
                 &message,
@@ -888,8 +893,9 @@ impl PsbtState {
             )
             || matches!(
                 &message,
-                Message::View(view::Message::Spend(view::SpendTxMessage::BorderWalletRecon(m)))
-                    if !matches!(m, BorderWalletReconMessage::Cancel | BorderWalletReconMessage::Previous)
+                Message::View(view::Message::Spend(
+                    view::SpendTxMessage::BorderWalletRecon(BorderWalletReconMessage::Next)
+                ))
             );
         if admission {
             if let Some(refused) = self.refuse_for_split_key(cache) {
@@ -5822,11 +5828,9 @@ mod tests {
             assert!(in_flight(&state) > second);
         }
 
-        /// The picker was opened while the key was fresh; the key's answer
-        /// then lapses and its re-qualification fails. No signer pick may
-        /// sign, and the picker comes down.
-        #[tokio::test]
-        async fn a_signer_pick_in_an_open_picker_needs_a_fresh_split_key() {
+        /// A journaled split-key split of the unsigned fixture after a
+        /// restart: only the journal holds the key's proof.
+        fn journaled_split() -> (PsbtState, Cache, Txid, OutPoint) {
             use coincube_core::claim_ancestry::{retained::RetainedPath, search::OwnedLink};
             use coincube_core::miniscript::bitcoin::consensus::serialize;
             let f = fixture();
@@ -5843,7 +5847,6 @@ mod tests {
                 }],
             )
             .unwrap();
-            // After a restart: only the journal holds the key's proof.
             let mut cache = Cache::default();
             cache
                 .split_records
@@ -5861,25 +5864,7 @@ mod tests {
                 cache.split_key_path(spend, key).map(|p| p.encode()),
                 Some(path.encode())
             );
-            let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
-                crate::daemon::client::Coincubed::new(MockDaemon::new(vec![]).run()),
-            );
-            let master = || {
-                Message::View(view::Message::Spend(
-                    view::SpendTxMessage::SelectMasterSigner,
-                ))
-            };
-            let generation = |state: &PsbtState| match &state.split_key_check {
-                SplitKeyCheck::InFlight { generation, .. } => *generation,
-                other => panic!("no split-key check in flight: {:?}", other),
-            };
-            let reply = |generation, result| Message::SplitKeyChecked {
-                spend,
-                key,
-                generation,
-                result,
-            };
-            let mut state = PsbtState::new(
+            let state = PsbtState::new(
                 wallet,
                 SpendTx::new(
                     None,
@@ -5891,18 +5876,63 @@ mod tests {
                 ),
                 true,
             );
-            let _ = state.update(daemon.clone(), &cache, Message::Reconcile);
-            let first = generation(&state);
-            let _ = state.update(daemon.clone(), &cache, reply(first, Ok(())));
+            (state, cache, spend, key)
+        }
+
+        fn split_key_generation(state: &PsbtState) -> u64 {
+            match &state.split_key_check {
+                SplitKeyCheck::InFlight { generation, .. } => *generation,
+                other => panic!("no split-key check in flight: {:?}", other),
+            }
+        }
+
+        /// Open the picker of [`journaled_split`] with its key freshly
+        /// re-qualified.
+        fn open_fresh_picker(
+            state: &mut PsbtState,
+            cache: &Cache,
+            spend: Txid,
+            key: OutPoint,
+            daemon: &Arc<dyn Daemon + Sync + Send>,
+        ) {
+            let _ = state.update(daemon.clone(), cache, Message::Reconcile);
+            let generation = split_key_generation(state);
             let _ = state.update(
                 daemon.clone(),
-                &cache,
+                cache,
+                Message::SplitKeyChecked {
+                    spend,
+                    key,
+                    generation,
+                    result: Ok(()),
+                },
+            );
+            let _ = state.update(
+                daemon.clone(),
+                cache,
                 Message::View(view::Message::Spend(view::SpendTxMessage::Sign)),
             );
             assert!(
                 matches!(state.modal, Some(PsbtModal::Sign(_))),
                 "fresh: opens"
             );
+        }
+
+        /// The picker was opened while the key was fresh; the key's answer
+        /// then lapses and its re-qualification fails. No signer pick may
+        /// sign, and the picker comes down.
+        #[tokio::test]
+        async fn a_signer_pick_in_an_open_picker_needs_a_fresh_split_key() {
+            let (mut state, cache, spend, key) = journaled_split();
+            let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
+                crate::daemon::client::Coincubed::new(MockDaemon::new(vec![]).run()),
+            );
+            let master = || {
+                Message::View(view::Message::Spend(
+                    view::SpendTxMessage::SelectMasterSigner,
+                ))
+            };
+            open_fresh_picker(&mut state, &cache, spend, key, &daemon);
 
             // The answer lapses while the picker is open.
             if let SplitKeyCheck::Done { at, .. } = &mut state.split_key_check {
@@ -5916,7 +5946,7 @@ mod tests {
                 !refused.iter().any(|m| matches!(m, Message::Signed(..))),
                 "no signature while the key is unchecked"
             );
-            let second = generation(&state);
+            let second = split_key_generation(&state);
             assert!(
                 matches!(state.modal, Some(PsbtModal::Sign(_))),
                 "checking: stays"
@@ -5925,11 +5955,46 @@ mod tests {
             // The fresh check fails: the picker comes down, and a pick that
             // still arrives signs nothing.
             let failed = "The split key couldn't be verified right now: reorg".to_string();
-            let _ = drive(state.update(daemon.clone(), &cache, reply(second, Err(failed)))).await;
+            let reply = Message::SplitKeyChecked {
+                spend,
+                key,
+                generation: second,
+                result: Err(failed),
+            };
+            let _ = drive(state.update(daemon.clone(), &cache, reply)).await;
             assert!(state.modal.is_none(), "the picker comes down");
             let refused = drive(state.update(daemon.clone(), &cache, master())).await;
             assert!(!refused.iter().any(|m| matches!(m, Message::Signed(..))));
             assert!(state.tx.psbt.inputs[0].partial_sigs.is_empty());
+        }
+
+        /// A picker already hidden (dismissed, draining its Keychain
+        /// sessions) is left alone when the key is refused: dismissing it
+        /// again on every message would re-send each pending cancel.
+        #[tokio::test]
+        async fn a_hidden_picker_is_not_dismissed_again_for_the_split_key() {
+            let (mut state, cache, spend, key) = journaled_split();
+            let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
+                crate::daemon::client::Coincubed::new(MockDaemon::new(vec![]).run()),
+            );
+            open_fresh_picker(&mut state, &cache, spend, key, &daemon);
+            if let Some(PsbtModal::Sign(sign)) = state.modal.as_mut() {
+                sign.display_modal = false;
+            }
+            state.split_key_check = SplitKeyCheck::Done {
+                key,
+                at: std::time::Instant::now(),
+                result: Err("reorg".into()),
+            };
+            assert!(state.split_key_refusal(&cache).is_some());
+            for _ in 0..2 {
+                let cancel = state.close_picker_if_split_key_refused(&cache);
+                assert_eq!(cancel.units(), 0, "no cancel sent again");
+                assert!(
+                    matches!(&state.modal, Some(PsbtModal::Sign(sign)) if !sign.display_modal),
+                    "left mounted and hidden, not dismissed again"
+                );
+            }
         }
 
         #[test]
