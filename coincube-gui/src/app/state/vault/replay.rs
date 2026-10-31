@@ -301,8 +301,9 @@ pub struct ReplayReview {
     status: ReplayStatus,
     /// The input that spends a split key: a coin whose verified ancestry
     /// proves it exists only on this chain, so Bitcoin rejects the whole
-    /// transaction whatever its signatures. Set from the cache when the PSBT
-    /// is opened ([`crate::app::state::vault::psbt::PsbtState::with_split_key`]).
+    /// transaction whatever its signatures. Set only while the spend screen
+    /// holds a fresh re-qualification of the key
+    /// ([`crate::app::state::vault::psbt::PsbtState::current_review`]).
     split_key: Option<(usize, coincube_core::miniscript::bitcoin::OutPoint)>,
     /// SHA-256 of the serialised PSBT the status was derived from: the exact
     /// signatures the user is looking at.

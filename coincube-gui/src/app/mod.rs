@@ -4970,7 +4970,7 @@ impl App {
                                         .map(|txs| txs.first().cloned())
                                 }) {
                                     if let Some(psbts) = &mut self.panels.psbts {
-                                        psbts.preselect(spend_tx, &self.cache);
+                                        psbts.preselect(spend_tx);
                                     }
                                     self.panels.current = menu;
                                     return Task::none();
@@ -8714,7 +8714,7 @@ impl App {
                             let load = self
                                 .set_current_panel(Menu::Vault(menu::VaultSubMenu::PSBTs(None)));
                             let panel = self.panels.psbts.as_mut().expect("checked above");
-                            panel.preselect(tx, &self.cache);
+                            panel.preselect(tx);
                             return load;
                         }
                     }

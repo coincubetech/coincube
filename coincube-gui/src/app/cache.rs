@@ -706,6 +706,21 @@ impl Cache {
             .and_then(|bytes| RetainedPath::decode(key, &bytes).ok())
     }
 
+    /// Whether [`Self::split_key_path`] has a proof to offer, without
+    /// copying or decoding it (the PSBT screen asks on every render).
+    pub fn has_split_key_path(
+        &self,
+        spend: coincube_core::miniscript::bitcoin::Txid,
+        key: coincube_core::miniscript::bitcoin::OutPoint,
+    ) -> bool {
+        matches!(
+            self.chain_proofs.get(&key),
+            Some(crate::services::chain_status::ProofEntry::Verified(_))
+        ) || self.split_records.iter().any(|record| {
+            record.txid == spend && record.key == Some(key) && record.key_path.is_some()
+        })
+    }
+
     /// The split key of `spend` if this Cube's journal records it as a
     /// split-key split.
     pub fn recorded_split_key(
