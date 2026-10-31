@@ -22,9 +22,10 @@ use iced::{
 use crate::theme::Theme;
 use crate::widget::{Element, Renderer};
 
-/// Widest a page's content gets, in logical pixels. Send and Receive need
-/// 960 to keep their 680px form and 240px step column side by side.
-pub const PAGE_MAX: f32 = 960.0;
+/// Widest a page's content gets, in logical pixels: the artboards' 1120px
+/// column, so a 1440-point laptop window fills between the gutters as the
+/// boards do. Send and Receive keep their own 960px layout inside it.
+pub const PAGE_MAX: f32 = 1120.0;
 /// Space above the page title.
 pub const PAGE_TOP: f32 = 28.0;
 /// Space below the last element.
@@ -273,7 +274,7 @@ mod tests {
         // A 2560px window less the 248px side menu.
         assert_eq!(
             content_frame(2312.0, PageWidth::Reading, 48.0),
-            (676.0, PAGE_MAX)
+            (596.0, PAGE_MAX)
         );
         let (x, width) = content_frame(1500.0, PageWidth::Reading, 48.0);
         assert_eq!(x, 1500.0 - x - width, "equal margins on both sides");
