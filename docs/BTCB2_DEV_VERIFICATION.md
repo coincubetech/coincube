@@ -140,9 +140,9 @@ its existing cooldown. Record these availability limits in dev acceptance.
 
 Claim/Split remains hidden until authenticated observation collection, ownership
 and inclusion checks, restart-safe state, both transaction steps and pre-broadcast
-validation are implemented and independently tested. The
-[core assessment](BTCB2_CLAIM_SAFETY.md) is only a prerequisite; its eligible
-result is not signing or broadcast permission. Dynamic RDTS expiry uses chain
+validation are implemented and independently tested. (The core Claim
+assessment this paragraph referred to was removed in S7b with the paired
+Claim and Split flows; Split coins replaces them.) Dynamic RDTS expiry uses chain
 MTP, never hard-coded expiry or the machine clock. Six confirmations must be
 rechecked with reorg handling. Missing transactions and post-fork timestamps
 never prove permanent chain exclusivity. Keychain LAN remains gated until
