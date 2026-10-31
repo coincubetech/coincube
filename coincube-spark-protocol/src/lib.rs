@@ -818,9 +818,13 @@ pub struct GetInfoOk {
     /// The USDB balance at full precision, reported separately from
     /// [`Self::balance_sats`] so the gui can show it as its own row.
     ///
-    /// `None` when the bridge doesn't report it: a bridge older than this
-    /// field, or one before S1b fills it in. Treat `Some` with a zero
-    /// balance the same as `None`.
+    /// `None` when the wallet holds no USDB: from S1b on, the bridge reports
+    /// only a nonzero balance of the configured USDB token whose metadata
+    /// names that token. Also `None` from a bridge that doesn't report it (one
+    /// older than this field, or before S1b). Treat `Some` with a zero
+    /// balance the same as `None`. Either way there is no USDB to show; don't
+    /// fall back to [`Self::stable_balance`], which isn't checked against the
+    /// token's metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usdb_balance: Option<UsdbBalanceSnapshot>,
 }

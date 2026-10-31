@@ -3628,6 +3628,22 @@ mod usdb_balance_tests {
         );
     }
 
+    /// The snapshot carries the token's own metadata, not a hard-coded
+    /// 6 decimals and "USDB": a holding with other metadata is passed through
+    /// as the SDK reports it.
+    #[test]
+    fn the_snapshot_carries_the_token_metadata_as_reported() {
+        assert_eq!(
+            usdb_balance(&balances([(USDB, token(USDB, 1_234_567_890, 8, "USDB.e"))])),
+            Some(UsdbBalanceSnapshot {
+                token_identifier: USDB.to_string(),
+                balance: 1_234_567_890,
+                decimals: 8,
+                ticker: "USDB.e".to_string(),
+            })
+        );
+    }
+
     #[test]
     fn zero_or_missing_usdb_is_none() {
         assert_eq!(usdb_balance(&HashMap::new()), None);
