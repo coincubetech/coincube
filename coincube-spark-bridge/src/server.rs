@@ -2288,6 +2288,10 @@ async fn handle_set_auto_convert(
 /// the answer is an error. A change is also announced with
 /// [`ProtocolEvent::AutoConvertStateChanged`].
 ///
+/// It first takes the send gate ([`AutoConvert::send_gate`]), so it waits
+/// for a conversion already committed to its send. Off is therefore never
+/// acknowledged while a conversion can still start.
+///
 /// Neither direction touches the wallet's funds: off leaves the USDB
 /// balance as USDB, and on converts only bitcoin received afterwards.
 async fn set_auto_convert(
@@ -2301,6 +2305,8 @@ async fn set_auto_convert(
             format!("init must succeed before {method}"),
         ));
     };
+    let gate = auto_convert.lock().await.send_gate();
+    let _no_send_in_flight = gate.lock().await;
     let mut auto_convert = auto_convert.lock().await;
     let changed = auto_convert.set_enabled(enabled).map_err(|e| {
         (
@@ -3653,6 +3659,89 @@ mod auto_convert_handler_tests {
             serde_json::from_slice(&std::fs::read(dir.0.join(auto_convert::STATE_FILE)).unwrap())
                 .unwrap();
         assert_eq!(json["pending_sats"], 4_000, "saved on arrival");
+    }
+
+    /// A converter whose send, once committed, waits to be released.
+    #[derive(Default)]
+    struct HeldSend {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        sends: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl auto_convert::Converter for HeldSend {
+        type Prepared = ();
+        async fn limits(&self) -> Result<auto_convert::Limits, String> {
+            Ok(auto_convert::Limits {
+                min_from_sats: Some(1_000),
+                min_to_units: None,
+            })
+        }
+        async fn balance_sats(&self) -> Result<u64, String> {
+            Ok(100_000)
+        }
+        async fn quote(&self, usdb_target: u128) -> Result<auto_convert::Quote<()>, String> {
+            // 1 USDB (10^6 units) for 1,000 sats.
+            Ok(auto_convert::Quote {
+                sats_in: usdb_target.div_ceil(1_000),
+                prepared: (),
+            })
+        }
+        async fn send(&self, _prepared: ()) -> Result<(), String> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            self.sends.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// Off sent while a conversion is past its final switch check waits for
+    /// that send to finish, through the real handler: it is never
+    /// acknowledged while that conversion can still start.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn off_waits_for_a_send_already_committed() {
+        let dir = TempDir::new();
+        let (state, _rx) = server(&dir);
+        call(
+            &state,
+            Method::SetAutoConvert(SetAutoConvertParams { enabled: true }),
+        )
+        .await;
+        let ac = Arc::clone(state.auto_convert.get().unwrap());
+        assert!(ac.lock().await.note_receive(&auto_convert::Receipt {
+            payment_id: "a".into(),
+            sats: 20_000,
+        }));
+
+        let held = Arc::new(HeldSend::default());
+        let pass = {
+            let (ac, held) = (Arc::clone(&ac), Arc::clone(&held));
+            tokio::spawn(async move { auto_convert::convert_pending(&ac, &*held, &|_| {}).await })
+        };
+        held.entered.notified().await;
+
+        let off = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move {
+                call(
+                    &state,
+                    Method::SetAutoConvert(SetAutoConvertParams { enabled: false }),
+                )
+                .await
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!off.is_finished(), "Off acknowledged mid-send");
+        assert!(ac.lock().await.state().enabled);
+
+        held.release.notify_one();
+        pass.await.unwrap();
+        assert!(matches!(
+            off.await.unwrap(),
+            ResponseResult::Ok(OkPayload::AutoConvert(s)) if !s.enabled
+        ));
+        assert_eq!(held.sends.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// Migration off SDK Stable Balance, at the handler level: a Cube whose

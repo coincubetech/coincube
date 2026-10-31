@@ -520,9 +520,11 @@ fn not_sent(reason: String) -> Shortfall {
 /// budget and re-quoted, shrinking it while the pool's rounding and slippage
 /// pad overshoot, and is sent only once a quote fits the budget.
 ///
-/// The switch is checked under the lock just before sending: the moment the
-/// conversion is committed. A switch made after that check finds the send
-/// already begun; one made before it stops the send.
+/// The send runs under the send gate ([`AutoConvert::send_gate`]), with the
+/// switch checked under the state lock once the gate is held. Every switch
+/// change takes the gate first, so a switch either lands before the check
+/// and stops the send, or waits until the send has finished: Off is never
+/// acknowledged while a conversion it would have stopped can still start.
 async fn convert<C: Converter>(
     converter: &C,
     budget_sats: u64,
@@ -542,6 +544,8 @@ async fn convert<C: Converter>(
         }
         let quote = converter.quote(target).await.map_err(not_sent)?;
         if quote.sats_in <= budget {
+            let gate = auto_convert.lock().await.send_gate();
+            let _sending = gate.lock().await;
             if !auto_convert.lock().await.still_wanted(epoch) {
                 return Err(Shortfall::Cancelled);
             }
@@ -583,6 +587,11 @@ pub struct AutoConvert {
     /// The last [`Self::adopt`] couldn't save: memory is ahead of the file,
     /// so the next change must be written even if it matches memory.
     unsaved: bool,
+    /// Held across a conversion's final switch check and its send, and taken
+    /// by every switch change before it changes anything. See [`convert`].
+    /// Separate from the state lock, which the SDK listener needs while a
+    /// send waits on the SDK's own payment event.
+    send_gate: Arc<Mutex<()>>,
 }
 
 impl AutoConvert {
@@ -619,6 +628,7 @@ impl AutoConvert {
             seen: SeenPayments::default(),
             epoch: 0,
             unsaved: false,
+            send_gate: Arc::new(Mutex::new(())),
         }
     }
 
@@ -705,6 +715,13 @@ impl AutoConvert {
         true
     }
 
+    /// The gate a switch change takes before changing anything, so it can't
+    /// be acknowledged while a conversion is between its final check and the
+    /// end of its send (see [`convert`]). Take it before the state lock.
+    pub fn send_gate(&self) -> Arc<Mutex<()>> {
+        Arc::clone(&self.send_gate)
+    }
+
     /// Whether a conversion decided at `epoch` may still be sent.
     fn still_wanted(&self, epoch: u64) -> bool {
         self.epoch == epoch && self.saved.enabled
@@ -716,25 +733,27 @@ impl AutoConvert {
 
     /// Decide the next attempt from the current bitcoin balance and the
     /// pool's minimum input. The budget is the pending sats, never more than
-    /// the balance. A conversion takes its budget out of the pending total
-    /// before it runs, so a crash mid-conversion can't convert it twice.
-    fn take(&mut self, balance_sats: u64, min_from_sats: Option<u128>) -> Step {
+    /// the balance. A conversion takes its budget out of the pending total,
+    /// on disk, before it runs, so a restart mid-conversion can't convert it
+    /// twice. If that can't be saved, nothing is taken and nothing may be
+    /// sent.
+    fn take(&mut self, balance_sats: u64, min_from_sats: Option<u128>) -> io::Result<Step> {
         if !self.has_pending() {
-            return Step::Idle;
+            return Ok(Step::Idle);
         }
         let budget_sats = self.saved.pending_sats.min(balance_sats);
         if budget_sats == 0 {
-            return Step::Idle;
+            return Ok(Step::Idle);
         }
         if min_from_sats.is_some_and(|min| u128::from(budget_sats) < min) {
-            return Step::Defer;
+            return Ok(Step::Defer);
         }
         let next = Saved {
             pending_sats: self.saved.pending_sats - budget_sats,
             ..self.saved.clone()
         };
-        self.adopt(next);
-        Step::Convert { budget_sats }
+        self.commit(next)?;
+        Ok(Step::Convert { budget_sats })
     }
 
     /// Return sats to the pending total, if auto-convert is still on.
@@ -834,8 +853,14 @@ pub async fn convert_pending<C: Converter>(
     let (budget_sats, epoch) = {
         let mut ac = auto_convert.lock().await;
         match ac.take(balance_sats, limits.min_from_sats) {
-            Step::Convert { budget_sats } => (budget_sats, ac.epoch),
-            Step::Idle | Step::Defer => return,
+            Ok(Step::Convert { budget_sats }) => (budget_sats, ac.epoch),
+            Ok(Step::Idle | Step::Defer) => return,
+            Err(e) => {
+                // The pending sats stay pending, and nothing is sent.
+                let reason = format!("could not save the auto-convert state: {e}");
+                trip(&mut ac, 0, &reason, false, emit);
+                return;
+            }
         }
     };
 
@@ -1379,7 +1404,7 @@ mod tests {
             !ac.note_receive(&receipt("b", 9_000)),
             "off ignores receives"
         );
-        assert_eq!(ac.take(1_000_000, Some(1_000)), Step::Idle);
+        assert_eq!(ac.take(1_000_000, Some(1_000)).unwrap(), Step::Idle);
 
         assert!(ac.set_enabled(true).unwrap());
         assert_eq!(ac.saved.pending_sats, 0, "on never sweeps old bitcoin");
@@ -1870,6 +1895,41 @@ mod tests {
             !AutoConvert::load(&cube).state().enabled,
             "off is on disk now"
         );
+    }
+
+    /// A conversion's pending debit must be on disk before it sends. If it
+    /// can't be saved, nothing is sent and the sats stay pending; after a
+    /// restart they convert once, not twice.
+    #[tokio::test]
+    async fn a_pending_debit_that_cannot_be_saved_sends_nothing() {
+        let dir = TempDir::new();
+        let cube = dir.0.join("cube");
+        fs::create_dir_all(&cube).unwrap();
+        let mut first = AutoConvert::load(&cube);
+        first.set_enabled(true).unwrap();
+        assert!(first.note_receive(&receipt("a", 20_000)));
+        let ac = Mutex::new(first);
+        let pool = FakePool::new(100_000);
+
+        let moved = dir.0.join("moved");
+        fs::rename(&cube, &moved).unwrap();
+        let events = StdMutex::new(Vec::new());
+        convert_pending(&ac, &pool, &|event| events.lock().unwrap().push(event)).await;
+        assert!(pool.sends().is_empty(), "sent without a saved debit");
+        assert_eq!(ac.lock().await.saved.pending_sats, 20_000);
+        assert_eq!(
+            ac.lock().await.failures.consecutive,
+            1,
+            "reported as a failure"
+        );
+        fs::rename(&moved, &cube).unwrap();
+
+        // Restart: the same sats load as pending and convert exactly once.
+        let ac = Mutex::new(AutoConvert::load(&cube));
+        assert_eq!(ac.lock().await.saved.pending_sats, 20_000);
+        convert_pending(&ac, &pool, &|_| {}).await;
+        convert_pending(&ac, &pool, &|_| {}).await;
+        assert_eq!(pool.sends().len(), 1);
     }
 
     /// The pause events go out while the lock is held, so a switch the user
