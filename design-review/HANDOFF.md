@@ -86,8 +86,8 @@ Where the plan departs from the boards, the plan wins:
 - **Spark nickname.** "Daily spending" on the boards is a fixture. Spark gets
   an optional per-Cube nickname, edited in Balances & conversion; without one
   the row reads plain "Spark" (master §3 decision 6).
-- **Page column.** The boards still declare the left-anchored 1120px column.
-  Keep the centred 960px column in §4 (master I7, #926).
+- **Page column.** The boards declare a left-anchored 1120px column. Use the
+  same 1120px width, centred, as in §4 (master I7, #926).
 - **USDB logo.** The boards use the logo from Flashnet's token list. Confirm its
   licence or use a COINCUBE-drawn mark (plan W2).
 
@@ -226,14 +226,15 @@ Reduced motion: every transition and the 3D floor spin are off under
 Every screen inside the Cube shell uses one page container: one column, the
 same width on every page, centred in the content area. Robert chose this on
 2026-10-28 over the earlier left-anchored layout, which left large monitors
-empty on the right.
+empty on the right. On 2026-10-31 he widened it from 960px to the boards'
+1120px, because 960 left a MacBook Pro window looking empty at the sides.
 
 | Rule | Value |
 | --- | --- |
 | Anchor | Centred. Below the page width plus two gutters the column fills the space between the gutters, so it starts one gutter from the side menu as before. |
 | Gutter | `clamp(24px, 3vw, 48px)` on both sides (30.7px at the 1024 minimum window, 43.2px at 1440, 48px from 1600). In the app: `(0.03 × window width).clamp(24, 48)`. |
 | Top padding | 28px above the page title on every page; 48px bottom padding. |
-| Page width | Content is at most 960px wide on every page, Activity included. 960 is what Send and Receive need for their 680px form and 240px step column side by side. |
+| Page width | Content is at most 1120px wide on every page, Activity included, the artboards' `--page-max`. A 1440 window fills between the gutters, as on the boards. Send and Receive keep their 960px layout (680px form and 240px step column) inside it, starting at its left edge. |
 | Activity | The title, filters and table sit on the page column. The detail panel (420px) sits at the content area's right edge; the column stays where it is while it clears the panel by a gutter, then slides left, then narrows once it reaches the left gutter, so it never jumps as the window is resized. |
 | Page header | The same on every page: title, then the Cube and network line. A right-side item (Overview's network line, Activity's result count) sits at the container's right edge. |
 
@@ -245,10 +246,11 @@ In the artboards the rule is the "page shell" block at the end of each
 (Activity: `.phd`, `.filters`, `.lst`). In the app this is `coincube_ui::component::tenshu::page`, wrapped by the
 Cube shell (`coincube-gui/src/app/view/mod.rs`: `dashboard`, and
 `dashboard_activity`, which applies the same column in `view::activity`). Do not
-give a screen its own side padding, page `max_width` or centering. The artboards,
-v175 included, still declare the left-anchored 1120px rule
-(`--page-max:1120px`, `.main .pg{margin:0}`); follow this section, not the
-artboards, for the column.
+give a screen its own side padding, page `max_width` or centering; an inner
+layout may cap its own width, as Send and Receive do, but starts at the
+column's left edge. The artboards,
+v175 included, anchor the 1120px column left (`.main .pg{margin:0}`); the app
+centres it. Follow this section, not the artboards, for the anchor.
 
 ## 5. Sequencing · one draft PR per step
 
@@ -302,7 +304,7 @@ review doc section in parentheses.
 - Window minimum 1024×768 (the compact-layout boards are in
   `archive/explorations/`).
 - Every Cube screen uses the shared page container (§4, "Page layout"): one
-  centred 960px column. No screen centers or pads its own column.
+  centred 1120px column. No screen centers or pads its own column.
 - Bitcoin Blake2b is a per-device toggle (App preferences › Developer). With it
   off, no Blake2b network, Cube, tab, card, copy or badge appears anywhere: not in
   the Launcher's network menu or Cube list, not in Create's network step, not in

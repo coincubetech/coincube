@@ -15817,7 +15817,7 @@ mod hidden_liquid_receive_tests {
 
     /// A mainnet App whose Liquid gate has both inputs set.
     fn app_with_liquid_inputs(root: &std::path::Path) -> super::App {
-        let (mut app, _) = super::claim_step1_tests::bitcoin_app(root);
+        let (mut app, _) = super::shell_tests::bitcoin_app(root);
         app.cache.liquid_gate = super::features::LiquidGate {
             server_enabled: true,
             local_state_exists: true,
