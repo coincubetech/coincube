@@ -1849,6 +1849,36 @@ mod tests {
         }
     }
 
+    /// Settings → General under the pinned head it takes from its route, at
+    /// the top and scrolled (Tenshu v175 L3). Opt-in:
+    /// `TOP_BAR_CAPTURE_DIR=<dir> cargo test -p coincube-gui --lib
+    /// page_head_capture -- --ignored`.
+    #[test]
+    #[ignore = "writes PNG frames; needs a GPU adapter"]
+    fn page_head_capture_settings() {
+        use crate::app::state::preferences::BalancePrivacy;
+        use crate::app::view::nav::shell::capture_tests;
+        let Some(directory) = capture_tests::directory() else {
+            return;
+        };
+        let mut renderer = capture_tests::renderer();
+        let menu = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::General));
+        let price = PriceSetting::default();
+        let unit = UnitSetting::default();
+        let currencies = [Currency::USD, Currency::EUR];
+        for (appearance, palette) in capture_tests::themes() {
+            let cache = capture_tests::cache(appearance == "light", BalancePrivacy::Shown);
+            capture_tests::save_page_head_frames(
+                &mut renderer,
+                &directory,
+                "settings",
+                appearance,
+                &palette,
+                || general_section(&menu, &cache, &price, &unit, &currencies, true, false, None),
+            );
+        }
+    }
+
     #[test]
     fn amounts_and_currency_fits_both_themes_and_window_sizes() {
         use crate::app::view::shared::landing::capture;

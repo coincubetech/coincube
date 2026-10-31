@@ -247,7 +247,7 @@ fn section_content<'a>(
 ) -> Element<'a, Message> {
     let mut content = Column::new()
         .push(
-            container(tenshu_text::title(page.section.label()))
+            container(tenshu_text::heading(page.section.label()))
                 .padding(iced::Padding::default().bottom(16)),
         )
         .width(Length::Fill);

@@ -240,7 +240,8 @@ impl State for LiquidReceive {
         )
         .map(view::Message::LiquidReceive);
 
-        let content = view::dashboard_payment(menu, cache, receive_view);
+        // Liquid is hidden (plan L2); its pages keep their in-body titles.
+        let content = view::dashboard_payment(menu, cache, None, receive_view);
 
         // Show picker modals if open
         if self.receive_picker_open {

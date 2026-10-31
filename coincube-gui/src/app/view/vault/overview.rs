@@ -21,7 +21,7 @@ use crate::{
         menu::{self, Menu, VaultSubMenu},
         settings::display::DisplayMode,
         view::{
-            dashboard,
+            dashboard_headed,
             message::Message,
             shared::landing::{
                 amount_cell, landing_balance_section, landing_button, landing_control_id,
@@ -29,6 +29,7 @@ use crate::{
             },
             vault::coins,
             vault::label,
+            vault_page_head,
             wallet_header::{wallet_header, HeaderVariant, SyncState, WalletHeaderProps},
             FiatAmountConverter,
         },
@@ -452,21 +453,19 @@ pub fn payment_view<'a>(
         vout: output_index as u32,
     }
     .to_string();
-    dashboard(
+    let title =
+        match tx.kind {
+            TransactionKind::OutgoingSinglePayment(_)
+            | TransactionKind::OutgoingPaymentBatch(_) => "Outgoing payment",
+            TransactionKind::IncomingSinglePayment(_)
+            | TransactionKind::IncomingPaymentBatch(_) => "Incoming payment",
+            _ => "Payment",
+        };
+    dashboard_headed(
         menu,
         cache,
+        vault_page_head(cache, title),
         Column::new()
-            .push(match tx.kind {
-                TransactionKind::OutgoingSinglePayment(_)
-                | TransactionKind::OutgoingPaymentBatch(_) => {
-                    Container::new(h3("Outgoing payment")).width(Length::Fill)
-                }
-                TransactionKind::IncomingSinglePayment(_)
-                | TransactionKind::IncomingPaymentBatch(_) => {
-                    Container::new(h3("Incoming payment")).width(Length::Fill)
-                }
-                _ => Container::new(h3("Payment")).width(Length::Fill),
-            })
             .push(if tx.is_single_payment().is_some() {
                 // if the payment is a payment of a single payment transaction then
                 // the label of the transaction is attached to the label of the payment outpoint

@@ -35,7 +35,12 @@ use iced::{
     Alignment, Length,
 };
 
-use coincube_ui::component::tenshu::{gutter_for_window, PageWidth};
+use coincube_ui::component::tenshu::{
+    gutter_for_window,
+    page::{PAGE_BOTTOM, PAGE_TOP},
+    page_head::BODY_TOP,
+    PageHead, PageWidth,
+};
 use coincube_ui::component::text::Text;
 use coincube_ui::{
     color,
@@ -125,6 +130,8 @@ pub fn spark_notice_banner(notice: &SparkNotice) -> Element<'_, Message> {
     page(body, PageWidth::Reading).vertical(8.0, 8.0).into()
 }
 
+/// A Cube page with no head of its own. Settings and the Vault's Tools still
+/// get theirs from the route (see [`dashboard_with_info_layout`]).
 pub fn dashboard<'a, T: Into<Element<'a, Message>>>(
     menu: &'a Menu,
     cache: &'a Cache,
@@ -138,6 +145,111 @@ pub fn dashboard<'a, T: Into<Element<'a, Message>>>(
         cache.avatar_handle.as_ref(),
         cache.lightning_address.as_deref(),
     )
+}
+
+/// A Cube page under a pinned [`page_head`]: the head stays put and only
+/// `content` scrolls (HANDOFF "v175 delta", "Page head").
+pub fn dashboard_headed<'a, T: Into<Element<'a, Message>>>(
+    menu: &'a Menu,
+    cache: &'a Cache,
+    head: PageHead<'a, Message>,
+    content: T,
+) -> Element<'a, Message> {
+    dashboard_with_info_layout(
+        menu,
+        cache,
+        Some(head),
+        content,
+        &cache.cube_name,
+        cache.avatar_handle.as_ref(),
+        cache.lightning_address.as_deref(),
+        PageWidth::Reading,
+    )
+}
+
+/// The Cube's coin, the mark before a page head's Cube line (`.idl > img`).
+pub fn cube_coin<'a>(cache: &Cache) -> Element<'a, Message> {
+    let light = matches!(
+        cache.theme_mode,
+        coincube_ui::theme::palette::ThemeMode::Light
+    );
+    iced::widget::Svg::new(iced::widget::svg::Handle::from_memory(
+        crate::home::launcher_coin::widget_source(cache.chain(), 16.0, 1.0, light).into_bytes(),
+    ))
+    .width(Length::Fixed(16.0))
+    .height(Length::Fixed(16.0))
+    .into()
+}
+
+/// "‹name› · ‹network›", the line under a page title.
+pub fn network_line(cache: &Cache, name: &str) -> String {
+    format!("{name} · {}", nav::shell::network_label(cache.chain()))
+}
+
+/// The Cube's name, or "Cube" while it has none.
+pub fn cube_display_name(cache: &Cache) -> &str {
+    if cache.cube_name.is_empty() {
+        "Cube"
+    } else {
+        cache.cube_name.as_str()
+    }
+}
+
+/// A pinned page head: `title`, then the Cube's coin and "‹Cube› · ‹network›".
+/// Add the page's actions and its back target with the [`PageHead`] builders.
+pub fn page_head<'a>(
+    cache: &Cache,
+    title: impl iced::widget::text::IntoFragment<'a>,
+) -> PageHead<'a, Message> {
+    coincube_ui::component::tenshu::page_head(title, Message::FocusAction).context(
+        cube_coin(cache),
+        network_line(cache, cube_display_name(cache)),
+    )
+}
+
+/// A wallet page's head: "Spark · ‹nickname›" or "Vault · ‹alias›" as the
+/// side panel names it, plain "Spark" or "Vault" without a name.
+pub fn wallet_page_head<'a>(
+    cache: &Cache,
+    wallet: &str,
+    name: Option<&str>,
+) -> PageHead<'a, Message> {
+    page_head(cache, nav::shell::wallet_label(wallet, name))
+}
+
+/// The head of a page inside a wallet (Send, Receive, its activity, a
+/// transaction): `title`, then the coin and "‹wallet› · ‹Cube› · ‹network›",
+/// so the page still says which wallet it belongs to (the H-Send boards).
+pub fn wallet_sub_page_head<'a>(
+    cache: &Cache,
+    wallet: &str,
+    name: Option<&str>,
+    title: impl iced::widget::text::IntoFragment<'a>,
+) -> PageHead<'a, Message> {
+    coincube_ui::component::tenshu::page_head(title, Message::FocusAction).context(
+        cube_coin(cache),
+        format!(
+            "{} · {}",
+            nav::shell::wallet_label(wallet, name),
+            network_line(cache, cube_display_name(cache))
+        ),
+    )
+}
+
+/// [`wallet_sub_page_head`] for a Spark page.
+pub fn spark_page_head<'a>(
+    cache: &Cache,
+    title: impl iced::widget::text::IntoFragment<'a>,
+) -> PageHead<'a, Message> {
+    wallet_sub_page_head(cache, "Spark", cache.wallet_names.spark.as_deref(), title)
+}
+
+/// [`wallet_sub_page_head`] for a Vault page.
+pub fn vault_page_head<'a>(
+    cache: &Cache,
+    title: impl iced::widget::text::IntoFragment<'a>,
+) -> PageHead<'a, Message> {
+    wallet_sub_page_head(cache, "Vault", cache.wallet_names.vault.as_deref(), title)
 }
 
 /// Activity fills the content area edge to edge (`.main`) so its header and
@@ -178,11 +290,13 @@ pub fn dashboard_activity<'a, T: Into<Element<'a, Message>>>(
 pub fn dashboard_payment<'a, T: Into<Element<'a, Message>>>(
     menu: &'a Menu,
     cache: &'a Cache,
+    head: Option<PageHead<'a, Message>>,
     content: T,
 ) -> Element<'a, Message> {
     dashboard_with_info_layout(
         menu,
         cache,
+        head,
         content,
         &cache.cube_name,
         cache.avatar_handle.as_ref(),
@@ -226,6 +340,7 @@ pub fn dashboard_with_info<'a, T: Into<Element<'a, Message>>>(
     dashboard_with_info_layout(
         menu,
         cache,
+        None,
         content,
         cube_name,
         avatar_handle,
@@ -234,15 +349,40 @@ pub fn dashboard_with_info<'a, T: Into<Element<'a, Message>>>(
     )
 }
 
+/// The pinned head over a page's scrollable, or an empty slot. The slot is
+/// always there, so a head that comes and goes (a Send that turns into its
+/// celebration) never moves the scrollable in the tree and resets its offset.
+fn head_slot<'a>(head: Option<PageHead<'a, Message>>) -> Element<'a, Message> {
+    head.map(|head| head.view(page_gutter))
+        .unwrap_or_else(|| Space::new().into())
+}
+
+/// The page body's top padding: tighter under a head (`.main .pg`).
+fn body_top(headed: bool) -> f32 {
+    if headed {
+        BODY_TOP
+    } else {
+        PAGE_TOP
+    }
+}
+
+/// `head` is the page's own; without one, Settings and the Vault's Tools
+/// take theirs from the route. Their scope chips, tabs and tool tabs stay in
+/// the body for now (plan W5, W6).
+#[allow(clippy::too_many_arguments)]
 fn dashboard_with_info_layout<'a, T: Into<Element<'a, Message>>>(
     menu: &'a Menu,
     cache: &'a Cache,
+    head: Option<PageHead<'a, Message>>,
     content: T,
     cube_name: &'a str,
     avatar_handle: Option<&'a iced::widget::image::Handle>,
     lightning_address: Option<&'a str>,
     width: PageWidth,
 ) -> Element<'a, Message> {
+    let head = head
+        .or_else(|| settings::frame::page_head(menu, cache))
+        .or_else(|| vault::tools::page_head(menu, cache));
     let body = page(
         Column::new()
             .push_maybe(settings::frame::in_content_navigation(menu, cache))
@@ -250,10 +390,12 @@ fn dashboard_with_info_layout<'a, T: Into<Element<'a, Message>>>(
             .push(content.into())
             .width(Length::Fill),
         width,
-    );
+    )
+    .vertical(body_top(head.is_some()), PAGE_BOTTOM);
     let content_column: Element<'_, Message> = Column::new()
         .push(warn(None))
         .push_maybe(cache.spark_notice.as_ref().map(spark_notice_banner))
+        .push(head_slot(head))
         .push(
             Container::new(scrollable(body).on_scroll(|w| Message::Scroll(w.absolute_offset().y)))
                 .width(Length::Fill)
@@ -278,27 +420,39 @@ const WALLET_PAGE_SCROLL_ID: &str = "tenshu.wallet.page.scroll";
 /// A reading page with Activity's detail pane (`.det`) for a selected row:
 /// beside the page at the content's right edge when both fit, else over the
 /// page from that edge. `content` and `detail` are rebuilt per layout width.
+///
+/// The pinned `head` spans the page beside the pane, not the pane itself.
 pub fn dashboard_with_detail<'a>(
     menu: &'a Menu,
     cache: &'a Cache,
+    head: impl Fn() -> PageHead<'a, Message> + 'a,
     content: impl Fn() -> Element<'a, Message> + 'a,
     detail: impl Fn() -> Option<Element<'a, Message>> + 'a,
 ) -> Element<'a, Message> {
     let body = iced::widget::responsive(move |size: iced::Size| {
-        let page_body = Container::new(
-            scrollable(page(
-                Column::new()
-                    .push_maybe(settings::frame::in_content_navigation(menu, cache))
-                    .push(content())
-                    .width(Length::Fill),
-                PageWidth::Reading,
-            ))
-            .id(iced::advanced::widget::Id::from(WALLET_PAGE_SCROLL_ID))
-            .on_scroll(|w| Message::Scroll(w.absolute_offset().y)),
-        )
-        .width(Length::Fill)
-        .style(theme::container::background)
-        .height(Length::Fill);
+        let page_body = Column::new()
+            .push(head_slot(Some(head())))
+            .push(
+                Container::new(
+                    scrollable(
+                        page(
+                            Column::new()
+                                .push_maybe(settings::frame::in_content_navigation(menu, cache))
+                                .push(content())
+                                .width(Length::Fill),
+                            PageWidth::Reading,
+                        )
+                        .vertical(BODY_TOP, PAGE_BOTTOM),
+                    )
+                    .id(iced::advanced::widget::Id::from(WALLET_PAGE_SCROLL_ID))
+                    .on_scroll(|w| Message::Scroll(w.absolute_offset().y)),
+                )
+                .width(Length::Fill)
+                .style(theme::container::background)
+                .height(Length::Fill),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill);
         // The page keeps one place in the tree, pane or not, beside or over:
         // otherwise Iced drops its scroll offset when a row is selected.
         let detail = detail();
@@ -343,6 +497,10 @@ pub fn dashboard_with_detail<'a>(
 
 /// Use the same shell for panels with their own scroll handling, such as P2P
 /// chat. `body` owns its content and warnings; the shell owns all navigation.
+///
+/// No pinned page head here (plan L3 exception): the chat lays out its own
+/// header, message list and composer to the pane's full height, and a head
+/// above it would take that height from the messages.
 pub fn dashboard_shell<'a, T: Into<Element<'a, Message>>>(
     menu: &'a Menu,
     cache: &'a Cache,
@@ -868,5 +1026,176 @@ mod page_tests {
             let off = (page_gutter(pane) - gutter_for_window(window)).abs();
             assert!(off <= 1.21, "window {}: off by {}", window, off);
         }
+    }
+}
+
+#[cfg(test)]
+mod page_head_tests {
+    use super::{dashboard_headed, page_head, Message};
+    use crate::app::cache::Cache;
+    use crate::app::menu::{CubeSubMenu, Menu};
+    use coincube_ui::widget::{Column, Element};
+    use iced::advanced::widget::operation::{Focusable, Scrollable};
+    use iced::advanced::widget::{Id, Operation, Tree};
+    use iced::advanced::{layout, renderer::Headless, Layout};
+    use iced::{mouse, Rectangle, Size, Vector};
+
+    const WINDOW: Size = Size::new(1024.0, 768.0);
+    const TITLE: &str = "A long page";
+
+    #[derive(Default)]
+    struct Probe {
+        text: Vec<(String, Rectangle)>,
+        scrollables: Vec<(Rectangle, Vector)>,
+    }
+
+    impl Operation for Probe {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+
+        fn text(&mut self, _id: Option<&Id>, bounds: Rectangle, value: &str) {
+            self.text.push((value.to_owned(), bounds));
+        }
+
+        fn focusable(&mut self, _id: Option<&Id>, _bounds: Rectangle, _: &mut dyn Focusable) {}
+
+        fn scrollable(
+            &mut self,
+            _id: Option<&Id>,
+            bounds: Rectangle,
+            _content_bounds: Rectangle,
+            translation: Vector,
+            _state: &mut dyn Scrollable,
+        ) {
+            self.scrollables.push((bounds, translation));
+        }
+    }
+
+    impl Probe {
+        fn text(&self, value: &str) -> Rectangle {
+            self.text
+                .iter()
+                .find(|(text, _)| text == value)
+                .unwrap_or_else(|| panic!("no {:?}", value))
+                .1
+        }
+
+        /// The scrollable that holds `inner`, and how far it has scrolled.
+        fn scroller_of(&self, inner: Rectangle) -> (Rectangle, Vector) {
+            *self
+                .scrollables
+                .iter()
+                .filter(|(bounds, _)| bounds.x <= inner.x && inner.x < bounds.x + bounds.width)
+                .max_by(|(a, _), (b, _)| a.width.partial_cmp(&b.width).unwrap())
+                .expect("a scrollable around the page body")
+        }
+    }
+
+    fn renderer() -> iced::Renderer {
+        for bytes in coincube_ui::font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(bytes);
+        }
+        iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(14.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap()
+    }
+
+    fn long_page<'a>(menu: &'a Menu, cache: &'a Cache) -> Element<'a, Message> {
+        let rows = (0..80).fold(Column::new().spacing(12), |column, row| {
+            column.push(iced::widget::text(format!("Row {}", row)).size(14))
+        });
+        dashboard_headed(menu, cache, page_head(cache, TITLE), rows)
+    }
+
+    /// Lays the page out as a fresh view, as every frame does, and probes it.
+    fn frame(
+        tree: &mut Tree,
+        renderer: &iced::Renderer,
+        element: &mut Element<'_, Message>,
+    ) -> (layout::Node, Probe) {
+        tree.diff(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            tree,
+            renderer,
+            &layout::Limits::new(Size::ZERO, WINDOW),
+        );
+        let mut probe = Probe::default();
+        element
+            .as_widget_mut()
+            .operate(tree, Layout::new(&node), renderer, &mut probe);
+        (node, probe)
+    }
+
+    #[test]
+    fn the_head_stays_put_while_a_long_page_scrolls_under_it() {
+        let renderer = renderer();
+        let cache = Cache {
+            cube_name: "Everyday".into(),
+            ..Cache::default()
+        };
+        let menu = Menu::Cube(CubeSubMenu::Overview);
+        let mut element = long_page(&menu, &cache);
+        let mut tree = Tree::new(element.as_widget());
+        let (node, before) = frame(&mut tree, &renderer, &mut element);
+        let title = before.text(TITLE);
+        let line = before.text("Everyday · Bitcoin mainnet");
+        let first_row = before.text("Row 0");
+        let (viewport, offset) = before.scroller_of(first_row);
+        assert_eq!(offset, Vector::ZERO);
+        assert!(
+            viewport.y >= line.y + line.height,
+            "only the body scrolls; the head sits above its viewport: {:?} {:?}",
+            line,
+            viewport
+        );
+
+        let mut messages = Vec::new();
+        element.as_widget_mut().update(
+            &mut tree,
+            &iced::Event::Mouse(mouse::Event::WheelScrolled {
+                delta: mouse::ScrollDelta::Pixels { x: 0.0, y: -400.0 },
+            }),
+            Layout::new(&node),
+            mouse::Cursor::Available(first_row.center()),
+            &renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut iced::advanced::Shell::new(&mut messages),
+            &Rectangle::with_size(WINDOW),
+        );
+        let scrolled = messages
+            .iter()
+            .find_map(|message| match message {
+                Message::Scroll(y) => Some(*y),
+                _ => None,
+            })
+            .expect("the body reports its scroll");
+        assert!(scrolled > 0.0, "{}", scrolled);
+
+        // The next frame is a new view over the same tree.
+        let mut element = long_page(&menu, &cache);
+        let (_, after) = frame(&mut tree, &renderer, &mut element);
+        assert_eq!(after.text(TITLE), title, "the title does not move");
+        assert_eq!(
+            after.text("Everyday · Bitcoin mainnet"),
+            line,
+            "the Cube line does not move"
+        );
+        let (_, offset) = after.scroller_of(after.text("Row 0"));
+        assert_eq!(offset.y, scrolled, "the body moved by the reported offset");
+        // Content draws at its layout position less the translation.
+        let shown_first_row = after.text("Row 0").y - offset.y;
+        assert!(
+            shown_first_row < viewport.y,
+            "the first row scrolled out under the head: {} vs {:?}",
+            shown_first_row,
+            viewport
+        );
     }
 }

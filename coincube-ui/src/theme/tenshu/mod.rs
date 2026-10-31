@@ -98,7 +98,11 @@ pub mod type_size {
     /// Disclosure headings (`.dsc`).
     pub const DISCLOSURE: f32 = 15.0;
     pub const SECTION: f32 = 18.0;
-    pub const TITLE: f32 = 20.0;
+    /// In-page headings: the Settings lead block (`.lead h2`) and the
+    /// sheet sections (`.sec h2`, `.sec h3`).
+    pub const HEADING: f32 = 20.0;
+    /// Page title (`.phead h1`), 22px since canvas v175.
+    pub const TITLE: f32 = 22.0;
     pub const AMOUNT_CARD: f32 = 26.0;
     pub const AMOUNT_HERO: f32 = 40.0;
     pub const LINE_HEIGHT: f32 = 1.45;

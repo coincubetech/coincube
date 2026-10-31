@@ -259,9 +259,10 @@ impl State for VaultReceivePanel {
             zero_balance_eligible(balance, masked, self.daemon_backend.as_ref(), cache)
                 && self.restore_rescan_clear;
         let balance_display = balance_label(balance, cache.bitcoin_unit, masked, zero_known);
-        let content = view::dashboard(
+        let content = view::dashboard_headed(
             menu,
             cache,
+            view::vault_page_head(cache, "Receive"),
             view::vault::receive::receive(
                 &self.addresses.list,
                 self.current_qr.as_ref(),

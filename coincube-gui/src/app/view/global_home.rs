@@ -3206,43 +3206,22 @@ pub fn global_home_view<'a>(
                 || (usdt_balance_loaded && !usdt_balance_error)))
         || imported_balance_loaded
         || (has_vault && !has_imported_bitcoin && vault_loaded);
+    // The Cube and network line is in the page head (`view::page_head`).
     let total_balance_label_row = Row::new()
+        .spacing(8)
         .width(Length::Fill)
         .align_y(Alignment::Center)
-        .push(
-            Row::new()
-                .spacing(8)
-                .width(Length::FillPortion(1))
-                .align_y(Alignment::Center)
-                .push(h3("Total Balance").bold())
-                .push(overview_eye(
-                    cube_id,
-                    "Total Balance",
-                    overview_masks.total,
-                    balance_masked,
-                    HomeMessage::ToggleTotalBalance,
-                ))
-                .push_maybe(
-                    (total_partial && !total_balance_loading)
-                        .then(|| warning_icon().size(12).style(theme::text::secondary)),
-                ),
-        )
-        .push(
-            Container::new(
-                Row::new()
-                    .spacing(6)
-                    .align_y(Alignment::Center)
-                    .push(network_coin(chain, light_theme))
-                    .push(
-                        text(format!("{cube_name} · {}", network_name(chain)))
-                            .size(P2_SIZE)
-                            .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
-                            .align_x(iced::alignment::Horizontal::Right)
-                            .style(theme::text::secondary),
-                    ),
-            )
-            .width(Length::FillPortion(1))
-            .align_x(iced::alignment::Horizontal::Right),
+        .push(h3("Total Balance").bold())
+        .push(overview_eye(
+            cube_id,
+            "Total Balance",
+            overview_masks.total,
+            balance_masked,
+            HomeMessage::ToggleTotalBalance,
+        ))
+        .push_maybe(
+            (total_partial && !total_balance_loading)
+                .then(|| warning_icon().size(12).style(theme::text::secondary)),
         );
 
     let total_balance_value: Element<'a, Message> = if total_balance_loading {
@@ -4446,7 +4425,9 @@ mod tests {
                     appearance,
                     theme,
                 );
-                assert!(shown.contains("Everyday · Bitcoin"));
+                // The Cube line moved to the page head; the body must not
+                // repeat it.
+                assert!(!shown.contains("Everyday · Bitcoin"));
                 assert!(shown.contains("Vault · Family savings"));
                 for section in ["Total Balance", "Wallets"] {
                     assert!(shown.has_focus(landing_control_id(
@@ -4455,25 +4436,6 @@ mod tests {
                         "balance-privacy"
                     )));
                 }
-                let title = shown
-                    .text
-                    .iter()
-                    .find(|(label, _)| label == "Total Balance")
-                    .expect("Total Balance title")
-                    .1;
-                let context = shown
-                    .text
-                    .iter()
-                    .find(|(label, _)| label.contains("Everyday · Bitcoin"))
-                    .expect("Cube and network line")
-                    .1;
-                assert!(context.x > title.x, "context belongs on the right");
-                assert!(
-                    (context.y - title.y).abs() <= title.height,
-                    "context and title must share a row: {:?} {:?}",
-                    title,
-                    context
-                );
 
                 for (local_total, local_wallets) in [(false, false), (true, false), (false, true)] {
                     let mut global_hidden = fixture.config(0, None, None);
@@ -4498,6 +4460,43 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// The Overview under its pinned head, at the top and scrolled (Tenshu
+    /// v175 L3). Opt-in: `TOP_BAR_CAPTURE_DIR=<dir> cargo test -p
+    /// coincube-gui --lib page_head_capture -- --ignored`.
+    #[test]
+    #[ignore = "writes PNG frames; needs a GPU adapter"]
+    fn page_head_capture_overview() {
+        use crate::app::state::preferences::BalancePrivacy;
+        use crate::app::view::nav::shell::capture_tests;
+        let Some(directory) = capture_tests::directory() else {
+            return;
+        };
+        let mut renderer = capture_tests::renderer();
+        let fixture = ViewFixture::new();
+        let menu = Menu::Cube(crate::app::menu::CubeSubMenu::Overview);
+        for (appearance, palette) in capture_tests::themes() {
+            let light = appearance == "light";
+            let cache = capture_tests::cache(light, BalancePrivacy::Shown);
+            capture_tests::save_page_head_frames(
+                &mut renderer,
+                &directory,
+                "overview",
+                appearance,
+                &palette,
+                || {
+                    let mut config = fixture.config(0, None, None);
+                    config.light_theme = light;
+                    crate::app::view::dashboard_headed(
+                        &menu,
+                        &cache,
+                        crate::app::view::page_head(&cache, "Overview"),
+                        overview(config),
+                    )
+                },
+            );
         }
     }
 

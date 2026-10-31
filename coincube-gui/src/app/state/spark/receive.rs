@@ -236,9 +236,13 @@ impl State for SparkReceive {
             ),
             None => (None, None),
         };
+        // The received celebration takes the whole page, head included.
+        let head = (!matches!(self.phase, SparkReceivePhase::Received { .. }))
+            .then(|| crate::app::view::spark::sub_page_head(cache, "Receive"));
         let content = crate::app::view::dashboard_payment(
             menu,
             cache,
+            head,
             SparkReceiveView {
                 backend_available,
                 method: self.method,

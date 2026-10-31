@@ -1,13 +1,11 @@
-//! The Vault's Tools page (P-Advanced): a back link to the Vault, the Tools
-//! heading, its scope line and one tab per tool, kept inside page content
-//! above whichever tool is open. Each tab is its own route, so the tool
+//! The Vault's Tools page (P-Advanced): a pinned head with the Tools title,
+//! its scope line and Back to Vault, then one tab per tool, kept inside page
+//! content above whichever tool is open (the tabs move onto the head's rule
+//! in plan W6). Each tab is its own route, so the tool
 //! panels keep their state and deep links (Refresh coins, a PSBT) still land
 //! on the right tab.
 
-use coincube_ui::component::{
-    button,
-    tenshu::{self, segment, tabs},
-};
+use coincube_ui::component::tenshu::{segment, tabs, PageHead};
 use coincube_ui::icon;
 use coincube_ui::widget::{Column, Element, Text};
 use iced::widget::Space;
@@ -15,7 +13,7 @@ use iced::Length;
 
 use crate::app::cache::Cache;
 use crate::app::menu::{Menu, VaultSubMenu};
-use crate::app::view::{message::Message, nav, settings};
+use crate::app::view::{message::Message, nav};
 
 /// Whether `menu` is one of the Vault's tools.
 fn is_tool(menu: &Menu) -> bool {
@@ -60,17 +58,24 @@ fn tab_icon(route: &Menu) -> Text<'static> {
     }
 }
 
-/// The Tools heading and tab bar for a Vault tool route, `None` elsewhere.
+/// The Tools head for a Vault tool route, `None` elsewhere.
+pub fn page_head(menu: &Menu, cache: &Cache) -> Option<PageHead<'static, Message>> {
+    is_tool(menu).then(|| {
+        coincube_ui::component::tenshu::page_head("Tools", Message::FocusAction)
+            .context(
+                crate::app::view::cube_coin(cache),
+                crate::app::view::network_line(cache, crate::app::view::cube_display_name(cache)),
+            )
+            .back("Vault", Message::Menu(Menu::Vault(VaultSubMenu::Overview)))
+    })
+}
+
+/// The tab bar for a Vault tool route, `None` elsewhere.
 pub fn in_content_navigation(menu: &Menu, cache: &Cache) -> Option<Element<'static, Message>> {
     if !is_tool(menu) {
         return None;
     }
     let tools = nav::vault::tools(&nav::NavContext::from_cache(cache));
-    let cube_name = if cache.cube_name.is_empty() {
-        "Cube"
-    } else {
-        cache.cube_name.as_str()
-    };
 
     let intents: Vec<Message> = tools
         .iter()
@@ -88,20 +93,6 @@ pub fn in_content_navigation(menu: &Menu, cache: &Cache) -> Option<Element<'stat
     Some(
         Column::new()
             .width(Length::Fill)
-            .push(
-                button::secondary_action(
-                    "tenshu.vault.tools.back",
-                    Some(icon::previous_icon()),
-                    "Vault",
-                    Message::FocusAction,
-                )
-                .on_press(Message::Menu(Menu::Vault(VaultSubMenu::Overview))),
-            )
-            .push(Space::new().height(Length::Fixed(8.0)))
-            .push(tenshu::title("Tools").size(24))
-            .push(Space::new().height(Length::Fixed(4.0)))
-            .push(settings::frame::scope_line(cache, cube_name))
-            .push(Space::new().height(Length::Fixed(20.0)))
             .push(tab_row)
             .push(Space::new().height(Length::Fixed(20.0)))
             .into(),
@@ -125,6 +116,7 @@ mod tests {
             Menu::Vault(VaultSubMenu::SplitCoins),
         ] {
             assert!(in_content_navigation(&menu, &cache).is_some(), "{:?}", menu);
+            assert!(page_head(&menu, &cache).is_some(), "{:?}", menu);
         }
         for menu in [
             Menu::Vault(VaultSubMenu::Overview),
@@ -132,6 +124,7 @@ mod tests {
             Menu::Vault(VaultSubMenu::Settings(None)),
         ] {
             assert!(in_content_navigation(&menu, &cache).is_none(), "{:?}", menu);
+            assert!(page_head(&menu, &cache).is_none(), "{:?}", menu);
         }
     }
 
@@ -143,18 +136,23 @@ mod tests {
             cube_name: "Everyday".to_owned(),
             ..Cache::default()
         };
-        let frame = in_content_navigation(&Menu::Vault(VaultSubMenu::PSBTs(None)), &cache)
-            .expect("PSBT proposals is a tool route");
+        let menu = Menu::Vault(VaultSubMenu::PSBTs(None));
+        let head = page_head(&menu, &cache).expect("PSBT proposals is a tool route");
+        let frame = in_content_navigation(&menu, &cache).expect("PSBT proposals is a tool route");
         let mounted = capture::inspect(
             "vault-tools-frame",
-            frame,
+            Column::new()
+                .push(head.view(crate::app::view::page_gutter))
+                .push(frame)
+                .into(),
             (1024, 768),
             "dark",
             coincube_ui::theme::Theme::dark(),
         );
         assert!(mounted.contains("Tools"));
         assert!(mounted.contains("Everyday"));
-        assert!(mounted.has_focus("tenshu.vault.tools.back".into()));
+        assert!(mounted.contains("Back to Vault"));
+        assert!(mounted.has_focus(coincube_ui::component::tenshu::page_head::BACK_ID.into()));
         for (label, route) in nav::vault::tools(&nav::NavContext::from_cache(&cache)) {
             assert!(mounted.contains(label), "missing tab {:?}", label);
             assert!(mounted.has_focus(tab_id(&route).into()));

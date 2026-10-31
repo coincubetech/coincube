@@ -544,7 +544,7 @@ fn sheet_link<'a, M: Clone + 'a>(
 
 /// Section heading (`.sec h3`), 20px semibold.
 fn sheet_title<'a>(label: impl IntoFragment<'a>) -> iced::widget::Text<'a, theme::Theme> {
-    tenshu_text::title(label)
+    tenshu_text::heading(label)
 }
 
 /// Group heading (`.grp h4`), 14px semibold.

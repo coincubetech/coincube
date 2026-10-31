@@ -4323,12 +4323,11 @@ impl State for P2PPanel {
                     }
 
                     // --- Header ---
-                    let mut overview_col = column![column![
-                        h3("P2P Order Book").bold(),
-                        p2_regular("Browse and take P2P trading orders from the Mostro network")
-                            .style(theme::text::secondary),
-                    ]
-                    .spacing(8)
+                    // The title is in the page head.
+                    let mut overview_col = column![p2_regular(
+                        "Browse and take P2P trading orders from the Mostro network"
+                    )
+                    .style(theme::text::secondary)
                     .width(Length::Fill),]
                     .spacing(16);
 
@@ -4343,8 +4342,12 @@ impl State for P2PPanel {
                     overview_col = overview_col.push(self.book_view());
                     overview_col = overview_col.push(Space::new().height(Length::Fixed(40.0)));
 
-                    let overview_content: Element<'_, view::Message> =
-                        view::dashboard(menu, cache, overview_col);
+                    let overview_content: Element<'_, view::Message> = view::dashboard_headed(
+                        menu,
+                        cache,
+                        view::page_head(cache, "P2P Order Book"),
+                        overview_col,
+                    );
 
                     // Show payment invoice modal if seller took a buy order
                     if let Some((ref oid, ref inv, amt, ref qr_data)) = self.pending_payment_invoice
@@ -4460,17 +4463,14 @@ impl State for P2PPanel {
                                         .width(Length::Fill),
                                 );
                             }
-                            return view::dashboard(
+                            return view::dashboard_headed(
                                 menu,
                                 cache,
+                                view::page_head(cache, "Trade Details"),
                                 column![
-                                    column![
-                                        h3("Trade Details").bold(),
-                                        p2_regular("View trade information and take actions")
-                                            .style(theme::text::secondary),
-                                    ]
-                                    .spacing(8)
-                                    .width(Length::Fill),
+                                    p2_regular("View trade information and take actions")
+                                        .style(theme::text::secondary)
+                                        .width(Length::Fill),
                                     container(self.trade_detail_view(trade)).width(Length::Fill),
                                     Space::new().height(Length::Fixed(40.0)),
                                 ]
@@ -4482,18 +4482,14 @@ impl State for P2PPanel {
                     let filtered = self.filtered_trades();
                     let shown_count = filtered.len();
 
-                    view::dashboard(
+                    view::dashboard_headed(
                         menu,
                         cache,
+                        view::page_head(cache, "My Trades"),
                         column![
-                            // Title
-                            column![
-                                h3("My Trades").bold(),
-                                p2_regular("Your active and completed P2P trades")
-                                    .style(theme::text::secondary),
-                            ]
-                            .spacing(8)
-                            .width(Length::Fill),
+                            p2_regular("Your active and completed P2P trades")
+                                .style(theme::text::secondary)
+                                .width(Length::Fill),
                             // Trade status filter
                             container(trade_status_filter(&self.trade_filters, shown_count,))
                                 .width(Length::Fill),
@@ -4617,17 +4613,14 @@ impl State for P2PPanel {
                     }
 
                     // Default: show chat list
-                    view::dashboard(
+                    view::dashboard_headed(
                         menu,
                         cache,
+                        view::page_head(cache, "Chat"),
                         column![
-                            column![
-                                h3("Chat").bold(),
-                                p2_regular("Your P2P trade conversations")
-                                    .style(theme::text::secondary),
-                            ]
-                            .spacing(8)
-                            .width(Length::Fill),
+                            p2_regular("Your P2P trade conversations")
+                                .style(theme::text::secondary)
+                                .width(Length::Fill),
                             container(self.chat_list_view()).width(Length::Fill),
                             Space::new().height(Length::Fixed(40.0)),
                         ]
@@ -4635,19 +4628,14 @@ impl State for P2PPanel {
                     )
                 }
                 P2PSubMenu::CreateOrder => {
-                    let content: Element<'_, view::Message> = view::dashboard(
+                    let content: Element<'_, view::Message> = view::dashboard_headed(
                         menu,
                         cache,
+                        view::page_head(cache, "Create P2P Order"),
                         column![
-                            column![
-                                h3("Create P2P Order").bold(),
-                                p2_regular(
-                                    "Create a new buy or sell order for the P2P marketplace"
-                                )
-                                .style(theme::text::secondary),
-                            ]
-                            .spacing(8)
-                            .width(Length::Fill),
+                            p2_regular("Create a new buy or sell order for the P2P marketplace")
+                                .style(theme::text::secondary)
+                                .width(Length::Fill),
                             container(self.create_order_view(cache)).width(Length::Fill),
                             Space::new().height(Length::Fixed(40.0)),
                         ]
@@ -4665,17 +4653,14 @@ impl State for P2PPanel {
                         content
                     }
                 }
-                P2PSubMenu::Settings => view::dashboard(
+                P2PSubMenu::Settings => view::dashboard_headed(
                     menu,
                     cache,
+                    view::page_head(cache, "P2P Settings"),
                     column![
-                        column![
-                            h3("P2P Settings").bold(),
-                            p2_regular("Configure Mostro nodes and relays")
-                                .style(theme::text::secondary),
-                        ]
-                        .spacing(8)
-                        .width(Length::Fill),
+                        p2_regular("Configure Mostro nodes and relays")
+                            .style(theme::text::secondary)
+                            .width(Length::Fill),
                         container(self.mostro_settings_view()).width(Length::Fill),
                         Space::new().height(Length::Fixed(40.0)),
                     ]

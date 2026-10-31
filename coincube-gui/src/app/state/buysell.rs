@@ -27,6 +27,9 @@ impl State for BuySellPanel {
         menu: &'a Menu,
         cache: &'a Cache,
     ) -> coincube_ui::widget::Element<'a, view::Message> {
+        // No pinned page head (plan L3 exception): Buy/Sell keeps its own
+        // heading and Back bar inside the provider column, whose steps own
+        // them (`view::buysell::panel`).
         view::dashboard(
             menu,
             cache,

@@ -16,9 +16,16 @@ fn base<'a>(content: impl IntoFragment<'a>, size: f32) -> Text<'a> {
         .line_height(LineHeight::Relative(type_size::LINE_HEIGHT))
 }
 
-/// Page title, 20px semibold (`.ttl h1`).
+/// Page title, 22px semibold (`.phead h1`).
 pub fn title<'a>(content: impl IntoFragment<'a>) -> Text<'a> {
     base(content, type_size::TITLE)
+        .font(font::SEMIBOLD)
+        .style(style::ink)
+}
+
+/// In-page heading, 20px semibold (`.lead h2`, `.sec h2`).
+pub fn heading<'a>(content: impl IntoFragment<'a>) -> Text<'a> {
+    base(content, type_size::HEADING)
         .font(font::SEMIBOLD)
         .style(style::ink)
 }

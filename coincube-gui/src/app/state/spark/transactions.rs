@@ -160,9 +160,13 @@ impl State for SparkTransactions {
         // body with the detail view; the back button clears the state
         // via `Message::Close` and we fall through to the list again.
         if let Some(payment) = &self.selected_payment {
-            return crate::app::view::dashboard(
+            return crate::app::view::dashboard_headed(
                 menu,
                 cache,
+                crate::app::view::spark_page_head(
+                    cache,
+                    crate::app::view::spark::transactions::transaction_detail_title(payment),
+                ),
                 crate::app::view::spark::transactions::transaction_detail_view(
                     payment,
                     fiat_converter,
@@ -182,9 +186,10 @@ impl State for SparkTransactions {
             SparkTransactionsStatus::Loaded(self.payments.clone())
         };
 
-        let content = crate::app::view::dashboard(
+        let content = crate::app::view::dashboard_headed(
             menu,
             cache,
+            crate::app::view::spark_page_head(cache, "Transactions"),
             SparkTransactionsView {
                 status,
                 recent_transactions: &self.recent_transactions,
