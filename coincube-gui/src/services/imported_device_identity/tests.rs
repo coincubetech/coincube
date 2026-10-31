@@ -201,7 +201,7 @@ async fn refuses_wrong_key_path_network_and_script_identity() {
     ));
     assert_eq!(fingerprint_reads.load(Ordering::SeqCst), 0);
 
-    let (other_script, _) = wallet("wsh(multi)", ChainId::Regtest);
+    let (other_script, _) = self::wallet("wsh(multi)", ChainId::Regtest);
     assert!(
         !check_export(&wallet, selected, selected.fingerprint, selected.xpub)
             .unwrap()
@@ -228,13 +228,13 @@ async fn refuses_wrong_key_path_network_and_script_identity() {
             .unwrap()
             .matches_wallet(&different_threshold)
     );
-    let other_chain = wallet("wsh(sortedmulti)", ChainId::Testnet4).0;
+    let other_chain = self::wallet("wsh(sortedmulti)", ChainId::Testnet4).0;
     assert!(
         !check_export(&wallet, selected, selected.fingerprint, selected.xpub)
             .unwrap()
             .matches_wallet(&other_chain)
     );
-    let (mainnet, mainnet_accounts) = wallet("wpkh", ChainId::Bitcoin);
+    let (mainnet, mainnet_accounts) = self::wallet("wpkh", ChainId::Bitcoin);
     let fork = mainnet.paired_blake2b().unwrap();
     assert!(matches!(
         check_wallet(&fork, &mainnet_accounts[0]),
