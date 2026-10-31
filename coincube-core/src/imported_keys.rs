@@ -127,7 +127,9 @@ impl VerifiedImportedKey {
     }
 }
 
-pub(crate) fn account_in_both_branches(
+/// Check an exact public account against both validated branches. Public
+/// account identity alone never grants signing authority.
+pub fn account_in_both_branches(
     wallet: &ImportedWalletDescriptor,
     account: &ImportedAccount,
 ) -> bool {

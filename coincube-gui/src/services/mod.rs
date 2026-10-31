@@ -7,6 +7,8 @@ pub(crate) mod esplora_backoff;
 pub mod feeestimation;
 pub mod fiat;
 pub mod foreign_scan;
+#[allow(dead_code)] // Keys admission will consume this read-only device proof.
+pub(crate) mod imported_device_identity;
 // The signer API is staged behind the external inventory anchor/recovery gate.
 // Only owner-verified import removal calls it in production at this head.
 #[allow(dead_code)]
