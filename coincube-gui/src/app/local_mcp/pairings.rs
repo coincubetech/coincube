@@ -146,9 +146,21 @@ fn confirm_directory(directory: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// A held registry lock, released by an explicit unlock rather than by close.
+/// flock belongs to the open file description, which a child forked by any
+/// thread shares until it execs (a process spawn can fork). Closing only this
+/// descriptor would leave the lock held by that child, and a reopen in this
+/// process would fail as "already open".
+pub(super) struct LockOwner(fs::File);
+impl Drop for LockOwner {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
 /// This lock stays outside the removable registry directory, so a failed
 /// remove_dir_all cannot unlink the inode that protects Store::open.
-fn lock_lifecycle(location: &Location) -> io::Result<Arc<fs::File>> {
+fn lock_lifecycle(location: &Location) -> io::Result<Arc<LockOwner>> {
     let parent = location
         .directory
         .parent()
@@ -185,7 +197,7 @@ fn lock_lifecycle(location: &Location) -> io::Result<Arc<fs::File>> {
     if !file.try_lock_exclusive()? {
         return Err(io::Error::other("pairing registry already open"));
     }
-    Ok(Arc::new(file))
+    Ok(Arc::new(LockOwner(file)))
 }
 
 /// The owner lock lives as long as any endpoint for this registry. A competing
@@ -194,8 +206,8 @@ pub(super) struct Store {
     pub location: Location,
     key: Zeroizing<[u8; 32]>,
     document: Document,
-    _owner: Arc<fs::File>,
-    _lifecycle_owner: Arc<fs::File>,
+    _owner: LockOwner,
+    _lifecycle_owner: Arc<LockOwner>,
 }
 impl Store {
     pub(super) fn open(
@@ -234,6 +246,7 @@ impl Store {
         if !owner.try_lock_exclusive()? {
             return Err(io::Error::other("pairing registry already open"));
         }
+        let owner = LockOwner(owner);
         let path = location.directory.join("clients.enc");
         let document = if path.exists() {
             Self::read_document(&location, &key)?
@@ -251,7 +264,7 @@ impl Store {
             location,
             key,
             document,
-            _owner: Arc::new(owner),
+            _owner: owner,
             _lifecycle_owner: lifecycle_owner,
         };
         if create && !path.exists() {
@@ -314,7 +327,7 @@ impl Store {
         }
         Ok(document)
     }
-    pub fn owner(&self) -> Arc<fs::File> {
+    pub fn owner(&self) -> Arc<LockOwner> {
         self._lifecycle_owner.clone()
     }
     pub fn enabled(&self) -> bool {
@@ -456,7 +469,7 @@ fn remove_cube_at(
             if !owner.try_lock_exclusive()? {
                 return Err(io::Error::other("paired Cube is open in another process"));
             }
-            Some(owner)
+            Some(LockOwner(owner))
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             // A pre-repair process can still own an unlinked child lock inode.
@@ -539,9 +552,9 @@ mod tests {
         let location = location(&root, "legacy");
         create_private_registry(&location);
         let child = location.directory.join("owner.lock");
-        let holder = fs::File::create(&child).unwrap();
+        let holder = LockOwner(fs::File::create(&child).unwrap());
         protect_new(&child, false).unwrap();
-        assert!(holder.try_lock_exclusive().unwrap());
+        assert!(holder.0.try_lock_exclusive().unwrap());
         fs::write(location.directory.join("clients.enc"), b"legacy").unwrap();
         assert!(remove_cube_at(&location, || Ok(())).is_err());
         drop(holder);
@@ -754,6 +767,30 @@ mod tests {
         bytes[20] ^= 1;
         fs::write(path, bytes).unwrap();
         assert!(Store::open(location, Zeroizing::new([7; 32]), false).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+    /// A spawn by any thread forks before it execs, and until then the child
+    /// shares this process's lock descriptions. A duplicated descriptor shares
+    /// them the same way, without opening a fork window for sibling tests.
+    #[test]
+    fn reopen_after_drop_succeeds_while_another_descriptor_shares_the_lock() {
+        let root =
+            std::env::temp_dir().join(format!("mcp-pairing-shared-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let location = location(&root, "shared");
+        let store = Store::open(location.clone(), Zeroizing::new([23; 32]), true).unwrap();
+        let shared = [
+            store._owner.0.try_clone().unwrap(),
+            store._lifecycle_owner.0.try_clone().unwrap(),
+        ];
+        drop(store);
+        let store = Store::open(location.clone(), Zeroizing::new([23; 32]), false).unwrap();
+        assert!(
+            Store::open(location, Zeroizing::new([23; 32]), false).is_err(),
+            "the reopened store must still exclude a second owner"
+        );
+        drop(store);
+        drop(shared);
         fs::remove_dir_all(root).unwrap();
     }
 }

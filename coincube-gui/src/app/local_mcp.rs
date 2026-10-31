@@ -33,7 +33,7 @@ struct PairedRuntime {
     // Last field: ownership outlives locator cleanup and server teardown.
     #[cfg(feature = "mcp-transactions")]
     transactions: Option<Arc<transactions::Service>>,
-    _registry_owner: Arc<std::fs::File>,
+    _registry_owner: Arc<pairings::LockOwner>,
 }
 impl Drop for PairedRuntime {
     fn drop(&mut self) {
