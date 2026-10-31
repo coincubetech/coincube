@@ -14,15 +14,9 @@ mod ancestry;
 mod discovery;
 pub use ancestry::{CanonicalCoinbase, CoinbasePair};
 pub use discovery::diagnostics::Report as AncestryTimingReport;
-#[cfg(test)]
-pub(crate) use discovery::diagnostics::{
-    Outcome as AncestryTimingOutcome, Stage as AncestryTimingStage,
-};
 pub use discovery::{
-    AncestryContext, ClaimPairError, CollectedAncestry, CollectedAncestrySweep,
-    CollectedFundingCoin, CollectedFundingPair, CollectedPostBitcoinInputs, CollectedSpendInputs,
-    DiscoveredAncestry, DiscoveryError, FundingContext, FundingProofStatus, OwnedClaimFunding,
-    OwnedSplitFunding, SplitPairError, MAX_ANCESTRY_CANDIDATES,
+    AncestryContext, CollectedAncestry, CollectedAncestrySweep, DiscoveredAncestry, DiscoveryError,
+    FundingProofStatus, MAX_ANCESTRY_CANDIDATES,
 };
 
 const BODY_LIMIT: usize = 256 * 1024;
@@ -44,28 +38,10 @@ pub struct HttpObservationSource {
     budget: Option<std::sync::Arc<discovery::CollectionBudget>>,
     ancestry_trace: Option<std::sync::Arc<discovery::diagnostics::Trace>>,
     ancestry_timing_observer: Option<discovery::diagnostics::Observer>,
-    funding_observer: Option<discovery::FundingProofObserver>,
     #[cfg(all(test, feature = "regtest-harness"))]
     test_ancestry_history: Option<crate::services::coincube::client::TestAncestryHistory>,
 }
 
-#[derive(Clone)]
-pub(crate) struct ObservationContextGuard {
-    provider: String,
-    expected: u64,
-    generation: watch::Receiver<u64>,
-}
-impl ObservationContextGuard {
-    pub(crate) fn validate(&self, provider: &str, generation: u64) -> Result<(), FailureKind> {
-        if provider.trim_end_matches('/') != self.provider {
-            return Err(FailureKind::Changed);
-        }
-        if generation != self.expected || !session_current(&self.generation, self.expected) {
-            return Err(FailureKind::Cancelled);
-        }
-        Ok(())
-    }
-}
 impl HttpObservationSource {
     /// Construct a source bound to the supplied provider and session context
     /// for the supported Bitcoin/BTCB2 pair. Validate the provider URL and
@@ -112,38 +88,9 @@ impl HttpObservationSource {
             budget: None,
             ancestry_trace: None,
             ancestry_timing_observer: None,
-            funding_observer: None,
             #[cfg(all(test, feature = "regtest-harness"))]
             test_ancestry_history,
         })
-    }
-    /// Attach diagnostics to this read-only source. No observer result grants
-    /// authority; callers still enter through the saved reservation admission.
-    pub(crate) fn with_funding_observer(
-        mut self,
-        observer: discovery::FundingProofObserver,
-    ) -> Self {
-        self.funding_observer = Some(observer);
-        self
-    }
-
-    /// Attach an identifier-free read-only ancestry timing observer. Reports
-    /// cannot manufacture proofs, signer permits or broadcast permission.
-    pub(crate) fn with_ancestry_timing_observer(
-        mut self,
-        observer: discovery::diagnostics::Observer,
-    ) -> Self {
-        self.ancestry_timing_observer = Some(observer);
-        self
-    }
-
-    /// Notify the optional observer of a chain-specific diagnostic, or do
-    /// nothing when no observer is installed. The callback cannot manufacture
-    /// a paired proof, signer permit or permission to spend.
-    fn report_funding(&self, chain: ChainId, status: FundingProofStatus) {
-        if let Some(observer) = &self.funding_observer {
-            observer(chain, status);
-        }
     }
 
     /// Stable identity shared with the Claim journal. Bind the admitted pair
@@ -151,24 +98,6 @@ impl HttpObservationSource {
     /// Preserve this encoding when reopening existing journals.
     pub(crate) fn provider_identity(&self) -> String {
         format!("bitcoin|{}/api/v1/esplora/bitcoin/mainnet", self.base)
-    }
-
-    /// Bind every result, including stable negative ancestry observations, to
-    /// the same admitted provider and live session generation as its consumer.
-    pub(crate) fn validate_context(
-        &self,
-        provider: &str,
-        generation: u64,
-    ) -> Result<(), FailureKind> {
-        self.context_guard().validate(provider, generation)
-    }
-
-    pub(crate) fn context_guard(&self) -> ObservationContextGuard {
-        ObservationContextGuard {
-            provider: self.provider_identity(),
-            expected: self.expected,
-            generation: self.generation.clone(),
-        }
     }
 
     fn prefix(chain: ChainId) -> Result<&'static str, FailureKind> {
@@ -408,35 +337,6 @@ impl HttpObservationSource {
     }
 }
 
-#[cfg(test)]
-mod session_tests {
-    use super::*;
-
-    #[test]
-    fn paired_observation_binding_revokes_on_same_value_refresh() {
-        let (sender, generation) = watch::channel(7);
-        let mut client = CoincubeClient::new();
-        client.base_url = "https://api.coincube.io/".into();
-        client.set_token("synthetic-test-token");
-        let source = HttpObservationSource::new(
-            client,
-            ChainId::Bitcoin,
-            ChainId::BitcoinBlake2b,
-            CollectionContext {
-                expected_generation: 7,
-                generation,
-            },
-        )
-        .unwrap();
-        let provider = source.provider_identity();
-        assert_eq!(source.validate_context(&provider, 7), Ok(()));
-        sender.send(7).unwrap();
-        assert_eq!(
-            source.validate_context(&provider, 7),
-            Err(FailureKind::Cancelled)
-        );
-    }
-}
 #[derive(Deserialize)]
 struct BlockStatus {
     in_best_chain: bool,

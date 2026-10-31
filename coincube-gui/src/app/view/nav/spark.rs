@@ -59,7 +59,6 @@ mod tests {
             connect_stream_status: status,
             btcb2_server_enabled: false,
             btcb2_already_claimed: false,
-            btcb2_claim_resume: false,
         }
     }
 

@@ -30,9 +30,8 @@ impl PsbtsPanel {
         }
     }
 
-    pub fn preselect(&mut self, spend_tx: SpendTx, cache: &Cache) {
-        let psbt_state =
-            psbt::PsbtState::new(self.wallet.clone(), spend_tx, true).with_split_key(cache);
+    pub fn preselect(&mut self, spend_tx: SpendTx) {
+        let psbt_state = psbt::PsbtState::new(self.wallet.clone(), spend_tx, true);
         self.selected_tx = Some(psbt_state);
         self.warning = None;
         self.modal = None;
@@ -106,8 +105,7 @@ impl State for PsbtsPanel {
                             spend_tx.psbt.unsigned_tx.compute_txid()
                                 == tx.tx.psbt.unsigned_tx.compute_txid()
                         }) {
-                            let tx = psbt::PsbtState::new(self.wallet.clone(), tx.clone(), true)
-                                .with_split_key(cache);
+                            let tx = psbt::PsbtState::new(self.wallet.clone(), tx.clone(), true);
                             let cmd = tx.load(daemon);
                             self.selected_tx = Some(tx);
                             return cmd;
@@ -147,8 +145,7 @@ impl State for PsbtsPanel {
             }
             Message::View(view::Message::Select(i)) => {
                 if let Some(tx) = self.spend_txs.get(i) {
-                    let tx = psbt::PsbtState::new(self.wallet.clone(), tx.clone(), true)
-                        .with_split_key(cache);
+                    let tx = psbt::PsbtState::new(self.wallet.clone(), tx.clone(), true);
                     let cmd = tx.load(daemon);
                     self.selected_tx = Some(tx);
                     return cmd;
@@ -322,7 +319,7 @@ mod tests {
         let tx = spend_tx();
 
         let mut panel = PsbtsPanel::new(wallet.clone());
-        panel.preselect(tx.clone(), &Cache::default());
+        panel.preselect(tx.clone());
         // Simulate an open Sign session by attaching a modal to the panel.
         panel.selected_tx.as_mut().unwrap().modal =
             Some(psbt::PsbtModal::Save(psbt::SaveModal::default()));

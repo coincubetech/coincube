@@ -102,39 +102,6 @@ pub enum Message {
     Fiat(FiatMessage),
     UpdatePanelCache(/* is current panel */ bool),
     View(view::Message),
-    /// Results of the claim step-1 panel's own async work (preconditions
-    /// probe, build, finalise, review, submit, track). Carries the panel's
-    /// coordinator session back and forth, so no other handler ever sees it.
-    Claim(super::state::vault::claim::ClaimEvent),
-    ForkClaim(Box<super::state::vault::claim::fork_panel::Event>),
-    ForkClaimOpened(Box<super::state::vault::claim::fork_load::Opened>),
-    /// Results of the Split step-1 panel's own tasks (#568 B1b). Carries the
-    /// panel's coordinator back and forth, so no other handler sees it.
-    Split(Box<super::state::vault::split::SplitEvent>),
-    /// #625 F3a: the Split journal discovery, run off the UI thread, for
-    /// this Cube and Vault.
-    SplitDiscovered {
-        cube: String,
-        wallet: crate::app::settings::WalletId,
-        panel: Option<Box<super::state::vault::split::SplitPanel>>,
-    },
-    /// #625 F3c: the Split ports a refresh built off the UI thread, under
-    /// its sequence number (`None`: the build did not finish).
-    SplitPortsBuilt(u64, Option<Box<super::SplitPorts>>),
-    /// Completion of the read-only Split destination reservation (with the
-    /// daemon's post-reservation sync state and coin history, to prove the
-    /// address fresh) and bounded BTCB2 fee-rate lookup (`None` =
-    /// unavailable). It never carries a PSBT or signing capability.
-    SplitTargetPrepared {
-        generation: u64,
-        result: Result<
-            (
-                Box<crate::services::foreign_psbt::TargetReservation>,
-                Option<u64>,
-            ),
-            String,
-        >,
-    },
     LoadDaemonConfig(Box<DaemonConfig>),
     DaemonConfigLoaded(Result<(), Error>),
     /// Result of an off-UI-thread daemon restart (a backend switch). Carries the
@@ -418,6 +385,23 @@ pub enum Message {
         /// an earlier signature set — can never clear the current claim.
         generation: u64,
         answers: Vec<crate::services::entangled::LookupAnswer>,
+    },
+    /// The spend screen asks for the split key `key` of the spend `spend` to
+    /// be re-qualified against both chains
+    /// ([`crate::services::split_coins::requalify`]) before it counts toward
+    /// signing or broadcast. `generation` is the screen's check generation.
+    SplitKeyCheck {
+        spend: coincube_core::miniscript::bitcoin::Txid,
+        key: coincube_core::miniscript::bitcoin::OutPoint,
+        generation: u64,
+    },
+    /// The answer to [`Self::SplitKeyCheck`], routed to the current panel.
+    /// The screen accepts it only for the generation it has in flight.
+    SplitKeyChecked {
+        spend: coincube_core::miniscript::bitcoin::Txid,
+        key: coincube_core::miniscript::bitcoin::OutPoint,
+        generation: u64,
+        result: Result<(), String>,
     },
     /// Latest UpdateTip/blockheaders line streamed from the pending internal
     /// bitcoind's debug.log.  `None` means no matching line found yet.

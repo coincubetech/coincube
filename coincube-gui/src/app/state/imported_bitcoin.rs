@@ -56,7 +56,7 @@ use crate::{
     wallet_source_form::{self, Source, SourceFormCopy, WalletSourceForm},
 };
 
-/// Coordinate local imported receive allocation with Claim's address selection.
+/// Serialize imported receive allocation per public source across sessions.
 /// Source and paired target descriptors have the same source digest. The guard
 /// is released before callers request a poll; it never owns daemon shutdown.
 pub(crate) async fn reserve_receive_address(
@@ -71,11 +71,11 @@ pub(crate) async fn reserve_receive_address(
         )
         .ok()
     });
-    // Scan-only policies cannot enter Claim and retain ordinary Receive.
+    // Scan-only policies have no change branch and take no lock.
     let _guard = match source {
         Some(source) => Some(
             tokio::task::spawn_blocking(move || {
-                bitcoin_import::pairing::legacy::source_reservation_lock(&root, &source)
+                bitcoin_import::pairing::source_lock::source_reservation_lock(&root, &source)
             })
             .await
             .map_err(|_| "Reserving the receive address was interrupted.".to_string())??,
@@ -542,110 +542,6 @@ impl ImportedBitcoinPanel {
             })
     }
 
-    #[cfg(test)]
-    pub(crate) fn reviewer_accept_completed_scan(&mut self) {
-        let wallet = self
-            .import
-            .active_attachment()
-            .expect("ready imported fixture")
-            .clone();
-        let chain = self.chain();
-        let descriptor = wallet.descriptor.clone();
-        let window = wallet.initial_lookahead;
-        self.info = Some(model::GetInfoResult {
-            version: "synthetic completed scan".into(),
-            network: chain.bitcoin_network(),
-            chain_id: Some(chain),
-            block_height: 1,
-            sync: 1.0,
-            descriptors: coincubed::commands::GetInfoDescriptors {
-                main: coincube_core::wallet_descriptor::WalletDescriptor::Imported(
-                    descriptor.clone(),
-                ),
-            },
-            imported_wallet: Some(coincubed::commands::ImportedWalletSync {
-                wallet_identity: descriptor.identity(chain).unwrap().to_string(),
-                chain_id: chain,
-                birthday: wallet.birthday,
-                initial_lookahead: window,
-                discovery_target: window,
-                receive_scanned: window,
-                change_scanned: window,
-                history_complete: true,
-            }),
-            rescan_progress: None,
-            refused_reorg_depth: None,
-            chain_divergence: false,
-            timestamp: 0,
-            last_poll_timestamp: Some(1),
-            history_sync: Default::default(),
-            receive_index: 0,
-            change_index: 0,
-        });
-        self.coins = Some(model::ListCoinsResult { coins: Vec::new() });
-        assert!(self.is_ready());
-    }
-
-    /// Bind a claim to the active public policy and the daemon's completed
-    /// discovery coverage. Allocated receive/change indices also need to fit
-    /// inside the fork scan, including the current next address.
-    pub fn claim_source(
-        &self,
-        cube: &settings::CubeSettings,
-    ) -> Result<crate::imported_claim::ImportedClaimSource, String> {
-        if cube.id != self.cube_id
-            || cube.network != ChainId::Bitcoin
-            || cube.bitcoin_import.as_deref() != Some(&self.import)
-            || !self.is_ready()
-            || self.snapshot_failed
-            || self.sync_failed
-        {
-            return Err("The imported Bitcoin wallet is not ready for a claim. Finish its scan and refresh the wallet.".into());
-        }
-        let wallet = self
-            .import
-            .active_attachment()
-            .ok_or_else(|| "The imported Bitcoin attachment is unavailable.".to_string())?;
-        wallet.validate(ChainId::Bitcoin)?;
-        let info = self
-            .info
-            .as_ref()
-            .ok_or_else(|| "The imported Bitcoin scan is unavailable.".to_string())?;
-        if !self.info_matches_attachment(info) {
-            return Err("The imported Bitcoin scan no longer matches this wallet.".into());
-        }
-        let status = info
-            .imported_wallet
-            .as_ref()
-            .ok_or_else(|| "The imported Bitcoin scan is unavailable.".to_string())?;
-        let address_window = status
-            .discovery_target
-            .max(status.receive_scanned)
-            .max(status.change_scanned)
-            .max(
-                info.receive_index
-                    .checked_add(1)
-                    .ok_or_else(|| "The receive address index is out of range.".to_string())?,
-            )
-            .max(
-                info.change_index
-                    .checked_add(1)
-                    .ok_or_else(|| "The change address index is out of range.".to_string())?,
-            );
-        if address_window == 0 || address_window > 10_000 {
-            return Err(
-                "The imported Bitcoin address window exceeds the supported claim range.".into(),
-            );
-        }
-        Ok(crate::imported_claim::ImportedClaimSource {
-            cube_id: cube.id.clone(),
-            name: cube.name.clone(),
-            external: wallet.descriptor.receive_descriptor().to_string(),
-            internal: wallet.descriptor.change_descriptor().to_string(),
-            address_window,
-        })
-    }
-
     pub fn authoritative_balance(&self) -> Option<coincube_core::miniscript::bitcoin::Amount> {
         self.is_ready()
             .then(|| {
@@ -786,7 +682,7 @@ impl ImportedBitcoinPanel {
 
     pub fn handles_route(&self, menu: &Menu) -> bool {
         match menu {
-            Menu::Vault(VaultSubMenu::Recovery | VaultSubMenu::Claim) => false,
+            Menu::Vault(VaultSubMenu::Recovery) => false,
             Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::LocalSigning))) => false,
             Menu::Vault(_) if !self.is_ready() => true,
             Menu::Vault(
@@ -812,7 +708,10 @@ impl ImportedBitcoinPanel {
         match menu {
             Menu::Vault(VaultSubMenu::Send | VaultSubMenu::PSBTs(_)) => {
                 if self.chain().is_blake2b() {
-                    self.error = Some("Sending from paired imported BTCB2 wallets is not available yet. Use the paired Claim flow.".into());
+                    self.error = Some(
+                        "Sending from paired imported Bitcoin Blake2b wallets is not available."
+                            .into(),
+                    );
                     return Task::none();
                 }
                 self.error = self.ensure_hardware_wallets().err();
@@ -1044,10 +943,7 @@ impl ImportedBitcoinPanel {
         connect_epoch: u64,
     ) -> Task<Message> {
         if self.chain().is_blake2b() && matches!(message, ImportMessage::ExpandDiscovery) {
-            self.error = Some(
-                "Search more addresses in the original Bitcoin Cube before continuing paired Claim."
-                    .into(),
-            );
+            self.error = Some("Search more addresses in the original Bitcoin Cube.".into());
             return Task::none();
         }
         self.set_connect_client(client.as_ref());
@@ -1067,7 +963,9 @@ impl ImportedBitcoinPanel {
                     | ImportMessage::SignWithDevice(_)
             )
         {
-            self.error = Some("Sending from paired imported BTCB2 wallets is not available yet. Use the paired Claim flow.".into());
+            self.error = Some(
+                "Sending from paired imported Bitcoin Blake2b wallets is not available.".into(),
+            );
             return Task::none();
         }
         if self.busy && (!matches!(&message, ImportMessage::PollProgress) || self.address_reserving)
@@ -2796,7 +2694,13 @@ impl ImportedBitcoinPanel {
 
     fn send_view(&self, psbts_only: bool) -> Element<'_, view::Message> {
         if self.chain().is_blake2b() {
-            return Column::new().spacing(16).push(h2("Send")).push(p1_regular("Sending from paired imported BTCB2 wallets is not available yet. Use the paired Claim flow.")).into();
+            return Column::new()
+                .spacing(16)
+                .push(h2("Send"))
+                .push(p1_regular(
+                    "Sending from paired imported Bitcoin Blake2b wallets is not available.",
+                ))
+                .into();
         }
         let mut content = Column::new()
             .spacing(14)
@@ -3674,7 +3578,7 @@ mod tests {
         let daemon: Arc<dyn Daemon + Send + Sync> =
             Arc::new(EmbeddedDaemon::unstarted_for_test(config, None));
         let guard =
-            bitcoin_import::pairing::legacy::source_reservation_lock(&root, &source).unwrap();
+            bitcoin_import::pairing::source_lock::source_reservation_lock(&root, &source).unwrap();
         for descriptor in [imported.clone(), imported.paired_blake2b().unwrap()] {
             let error = reserve_receive_address(root.clone(), descriptor.into(), daemon.clone())
                 .await
@@ -3690,7 +3594,8 @@ mod tests {
                 .unwrap_err();
             assert!(!error.contains("reserving addresses"), "{}", error);
             assert!(
-                bitcoin_import::pairing::legacy::source_reservation_lock(&root, &source).is_ok()
+                bitcoin_import::pairing::source_lock::source_reservation_lock(&root, &source)
+                    .is_ok()
             );
         }
         std::fs::remove_dir_all(root.path()).unwrap();
@@ -4052,88 +3957,6 @@ mod tests {
     }
 
     #[test]
-    fn claim_source_requires_attested_completed_scan_and_covers_allocated_indices() {
-        let mut panel = ready_import_panel();
-        let mut cube = settings::CubeSettings::new_with_raw_id(
-            "cube-1".into(),
-            "Imported".into(),
-            ChainId::Bitcoin,
-        );
-        cube.bitcoin_import = Some(Box::new(panel.import.clone()));
-        let source = panel.claim_source(&cube).unwrap();
-        assert_eq!(source.address_window, 200);
-        assert_eq!(source.cube_id, cube.id);
-        assert_eq!(
-            source.external,
-            panel
-                .import
-                .active_attachment()
-                .unwrap()
-                .descriptor
-                .receive_descriptor()
-                .to_string()
-        );
-        assert_eq!(
-            source.internal,
-            panel
-                .import
-                .active_attachment()
-                .unwrap()
-                .descriptor
-                .change_descriptor()
-                .to_string()
-        );
-
-        // A harmless background refresh can be in flight while the last
-        // completed snapshot is still authoritative. Claim scans afresh.
-        panel.busy = true;
-        panel.sync_requesting = true;
-        assert!(panel.claim_source(&cube).is_ok());
-        panel.busy = false;
-        panel.sync_requesting = false;
-
-        panel.info.as_mut().unwrap().receive_index = 250;
-        assert_eq!(panel.claim_source(&cube).unwrap().address_window, 251);
-        // Completed discovery can extend beyond both the configured gap and
-        // allocated indices. Claim includes that entire attested history.
-        {
-            let status = panel
-                .info
-                .as_mut()
-                .unwrap()
-                .imported_wallet
-                .as_mut()
-                .unwrap();
-            status.receive_scanned = 450;
-            status.change_scanned = 500;
-        }
-        assert_eq!(panel.claim_source(&cube).unwrap().address_window, 500);
-        panel.info.as_mut().unwrap().change_index = 10_000;
-        assert!(panel.claim_source(&cube).is_err());
-        panel.info.as_mut().unwrap().change_index = 0;
-        panel
-            .info
-            .as_mut()
-            .unwrap()
-            .history_sync
-            .full_scan_in_progress = true;
-        assert!(panel.claim_source(&cube).is_err());
-        panel
-            .info
-            .as_mut()
-            .unwrap()
-            .history_sync
-            .full_scan_in_progress = false;
-        panel.snapshot_failed = true;
-        assert!(panel.claim_source(&cube).is_err());
-        panel.snapshot_failed = false;
-        cube.name = "Renamed".into();
-        assert_eq!(panel.claim_source(&cube).unwrap().name, "Renamed");
-        cube.bitcoin_import = Some(Box::new(BitcoinImport::pending()));
-        assert!(panel.claim_source(&cube).is_err());
-    }
-
-    #[test]
     fn imported_home_available_balance_matches_vault_coin_ownership() {
         let mut panel = ready_import_panel();
         let txid =
@@ -4230,7 +4053,6 @@ mod tests {
         assert!(panel.handles_route(&Menu::Vault(VaultSubMenu::Receive)));
         assert!(panel.handles_route(&Menu::Vault(VaultSubMenu::Send)));
         assert!(!panel.handles_route(&Menu::Vault(VaultSubMenu::Recovery)));
-        assert!(!panel.handles_route(&Menu::Vault(VaultSubMenu::Claim)));
         assert!(
             !panel.handles_route(&Menu::Vault(VaultSubMenu::Settings(Some(
                 SettingsOption::LocalSigning,
