@@ -5174,6 +5174,111 @@ mod tests {
         assert!(tree.contains("New Cubes: Bitcoin mainnet"));
     }
 
+    /// Developer mode on Testnet4 with its two Cubes checked, Signet's read
+    /// alongside, and no Cube on Bitcoin or any other live network.
+    fn cubes_on_test_networks_only() -> Home {
+        let mut home = all_networks();
+        let testnet4 = home.network_catalog(ChainId::Testnet4).to_vec();
+        home.network = ChainId::Testnet4;
+        home.state = State::Cubes {
+            cubes: testnet4,
+            create_cube: false,
+            source: ChainId::Testnet4,
+        };
+        home.network_catalog
+            .retain(|(chain, _)| *chain != ChainId::Testnet4);
+        home.network_catalog_requested = ChainId::LAUNCHER
+            .iter()
+            .copied()
+            .filter(|chain| *chain != ChainId::Testnet4)
+            .collect();
+        home
+    }
+
+    #[test]
+    fn live_onto_a_network_without_cubes_opens_create_and_back_lists_every_cube() {
+        let mut home = cubes_on_test_networks_only();
+        let switch = run_task(home.update_catalog(CatalogMessage::Filter(NetworkFilter::Live)));
+        assert!(switch.iter().any(|m| matches!(
+            m,
+            Message::View(ViewMessage::SelectNetwork(ChainId::Bitcoin))
+        )));
+        drop(home.update(Message::View(ViewMessage::SelectNetwork(ChainId::Bitcoin))));
+        drop(home.update(Message::Checked {
+            for_chain: ChainId::Bitcoin,
+            res: Ok(State::NoCube { create_cube: false }),
+        }));
+        // No live Cube to show: Create opens on Bitcoin, at its network step.
+        assert_eq!(home.network, ChainId::Bitcoin);
+        assert!(home.showing_create_journey());
+        assert!(!home.create_network_confirmed);
+        // The test networks' Cubes are still a list to go back to.
+        assert!(home.can_leave_create_journey());
+
+        drop(home.update(Message::View(ViewMessage::ShowCreateCube(false))));
+        assert!(!home.showing_create_journey());
+        assert!(catalog_visible(&home));
+        assert_eq!(home.effective_filter(), NetworkFilter::All);
+        assert_eq!(names(&home), ["Lab", "Bench", "Sig"]);
+        // Create and Import still act on the network Live picked.
+        assert_eq!(home.network, ChainId::Bitcoin);
+    }
+
+    #[test]
+    fn back_from_create_keeps_a_filter_that_still_lists_cubes() {
+        let mut home = all_networks();
+        catalog(&mut home, CatalogMessage::Filter(NetworkFilter::Live));
+        drop(home.update(Message::View(ViewMessage::ShowCreateCube(true))));
+        assert!(home.can_leave_create_journey());
+        drop(home.update(Message::View(ViewMessage::ShowCreateCube(false))));
+        assert!(!home.showing_create_journey());
+        assert_eq!(home.effective_filter(), NetworkFilter::Live);
+        assert_eq!(names(&home), ["Alpha", "Beta"]);
+    }
+
+    #[test]
+    fn another_networks_read_yields_an_untouched_form_but_keeps_one_being_typed_in() {
+        // Bitcoin checked before any other network was read: nothing to list
+        // yet, so the form is the landing screen, implicitly.
+        let empty_bitcoin = || {
+            let mut home = all_networks();
+            home.state = State::NoCube { create_cube: false };
+            home.network_catalog.clear();
+            home.network_catalog_generation = 1;
+            assert!(home.showing_create_journey());
+            assert!(!home.can_leave_create_journey());
+            home
+        };
+        let testnet4_read = || Message::NetworkCatalogLoaded {
+            generation: 1,
+            chain: ChainId::Testnet4,
+            cubes: Ok(vec![CubeSettings::new_with_raw_id(
+                "t1".into(),
+                "Lab".into(),
+                ChainId::Testnet4,
+            )]),
+        };
+
+        let mut untouched = empty_bitcoin();
+        drop(untouched.update(testnet4_read()));
+        assert!(!untouched.showing_create_journey());
+        assert!(catalog_visible(&untouched));
+
+        let mut typing = empty_bitcoin();
+        typing.create_network_confirmed = true;
+        drop(typing.update(Message::View(ViewMessage::CubeNameEdited(
+            "Half typed".into(),
+        ))));
+        drop(typing.update(testnet4_read()));
+        assert!(matches!(typing.state, State::NoCube { create_cube: true }));
+        assert!(typing.showing_create_journey());
+        assert_eq!(typing.create_cube_name.value, "Half typed");
+        assert!(
+            typing.can_leave_create_journey(),
+            "the read did land a list"
+        );
+    }
+
     #[test]
     fn choosing_from_the_network_menu_returns_focus_to_its_chip() {
         let mut home = all_networks();

@@ -1225,14 +1225,30 @@ impl Home {
         ))
     }
 
-    /// Whether this screen has any Cubes to list — local ones, or remote ones
-    /// registered in Connect for the selected network. False only on a genuinely
-    /// fresh device, where there is no list to navigate back to.
+    /// Whether this screen has any Cubes to list under the Launcher's network
+    /// filter — local ones, or remote ones registered in Connect for the
+    /// selected network. False on a genuinely fresh device, and when the
+    /// filter shows nothing: picking Live, Test or a network without Cubes
+    /// opens Create for it.
     fn has_cube_list(&self) -> bool {
+        self.has_cube_list_under(self.effective_filter())
+    }
+
+    /// [`Self::has_cube_list`] for a given filter. The Launcher lists every
+    /// listed network's Cubes, so another network's count too, unless the
+    /// filter hides it. The selected network's own list always counts.
+    fn has_cube_list_under(&self, filter: launcher_catalog::NetworkFilter) -> bool {
         if let State::Cubes { cubes, .. } = &self.state {
             if !cubes.is_empty() {
                 return true;
             }
+        }
+        if self
+            .displayed_networks
+            .iter()
+            .any(|chain| filter.matches(*chain) && !self.network_catalog(*chain).is_empty())
+        {
+            return true;
         }
         let network_str = settings::network_to_api_str(self.network);
         self.remote_cubes.iter().any(|rc| rc.network == network_str)
@@ -1277,8 +1293,11 @@ impl Home {
                 || (self.showing_create_form() && self.pending_bitcoin_import.is_none()))
     }
 
+    /// "Back to Cube list" needs Cubes somewhere, not under the current
+    /// filter: leaving clears a filter that would list none (see
+    /// `ShowCreateCube(false)`).
     fn can_leave_create_journey(&self) -> bool {
-        self.has_cube_list()
+        self.has_cube_list_under(launcher_catalog::NetworkFilter::All)
             && !matches!(self.state, State::CreationBackup(_))
             && !self.creating_cube
     }
@@ -2289,6 +2308,13 @@ impl Home {
                         word.shrink_to_fit();
                     }
                     self.recovery_active_index = None;
+                    // A filter that lists nothing (Live with Cubes on test
+                    // networks only) is what opened this form; keeping it
+                    // would open it again. Back shows every Cube instead.
+                    if !self.has_cube_list() {
+                        self.catalog.filter = launcher_catalog::NetworkFilter::All;
+                        self.catalog.page = 0;
+                    }
                 }
                 Task::none()
             }
@@ -2982,10 +3008,22 @@ impl Home {
                 }
                 self.network_catalog_unread.retain(|c| *c != chain);
                 match cubes {
-                    Ok(cubes) => match self.network_catalog.iter_mut().find(|(c, _)| *c == chain) {
-                        Some((_, list)) => *list = cubes,
-                        None => self.network_catalog.push((chain, cubes)),
-                    },
+                    Ok(cubes) => {
+                        // Can hand an empty network a list, as a remote-cube
+                        // fetch can: keep a create form being filled in (see
+                        // `RemoteCubesLoaded`).
+                        if self.showing_create_form() && self.create_form_has_input() {
+                            match &mut self.state {
+                                State::Cubes { create_cube, .. }
+                                | State::NoCube { create_cube } => *create_cube = true,
+                                _ => {}
+                            }
+                        }
+                        match self.network_catalog.iter_mut().find(|(c, _)| *c == chain) {
+                            Some((_, list)) => *list = cubes,
+                            None => self.network_catalog.push((chain, cubes)),
+                        }
+                    }
                     // Keep whatever was last read; the menu says the
                     // network is unavailable rather than showing 0 Cubes.
                     Err(_) => self.network_catalog_unread.push(chain),
