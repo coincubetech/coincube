@@ -1002,4 +1002,98 @@ mod tests {
             ))
         ));
     }
+
+    /// The shared public-wallet finalizer refuses every change to the
+    /// construction other than added signatures. Ported from the removed
+    /// foreign-Split finalizer tests, which covered these helpers through
+    /// step 1.
+    #[test]
+    fn any_change_to_the_construction_refuses() {
+        type Change = Box<dyn Fn(&mut Psbt)>;
+        let secp = secp256k1::Secp256k1::new();
+        let (wallet, signers, created) = draft("wpkh");
+        let mut signed = created.psbt.clone();
+        add_signature(&mut signed, &signers[0]);
+        assert!(finalize_imported_spend(&wallet, &created.psbt, &signed, &secp).is_ok());
+        let internal_key = PublicKey::new(secp256k1::PublicKey::from_secret_key(
+            &secp,
+            &account(9, "m/86h/1h/0h").0.private_key,
+        ));
+        let changes: Vec<Change> = vec![
+            Box::new(|p| p.unsigned_tx.output[1].value = Amount::from_sat(1_000)),
+            Box::new(|p| p.unsigned_tx.output.reverse()),
+            Box::new(|p| p.inputs[0].bip32_derivation.clear()),
+            Box::new(|p| p.inputs[0].witness_utxo = None),
+            Box::new(|p| p.outputs[1].bip32_derivation.clear()),
+            Box::new(move |p| p.inputs[0].tap_internal_key = Some(internal_key.inner.into())),
+            Box::new(|p| p.inputs[0].final_script_witness = Some(bitcoin::Witness::new())),
+            Box::new(|p| {
+                p.inputs[0].unknown.insert(
+                    bitcoin::psbt::raw::Key {
+                        type_value: 0xfc,
+                        key: vec![1],
+                    },
+                    vec![2],
+                );
+            }),
+        ];
+        for (index, change) in changes.iter().enumerate() {
+            let mut tampered = signed.clone();
+            change(&mut tampered);
+            assert!(
+                matches!(
+                    finalize_imported_spend(&wallet, &created.psbt, &tampered, &secp),
+                    Err(ImportedFinalizeError::Signatures(
+                        FinalizeError::ConstructionChanged
+                    ))
+                ),
+                "change {}",
+                index
+            );
+        }
+    }
+
+    /// Every signature present must be by a key the input commits to and
+    /// valid for it, even a surplus one the finalizer would ignore; an
+    /// uncompressed key never signs a segwit input. Ported from the removed
+    /// foreign-Split finalizer tests.
+    #[test]
+    fn every_signature_must_be_a_committed_key_over_this_input() {
+        let secp = secp256k1::Secp256k1::new();
+        let (wallet, signers, created) = draft("wpkh");
+        let mut signed = created.psbt.clone();
+        add_signature(&mut signed, &signers[0]);
+        let (key, signature) = signed.inputs[0]
+            .partial_sigs
+            .iter()
+            .next()
+            .map(|(k, s)| (*k, *s))
+            .unwrap();
+        let refused = |psbt: &Psbt| {
+            matches!(
+                finalize_imported_spend(&wallet, &created.psbt, psbt, &secp),
+                Err(ImportedFinalizeError::Signatures(
+                    FinalizeError::InvalidSignature { input: 0 }
+                ))
+            )
+        };
+
+        // A signature valid over this input's digest, by a key the input
+        // does not commit to.
+        let mut surplus = signed.clone();
+        add_signature(&mut surplus, &account(9, "m/84h/1h/0h").0);
+        assert_eq!(surplus.inputs[0].partial_sigs.len(), 2);
+        assert!(refused(&surplus));
+
+        let mut uncompressed = signed.clone();
+        uncompressed.inputs[0].partial_sigs.clear();
+        uncompressed.inputs[0].partial_sigs.insert(
+            PublicKey {
+                compressed: false,
+                inner: key.inner,
+            },
+            signature,
+        );
+        assert!(refused(&uncompressed));
+    }
 }
