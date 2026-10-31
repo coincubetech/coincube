@@ -697,7 +697,6 @@ async fn requalify(
     .map_err(|e| format!("Couldn't check the split key: {:?}", e))?;
     let policy = coincube_core::claim::Policy {
         max_observation_age_seconds: 60,
-        expiry_margin_seconds: 600,
     };
     let refreshed = if chain.is_blake2b() {
         source.requalify_fork_ancestry(&key.path, policy).await

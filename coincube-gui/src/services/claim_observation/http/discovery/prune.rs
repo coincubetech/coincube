@@ -264,7 +264,6 @@ mod tests {
                     expected,
                     Policy {
                         max_observation_age_seconds: 90,
-                        expiry_margin_seconds: 600,
                     },
                     metadata
                 )
@@ -337,7 +336,6 @@ mod tests {
                     txid,
                     Policy {
                         max_observation_age_seconds: 60,
-                        expiry_margin_seconds: 600,
                     }
                 )
                 .await
@@ -357,7 +355,6 @@ mod tests {
                     &source,
                     Policy {
                         max_observation_age_seconds: 60,
-                        expiry_margin_seconds: 600,
                     },
                 )
                 .await;
