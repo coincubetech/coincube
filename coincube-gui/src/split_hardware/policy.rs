@@ -23,13 +23,13 @@
 use std::fmt;
 
 use coincube_core::{
-    foreign_split::SplitSource,
     miniscript::{
         bitcoin::bip32::{ChildNumber, DerivationPath, Xpub},
         descriptor::{DerivPaths, DescriptorMultiXKey, DescriptorXKey, Wildcard},
         translate_hash_clone, Descriptor, DescriptorPublicKey, ForEachKey, TranslateErr,
         TranslatePk, Translator,
     },
+    public_wallet_source::SplitSource,
     wallet_descriptor::ImportedWalletDescriptor,
 };
 

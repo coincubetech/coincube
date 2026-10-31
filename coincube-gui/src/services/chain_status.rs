@@ -311,7 +311,6 @@ pub async fn check_ancestry(
     };
     let policy = coincube_core::claim::Policy {
         max_observation_age_seconds: 60,
-        expiry_margin_seconds: 600,
     };
     let mut results = Vec::with_capacity(outpoints.len());
     for outpoint in outpoints {

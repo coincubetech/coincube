@@ -16,12 +16,12 @@ use std::{
 };
 
 use coincube_core::{
-    foreign_split::FinalizeError,
     imported_spend::{finalize_imported_spend, verify_imported_signatures, ImportedFinalizeError},
     miniscript::{
         bitcoin::{address, psbt::Psbt, secp256k1, Address, Network, Txid},
         DescriptorPublicKey, ForEachKey,
     },
+    public_wallet_finalize::FinalizeError,
     wallet_descriptor::{ImportedWalletDescriptor, WalletDescriptor},
 };
 use coincube_ui::{
@@ -65,7 +65,7 @@ pub(crate) async fn reserve_receive_address(
     daemon: Arc<dyn Daemon + Send + Sync>,
 ) -> Result<model::GetAddressResult, String> {
     let source = descriptor.as_imported().and_then(|imported| {
-        coincube_core::foreign_split::SplitSource::new(
+        coincube_core::public_wallet_source::SplitSource::new(
             imported.receive_descriptor().clone(),
             Some(imported.change_descriptor().clone()),
         )
@@ -3559,7 +3559,7 @@ mod tests {
     async fn imported_receive_shares_source_claim_lock_and_releases_after_daemon_error() {
         let panel = ready_import_panel();
         let imported = panel.import.active_attachment().unwrap().descriptor.clone();
-        let source = coincube_core::foreign_split::SplitSource::new(
+        let source = coincube_core::public_wallet_source::SplitSource::new(
             imported.receive_descriptor().clone(),
             Some(imported.change_descriptor().clone()),
         )
