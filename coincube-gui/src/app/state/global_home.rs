@@ -2881,6 +2881,12 @@ impl State for GlobalHome {
                         // information the user had and disagree with the total
                         // right above it. A transient blip keeps the number.
                         self.liquid_balance_error = !had_a_balance;
+                        // A fetch started before Liquid was hidden can still
+                        // fail late. Its wallet isn't on screen, so neither is
+                        // the error.
+                        if !self.liquid_shown {
+                            return Task::none();
+                        }
                         let (title, guidance) = if had_a_balance {
                             (
                                 "Couldn't refresh your Liquid balance",
@@ -3572,10 +3578,14 @@ impl State for GlobalHome {
     ) -> Task<Message> {
         self.wallet = wallet;
         let mut tasks = Vec::new();
-        if matches!(
-            self.network,
-            crate::chain::ChainId::Bitcoin | crate::chain::ChainId::Regtest
-        ) {
+        // Hidden Liquid settles as a network with no Liquid backend does:
+        // nothing is fetched, so a late failure can't raise an error.
+        if self.liquid_shown
+            && matches!(
+                self.network,
+                crate::chain::ChainId::Bitcoin | crate::chain::ChainId::Regtest
+            )
+        {
             tasks.extend([
                 self.load_liquid_balance(),
                 self.load_usdt_balance(),
@@ -3978,10 +3988,13 @@ impl GlobalHome {
     fn load_liquid_balance(&self) -> Task<Message> {
         // Networks without a Breez backend (Signet/Testnet) only ever return
         // `NetworkNotSupported` here — skip the RPC entirely to keep logs clean.
-        if !self
-            .breez_client
-            .as_ref()
-            .is_some_and(|client| client.is_supported())
+        // Hidden Liquid fetches nothing either (`RefreshLiquidBalance` still
+        // arrives from the SDK's events).
+        if !self.liquid_shown
+            || !self
+                .breez_client
+                .as_ref()
+                .is_some_and(|client| client.is_supported())
         {
             return Task::none();
         }
@@ -4006,10 +4019,11 @@ impl GlobalHome {
 
     fn load_pending_sends(&self) -> Task<Message> {
         use crate::app::breez_liquid::assets::{asset_kind_for_id, AssetKind};
-        if !self
-            .breez_client
-            .as_ref()
-            .is_some_and(|client| client.is_supported())
+        if !self.liquid_shown
+            || !self
+                .breez_client
+                .as_ref()
+                .is_some_and(|client| client.is_supported())
         {
             return Task::none();
         }
@@ -4090,10 +4104,11 @@ impl GlobalHome {
 
     fn load_usdt_balance(&self) -> Task<Message> {
         use crate::app::breez_liquid::assets::{asset_kind_for_id, AssetKind};
-        if !self
-            .breez_client
-            .as_ref()
-            .is_some_and(|client| client.is_supported())
+        if !self.liquid_shown
+            || !self
+                .breez_client
+                .as_ref()
+                .is_some_and(|client| client.is_supported())
         {
             return Task::none();
         }
@@ -4635,6 +4650,111 @@ mod tests {
         assert!(total_balance_pending(BalanceReadiness {
             vault_pending: true,
             ..all_present
+        }));
+    }
+
+    /// Every message a task produces, in order.
+    fn outputs(task: Task<Message>) -> Vec<Message> {
+        use iced_runtime::futures::futures::StreamExt;
+        let Some(stream) = iced_runtime::task::into_stream(task) else {
+            return Vec::new();
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(
+                stream
+                    .filter_map(|action| async move {
+                        match action {
+                            iced_runtime::Action::Output(message) => Some(message),
+                            _ => None,
+                        }
+                    })
+                    .collect(),
+            )
+    }
+
+    /// #968 review finding 1: Tenshu v175 hides Liquid (master §3 decision
+    /// 2), so `reload` takes the no-Liquid-backend path: it starts no Liquid
+    /// fetch and settles both balances so nothing waits on them. The loaders'
+    /// own `liquid_shown` checks (`RefreshLiquidBalance`,
+    /// `LiquidPeginCompleted`) can't be driven here: the test client is
+    /// disconnected, so it fetches nothing either way.
+    #[test]
+    fn reload_settles_hidden_liquid_without_fetching() {
+        let mut hidden = panel();
+        hidden.set_liquid_shown(false);
+        let _ = hidden.reload(None, None);
+        assert!(hidden.liquid_balance_loaded && hidden.usdt_balance_loaded);
+
+        // Control: shown Liquid on the same network still waits for its
+        // balances, so the settling above is the gate's doing.
+        let mut shown = panel();
+        shown.set_liquid_shown(true);
+        let _ = shown.reload(None, None);
+        assert!(!shown.liquid_balance_loaded && !shown.usdt_balance_loaded);
+    }
+
+    /// A fetch that started before Liquid was hidden can fail late. While
+    /// hidden it raises no error, and still stops anything waiting on it.
+    #[test]
+    fn a_late_liquid_fetch_failure_shows_no_error_while_hidden() {
+        let fail = |home: &mut GlobalHome, msg| {
+            outputs(home.update(
+                None,
+                &Cache::default(),
+                Message::View(view::Message::Home(msg)),
+            ))
+        };
+        let mut hidden = panel();
+        hidden.set_liquid_shown(false);
+        let produced = fail(
+            &mut hidden,
+            HomeMessage::LiquidBalanceFetchFailed("blip".into()),
+        );
+        assert!(produced.is_empty());
+        assert!(fail(&mut hidden, HomeMessage::UsdtBalanceFetchFailed).is_empty());
+        assert!(hidden.liquid_balance_loaded && hidden.usdt_balance_loaded);
+
+        // Control: the same failure with Liquid shown raises the toast.
+        let mut shown = panel();
+        shown.set_liquid_shown(true);
+        let produced = fail(
+            &mut shown,
+            HomeMessage::LiquidBalanceFetchFailed("blip".into()),
+        );
+        assert!(matches!(
+            &produced[..],
+            [Message::View(view::Message::ShowError(_))]
+        ));
+    }
+
+    /// The Total Balance doesn't wait on hidden Liquid, even for an account
+    /// with the grant and a Liquid wallet on disk.
+    #[test]
+    fn the_total_does_not_wait_on_hidden_liquid() {
+        let gate = crate::app::features::LiquidGate {
+            server_enabled: true,
+            local_state_exists: true,
+        };
+        let readiness = BalanceReadiness {
+            has_spark: false,
+            spark_loaded: false,
+            has_liquid: crate::app::features::liquid_wallet_usable(
+                crate::chain::ChainId::Bitcoin,
+                gate,
+            ),
+            liquid_loaded: false,
+            usdt_loaded: false,
+            vault_pending: false,
+        };
+        assert!(!total_balance_pending(readiness));
+
+        // Control: a shown Liquid wallet that hasn't loaded holds the Total.
+        assert!(total_balance_pending(BalanceReadiness {
+            has_liquid: true,
+            ..readiness
         }));
     }
 

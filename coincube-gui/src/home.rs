@@ -5311,20 +5311,14 @@ impl Home {
                     "Bitcoin Blake2b availability could not be verified. Vault creation is disabled."
                 } else {
                     match chain {
-                        ChainId::Bitcoin => "Spark · Liquid · Vault",
-                        ChainId::Regtest => "Spark · Vault. Liquid isn't available on Regtest.",
+                        ChainId::Bitcoin => "Spark · Vault",
+                        ChainId::Regtest => "Spark · Vault",
                         ChainId::BitcoinBlake2b | ChainId::BitcoinBlake2bTestnet4 => {
                             "Bitcoin Blake2b supports Vault creation only"
                         }
-                        ChainId::Testnet => {
-                            "Vault only. Spark and Liquid aren't available on Testnet."
-                        }
-                        ChainId::Testnet4 => {
-                            "Vault only. Spark and Liquid aren't available on Testnet4."
-                        }
-                        ChainId::Signet => {
-                            "Vault only. Spark and Liquid aren't available on Signet."
-                        }
+                        ChainId::Testnet => "Vault only. Spark isn't available on Testnet.",
+                        ChainId::Testnet4 => "Vault only. Spark isn't available on Testnet4.",
+                        ChainId::Signet => "Vault only. Spark isn't available on Signet.",
                     }
                 };
                 let id = create_network_row_id(chain);
@@ -6259,7 +6253,7 @@ fn create_cube_form<'a>(
             p1_regular(if importing_bitcoin {
                 "Create and back up your Cube first, then import the public descriptors for your existing Bitcoin wallet. Your original wallet signers remain necessary to spend."
             } else {
-                "A Cube is your account which can contain a Spark wallet, a Liquid wallet, a Vault wallet and other features."
+                "A Cube is your account which can contain a Spark wallet, a Vault wallet and other features."
             })
             .style(theme::text::secondary),
         );
@@ -6945,10 +6939,8 @@ fn recovery_input_view(
                 .push(Space::new().width(Length::Fill))
                 .push(
                     Container::new(
-                        p1_regular(
-                            "Enter your 12-word recovery phrase to restore your Liquid wallet.",
-                        )
-                        .align_x(iced::alignment::Horizontal::Center),
+                        p1_regular("Enter your 12-word recovery phrase to restore your Cube.")
+                            .align_x(iced::alignment::Horizontal::Center),
                     )
                     .width(Length::Fixed(700.0))
                     .align_x(iced::alignment::Horizontal::Center),
@@ -10510,6 +10502,53 @@ mod tests {
         let _ = recovery_input_view(&words, Some(0), false);
         words.fill("abandon".to_string());
         let _ = recovery_input_view(&words, None, true);
+    }
+
+    /// Tenshu v175 hides Liquid (master §3 decision 2), so creating or
+    /// recovering a Cube names no Liquid wallet. Restore this copy when
+    /// Liquid reopens.
+    #[test]
+    fn create_and_recovery_copy_names_no_liquid_wallet() {
+        use crate::app::view::shared::landing::capture;
+        fn inspect(content: Element<'_, Message>) -> capture::Inspection {
+            capture::inspect_full_window(
+                "create-recovery-no-liquid",
+                content,
+                (1440, 900),
+                "dark",
+                theme::Theme::dark(),
+            )
+        }
+        let mut home = home();
+        home.state = State::NoCube { create_cube: true };
+        home.developer_mode = true;
+        home.displayed_networks = vec![
+            ChainId::Bitcoin,
+            ChainId::Testnet,
+            ChainId::Testnet4,
+            ChainId::Signet,
+            ChainId::Regtest,
+        ];
+
+        let networks = inspect(home.create_journey_view());
+        assert!(networks.contains("Spark · Vault"));
+        for chain in ["Testnet", "Testnet4", "Signet"] {
+            assert!(networks.contains(&format!("Vault only. Spark isn't available on {chain}.")));
+        }
+        assert!(!networks.contains("Liquid"));
+
+        home.create_network_confirmed = true;
+        let cube = inspect(home.create_journey_view());
+        assert!(cube.contains(
+            "A Cube is your account which can contain a Spark wallet, a Vault wallet and other \
+             features."
+        ));
+        assert!(!cube.contains("Liquid"));
+
+        let words: [String; 12] = Default::default();
+        let recovery = inspect(recovery_input_view(&words, None, false).map(Message::View));
+        assert!(recovery.contains("Enter your 12-word recovery phrase to restore your Cube."));
+        assert!(!recovery.contains("Liquid"));
     }
 
     #[test]
