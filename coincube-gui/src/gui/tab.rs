@@ -5795,6 +5795,10 @@ pub fn create_app_with_remote_backend(
             liquid_gate: crate::app::features::LiquidGate::HIDDEN,
             entangled: std::collections::HashMap::new(),
             chain_proofs: std::collections::HashMap::new(),
+            split_records: Vec::new(),
+            splitting: std::collections::HashMap::new(),
+            split_unconfirmed: std::collections::HashSet::new(),
+            separated: std::collections::HashSet::new(),
             split_deposit: None,
             // We ignore last poll fields for remote backend.
             last_poll_at_startup: None,

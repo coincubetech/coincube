@@ -64,6 +64,22 @@ pub fn items(ctx: &NavContext) -> Vec<SubItem> {
             ),
         );
     }
+    // Split coins checklist (Lane B1.5): only while Bitcoin Blake2b is on for
+    // this Vault, like Coin control's Chains column.
+    let blake2b_on = ctx.network.is_blake2b()
+        || (ctx.network == crate::chain::ChainId::Bitcoin && ctx.btcb2_server_enabled);
+    if blake2b_on && ctx.has_vault && !ctx.has_imported_bitcoin {
+        let settings_at = items.len().saturating_sub(1);
+        items.insert(
+            settings_at,
+            SubItem::new(
+                "Split coins",
+                claim_icon,
+                Menu::Vault(VaultSubMenu::SplitCoins),
+                |m| matches!(m, Menu::Vault(VaultSubMenu::SplitCoins)),
+            ),
+        );
+    }
     // Bitcoin Blake2b claim entry. Hidden rather than disabled when the
     // account has no fork grant: an account without it has no BTCB2 at all,
     // which is not a per-Cube state the user can act on. Inserted before
@@ -112,7 +128,7 @@ pub fn tools(ctx: &NavContext) -> Vec<(&'static str, Menu)> {
                 Menu::Vault(VaultSubMenu::Coins(_)) => "Coin control",
                 Menu::Vault(VaultSubMenu::PSBTs(_)) => "PSBT proposals",
                 Menu::Vault(VaultSubMenu::Recovery) => "Recovery path",
-                Menu::Vault(VaultSubMenu::Claim) => "Split coins",
+                Menu::Vault(VaultSubMenu::SplitCoins) => "Split coins",
                 _ => return None,
             };
             Some((label, item.route))
@@ -186,7 +202,7 @@ mod tests {
                     VaultSubMenu::Coins(_)
                         | VaultSubMenu::PSBTs(_)
                         | VaultSubMenu::Recovery
-                        | VaultSubMenu::Claim
+                        | VaultSubMenu::SplitCoins
                 )
             ));
         }
@@ -286,6 +302,7 @@ mod tests {
                 "Transactions",
                 "PSBTs",
                 "Recovery",
+                "Split coins",
                 "Claim BTCB2",
                 "Settings",
             ]
@@ -320,8 +337,8 @@ mod tests {
             ))),
             labels(&granted)
         );
-        // A non-Bitcoin Cube: no claim surface, answered by
-        // `features::claim_blake2b`.
+        // A Blake2b Cube: no claim surface (`features::claim_blake2b`), but
+        // its own Split coins checklist.
         assert_eq!(
             labels(&items(&ctx(
                 &status,
@@ -329,7 +346,17 @@ mod tests {
                 true,
                 false
             ))),
-            labels(&ungranted)
+            [
+                "Overview",
+                "Send",
+                "Receive",
+                "Coins",
+                "Transactions",
+                "PSBTs",
+                "Recovery",
+                "Split coins",
+                "Settings",
+            ]
         );
     }
     #[test]

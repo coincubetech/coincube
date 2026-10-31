@@ -37,6 +37,10 @@ pub enum ChainStatus {
     /// Spent by this Cube's split, which has `confirmations` of
     /// [`SPLIT_CONFIRMATIONS`].
     Splitting { confirmations: u32 },
+    /// Spent by this Cube's signature split, which is past
+    /// [`SPLIT_CONFIRMATIONS`] but whose replay-protected signatures nothing
+    /// has checked yet (decision open item 1). Not proof.
+    SplitUnconfirmed,
     /// Proven to exist on this chain only.
     OnlyHere,
     /// The twin chain has no such transaction, which proves nothing; an
@@ -65,9 +69,11 @@ pub struct CoinEvidence {
     pub proof: Option<ProofOutcome>,
     /// Confirmations of the split of this Cube that spends this coin.
     pub splitting: Option<u32>,
-    /// The twin copy was spent by a split this Cube recorded and that split
-    /// has [`SPLIT_CONFIRMATIONS`] on the twin chain.
-    pub twin_split: bool,
+    /// Spent by this Cube's signature split past [`SPLIT_CONFIRMATIONS`].
+    pub signature_split: bool,
+    /// A split-key split on the twin Cube spent this coin's twin copy, and
+    /// Connect showed it [`SPLIT_CONFIRMATIONS`] deep on the twin chain.
+    pub separated: bool,
 }
 
 /// The display-relevant part of an ancestry check.
@@ -86,11 +92,16 @@ pub fn classify(evidence: CoinEvidence) -> ChainStatus {
             confirmations: confirmations.min(SPLIT_CONFIRMATIONS),
         };
     }
-    if evidence.twin_split {
+    if evidence.separated {
         return ChainStatus::OnlyHere;
     }
     if evidence.entanglement == Some(Entanglement::Entangled) {
         return ChainStatus::BothChains;
+    }
+    // After the twin-chain lookup: a signature split replayed onto the twin
+    // chain shows up there, and the safe reading wins over its intent.
+    if evidence.signature_split {
+        return ChainStatus::SplitUnconfirmed;
     }
     match evidence.proof {
         Some(ProofOutcome::Verified) => ChainStatus::OnlyHere,
@@ -120,6 +131,7 @@ impl ChainStatus {
             Self::Splitting { confirmations } => {
                 format!("Splitting · {} of {}", confirmations, SPLIT_CONFIRMATIONS)
             }
+            Self::SplitUnconfirmed => "Split · unconfirmed".to_string(),
             Self::OnlyHere => format!("{} only · verified", short_name(here)),
             Self::NotSeen => format!("Not seen on {} · checking", short_name(twin)),
             Self::CouldntVerify => "Couldn't verify".to_string(),
@@ -139,9 +151,13 @@ impl ChainStatus {
                 "Spent by a split. After {} confirmations it exists on each chain separately.",
                 SPLIT_CONFIRMATIONS
             ),
+            Self::SplitUnconfirmed => format!(
+                "Spent by a split meant to use a replay-protected signature. The app can't check that signature yet, so this coin isn't verified as {} only.",
+                short_name(here)
+            ),
             Self::OnlyHere => format!(
-                "Its history proves it exists only on {}. It can serve as a split key.",
-                chain_name(here)
+                "It can no longer be copied to or from {}.",
+                chain_name(twin)
             ),
             Self::NotSeen => format!(
                 "Its transaction wasn't found on {}. That alone doesn't prove anything, so its history is being checked.",
@@ -157,7 +173,7 @@ impl ChainStatus {
 
     pub fn tone(self) -> StatusTone {
         match self {
-            Self::BothChains | Self::Splitting { .. } => StatusTone::Warn,
+            Self::BothChains | Self::Splitting { .. } | Self::SplitUnconfirmed => StatusTone::Warn,
             Self::OnlyHere => StatusTone::Good,
             Self::NotSeen | Self::CouldntVerify | Self::NotChecked => StatusTone::Muted,
         }
@@ -166,12 +182,6 @@ impl ChainStatus {
     /// Whether the Split coins overlay offers this coin as one to split.
     pub fn needs_split(self) -> bool {
         matches!(self, Self::BothChains)
-    }
-
-    /// Whether this coin can serve as a split key, subject to re-qualification
-    /// before signing.
-    pub fn is_key(self) -> bool {
-        matches!(self, Self::OnlyHere)
     }
 }
 
@@ -352,7 +362,6 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(status, ChainStatus::NotSeen);
-        assert!(!status.is_key());
         assert_eq!(
             status.label(ChainId::Bitcoin),
             "Not seen on Blake2b · checking"
@@ -371,14 +380,13 @@ mod tests {
     }
 
     #[test]
-    fn verified_path_is_a_key_on_either_chain() {
+    fn verified_path_is_only_here_on_either_chain() {
         let status = classify(CoinEvidence {
             entanglement: Some(Entanglement::NotEntangled),
             proof: Some(ProofOutcome::Verified),
             ..Default::default()
         });
         assert_eq!(status, ChainStatus::OnlyHere);
-        assert!(status.is_key());
         assert_eq!(status.label(ChainId::Bitcoin), "Bitcoin only · verified");
         assert_eq!(
             status.label(ChainId::BitcoinBlake2b),
@@ -399,10 +407,34 @@ mod tests {
     }
 
     #[test]
+    fn a_deep_signature_split_is_split_but_unconfirmed() {
+        let status = classify(CoinEvidence {
+            entanglement: Some(Entanglement::NotEntangled),
+            signature_split: true,
+            ..Default::default()
+        });
+        assert_eq!(status, ChainStatus::SplitUnconfirmed);
+        assert_eq!(status.label(ChainId::BitcoinBlake2b), "Split · unconfirmed");
+        assert_eq!(status.tone(), StatusTone::Warn);
+        assert!(!status.needs_split());
+    }
+
+    #[test]
+    fn a_replayed_signature_split_is_on_both_chains() {
+        let status = classify(CoinEvidence {
+            entanglement: Some(Entanglement::Entangled),
+            signature_split: true,
+            ..Default::default()
+        });
+        assert_eq!(status, ChainStatus::BothChains);
+        assert!(status.needs_split());
+    }
+
+    #[test]
     fn recorded_twin_split_separates_a_both_chain_coin() {
         let status = classify(CoinEvidence {
             entanglement: Some(Entanglement::Entangled),
-            twin_split: true,
+            separated: true,
             ..Default::default()
         });
         assert_eq!(status, ChainStatus::OnlyHere);

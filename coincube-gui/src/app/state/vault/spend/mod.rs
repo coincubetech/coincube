@@ -136,6 +136,50 @@ impl CreateSpendPanel {
         }
     }
 
+    /// Send with exactly `preselected` chosen, from Coin control's Send
+    /// selected.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_coins(
+        wallet: Arc<Wallet>,
+        coins: &[Coin],
+        blockheight: u32,
+        preselected_coins: &[OutPoint],
+        network: Network,
+        balance: Amount,
+        unconfirmed_balance: Amount,
+        sync_status: SyncStatus,
+        bitcoin_unit: BitcoinDisplayUnit,
+    ) -> Self {
+        Self {
+            draft: step::TransactionDraft::new(network, None),
+            current: 0,
+            steps: vec![
+                Box::new(
+                    step::DefineSpend::new(
+                        network,
+                        wallet.clone(),
+                        coins,
+                        blockheight,
+                        None,
+                        true,
+                        balance,
+                        unconfirmed_balance,
+                        sync_status,
+                        bitcoin_unit,
+                    )
+                    .with_preselected_coins(preselected_coins)
+                    .with_user_coin_selection()
+                    .with_coins_sorted(blockheight),
+                ),
+                Box::new(step::SaveSpend::new(wallet)),
+            ],
+            coins: coins.to_vec(),
+            tip_height: blockheight.try_into().expect("i32 by consensus"),
+            initial_feerate_requested: false,
+            mcp_prepared: false,
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new_self_send(
         wallet: Arc<Wallet>,

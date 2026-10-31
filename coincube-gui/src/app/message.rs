@@ -344,6 +344,51 @@ pub enum Message {
         claimed: Vec<coincube_core::miniscript::bitcoin::Txid>,
         answers: Vec<crate::services::entangled::LookupAnswer>,
     },
+    /// Coin control asks the app for what the Split coins overlay needs: the
+    /// chain's fee rate and, without a split key, a fresh receive address.
+    SplitFetch {
+        fee: bool,
+        address: bool,
+    },
+    /// The chain-tagged Connect fee rate for the overlay; `None` is
+    /// unavailable, never a guess.
+    SplitFeeRate(Option<u64>),
+    /// A fresh receive address for a split key, or why there isn't one.
+    SplitAddress(Result<String, String>),
+    /// Build the split the overlay shows ([`crate::services::split_coins::prepare`]).
+    SplitRequest {
+        method: crate::services::split_coins::Method,
+        coins: Vec<coincube_core::miniscript::bitcoin::OutPoint>,
+        key: Option<coincube_core::miniscript::bitcoin::OutPoint>,
+        feerate_vb: u64,
+    },
+    /// The split was built and stored with the daemon, or why not.
+    SplitPrepared(Result<Box<crate::services::split_coins::SplitRecord>, String>),
+    /// Open Send with exactly these coins chosen.
+    SendSelectedCoins(Vec<coincube_core::miniscript::bitcoin::OutPoint>),
+    /// The daemon's copies of this Vault's recorded split transactions, for
+    /// the Chains column ([`crate::services::split_coins::derive`]).
+    SplitTransactions {
+        origin: crate::app::cache::LookupOrigin,
+        transactions: std::collections::HashMap<
+            coincube_core::miniscript::bitcoin::Txid,
+            coincube_core::miniscript::bitcoin::Transaction,
+        >,
+        /// The pass's number; only a newer pass than the last applied one
+        /// is applied ([`crate::services::split_coins::newer_pass`]).
+        seq: u64,
+        /// The twin Cube's split journal as read for this pass.
+        twin_records: Vec<crate::services::split_coins::SplitRecord>,
+        /// Every twin split this pass nominated, with the inputs of its
+        /// transaction if Connect showed it deep enough on the twin chain
+        /// ([`crate::services::split_coins::TwinCheck::spent`]).
+        twin_checked: Vec<(
+            coincube_core::miniscript::bitcoin::Txid,
+            Option<std::collections::HashSet<coincube_core::miniscript::bitcoin::OutPoint>>,
+        )>,
+        /// When the twin lookups finished; orders them against other passes'.
+        twin_checked_at: std::time::Instant,
+    },
     /// A sync-driven ancestry check batch for the Chains column finished
     /// ([`crate::services::chain_status::check_ancestry`]). `claimed` is the
     /// batch's single-flight claim; see [`crate::app::cache::Cache::chain_proofs_landed`].

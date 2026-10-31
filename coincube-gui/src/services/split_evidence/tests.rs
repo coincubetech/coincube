@@ -917,6 +917,10 @@ fn split_b1a_services_have_no_new_gui_callers() {
                 ]
                 .contains(&ident))
             || (file == "src/app/mod.rs" && ["split_fees", "btcb2_fee_source"].contains(&ident))
+            // B1.5: the one-sided split prices itself from its own chain's
+            // Connect fee source only (`split_coins::fee_rate`).
+            || (file == "src/services/split_coins.rs"
+                && ["split_fees", "ConnectBitcoinFees", "ConnectBtcb2Fees"].contains(&ident))
             // B1b: the Split step-1 panel, whose only production constructor
             // is the resume of an existing journal
             // (`app::state::vault::split::tests::split_panel_has_no_gui_entry_point`).

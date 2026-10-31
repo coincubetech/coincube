@@ -13,6 +13,7 @@ pub mod settings;
 pub mod signers;
 pub mod spend;
 pub mod split;
+pub mod split_hub;
 #[cfg(test)]
 pub mod test_support;
 pub mod transactions;

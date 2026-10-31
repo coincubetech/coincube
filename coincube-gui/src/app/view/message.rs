@@ -116,6 +116,24 @@ pub trait Close {
     fn close() -> Self;
 }
 
+/// Coin control intents: choosing coins to send, and the Split coins overlay.
+#[derive(Debug, Clone)]
+pub enum CoinControlMessage {
+    Choose(coincube_core::miniscript::bitcoin::OutPoint),
+    ClearChosen,
+    SendSelected,
+    OpenSplit,
+    CancelSplit,
+    ToggleSplitCoin(coincube_core::miniscript::bitcoin::OutPoint),
+    SplitMethod(crate::services::split_coins::Method),
+    SignSplit,
+    /// The send warning's acknowledgement checkbox.
+    AcknowledgeBothChains(bool),
+    /// Send the selected coins despite the warning.
+    SendAnyway,
+    CloseWarning,
+}
+
 #[derive(Debug, Clone)]
 pub enum VaultReceiveMessage {
     Copy(String),
@@ -170,6 +188,10 @@ pub enum Message {
     SetupVaultRestoreFromKit,
     Close,
     Select(usize),
+    /// Coin control's checkbox selection and Split coins overlay.
+    CoinControl(CoinControlMessage),
+    /// Go to Coin control and open the Split coins overlay.
+    SplitFirst,
     SelectRefundable(usize),
     RefundAddressEdited(String),
     RefundAddressValidated(bool),
@@ -221,6 +243,9 @@ pub enum Message {
     /// (Lane B1.4). Creates the target Cube only — nothing is claimed,
     /// poisoned, swept or broadcast by this flow.
     StartClaimBlake2b,
+    /// Tools › Split coins › Create copy. The App re-checks the disk for an
+    /// existing copy before it starts [`Self::StartClaimBlake2b`].
+    CreateBlake2bCopy,
     /// Start the imported Bitcoin policy claim flow after App rechecks the
     /// live attachment, completed scan, and current Connect feature grant.
     StartImportedClaim,

@@ -136,6 +136,7 @@ struct Panels {
     // Vault-only panels - None when no vault exists
     vault_overview: Option<VaultOverview>,
     coins: Option<CoinsPanel>,
+    split_hub: Option<state::vault::split_hub::SplitHubPanel>,
     transactions: Option<VaultTransactionsPanel>,
     psbts: Option<PsbtsPanel>,
     recovery: Option<CreateSpendPanel>,
@@ -290,6 +291,7 @@ impl Panels {
             // All vault panels are None - no vault exists
             vault_overview: None,
             coins: None,
+            split_hub: None,
             transactions: None,
             psbts: None,
             recovery: None,
@@ -417,11 +419,11 @@ impl Panels {
                 cube_id.clone(),
                 &data_dir.network_directory(cache.fiat_chain),
             ),
-            coins: Some(CoinsPanel::new(
-                cache.coins(),
-                wallet.recovery_timelock(),
-                wallet.chain,
-            )),
+            coins: Some(
+                CoinsPanel::new(cache.coins(), wallet.recovery_timelock(), wallet.chain)
+                    .with_wallet(wallet.clone()),
+            ),
+            split_hub: Some(state::vault::split_hub::SplitHubPanel::new(wallet.clone())),
             transactions: Some(VaultTransactionsPanel::new(wallet.clone())),
             psbts: wallet
                 .supports_inheritance()
@@ -567,11 +569,11 @@ impl Panels {
             cache.blockheight(),
             needs_rescan_date(&data_dir, cache.chain(), &wallet, &daemon_backend),
         ));
-        self.coins = Some(CoinsPanel::new(
-            cache.coins(),
-            wallet.recovery_timelock(),
-            wallet.chain,
-        ));
+        self.coins = Some(
+            CoinsPanel::new(cache.coins(), wallet.recovery_timelock(), wallet.chain)
+                .with_wallet(wallet.clone()),
+        );
+        self.split_hub = Some(state::vault::split_hub::SplitHubPanel::new(wallet.clone()));
         self.transactions = Some(VaultTransactionsPanel::new(wallet.clone()));
         self.psbts = wallet
             .supports_inheritance()
@@ -718,6 +720,9 @@ impl Panels {
                 crate::app::menu::VaultSubMenu::Recovery => {
                     self.recovery.as_ref().map(|v| v as &dyn State)
                 }
+                crate::app::menu::VaultSubMenu::SplitCoins => {
+                    self.split_hub.as_ref().map(|v| v as &dyn State)
+                }
                 crate::app::menu::VaultSubMenu::Settings(_) => {
                     self.vault_settings.as_ref().map(|v| v as &dyn State)
                 }
@@ -817,6 +822,9 @@ impl Panels {
                 }
                 crate::app::menu::VaultSubMenu::Recovery => {
                     self.recovery.as_mut().map(|v| v as &mut dyn State)
+                }
+                crate::app::menu::VaultSubMenu::SplitCoins => {
+                    self.split_hub.as_mut().map(|v| v as &mut dyn State)
                 }
                 crate::app::menu::VaultSubMenu::Settings(_) => {
                     self.vault_settings.as_mut().map(|v| v as &mut dyn State)
@@ -1187,6 +1195,14 @@ pub struct App {
     /// Coins a Chains-column ancestry check batch has claimed and not yet
     /// answered. Released as a whole set when its `ChainProofs` lands.
     chain_proofs_in_flight: HashSet<bitcoin::OutPoint>,
+    /// The last split refresh pass issued, and the last one applied.
+    split_refresh_issued: u64,
+    split_refresh_applied: u64,
+    /// The last fresh Connect check of each twin split.
+    twin_checks: std::collections::HashMap<bitcoin::Txid, crate::services::split_coins::TwinCheck>,
+    /// The twin Cube's split journal as the last applied pass read it, so a
+    /// late pass's twin checks can still be applied to it.
+    twin_records: Vec<crate::services::split_coins::SplitRecord>,
     /// Whether this Vault's saved ancestry results have been read into the
     /// cache yet ([`crate::services::chain_status::store::load`]).
     chain_proofs_loaded: bool,
@@ -4110,6 +4126,10 @@ impl App {
             local_switch_hold: None,
             entangled_in_flight: HashSet::new(),
             chain_proofs_in_flight: HashSet::new(),
+            split_refresh_issued: 0,
+            split_refresh_applied: 0,
+            twin_checks: std::collections::HashMap::new(),
+            twin_records: Vec::new(),
             chain_proofs_loaded: false,
             unswept_in_flight: None,
             unswept_session: None,
@@ -4359,6 +4379,10 @@ impl App {
                 local_switch_hold: None,
                 entangled_in_flight: HashSet::new(),
                 chain_proofs_in_flight: HashSet::new(),
+                split_refresh_issued: 0,
+                split_refresh_applied: 0,
+                twin_checks: std::collections::HashMap::new(),
+                twin_records: Vec::new(),
                 chain_proofs_loaded: false,
                 unswept_in_flight: None,
                 unswept_session: None,
@@ -4562,6 +4586,7 @@ impl App {
                 for (outpoint, entry) in saved {
                     self.cache.chain_proofs.entry(outpoint).or_insert(entry);
                 }
+                self.cache.split_records = crate::services::split_coins::journal::load(&dir, chain);
             }
         }
         if !crate::services::chain_status::checks_enabled(chain) {
@@ -4596,6 +4621,134 @@ impl App {
                 results,
             },
         )
+    }
+
+    /// Refresh the Chains column's split facts: read the daemon's copies of
+    /// the recorded split transactions, then derive *Splitting*, the split
+    /// outputs' proofs and the coins a split separated.
+    fn split_refresh_task(&mut self) -> Task<Message> {
+        let (Some(wallet), Some(daemon)) = (self.wallet.as_ref(), self.daemon.clone()) else {
+            return Task::none();
+        };
+        if !self.chain_proofs_loaded {
+            return Task::none();
+        }
+        let origin = cache::LookupOrigin {
+            app: self.cache.app_generation,
+            chain: wallet.chain,
+        };
+        let txids: Vec<bitcoin::Txid> = self
+            .cache
+            .split_records
+            .iter()
+            .map(|record| record.txid)
+            .collect();
+        let chain = wallet.chain;
+        let twin_records = crate::services::split_coins::journal::twin_data_dir(
+            &self.cache.datadir_path,
+            chain,
+            &wallet.descriptor_checksum,
+        )
+        .zip(crate::services::entangled::twin_chain(chain))
+        .map(|(dir, twin)| crate::services::split_coins::journal::load(&dir, twin))
+        .unwrap_or_default();
+        // The twin journal only nominates splits; Connect must show each one
+        // deep on the twin chain now before its coins count as separated.
+        let candidates =
+            crate::services::split_coins::twin_candidates(&twin_records, &self.twin_checks);
+        self.split_refresh_issued += 1;
+        let seq = self.split_refresh_issued;
+        let client = (!candidates.is_empty()
+            && crate::services::chain_status::checks_enabled(chain))
+        .then(|| self.authenticated_coincube_client())
+        .flatten();
+        let generation = *self.panels.claim_generation.borrow();
+        let live = self.panels.claim_generation.subscribe();
+        Task::perform(
+            async move {
+                let transactions = async {
+                    if txids.is_empty() {
+                        return std::collections::HashMap::new();
+                    }
+                    daemon
+                        .list_txs(&txids)
+                        .await
+                        .map(|found| {
+                            found
+                                .transactions
+                                .into_iter()
+                                .map(|info| (info.tx.compute_txid(), info.tx))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+                // A nominated split this pass could not look up is answered
+                // as not separated, never left on an older positive.
+                let confirmed = async {
+                    match client {
+                        Some(client) => {
+                            crate::services::split_coins::twin_confirmed(
+                                client, chain, candidates, generation, live,
+                            )
+                            .await
+                        }
+                        None => candidates.into_iter().map(|txid| (txid, None)).collect(),
+                    }
+                };
+                let (transactions, twin_checked) = tokio::join!(transactions, confirmed);
+                let twin_checked_at = std::time::Instant::now();
+                (transactions, twin_records, twin_checked, twin_checked_at)
+            },
+            move |(transactions, twin_records, twin_checked, twin_checked_at)| {
+                Message::SplitTransactions {
+                    origin,
+                    transactions,
+                    seq,
+                    twin_records,
+                    twin_checked,
+                    twin_checked_at,
+                }
+            },
+        )
+    }
+
+    /// Record a split this Cube just built and stored with the daemon, so the
+    /// Chains column follows it.
+    pub(crate) fn record_split(
+        &mut self,
+        record: crate::services::split_coins::SplitRecord,
+    ) -> Task<Message> {
+        self.cache.split_records.push(record);
+        self.save_split_records();
+        self.split_refresh_task()
+    }
+
+    fn save_split_records(&self) {
+        if let Some(dir) = self.vault_data_dir() {
+            if let Err(e) =
+                crate::services::split_coins::journal::save(&dir, &self.cache.split_records)
+            {
+                tracing::warn!("couldn't save split records: {}", e);
+            }
+        }
+    }
+
+    fn save_chain_proofs(&self) {
+        if let Some(dir) = self.vault_data_dir() {
+            let held: HashSet<bitcoin::OutPoint> = self
+                .cache
+                .coins()
+                .iter()
+                .map(|coin| coin.outpoint)
+                .collect();
+            if let Err(e) = crate::services::chain_status::store::save(
+                &dir,
+                &self.cache.chain_proofs,
+                |outpoint| held.contains(outpoint),
+            ) {
+                tracing::warn!("couldn't save Chains-column results: {}", e);
+            }
+        }
     }
 
     /// The chain of this Cube's Vault, `None` without one — what a lookup
@@ -6693,7 +6846,7 @@ impl App {
                                         .map(|txs| txs.first().cloned())
                                 }) {
                                     if let Some(psbts) = &mut self.panels.psbts {
-                                        psbts.preselect(spend_tx);
+                                        psbts.preselect(spend_tx, &self.cache);
                                     }
                                     self.panels.current = menu;
                                     return Task::none();
@@ -9295,20 +9448,222 @@ impl App {
                 if !changed {
                     return Task::none();
                 }
-                if let Some(dir) = self.vault_data_dir() {
-                    let held: HashSet<bitcoin::OutPoint> = self
+                self.save_chain_proofs();
+                return Task::done(Message::CacheUpdated);
+            }
+            Message::SplitFetch { fee, address } => {
+                let Some(wallet) = self.wallet.as_ref() else {
+                    return Task::none();
+                };
+                let mut tasks = Vec::new();
+                if fee {
+                    let client = self.authenticated_coincube_client();
+                    let chain = wallet.chain;
+                    tasks.push(Task::perform(
+                        crate::services::split_coins::fee_rate(client, chain),
+                        Message::SplitFeeRate,
+                    ));
+                }
+                if let (true, Some(daemon)) = (address, self.daemon.clone()) {
+                    tasks.push(Task::perform(
+                        async move {
+                            daemon
+                                .get_new_address()
+                                .await
+                                .map(|result| result.address.to_string())
+                                .map_err(|e| format!("Couldn't get an address: {}", e))
+                        },
+                        Message::SplitAddress,
+                    ));
+                }
+                return Task::batch(tasks);
+            }
+            Message::SplitRequest {
+                method,
+                coins,
+                key,
+                feerate_vb,
+            } => {
+                let failed = |e: &str| Task::done(Message::SplitPrepared(Err(e.to_string())));
+                let (Some(wallet), Some(daemon)) = (self.wallet.clone(), self.daemon.clone())
+                else {
+                    return failed("This Vault isn't loaded.");
+                };
+                let Some(client) = self.authenticated_coincube_client() else {
+                    return failed("Sign in to COINCUBE Connect to split coins.");
+                };
+                let key = match key {
+                    Some(outpoint) => match self
                         .cache
-                        .coins()
-                        .iter()
-                        .map(|coin| coin.outpoint)
-                        .collect();
-                    if let Err(e) = crate::services::chain_status::store::save(
-                        &dir,
-                        &self.cache.chain_proofs,
-                        |outpoint| held.contains(outpoint),
-                    ) {
-                        tracing::warn!("couldn't save Chains-column results: {}", e);
+                        .split_keys()
+                        .into_iter()
+                        .find(|(coin, _)| coin.outpoint == outpoint)
+                    {
+                        Some((_, path)) => Some(crate::services::split_coins::KeyChoice {
+                            outpoint,
+                            path: path.clone(),
+                        }),
+                        None => return failed("The split key is no longer available."),
+                    },
+                    None => None,
+                };
+                let generation = *self.panels.claim_generation.borrow();
+                let live = self.panels.claim_generation.subscribe();
+                return Task::perform(
+                    crate::services::split_coins::prepare(
+                        daemon, wallet, method, coins, key, feerate_vb, client, generation, live,
+                    ),
+                    |result| {
+                        Message::SplitPrepared(result.map(|prepared| Box::new(prepared.record)))
+                    },
+                );
+            }
+            Message::SplitPrepared(result) => {
+                let txid = result.as_ref().ok().map(|record| record.txid);
+                let mut tasks = Vec::new();
+                if let Ok(record) = &result {
+                    tasks.push(self.record_split((**record).clone()));
+                }
+                // To the Coins panel whichever panel is showing: its overlay
+                // stays locked until it hears the result.
+                if let (Some(daemon), Some(panel)) =
+                    (self.daemon.clone(), self.panels.coins.as_mut())
+                {
+                    tasks.push(panel.update(
+                        Some(daemon),
+                        &self.cache,
+                        Message::SplitPrepared(result),
+                    ));
+                }
+                if let Some(txid) = txid {
+                    // Sign and broadcast through the Vault's normal PSBT screen.
+                    tasks.push(Task::done(Message::View(view::Message::Menu(Menu::Vault(
+                        menu::VaultSubMenu::PSBTs(Some(txid)),
+                    )))));
+                }
+                return Task::batch(tasks);
+            }
+            Message::View(view::Message::CreateBlake2bCopy) => {
+                // From the disk, not the cache (#503): a copy made earlier in
+                // this session leaves the cached flag stale, and the hub would
+                // otherwise start a second installer for the same Vault.
+                let Some(wallet) = self.wallet.as_ref() else {
+                    return Task::none();
+                };
+                if self.cube_settings.network != crate::chain::ChainId::Bitcoin {
+                    return Task::none();
+                }
+                self.cache.btcb2_already_claimed =
+                    claim_target_exists(&self.datadir, &wallet.descriptor_checksum);
+                if self.cache.btcb2_already_claimed {
+                    return Task::none();
+                }
+                return Task::done(Message::View(view::Message::StartClaimBlake2b));
+            }
+            Message::View(view::Message::SplitFirst) => {
+                let menu = Menu::Vault(menu::VaultSubMenu::Coins(None));
+                let load = self.set_current_panel(menu);
+                return Task::batch([
+                    load,
+                    Task::done(Message::View(view::Message::CoinControl(
+                        view::CoinControlMessage::OpenSplit,
+                    ))),
+                ]);
+            }
+            Message::SendSelectedCoins(outpoints) => {
+                let Some(wallet) = self.wallet.clone() else {
+                    return Task::none();
+                };
+                let (balance, unconfirmed_balance, _, _) = state::coins_summary(
+                    self.cache.coins(),
+                    self.cache.blockheight() as u32,
+                    wallet.recovery_timelock(),
+                );
+                self.panels.create_spend = Some(CreateSpendPanel::new_with_coins(
+                    wallet.clone(),
+                    self.cache.coins(),
+                    self.cache.blockheight() as u32,
+                    &outpoints,
+                    self.cache.network,
+                    balance,
+                    unconfirmed_balance,
+                    sync_status(
+                        self.daemon_backend(),
+                        self.cache.blockheight(),
+                        self.cache.sync_progress(),
+                        self.cache.last_poll_timestamp(),
+                        self.cache.last_poll_at_startup,
+                        self.cache.history_sync(),
+                    ),
+                    self.cache.bitcoin_unit,
+                ));
+                self.panels.current = Menu::Vault(menu::VaultSubMenu::Send);
+                if let Some(panel) = self.panels.current_mut() {
+                    return panel.reload(self.daemon.clone(), self.wallet.clone());
+                }
+                return Task::none();
+            }
+            Message::SplitTransactions {
+                origin,
+                transactions,
+                seq,
+                twin_records,
+                twin_checked,
+                twin_checked_at,
+            } => {
+                let Some(wallet) = self.wallet.as_ref() else {
+                    return Task::none();
+                };
+                if !self.cache.issued_here(origin) || origin.chain != wallet.chain {
+                    return Task::none();
+                }
+                // Twin checks apply even from a pass that lands late: each
+                // replaces only an older check of the same split.
+                let checks_changed = crate::services::split_coins::record_twin_checks(
+                    &mut self.twin_checks,
+                    twin_checked,
+                    twin_checked_at,
+                );
+                if !crate::services::split_coins::newer_pass(&mut self.split_refresh_applied, seq) {
+                    if !checks_changed {
+                        return Task::none();
                     }
+                    self.cache.separated = crate::services::split_coins::twin_separated(
+                        &self.twin_records,
+                        &self.twin_checks,
+                        std::time::Instant::now(),
+                    );
+                    return Task::done(Message::CacheUpdated);
+                }
+                self.twin_records = twin_records;
+                let twin_records = &self.twin_records;
+                self.twin_checks
+                    .retain(|txid, _| twin_records.iter().any(|record| record.txid == *txid));
+                let coins = self.cache.coins().to_vec();
+                let tip = self.cache.blockheight();
+                let derived = crate::services::split_coins::derive(
+                    &mut self.cache.split_records,
+                    &coins,
+                    tip,
+                    &transactions,
+                    std::time::SystemTime::now(),
+                );
+                self.cache.splitting = derived.splitting;
+                self.cache.split_unconfirmed = derived.unconfirmed;
+                self.cache.separated = crate::services::split_coins::twin_separated(
+                    &self.twin_records,
+                    &self.twin_checks,
+                    std::time::Instant::now(),
+                );
+                let proved = crate::services::split_coins::merge_proofs(
+                    &mut self.cache.chain_proofs,
+                    derived.proofs,
+                );
+                if derived.changed {
+                    self.save_split_records();
+                }
+                if proved {
+                    self.save_chain_proofs();
                 }
                 return Task::done(Message::CacheUpdated);
             }
@@ -9678,11 +10033,13 @@ impl App {
                         // `Task::none()` on every Bitcoin-family Cube.
                         let entangled = self.entangled_lookup_task();
                         let chain_proofs = self.chain_proof_task();
+                        let splits = self.split_refresh_task();
                         let unswept = self.unswept_notice_task();
                         return Task::batch([
                             heartbeat,
                             entangled,
                             chain_proofs,
+                            splits,
                             unswept,
                             retire_obligation.unwrap_or_else(Task::none),
                             Task::done(Message::CacheUpdated),
@@ -10441,7 +10798,7 @@ impl App {
                             let load = self
                                 .set_current_panel(Menu::Vault(menu::VaultSubMenu::PSBTs(None)));
                             let panel = self.panels.psbts.as_mut().expect("checked above");
-                            panel.preselect(tx);
+                            panel.preselect(tx, &self.cache);
                             return load;
                         }
                     }
@@ -18344,6 +18701,86 @@ pub(crate) mod claim_step1_tests {
             .unwrap(),
         );
         (app, wallet)
+    }
+
+    #[test]
+    fn create_copy_starts_the_installer_only_while_no_copy_is_on_disk() {
+        let root = std::env::temp_dir().join(format!("create-copy-{}", uuid::Uuid::new_v4()));
+        let (mut app, wallet) = {
+            let _guard = crate::app::session::test_guard();
+            bitcoin_app(&root)
+        };
+        let starts = |task: Task<Message>| {
+            use iced::futures::StreamExt;
+            let Some(stream) = iced_runtime::task::into_stream(task) else {
+                return false;
+            };
+            iced::futures::executor::block_on(stream.collect::<Vec<_>>())
+                .into_iter()
+                .any(|action| {
+                    matches!(
+                        action,
+                        iced_runtime::Action::Output(Message::View(
+                            view::Message::StartClaimBlake2b
+                        ))
+                    )
+                })
+        };
+        assert!(!app.cache.btcb2_already_claimed);
+        assert!(
+            starts(app.update(Message::View(view::Message::CreateBlake2bCopy))),
+            "no copy yet: the installer starts"
+        );
+
+        // A copy made since the Cube opened; the cached flag is stale.
+        let fork_dir = app
+            .datadir
+            .network_directory(crate::chain::ChainId::BitcoinBlake2b);
+        std::fs::create_dir_all(fork_dir.path()).unwrap();
+        let mut copy = settings::CubeSettings::new_with_raw_id(
+            uuid::Uuid::new_v4().to_string(),
+            "Fixture · BTCB2".to_string(),
+            crate::chain::ChainId::BitcoinBlake2b,
+        );
+        copy.vault_wallet_id = Some(crate::app::settings::WalletId::new(
+            wallet.descriptor_checksum.clone(),
+            Some(1),
+        ));
+        std::fs::write(
+            fork_dir.path().join(settings::SETTINGS_FILE_NAME),
+            serde_json::to_vec(&settings::Settings {
+                cubes: vec![copy],
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(!app.cache.btcb2_already_claimed, "stale by construction");
+        assert!(
+            !starts(app.update(Message::View(view::Message::CreateBlake2bCopy))),
+            "a second installer must not start"
+        );
+        assert!(app.cache.btcb2_already_claimed, "corrected from the disk");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_split_result_reaches_the_coins_panel_from_another_panel() {
+        let root = std::env::temp_dir().join(format!("split-result-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = bitcoin_app(&root);
+        app.panels
+            .coins
+            .as_mut()
+            .unwrap()
+            .start_building_split_for_test();
+        drop(app.set_current_panel(Menu::Vault(menu::VaultSubMenu::Overview)));
+        drop(app.update(Message::SplitPrepared(Err("Couldn't build".into()))));
+        assert_eq!(
+            app.panels.coins.as_ref().unwrap().split_progress_for_test(),
+            Some((false, Some("Couldn't build".to_string()))),
+            "unlocked, with the error"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

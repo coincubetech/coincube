@@ -69,7 +69,9 @@ use crate::{
 /// the screen and Broadcast gates on the path threshold as before.
 #[derive(Debug, Clone)]
 pub struct ReplayPill<'a> {
-    pub review: &'a ReplayReview,
+    /// The review as of the current cache
+    /// ([`crate::app::state::vault::psbt::PsbtState::current_review`]).
+    pub review: std::borrow::Cow<'a, ReplayReview>,
     /// [`replay::entangled_inputs`] for this PSBT, from the cache.
     pub entangled: Vec<(usize, Entanglement)>,
     /// [`crate::app::state::vault::psbt::PsbtState::broadcast_ready`].
@@ -108,7 +110,12 @@ fn replay_status_view<'a>(pill: &ReplayPill<'a>) -> Element<'a, Message> {
     if let Some(required) = replay::blocked_entangled_copy(&blocked) {
         // No checkbox: the acknowledgement does not apply to a required
         // signature, and showing one would suggest it does.
-        column = column.push(p2_regular(required).style(theme::text::warning));
+        column = column
+            .push(p2_regular(required).style(theme::text::warning))
+            .push(
+                coincube_ui::component::button::secondary(None, "Split first")
+                    .on_press(Message::SplitFirst),
+            );
     } else if pill.review.status().needs_acknowledgement() {
         if pill.checking {
             column = column.push(p2_regular(replay::CHECKING_COPY).style(theme::text::secondary));
