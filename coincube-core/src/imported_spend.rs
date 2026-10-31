@@ -421,8 +421,8 @@ fn verified_partial_outputs<C: secp256k1::Verification>(
 
 /// Bitcoin Core may return the funding transaction in a signed PSBT without
 /// its witnesses. Those witnesses are not part of its txid and do not affect
-/// the output being spent. Permit only that difference for imported wallets;
-/// Split's construction check remains byte-exact. Signature verification still
+/// the output being spent. Permit only that difference; the shared
+/// construction check is otherwise byte-exact. Signature verification still
 /// authenticates the actual funding transaction supplied by the signer.
 fn check_imported_signed_construction(
     construction: &Psbt,

@@ -196,24 +196,6 @@ impl SplitSource {
         self.internal.as_ref()
     }
 
-    /// Required signatures per input for every supported source shape. This
-    /// is display information; PSBT finalization still verifies each input.
-    pub fn signing_threshold(&self) -> usize {
-        match &self.external {
-            Descriptor::Pkh(_) | Descriptor::Wpkh(_) | Descriptor::Sh(_) => 1,
-            Descriptor::Wsh(wsh) => match wsh.as_inner() {
-                WshInner::SortedMulti(multi) => multi.k(),
-                WshInner::Ms(ms) => match ms.as_inner() {
-                    Terminal::Multi(multi) => multi.k(),
-                    _ => unreachable!("SplitSource::new checks the descriptor shape"),
-                },
-            },
-            Descriptor::Bare(_) | Descriptor::Tr(_) => {
-                unreachable!("SplitSource::new checks the descriptor shape")
-            }
-        }
-    }
-
     /// The source identity: SHA-256 over the domain tag
     /// [`SPLIT_SOURCE_DIGEST_TAG`], then each descriptor's canonical text
     /// with its checksum, tagged by branch and length-prefixed so the pair
@@ -293,26 +275,15 @@ mod tests {
 
     struct Wallet {
         source: SplitSource,
-        /// Signatures needed per input.
-        threshold: usize,
     }
 
     fn wallet(shape: Shape) -> Wallet {
         let branch =
             |template: &str, branch: u32| descriptor(&template.replace("{b}", &branch.to_string()));
-        let (template, threshold) = match shape {
-            Shape::Wpkh => (
-                format!("wpkh({}/{{b}}/*)", account(&master(1), "m/84'/0'/0'")),
-                1,
-            ),
-            Shape::ShWpkh => (
-                format!("sh(wpkh({}/{{b}}/*))", account(&master(1), "m/49'/0'/0'")),
-                1,
-            ),
-            Shape::Pkh => (
-                format!("pkh({}/{{b}}/*)", account(&master(1), "m/44'/0'/0'")),
-                1,
-            ),
+        let template = match shape {
+            Shape::Wpkh => format!("wpkh({}/{{b}}/*)", account(&master(1), "m/84'/0'/0'")),
+            Shape::ShWpkh => format!("sh(wpkh({}/{{b}}/*))", account(&master(1), "m/49'/0'/0'")),
+            Shape::Pkh => format!("pkh({}/{{b}}/*)", account(&master(1), "m/44'/0'/0'")),
             Shape::WshSortedMulti | Shape::WshMulti => {
                 let keys: Vec<_> = [master(1), master(2), master(3)]
                     .iter()
@@ -323,24 +294,11 @@ mod tests {
                 } else {
                     "sortedmulti"
                 };
-                (format!("wsh({name}(2,{}))", keys.join(",")), 2)
+                format!("wsh({name}(2,{}))", keys.join(","))
             }
         };
         Wallet {
             source: SplitSource::new(branch(&template, 0), Some(branch(&template, 1))).unwrap(),
-            threshold,
-        }
-    }
-
-    #[test]
-    fn review_threshold_matches_supported_source_shapes() {
-        for shape in SHAPES {
-            let wallet = wallet(shape);
-            assert_eq!(
-                wallet.source.signing_threshold(),
-                wallet.threshold,
-                "{shape:?}"
-            );
         }
     }
 
