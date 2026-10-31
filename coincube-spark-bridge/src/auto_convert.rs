@@ -66,7 +66,7 @@ struct Saved {
     enabled: bool,
     breaker: AutoConvertBreaker,
     /// Sats received while on and not converted yet: below the pool's minimum
-    /// so far, or left over from the last conversion.
+    /// so far, or handed back by an attempt that failed before sending.
     #[serde(default)]
     pending_sats: u64,
 }
@@ -333,7 +333,7 @@ pub fn checked_sats_in(
 /// `token_conversion/flashnet.rs` at the pin), not the quote's figure. Aiming
 /// below the budget by the slippage cap keeps a price move up to the cap,
 /// plus the pool's rounding, within the budget. What this leaves stays
-/// pending and joins the next conversion.
+/// bitcoin (see [`AutoConvert::record_success`]).
 fn sizing_aim(budget: u128) -> u128 {
     let margin = (budget * u128::from(CONVERSION_MAX_SLIPPAGE_BPS)).div_ceil(10_000) + 1;
     budget.saturating_sub(margin)
@@ -681,15 +681,17 @@ impl AutoConvert {
         self.adopt(next);
     }
 
-    /// A conversion of `budget_sats` went through, spending `spent_sats`.
-    /// The few sats left over stay pending.
+    /// A conversion went through. Nothing of its budget goes back to the
+    /// pending total: the send re-priced it, so the sats it actually spent
+    /// may exceed the quoted `spent_sats` by up to the cap, and booking the
+    /// quote's leftover could later sweep bitcoin the user held before
+    /// turning auto-convert on. The few received sats left over stay bitcoin.
     fn record_success(&mut self, budget_sats: u64, spent_sats: u128) {
         let forgotten = self.failures.record_success();
         if forgotten > 0 {
             tracing::info!("auto-convert succeeded; forgetting {forgotten} earlier failure(s)");
         }
-        let spent = u64::try_from(spent_sats).unwrap_or(u64::MAX);
-        self.give_back(budget_sats.saturating_sub(spent));
+        tracing::debug!("auto-convert budget {budget_sats} sats, quoted {spent_sats}");
     }
 
     /// A conversion of `budget_sats` failed. Returns the number of failures
@@ -1269,8 +1271,9 @@ mod tests {
             spent >= 19_800,
             "spent only {spent}: the target was undersized"
         );
-        // The few sats left over wait for the next receive.
-        assert_eq!(ac.lock().await.saved.pending_sats, 20_000 - spent as u64);
+        // The few sats left over stay bitcoin: the send re-prices, so the
+        // quote's leftover isn't known to be unspent.
+        assert_eq!(ac.lock().await.saved.pending_sats, 0);
     }
 
     /// The slippage pad can push the first sized quote past the received sats;
@@ -1639,9 +1642,8 @@ mod tests {
             ac: &ac,
         };
         process(&ac, Some(&mid), &[receipt("a", 20_000)]).await;
-        let spent = pool.sats_for(pool.sends()[0]) as u64;
         let pending = ac.lock().await.saved.pending_sats;
-        assert_eq!(pending, 20_000 - spent + 3_000);
+        assert_eq!(pending, 3_000);
         assert_eq!(AutoConvert::load(&dir.0).saved.pending_sats, pending);
     }
 

@@ -352,6 +352,7 @@ async fn handle_init(
                 tx: state.event_tx.clone(),
                 auto_convert,
                 wake_auto_convert: wake_tx,
+                synced_once: std::sync::atomic::AtomicBool::new(false),
             };
             let _listener_id = handle.sdk.add_event_listener(Box::new(listener)).await;
             *state.sdk.write().await = Some(handle);
@@ -374,15 +375,29 @@ struct BridgeEventListener {
     /// Counts each incoming bitcoin payment as it is reported, so it is
     /// saved even if a conversion is running or the bridge stops next.
     auto_convert: Arc<Mutex<AutoConvert>>,
-    /// Wakes [`run_auto_convert`] after a receive counted.
+    /// Wakes [`run_auto_convert`] after a receive counted, and once after
+    /// the first sync.
     wake_auto_convert: tokio::sync::mpsc::UnboundedSender<()>,
+    /// Set by the first `Synced`. That one wake converts sats left pending
+    /// by the last session, or counted before the SDK was ready, without
+    /// waiting for the next receive. Waiting for a sync means the balance
+    /// and pool reads are current, as the SDK's own conversion worker does.
+    synced_once: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait]
 impl EventListener for BridgeEventListener {
     async fn on_event(&self, event: SdkEvent) {
         let protocol_event = match event {
-            SdkEvent::Synced => Some(ProtocolEvent::Synced),
+            SdkEvent::Synced => {
+                if !self
+                    .synced_once
+                    .swap(true, std::sync::atomic::Ordering::Relaxed)
+                {
+                    let _ = self.wake_auto_convert.send(());
+                }
+                Some(ProtocolEvent::Synced)
+            }
             SdkEvent::PaymentSucceeded { payment } => {
                 if let Some(receipt) = auto_convert::eligible_receive(&payment) {
                     if self.auto_convert.lock().await.note_receive(&receipt) {
@@ -3543,6 +3558,95 @@ mod auto_convert_handler_tests {
                 .enabled
         );
         assert!(rx.try_recv().is_err());
+    }
+
+    fn listener(
+        dir: &TempDir,
+    ) -> (
+        BridgeEventListener,
+        Arc<Mutex<AutoConvert>>,
+        tokio::sync::mpsc::UnboundedReceiver<Frame>,
+        tokio::sync::mpsc::UnboundedReceiver<()>,
+    ) {
+        let (tx, frames) = tokio::sync::mpsc::unbounded_channel();
+        let (wake_tx, wakes) = tokio::sync::mpsc::unbounded_channel();
+        let auto_convert = Arc::new(Mutex::new(AutoConvert::load(&dir.0)));
+        let listener = BridgeEventListener {
+            tx,
+            auto_convert: Arc::clone(&auto_convert),
+            wake_auto_convert: wake_tx,
+            synced_once: std::sync::atomic::AtomicBool::new(false),
+        };
+        (listener, auto_convert, frames, wakes)
+    }
+
+    fn received(id: &str, sats: u128) -> breez_sdk_spark::Payment {
+        breez_sdk_spark::Payment {
+            id: id.to_string(),
+            payment_type: breez_sdk_spark::PaymentType::Receive,
+            status: breez_sdk_spark::PaymentStatus::Completed,
+            amount: sats,
+            fees: 0,
+            timestamp: 1,
+            method: breez_sdk_spark::PaymentMethod::Spark,
+            details: None,
+            conversion_details: None,
+        }
+    }
+
+    /// The first sync wakes the worker once, so sats pending from the last
+    /// session convert without waiting for the next receive. Later syncs
+    /// don't, and every sync still reaches the gui.
+    #[tokio::test]
+    async fn the_first_sync_wakes_the_worker_once() {
+        let dir = TempDir::new();
+        let (listener, _ac, mut frames, mut wakes) = listener(&dir);
+        listener.on_event(SdkEvent::Synced).await;
+        listener.on_event(SdkEvent::Synced).await;
+        assert!(wakes.try_recv().is_ok());
+        assert!(wakes.try_recv().is_err(), "one wake, not one per sync");
+        for _ in 0..2 {
+            assert!(matches!(
+                frames.try_recv(),
+                Ok(Frame::Event(ProtocolEvent::Synced))
+            ));
+        }
+    }
+
+    /// A receive is counted and saved by the listener as it arrives, then
+    /// the worker is woken; while off it is neither. The gui gets the
+    /// payment event either way.
+    #[tokio::test]
+    async fn the_listener_counts_a_receive_as_it_arrives() {
+        let dir = TempDir::new();
+        let (listener, ac, mut frames, mut wakes) = listener(&dir);
+
+        listener
+            .on_event(SdkEvent::PaymentSucceeded {
+                payment: received("off", 4_000),
+            })
+            .await;
+        assert!(wakes.try_recv().is_err());
+        assert!(matches!(
+            frames.try_recv(),
+            Ok(Frame::Event(ProtocolEvent::PaymentSucceeded { .. }))
+        ));
+
+        ac.lock().await.set_enabled(true).unwrap();
+        listener
+            .on_event(SdkEvent::PaymentSucceeded {
+                payment: received("on", 4_000),
+            })
+            .await;
+        assert!(wakes.try_recv().is_ok());
+        assert!(matches!(
+            frames.try_recv(),
+            Ok(Frame::Event(ProtocolEvent::PaymentSucceeded { .. }))
+        ));
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.0.join(auto_convert::STATE_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(json["pending_sats"], 4_000, "saved on arrival");
     }
 
     /// Migration off SDK Stable Balance, at the handler level: a Cube whose

@@ -818,13 +818,14 @@ pub struct GetInfoOk {
     /// The USDB balance at full precision, reported separately from
     /// [`Self::balance_sats`] so the gui can show it as its own row.
     ///
-    /// `None` when the wallet holds no USDB: from S1b on, the bridge reports
+    /// `None` means no USDB balance to show. From S1b on, the bridge reports
     /// only a nonzero balance of the configured USDB token whose metadata
-    /// names that token. Also `None` from a bridge that doesn't report it (one
-    /// older than this field, or before S1b). Treat `Some` with a zero
-    /// balance the same as `None`. Either way there is no USDB to show; don't
-    /// fall back to [`Self::stable_balance`], which isn't checked against the
-    /// token's metadata.
+    /// names that token, so `None` from it means the wallet holds none. A
+    /// bridge older than S1b leaves the field out, so its `None` says nothing
+    /// about the holding; the gui can't tell the two apart and shows no USDB
+    /// row for either. Treat `Some` with a zero balance the same as `None`.
+    /// Never fall back to [`Self::stable_balance`], which isn't checked
+    /// against the token's metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usdb_balance: Option<UsdbBalanceSnapshot>,
 }
@@ -1525,9 +1526,10 @@ pub enum Event {
     /// tripped. Settings re-renders from `state`.
     ///
     /// Emitted from S2b on. A gui built before this variant (#952) can't
-    /// parse it, and its reader stops on an unparseable line. The gui and
-    /// the bridge are built and shipped together, so every gui running a
-    /// bridge that sends it can read it.
+    /// parse it, and its reader stops on an unparseable line, so such a gui
+    /// must not run a bridge from S2b on, including one picked through
+    /// `COINCUBE_SPARK_BRIDGE_PATH`. Release builds ship both halves from
+    /// one build, so they always match.
     AutoConvertStateChanged { state: AutoConvertState },
     /// A swap from [`Method::Swap`] moved to `status`. `swap_id` is
     /// [`SwapOk::swap_id`], the [`PaymentSummary::id`] of the swap's Activity
