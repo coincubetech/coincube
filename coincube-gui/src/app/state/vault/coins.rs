@@ -196,11 +196,7 @@ impl CoinsPanel {
             let descriptor = wallet.inheritance_descriptor()?;
             // The estimator counts one input beyond the shared ones: the key,
             // or for a signature split an overestimate by one input.
-            coincube_core::claim_spend::estimate_ancestry_self_transfer_vbytes(
-                descriptor,
-                included.max(1),
-            )
-            .ok()
+            crate::services::split_coins::estimate_split_vbytes(descriptor, included.max(1))
         });
         Some(SplitOverlay {
             here: self.chain,

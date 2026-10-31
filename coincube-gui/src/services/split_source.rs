@@ -1,6 +1,6 @@
 //! Build a Split step-1 [`SplitSource`] from the scanned public descriptors.
 //!
-//! `coincube_core::foreign_split::SplitSource` pairs the receive and change
+//! `coincube_core::public_wallet_source::SplitSource` pairs the receive and change
 //! descriptors key by key and refuses any pair that differs in more than each
 //! key's final branch step. Some genuine exports of one wallet fail that
 //! literal comparison (#568, finding I2). This module either canonicalizes
@@ -26,7 +26,7 @@
 
 use std::fmt;
 
-use coincube_core::foreign_split::{Error as CoreError, SplitSource};
+use coincube_core::public_wallet_source::{SourceError as CoreError, SplitSource};
 
 use super::{
     foreign_scan::{Branch, ScanDescriptor},
@@ -129,7 +129,7 @@ pub fn split_source(
     SplitSource::new(external, internal).map_err(|error| match error {
         CoreError::Taproot => SourceError::Taproot,
         CoreError::UnrelatedInternal => SourceError::Unrelated,
-        _ => SourceError::Unsupported,
+        CoreError::UnsupportedDescriptor => SourceError::Unsupported,
     })
 }
 

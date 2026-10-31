@@ -1,29 +1,18 @@
 # BTCB2 split migration: chain-specific inputs
 
-Status: migration in progress. New Claim and two-step Split transactions using
-the 90-byte OP_RETURN are disabled. Existing records remain readable for
-reconciliation. The replacement input-ancestry flow is not yet live.
-
-Current acceptance checkpoint (`38ef5e59`): the pinned disposable two-chain
-harness passed 106 tests with one intentionally deselected, including the
-paired Claim and Split wizards, signed-pair recovery, staged submissions and
-headless rendering checks of the actual wizard elements. This establishes
-software fixture behavior only. The production signing gate remains closed.
-Connect's active-fork anchor must also accept RDTS-absent and RDTS-unsupported
-nodes for this ancestry flow; the companion API change is
-[`coincube-api` PR #349](https://github.com/coincubetech/coincube-api/pull/349).
-The journal has a Windows backend that pins directory components, requires
-private owner-only NTFS files, and replaces intents with write-through
-semantics; Windows crash and access-control tests remain in platform CI.
-Deployed same-database indexer recovery, a realistic authenticated Connect
-scan under its separate 90-second ancestry-search and 30-second final-collection
-deadlines (with finite shared data and request bounds), visual and accessibility
-review, physical BitBox and Ledger PSBT approval, and independent review are
-still required before enabling signing. The implementation notes below record
-incremental work; statements about a next step describe the state at that
-point, while the acceptance checks at the end govern release readiness.
-Record those checks against the exact release commit using
-[`BTCB2_ANCESTRY_ACCEPTANCE.md`](BTCB2_ANCESTRY_ACCEPTANCE.md).
+Status: superseded. This records the input-ancestry migration of the paired
+Claim and two-step Split flows. Robert's decision of 2026-10-29 (company-brain
+`decisions/2026-10-29-coincube-desktop-btcb2-split-protection-in-coin-control.md`)
+replaced both with one-sided **Split coins** in Coin control
+(`coincube-gui/src/services/split_coins.rs`). S7a removed the Claim wizard, the
+foreign-wallet Split and the launch gate from the GUI; S7b removed the paired
+engine, the OP_RETURN poison, `coincubed`'s `poison_broadcast`, the Claim
+observation assessment and the regtest bridges and consensus modules that
+drove them. What this document says about the input-ancestry engine
+(`coincube_core::claim_ancestry`, its proofs and bounds) still describes code
+Split coins uses; what it says about Claim and Split intents, paired
+signing, staged submission, the 6-confirmation gate between sides and the
+acceptance gate describes removed code and is kept as history only.
 
 ## Decision and safety invariant
 

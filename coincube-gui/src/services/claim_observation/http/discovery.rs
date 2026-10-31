@@ -1,12 +1,7 @@
 //! Bounded network discovery, retaining raw evidence without authorizing a spend.
 use super::*;
-mod binding;
-mod collect;
 pub(crate) mod diagnostics;
-mod preferred;
 mod prune;
-mod sweep;
-pub use binding::AncestryContext;
 use coincube_core::{
     claim_ancestry::{
         self,
@@ -14,13 +9,10 @@ use coincube_core::{
     },
     miniscript::bitcoin::OutPoint,
 };
-pub use collect::CollectedAncestry;
-pub use preferred::MAX_ANCESTRY_CANDIDATES;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
-pub use sweep::CollectedAncestrySweep;
 
 // A pair with several shared Vault coins rechecks each coin on both chains in
 // addition to the two funding paths. Keep a finite cap alongside the shared
@@ -68,31 +60,9 @@ pub enum DiscoveryError {
     Structural(claim_ancestry::Error),
     Observation(FailureKind),
 }
-/// Display-only search diagnostics. Even PathFound is not a paired proof or
-/// permission to sign. A missing result must never imply the other chain passed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum FundingProofStatus {
-    /// No final chain diagnostic is retained for this attempt. Work may be
-    /// unattempted, reset or interrupted; this never means verification passed.
-    #[default]
-    Pending,
-    /// One candidate has qualifying ancestry, while ownership, current wallet
-    /// state and the complete paired review may still require verification.
-    /// The current paired review supplies completed-verification UI separately.
-    PathFound,
-    /// The bounded candidate search returned no qualifying path. This alone is
-    /// not a general proof of deposit unsuitability or advice to send more funds.
-    NoQualifyingAncestry,
-    /// A typed refusal from this chain's search or known validation step.
-    /// Its cause can be incomplete evidence or a positive incompatibility;
-    /// callers must not treat every refusal as proof of unsuitable funds.
-    Failed(DiscoveryError),
-}
 
 #[derive(Debug)]
 pub struct DiscoveredAncestry {
-    provider: String,
-    live_generation: watch::Receiver<u64>,
     links: Vec<OwnedLink>,
     pair: CoinbasePair,
     observed_at: i64,
@@ -245,8 +215,6 @@ impl HttpObservationSource {
             return Err(DiscoveryError::Observation(FailureKind::Cancelled));
         }
         Ok(DiscoveredAncestry {
-            provider: snapshot.provider_identity(),
-            live_generation: snapshot.generation.clone(),
             links: path.links().to_vec(),
             pair,
             observed_at,
@@ -344,8 +312,6 @@ impl HttpObservationSource {
                             Err(error) => return Err(observation(error)),
                             Ok((pair, observed_at)) => {
                                 return Ok(Some(DiscoveredAncestry {
-                                    provider: snapshot.provider_identity(),
-                                    live_generation: snapshot.generation.clone(),
                                     links: candidate.links,
                                     pair,
                                     observed_at,
@@ -402,7 +368,6 @@ mod tests {
     fn policy() -> Policy {
         Policy {
             max_observation_age_seconds: 60,
-            expiry_margin_seconds: 600,
         }
     }
 
@@ -1010,7 +975,6 @@ mod tests {
                     OutPoint::new(selected.compute_txid(), 0),
                     Policy {
                         max_observation_age_seconds: 60,
-                        expiry_margin_seconds: 600,
                     },
                 )
                 .await;

@@ -772,7 +772,8 @@ impl DaemonControl {
     }
 
     // Commit a successfully built change output only if its peeked index is still
-    // next. Claim uses `reserve_change` directly; both operations serialize through
+    // next. `reserve_change` (written for the removed Claim flow, and without a
+    // production caller since) allocates directly; both serialize through
     // the same database writer lock, so a false result requires rebuilding with a
     // newly peeked address and never permits index reuse.
     fn commit_change_if_next(&self, change: &Option<AddrInfo>) -> Result<bool, CommandError> {

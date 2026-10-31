@@ -72,8 +72,8 @@ scheduled at a chosen height, a BLAKE2b-aware Esplora indexer
 pre-fork history (node B is started on a copy of node A's datadir at
 `activation_height - 1`) and are never peered, so they diverge at the height.
 The fixture funds a 2-of-3 Vault with a recovery path before the fork and creates
-one post-fork Bitcoin-only coin (spent from a post-fork coinbase) for the input
-poison. See `tests/test_framework/btcb2.py`.
+one post-fork Bitcoin-only coin (spent from a post-fork coinbase), a coin that
+exists on one chain only (what Split coins calls a split key). See `tests/test_framework/btcb2.py`.
 
 All ordinary regtest nodes pass `-listenonion=0`: the suite does not test Tor,
 and Knots' default automatic Tor launcher can enter the external descriptor
@@ -91,88 +91,21 @@ export ELECTRS_BLAKE2B_PATH=$(tests/tools/fetch_electrs_blake2b.sh)
 pytest tests/test_btcb2_harness.py -vvv
 ```
 
-The production Claim construction/finalization regression uses the same binaries
-and a test-only Rust bridge:
+`tests/test_btcb2_unified_sighash.py` needs no node: it pins a Python port of
+Bitcoin Knots' unified sighash (`ALL|UNIFIED`, script types 0 and 1) to the
+upstream vectors in `coincube-core/tests/data/unified_sighash.json`,
+independently of the Rust port in `coincube-core/src/unified_sighash.rs`.
 
-```sh
-cargo build --release --package coincube-core --example claim_regtest_vectors
-export CLAIM_REGTEST_TOOL_PATH="$PWD/target/release/examples/claim_regtest_vectors"
-pytest tests/test_btcb2_claim_consensus.py tests/test_btcb2_claim_ancestry_consensus.py tests/test_btcb2_claim_pair_consensus.py -vvv --junitxml=claim-consensus.xml
-```
-
-The ancestry case funds an owned 2-of-3 script with a Bitcoin coinbase, checks
-the 99/100-confirmation maturity boundary, fork mempool and block rejection,
-and a fork sweep excluding that input. It tests construction and consensus;
-it does not admit regtest as mainnet historical proof or exercise automatic
-input preference and coordinator authorization.
-
-The paired ancestry case adds independent post-fork coinbase inputs on Bitcoin
-and BTCB2, builds ordinary `S+B` and `S+F` PSBTs from the production core,
-signs both with disposable keys, checks each signed transaction is accepted
-only on its intended node, and broadcasts BTCB2 first to exercise the reverse
-step order. Separate cases spend only one chain's funding input after the
-pair is signed and check that the saved transaction on that chain is then
-rejected without consuming the opposite chain's funding input. These cases
-still do not validate GUI admission or physical hardware approval.
-
-The Claim GUI harness also calls the actual paired HTTP funding collector
-through the disposable Connect/Esplora bridge. It proves separate mature
-post-fork coinbases on both chains, refuses a stale outspend response, then
-spends either chain's funding output and requires a fresh paired collection
-to refuse after both indexers catch up.
-The funding-collector case does not open the signing UI or authorize a
-broadcast. The separate paired-wizard case below exercises synthetic signing
-through the panel without opening a physical device.
-
-The ordinary foreign Split pair has a separate `test_split_ancestry_pair_*`
-path in `test_btcb2_split_consensus.py`. Its offline vectors cover all five
-supported source descriptors; its pinned two-node case signs `S+B` and `S+F`,
-accepts each only on its own chain and repeats the opposite-chain rejection
-after shallow and six-block reorgs. The older step-one, step-two and unified
-tests below exercise historical or alternative constructions; they do not
-describe the production ancestry split or open its acceptance gate.
-
-Split steps 1 and 2 (#568) have their own test-only bridge:
-
-```sh
-cargo build --release --package coincube-core --example split_regtest_vectors
-export SPLIT_REGTEST_TOOL_PATH="$PWD/target/release/examples/split_regtest_vectors"
-pytest tests/test_btcb2_split_consensus.py -vvv
-```
-
-It funds one foreign wallet per supported shape (`pkh`, `sh(wpkh)`, `wpkh`,
-2-of-3 `wsh(multi)` and `wsh(sortedmulti)`) before the fork, runs only the two
-nodes, and checks: acceptance on Bitcoin with a signed vsize within the
-construction's estimate, mempool and block rejection on BTCB2, implicit and
-explicit `SIGHASH_ALL` giving identical transactions, and an `invalidateblock`
-reorg that returns the spent outpoints to Bitcoin's UTXO set. The step-1 poison's
-chain byte, fork marker and outpoint commitment are parsed independently of the
-Rust decoder. After step 1 has six confirmations on Bitcoin, step 2 spends exactly
-the claimed outpoints to a fresh P2WSH target (P2TR for `wpkh`): accepted by the
-BTCB2 mempool within the construction's vsize estimate and mined there, and
-refused by Bitcoin's mempool (`missing-inputs`) and in a candidate block. The
-bridge refuses an unclaimed or missing coin, a foreign-wallet or non-Vault target,
-a future locktime, step 1's signatures and any hash type but `SIGHASH_ALL`; the
-signed bytes (and the bytes BTCB2 mined, compared whole, witness included)
-verify as a recorded step 2 rebuilt at a later BTCB2 tip, as a restart rebuilds
-it, and a tampered copy does not. A replay test pins, at node level, the
-exposure the post-submission reorg design must close: once step 1's Bitcoin
-block is invalidated, step 2 is refused by Bitcoin's mempool only as step 1's
-conflict and a block carrying it is accepted, until the chain is restored. Its
-offline cases need only the bridge. The unified `ALL|UNIFIED` fallback (#568 B4b)
-is not built yet and is not covered.
-
-Set the bridge path to your Cargo target directory when using `CARGO_TARGET_DIR`.
-This test spends the fixture's original coins, so it has its own module-scoped
-harness. It checks the production OP_RETURN self-transfer and legacy 2-of-3 fork
-sweep against both real nodes, pins the fork block rejection `bad-txns-vout-script-toolarge` and Bitcoin
-`missing-inputs` response in JUnit, and
-invalidates Bitcoin confirmation while the fork sweep remains confirmed. The
-legacy node uses `datacarriersize=100`, matching the managed-node Claim policy;
-the fork node does not receive that override. The bridge never loads keys or
-contacts a network: disposable fixture keys sign its PSBTs in Python. This is
-consensus integration coverage, not GUI, hardware, input-poison, or restart
-acceptance. The labelled CI workflow builds the bridge and runs this test too.
+The Claim and foreign-Split consensus modules (`test_btcb2_claim_consensus.py`,
+`test_btcb2_claim_ancestry_consensus.py`, `test_btcb2_claim_pair_consensus.py`,
+`test_btcb2_split_consensus.py`) and their Rust bridges
+(`claim_regtest_vectors`, `split_regtest_vectors`) were removed with those
+flows in S7b; Split coins replaces them (company-brain decision
+`2026-10-29-coincube-desktop-btcb2-split-protection-in-coin-control.md`).
+`tests/test_btcb2_split_coins_consensus.py` checks Split coins' splits against
+both nodes: a split-key split on Bitcoin (including after a reorg), reusing a
+split output as a key, a coinbase key's maturity, and a Blake2b split signed
+`ALL|UNIFIED`. Its tests share one harness and run in file order.
 
 `fetch_knots.sh` downloads a release for the host platform and refuses to extract
 it unless its checksum is listed in the release `SHA256SUMS` *and*

@@ -1,21 +1,21 @@
 # Claim observation boundaries
 
-`services::claim_observation` collects supplied chain observations and invokes
-`coincube_core::claim::assess` for legacy intent evaluation. Its HTTP adapter
-also powers the production two-deposit status checks and separate typed
-Bitcoin/BTCB2 ancestry collectors. These reads perform no wallet writes,
-signing or broadcast.
-`ObservationsEligibleForPreflight` remains an observation assessment, never
-spend permission or a persistent Split label.
+> **Status (S7b):** the legacy Claim assessment (`coincube_core::claim::assess`,
+> `ClaimPlan`, the OP_RETURN poison checks, RDTS expiry margin and the
+> confirmation gate between the two sides) and the plan-bound collectors
+> (`collect`, `collect_sweep`, `collect_fork_sweep`, the plan-bound ancestry
+> collection and the Claim funding-candidate search) have been removed. What
+> remains is what Split coins and the Chains column use: fresh transaction
+> and depth reads and the typed Bitcoin/BTCB2 ancestry discovery and
+> requalification described below. References below to Claim deposits,
+> paired review and the deposit-check screen are historical.
 
-The caller supplies an actual `ClaimPlan`, positive maximum-age/expiry-margin
-policy and a collection budget up to 30 seconds. Exact mainnet/mainnet or
-testnet4/testnet4 pairs and transaction/claimed-prevout structure are validated
-before I/O for the generic legacy assessment. Input ancestry uses separate
-typed collectors and validators: each funding input must trace through a
-bounded, confirmed path to a canonical coinbase that differs between the two
-chains at the dependency root. A post-fork timestamp or missing transaction
-is never a proof of chain exclusivity.
+`services::claim_observation` reads fresh chain observations through its
+HTTP adapter. These reads perform no wallet writes, signing or broadcast.
+Input ancestry uses typed collectors and validators: each funding input must
+trace through a bounded, confirmed path to a canonical coinbase that differs
+between the two chains at the dependency root. A post-fork timestamp or
+missing transaction is never a proof of chain exclusivity.
 
 Automatic Claim ancestry discovery may inspect up to 512 distinct transactions,
 4,096 distinct dependency edges and 4,000,000 bytes of raw graph data per candidate.
