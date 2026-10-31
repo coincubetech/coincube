@@ -12,9 +12,12 @@ use coincube_ui::component::amount::{format_f64_as_string, format_u64_as_string}
 use coincube_ui::component::{button, card, text};
 use coincube_ui::{color, icon::*, theme};
 
+/// `liquid_shown` is the Liquid gate ([`crate::app::features::LiquidGate::show`]):
+/// while it is off, a sell checkout offers no Liquid fulfilment.
 pub fn form<'a>(
     state: &'a MavapayState,
     mask_amounts: bool,
+    liquid_shown: bool,
 ) -> iced::Element<'a, ViewMessage, theme::Theme> {
     // The eye covers saved orders and completed checkout. Entry and an
     // unfulfilled checkout show amounts for active payment review.
@@ -25,7 +28,7 @@ pub fn form<'a>(
     {
         MavapayFlowStep::BuyInputFrom { .. } => buy_input_form(state),
         MavapayFlowStep::SellInputForm { .. } => sell_input_form(state),
-        MavapayFlowStep::Checkout { .. } => checkout_form(state, mask_amounts),
+        MavapayFlowStep::Checkout { .. } => checkout_form(state, mask_amounts, liquid_shown),
         MavapayFlowStep::History { .. } => history_view(state, mask_amounts),
         MavapayFlowStep::OrderDetail { .. } => order_detail_view(state, mask_amounts),
     };
@@ -1148,6 +1151,7 @@ fn order_detail_view<'a>(
 fn checkout_form<'a>(
     state: &'a MavapayState,
     mask_amounts: bool,
+    liquid_shown: bool,
 ) -> widget::Column<'a, BuySellMessage, theme::Theme> {
     let Some(MavapayFlowStep::Checkout {
         fulfilled_order,
@@ -1185,7 +1189,9 @@ fn checkout_form<'a>(
                                     quote.invoice.as_str(),
                                     data
                                 )),
-                            match can_fulfil_sell_order {
+                            // Only while Liquid is shown: the deposit QR
+                            // above is how a sell order is paid otherwise.
+                            liquid_shown.then(|| match can_fulfil_sell_order {
                                 true => button::primary(
                                     Some(bitcoin_icon()),
                                     "Fulfil Order from Liquid Wallet"
@@ -1197,7 +1203,7 @@ fn checkout_form<'a>(
                                     Some(restore_icon()),
                                     "Liquid Balance insufficient. Manually fulfill invoice"
                                 ),
-                            }
+                            }),
                         ]
                         .spacing(10)
                     }
@@ -1663,7 +1669,7 @@ mod tests {
             },
             "NG",
         );
-        let _ = form(&buy, false);
+        let _ = form(&buy, false, false);
 
         let mut buy_without_price = state(
             BuyOrSell::Buy,
@@ -1675,7 +1681,7 @@ mod tests {
             "NG",
         );
         buy_without_price.btc_price = None;
-        let _ = form(&buy_without_price, false);
+        let _ = form(&buy_without_price, false, false);
 
         let ngn = state(
             BuyOrSell::Sell,
@@ -1695,7 +1701,7 @@ mod tests {
             },
             "NG",
         );
-        let _ = form(&ngn, false);
+        let _ = form(&ngn, false, false);
 
         let zar = state(
             BuyOrSell::Sell,
@@ -1714,7 +1720,7 @@ mod tests {
             },
             "ZA",
         );
-        let _ = form(&zar, false);
+        let _ = form(&zar, false, false);
 
         let kes = state(
             BuyOrSell::Sell,
@@ -1729,7 +1735,7 @@ mod tests {
             },
             "KE",
         );
-        let _ = form(&kes, false);
+        let _ = form(&kes, false, false);
 
         let invalid_ngn = state(
             BuyOrSell::Sell,
@@ -1746,7 +1752,7 @@ mod tests {
             },
             "NG",
         );
-        let _ = form(&invalid_ngn, false);
+        let _ = form(&invalid_ngn, false, false);
     }
 
     #[test]
@@ -1768,7 +1774,7 @@ mod tests {
             },
             "NG",
         );
-        let _ = form(&checkout, false);
+        let _ = form(&checkout, false, false);
 
         let fulfilled = state(
             BuyOrSell::Buy,
@@ -1787,7 +1793,7 @@ mod tests {
             },
             "NG",
         );
-        let _ = form(&fulfilled, false);
+        let _ = form(&fulfilled, false, false);
 
         for step in [
             MavapayFlowStep::History {
@@ -1812,7 +1818,7 @@ mod tests {
             },
         ] {
             let history = state(BuyOrSell::Buy, step, "NG");
-            let _ = form(&history, false);
+            let _ = form(&history, false, false);
         }
     }
 
@@ -1859,14 +1865,14 @@ mod tests {
             },
         ] {
             let detail = state(BuyOrSell::Buy, step, "NG");
-            let _ = form(&detail, false);
+            let _ = form(&detail, false, false);
         }
     }
 
     fn inspect(state: &MavapayState, mask_amounts: bool) -> capture::Inspection {
         capture::inspect(
             "mavapay-passive-order-privacy",
-            form(state, mask_amounts),
+            form(state, mask_amounts, false),
             (1024, 768),
             "dark",
             theme::Theme::dark(),
@@ -1940,6 +1946,60 @@ mod tests {
             let shown = inspect(&detail, false);
             assert!(shown.contains("123.45 NGN"));
             assert!(shown.contains("2.50 NGN") || shown.contains("0.00000022 BTC"));
+        }
+    }
+
+    /// Tenshu v175 hides Liquid, so a sell checkout pays only by its deposit
+    /// QR, even for an account with the grant and a Liquid wallet on disk.
+    #[test]
+    fn sell_checkout_offers_no_liquid_fulfilment_while_liquid_is_hidden() {
+        let quote = quote(
+            "quote-sell",
+            MavapayUnitCurrency::BitcoinSatoshi,
+            MavapayUnitCurrency::NigerianNairaKobo,
+            MavapayPaymentMethod::Lightning,
+        );
+        // A balance that covers the order and one that doesn't: each would
+        // show its own Liquid line if Liquid were shown.
+        for liquid_balance in [Some(quote.total_amount_in_source_currency), Some(0)] {
+            let checkout = state(
+                BuyOrSell::Sell,
+                MavapayFlowStep::Checkout {
+                    quote: quote.clone(),
+                    fulfilled_order: None,
+                    invoice_qr_code_data: Some(
+                        iced::widget::qr_code::Data::new(quote.invoice.as_bytes()).unwrap(),
+                    ),
+                    liquid_balance,
+                    fulfilling_ln_invoice: false,
+                    stream_order_id: None,
+                },
+                "NG",
+            );
+            let gate = crate::app::features::LiquidGate {
+                server_enabled: true,
+                local_state_exists: true,
+            };
+            let hidden = capture::inspect(
+                "mavapay-sell-checkout-liquid-hidden",
+                form(&checkout, false, gate.show()),
+                (1024, 768),
+                "dark",
+                theme::Theme::dark(),
+            );
+            assert!(hidden.contains("Deposit into the following address to proceed"));
+            assert!(!hidden.contains("Liquid"), "{:?}", liquid_balance);
+
+            // The same checkout with Liquid shown still offers it, so the
+            // absence above is the gate's doing.
+            let shown = capture::inspect(
+                "mavapay-sell-checkout-liquid-shown",
+                form(&checkout, false, true),
+                (1024, 768),
+                "dark",
+                theme::Theme::dark(),
+            );
+            assert!(shown.contains("Liquid"), "{:?}", liquid_balance);
         }
     }
 

@@ -440,6 +440,13 @@ pub struct GlobalHome {
     other_locked_again: bool,
     pending_vault_incoming: Option<PendingTransfer>,
     pending_vault_incoming_swap_id: Option<String>,
+    /// Whether the Liquid wallet is shown ([`LiquidGate::show`]), kept in
+    /// step by the App because `reload` has no cache. While it is off, a
+    /// Liquid → Vault transfer persisted by an earlier session is neither
+    /// restored nor shown; its settings entry stays as it is.
+    ///
+    /// [`LiquidGate::show`]: crate::app::features::LiquidGate::show
+    liquid_shown: bool,
     /// Session-level counter for non-swap inbound Vault transfers (SparkToVault).
     /// Mirrors `pending_liquid_receive_sats` but for the Vault card. Bumped on
     /// `TransferBroadcast` with a Vault destination and decremented on `Tick`
@@ -501,6 +508,12 @@ pub struct GlobalHome {
 }
 
 impl GlobalHome {
+    /// Follow the Liquid gate. Hiding Liquid also hides a restored
+    /// Liquid → Vault transfer at once (the view reads this flag).
+    pub fn set_liquid_shown(&mut self, shown: bool) {
+        self.liquid_shown = shown;
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         wallet: Arc<Wallet>,
@@ -572,6 +585,7 @@ impl GlobalHome {
             other_address: None,
             other_locked_again: false,
             pending_vault_incoming: None,
+            liquid_shown: false,
             pending_vault_incoming_swap_id: None,
             pending_vault_receive_sats: 0,
             pending_vault_receive_baseline_sats: 0,
@@ -662,6 +676,7 @@ impl GlobalHome {
             other_address: None,
             other_locked_again: false,
             pending_vault_incoming: None,
+            liquid_shown: false,
             pending_vault_incoming_swap_id: None,
             pending_vault_receive_sats: 0,
             pending_vault_receive_baseline_sats: 0,
@@ -819,7 +834,7 @@ impl State for GlobalHome {
             pending_usdt_receive_sats: self.pending_usdt_receive_sats,
             vault_pending_send_sats,
             vault_pending_receive_sats,
-            pending_vault_incoming: self.pending_vault_incoming,
+            pending_vault_incoming: self.pending_vault_incoming.filter(|_| self.liquid_shown),
             btc_usd_price: cache.btc_usd_price,
             cube_name: &cache.cube_name,
             vault_alias: self
@@ -2866,6 +2881,12 @@ impl State for GlobalHome {
                         // information the user had and disagree with the total
                         // right above it. A transient blip keeps the number.
                         self.liquid_balance_error = !had_a_balance;
+                        // A fetch started before Liquid was hidden can still
+                        // fail late. Its wallet isn't on screen, so neither is
+                        // the error.
+                        if !self.liquid_shown {
+                            return Task::none();
+                        }
                         let (title, guidance) = if had_a_balance {
                             (
                                 "Couldn't refresh your Liquid balance",
@@ -3009,6 +3030,9 @@ impl State for GlobalHome {
                                 "Liquid to Spark transfer failed. Please retry.".to_string(),
                             )));
                         }
+                        Task::none()
+                    }
+                    HomeMessage::PendingTransferRestored { .. } if !self.liquid_shown => {
                         Task::none()
                     }
                     HomeMessage::PendingTransferRestored {
@@ -3554,10 +3578,14 @@ impl State for GlobalHome {
     ) -> Task<Message> {
         self.wallet = wallet;
         let mut tasks = Vec::new();
-        if matches!(
-            self.network,
-            crate::chain::ChainId::Bitcoin | crate::chain::ChainId::Regtest
-        ) {
+        // Hidden Liquid settles as a network with no Liquid backend does:
+        // nothing is fetched, so a late failure can't raise an error.
+        if self.liquid_shown
+            && matches!(
+                self.network,
+                crate::chain::ChainId::Bitcoin | crate::chain::ChainId::Regtest
+            )
+        {
             tasks.extend([
                 self.load_liquid_balance(),
                 self.load_usdt_balance(),
@@ -3960,10 +3988,13 @@ impl GlobalHome {
     fn load_liquid_balance(&self) -> Task<Message> {
         // Networks without a Breez backend (Signet/Testnet) only ever return
         // `NetworkNotSupported` here — skip the RPC entirely to keep logs clean.
-        if !self
-            .breez_client
-            .as_ref()
-            .is_some_and(|client| client.is_supported())
+        // Hidden Liquid fetches nothing either (`RefreshLiquidBalance` still
+        // arrives from the SDK's events).
+        if !self.liquid_shown
+            || !self
+                .breez_client
+                .as_ref()
+                .is_some_and(|client| client.is_supported())
         {
             return Task::none();
         }
@@ -3988,10 +4019,11 @@ impl GlobalHome {
 
     fn load_pending_sends(&self) -> Task<Message> {
         use crate::app::breez_liquid::assets::{asset_kind_for_id, AssetKind};
-        if !self
-            .breez_client
-            .as_ref()
-            .is_some_and(|client| client.is_supported())
+        if !self.liquid_shown
+            || !self
+                .breez_client
+                .as_ref()
+                .is_some_and(|client| client.is_supported())
         {
             return Task::none();
         }
@@ -4072,10 +4104,11 @@ impl GlobalHome {
 
     fn load_usdt_balance(&self) -> Task<Message> {
         use crate::app::breez_liquid::assets::{asset_kind_for_id, AssetKind};
-        if !self
-            .breez_client
-            .as_ref()
-            .is_some_and(|client| client.is_supported())
+        if !self.liquid_shown
+            || !self
+                .breez_client
+                .as_ref()
+                .is_some_and(|client| client.is_supported())
         {
             return Task::none();
         }
@@ -4164,6 +4197,11 @@ impl GlobalHome {
     }
 
     fn restore_pending_liquid_to_vault_transfer(&self) -> Task<Message> {
+        // Hidden Liquid restores nothing: no banner, and the persisted entry
+        // is left for a build that shows Liquid again.
+        if !self.liquid_shown {
+            return Task::none();
+        }
         // Same guard as the balance/pending loaders above: without a connected
         // SDK (`features::liquid` is mainnet-only, so testnet/signet/regtest all
         // get a disconnected client) `list_payments` can only fail. The failure
@@ -4612,6 +4650,111 @@ mod tests {
         assert!(total_balance_pending(BalanceReadiness {
             vault_pending: true,
             ..all_present
+        }));
+    }
+
+    /// Every message a task produces, in order.
+    fn outputs(task: Task<Message>) -> Vec<Message> {
+        use iced_runtime::futures::futures::StreamExt;
+        let Some(stream) = iced_runtime::task::into_stream(task) else {
+            return Vec::new();
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(
+                stream
+                    .filter_map(|action| async move {
+                        match action {
+                            iced_runtime::Action::Output(message) => Some(message),
+                            _ => None,
+                        }
+                    })
+                    .collect(),
+            )
+    }
+
+    /// #968 review finding 1: Tenshu v175 hides Liquid (master §3 decision
+    /// 2), so `reload` takes the no-Liquid-backend path: it starts no Liquid
+    /// fetch and settles both balances so nothing waits on them. The loaders'
+    /// own `liquid_shown` checks (`RefreshLiquidBalance`,
+    /// `LiquidPeginCompleted`) can't be driven here: the test client is
+    /// disconnected, so it fetches nothing either way.
+    #[test]
+    fn reload_settles_hidden_liquid_without_fetching() {
+        let mut hidden = panel();
+        hidden.set_liquid_shown(false);
+        let _ = hidden.reload(None, None);
+        assert!(hidden.liquid_balance_loaded && hidden.usdt_balance_loaded);
+
+        // Control: shown Liquid on the same network still waits for its
+        // balances, so the settling above is the gate's doing.
+        let mut shown = panel();
+        shown.set_liquid_shown(true);
+        let _ = shown.reload(None, None);
+        assert!(!shown.liquid_balance_loaded && !shown.usdt_balance_loaded);
+    }
+
+    /// A fetch that started before Liquid was hidden can fail late. While
+    /// hidden it raises no error, and still stops anything waiting on it.
+    #[test]
+    fn a_late_liquid_fetch_failure_shows_no_error_while_hidden() {
+        let fail = |home: &mut GlobalHome, msg| {
+            outputs(home.update(
+                None,
+                &Cache::default(),
+                Message::View(view::Message::Home(msg)),
+            ))
+        };
+        let mut hidden = panel();
+        hidden.set_liquid_shown(false);
+        let produced = fail(
+            &mut hidden,
+            HomeMessage::LiquidBalanceFetchFailed("blip".into()),
+        );
+        assert!(produced.is_empty());
+        assert!(fail(&mut hidden, HomeMessage::UsdtBalanceFetchFailed).is_empty());
+        assert!(hidden.liquid_balance_loaded && hidden.usdt_balance_loaded);
+
+        // Control: the same failure with Liquid shown raises the toast.
+        let mut shown = panel();
+        shown.set_liquid_shown(true);
+        let produced = fail(
+            &mut shown,
+            HomeMessage::LiquidBalanceFetchFailed("blip".into()),
+        );
+        assert!(matches!(
+            &produced[..],
+            [Message::View(view::Message::ShowError(_))]
+        ));
+    }
+
+    /// The Total Balance doesn't wait on hidden Liquid, even for an account
+    /// with the grant and a Liquid wallet on disk.
+    #[test]
+    fn the_total_does_not_wait_on_hidden_liquid() {
+        let gate = crate::app::features::LiquidGate {
+            server_enabled: true,
+            local_state_exists: true,
+        };
+        let readiness = BalanceReadiness {
+            has_spark: false,
+            spark_loaded: false,
+            has_liquid: crate::app::features::liquid_wallet_usable(
+                crate::chain::ChainId::Bitcoin,
+                gate,
+            ),
+            liquid_loaded: false,
+            usdt_loaded: false,
+            vault_pending: false,
+        };
+        assert!(!total_balance_pending(readiness));
+
+        // Control: a shown Liquid wallet that hasn't loaded holds the Total.
+        assert!(total_balance_pending(BalanceReadiness {
+            has_liquid: true,
+            ..readiness
         }));
     }
 
@@ -5536,66 +5679,46 @@ mod tests {
             assert!(home.destination_is_ready());
         }
 
+        /// Tenshu v175 hides Liquid, so neither transfer side accepts it, even
+        /// with the grant and a Liquid wallet on disk: the pair, its destination
+        /// and the request generation stay as they were. (The From choice that
+        /// swaps an existing pair is now reachable only with Spark, whose
+        /// bridge has no test double here; that code is unchanged.)
         #[test]
-        fn inline_from_selection_swaps_the_existing_destination() {
+        fn inline_selection_refuses_hidden_liquid() {
             let (mut home, _) = home_on_transfer_screen();
             home.transfer_from = Some(WalletKind::Vault);
             home.transfer_to = Some(WalletKind::Liquid);
-            let old_generation = home.transfer_request_generation;
+            let generation = home.transfer_request_generation;
             assert!(home.destination_is_ready());
             let cache = Cache {
                 has_vault: true,
                 liquid_gate: crate::app::features::LiquidGate {
-                    server_enabled: false,
+                    server_enabled: true,
                     local_state_exists: true,
                 },
                 ..Cache::default()
             };
-            drain(home.update(
-                None,
-                &cache,
-                Message::View(view::Message::Home(HomeMessage::SelectTransferWallet(
-                    PickerSide::From,
-                    WalletKind::Liquid,
-                ))),
-            ));
-            assert_eq!(home.transfer_from, Some(WalletKind::Liquid));
-            assert_eq!(home.transfer_to, Some(WalletKind::Vault));
-            assert!(home.transfer_request_generation > old_generation);
-            assert!(home.receive_address_info.is_none());
-            assert!(!home.destination_is_ready());
-            assert_eq!(
-                home.transfer_direction,
-                Some(TransferDirection::LiquidToVault)
-            );
-            assert_eq!(home.entered_amount.value, "100000");
-            assert!(!home.entered_amount.valid);
-            assert_eq!(
-                home.entered_amount.warning,
-                Some("Amount exceeds Liquid balance")
-            );
-            let unchanged_generation = home.transfer_request_generation;
-            drain(home.update(
-                None,
-                &cache,
-                Message::View(view::Message::Home(HomeMessage::SelectTransferWallet(
-                    PickerSide::From,
-                    WalletKind::Liquid,
-                ))),
-            ));
-            assert_eq!(home.transfer_request_generation, unchanged_generation);
-            assert_eq!(home.transfer_from, Some(WalletKind::Liquid));
-            assert_eq!(home.transfer_to, Some(WalletKind::Vault));
-            drain(home.update(
-                None,
-                &cache,
-                Message::View(view::Message::Home(HomeMessage::SelectTransferWallet(
-                    PickerSide::To,
-                    WalletKind::Liquid,
-                ))),
-            ));
-            assert_eq!(home.transfer_to, Some(WalletKind::Vault));
-            assert_eq!(home.transfer_request_generation, unchanged_generation);
+            for side in [PickerSide::From, PickerSide::To] {
+                drain(home.update(
+                    None,
+                    &cache,
+                    Message::View(view::Message::Home(HomeMessage::SelectTransferWallet(
+                        side,
+                        WalletKind::Liquid,
+                    ))),
+                ));
+                assert_eq!(home.transfer_from, Some(WalletKind::Vault));
+                assert_eq!(home.transfer_to, Some(WalletKind::Liquid));
+                assert_eq!(
+                    home.transfer_direction,
+                    Some(TransferDirection::VaultToLiquid)
+                );
+                assert_eq!(home.transfer_request_generation, generation);
+                assert!(home.destination_is_ready());
+                assert_eq!(home.entered_amount.value, "100000");
+                assert!(home.entered_amount.valid);
+            }
         }
 
         #[test]
@@ -5833,6 +5956,72 @@ mod tests {
                 !alone.contains("Review and confirm"),
                 "a modal overlay alone"
             );
+        }
+
+        /// Tenshu v175 hides Liquid, so a Liquid → Vault transfer persisted by
+        /// an earlier session shows no "Pending deposit" on Overview, even for
+        /// an account with the grant and a Liquid wallet on disk.
+        #[test]
+        fn a_restored_liquid_transfer_stays_off_overview_while_liquid_is_hidden() {
+            use crate::app::view::shared::landing::capture;
+            let wallet = Arc::new(Wallet::new(CoincubeDescriptor::from_str(DESC).unwrap()));
+            let network = coincube_core::miniscript::bitcoin::Network::Bitcoin;
+            let home = || {
+                GlobalHome::new(
+                    wallet.clone(),
+                    Arc::new(LiquidBackend::new(Arc::new(
+                        crate::app::breez_liquid::BreezClient::disconnected(network),
+                    ))),
+                    None,
+                    CoincubeDirectory::new(std::path::PathBuf::from("/nonexistent")),
+                    crate::chain::ChainId::Bitcoin,
+                    "cube".to_string(),
+                    false,
+                )
+            };
+            let gate = crate::app::features::LiquidGate {
+                server_enabled: true,
+                local_state_exists: true,
+            };
+            let cache = Cache {
+                has_vault: true,
+                liquid_gate: gate,
+                daemon_cache: crate::app::cache::DaemonCache {
+                    blockheight: 900_000,
+                    ..Default::default()
+                },
+                ..Cache::default()
+            };
+            let menu = Menu::Cube(crate::app::menu::CubeSubMenu::Overview);
+            let restored = || {
+                Message::View(view::Message::Home(HomeMessage::PendingTransferRestored {
+                    amount_sat: 250_000,
+                    stage: TransferStage::SwappingLbtcToBtc,
+                    swap_id: "synthetic-swap".to_string(),
+                }))
+            };
+            let overview = |home: &GlobalHome| {
+                capture::inspect(
+                    "overview-restored-liquid-transfer",
+                    home.view(&menu, &cache),
+                    (1440, 900),
+                    "dark",
+                    coincube_ui::theme::Theme::dark(),
+                )
+            };
+
+            let mut hidden = home();
+            hidden.set_liquid_shown(gate.show());
+            let _ = hidden.update(None, &cache, restored());
+            assert!(hidden.pending_vault_incoming.is_none());
+            assert!(!overview(&hidden).contains("Pending deposit"));
+
+            // The same restore with Liquid shown puts the card on the Vault,
+            // so its absence above is the gate's doing.
+            let mut shown = home();
+            shown.set_liquid_shown(true);
+            let _ = shown.update(None, &cache, restored());
+            assert!(overview(&shown).contains("Pending deposit"));
         }
     }
 }

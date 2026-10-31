@@ -2418,6 +2418,9 @@ mod tests {
                         ..Scenario::valid_send()
                     };
                     let mut harness = Harness::new(compose(&fixture, &scenario), outer);
+                    // Arrive as a keyboard user does: only keyboard
+                    // navigation paints the ring.
+                    harness.key(keyboard::key::Named::Tab, false, true);
                     harness.focus(preset(focused));
                     assert_eq!(harness.focused_id(), Some(preset(focused)), "{}", context);
                     let probe = harness.probe();

@@ -153,6 +153,15 @@ struct Panels {
 }
 
 impl Panels {
+    /// Hand the Liquid gate to the panels that load Liquid data from a
+    /// `reload`, which gets no cache: Activity and the Cube home. Called
+    /// wherever the App sets [`Cache::liquid_gate`].
+    fn show_liquid(&mut self, gate: crate::app::features::LiquidGate) {
+        let shown = gate.show();
+        self.activity.set_liquid_shown(shown);
+        self.global_home.set_liquid_shown(shown);
+    }
+
     /// Read the cube's fiat currency preference from the settings file.
     fn default_fiat_currency(
         datadir: &CoincubeDirectory,
@@ -3339,6 +3348,7 @@ impl App {
         cache.fiat_chain = cube_settings.network;
         cache.has_vault = wallet.supports_inheritance();
         cache.has_imported_bitcoin = wallet.is_imported();
+        cache.wallet_names = cache::WalletNames::new(&cube_settings, Some(&wallet));
         if cache.fiat_chain.is_blake2b() {
             cache.clear_btcb2_fiat();
         }
@@ -3502,6 +3512,7 @@ impl App {
                 data_dir.path(),
                 cache_with_vault.network,
             );
+        panels.show_liquid(cache_with_vault.liquid_gate);
         cache_with_vault.connect_tokens = connect_auth_arc.clone();
         cache_with_vault.connect_email = connect_email.clone();
         // A restored on-disk session (or a threaded remote-backend one) means
@@ -3642,6 +3653,7 @@ impl App {
                 display_mode
             },
             cube_name: cube_settings.name.clone(),
+            wallet_names: cache::WalletNames::new(&cube_settings, None),
             cube_connect_owner: cube_settings.connect_owner.clone(),
             cube_owned_by_other_account: false,
             current_cube_backed_up: cube_settings.backed_up,
@@ -3702,6 +3714,7 @@ impl App {
         // hide the rail.
         cache.liquid_gate.local_state_exists =
             crate::app::breez_liquid::local_state_exists(datadir.path(), network);
+        panels.show_liquid(cache.liquid_gate);
         cache.p2p_test_coordinator = panels
             .p2p
             .as_ref()
@@ -6001,6 +6014,14 @@ impl App {
         // Connect" and "Sign with Connect" — never see a stale value after
         // a launch-time session restore.
         self.cache.connect_authenticated = self.panels.connect.account.is_authenticated();
+
+        // The side panel's wallet names follow the Cube settings and the
+        // loaded Vault, whichever message changed them (a Vault created or
+        // renamed mid-session, an imported wallet adopted, a settings reload).
+        self.cache.wallet_names =
+            cache::WalletNames::new(&self.cube_settings, self.wallet.as_deref());
+        // The Connect grant (one gate input) can change on any message.
+        self.panels.show_liquid(self.cache.liquid_gate);
 
         // The Kit fingerprint must include the imported wallet's durable
         // address-allocation state. A Cube seed cannot stand in for its
@@ -9643,8 +9664,12 @@ impl App {
                         return Task::batch(tasks);
                     }
                     SdkEvent::PaymentSucceeded { details } => {
-                        // Show global celebration for incoming payments
-                        if matches!(details.payment_type, PaymentType::Receive) {
+                        // Show global celebration for incoming payments. Hidden
+                        // Liquid celebrates nothing: the amount appears in no
+                        // balance or row (Tenshu v175 master §3 decision 2).
+                        if matches!(details.payment_type, PaymentType::Receive)
+                            && self.cache.liquid_gate.show()
+                        {
                             use coincube_ui::component::amount::DisplayAmount;
                             let usdt_id =
                                 crate::app::breez_liquid::assets::usdt_asset_id(self.cache.network);
@@ -9812,8 +9837,10 @@ impl App {
                         // so without this toast the wait between PaymentWaitingConfirmation
                         // and PaymentSucceeded looks like nothing is happening.
                         // Breez fires this event multiple times for the same swap, so
-                        // dedupe by tx_id to avoid stacking duplicate toasts.
+                        // dedupe by tx_id to avoid stacking duplicate toasts. Hidden
+                        // Liquid raises no toast, as with the celebration above.
                         if matches!(details.payment_type, PaymentType::Receive)
+                            && self.cache.liquid_gate.show()
                             && details.tx_id.as_ref().is_some_and(|id| {
                                 !self.toasted_incoming_waiting_tx_ids.contains(id)
                             })
@@ -15757,6 +15784,115 @@ mod incoming_liquid_toast_privacy_tests {
         assert!(mounted(&app).contains("12,345"));
         assert_eq!(app.errors.len(), 1);
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// #968 review finding 1: Tenshu v175 hides Liquid for everyone (master §3
+/// decision 2), so a Liquid receive raises no waiting toast and no
+/// celebration, even on a Cube with the grant and a Liquid wallet on disk.
+/// [`super::features::LiquidGate::show`] can't be turned on, so each test was
+/// checked against its guard removed (both failed); the Spark control shows
+/// the celebration itself still works.
+#[cfg(test)]
+mod hidden_liquid_receive_tests {
+    use breez_sdk_liquid::prelude::{Payment, PaymentDetails, PaymentState, PaymentType, SdkEvent};
+
+    fn liquid_receive() -> Payment {
+        Payment {
+            destination: None,
+            tx_id: Some("synthetic-liquid-receive".into()),
+            unblinding_data: None,
+            timestamp: 0,
+            amount_sat: 12_345,
+            fees_sat: 0,
+            swapper_fees_sat: None,
+            payment_type: PaymentType::Receive,
+            status: PaymentState::Pending,
+            details: PaymentDetails::Liquid {
+                destination: "synthetic-destination".into(),
+                description: String::new(),
+                asset_id: String::new(),
+                asset_info: None,
+                lnurl_info: None,
+                bip353_address: None,
+                payer_note: None,
+            },
+        }
+    }
+
+    /// A mainnet App whose Liquid gate has both inputs set.
+    fn app_with_liquid_inputs(root: &std::path::Path) -> super::App {
+        let (mut app, _) = super::shell_tests::bitcoin_app(root);
+        app.cache.liquid_gate = super::features::LiquidGate {
+            server_enabled: true,
+            local_state_exists: true,
+        };
+        app
+    }
+
+    /// Every message a task produces, in order.
+    fn outputs(task: super::Task<super::Message>) -> Vec<super::Message> {
+        use iced_runtime::futures::futures::StreamExt;
+        let Some(stream) = iced_runtime::task::into_stream(task) else {
+            return Vec::new();
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(
+                stream
+                    .filter_map(|action| async move {
+                        match action {
+                            iced_runtime::Action::Output(message) => Some(message),
+                            _ => None,
+                        }
+                    })
+                    .collect(),
+            )
+    }
+
+    #[test]
+    fn hidden_liquid_receive_raises_no_waiting_toast() {
+        let _guard = crate::app::session::test_guard();
+        let root =
+            std::env::temp_dir().join(format!("hidden-liquid-toast-{}", uuid::Uuid::new_v4()));
+        let mut app = app_with_liquid_inputs(&root);
+        let produced = outputs(app.update(super::Message::BreezEvent(
+            SdkEvent::PaymentWaitingConfirmation {
+                details: liquid_receive(),
+            },
+        )));
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!produced.iter().any(|message| matches!(
+            message,
+            super::Message::View(super::view::Message::ShowIncomingLiquidWaitingToast(_))
+        )));
+        assert!(app.toasted_incoming_waiting_tx_ids.is_empty());
+    }
+
+    #[test]
+    fn hidden_liquid_receive_does_not_celebrate() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!(
+            "hidden-liquid-celebration-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let mut app = app_with_liquid_inputs(&root);
+        drop(
+            app.update(super::Message::BreezEvent(SdkEvent::PaymentSucceeded {
+                details: liquid_receive(),
+            })),
+        );
+        assert!(!app.show_received_celebration);
+
+        // Control: a Spark receive on the same App still celebrates.
+        drop(app.update(super::Message::ShowReceivedCelebration {
+            context: "spark-receive".to_string(),
+            amount_sat: 12_345,
+        }));
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(app.show_received_celebration);
     }
 }
 

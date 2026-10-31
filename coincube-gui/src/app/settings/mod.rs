@@ -715,6 +715,13 @@ pub struct CubeSettings {
     pub split_from: Vec<SplitFromRecord>,
     pub id: String,
     pub name: String,
+    /// The Spark wallet's nickname, shown as `Spark · ‹nickname›` in the side
+    /// panel. Spark has no wallet settings of its own, so its name lives on
+    /// the Cube; a Vault's name is its [`WalletSettings::alias`]. `None` (or
+    /// blank) shows plain "Spark". Files written before the field existed
+    /// load unchanged, and an unset name writes nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spark_alias: Option<String>,
     /// The chain this Cube lives on — its *identity*, which decides the
     /// directory it is stored under, the Connect network string, the node
     /// and provider it may talk to, and whether this build can run it at all
@@ -1038,6 +1045,7 @@ impl CubeSettings {
             split_from: Vec::new(),
             id,
             name,
+            spark_alias: None,
             network: network.into(),
             created_at: chrono::Utc::now().timestamp(),
             vault_wallet_id: None,
@@ -5417,6 +5425,42 @@ mod test {
             cube.vault_fingerprint, None,
             "an absent field reads as `not asserted yet`, not as an error"
         );
+    }
+
+    /// Tenshu v175 L2: the Spark nickname is optional. A `settings.json`
+    /// written before it existed loads with no nickname and writes back
+    /// without the key, and a set nickname survives a round-trip.
+    #[test]
+    fn spark_alias_is_optional_and_round_trips() {
+        use super::CubeSettings;
+
+        let json = r#"{
+            "id": "cube-1",
+            "name": "Family",
+            "network": "bitcoin",
+            "created_at": 0,
+            "vault_fingerprint": "8099ee80"
+        }"#;
+        let cube: CubeSettings =
+            serde_json::from_str(json).expect("pre-field settings must still deserialize");
+        assert_eq!(cube.spark_alias, None);
+        assert_eq!(cube.name, "Family");
+        assert_eq!(cube.vault_fingerprint.as_deref(), Some("8099ee80"));
+        let written = serde_json::to_value(&cube).expect("CubeSettings must serialize");
+        assert!(
+            written.get("spark_alias").is_none(),
+            "an unset nickname writes nothing, so the file stays as it was"
+        );
+        let reread: CubeSettings = serde_json::from_value(written.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&reread).unwrap(), written);
+
+        let mut named = cube;
+        named.spark_alias = Some("Daily spending".to_string());
+        let json = serde_json::to_string(&named).expect("CubeSettings must serialize");
+        let restored: CubeSettings =
+            serde_json::from_str(&json).expect("CubeSettings must deserialize");
+        assert_eq!(restored.spark_alias.as_deref(), Some("Daily spending"));
+        assert_eq!(restored.name, "Family", "the Cube name is a separate value");
     }
 
     fn split_from_record(byte: u8) -> super::SplitFromRecord {

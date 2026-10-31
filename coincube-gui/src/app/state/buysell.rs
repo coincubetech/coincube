@@ -27,7 +27,11 @@ impl State for BuySellPanel {
         menu: &'a Menu,
         cache: &'a Cache,
     ) -> coincube_ui::widget::Element<'a, view::Message> {
-        view::dashboard(menu, cache, self.view(cache.balance_amounts_masked()))
+        view::dashboard(
+            menu,
+            cache,
+            self.view(cache.balance_amounts_masked(), cache.liquid_gate.show()),
+        )
     }
 
     fn update(

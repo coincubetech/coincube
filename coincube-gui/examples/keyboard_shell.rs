@@ -149,6 +149,8 @@ impl Fixture {
             marketplace_flags: MarketplaceServerFlags::OFF,
             liquid_gate: LiquidGate::HIDDEN,
             cube_name: "Synthetic QA Cube",
+            spark_alias: Some("Daily spending"),
+            vault_alias: Some("Family savings"),
             lightning_address: None,
             avatar: None,
             theme_mode: self.mode,

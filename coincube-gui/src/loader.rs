@@ -1090,6 +1090,7 @@ pub async fn load_application(
         has_vault: !wallet.is_imported(),
         has_imported_bitcoin: wallet.is_imported(),
         cube_name: config.cube_settings.name.clone(),
+        wallet_names: Default::default(),
         cube_connect_owner: config.cube_settings.connect_owner.clone(),
         cube_owned_by_other_account: false,
         current_cube_backed_up: config.cube_settings.backed_up,
