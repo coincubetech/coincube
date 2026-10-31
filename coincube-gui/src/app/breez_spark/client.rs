@@ -710,9 +710,9 @@ impl SparkClient {
         }
     }
 
-    /// Phase 6: read the SDK's `UserSettings` (Stable Balance on/off,
-    /// private mode). Boolean-flattened on the bridge side so the gui
-    /// never sees the USDB token label.
+    /// Phase 6: read the user settings (Stable Balance on/off, private
+    /// mode). Since S2b `stable_balance_active` is bridge-driven
+    /// auto-convert, the same state [`Self::get_auto_convert`] reads.
     pub async fn get_user_settings(&self) -> Result<GetUserSettingsOk, SparkClientError> {
         match self.request(Method::GetUserSettings).await? {
             OkPayload::GetUserSettings(resp) => Ok(resp),
@@ -724,8 +724,8 @@ impl SparkClient {
     }
 
     /// Phase 6: activate (enabled=true) or deactivate (false) the
-    /// Stable Balance feature. The bridge translates this into
-    /// `update_user_settings(stable_balance_active_label = ...)`.
+    /// Stable Balance feature. Since S2b the bridge treats it as
+    /// [`Self::set_auto_convert`]: off leaves the USDB balance as USDB.
     pub async fn set_stable_balance(&self, enabled: bool) -> Result<(), SparkClientError> {
         match self
             .request(Method::SetStableBalance(SetStableBalanceParams { enabled }))
@@ -739,9 +739,8 @@ impl SparkClient {
         }
     }
 
-    /// Read bridge-driven auto-convert and its circuit breaker. Not the SDK's
-    /// Stable Balance, which [`Self::get_user_settings`] still reports until
-    /// S2b migrates off it.
+    /// Read bridge-driven auto-convert and its circuit breaker. The legacy
+    /// [`Self::get_user_settings`] reports the same switch.
     pub async fn get_auto_convert(&self) -> Result<AutoConvertState, SparkClientError> {
         match self.request(Method::GetAutoConvert).await? {
             OkPayload::AutoConvert(state) => Ok(state),
