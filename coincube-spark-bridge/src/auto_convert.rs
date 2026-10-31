@@ -665,14 +665,14 @@ pub(crate) async fn fitted_quote<C: Converter>(
             .ok_or_else(|| not_sent("the pool quoted no bitcoin input".to_string()))?;
     }
     Err(not_sent(format!(
-        "could not fit the conversion within the {budget_sats} sats received"
+        "could not fit the conversion within {budget_sats} sats"
     )))
 }
 
 /// What the next conversion attempt should do.
 #[derive(Debug, PartialEq, Eq)]
 enum Step {
-    /// Off, or nothing pending.
+    /// Off, nothing pending, or a USDB → bitcoin swap is being sent.
     Idle,
     /// Below the pool's minimum: keep the sats pending for the next receive.
     Defer,
@@ -698,6 +698,9 @@ pub struct AutoConvert {
     /// Separate from the state lock, which the SDK listener needs while a
     /// send waits on the SDK's own payment event.
     send_gate: Arc<Mutex<()>>,
+    /// USDB → bitcoin swaps being sent ([`Self::begin_swap`]). While any is,
+    /// no pass takes pending sats.
+    swaps_in_flight: u32,
 }
 
 impl AutoConvert {
@@ -735,6 +738,7 @@ impl AutoConvert {
             epoch: 0,
             unsaved: false,
             send_gate: Arc::new(Mutex::new(())),
+            swaps_in_flight: 0,
         }
     }
 
@@ -842,6 +846,61 @@ impl AutoConvert {
         self.saved.enabled && self.saved.pending_sats > 0
     }
 
+    /// Whether a pass may convert now: something is pending and no USDB →
+    /// bitcoin swap is being sent ([`Self::begin_swap`]).
+    fn may_convert(&self) -> bool {
+        self.has_pending() && self.swaps_in_flight == 0
+    }
+
+    /// A USDB → bitcoin swap (`crate::swap`) is about to be sent. Until
+    /// [`Self::end_swap`], no pass takes pending sats. Returns the epoch to
+    /// hand back to `end_swap`.
+    ///
+    /// Why: the SDK marks the bitcoin a swap delivers as a conversion's only
+    /// once the pool has answered (`update_payment_conversion_info` in
+    /// `flashnet.rs` at the pin). If the wallet claims that transfer first,
+    /// the SDK reports it as an ordinary receive, which counts. Holding
+    /// passes keeps it unconverted until the swap says which payment it was.
+    /// The SDK guards its own conversions the same way
+    /// (`acquire_payment_guard`).
+    pub fn begin_swap(&mut self) -> u64 {
+        self.swaps_in_flight = self.swaps_in_flight.saturating_add(1);
+        self.epoch
+    }
+
+    /// The swap begun at `began` was answered. When it delivered `delivered`
+    /// and that receive was counted, it is taken back out of the pending
+    /// sats: it is the swap's, not a receive. It is remembered either way,
+    /// so a later report of it can't count. Returns whether to wake
+    /// [`convert_pending`]: passes are held no longer.
+    ///
+    /// After a switch change during the swap nothing is taken back, since
+    /// the change already dropped what was pending.
+    pub fn end_swap(&mut self, began: u64, delivered: Option<&Receipt>) -> bool {
+        self.swaps_in_flight = self.swaps_in_flight.saturating_sub(1);
+        if let Some(receipt) = delivered {
+            let counted = !self.seen.insert(&receipt.payment_id);
+            if counted && self.epoch == began && self.saved.enabled {
+                tracing::info!(
+                    "a swap's {} sats were reported as a receive before the SDK marked them; \
+                     they won't be converted",
+                    receipt.sats
+                );
+                let next = Saved {
+                    pending_sats: self.saved.pending_sats.saturating_sub(receipt.sats),
+                    ..self.saved.clone()
+                };
+                self.adopt(next);
+            }
+        }
+        self.swaps_in_flight == 0
+    }
+
+    #[cfg(test)]
+    pub fn pending_sats(&self) -> u64 {
+        self.saved.pending_sats
+    }
+
     /// Decide the next attempt from the current bitcoin balance and the
     /// pool's minimum input. The budget is the pending sats, never more than
     /// the balance. A conversion takes its budget out of the pending total,
@@ -849,7 +908,7 @@ impl AutoConvert {
     /// twice. If that can't be saved, nothing is taken and nothing may be
     /// sent.
     fn take(&mut self, balance_sats: u64, min_from_sats: Option<u128>) -> io::Result<Step> {
-        if !self.has_pending() {
+        if !self.may_convert() {
             return Ok(Step::Idle);
         }
         let budget_sats = self.saved.pending_sats.min(balance_sats);
@@ -943,7 +1002,7 @@ pub async fn convert_pending<C: Converter>(
     converter: &C,
     emit: &(dyn Fn(ProtocolEvent) + Send + Sync),
 ) {
-    if !auto_convert.lock().await.has_pending() {
+    if !auto_convert.lock().await.may_convert() {
         return;
     }
 
@@ -2454,5 +2513,55 @@ mod tests {
         assert_eq!(scale_target(1_000_000, 1_005, 1_000), Some(995_024));
         assert_eq!(scale_target(1_000_000, 0, 1_000), None);
         assert_eq!(scale_target(u128::MAX, 2, 3), None);
+    }
+
+    // ---- swaps out of USDB (S3b) ----
+
+    /// While a USDB → bitcoin swap is sent no pass takes anything, not even
+    /// what was pending before; once it is answered the next pass converts.
+    #[tokio::test]
+    async fn passes_take_nothing_while_a_usdb_swap_is_sent() {
+        let dir = TempDir::new();
+        let ac = Mutex::new(enabled(&dir));
+        let pool = FakePool::new(100_000);
+        assert!(ac.lock().await.note_receive(&receipt("r1", 20_000)));
+        let began = ac.lock().await.begin_swap();
+        convert_pending(&ac, &pool, &|_| {}).await;
+        assert!(pool.calls().is_empty(), "{:?}", pool.calls());
+        assert_eq!(ac.lock().await.pending_sats(), 20_000);
+
+        assert!(ac.lock().await.end_swap(began, None));
+        convert_pending(&ac, &pool, &|_| {}).await;
+        assert_eq!(pool.sends().len(), 1);
+    }
+
+    /// A swap's own receive is taken back once, and only in the epoch the
+    /// swap began in: a switch change during the swap already dropped it.
+    /// Passes stay held until every swap in flight is answered.
+    #[test]
+    fn a_swaps_receive_is_taken_back_only_in_its_epoch() {
+        let dir = TempDir::new();
+        let mut ac = enabled(&dir);
+        let began = ac.begin_swap();
+        assert!(ac.note_receive(&receipt("swap-recv", 9_950)));
+        assert!(ac.note_receive(&receipt("gift", 5_000)));
+        assert!(ac.end_swap(began, Some(&receipt("swap-recv", 9_950))));
+        assert_eq!(ac.pending_sats(), 5_000);
+        assert!(!ac.note_receive(&receipt("swap-recv", 9_950)));
+        // Saved, not only in memory.
+        assert_eq!(AutoConvert::load(&dir.0).pending_sats(), 5_000);
+
+        let began = ac.begin_swap();
+        assert!(ac.note_receive(&receipt("swap-recv-2", 9_950)));
+        assert!(ac.set_enabled(false).expect("saved"));
+        assert!(ac.set_enabled(true).expect("saved"));
+        assert!(ac.note_receive(&receipt("gift-2", 7_000)));
+        assert!(ac.end_swap(began, Some(&receipt("swap-recv-2", 9_950))));
+        assert_eq!(ac.pending_sats(), 7_000);
+
+        let first = ac.begin_swap();
+        let second = ac.begin_swap();
+        assert!(!ac.end_swap(first, None));
+        assert!(ac.end_swap(second, None));
     }
 }

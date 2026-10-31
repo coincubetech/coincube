@@ -204,6 +204,9 @@ struct ServerState {
     /// from its Spark storage directory by a successful `init`. See
     /// [`crate::auto_convert`].
     auto_convert: std::sync::OnceLock<Arc<Mutex<AutoConvert>>>,
+    /// Wakes the auto-convert worker; set with [`Self::auto_convert`]. A
+    /// swap out of USDB holds the worker's passes, and wakes it once done.
+    wake_auto_convert: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<()>>,
     /// The wallet's own Spark address, the destination of every
     /// auto-convert self-transfer. Read from the SDK once.
     own_spark_address: Arc<OnceCell<String>>,
@@ -220,6 +223,7 @@ impl ServerState {
             swaps: Arc::new(Mutex::new(swap::SwapTracker::default())),
             event_tx,
             auto_convert: std::sync::OnceLock::new(),
+            wake_auto_convert: std::sync::OnceLock::new(),
             own_spark_address: Arc::new(OnceCell::new()),
         }
     }
@@ -355,6 +359,7 @@ async fn handle_init(
             )));
             let _ = state.auto_convert.set(Arc::clone(&auto_convert));
             let (wake_tx, wake_rx) = tokio::sync::mpsc::unbounded_channel();
+            let _ = state.wake_auto_convert.set(wake_tx.clone());
             // Each pass borrows the SDK and the stdout sender only while it
             // runs, through a weak state reference, so the worker doesn't keep
             // either alive past shutdown. Before the SDK is published a pass
@@ -2567,10 +2572,24 @@ async fn handle_swap(id: u64, params: SwapParams, state: Arc<ServerState>) -> Re
     };
     let backend = SdkConverter::new(sdk, Arc::clone(&state.own_spark_address))
         .at_slippage(prepared.max_slippage_bps());
-    match swap::execute(&backend, prepared).await {
+    let auto_convert = state.auto_convert.get().map(|ac| ac.as_ref());
+    let outcome = swap::execute(&backend, prepared, auto_convert).await;
+    // Passes held during a swap out of USDB run now; otherwise this finds
+    // nothing new to do.
+    if let Some(wake) = state.wake_auto_convert.get() {
+        let _ = wake.send(());
+    }
+    match outcome {
         Ok((swap_id, status)) => {
+            // Followed before the answer is written, so in a rare race a
+            // `SwapStatusChanged` can reach the gui just before its `SwapOk`.
             state.swaps.lock().await.track(&swap_id, status);
             Response::ok(id, OkPayload::Swap(SwapOk { swap_id, status }))
+        }
+        // The SDK's whole text: after an unknown outcome it is the only
+        // record the gui logs of what happened.
+        Err(swap::Refusal::Sdk(message)) => {
+            Response::err(id, ErrorKind::Sdk, format!("swap failed: {message}"))
         }
         Err(refusal) => swap_refusal(id, "swap", refusal),
     }

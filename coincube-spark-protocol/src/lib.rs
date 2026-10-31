@@ -901,8 +901,8 @@ pub enum AutoConvertBreaker {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ConversionLimits {
     /// Least that can be converted, in the asset converted out of. Out of
-    /// bitcoin the bridge reports the least its sizing can convert, a few
-    /// sats above the pool's own minimum (S3b).
+    /// bitcoin the bridge reports the least its sizing can convert, about
+    /// 0.2% above the pool's own minimum (S3b).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_from: Option<AssetAmount>,
     /// Least that can be received, in the asset converted into.
@@ -1005,8 +1005,11 @@ pub struct SwapOk {
     /// SDK source at `a38117d`; not yet run.
     pub swap_id: String,
     /// The swap's status as the SDK answered it, worked out as
-    /// [`PaymentConversionSummary::status`] is. In practice `Completed`: the
-    /// SDK answers a self-transfer once the converted funds have arrived.
+    /// [`PaymentConversionSummary::status`] is. Usually `Completed`: the SDK
+    /// answers a self-transfer once the converted funds have arrived. It is
+    /// `Pending` when the SDK answers before it has stored the receive with
+    /// its conversion information; the bridge then follows the swap and
+    /// emits [`Event::SwapStatusChanged`].
     pub status: SwapStatus,
 }
 
@@ -1144,8 +1147,9 @@ pub struct PaymentConversionSummary {
     /// otherwise the row's own AMM `conversion_info` status, otherwise
     /// `Pending`. A self-transfer's row has no `conversion_details` at
     /// `a38117d`, so a swap's status comes from its AMM information.
-    /// `Completed` only once the payment itself is completed. Updated in
-    /// place by [`Event::SwapStatusChanged`].
+    /// `Completed` only once the payment itself is completed; a completed
+    /// conversion on a payment that failed is `Failed`, since nothing
+    /// arrived. Updated in place by [`Event::SwapStatusChanged`].
     pub status: SwapStatus,
     /// What the BTC ⇄ USDB step converted. `None` until the SDK fills in the
     /// steps, which it does later from child payments, or when there is no
@@ -1554,6 +1558,7 @@ pub enum Event {
     /// [`PaymentDetailSummary::conversion`]. Emitted from S3b on, only for a
     /// swap whose [`SwapOk::status`] wasn't finished: the bridge re-reads it
     /// on each sync until it is, and only within the session that ran it.
+    /// In a rare race it can arrive just before the [`SwapOk`] it follows.
     /// The same caution as [`Event::AutoConvertStateChanged`] applies.
     SwapStatusChanged { swap_id: String, status: SwapStatus },
 }

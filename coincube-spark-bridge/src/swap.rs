@@ -30,8 +30,15 @@
 //!
 //! Known limit: a swap and an auto-convert pass are not coordinated. Both
 //! spend from the same balances, so when they overlap one or both may fail,
-//! or both may go through against the balance available. The synced balance
-//! check right before a swap is sent ([`execute`]) is the only guard.
+//! or both may go through against the balance available. The balance re-read
+//! right before a swap is sent ([`execute`]) is the only guard, and it reads
+//! the SDK's cached balance (`ensure_synced` waits only for the first sync).
+//!
+//! The bitcoin a USDB → bitcoin swap delivers isn't auto-converted back:
+//! passes are held while it is sent ([`AutoConvert::begin_swap`]), and the
+//! swap's receive is taken back out if the SDK reported it before marking it
+//! a conversion's. A swap whose send ends in an error can't say which receive
+//! was its own, so that case stays open.
 //!
 //! [`Method::PrepareSwap`]: coincube_spark_protocol::Method::PrepareSwap
 //! [`Method::Swap`]: coincube_spark_protocol::Method::Swap
@@ -56,7 +63,9 @@ use coincube_spark_protocol::{
 };
 use tokio::sync::Mutex;
 
-use crate::auto_convert::{self, fitted_quote, Converter, Limits, SdkConverter, Shortfall};
+use crate::auto_convert::{
+    self, fitted_quote, AutoConvert, Converter, Limits, SdkConverter, Shortfall,
+};
 use crate::sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER;
 
 /// The slippage caps a swap accepts, the same range as
@@ -108,7 +117,8 @@ pub struct UsdbLimits {
 /// implements it on [`SdkConverter`]; tests use a fake.
 #[async_trait]
 pub trait SwapBackend: Converter<Prepared = PrepareSendPaymentResponse> {
-    /// Both balances, synced.
+    /// Both balances, read again (`ensure_synced`: after the first sync this
+    /// is the SDK's cached balance).
     async fn balances(&self) -> Result<Balances, String>;
     async fn usdb_limits(&self) -> Result<UsdbLimits, String>;
     /// Prepare (without sending) a conversion of exactly `usdb_units` into
@@ -225,16 +235,29 @@ pub fn checked_usdb_prepare(
 }
 
 /// The smallest bitcoin amount auto-convert's sizing can convert when the
-/// pool's minimum input is `min_sats` ([`auto_convert::clears_min_input`]).
-/// A swap reports this as its minimum, and refuses anything below it,
-/// because a quote under the minimum fails in a form the bridge can't read.
-/// Exact because the margin can only grow with the budget.
+/// pool's minimum input is `min_sats` ([`auto_convert::clears_min_input`]),
+/// about 0.2% above it. A swap reports this as its minimum, and refuses
+/// anything below it, because a quote under the minimum fails in a form the
+/// bridge can't read.
+///
+/// A binary search: whether a budget clears only grows with the budget, and
+/// twice the minimum plus a few sats always clears. A minimum too large for
+/// that bound comes back as `u128::MAX`, which refuses every amount.
 fn least_bitcoin_input(min_sats: u128) -> u128 {
-    let mut budget = min_sats;
-    while !auto_convert::clears_min_input(budget, min_sats) {
-        budget += 1;
+    let clears = |budget| auto_convert::clears_min_input(budget, min_sats);
+    let (mut low, mut high) = (min_sats, min_sats.saturating_mul(2).saturating_add(4));
+    if !clears(high) {
+        return u128::MAX;
     }
-    budget
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if clears(mid) {
+            high = mid;
+        } else {
+            low = mid + 1;
+        }
+    }
+    low
 }
 
 fn bitcoin(amount: u128) -> AssetAmount {
@@ -483,6 +506,10 @@ fn refuse_small_output(amount_out: u128, min: Option<u128>, asset: &str) -> Resu
 /// products, so the two quotes need not convert the same amount.
 fn within_cap(reviewed: (u128, u128), fresh: (u128, u128), max_slippage_bps: u32) -> Option<bool> {
     let ((reviewed_in, reviewed_out), (fresh_in, fresh_out)) = (reviewed, fresh);
+    // A quote with nothing in or nothing out prices nothing.
+    if [reviewed_in, reviewed_out, fresh_in, fresh_out].contains(&0) {
+        return None;
+    }
     let fresh_side = fresh_out.checked_mul(reviewed_in)?.checked_mul(10_000)?;
     let reviewed_side = reviewed_out
         .checked_mul(fresh_in)?
@@ -509,13 +536,18 @@ async fn current_price<B: SwapBackend>(
 /// Send a prepared swap. Returns the id of its Activity row and its status.
 ///
 /// Before sending, the swap is re-priced ([`within_cap`]) and its input
-/// checked against the synced balance. Either refusal is
+/// checked against a fresh balance read. Either refusal is
 /// [`Refusal::BadRequest`]: nothing was sent. The prepare that is sent is
 /// the reviewed one, so a swap out of bitcoin spends exactly the reviewed
 /// sats.
+///
+/// A swap out of USDB holds `auto_convert`'s passes while it is sent, so the
+/// bitcoin it delivers isn't converted back ([`AutoConvert::begin_swap`]).
+/// The caller wakes the auto-convert worker afterwards.
 pub async fn execute<B: SwapBackend>(
     backend: &B,
     swap: PreparedSwap,
+    auto_convert: Option<&Mutex<AutoConvert>>,
 ) -> Result<(String, SwapStatus), Refusal> {
     let not_sent = |reason: String| Refusal::BadRequest(format!("{reason} Nothing was sent."));
     let fresh = current_price(backend, &swap).await.map_err(|e| {
@@ -556,7 +588,26 @@ pub async fn execute<B: SwapBackend>(
         )));
     }
 
-    let payment = backend.execute(swap.prepared).await.map_err(Refusal::Sdk)?;
+    // Only the bitcoin out of a USDB swap could count as a receive.
+    let guard = auto_convert.filter(|_| swap.from == WalletAsset::Usdb);
+    let began = match guard {
+        Some(auto_convert) => Some(auto_convert.lock().await.begin_swap()),
+        None => None,
+    };
+    let sent = backend.execute(swap.prepared).await;
+    if let (Some(auto_convert), Some(began)) = (guard, began) {
+        let delivered = sent.as_ref().ok().and_then(|payment| {
+            Some(auto_convert::Receipt {
+                payment_id: payment.id.clone(),
+                sats: u64::try_from(payment.amount).ok()?,
+            })
+        });
+        auto_convert
+            .lock()
+            .await
+            .end_swap(began, delivered.as_ref());
+    }
+    let payment = sent.map_err(Refusal::Sdk)?;
     let status = swap_status(&payment);
     Ok((payment.id, status))
 }
@@ -608,8 +659,9 @@ fn protocol_status(status: &ConversionStatus) -> SwapStatus {
 /// `flashnet.rs`, is next. A cross-chain provider's status is not a
 /// conversion status here. Without either it is `Pending`.
 ///
-/// `Completed` also needs the payment itself to be completed; until then it
-/// is `Pending`.
+/// `Completed` also needs the payment itself to be completed: until then it
+/// is `Pending`, and on a payment that failed (a transfer the wallet never
+/// claimed) it is `Failed`, since nothing arrived.
 pub fn swap_status(payment: &Payment) -> SwapStatus {
     let status = payment
         .conversion_details
@@ -620,9 +672,10 @@ pub fn swap_status(payment: &Payment) -> SwapStatus {
             Some(ConversionInfo::Orchestra { .. } | ConversionInfo::Boltz { .. }) | None => None,
         })
         .unwrap_or(SwapStatus::Pending);
-    match status {
-        SwapStatus::Completed if payment.status != PaymentStatus::Completed => SwapStatus::Pending,
-        other => other,
+    match (status, &payment.status) {
+        (SwapStatus::Completed, PaymentStatus::Pending) => SwapStatus::Pending,
+        (SwapStatus::Completed, PaymentStatus::Failed) => SwapStatus::Failed,
+        (other, _) => other,
     }
 }
 
@@ -874,10 +927,15 @@ mod tests {
         TokenMetadata, TokenTransactionType,
     };
 
+    use crate::auto_convert::Receipt;
+
     const OWN: &str = "spark1ownaddressfortests";
     const CAP: u32 = CONVERSION_MAX_SLIPPAGE_BPS;
     /// 1 USDB (10^6 base units).
     const ONE_USDB: u128 = 1_000_000;
+
+    /// Receives to count on an auto-convert state while a swap is sent.
+    type Reports = (Arc<Mutex<AutoConvert>>, Vec<Receipt>);
 
     /// One recorded call to the fake.
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -905,6 +963,8 @@ mod tests {
         adjustment: Option<AmountAdjustmentReason>,
         fail_quote: StdMutex<Option<String>>,
         execute_answer: StdMutex<Option<Result<Payment, String>>>,
+        /// Receives the SDK reports to the listener while the swap is sent.
+        reports_during_send: StdMutex<Option<Reports>>,
         payments: StdMutex<HashMap<String, Result<Payment, String>>>,
         calls: StdMutex<Vec<Call>>,
     }
@@ -928,6 +988,7 @@ mod tests {
                 adjustment: None,
                 fail_quote: StdMutex::new(None),
                 execute_answer: StdMutex::new(None),
+                reports_during_send: StdMutex::new(None),
                 payments: StdMutex::new(HashMap::new()),
                 calls: StdMutex::new(Vec::new()),
             }
@@ -995,7 +1056,9 @@ mod tests {
                 conversion_estimate: Some(ConversionEstimate {
                     options: auto_convert::conversion_options_at(CAP),
                     amount_in: sats_in,
-                    amount_out: usdb_target,
+                    // As the SDK's `MinAmountOut` estimate: the simulated
+                    // output of the padded input, above the target.
+                    amount_out: sats_in * ONE_USDB / self.price(),
                     fee: sats_in / 200,
                     amount_adjustment: self.adjustment.clone(),
                 }),
@@ -1055,6 +1118,12 @@ mod tests {
         async fn execute(&self, prepared: PrepareSendPaymentResponse) -> Result<Payment, String> {
             let estimate = prepared.conversion_estimate.expect("a conversion");
             self.record(Call::Execute(estimate.amount_in));
+            let reports = self.reports_during_send.lock().unwrap().take();
+            if let Some((auto_convert, receipts)) = reports {
+                for receipt in &receipts {
+                    auto_convert.lock().await.note_receive(receipt);
+                }
+            }
             if let Some(answer) = self.execute_answer.lock().unwrap().take() {
                 return answer;
             }
@@ -1505,13 +1574,15 @@ mod tests {
 
         assert!(quote.amount_in.amount <= typed, "{quote:?}");
         assert_eq!(quote.amount_in.asset, WalletAsset::Bitcoin);
-        assert_eq!(quote.amount_out, usdb(target));
+        // The estimate's output, which is above the target it was fitted to.
+        assert_eq!(quote.amount_out.asset, WalletAsset::Usdb);
+        assert!(quote.amount_out.amount > target, "{quote:?}");
         assert_eq!(quote.fee.asset, WalletAsset::Bitcoin);
         assert_eq!(quote.max_slippage_bps, 50);
         assert_eq!(quote.amount_adjustment, None);
         assert_eq!(swap.amount_in, quote.amount_in.amount);
         // Exact input: the prepared amount is the estimate's output.
-        assert_eq!(swap.prepared.amount, target);
+        assert_eq!(swap.prepared.amount, quote.amount_out.amount);
         assert_eq!(
             limits,
             ConversionLimits {
@@ -1542,12 +1613,14 @@ mod tests {
 
     #[test]
     fn the_least_bitcoin_input_is_the_first_budget_sizing_can_convert() {
-        for min in [1, 999, 1_000, 1_001, 12_345, 1_000_000] {
+        for min in [1, 999, 1_000, 1_001, 12_345, 1_000_000, u128::MAX / 2] {
             let least = least_bitcoin_input(min);
             assert!(auto_convert::clears_min_input(least, min), "{min}");
             assert!(!auto_convert::clears_min_input(least - 1, min), "{min}");
         }
         assert_eq!(least_bitcoin_input(1_000), 1_004);
+        // A minimum too large to size refuses everything, without looping.
+        assert_eq!(least_bitcoin_input(u128::MAX), u128::MAX);
     }
 
     /// Below the minimum the limits state, or above the balance: refused
@@ -1591,7 +1664,8 @@ mod tests {
         assert!(refused_before_sending(refusal).contains("smallest swap"));
     }
 
-    /// An adjustment the SDK reports out of bitcoin reaches the quote.
+    /// An adjustment the SDK reports out of bitcoin reaches the quote. The
+    /// SDK at the pin reports none on this path; this pins the pass-through.
     #[tokio::test]
     async fn an_sdk_adjustment_out_of_bitcoin_is_reported() {
         let mut fake = FakeSdk::new();
@@ -1623,7 +1697,7 @@ mod tests {
         let Prepared { swap, .. } = prepared(&fake, exact(WalletAsset::Usdb, 10 * ONE_USDB)).await;
         fake.calls.lock().unwrap().clear();
         assert_eq!(
-            execute(&fake, swap).await,
+            execute(&fake, swap, None).await,
             Ok(("recv-1".to_string(), SwapStatus::Completed))
         );
         assert_eq!(
@@ -1648,7 +1722,7 @@ mod tests {
         fake.set_price(1_002);
         fake.calls.lock().unwrap().clear();
         assert_eq!(
-            execute(&fake, swap).await,
+            execute(&fake, swap, None).await,
             Ok(("recv-1".to_string(), SwapStatus::Completed))
         );
         assert_eq!(
@@ -1677,7 +1751,7 @@ mod tests {
             let fake = FakeSdk::new();
             let Prepared { swap, .. } = prepared(&fake, exact(from, amount)).await;
             fake.set_price(price);
-            let outcome = execute(&fake, swap).await;
+            let outcome = execute(&fake, swap, None).await;
             if refused {
                 let message = refused_before_sending(outcome.expect_err("refused"));
                 assert!(message.contains("moved by more than 0.5%"), "{message}");
@@ -1694,7 +1768,8 @@ mod tests {
         let fake = FakeSdk::new();
         let Prepared { swap, .. } = prepared(&fake, exact(WalletAsset::Bitcoin, 100_000)).await;
         fake.balances.lock().unwrap().sats = 50_000;
-        let message = refused_before_sending(execute(&fake, swap).await.expect_err("refused"));
+        let message =
+            refused_before_sending(execute(&fake, swap, None).await.expect_err("refused"));
         assert!(
             message.contains("no longer holds enough bitcoin"),
             "{message}"
@@ -1704,13 +1779,14 @@ mod tests {
         let fake = FakeSdk::new();
         let Prepared { swap, .. } = prepared(&fake, exact(WalletAsset::Usdb, 10 * ONE_USDB)).await;
         fake.balances.lock().unwrap().usdb_units = ONE_USDB;
-        refused_before_sending(execute(&fake, swap).await.expect_err("refused"));
+        refused_before_sending(execute(&fake, swap, None).await.expect_err("refused"));
         assert!(!fake.executed());
 
         let fake = FakeSdk::new();
         let Prepared { swap, .. } = prepared(&fake, exact(WalletAsset::Usdb, 10 * ONE_USDB)).await;
         *fake.fail_quote.lock().unwrap() = Some("pool unavailable".to_string());
-        let message = refused_before_sending(execute(&fake, swap).await.expect_err("refused"));
+        let message =
+            refused_before_sending(execute(&fake, swap, None).await.expect_err("refused"));
         assert!(message.contains("pool unavailable"), "{message}");
         assert!(!fake.executed());
     }
@@ -1723,7 +1799,7 @@ mod tests {
         *fake.execute_answer.lock().unwrap() =
             Some(Err("Timeout waiting for conversion to complete".to_string()));
         assert_eq!(
-            execute(&fake, swap).await,
+            execute(&fake, swap, None).await,
             Err(Refusal::Sdk(
                 "Timeout waiting for conversion to complete".to_string()
             ))
@@ -1739,9 +1815,81 @@ mod tests {
         receive.status = PaymentStatus::Pending;
         *fake.execute_answer.lock().unwrap() = Some(Ok(receive));
         assert_eq!(
-            execute(&fake, swap).await,
+            execute(&fake, swap, None).await,
             Ok(("recv-9".to_string(), SwapStatus::Pending))
         );
+    }
+
+    /// A fresh Cube state directory, removed on drop.
+    struct StateDir(std::path::PathBuf);
+
+    impl StateDir {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!("cc-swap-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            Self(dir)
+        }
+    }
+
+    impl Drop for StateDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn auto_convert_on(dir: &StateDir) -> Arc<Mutex<AutoConvert>> {
+        let mut auto_convert = AutoConvert::load(&dir.0);
+        assert!(auto_convert.set_enabled(true).expect("saved"));
+        Arc::new(Mutex::new(auto_convert))
+    }
+
+    fn receipt(id: &str, sats: u64) -> Receipt {
+        Receipt {
+            payment_id: id.to_string(),
+            sats,
+        }
+    }
+
+    /// The SDK can report the bitcoin a USDB swap delivers as a receive
+    /// before it marks it a conversion's. It is taken back out of the pending
+    /// sats, and can't count later; a real receive in the same window stays.
+    #[tokio::test]
+    async fn a_usdb_swaps_own_bitcoin_is_not_auto_converted() {
+        let dir = StateDir::new();
+        let auto_convert = auto_convert_on(&dir);
+        let fake = FakeSdk::new();
+        let Prepared { swap, quote, .. } =
+            prepared(&fake, exact(WalletAsset::Usdb, 10 * ONE_USDB)).await;
+        let delivered = u64::try_from(quote.amount_out.amount).unwrap();
+        *fake.reports_during_send.lock().unwrap() = Some((
+            Arc::clone(&auto_convert),
+            vec![receipt("recv-1", delivered), receipt("gift", 5_000)],
+        ));
+        assert_eq!(
+            execute(&fake, swap, Some(&auto_convert)).await,
+            Ok(("recv-1".to_string(), SwapStatus::Completed))
+        );
+        let mut auto_convert = auto_convert.lock().await;
+        assert_eq!(auto_convert.pending_sats(), 5_000);
+        assert!(!auto_convert.note_receive(&receipt("recv-1", delivered)));
+        assert_eq!(auto_convert.pending_sats(), 5_000);
+    }
+
+    /// A swap out of bitcoin delivers USDB, which never counts, so it
+    /// doesn't touch auto-convert.
+    #[tokio::test]
+    async fn a_bitcoin_swap_leaves_auto_convert_alone() {
+        let dir = StateDir::new();
+        let auto_convert = auto_convert_on(&dir);
+        let fake = FakeSdk::new();
+        let Prepared { swap, .. } = prepared(&fake, exact(WalletAsset::Bitcoin, 100_000)).await;
+        *fake.reports_during_send.lock().unwrap() =
+            Some((Arc::clone(&auto_convert), vec![receipt("gift", 5_000)]));
+        assert!(execute(&fake, swap, Some(&auto_convert)).await.is_ok());
+        let mut auto_convert = auto_convert.lock().await;
+        assert_eq!(auto_convert.pending_sats(), 5_000);
+        // Not marked seen: a receive with the swap's id would still count.
+        assert!(auto_convert.note_receive(&receipt("recv-1", 1)));
     }
 
     #[test]
@@ -1763,6 +1911,10 @@ mod tests {
         // A better price always passes.
         assert_eq!(within_cap((10_000, 5_000), (10_000, 6_000), 50), Some(true));
         assert_eq!(within_cap((u128::MAX, 1), (1, 1), 50), None);
+        // A quote of nothing prices nothing.
+        assert_eq!(within_cap((10_000, 5_000), (0, 0), 50), None);
+        assert_eq!(within_cap((10_000, 5_000), (10_000, 0), 50), None);
+        assert_eq!(within_cap((10_000, 5_000), (0, 5_000), 50), None);
     }
 
     #[test]
@@ -1823,22 +1975,30 @@ mod tests {
         assert_eq!(swap_status(&payment), SwapStatus::Pending);
     }
 
-    /// Never reported done before the payment itself is.
+    /// Never reported done before the payment itself is. A completed
+    /// conversion whose receive failed delivered nothing: `Failed`, which is
+    /// terminal, so it isn't followed for the rest of the session.
     #[test]
     fn completed_needs_a_completed_payment() {
-        for payment_status in [PaymentStatus::Pending, PaymentStatus::Failed] {
+        for (payment_status, expected) in [
+            (PaymentStatus::Pending, SwapStatus::Pending),
+            (PaymentStatus::Failed, SwapStatus::Failed),
+        ] {
             let mut payment = token_receive("r", 1, ConversionStatus::Completed);
             payment.status = payment_status;
-            assert_eq!(swap_status(&payment), SwapStatus::Pending);
+            assert_eq!(swap_status(&payment), expected);
 
             payment.details = None;
             payment.conversion_details = Some(details(ConversionStatus::Completed, vec![]));
-            assert_eq!(swap_status(&payment), SwapStatus::Pending);
+            assert_eq!(swap_status(&payment), expected);
 
             // A failure is reported as it is.
             payment.conversion_details = Some(details(ConversionStatus::RefundNeeded, vec![]));
             assert_eq!(swap_status(&payment), SwapStatus::RefundNeeded);
         }
+        let mut no_info = sats_receive("r", 1, None);
+        no_info.status = PaymentStatus::Failed;
+        assert_eq!(swap_status(&no_info), SwapStatus::Pending);
     }
 
     // ---- following unfinished swaps ----
