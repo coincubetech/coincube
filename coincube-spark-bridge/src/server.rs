@@ -766,7 +766,9 @@ fn detail_summary(details: Option<&PaymentDetails>) -> PaymentDetailSummary {
 ///
 /// **Why a plain sats send can grow a conversion leg at all.** Both
 /// [`handle_prepare_send`] and [`handle_prepare_lnurl_pay`] first prepare with
-/// `conversion_options: None` and `token_identifier: None`. The SDK's Stable
+/// `conversion_options: None` and `token_identifier: None` (and
+/// [`handle_prepare_cross_chain`] attaches its own top-up; see
+/// [`prepare_cross_chain_once`]). The SDK's Stable
 /// Balance, which used to auto-attach a `ToBitcoin { <stable token> }`
 /// conversion when the sat balance was below `amount + fee`, is no longer
 /// configured (S2b). A conversion on the response is now the bridge's own,
@@ -1521,28 +1523,39 @@ async fn handle_prepare_cross_chain(
     };
     let retry_safe = route_is_retry_safe(&route);
 
-    let request = PrepareSendPaymentRequest {
-        payment_request: PaymentRequest::CrossChain {
-            // The SDK wants the bare recipient address here, not the URI it may
-            // have come from — the URI's extra context has already done its job
-            // in the route filter above.
-            address: params.destination.address,
-            route,
-            max_slippage_bps: params.max_slippage_bps,
-            // Leave the overpay pad at the SDK default (15 bps). It only
-            // applies to `FeesExcluded` conversion sends and exists to stop the
-            // recipient landing *under* the requested amount; there's no user
-            // question here worth exposing.
-            target_overpay_bps: None,
+    // The SDK wants the bare recipient address here, not the URI it may have
+    // come from — the URI's extra context has already done its job in the
+    // route filter above.
+    let address = params.destination.address;
+    let (max_slippage_bps, amount_sat) = (params.max_slippage_bps, params.amount_sat);
+    let (shortfall, prepared) = prepare_cross_chain_once(
+        amount_sat,
+        |needed| usdb_shortfall_conversion(&sdk, needed),
+        |conversion_options| {
+            sdk.sdk.prepare_send_payment(cross_chain_prepare_request(
+                address,
+                route,
+                max_slippage_bps,
+                amount_sat,
+                conversion_options,
+            ))
         },
-        amount: Some(params.amount_sat as u128),
-        token_identifier: None,
-        conversion_options: None,
-        fee_policy: None,
-    };
+    )
+    .await;
 
-    match sdk.sdk.prepare_send_payment(request).await {
+    match prepared {
         Ok(prepare) => {
+            // The SDK refuses a top-up the USDB balance can't fund
+            // (`ensure_token_balance_covers` at the pin); this re-reads the
+            // balance synced, with the copy the other send paths use.
+            if shortfall.is_some() {
+                if let Some(response) =
+                    unfundable_conversion_error(id, &sdk, prepare.conversion_estimate.as_ref())
+                        .await
+                {
+                    return response;
+                }
+            }
             let amount_sat = clamp_u128_to_u64(prepare.amount);
             let SendPaymentMethod::CrossChainAddress {
                 route,
@@ -1602,7 +1615,89 @@ async fn handle_prepare_cross_chain(
                 }),
             )
         }
-        Err(e) => Response::err(id, ErrorKind::Sdk, e.to_string()),
+        Err(e) => cross_chain_prepare_failed(id, e, shortfall.as_ref()),
+    }
+}
+
+/// The one prepare of [`handle_prepare_cross_chain`], with a USDB top-up when
+/// the bitcoin balance is below the requested `amount_sat` and USDB is held
+/// (#965 F9): the trigger SDK Stable Balance applied here before S2b
+/// (`get_conversion_options` at the pin). Returns the top-up attached, for
+/// the error copy, and the prepare's result.
+///
+/// The provider's amount and source fee are known only from its prepare,
+/// which has side effects (a Boltz reverse swap each time), so `prepare` is
+/// `FnOnce`: there is no second prepare to catch a shortfall in the fees
+/// alone. Bitcoin that covers the amount but not the fees gets no top-up, as
+/// before S2b. Balances that can't be read mean no top-up, as before this
+/// repair.
+async fn prepare_cross_chain_once<P, F, Fut, S, SFut>(
+    amount_sat: u64,
+    shortfall_conversion: S,
+    prepare: F,
+) -> (Option<UsdbShortfall>, Result<P, breez_sdk_spark::SdkError>)
+where
+    F: FnOnce(Option<ConversionOptions>) -> Fut,
+    Fut: std::future::Future<Output = Result<P, breez_sdk_spark::SdkError>>,
+    S: FnOnce(u64) -> SFut,
+    SFut: std::future::Future<Output = Result<Option<UsdbShortfall>, breez_sdk_spark::SdkError>>,
+{
+    let shortfall = match shortfall_conversion(amount_sat).await {
+        Ok(shortfall) => shortfall,
+        Err(e) => {
+            tracing::warn!("could not read the balances for a cross-chain USDB top-up: {e}");
+            None
+        }
+    };
+    let prepared = prepare(shortfall.as_ref().map(|s| s.conversion.clone())).await;
+    (shortfall, prepared)
+}
+
+/// The SDK request for [`handle_prepare_cross_chain`]: sats-denominated, with
+/// the USDB top-up `conversion_options` when one is attached. With it, the
+/// SDK converts USDB for the provider's amount plus the source transfer fee
+/// before sending (`prepare_sats_denominated_with_conversion` at the pin).
+fn cross_chain_prepare_request(
+    address: String,
+    route: CrossChainRoutePair,
+    max_slippage_bps: Option<u32>,
+    amount_sat: u64,
+    conversion_options: Option<ConversionOptions>,
+) -> PrepareSendPaymentRequest {
+    PrepareSendPaymentRequest {
+        payment_request: PaymentRequest::CrossChain {
+            address,
+            route,
+            max_slippage_bps,
+            // Leave the overpay pad at the SDK default (15 bps). It only
+            // applies to `FeesExcluded` conversion sends and exists to stop the
+            // recipient landing *under* the requested amount; there's no user
+            // question here worth exposing.
+            target_overpay_bps: None,
+        },
+        amount: Some(u128::from(amount_sat)),
+        token_identifier: None,
+        conversion_options,
+        fee_policy: None,
+    }
+}
+
+/// The answer to a failed cross-chain prepare. With a USDB top-up attached,
+/// the failure is reported as the top-up's, as on the other send paths
+/// ([`PrepareError::UsdbConversion`]); without one, as the SDK's error, as
+/// before.
+fn cross_chain_prepare_failed(
+    id: u64,
+    e: breez_sdk_spark::SdkError,
+    shortfall: Option<&UsdbShortfall>,
+) -> Response {
+    match shortfall {
+        Some(shortfall) => PrepareError::UsdbConversion {
+            balance_sats: shortfall.balance_sats,
+            source: e,
+        }
+        .into_response(id, "prepare_cross_chain"),
+        None => Response::err(id, ErrorKind::Sdk, e.to_string()),
     }
 }
 
@@ -3079,7 +3174,7 @@ mod usdb_fallback_error_tests {
 #[cfg(test)]
 mod cross_chain_tests {
     use super::*;
-    use breez_sdk_spark::CrossChainProvider;
+    use breez_sdk_spark::{CrossChainProvider, SdkError};
 
     fn route(provider: CrossChainProvider, sources: Vec<SparkAsset>) -> CrossChainRoutePair {
         CrossChainRoutePair {
@@ -3093,6 +3188,149 @@ mod cross_chain_tests {
             accepted_assets: sources,
             delivery_methods: vec![breez_sdk_spark::DeliveryMethod::Spark],
         }
+    }
+
+    fn top_up(balance_sats: u64, held_usdb: u128) -> Option<ConversionOptions> {
+        conversion_for_shortfall(balance_sats, held_usdb, 20_000).map(|s| s.conversion)
+    }
+
+    /// #965 F9: a cross-chain send whose bitcoin is below the requested
+    /// amount, with USDB held, prepares once with a USDB → bitcoin top-up at
+    /// the 50 bps cap. The SDK sizes it for the provider's amount and fee.
+    #[test]
+    fn a_cross_chain_send_short_of_bitcoin_tops_up_from_usdb() {
+        let r = route(CrossChainProvider::Boltz, vec![SparkAsset::Bitcoin]);
+        let request = cross_chain_prepare_request(
+            "0xrecipient".to_string(),
+            r.clone(),
+            Some(100),
+            20_000,
+            top_up(19_999, 5_000_000),
+        );
+        assert_eq!(
+            request.conversion_options,
+            Some(ConversionOptions {
+                conversion_type: ConversionType::ToBitcoin {
+                    from_token_identifier: sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER.to_string(),
+                },
+                max_slippage_bps: Some(50),
+                completion_timeout_secs: None,
+            })
+        );
+        assert_eq!(request.amount, Some(20_000));
+        assert_eq!(request.token_identifier, None);
+        assert!(request.fee_policy.is_none());
+        assert!(matches!(
+            request.payment_request,
+            PaymentRequest::CrossChain {
+                ref address,
+                ref route,
+                max_slippage_bps: Some(100),
+                target_overpay_bps: None,
+            } if address == "0xrecipient" && *route == r
+        ));
+    }
+
+    /// One prepare, whatever the balances say: with the top-up, sized from
+    /// the requested amount, when bitcoin is short and USDB is held; plain
+    /// otherwise, and plain when the balances can't be read (#965 F9).
+    /// `prepare` is `FnOnce`, so there is no second one.
+    #[tokio::test]
+    async fn a_cross_chain_send_prepares_once() {
+        let asked = std::cell::Cell::new(None);
+        let (shortfall, prepared) = prepare_cross_chain_once(
+            20_000,
+            |needed| {
+                asked.set(Some(needed));
+                async move { Ok(conversion_for_shortfall(12_000, 5_000_000, needed)) }
+            },
+            |conversion| async move { Ok::<_, SdkError>(conversion) },
+        )
+        .await;
+        assert_eq!(asked.get(), Some(20_000), "sized from the requested amount");
+        let attached = prepared.expect("prepared");
+        assert!(attached.is_some());
+        assert_eq!(attached, shortfall.map(|s| s.conversion));
+
+        let (shortfall, prepared) = prepare_cross_chain_once(
+            20_000,
+            |needed| async move { Ok(conversion_for_shortfall(20_000, 5_000_000, needed)) },
+            |conversion| async move { Ok::<_, SdkError>(conversion) },
+        )
+        .await;
+        assert!(shortfall.is_none());
+        assert_eq!(prepared.expect("prepared"), None);
+
+        let (shortfall, prepared) = prepare_cross_chain_once(
+            20_000,
+            |_| async { Err(SdkError::Generic("offline".to_string())) },
+            |conversion| async move { Ok::<_, SdkError>(conversion) },
+        )
+        .await;
+        assert!(shortfall.is_none());
+        assert_eq!(prepared.expect("prepared"), None, "no balances, no top-up");
+    }
+
+    /// Bitcoin covering the requested amount, or no USDB held: the plain
+    /// prepare, as before. So is bitcoin that covers the amount but not the
+    /// provider and source fees (the known limit: those fees are known only
+    /// from the provider's prepare).
+    #[test]
+    fn a_cross_chain_send_with_enough_bitcoin_or_no_usdb_stays_plain() {
+        for (balance_sats, held_usdb) in [
+            (20_000, 5_000_000),
+            (25_000, 5_000_000),
+            (19_999, 0),
+            (0, 0),
+        ] {
+            let request = cross_chain_prepare_request(
+                "0xrecipient".to_string(),
+                route(CrossChainProvider::Orchestra, vec![SparkAsset::Bitcoin]),
+                None,
+                20_000,
+                top_up(balance_sats, held_usdb),
+            );
+            assert!(
+                request.conversion_options.is_none(),
+                "{balance_sats} sats, {held_usdb} USDB"
+            );
+        }
+    }
+
+    /// A top-up the USDB balance can't fund is refused at prepare, so no
+    /// handle exists to send. The refusal is answered in the user's terms, as
+    /// on the other send paths; a plain prepare's error keeps its shape.
+    #[test]
+    fn a_refused_cross_chain_top_up_is_answered_in_the_users_terms() {
+        let shortfall = conversion_for_shortfall(12_000, 1, 20_000).expect("a top-up");
+        // `ensure_token_balance_covers` at the pin.
+        let refused = SdkError::InvalidInput(
+            "Insufficient USDB balance for cross-chain conversion: have 1, need 8200000 \
+             (includes conversion and bridge fees)."
+                .to_string(),
+        );
+
+        let value = serde_json::to_value(cross_chain_prepare_failed(
+            7,
+            refused.clone(),
+            Some(&shortfall),
+        ))
+        .expect("serialize");
+        assert_eq!(value["err"]["kind"], serde_json::json!("bad_request"));
+        let message = value["err"]["message"].as_str().expect("a message");
+        assert!(message.contains("(12,000 sats available)"), "{message}");
+        assert!(
+            message.contains("converting USDB to bitcoin to cover it failed"),
+            "{message}"
+        );
+
+        let value = serde_json::to_value(cross_chain_prepare_failed(7, refused.clone(), None))
+            .expect("serialize");
+        assert_eq!(value["err"]["kind"], serde_json::json!("sdk"));
+        assert_eq!(
+            value["err"]["message"],
+            serde_json::json!(refused.to_string())
+        );
     }
 
     #[test]

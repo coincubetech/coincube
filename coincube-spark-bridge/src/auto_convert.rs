@@ -58,6 +58,13 @@ const STATE_VERSION: u32 = 1;
 /// so it just has to be quotable.
 const PROBE_TARGET_UNITS: u128 = 1_000_000;
 
+/// Larger probes tried when the pool states only a bitcoin-side minimum and
+/// the probe is refused, each [`PROBE_GROWTH`] times the last (up to 1,000
+/// USDB). A probe is only a prepare: nothing is sent, and the SDK checks no
+/// balance for it.
+const PROBE_ESCALATIONS: usize = 3;
+const PROBE_GROWTH: u128 = 10;
+
 /// Quotes allowed after the price probe. Each one after the first shrinks the
 /// target by how far the previous quote overshot the received sats.
 const SIZING_ROUNDS: usize = 3;
@@ -347,6 +354,16 @@ fn sizing_aim(budget: u128) -> u128 {
     budget.saturating_sub(budget / 1_000 + 1)
 }
 
+/// Whether a conversion of `budget` sats clears the pool's minimum input
+/// `min_sats`, with the sizing margin below its aim as well as above it, so
+/// a quote's rounding can't land under the minimum. The pool refuses such a
+/// quote, and the refusal doesn't say so in a form the bridge can rely on
+/// (a Flashnet error string at the pin), so it would count as a failure.
+/// Short of that, the sats wait for the next receive.
+fn clears_min_input(budget: u128, min_sats: u128) -> bool {
+    sizing_aim(sizing_aim(budget)) >= min_sats
+}
+
 /// Make a checked auto-convert prepare spend exactly its quoted sats.
 ///
 /// As prepared, the send converts toward a USDB target, and sending resolves
@@ -520,6 +537,11 @@ fn not_sent(reason: String) -> Shortfall {
 /// budget and re-quoted, shrinking it while the pool's rounding and slippage
 /// pad overshoot, and is sent only once a quote fits the budget.
 ///
+/// Flashnet states a minimum for one side of a pair only
+/// (`get_min_amounts` at the pin). With a minimum output, the probe asks for
+/// at least that. With only a minimum input, a probe that costs fewer sats is
+/// refused, so a refused probe is retried larger ([`PROBE_ESCALATIONS`]).
+///
 /// The send runs under the send gate ([`AutoConvert::send_gate`]), with the
 /// switch checked under the state lock once the gate is held. Every switch
 /// change takes the gate first, so a switch either lands before the check
@@ -534,8 +556,18 @@ async fn convert<C: Converter>(
 ) -> Result<u128, Shortfall> {
     let budget = u128::from(budget_sats);
     let aim = sizing_aim(budget);
-    let probe_target = limits.min_to_units.unwrap_or(0).max(PROBE_TARGET_UNITS);
-    let probe = converter.quote(probe_target).await.map_err(not_sent)?;
+    let mut probe_target = limits.min_to_units.unwrap_or(0).max(PROBE_TARGET_UNITS);
+    let mut probe = converter.quote(probe_target).await;
+    if limits.min_to_units.is_none() && limits.min_from_sats.is_some() {
+        for _ in 0..PROBE_ESCALATIONS {
+            if probe.is_ok() {
+                break;
+            }
+            probe_target *= PROBE_GROWTH;
+            probe = converter.quote(probe_target).await;
+        }
+    }
+    let probe = probe.map_err(not_sent)?;
     let mut target = scale_target(probe_target, probe.sats_in, aim)
         .ok_or_else(|| not_sent("the pool quoted no bitcoin input".to_string()))?;
     for _ in 0..SIZING_ROUNDS {
@@ -673,6 +705,11 @@ impl AutoConvert {
         let before = self.state();
         let next = if enabled {
             if self.saved.enabled {
+                // Already on. Memory may be ahead of the file (an adoption
+                // that couldn't be saved): save it before acknowledging.
+                if self.unsaved {
+                    self.commit(self.saved.clone())?;
+                }
                 return Ok(false);
             }
             Saved {
@@ -745,7 +782,7 @@ impl AutoConvert {
         if budget_sats == 0 {
             return Ok(Step::Idle);
         }
-        if min_from_sats.is_some_and(|min| u128::from(budget_sats) < min) {
+        if min_from_sats.is_some_and(|min| !clears_min_input(u128::from(budget_sats), min)) {
             return Ok(Step::Defer);
         }
         let next = Saved {
@@ -1043,6 +1080,9 @@ mod tests {
         pad_bps: u128,
         fail_quote: StdMutex<Script<String>>,
         fail_send: StdMutex<Script<String>>,
+        /// Refuse a quote costing fewer sats than `limits.min_from_sats`, as
+        /// Flashnet's `simulate_swap` does.
+        refuse_below_min_input: bool,
         calls: StdMutex<Vec<Call>>,
         /// Sats each send spent: exactly the quote's, as the SDK's exact-input
         /// conversion does ([`exact_input`]).
@@ -1062,8 +1102,23 @@ mod tests {
                 pad_bps: 50,
                 fail_quote: StdMutex::new(Script::new()),
                 fail_send: StdMutex::new(Script::new()),
+                refuse_below_min_input: false,
                 calls: StdMutex::new(Vec::new()),
                 spent: StdMutex::new(Vec::new()),
+            }
+        }
+
+        /// Flashnet's shape for bitcoin → USDB with a bitcoin-side minimum:
+        /// a minimum input only (`get_min_amounts` never states both), which
+        /// every quote must cost.
+        fn with_min_input_only(balance_sats: u64, min_sats: u128) -> Self {
+            Self {
+                limits: Limits {
+                    min_from_sats: Some(min_sats),
+                    min_to_units: None,
+                },
+                refuse_below_min_input: true,
+                ..Self::new(balance_sats)
             }
         }
 
@@ -1106,8 +1161,17 @@ mod tests {
             if let Some(reason) = self.fail_quote.lock().unwrap().pop_front() {
                 return Err(reason);
             }
+            let sats_in = self.sats_for(usdb_target);
+            if let Some(min) = self.limits.min_from_sats {
+                if self.refuse_below_min_input && sats_in < min {
+                    // Flashnet's wording (`ensure_min_amounts` at the pin).
+                    return Err(format!(
+                        "Amount in {sats_in} is less than minimum required {min} for asset btc"
+                    ));
+                }
+            }
             Ok(Quote {
-                sats_in: self.sats_for(usdb_target),
+                sats_in,
                 prepared: usdb_target,
             })
         }
@@ -1503,6 +1567,139 @@ mod tests {
         assert_eq!(sent.len(), 1, "600 + 700 converts as one");
         let spent = pool.sats_for(sent[0]);
         assert!((1_200..=1_300).contains(&spent), "spent {spent}");
+    }
+
+    /// Flashnet states only a bitcoin-side minimum for bitcoin → USDB and
+    /// refuses any quote under it, the 1 USDB probe included (1,005 sats
+    /// here). The probe is retried larger, and the receive converts once,
+    /// within its sats, with no failure counted (#965 F1).
+    #[tokio::test]
+    async fn an_input_side_minimum_prices_with_a_larger_probe() {
+        let dir = TempDir::new();
+        let ac = Mutex::new(enabled(&dir));
+        let pool = FakePool::with_min_input_only(100_000, 2_000);
+        assert!(pool.sats_for(PROBE_TARGET_UNITS) < 2_000);
+
+        let events = process(&ac, Some(&pool), &[receipt("a", 20_000)]).await;
+        assert!(events.is_empty(), "{events:?}");
+
+        let calls = pool.calls();
+        assert_eq!(
+            calls[2..4],
+            [Call::Quote(1_000_000), Call::Quote(10_000_000)]
+        );
+        let sent = pool.sends();
+        assert_eq!(sent.len(), 1);
+        let spent = pool.sats_for(sent[0]);
+        assert!((19_800..=20_000).contains(&spent), "spent {spent}");
+        let ac = ac.lock().await;
+        assert_eq!(ac.failures.consecutive, 0, "no failure counted");
+        assert_eq!(ac.saved.pending_sats, 0);
+    }
+
+    /// A receive of exactly the minimum input waits for the next one, unquoted
+    /// and without a failure; three in a row never pause (#965 F1).
+    #[tokio::test]
+    async fn receives_at_the_input_minimum_wait_without_a_failure() {
+        let dir = TempDir::new();
+        let ac = Mutex::new(enabled(&dir));
+        let pool = FakePool::with_min_input_only(100_000, 2_000);
+        let quotes = || {
+            pool.calls()
+                .iter()
+                .filter(|c| matches!(c, Call::Quote(_)))
+                .count()
+        };
+
+        process(&ac, Some(&pool), &[receipt("a", 2_000)]).await;
+        assert_eq!(quotes(), 0, "nothing quoted");
+        assert_eq!(ac.lock().await.saved.pending_sats, 2_000);
+
+        // With the second, 4,000 sats are pending, and they convert.
+        process(&ac, Some(&pool), &[receipt("b", 2_000)]).await;
+        let sent = pool.sends();
+        assert_eq!(sent.len(), 1);
+        let spent = pool.sats_for(sent[0]);
+        assert!((2_000..=4_000).contains(&spent), "spent {spent}");
+
+        process(&ac, Some(&pool), &[receipt("c", 2_000)]).await;
+        let ac = ac.lock().await;
+        assert_eq!(
+            ac.state(),
+            AutoConvertState {
+                enabled: true,
+                breaker: AutoConvertBreaker::Ready,
+            }
+        );
+        assert_eq!(ac.failures.consecutive, 0);
+        assert_eq!(ac.saved.pending_sats, 2_000);
+        assert_eq!(pool.sends().len(), 1);
+    }
+
+    /// Just over the minimum input, a budget whose sizing aim could round a
+    /// quote under it waits unquoted; from the first one clear of that, it
+    /// converts at once. Neither way does a refused quote count (#965 F1).
+    #[tokio::test]
+    async fn budgets_just_over_the_input_minimum_never_fail() {
+        let (mut waited, mut converted) = (0, 0);
+        for budget in 2_000..=2_030u64 {
+            let dir = TempDir::new();
+            let ac = Mutex::new(enabled(&dir));
+            let pool = FakePool::with_min_input_only(100_000, 2_000);
+            process(&ac, Some(&pool), &[receipt("a", budget)]).await;
+            let ac = ac.lock().await;
+            assert_eq!(ac.failures.consecutive, 0, "budget {budget}");
+            match pool.sends()[..] {
+                [] => {
+                    waited += 1;
+                    assert_eq!(ac.saved.pending_sats, budget);
+                    assert!(
+                        !pool.calls().iter().any(|c| matches!(c, Call::Quote(_))),
+                        "budget {budget} was quoted"
+                    );
+                }
+                [target] => {
+                    converted += 1;
+                    let spent = pool.sats_for(target);
+                    assert!(
+                        (2_000..=u128::from(budget)).contains(&spent),
+                        "budget {budget} spent {spent}"
+                    );
+                }
+                ref more => panic!("budget {budget}: {more:?}"),
+            }
+        }
+        assert_eq!((waited, converted), (6, 25), "2,000-2,005 wait");
+    }
+
+    /// A probe refused at every size is one ordinary failure, after a bounded
+    /// number of quotes, and the unsent sats stay pending.
+    #[tokio::test]
+    async fn a_probe_refused_at_every_size_is_one_failure() {
+        let dir = TempDir::new();
+        let ac = Mutex::new(enabled(&dir));
+        // 1,000 USDB costs 1,005,000 sats, still under this minimum.
+        let pool = FakePool::with_min_input_only(5_000_000, 2_000_000);
+
+        process(&ac, Some(&pool), &[receipt("a", 3_000_000)]).await;
+        let quotes: Vec<Call> = pool
+            .calls()
+            .into_iter()
+            .filter(|c| matches!(c, Call::Quote(_)))
+            .collect();
+        assert_eq!(
+            quotes,
+            [
+                Call::Quote(1_000_000),
+                Call::Quote(10_000_000),
+                Call::Quote(100_000_000),
+                Call::Quote(1_000_000_000),
+            ]
+        );
+        assert!(pool.sends().is_empty());
+        let ac = ac.lock().await;
+        assert_eq!(ac.failures.consecutive, 1);
+        assert_eq!(ac.saved.pending_sats, 3_000_000, "not sent: pending again");
     }
 
     /// Receives queued together convert once, and a payment reported twice
@@ -2112,6 +2309,24 @@ mod tests {
         let fresh = TempDir::new();
         assert!(!AutoConvert::load_or_adopt(&fresh.0, false).state().enabled);
         assert!(!fresh.file().exists(), "nothing to save");
+    }
+
+    /// An adoption that couldn't be saved leaves memory on with no file. An
+    /// On then saves it before it is acknowledged, or fails (#965 F8).
+    #[test]
+    fn on_over_an_unsaved_adoption_saves_it_or_fails() {
+        let dir = TempDir::new();
+        // No directory yet, so the adoption's write fails.
+        let cube = dir.0.join("cube");
+        let mut ac = AutoConvert::load_or_adopt(&cube, true);
+        assert!(ac.state().enabled);
+        assert!(ac.unsaved);
+
+        assert!(ac.set_enabled(true).is_err(), "still unsaveable");
+        fs::create_dir_all(&cube).unwrap();
+        assert!(!ac.set_enabled(true).unwrap(), "already on");
+        assert!(!ac.unsaved);
+        assert!(AutoConvert::load(&cube).state().enabled, "on is on disk");
     }
 
     #[test]

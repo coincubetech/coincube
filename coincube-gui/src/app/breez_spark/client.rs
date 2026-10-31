@@ -188,7 +188,8 @@ enum Handover {
     /// so it is unknown too, and so is [`ErrorKind::NotConnected`] (see
     /// [`swap_error`]).
     Swap,
-    /// An auto-convert switch. Not a payment, and
+    /// An auto-convert switch, or the legacy Stable Balance switch the
+    /// bridge treats as one since S2b. Not a payment, and
     /// [`SparkClient::get_auto_convert`] reconciles it, so a late answer has
     /// no reader and is dropped rather than held forever. An
     /// [`ErrorKind::NotConnected`] answer is unknown, as for a swap (see
@@ -200,7 +201,7 @@ impl Handover {
     fn of(method: &Method) -> Self {
         match method {
             Method::Swap(_) => Self::Swap,
-            Method::SetAutoConvert(_) => Self::AutoConvert,
+            Method::SetAutoConvert(_) | Method::SetStableBalance(_) => Self::AutoConvert,
             _ => Self::Payment,
         }
     }
@@ -726,9 +727,18 @@ impl SparkClient {
     /// Phase 6: activate (enabled=true) or deactivate (false) the
     /// Stable Balance feature. Since S2b the bridge treats it as
     /// [`Self::set_auto_convert`]: off leaves the USDB balance as USDB.
+    ///
+    /// So it is **state-changing** in the same way, with the same deadline
+    /// and the same [`SparkClientError::OutcomeUnknown`] for a lost or
+    /// made-up [`ErrorKind::NotConnected`] answer: the bridge may wait for a
+    /// conversion in flight before it applies the switch. Read
+    /// [`Self::get_auto_convert`] to see which way it went.
     pub async fn set_stable_balance(&self, enabled: bool) -> Result<(), SparkClientError> {
         match self
-            .request(Method::SetStableBalance(SetStableBalanceParams { enabled }))
+            .request_with(
+                Method::SetStableBalance(SetStableBalanceParams { enabled }),
+                RequestKind::StateChanging,
+            )
             .await?
         {
             OkPayload::SetStableBalance {} => Ok(()),
@@ -2443,6 +2453,68 @@ mod p0_contract_tests {
         );
         assert!(matches!(method, Method::GetAutoConvert));
         assert_eq!(result.expect("state"), state);
+    }
+
+    /// The legacy Stable Balance switch is an auto-convert change on the
+    /// bridge since S2b, which may wait for a conversion in flight before
+    /// applying it. So it gets the state-changing deadline, not the 30 s
+    /// query one, and a timeout or a made-up `NotConnected` answer reads as
+    /// unknown, never as a definite failure (#965 F3).
+    #[tokio::test(start_paused = true)]
+    async fn the_legacy_stable_balance_switch_is_an_auto_convert_change() {
+        let (client, mut requests) = fake_client();
+
+        let started = tokio::time::Instant::now();
+        let err = client
+            .set_stable_balance(false)
+            .await
+            .expect_err("no answer came back");
+        assert!(
+            started.elapsed() >= SEND_SOFT_DEADLINE,
+            "{:?}",
+            started.elapsed()
+        );
+        let request = requests.recv().await.expect("the change was sent");
+        assert!(matches!(
+            request.method,
+            Method::SetStableBalance(SetStableBalanceParams { enabled: false })
+        ));
+        assert!(
+            matches!(err, SparkClientError::OutcomeUnknown { request_id, .. } if request_id == request.id),
+            "{:?}",
+            err
+        );
+        assert_not_a_payment(&err);
+        assert!(!client
+            .inner
+            .awaiting_late
+            .lock()
+            .await
+            .contains(&request.id));
+
+        let (result, id) = tokio::join!(
+            client.set_stable_balance(true),
+            bridge_exits(&client, &mut requests)
+        );
+        let Err(err @ SparkClientError::OutcomeUnknown { .. }) = result else {
+            panic!("expected an unknown outcome, got {:?}", result);
+        };
+        assert!(
+            matches!(err, SparkClientError::OutcomeUnknown { request_id, .. } if request_id == id),
+            "{:?}",
+            err
+        );
+        assert_not_a_payment(&err);
+
+        let (result, method) = tokio::join!(
+            client.set_stable_balance(true),
+            bridge_answers(&client, &mut requests, Some(OkPayload::SetStableBalance {}))
+        );
+        assert!(matches!(
+            method,
+            Method::SetStableBalance(SetStableBalanceParams { enabled: true })
+        ));
+        assert!(result.is_ok(), "{:?}", result);
     }
 
     /// Sends and swaps keep the payment wording on a timeout, and their late
