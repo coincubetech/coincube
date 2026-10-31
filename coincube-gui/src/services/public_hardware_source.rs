@@ -351,11 +351,6 @@ impl HardwareSource {
         &self.status
     }
 
-    #[cfg(test)]
-    pub(crate) fn ready_for_test(&mut self, account: HardwareAccount) {
-        self.status = HardwareStatus::Ready(Arc::new(account));
-    }
-
     /// Drops any read or in-flight account. A later `Loaded` is stale.
     pub fn clear(&mut self) {
         self.generation = self.generation.wrapping_add(1);

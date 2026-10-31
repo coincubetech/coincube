@@ -352,7 +352,6 @@ fn fixture_nav_context(cache: &Cache) -> crate::app::view::nav::NavContext<'_> {
         liquid_gate: cache.liquid_gate,
         btcb2_server_enabled: cache.btcb2_server_enabled,
         btcb2_already_claimed: cache.btcb2_already_claimed,
-        btcb2_claim_resume: cache.btcb2_claim_resume,
         cube_name: &cache.cube_name,
         spark_alias: cache.wallet_names.spark.as_deref(),
         vault_alias: cache.wallet_names.vault.as_deref(),

@@ -632,6 +632,13 @@ impl KeychainSignModal {
         self.dismissed = true;
     }
 
+    /// Whether [`Self::mark_dismissed`] ran: the modal is hidden and its
+    /// sessions were cancelled, unlike a picker merely hidden while a local
+    /// signer works.
+    pub fn is_dismissed(&self) -> bool {
+        self.dismissed
+    }
+
     /// When the modal was dismissed mid-flight, close it once every
     /// pending session has reached a terminal state — reusing the
     /// existing `Phase::AllDone` + `Message::Updated(Ok)` close path
@@ -2534,7 +2541,7 @@ impl KeychainSignModal {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::app::state::vault::test_support::{empty_psbt, tokens};
     use coincube_core::descriptors::CoincubeDescriptor;
@@ -2865,6 +2872,19 @@ mod tests {
             ],
             self_user_id: 7,
         }
+    }
+
+    /// A Keychain flow with one session in flight on the server, for tests
+    /// outside this module.
+    pub(crate) fn modal_with_live_session() -> KeychainSignModal {
+        let mut modal = modal();
+        modal.pending.push(pending(PendingSessionStatus::Creating));
+        modal
+    }
+
+    /// Whether every session of `modal` has had its cancellation requested.
+    pub(crate) fn all_cancel_requested(modal: &KeychainSignModal) -> bool {
+        modal.pending.iter().all(|p| p.cancel_requested)
     }
 
     fn modal() -> KeychainSignModal {

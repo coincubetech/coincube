@@ -485,10 +485,6 @@ impl Home {
         {
             return None;
         }
-        if self.claim_handoff_pending() {
-            self.set_error(CLAIM_HOLDS_NETWORK);
-            return Some(Task::none());
-        }
         self.catalog.pending_select = Some((key.clone(), intent));
         self.catalog.selected = None;
         self.catalog.motion = None;
@@ -496,21 +492,6 @@ impl Home {
         Some(Task::done(Message::View(
             super::ViewMessage::SelectNetwork(key.chain),
         )))
-    }
-}
-
-/// Switching networks would cancel a Bitcoin Blake2b Claim handoff, which
-/// is bound to the Bitcoin Cube it started from.
-const CLAIM_HOLDS_NETWORK: &str = "Finish or cancel the Bitcoin Blake2b Claim before showing \
-     another network's Cubes.";
-
-impl Home {
-    /// A Claim handoff waits on this network; switching would cancel it.
-    pub(super) fn claim_handoff_pending(&self) -> bool {
-        self.pending_fork_claim.is_some()
-            || self.imported_claim.is_some()
-            || self.claim_owner.is_some()
-            || self.pending_begin_claim
     }
 }
 
@@ -820,10 +801,6 @@ impl Home {
                 // be one the filter shows: one network becomes current, and
                 // Live or Test move off a network they hide.
                 let target = self.filter_target(filter);
-                if target.is_some() && self.claim_handoff_pending() {
-                    self.set_error(CLAIM_HOLDS_NETWORK);
-                    return Task::none();
-                }
                 self.catalog.filter = filter;
                 self.catalog.page = 0;
                 // A selection the filter hides falls back to browsing.
@@ -3120,7 +3097,6 @@ mod tests {
         ] {
             catalog(&mut home, message);
             assert_eq!(home.active_section, section);
-            assert!(!home.is_claim_route());
             assert!(home.delete_cube_modal.is_none());
             assert!(home.rename_cube_modal.is_none());
             assert!(home.recovery_method_modal.is_none());
@@ -5034,26 +5010,6 @@ mod tests {
                     .collect()
                     .await
             })
-    }
-
-    #[test]
-    fn a_pending_claim_handoff_keeps_the_network() {
-        let mut home = all_networks();
-        home.pending_begin_claim = true;
-        let lab = CubeCatalogKey {
-            chain: ChainId::Testnet4,
-            cube_id: "t1".into(),
-        };
-        let messages = run_task(home.update_catalog(CatalogMessage::SelectFloor(lab)));
-        assert!(messages.is_empty(), "no switch: {:?}", messages);
-        assert!(home.catalog.pending_select.is_none());
-        assert_eq!(home.error.as_deref(), Some(CLAIM_HOLDS_NETWORK));
-        let messages = run_task(home.update_catalog(CatalogMessage::Filter(
-            NetworkFilter::Network(ChainId::Signet),
-        )));
-        assert!(messages.is_empty());
-        assert_eq!(home.catalog.filter, NetworkFilter::All);
-        assert!(home.pending_begin_claim, "the handoff survives");
     }
 
     #[test]

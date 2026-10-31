@@ -3,7 +3,6 @@ use super::*;
 mod binding;
 mod collect;
 pub(crate) mod diagnostics;
-mod funding;
 mod preferred;
 mod prune;
 mod sweep;
@@ -16,10 +15,6 @@ use coincube_core::{
     miniscript::bitcoin::OutPoint,
 };
 pub use collect::CollectedAncestry;
-pub use funding::{
-    ClaimPairError, CollectedFundingCoin, CollectedFundingPair, CollectedPostBitcoinInputs,
-    CollectedSpendInputs, FundingContext, OwnedClaimFunding, OwnedSplitFunding, SplitPairError,
-};
 pub use preferred::MAX_ANCESTRY_CANDIDATES;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -52,9 +47,6 @@ impl CollectionBudget {
             requests: AtomicUsize::new(requests),
             bytes: AtomicUsize::new(MAX_RESPONSE_BYTES),
         }
-    }
-    fn restrict_to_collection(&self) {
-        self.requests.fetch_min(MAX_REQUESTS, Ordering::Relaxed);
     }
     pub(super) fn charge_request(&self, reserved_bytes: usize) -> Result<(), FailureKind> {
         self.requests
@@ -96,7 +88,6 @@ pub enum FundingProofStatus {
     /// callers must not treat every refusal as proof of unsuitable funds.
     Failed(DiscoveryError),
 }
-pub(crate) type FundingProofObserver = Arc<dyn Fn(ChainId, FundingProofStatus) + Send + Sync>;
 
 #[derive(Debug)]
 pub struct DiscoveredAncestry {
@@ -135,7 +126,6 @@ impl HttpObservationSource {
     fn discovery_snapshot(&self) -> Self {
         Self {
             authenticated: self.authenticated.clone(),
-            funding_observer: self.funding_observer.clone(),
             anonymous: self.anonymous.clone(),
             base: self.base.clone(),
             generation: self.generation.clone(),
@@ -414,28 +404,6 @@ mod tests {
             max_observation_age_seconds: 60,
             expiry_margin_seconds: 600,
         }
-    }
-
-    #[test]
-    fn final_phase_clamps_without_resetting_shared_requests_or_bytes() {
-        let budget = CollectionBudget::for_discovery();
-        for _ in 0..(MAX_DISCOVERY_REQUESTS - 7) {
-            budget.charge_request(0).unwrap();
-        }
-        budget.charge_bytes(123).unwrap();
-        budget.restrict_to_collection();
-        assert_eq!(budget.requests.load(Ordering::Relaxed), 7);
-        assert_eq!(
-            budget.bytes.load(Ordering::Relaxed),
-            MAX_RESPONSE_BYTES - 123
-        );
-        for _ in 0..7 {
-            budget.charge_request(0).unwrap();
-        }
-        assert_eq!(budget.charge_request(0), Err(FailureKind::CollectionLimit));
-        let budget = CollectionBudget::for_discovery();
-        budget.restrict_to_collection();
-        assert_eq!(budget.requests.load(Ordering::Relaxed), MAX_REQUESTS);
     }
 
     #[tokio::test]

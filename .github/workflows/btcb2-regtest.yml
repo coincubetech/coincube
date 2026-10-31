@@ -145,20 +145,6 @@ jobs:
           cargo build --release --package coincube-core --example claim_regtest_vectors
           cargo build --release --package coincube-core --example split_regtest_vectors
 
-      - name: Build headless Claim panel test driver
-        if: ${{ !inputs.probe_only }}
-        env:
-          BREEZ_API_KEY: DUMMY_BREEZ_API_KEY
-          # Release compilation requires a default; harness clients inject their local server.
-          COINCUBE_API_URL: https://claim-harness.invalid
-        run: |
-          cargo test --release --locked --package coincube-gui --lib --features regtest-harness --no-run --message-format=json-render-diagnostics > claim-gui-build.json
-          driver="$(jq -ser '[.[] | select(.reason == "compiler-artifact" and .target.name == "coincube_gui" and .profile.test == true and .executable != null) | .executable] | unique | if length == 1 then .[0] else error("expected one GUI test executable") end' claim-gui-build.json)"
-          test -x "$driver"
-          echo "CLAIM_GUI_REGTEST_TEST_PATH=$driver" >> "$GITHUB_ENV"
-          # The same executable holds the Split service driver (#568 B6c-2).
-          echo "SPLIT_SERVICE_REGTEST_TEST_PATH=$driver" >> "$GITHUB_ENV"
-
       - name: Test and build knots_verify
         # The verifier decides which node binaries the harness may execute, so
         # its own tests (real signed manifest, tampered/garbled/missing
@@ -220,17 +206,13 @@ jobs:
           # historical Claim consensus modules cover recorded constructions;
           # test_btcb2_claim_pair_consensus.py checks ordinary S+B/S+F against
           # both pinned nodes, including reverse broadcast order and reorgs.
-          # The Claim GUI module checks retired one-sided refusal and paired
-          # deposit proof plus synthetic signed-PSBT imports through the real
-          # panel transitions. Physical hardware is still a separate gate.
-          # Split consensus covers
-          # the ordinary pair and historical alternatives, while Split
-          # observation covers step-1 reorgs through the service and journal.
+          # Split consensus covers the ordinary pair and historical
+          # alternatives.
           # test_btcb2_blockfile.py drives concurrent getblock batches at one
           # node to reproduce the block-file fault in #394. The modules are
           # named explicitly: a bare `pytest tests/` here would also pull in
           # the functional suite, which this job does not set up.
-          modules="tests/test_btcb2_harness.py tests/test_btcb2_b42_matrices.py tests/test_btcb2_blockfile.py tests/test_btcb2_claim_consensus.py tests/test_btcb2_claim_ancestry_consensus.py tests/test_btcb2_claim_pair_consensus.py tests/test_btcb2_claim_gui.py tests/test_btcb2_split_consensus.py tests/test_btcb2_split_observation.py"
+          modules="tests/test_btcb2_harness.py tests/test_btcb2_b42_matrices.py tests/test_btcb2_blockfile.py tests/test_btcb2_claim_consensus.py tests/test_btcb2_claim_ancestry_consensus.py tests/test_btcb2_claim_pair_consensus.py tests/test_btcb2_split_consensus.py"
           # The stress reproduction itself runs only when it is asked for: it
           # reproduces a node defect nothing here can fix, about one attempt in
           # eight, and a pull request is not the place to discover that. Its

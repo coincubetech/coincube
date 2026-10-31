@@ -413,9 +413,13 @@ async fn run_local_duress_activation(root: &std::path::Path, account_id: Option<
 #[derive(Debug)]
 pub enum Message {
     StartClaimInstaller,
-    ClaimInstallCancelled,
-    OpenForkClaim(app::claim_intent::ForkHandoff),
-    OpenBitcoinClaim(app::claim_intent::ForkHandoff),
+    /// The copy installer this tab hosts is done: cancelled, or `created` its
+    /// Bitcoin Blake2b copy. The pane closes this tab and returns to the
+    /// source App (`owner`); after a creation, to its Tools › Split coins.
+    CopyInstallFinished {
+        owner: app::cache::AppGeneration,
+        created: bool,
+    },
     /// An App callback is valid only for the App generation that emitted it.
     /// A retained Launcher tab can otherwise reuse this tab ID after Lock.
     AppAsync(u64, Box<Message>),
@@ -427,7 +431,6 @@ pub enum Message {
     Launch(home::Message),
     Install(installer::Message),
     Load(loader::Message),
-    ClaimResourcesLoaded(Box<ClaimResources>),
     Run(app::Message),
     Login(login::Message),
     PinEntry(crate::pin_entry::Message),
@@ -557,41 +560,6 @@ pub enum PreferencesSource {
     App(u64),
 }
 
-/// A restricted fork-loader result. GUI transfers these resources to the
-/// source App's Claim owner; this payload must never become a second App.
-pub struct ClaimResources {
-    pub intent: home::ClaimOpenIntent,
-    pub wallet: Arc<Wallet>,
-    pub cache: Cache,
-    pub daemon: Arc<dyn crate::daemon::Daemon + Sync + Send>,
-    pub bitcoind: Option<crate::node::bitcoind::Bitcoind>,
-    pub settings: app::settings::CubeSettings,
-    pub client: Option<crate::services::coincube::CoincubeClient>,
-    pub verified_account: Option<u32>,
-}
-
-impl std::fmt::Debug for ClaimResources {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ClaimResources")
-            .field("operation", &self.intent.operation)
-            .field("fork_cube", &self.settings.id)
-            .finish_non_exhaustive()
-    }
-}
-
-impl ClaimResources {
-    pub(crate) fn stop_owned(&mut self) {
-        if self.daemon.backend().is_embedded() {
-            if let Err(error) = tokio::runtime::Handle::current().block_on(self.daemon.stop()) {
-                tracing::error!("Claim fork daemon stop failed: {error}");
-            }
-        }
-        if let Some(bitcoind) = self.bitcoind.take() {
-            bitcoind.stop();
-        }
-    }
-}
-
 /// A closed loader can still have queued worker results with transferred
 /// resource ownership. Reject the result without ever admitting a new App.
 pub(crate) fn discard_closed_loader_result(message: Message) {
@@ -607,7 +575,6 @@ pub(crate) fn discard_closed_loader_result(message: Message) {
         Message::AppAsync(_, nested) | Message::ForkAsync(_, nested) => {
             discard_closed_loader_result(*nested);
         }
-        Message::ClaimResourcesLoaded(mut resources) => resources.stop_owned(),
         Message::Load(loader::Message::Started(Ok((daemon, pending, _)))) => {
             stop_embedded(&daemon);
             // PendingForkNode owns its node until admitted by a live Loader.
@@ -686,10 +653,10 @@ mod admitted_app_startup_tests {
                 let path = std::env::temp_dir()
                     .join(format!("admitted-app-startup-{}", uuid::Uuid::new_v4()));
                 let root = CoincubeDirectory::new(path.clone());
-                let (fixture, wallet) = crate::app::claim_step1_tests::bitcoin_app(&path);
+                let (fixture, wallet) = crate::app::shell_tests::bitcoin_app(&path);
                 let settings = fixture.cube_settings().clone();
                 let cache = fixture.cache().clone();
-                let daemon = crate::app::claim_step1_tests::fixture_daemon(&fixture);
+                let daemon = crate::app::shell_tests::fixture_daemon(&fixture);
                 drop(fixture);
                 let breez = Arc::new(app::breez_liquid::BreezClient::disconnected(
                     settings.network.bitcoin_network(),
@@ -1010,18 +977,15 @@ pub struct Tab {
     )>,
     pending_seed_export_trials: usize,
     closed_seed_export_origin: Option<usize>,
-    claim_open: Option<home::ClaimOpenIntent>,
+    /// The source App that launched this tab's Bitcoin Blake2b copy
+    /// installer. The pane keeps that App open in its own tab; cancelling
+    /// returns to it and closing it closes this installer. Cleared once the
+    /// copy is saved, so the copy then opens as an ordinary Cube.
+    copy_owner: Option<app::cache::AppGeneration>,
     fork_session_generation: u64,
     fork_save_task: Option<iced::task::Handle>,
     fork_tasks: HashMap<u64, iced::task::Handle>,
     next_fork_task: u64,
-    /// Split entry suspended while the ordinary BTCB2 wallet installer creates
-    /// the first eligible Vault Cube.
-    pending_split_after_install: bool,
-    pending_imported_claim: Option<crate::imported_claim::ImportedClaimRequest>,
-    /// One-use foreign Split scan retained by this admitted unlock only. The
-    /// process-global slot is cleared at the old-session teardown barrier.
-    pending_split_intent: Option<app::split_intent::SplitIntent>,
     /// An Account Recovery row may choose a destination before this Cube is
     /// unlocked. It applies only to the exact Cube that completes admission.
     pending_recovery_route: Option<(CoincubeDirectory, crate::chain::ChainId, String)>,
@@ -1077,30 +1041,21 @@ impl Tab {
             seed_export_origins: Vec::new(),
             pending_seed_export_trials: 0,
             closed_seed_export_origin: None,
-            claim_open: None,
+            copy_owner: None,
             fork_session_generation: 0,
             fork_save_task: None,
             fork_tasks: HashMap::new(),
             next_fork_task: 0,
-            pending_split_after_install: false,
-            pending_imported_claim: None,
-            pending_split_intent: None,
             pending_recovery_route: None,
         }
     }
 
-    pub(crate) fn set_claim_open(&mut self, intent: home::ClaimOpenIntent) {
-        self.claim_open = Some(intent);
+    pub(crate) fn set_copy_owner(&mut self, owner: app::cache::AppGeneration) {
+        self.copy_owner = Some(owner);
     }
 
-    pub(crate) fn claim_open_owner(&self) -> Option<app::cache::AppGeneration> {
-        self.claim_open
-            .as_ref()
-            .map(|intent| intent.owner)
-            .or_else(|| match &self.state {
-                State::Home(home) => home.claim_owner(),
-                _ => None,
-            })
+    pub(crate) fn copy_owner(&self) -> Option<app::cache::AppGeneration> {
+        self.copy_owner
     }
 
     pub fn cache(&self) -> Option<&Cache> {
@@ -1231,6 +1186,7 @@ impl Tab {
             State::App(app) => app.cube_settings().network.is_blake2b(),
             State::Loader(loader) => loader.cube_settings.network.is_blake2b(),
             State::PinEntry(pin) => pin.cube().network.is_blake2b(),
+            State::PasskeyUnlock(unlock) => unlock.cube().network.is_blake2b(),
             State::Installer(installer) => installer.context.bitcoin_config.chain.is_blake2b(),
             _ => false,
         };
@@ -1350,8 +1306,6 @@ impl Tab {
         originated: bool,
         capability_revoked: bool,
     ) -> Task<Message> {
-        self.pending_imported_claim = None;
-        self.pending_split_after_install = false;
         if !capability_revoked {
             match &mut self.state {
                 State::App(app)
@@ -1374,6 +1328,14 @@ impl Tab {
                     *connect_client = None;
                     return Task::none();
                 }
+                State::PasskeyUnlock(unlock)
+                    if unlock.cube().network.is_blake2b() && !unlock.requires_connect() =>
+                {
+                    let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } =
+                        &mut unlock.on_success;
+                    *connect_client = None;
+                    return Task::none();
+                }
                 State::Installer(installer)
                     if installer.context.fresh_fork_cube
                         && !installer.context.use_coincube_connect =>
@@ -1386,9 +1348,6 @@ impl Tab {
             }
         }
         self.fork_session_generation = self.fork_session_generation.wrapping_add(1);
-        self.pending_split_after_install = false;
-        self.pending_imported_claim = None;
-        app::split_intent::clear();
         self.fork_save_task.take();
         self.fork_tasks.clear();
         let mut command = Task::none();
@@ -1444,6 +1403,14 @@ impl Tab {
                 *connect_client = None;
                 pin.fail_open(if capability_revoked { "Bitcoin Blake2b is disabled. Check Global Settings before reopening this Cube." } else { "Connect session changed. Return Home and sign in again." }.into());
             }
+            // The same for a passkey copy: its assertion must not open the
+            // copy with the previous account's client.
+            State::PasskeyUnlock(unlock) if unlock.cube().network.is_blake2b() => {
+                let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } =
+                    &mut unlock.on_success;
+                *connect_client = None;
+                unlock.fail_open(if capability_revoked { "Bitcoin Blake2b is disabled. Check Global Settings before reopening this Cube." } else { "Connect session changed. Return Home and sign in again." }.into());
+            }
             State::Installer(installer) if installer.context.bitcoin_config.chain.is_blake2b() => {
                 installer.stop();
                 let (mut home, startup) = Home::new_for_chain(
@@ -1460,8 +1427,7 @@ impl Tab {
         }
         if let Some(state) = replacement {
             if matches!(state, State::Home(_)) {
-                self.claim_open = None;
-                self.pending_split_intent = None;
+                self.copy_owner = None;
             }
             self.state = state;
         }
@@ -1531,10 +1497,6 @@ impl Tab {
         task.map(move |message| Message::AppAsync(generation, Box::new(Message::Run(message))))
     }
 
-    pub(crate) fn stage_split_intent(&mut self, intent: app::split_intent::SplitIntent) {
-        self.pending_split_intent = Some(intent);
-    }
-
     /// Pure admission checks shared by GUI's teardown barrier and this Tab's
     /// Home transition. A refused destination must leave the current public
     /// Cube and its process session untouched.
@@ -1545,8 +1507,7 @@ impl Tab {
         match message {
             home::Message::Run(root, _, chain, cube)
             | home::Message::RunFromFloor(root, _, chain, cube, _)
-            | home::Message::RunToRecovery(root, _, chain, cube)
-            | home::Message::RunClaim(root, _, chain, cube, _) => {
+            | home::Message::RunToRecovery(root, _, chain, cube) => {
                 if let home::Message::RunFromFloor(_, _, _, _, generation) = message {
                     if !home.floor_open_matches_queued(*generation, cube) {
                         return Err("This Cube changed while opening. Select it again to use the current details.".into());
@@ -1594,17 +1555,6 @@ impl Tab {
                     return Err("The installation belongs to another data directory.".into());
                 }
                 home.chain_availability(*chain)
-                    .reason()
-                    .map_or(Ok(()), |reason| Err(reason.to_string()))
-            }
-            home::Message::InstallForSplit(root, client) => {
-                if !crate::chain::same_path(root.path(), home.datadir_path.path()) {
-                    return Err("The Split destination belongs to another data directory.".into());
-                }
-                if let Some(request) = home.imported_claim_request() {
-                    request.validate(root, client)?;
-                }
-                home.connect_chain_availability(crate::chain::ChainId::BitcoinBlake2b)
                     .reason()
                     .map_or(Ok(()), |reason| Err(reason.to_string()))
             }
@@ -1691,7 +1641,7 @@ impl Tab {
         };
         if matches!(
             message,
-            Message::StartClaimInstaller | Message::ClaimInstallCancelled
+            Message::StartClaimInstaller | Message::CopyInstallFinished { .. }
         ) {
             return Task::done(message);
         }
@@ -1911,8 +1861,6 @@ impl Tab {
                     if let State::Home(home) = &mut self.state {
                         home.set_error(error);
                     }
-                    app::split_intent::clear();
-                    self.pending_split_intent = None;
                     return Task::none();
                 }
                 let home::Message::RunFromFloor(root, config, chain, cube, _) = floor else {
@@ -1923,17 +1871,10 @@ impl Tab {
             }
             Message::Launch(home::Message::RunToRecovery(root, config, chain, cube)) => {
                 self.pending_recovery_route = Some((root.clone(), chain, cube.id.clone()));
-                self.claim_open = None;
-                Message::Launch(home::Message::Run(root, config, chain, cube))
-            }
-            Message::Launch(home::Message::RunClaim(root, config, chain, cube, intent)) => {
-                self.pending_recovery_route = None;
-                self.claim_open = Some(intent);
                 Message::Launch(home::Message::Run(root, config, chain, cube))
             }
             Message::Launch(home::Message::Run(root, config, chain, cube)) => {
                 self.pending_recovery_route = None;
-                self.claim_open = None;
                 Message::Launch(home::Message::Run(root, config, chain, cube))
             }
             Message::ForkInstallCompleted(generation, msg) => {
@@ -1951,17 +1892,12 @@ impl Tab {
                 launch,
                 home::Message::Run(..)
                     | home::Message::RunToRecovery(..)
-                    | home::Message::RunClaim(..)
                     | home::Message::Install(..)
-                    | home::Message::InstallForSplit(..)
             ) {
                 if let Err(error) = self.validate_home_exit(launch) {
                     if let State::Home(home) = &mut self.state {
                         home.set_error(error);
                     }
-                    app::split_intent::clear();
-                    self.pending_split_intent = None;
-                    self.claim_open = None;
                     return Task::none();
                 }
             }
@@ -2110,44 +2046,6 @@ impl Tab {
                     self.state = State::Installer(Box::new(install));
                     command.map(Message::Install)
                 }
-                home::Message::InstallForSplit(datadir, coincube_client) => {
-                    let imported = l.imported_claim_request();
-                    if let Some(request) = &imported {
-                        if let Err(error) = request.validate(&datadir, &coincube_client) {
-                            l.set_error(error);
-                            return Task::none();
-                        }
-                    }
-                    let network = crate::chain::ChainId::BitcoinBlake2b;
-                    if let Some(reason) = l.connect_chain_availability(network).reason() {
-                        l.set_error(reason.to_string());
-                        return Task::none();
-                    }
-                    let (install, command) = match Installer::try_new_for_chain(
-                        datadir,
-                        network,
-                        None,
-                        UserFlow::CreateWallet,
-                        false,
-                        None,
-                        None,
-                        None,
-                        false,
-                        Some(coincube_client),
-                    ) {
-                        Ok(result) => result,
-                        Err(error) => {
-                            self.pending_split_after_install = false;
-                            self.pending_imported_claim = None;
-                            l.set_error(error.to_string());
-                            return Task::none();
-                        }
-                    };
-                    self.pending_split_after_install = true;
-                    self.pending_imported_claim = imported;
-                    self.state = State::Installer(Box::new(install));
-                    command.map(Message::Install)
-                }
                 home::Message::Run(datadir_path, cfg, chain, cube) => {
                     self.unlock_floor = None;
                     let opened_on_floor = l.launcher_floor_open_armed();
@@ -2157,7 +2055,6 @@ impl Tab {
                             "This Cube changed while opening. Select it again to use the current details.",
                         );
                         self.unlock_motion = None;
-                        app::split_intent::clear();
                         return Task::none();
                     }
                     // Every refusal below abandons this open: drop an armed Split
@@ -2186,12 +2083,10 @@ impl Tab {
                             cube.network.label(),
                             chain.label(),
                         ));
-                        app::split_intent::clear();
                         return Task::none();
                     }
                     if let Some(reason) = l.chain_availability(cube.network).reason() {
                         l.set_error(reason.to_string());
-                        app::split_intent::clear();
                         return Task::none();
                     }
                     let network = chain.bitcoin_network();
@@ -2248,7 +2143,6 @@ impl Tab {
                                 cube.is_passkey_cube()
                             )
                         ));
-                        app::split_intent::clear();
                         return Task::none();
                     }
 
@@ -2272,7 +2166,6 @@ impl Tab {
                              and its recovery password, or use a build with \
                              COINCUBE_ENABLE_PASSKEY set.",
                         );
-                        app::split_intent::clear();
                         return Task::none();
                     }
 
@@ -2471,10 +2364,6 @@ impl Tab {
                     }
                     self.state = State::Home(home);
                     return task.map(Message::Launch);
-                }
-                if matches!(msg, installer::Message::CubeSaveFailed(_)) {
-                    self.pending_split_after_install = false;
-                    self.pending_imported_claim = None;
                 }
                 if let installer::Message::Exit(settings_opt, internal_bitcoind) = msg {
                     // Associate wallet with cube, and — for the Recovery
@@ -2789,8 +2678,6 @@ impl Tab {
                             error!("Aborting loader transition due to cube save failure");
                             #[cfg(feature = "mcp-proposals")]
                             i.finish_proposal_failure("The wallet/Cube setup could not be saved completely. Partial local data is retained. Return to the launcher and inspect the outcome before retrying.");
-                            self.pending_split_after_install = false;
-                            self.pending_imported_claim = None;
                             return i
                                 .update(installer::Message::CubeSaveFailed(err))
                                 .map(Message::Install);
@@ -2823,52 +2710,19 @@ impl Tab {
                     };
 
                     if cube.network.is_blake2b() {
-                        // Target setup is a prerequisite, not the Claim itself.
-                        // Reopen the Bitcoin source and let App re-check admission
-                        // and the persisted target before entering step one.
-                        if let Some(source) = &i.source_cube {
+                        // A copy (Tools › Split coins → Create copy) is
+                        // finished once saved. Its source App is still open in
+                        // the tab that launched it, so hand control back
+                        // there; the copy opens later from the Launcher like
+                        // any other Cube, which keeps one public Cube session.
+                        if i.source_cube.is_some() {
                             i.claim_target_saved = true;
-                            if self.claim_open.is_none() {
-                                match reopen_claim_source(&i.datadir, source) {
-                                    Ok((state, task)) => {
-                                        app::claim_intent::arm(source.settings.id.clone());
-                                        self.state = state;
-                                        return task;
-                                    }
-                                    Err(error) => {
-                                        i.navigation_error = Some(error);
-                                        return Task::none();
-                                    }
-                                }
+                            if let Some(owner) = self.copy_owner.take() {
+                                return Task::done(Message::CopyInstallFinished {
+                                    owner,
+                                    created: true,
+                                });
                             }
-                        }
-                        if self.pending_split_after_install {
-                            self.pending_split_after_install = false;
-                            let imported = self.pending_imported_claim.take();
-                            let (mut home, command) = match imported {
-                                Some(request) => match i.context.coincube_client.clone() {
-                                    Some(client) => {
-                                        Home::new_imported_claim(i.datadir.clone(), request, client)
-                                    }
-                                    None => {
-                                        let (mut home, command) = Home::new_for_chain(
-                                            i.datadir.clone(),
-                                            Some(cube.network),
-                                        );
-                                        home.set_error("Sign in to Connect, then open Claim BTCB2 from your imported wallet again.");
-                                        (home, command)
-                                    }
-                                },
-                                None => {
-                                    let (mut home, command) =
-                                        Home::new_for_chain(i.datadir.clone(), Some(cube.network));
-                                    home.request_split_resume();
-                                    (home, command)
-                                }
-                            };
-                            home.theme_mode = self.theme_mode;
-                            self.state = State::Home(home);
-                            return command.map(Message::Launch);
                         }
                         let config = match app::Config::from_file(
                             &i.datadir
@@ -2878,8 +2732,6 @@ impl Tab {
                         ) {
                             Ok(config) => config,
                             Err(e) => {
-                                self.pending_split_after_install = false;
-                                self.pending_imported_claim = None;
                                 return i
                                     .update(installer::Message::CubeSaveFailed(e.to_string()))
                                     .map(Message::Install);
@@ -3032,10 +2884,11 @@ impl Tab {
                         command.map(Message::Load)
                     }
                 } else if let installer::Message::BackToApp(network) = msg {
-                    self.pending_split_after_install = false;
-                    self.pending_imported_claim = None;
-                    if self.claim_open.take().is_some() {
-                        return Task::done(Message::ClaimInstallCancelled);
+                    if let Some(owner) = self.copy_owner.take() {
+                        return Task::done(Message::CopyInstallFinished {
+                            owner,
+                            created: false,
+                        });
                     }
                     // A claim was launched from a *different* Cube than the one
                     // being built, so there is no `cube_settings` to go back to
@@ -3047,9 +2900,6 @@ impl Tab {
                     if let Some(source) = i.source_cube.take() {
                         match reopen_claim_source(&i.datadir, &source) {
                             Ok((state, task)) => {
-                                if i.claim_target_saved {
-                                    app::claim_intent::arm(source.settings.id.clone());
-                                }
                                 self.state = state;
                                 return task;
                             }
@@ -3118,13 +2968,6 @@ impl Tab {
             }
             (State::Loader(loader), Message::Load(msg)) => match msg {
                 loader::Message::View(loader::ViewMessage::SwitchNetwork) => {
-                    let claim_cancelled = self.claim_open.take().is_some();
-                    // Back from the loader abandons this open, and its Split
-                    // handoff with it (Retry keeps both).
-                    app::split_intent::clear();
-                    if claim_cancelled {
-                        return Task::done(Message::ClaimInstallCancelled);
-                    }
                     let (home, command) =
                         Home::new(loader.datadir_path.clone(), Some(loader.network));
                     loader.stop();
@@ -3168,7 +3011,7 @@ impl Tab {
                 }
                 loader::Message::Synced(Ok((
                     wallet,
-                    mut cache,
+                    cache,
                     daemon,
                     bitcoind,
                     backup,
@@ -3177,36 +3020,9 @@ impl Tab {
                     if loader.fork_revoked() {
                         return Task::none();
                     }
-                    if let Some(intent) = self.claim_open.take() {
-                        if cube_settings.network != crate::chain::ChainId::BitcoinBlake2b
-                            || backup.is_some()
-                        {
-                            loader.fail(loader::Error::Unexpected(
-                                "The paired Claim load did not return an active fork Vault.".into(),
-                            ));
-                            return Task::none();
-                        }
-                        cache.cube_encryption_key = loader.cube_encryption_key.clone();
-                        let client = loader.connect_client.clone();
-                        let verified_account = loader.claim_verified_account;
-                        loader.detach_claim_resources();
-                        return Task::done(Message::ClaimResourcesLoaded(Box::new(
-                            ClaimResources {
-                                intent,
-                                wallet,
-                                cache,
-                                daemon,
-                                bitcoind,
-                                settings: cube_settings,
-                                client,
-                                verified_account,
-                            },
-                        )));
-                    }
                     if cube_settings.network.is_blake2b() {
                         let client = if loader.requires_connect() {
                             let Some(client) = loader.connect_client.clone() else {
-                                self.pending_split_intent = None;
                                 return Task::done(Message::Load(loader::Message::Failure(
                                     crate::daemon::DaemonError::Unexpected(
                                         "Connect session lost; reopen this Cube".into(),
@@ -3217,19 +3033,6 @@ impl Tab {
                         } else {
                             None
                         };
-                        // The fork constructors consume the one-use Split slot
-                        // inside App::new_inner. BreezLoaded is never reached by
-                        // this path, so transfer the private scan immediately
-                        // before the accepted constructor and clear it afterward.
-                        app::split_intent::clear();
-                        if let Some(intent) = self.pending_split_intent.take() {
-                            if intent.target_source() == cube_settings.network
-                                && intent.target_cube_id() == cube_settings.id
-                                && intent.is_internally_current()
-                            {
-                                app::split_intent::arm(intent);
-                            }
-                        }
                         let opened = if let Some(client) = client {
                             App::new_for_chain_with_node(
                                 cache,
@@ -3254,7 +3057,6 @@ impl Tab {
                                 bitcoind,
                             )
                         };
-                        app::split_intent::clear();
                         match opened {
                             Ok((app, task)) => {
                                 self.state = State::App(app);
@@ -3374,14 +3176,6 @@ impl Tab {
                             )
                         });
 
-                    if let Some(intent) = self.pending_split_intent.take() {
-                        if intent.target_source() == cube_settings.network
-                            && intent.target_cube_id() == cube_settings.id
-                            && intent.is_internally_current()
-                        {
-                            app::split_intent::arm(intent);
-                        }
-                    }
                     let admitted_app = App::new(
                         cache,
                         wallet,
@@ -3396,7 +3190,6 @@ impl Tab {
                     );
                     // App::new consumes only its exact target. Never leave a
                     // staged operation globally armed after an error.
-                    app::split_intent::clear();
                     let (app, command) = match admitted_app {
                         Ok(app) => app,
                         Err(error) => {
@@ -3503,26 +3296,28 @@ impl Tab {
                             ))),
                         }
                     }
-                    app::Message::View(app::view::Message::ReturnBitcoinClaim) => {
-                        match app.return_bitcoin_claim_handoff() {
-                            Ok(handoff) => Task::done(Message::OpenBitcoinClaim(handoff)),
-                            Err(error) => Task::done(Message::Run(app::Message::View(
-                                app::view::Message::ShowError(error),
-                            ))),
-                        }
-                    }
-                    app::Message::View(app::view::Message::ContinueForkClaim) => {
-                        match app.continue_claim_handoff() {
-                            Ok(handoff) => Task::done(Message::OpenForkClaim(handoff)),
-                            Err(error) => Task::done(Message::Run(app::Message::View(
-                                app::view::Message::ShowError(error),
-                            ))),
-                        }
-                    }
                     app::Message::View(app::view::Message::StartClaimBlake2b) => {
-                        // The pane retains this source App while a temporary
-                        // installer builds its counterpart Cube.
-                        Task::done(Message::StartClaimInstaller)
+                        // Tools › Split coins → Create copy. Re-checked here
+                        // rather than trusted from the button: the account
+                        // grant can lapse and a copy can appear meanwhile.
+                        app.refresh_copy_exists();
+                        let source = app.claim_source_cube();
+                        let refusal = app::features::claim_blake2b(source)
+                            .reason()
+                            .map(str::to_string)
+                            .or_else(|| {
+                                source.already_claimed.then(|| {
+                                    "This Cube already has a Bitcoin Blake2b copy.".to_string()
+                                })
+                            });
+                        match refusal {
+                            Some(error) => Task::done(Message::Run(app::Message::View(
+                                app::view::Message::ShowError(error),
+                            ))),
+                            // The pane retains this source App while a
+                            // temporary installer builds its copy.
+                            None => Task::done(Message::StartClaimInstaller),
+                        }
                     }
                     app::Message::View(app::view::Message::SetupVaultRestoreFromKit) => {
                         // W15 — same installer launch path as SetupVault,
@@ -3708,11 +3503,8 @@ impl Tab {
                                         cube.network.bitcoin_network(),
                                     ),
                                 );
-                                let scoped_claim = self.claim_open.is_some();
-                                if !scoped_claim {
-                                    app::session::open(cube.id.clone(), pin.clone());
-                                }
-                                let (mut loader, command) = if requires_connect {
+                                app::session::open(cube.id.clone(), pin.clone());
+                                let (loader, command) = if requires_connect {
                                     Loader::new_for_chain(
                                         datadir.clone(),
                                         config.clone(),
@@ -3730,11 +3522,6 @@ impl Tab {
                                         cek,
                                     )
                                 };
-                                if scoped_claim {
-                                    loader.set_scoped_seed_password(pin);
-                                    loader.claim_verified_account =
-                                        pin_entry.verified_connect_user();
-                                }
                                 self.state = State::Loader(loader);
                                 return command.map(Message::Load);
                             }
@@ -4119,14 +3906,6 @@ impl Tab {
                     }
                 }
                 crate::pin_entry::Message::Back => {
-                    self.pending_split_intent = None;
-                    if self.claim_open.take().is_some() {
-                        app::split_intent::clear();
-                        return Task::done(Message::ClaimInstallCancelled);
-                    }
-                    // An abandoned unlock abandons its Split handoff too; it
-                    // must not fire on a later ordinary open of this Cube.
-                    app::split_intent::clear();
                     // Go back to home. `Home` speaks `bitcoin::Network` (it
                     // only ever lists the Bitcoin family), and a Cube on the
                     // PIN screen is one that passed the open gate, so the
@@ -4199,10 +3978,81 @@ impl Tab {
             (State::PasskeyUnlock(unlock), Message::PasskeyUnlock(msg)) => match msg {
                 crate::passkey_unlock::Message::Unlocked { fingerprint } => {
                     if unlock.cube().network.is_blake2b() {
-                        // Fork passkey creation is unavailable; do not route a
-                        // forged/stale callback into legacy SDK initialization.
-                        unlock.relocked();
-                        return Task::none();
+                        // A Bitcoin Blake2b copy of a passkey Cube unlocks with
+                        // the same passkey (decision 2026-10-29). It has a
+                        // Vault only: open it through the fork loader, as the
+                        // PIN path does, and never start Liquid or Spark.
+                        let crate::pin_entry::PinEntrySuccess::LoadApp {
+                            datadir,
+                            config,
+                            wallet_settings,
+                            connect_client,
+                            ..
+                        } = &unlock.on_success;
+                        let cube = unlock.cube().clone();
+                        // Every way out below that does not open the Vault
+                        // closes the session the assertion just opened, so a
+                        // copy that looks locked holds no seed.
+                        let requires_connect = !crate::chain::has_managed_local_fork(
+                            datadir,
+                            cube.network,
+                            wallet_settings.as_ref(),
+                        );
+                        let client = connect_client.clone().filter(|c| c.token().is_some());
+                        if requires_connect && client.is_none() {
+                            crate::app::session::close_cube(&cube.id);
+                            unlock.fail_open(
+                                "Sign in to Connect from Home before opening this Bitcoin Blake2b Cube"
+                                    .into(),
+                            );
+                            return Task::none();
+                        }
+                        let Some(wallet_settings) = wallet_settings
+                            .clone()
+                            .filter(|w| w.remote_backend_auth.is_none())
+                        else {
+                            crate::app::session::close_cube(&cube.id);
+                            unlock.fail_open(
+                                "Bitcoin Blake2b requires a local Connect-backed Vault".into(),
+                            );
+                            return Task::none();
+                        };
+                        // The assertion parked the derived master seed in the
+                        // session under this Cube; the Vault's seed file opens
+                        // with the password derived from it
+                        // (`app::session::seed_file_password`).
+                        let Some(signer) =
+                            crate::app::session::unlocked_signer(&cube.id, fingerprint)
+                        else {
+                            crate::app::session::close_cube(&cube.id);
+                            unlock.relocked();
+                            return Task::none();
+                        };
+                        let cek =
+                            Arc::new(crate::services::connect::crypto::CubeEncryptionKey::derive(
+                                &signer,
+                                cube.network.bitcoin_network(),
+                            ));
+                        let (loader, command) = if requires_connect {
+                            Loader::new_for_chain(
+                                datadir.clone(),
+                                config.clone(),
+                                wallet_settings,
+                                cube,
+                                client.expect("authenticated backend checked"),
+                                cek,
+                            )
+                        } else {
+                            Loader::new_local_fork(
+                                datadir.clone(),
+                                config.clone(),
+                                wallet_settings,
+                                cube,
+                                cek,
+                            )
+                        };
+                        self.state = State::Loader(loader);
+                        return command.map(Message::Load);
                     }
                     // The assertion succeeded and `passkey_unlock` has already
                     // parked the derived signer in `app::session`. What follows
@@ -4404,9 +4254,9 @@ impl Tab {
                     )
                 }
                 crate::passkey_unlock::Message::Back => {
-                    self.pending_split_intent = None;
-                    // As for PIN Back: abandoning the unlock clears Split.
-                    app::split_intent::clear();
+                    // A failed open stays on this screen with the session the
+                    // assertion opened; leaving closes it.
+                    crate::app::session::close_cube(&unlock.cube().id);
                     // Dropping the screen drops any in-flight ceremony, which
                     // cancels the system prompt.
                     let network = unlock.cube().network.bitcoin_network();
@@ -4822,12 +4672,7 @@ impl Tab {
                     Message::AppAsync(generation, Box::new(Message::Run(message)))
                 })
             }
-            State::Home(v) => v
-                .view_with_privacy(
-                    self.balance_privacy
-                        .is_none_or(|chrome| chrome.privacy.masks_amounts()),
-                )
-                .map(Message::Launch),
+            State::Home(v) => v.view().map(Message::Launch),
             State::Loader(v) => v.view().map(Message::Load),
             State::Login(v) => v.view().map(Message::Login),
             State::PinEntry(v) => {
@@ -5033,8 +4878,7 @@ impl Tab {
     }
 
     pub fn stop(&mut self) {
-        self.pending_split_intent = None;
-        self.claim_open = None;
+        self.copy_owner = None;
         self.unlock_motion = None;
         self.unlock_floor = None;
         self.opening = None;
@@ -5144,6 +4988,12 @@ pub(crate) struct RestoreCubeSeed {
     pub(crate) pin: zeroize::Zeroizing<String>,
     pub(crate) master_signer_fingerprint: bitcoin::bip32::Fingerprint,
     pub(crate) seed_backed_up: bool,
+    /// For a Bitcoin Blake2b copy of a passkey Cube: the source's passkey,
+    /// which the copy unlocks with. Its seed file was written under the
+    /// password derived from that passkey's seed, and `pin` is empty and
+    /// never read: a copy is a Blake2b Cube, and every use of `pin` at the
+    /// exit seam is on a Bitcoin-family Cube.
+    pub(crate) passkey: Option<app::settings::PasskeyMetadata>,
 }
 
 /// The deleted Cube's original identity, carried out of the decrypted
@@ -5245,10 +5095,23 @@ pub(crate) fn installer_exit_seed(i: &Installer) -> Option<RestoreCubeSeed> {
         // under the source Cube's PIN (`Context::cube_pin`, resolved from the
         // source session at admission) — not a `restore_pin`, because nothing
         // was restored and no PIN was chosen.
+        if let Some(passkey) = source.cube.passkey_metadata.clone() {
+            return i
+                .context
+                .passkey_seed_password
+                .as_ref()
+                .map(|_| RestoreCubeSeed {
+                    pin: zeroize::Zeroizing::new(String::new()),
+                    master_signer_fingerprint: source.master_signer_fingerprint(),
+                    seed_backed_up: source.seed_backed_up(),
+                    passkey: Some(passkey),
+                });
+        }
         return i.context.cube_pin.clone().map(|pin| RestoreCubeSeed {
             pin,
             master_signer_fingerprint: source.master_signer_fingerprint(),
             seed_backed_up: source.seed_backed_up(),
+            passkey: None,
         });
     }
     match (
@@ -5267,6 +5130,7 @@ pub(crate) fn installer_exit_seed(i: &Installer) -> Option<RestoreCubeSeed> {
             pin,
             master_signer_fingerprint: fp,
             seed_backed_up: i.context.fresh_fork_seed_backed_up,
+            passkey: None,
         }),
         _ => None,
     }
@@ -5401,6 +5265,9 @@ pub(crate) async fn find_or_create_cube<C: Into<crate::chain::ChainId>>(
                 // what verifies that PIN from now on (I1).
                 cube = cube.with_master_signer(seed.master_signer_fingerprint);
                 cube.backed_up |= seed.seed_backed_up;
+                if let Some(passkey) = &seed.passkey {
+                    cube = cube.with_passkey(passkey.clone());
+                }
             }
             Ok(cube)
         };
@@ -5788,7 +5655,6 @@ pub fn create_app_with_remote_backend(
             btcb2_server_enabled: false,
             // Resolved from disk in `App::new_inner`.
             btcb2_already_claimed: false,
-            btcb2_claim_resume: false,
             // Liquid sunset gate. Both halves are filled in later: the local
             // half in `App::new` (from whether the Liquid SDK actually
             // connected), the server half when `/connect/features` loads.
@@ -5798,8 +5664,7 @@ pub fn create_app_with_remote_backend(
             split_records: Vec::new(),
             splitting: std::collections::HashMap::new(),
             split_unconfirmed: std::collections::HashSet::new(),
-            separated: std::collections::HashSet::new(),
-            split_deposit: None,
+            separated: std::collections::HashMap::new(),
             // We ignore last poll fields for remote backend.
             last_poll_at_startup: None,
             daemon_cache: DaemonCache {
@@ -6162,22 +6027,6 @@ mod migration_warning_tests {
         }
     }
 
-    /// #578 review I7: a Home-level refusal of the open (chain-folder
-    /// mismatch, Connect availability) drops an armed Split handoff.
-    #[test]
-    fn a_refused_open_from_home_clears_the_split_handoff() {
-        use crate::chain::ChainId;
-        for found_in in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
-            let cube = cube_on(ChainId::BitcoinBlake2b);
-            let id = cube.id.clone();
-            app::split_intent::arm_fresh_for_test(&id);
-            let (state, error) = open_from_home(cube, found_in);
-            assert_eq!(state, "Home", "{:?}", found_in);
-            assert!(error.is_some());
-            assert!(app::split_intent::take_for_open(&id, ChainId::BitcoinBlake2b).is_none());
-        }
-    }
-
     #[test]
     fn refused_home_open_discards_any_prior_floor_snapshot() {
         let mut tab = non_app_tab();
@@ -6209,84 +6058,6 @@ mod migration_warning_tests {
         assert!(matches!(tab.state, State::Home(_)));
         assert!(tab.unlock_floor.is_none());
         assert!(tab.unlock_motion.is_none());
-    }
-
-    #[test]
-    fn refused_claim_then_ordinary_open_does_not_retain_claim_authority() {
-        use crate::chain::ChainId;
-
-        let mut tab = non_app_tab();
-        let root = match &tab.state {
-            State::Home(home) => home.datadir_path.clone(),
-            _ => unreachable!(),
-        };
-        let target = cube_on(ChainId::BitcoinBlake2b);
-        let handoff =
-            app::claim_intent::ForkHandoff::new(&root, "source-cube".into(), target.id.clone())
-                .unwrap();
-        let intent = home::ClaimOpenIntent::new(
-            app::cache::AppGeneration::next(),
-            &root,
-            "source-cube".into(),
-            target.id.clone(),
-            home::ClaimRoute::Begin(handoff),
-        );
-        drop(tab.update(Message::Launch(home::Message::RunClaim(
-            root.clone(),
-            app::config::Config::new(false),
-            ChainId::Bitcoin, // Wrong folder: refuse before PIN entry.
-            target,
-            intent,
-        ))));
-        assert!(matches!(tab.state, State::Home(_)));
-        assert!(tab.claim_open.is_none(), "refusal must discard the Claim");
-
-        let ordinary = cube_on(ChainId::Bitcoin);
-        drop(tab.update(Message::Launch(home::Message::Run(
-            root,
-            app::config::Config::new(false),
-            ChainId::Bitcoin,
-            ordinary,
-        ))));
-        assert!(matches!(tab.state, State::PinEntry(_)));
-        assert!(tab.claim_open.is_none());
-    }
-
-    #[test]
-    fn ordinary_open_clears_preexisting_claim_intent() {
-        use crate::chain::ChainId;
-
-        let mut tab = non_app_tab();
-        let root = match &tab.state {
-            State::Home(home) => home.datadir_path.clone(),
-            _ => unreachable!(),
-        };
-        let ordinary = cube_on(ChainId::Bitcoin);
-        tab.set_claim_open(home::ClaimOpenIntent::new(
-            app::cache::AppGeneration::next(),
-            &root,
-            "source-cube".into(),
-            ordinary.id.clone(),
-            home::ClaimRoute::Begin(
-                app::claim_intent::ForkHandoff::new(
-                    &root,
-                    "source-cube".into(),
-                    ordinary.id.clone(),
-                )
-                .unwrap(),
-            ),
-        ));
-        drop(tab.update(Message::Launch(home::Message::Run(
-            root,
-            app::config::Config::new(false),
-            ChainId::Bitcoin,
-            ordinary,
-        ))));
-        assert!(matches!(tab.state, State::PinEntry(_)));
-        assert!(
-            tab.claim_open.is_none(),
-            "ordinary open must discard stale Claim"
-        );
     }
 
     fn cube_on(chain: crate::chain::ChainId) -> app::settings::CubeSettings {
@@ -6565,6 +6336,7 @@ mod find_or_create_cube_tests {
         let seed = RestoreCubeSeed {
             pin: zeroize::Zeroizing::new("246810".to_string()),
             master_signer_fingerprint: fp,
+            passkey: None,
             seed_backed_up: false,
         };
         let mut cube = app::settings::CubeSettings::new(
@@ -6626,6 +6398,7 @@ mod find_or_create_cube_tests {
         let wrong_seed = RestoreCubeSeed {
             pin: zeroize::Zeroizing::new("246810".to_string()),
             master_signer_fingerprint: bitcoin::bip32::Fingerprint::from([9, 9, 9, 9]),
+            passkey: None,
             seed_backed_up: false,
         };
         let mismatch = find_or_create_cube_for_imported_restore(
@@ -6827,6 +6600,7 @@ mod find_or_create_cube_tests {
         let seed = RestoreCubeSeed {
             pin: zeroize::Zeroizing::new("synthetic-pin".into()),
             master_signer_fingerprint: fp,
+            passkey: None,
             seed_backed_up: true,
         };
         let cube = find_or_create_cube(
@@ -7227,6 +7001,7 @@ mod find_or_create_cube_tests {
         let seed = RestoreCubeSeed {
             pin: zeroize::Zeroizing::new("135790".to_string()),
             master_signer_fingerprint: fp,
+            passkey: None,
             seed_backed_up: false,
         };
         let mut settings = app::settings::Settings::default();
@@ -7424,6 +7199,7 @@ mod find_or_create_cube_tests {
         let seed = RestoreCubeSeed {
             pin: zeroize::Zeroizing::new("246810".to_string()),
             master_signer_fingerprint: fp,
+            passkey: None,
             seed_backed_up: false,
         };
 
@@ -7610,49 +7386,91 @@ mod unlock_routing_tests {
         );
     }
 
-    /// #576 review F1: abandoning the unlock of a Split target must clear the
-    /// armed handoff, or it fires on a later ordinary open of the same Cube.
+    /// #947 review: after the assertion parked the seed, a refused open
+    /// (here: no Connect sign-in) must close the session, and so must Back.
     #[test]
-    fn abandoning_pin_or_passkey_unlock_clears_the_split_handoff() {
-        use crate::{app::split_intent, chain::ChainId};
+    fn a_refused_passkey_copy_open_closes_the_session() {
+        use crate::chain::ChainId;
+        use coincube_core::{miniscript::bitcoin::secp256k1::Secp256k1, signer::MasterSigner};
         let _guard = crate::app::session::test_guard();
-        for passkey in [false, true] {
-            let mut cube = CubeSettings::new("Fork".to_string(), ChainId::BitcoinBlake2b);
-            if passkey {
-                cube = cube.with_passkey(PasskeyMetadata {
-                    credential_id: "Y3JlZC1pZA==".to_string(),
-                    rp_id: "coincube.io".to_string(),
-                    created_at: 1_786_122_245,
-                    label: None,
-                });
-            }
-            let id = cube.id.clone();
-            // Control: the fixture is armed and would be taken by this Cube.
-            split_intent::arm_fresh_for_test(&id);
-            assert!(split_intent::take_for_open(&id, ChainId::BitcoinBlake2b).is_some());
+        crate::app::session::close();
+        let signer = MasterSigner::generate(Network::Bitcoin).unwrap();
+        let fingerprint = signer.fingerprint(&Secp256k1::signing_only());
+        let cube = CubeSettings::new("Copy".to_string(), ChainId::BitcoinBlake2b).with_passkey(
+            PasskeyMetadata {
+                credential_id: "Y3JlZC1pZA==".to_string(),
+                rp_id: "coincube.io".to_string(),
+                created_at: 1_786_122_245,
+                label: None,
+            },
+        );
+        let id = cube.id.clone();
+        let mut tab = super::Tab::new(
+            1,
+            unlock_state(
+                cube,
+                std::path::PathBuf::from("/tmp/unused"),
+                on_success(),
+                None,
+            ),
+        );
+        crate::app::session::open_without_pin(id.clone());
+        crate::app::session::store_unlocked_signer(&id, fingerprint, signer);
+        let _ = tab.update(super::Message::PasskeyUnlock(
+            crate::passkey_unlock::Message::Unlocked { fingerprint },
+        ));
+        assert!(
+            matches!(tab.state, State::PasskeyUnlock(_)),
+            "the open was refused"
+        );
+        assert!(crate::app::session::unlocked_signer(&id, fingerprint).is_none());
+        assert!(!crate::app::session::is_open());
 
-            split_intent::arm_fresh_for_test(&id);
-            let mut tab = super::Tab::new(
-                1,
-                unlock_state(
-                    cube,
-                    std::path::PathBuf::from("/tmp/unused"),
-                    on_success(),
-                    None,
-                ),
-            );
-            let _ = tab.update(if passkey {
-                super::Message::PasskeyUnlock(crate::passkey_unlock::Message::Back)
-            } else {
-                super::Message::PinEntry(crate::pin_entry::Message::Back)
-            });
-            assert!(matches!(tab.state, State::Home(_)));
-            assert!(
-                split_intent::take_for_open(&id, ChainId::BitcoinBlake2b).is_none(),
-                "passkey={}",
-                passkey
-            );
-        }
+        // Back from a failed open closes it too.
+        let signer = MasterSigner::generate(Network::Bitcoin).unwrap();
+        let fingerprint = signer.fingerprint(&Secp256k1::signing_only());
+        crate::app::session::open_without_pin(id.clone());
+        crate::app::session::store_unlocked_signer(&id, fingerprint, signer);
+        let _ = tab.update(super::Message::PasskeyUnlock(
+            crate::passkey_unlock::Message::Back,
+        ));
+        assert!(!crate::app::session::is_open());
+    }
+
+    /// #947 review: a Connect change while a Connect-backed passkey copy is
+    /// at its prompt drops the old client and fails the open, as PIN entry
+    /// does, so the assertion cannot open it under the previous account.
+    #[test]
+    fn a_connect_change_fails_a_waiting_passkey_copy_open() {
+        use crate::chain::ChainId;
+        let cube = CubeSettings::new("Copy".to_string(), ChainId::BitcoinBlake2b).with_passkey(
+            PasskeyMetadata {
+                credential_id: "Y3JlZC1pZA==".to_string(),
+                rp_id: "coincube.io".to_string(),
+                created_at: 1_786_122_245,
+                label: None,
+            },
+        );
+        let mut success = on_success();
+        let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } = &mut success;
+        *connect_client = Some(crate::services::coincube::CoincubeClient::for_test(
+            "https://connect.example/",
+        ));
+        let mut tab = super::Tab::new(
+            1,
+            unlock_state(cube, std::path::PathBuf::from("/tmp/unused"), success, None),
+        );
+        drop(tab.invalidate_fork_state(super::AuthChange::LogOut, false, false));
+        let State::PasskeyUnlock(unlock) = &tab.state else {
+            panic!("still at the prompt");
+        };
+        assert!(unlock.requires_connect());
+        let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } = &unlock.on_success;
+        assert!(connect_client.is_none(), "the old client is dropped");
+        assert_eq!(
+            unlock.error_for_test(),
+            Some("Connect session changed. Return Home and sign in again.")
+        );
     }
 
     fn blake2b_error_loader() -> super::State {
@@ -7702,65 +7520,6 @@ mod unlock_routing_tests {
         std::fs::remove_dir_all(root_path).unwrap();
     }
 
-    /// #578 review R1: Back from the loader error screen abandons the open
-    /// and its Split handoff; Retry keeps it for the same open.
-    #[test]
-    fn loader_back_clears_the_split_handoff_and_retry_keeps_it() {
-        use crate::{app::split_intent, chain::ChainId, loader};
-        let _guard = crate::app::session::test_guard();
-        let id = "split-loader";
-
-        split_intent::arm_fresh_for_test(id);
-        let mut tab = super::Tab::new(1, blake2b_error_loader());
-        let _ = tab.update(super::Message::Load(loader::Message::View(
-            loader::ViewMessage::Retry,
-        )));
-        assert!(matches!(tab.state, State::Loader(_)));
-        assert!(split_intent::take_for_open(id, ChainId::BitcoinBlake2b).is_some());
-
-        split_intent::arm_fresh_for_test(id);
-        let mut tab = super::Tab::new(1, blake2b_error_loader());
-        let _ = tab.update(super::Message::Load(loader::Message::View(
-            loader::ViewMessage::SwitchNetwork,
-        )));
-        assert!(matches!(tab.state, State::Home(_)));
-        assert!(split_intent::take_for_open(id, ChainId::BitcoinBlake2b).is_none());
-    }
-
-    /// #578 review R1: closing a tab that is mid-open (loader or unlock)
-    /// clears the Split handoff; closing a settled tab does not.
-    #[test]
-    fn closing_a_tab_mid_open_clears_the_split_handoff() {
-        use crate::{app::split_intent, chain::ChainId, gui::pane::Pane};
-        let _guard = crate::app::session::test_guard();
-        let id = "split-loader";
-        let pin = unlock_state(
-            CubeSettings::new("Fork".to_string(), ChainId::BitcoinBlake2b),
-            std::path::PathBuf::from("/tmp/unused"),
-            on_success(),
-            None,
-        );
-        for state in [blake2b_error_loader(), pin] {
-            split_intent::arm_fresh_for_test(id);
-            let mut pane = Pane::new_with_tab(state);
-            pane.close_tab(0);
-            assert!(split_intent::take_for_open(id, ChainId::BitcoinBlake2b).is_none());
-        }
-
-        let root =
-            std::env::temp_dir().join(format!("coincube-split-close-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        let (home, _) = crate::home::Home::new(
-            crate::dir::CoincubeDirectory::new(root.clone()),
-            Some(Network::Bitcoin),
-        );
-        split_intent::arm_fresh_for_test(id);
-        let mut pane = Pane::new_with_tab(super::State::Home(home));
-        pane.close_tab(0);
-        assert!(split_intent::take_for_open(id, ChainId::BitcoinBlake2b).is_some());
-        let _ = std::fs::remove_dir_all(root);
-    }
-
     /// The other half: the PIN path is untouched by the fix. Without this, a
     /// future "just always use PasskeyUnlock" simplification passes the test
     /// above and breaks every PIN Cube.
@@ -7786,118 +7545,7 @@ mod unlock_routing_tests {
 #[cfg(test)]
 mod fork_completion_tests {
     use super::*;
-    use crate::app::settings::CubeSettings;
     use crate::chain::ChainId;
-
-    #[test]
-    fn terminal_fork_revoke_clears_old_claim_and_admits_a_new_valid_start() {
-        let result = std::thread::Builder::new()
-            .name("terminal-claim-restart".into())
-            .stack_size(8 * 1024 * 1024)
-            .spawn(|| {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap();
-                let _enter = runtime.enter();
-                let _guard = app::session::test_guard();
-                let (source, handoff, path) =
-                    app::claim_step1_tests::returning_claim_fixture(false);
-                let root = source.datadir().clone();
-                let target = app::settings::Settings::from_file(
-                    &root.network_directory(ChainId::BitcoinBlake2b),
-                )
-                .unwrap()
-                .cubes
-                .remove(0);
-                let owner = source.cache().app_generation;
-                let old = home::ClaimOpenIntent::new(
-                    owner,
-                    &root,
-                    source.cube_settings().id.clone(),
-                    target.id.clone(),
-                    home::ClaimRoute::Begin(handoff.clone()),
-                );
-                assert!(old.validates(&source, &root, ChainId::BitcoinBlake2b, &target));
-                let (mut installer, startup) = Installer::new(
-                    root.clone(),
-                    bitcoin::Network::Bitcoin,
-                    None,
-                    installer::UserFlow::CreateWallet,
-                    false,
-                    None,
-                    None,
-                    None,
-                    false,
-                    None,
-                )
-                .unwrap();
-                drop(startup);
-                installer.context.bitcoin_config.chain = ChainId::BitcoinBlake2b;
-                let mut tab = Tab::new(1, State::Installer(Box::new(installer)));
-                tab.set_claim_open(old.clone());
-                let old_fork_generation = tab.fork_session_generation;
-                app::settings::global::GlobalSettings::update_bitcoin_blake2b_beta(
-                    &app::settings::global::GlobalSettings::path(&root),
-                    true,
-                )
-                .unwrap();
-                drop(tab.invalidate_fork_state(AuthChange::LogOut, false, true));
-                assert!(matches!(tab.state, State::Home(_)));
-                assert!(
-                    tab.claim_open.is_none(),
-                    "terminal Home discards old Claim metadata"
-                );
-                let State::Home(home) = &mut tab.state else {
-                    unreachable!()
-                };
-                drop(home.update(home::Message::GlobalFeatureLoaded(0, true)));
-
-                let next = home::ClaimOpenIntent::new(
-                    owner,
-                    &root,
-                    source.cube_settings().id.clone(),
-                    target.id.clone(),
-                    home::ClaimRoute::Begin(handoff),
-                );
-                assert_ne!(next.operation, old.operation);
-                assert!(next.validates(&source, &root, ChainId::BitcoinBlake2b, &target));
-                drop(tab.update(Message::Launch(home::Message::RunClaim(
-                    root,
-                    app::Config::new(false),
-                    ChainId::BitcoinBlake2b,
-                    target.clone(),
-                    next.clone(),
-                ))));
-                assert!(matches!(tab.state, State::PinEntry(_)));
-                assert_eq!(
-                    tab.claim_open.as_ref().map(|i| i.operation),
-                    Some(next.operation)
-                );
-                assert_eq!(
-                    tab.update(Message::ForkInstallCompleted(
-                        old_fork_generation,
-                        installer::Message::CubeSaved(Ok((target, None, None)), None, None),
-                    ))
-                    .units(),
-                    0,
-                    "the delayed old completion cannot replace the new operation"
-                );
-                assert!(matches!(tab.state, State::PinEntry(_)));
-                assert_eq!(
-                    tab.claim_open.as_ref().map(|i| i.operation),
-                    Some(next.operation)
-                );
-                drop(tab);
-                drop(source);
-                std::fs::remove_dir_all(path).ok();
-            })
-            .unwrap()
-            .join();
-        if let Err(panic) = result {
-            std::panic::resume_unwind(panic);
-        }
-    }
 
     #[test]
     fn sibling_connect_refresh_is_adopted_without_another_keyring_refresh() {
@@ -7929,280 +7577,6 @@ mod fork_completion_tests {
             Some("fresh-bearer".into())
         );
         let _ = std::fs::remove_dir_all(root_path);
-    }
-
-    #[test]
-    fn cancelling_the_split_prerequisite_installer_discards_the_pending_intent() {
-        let _guard = crate::app::session::test_guard();
-        let root_path = std::env::temp_dir().join(format!(
-            "coincube-split-installer-cancel-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let root = CoincubeDirectory::new(root_path.clone());
-        let (mut installer, _) = Installer::new(
-            root,
-            bitcoin::Network::Bitcoin,
-            None,
-            installer::UserFlow::CreateWallet,
-            false,
-            None,
-            None,
-            None,
-            false,
-            None,
-        )
-        .expect("installer fixture");
-        installer.context.bitcoin_config.chain = ChainId::BitcoinBlake2b;
-        let mut tab = Tab::new(1, State::Installer(Box::new(installer)));
-        tab.pending_split_after_install = true;
-        tab.pending_imported_claim = Some(crate::imported_claim::tests::fixture().1);
-
-        let _ = tab.update(Message::Install(installer::Message::BackToApp(
-            bitcoin::Network::Bitcoin,
-        )));
-
-        assert!(!tab.pending_split_after_install);
-        assert!(tab.pending_imported_claim.is_none());
-        assert!(matches!(tab.state, State::Home(_)));
-        let _ = std::fs::remove_dir_all(root_path);
-    }
-
-    #[test]
-    fn imported_claim_source_survives_successful_target_save_only_with_its_client() {
-        let _guard = crate::app::session::test_guard();
-        for authenticated in [true, false] {
-            let root_path = std::env::temp_dir().join(format!(
-                "imported-claim-target-save-{}",
-                uuid::Uuid::new_v4()
-            ));
-            let root = CoincubeDirectory::new(root_path.clone());
-            let (cube, request, client) = crate::imported_claim::tests::fixture();
-            crate::imported_claim::tests::prepare_storage(&root, &cube);
-            let (mut installer, startup) = Installer::new(
-                root,
-                bitcoin::Network::Bitcoin,
-                None,
-                installer::UserFlow::CreateWallet,
-                false,
-                None,
-                None,
-                None,
-                false,
-                None,
-            )
-            .unwrap();
-            drop(startup);
-            installer.context.bitcoin_config.chain = ChainId::BitcoinBlake2b;
-            installer.context.coincube_client = authenticated.then_some(client);
-            let mut tab = Tab::new(1, State::Installer(Box::new(installer)));
-            tab.pending_split_after_install = true;
-            tab.pending_imported_claim = Some(request.clone());
-            let target = CubeSettings::new("BTCB2 destination".into(), ChainId::BitcoinBlake2b);
-            drop(tab.update(Message::ForkInstallCompleted(
-                tab.fork_session_generation,
-                installer::Message::CubeSaved(Ok((target, None, None)), None, None),
-            )));
-            assert!(tab.pending_imported_claim.is_none());
-            assert!(!tab.pending_split_after_install);
-            let State::Home(home) = &tab.state else {
-                panic!("target setup must return to Claim selection");
-            };
-            assert_eq!(
-                home.imported_claim_request().map(|r| r.source),
-                authenticated.then_some(request.source)
-            );
-            if !authenticated {
-                assert!(home.error().is_some());
-            }
-            let _ = std::fs::remove_dir_all(root_path);
-        }
-    }
-
-    /// Exercise the real save completion seam without starting a daemon or
-    /// touching an existing Cube. Only a successful, current Claim setup
-    /// may arm navigation to step one in the Bitcoin source.
-    #[test]
-    fn claim_setup_returns_to_bitcoin_only_after_current_successful_save() {
-        let _guard = app::session::test_guard();
-        for outcome in [
-            "success",
-            "save-failed",
-            "stale",
-            "cancel",
-            "missing-config",
-            "cancel-missing-config",
-        ] {
-            let root_path =
-                std::env::temp_dir().join(format!("claim-setup-return-{}", uuid::Uuid::new_v4()));
-            let root = CoincubeDirectory::new(root_path.clone());
-            let source_dir = root.network_directory(ChainId::Bitcoin);
-            source_dir.init().unwrap();
-            if !outcome.ends_with("missing-config") {
-                app::Config::new(false)
-                    .to_file(&source_dir.path().join(app::config::DEFAULT_FILE_NAME))
-                    .unwrap();
-            }
-            let source = CubeSettings::new_with_raw_id(
-                "claim-source".into(),
-                "Original Bitcoin Cube".into(),
-                ChainId::Bitcoin,
-            );
-            let target = CubeSettings::new_with_raw_id(
-                "claim-target".into(),
-                "Paired Blake2b Cube".into(),
-                ChainId::BitcoinBlake2b,
-            );
-            let (mut installer, _) = Installer::new(
-                root,
-                bitcoin::Network::Bitcoin,
-                None,
-                installer::UserFlow::CreateWallet,
-                true,
-                None,
-                None,
-                None,
-                false,
-                None,
-            )
-            .unwrap();
-            installer.context.bitcoin_config.chain = ChainId::BitcoinBlake2b;
-            installer.source_cube = Some(installer::SourceCube {
-                settings: source.clone(),
-                breez_client: None,
-                spark_backend: None,
-            });
-            let mut tab = Box::new(Tab::new(1, State::Installer(Box::new(installer))));
-            app::claim_intent::clear();
-            let msg = if outcome.starts_with("cancel") {
-                Message::Install(installer::Message::BackToApp(bitcoin::Network::Bitcoin))
-            } else {
-                Message::ForkInstallCompleted(
-                    if outcome == "stale" {
-                        tab.fork_session_generation.wrapping_sub(1)
-                    } else {
-                        tab.fork_session_generation
-                    },
-                    installer::Message::CubeSaved(
-                        if outcome == "save-failed" {
-                            Err("synthetic save failure".into())
-                        } else {
-                            Ok((target, None, None))
-                        },
-                        None,
-                        None,
-                    ),
-                )
-            };
-            // Drop the returned task: navigation is under test; no daemon starts.
-            let _ = tab.update(msg);
-            assert_eq!(
-                app::claim_intent::take(&source.id),
-                outcome == "success",
-                "{outcome}"
-            );
-            if outcome == "success" || outcome == "cancel" {
-                let State::Loader(loader) = &tab.state else {
-                    panic!("{}: must reopen Bitcoin", outcome)
-                };
-                assert_eq!(loader.cube_settings.id, source.id);
-                assert_eq!(loader.cube_settings.network, ChainId::Bitcoin);
-            } else {
-                assert!(matches!(tab.state, State::Installer(_)), "{}", outcome);
-                if outcome.ends_with("missing-config") {
-                    let State::Installer(installer) = &tab.state else {
-                        unreachable!()
-                    };
-                    assert!(installer
-                        .navigation_error
-                        .as_deref()
-                        .unwrap()
-                        .contains("reopen your Bitcoin Cube"));
-                    let _ = installer.view();
-                }
-            }
-            if outcome.ends_with("missing-config") {
-                app::Config::new(false)
-                    .to_file(&source_dir.path().join(app::config::DEFAULT_FILE_NAME))
-                    .unwrap();
-                let _ = tab.update(Message::Install(installer::Message::BackToApp(
-                    bitcoin::Network::Bitcoin,
-                )));
-                assert!(matches!(tab.state, State::Loader(_)));
-                assert_eq!(
-                    app::claim_intent::take(&source.id),
-                    outcome == "missing-config",
-                    "only completed setup resumes Claim on retry"
-                );
-            }
-            drop(tab);
-            std::fs::remove_dir_all(root_path).unwrap();
-        }
-    }
-
-    #[test]
-    fn scoped_claim_target_save_keeps_source_and_uses_target_unlock() {
-        let _guard = app::session::test_guard();
-        let root_path =
-            std::env::temp_dir().join(format!("scoped-claim-save-{}", uuid::Uuid::new_v4()));
-        let root = CoincubeDirectory::new(root_path.clone());
-        let fork_dir = root.network_directory(ChainId::BitcoinBlake2b);
-        fork_dir.init().unwrap();
-        app::Config::new(false)
-            .to_file(&fork_dir.path().join(app::config::DEFAULT_FILE_NAME))
-            .unwrap();
-        let source = CubeSettings::new_with_raw_id(
-            "claim-source".into(),
-            "Bitcoin source".into(),
-            ChainId::Bitcoin,
-        );
-        let target = CubeSettings::new_with_raw_id(
-            "claim-target".into(),
-            "Paired destination".into(),
-            ChainId::BitcoinBlake2b,
-        );
-        let (mut installer, startup) = Installer::new(
-            root.clone(),
-            bitcoin::Network::Bitcoin,
-            None,
-            installer::UserFlow::CreateWallet,
-            true,
-            None,
-            None,
-            None,
-            false,
-            None,
-        )
-        .unwrap();
-        drop(startup);
-        installer.context.bitcoin_config.chain = ChainId::BitcoinBlake2b;
-        installer.source_cube = Some(installer::SourceCube {
-            settings: source.clone(),
-            breez_client: None,
-            spark_backend: None,
-        });
-        let owner = app::cache::AppGeneration::next();
-        let handoff =
-            app::claim_intent::ForkHandoff::new(&root, source.id.clone(), target.id.clone())
-                .unwrap();
-        let mut tab = Tab::new(1, State::Installer(Box::new(installer)));
-        tab.set_claim_open(crate::home::ClaimOpenIntent::new(
-            owner,
-            &root,
-            source.id.clone(),
-            target.id.clone(),
-            crate::home::ClaimRoute::Begin(handoff),
-        ));
-        app::claim_intent::clear();
-        let generation = tab.fork_session_generation;
-        drop(tab.update(Message::ForkInstallCompleted(
-            generation,
-            installer::Message::CubeSaved(Ok((target, None, None)), None, None),
-        )));
-        assert!(matches!(tab.state, State::PinEntry(_)));
-        assert_eq!(tab.claim_open_owner(), Some(owner));
-        assert!(!app::claim_intent::take(&source.id));
-        drop(tab);
-        std::fs::remove_dir_all(root_path).unwrap();
     }
 
     async fn outputs(task: Task<Message>) -> Vec<Message> {
