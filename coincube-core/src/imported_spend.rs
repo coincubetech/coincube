@@ -14,7 +14,7 @@ use miniscript::{
 };
 
 use crate::{
-    foreign_split::{self, FinalizeError},
+    public_wallet_finalize::{self, FinalizeError},
     spend::{
         self, AddrInfo, CandidateCoin, CoinSelectionRes, CreateSpendRes, CreateSpendWarning,
         InputAuthError, InsaneFeeInfo, SpendCreationError, SpendOutputAddress, SpendTxFees,
@@ -413,7 +413,7 @@ fn verified_partial_outputs<C: secp256k1::Verification>(
         .map_err(ImportedFinalizeError::Construction)?;
     check_imported_signed_construction(construction, signed)
         .map_err(ImportedFinalizeError::Signatures)?;
-    foreign_split::verify_partial_signatures_for(signed, secp, |_, input, output| {
+    public_wallet_finalize::verify_partial_signatures_for(signed, secp, |_, input, output| {
         locate_input(wallet, input, &output.script_pubkey)
     })
     .map_err(ImportedFinalizeError::Signatures)
@@ -421,8 +421,8 @@ fn verified_partial_outputs<C: secp256k1::Verification>(
 
 /// Bitcoin Core may return the funding transaction in a signed PSBT without
 /// its witnesses. Those witnesses are not part of its txid and do not affect
-/// the output being spent. Permit only that difference for imported wallets;
-/// Split's construction check remains byte-exact. Signature verification still
+/// the output being spent. Permit only that difference; the shared
+/// construction check is otherwise byte-exact. Signature verification still
 /// authenticates the actual funding transaction supplied by the signer.
 fn check_imported_signed_construction(
     construction: &Psbt,
@@ -453,7 +453,7 @@ fn check_imported_signed_construction(
             _ => return Err(FinalizeError::ConstructionChanged),
         }
     }
-    foreign_split::check_signed_construction(construction, &normalized)
+    public_wallet_finalize::check_signed_construction(construction, &normalized)
 }
 
 /// Number of cryptographically valid signatures per input on an exact partial
@@ -516,7 +516,7 @@ pub fn finalize_imported_spend<C: secp256k1::Verification>(
         .checked_sub(paid)
         .ok_or(ImportedFinalizeError::Signatures(FinalizeError::Economics))?;
     let (transaction, signatures_per_input) =
-        foreign_split::finalize_and_replay(construction, signed, &outputs, secp)
+        public_wallet_finalize::finalize_and_replay(construction, signed, &outputs, secp)
             .map_err(ImportedFinalizeError::Signatures)?;
     let actual_feerate = fee / (transaction.vsize() as u64);
     if !(1..=spend::MAX_FEERATE).contains(&actual_feerate) {
@@ -754,6 +754,60 @@ mod tests {
         );
     }
 
+    /// The shared public-wallet finalizer accepts only implicit or explicit
+    /// `SIGHASH_ALL`: an `ALL` input request is accepted like the default,
+    /// while any other request, or an `ALL` signature whose trailing byte is
+    /// relabeled, is refused. Ported from the removed foreign-Split finalizer
+    /// tests, which covered these helpers through step 1.
+    #[test]
+    fn only_sighash_all_signatures_finalize() {
+        use miniscript::bitcoin::psbt::PsbtSighashType;
+        let secp = secp256k1::Secp256k1::new();
+        let (wallet, signers, created) = draft("wpkh");
+
+        let mut explicit = created.psbt.clone();
+        explicit.inputs[0].sighash_type = Some(PsbtSighashType::from(EcdsaSighashType::All));
+        add_signature(&mut explicit, &signers[0]);
+        assert!(finalize_imported_spend(&wallet, &created.psbt, &explicit, &secp).is_ok());
+
+        for other in [
+            EcdsaSighashType::None,
+            EcdsaSighashType::Single,
+            EcdsaSighashType::AllPlusAnyoneCanPay,
+        ] {
+            let mut requested = created.psbt.clone();
+            requested.inputs[0].sighash_type = Some(PsbtSighashType::from(other));
+            add_signature(&mut requested, &signers[0]);
+            assert!(
+                matches!(
+                    finalize_imported_spend(&wallet, &created.psbt, &requested, &secp),
+                    Err(ImportedFinalizeError::Signatures(
+                        FinalizeError::UnsupportedSighash
+                    ))
+                ),
+                "{:?}",
+                other
+            );
+
+            let mut relabeled = created.psbt.clone();
+            add_signature(&mut relabeled, &signers[0]);
+            for signature in relabeled.inputs[0].partial_sigs.values_mut() {
+                signature.sighash_type = other;
+            }
+            assert!(relabeled.inputs[0].sighash_type.is_none());
+            assert!(
+                matches!(
+                    finalize_imported_spend(&wallet, &created.psbt, &relabeled, &secp),
+                    Err(ImportedFinalizeError::Signatures(
+                        FinalizeError::UnsupportedSighash
+                    ))
+                ),
+                "{:?}",
+                other
+            );
+        }
+    }
+
     #[test]
     fn all_supported_shapes_construct_with_authenticated_prevtx_and_own_change() {
         for kind in ["pkh", "sh(wpkh)", "wpkh", "wsh(multi)", "wsh(sortedmulti)"] {
@@ -947,5 +1001,99 @@ mod tests {
                 FinalizeError::InvalidSignature { .. }
             ))
         ));
+    }
+
+    /// The shared public-wallet finalizer refuses every change to the
+    /// construction other than added signatures. Ported from the removed
+    /// foreign-Split finalizer tests, which covered these helpers through
+    /// step 1.
+    #[test]
+    fn any_change_to_the_construction_refuses() {
+        type Change = Box<dyn Fn(&mut Psbt)>;
+        let secp = secp256k1::Secp256k1::new();
+        let (wallet, signers, created) = draft("wpkh");
+        let mut signed = created.psbt.clone();
+        add_signature(&mut signed, &signers[0]);
+        assert!(finalize_imported_spend(&wallet, &created.psbt, &signed, &secp).is_ok());
+        let internal_key = PublicKey::new(secp256k1::PublicKey::from_secret_key(
+            &secp,
+            &account(9, "m/86h/1h/0h").0.private_key,
+        ));
+        let changes: Vec<Change> = vec![
+            Box::new(|p| p.unsigned_tx.output[1].value = Amount::from_sat(1_000)),
+            Box::new(|p| p.unsigned_tx.output.reverse()),
+            Box::new(|p| p.inputs[0].bip32_derivation.clear()),
+            Box::new(|p| p.inputs[0].witness_utxo = None),
+            Box::new(|p| p.outputs[1].bip32_derivation.clear()),
+            Box::new(move |p| p.inputs[0].tap_internal_key = Some(internal_key.inner.into())),
+            Box::new(|p| p.inputs[0].final_script_witness = Some(bitcoin::Witness::new())),
+            Box::new(|p| {
+                p.inputs[0].unknown.insert(
+                    bitcoin::psbt::raw::Key {
+                        type_value: 0xfc,
+                        key: vec![1],
+                    },
+                    vec![2],
+                );
+            }),
+        ];
+        for (index, change) in changes.iter().enumerate() {
+            let mut tampered = signed.clone();
+            change(&mut tampered);
+            assert!(
+                matches!(
+                    finalize_imported_spend(&wallet, &created.psbt, &tampered, &secp),
+                    Err(ImportedFinalizeError::Signatures(
+                        FinalizeError::ConstructionChanged
+                    ))
+                ),
+                "change {}",
+                index
+            );
+        }
+    }
+
+    /// Every signature present must be by a key the input commits to and
+    /// valid for it, even a surplus one the finalizer would ignore; an
+    /// uncompressed key never signs a segwit input. Ported from the removed
+    /// foreign-Split finalizer tests.
+    #[test]
+    fn every_signature_must_be_a_committed_key_over_this_input() {
+        let secp = secp256k1::Secp256k1::new();
+        let (wallet, signers, created) = draft("wpkh");
+        let mut signed = created.psbt.clone();
+        add_signature(&mut signed, &signers[0]);
+        let (key, signature) = signed.inputs[0]
+            .partial_sigs
+            .iter()
+            .next()
+            .map(|(k, s)| (*k, *s))
+            .unwrap();
+        let refused = |psbt: &Psbt| {
+            matches!(
+                finalize_imported_spend(&wallet, &created.psbt, psbt, &secp),
+                Err(ImportedFinalizeError::Signatures(
+                    FinalizeError::InvalidSignature { input: 0 }
+                ))
+            )
+        };
+
+        // A signature valid over this input's digest, by a key the input
+        // does not commit to.
+        let mut surplus = signed.clone();
+        add_signature(&mut surplus, &account(9, "m/84h/1h/0h").0);
+        assert_eq!(surplus.inputs[0].partial_sigs.len(), 2);
+        assert!(refused(&surplus));
+
+        let mut uncompressed = signed.clone();
+        uncompressed.inputs[0].partial_sigs.clear();
+        uncompressed.inputs[0].partial_sigs.insert(
+            PublicKey {
+                compressed: false,
+                inner: key.inner,
+            },
+            signature,
+        );
+        assert!(refused(&uncompressed));
     }
 }
