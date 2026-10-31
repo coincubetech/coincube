@@ -66,10 +66,6 @@ pub struct CoincubeClient {
     /// Production builds cannot construct or observe this field.
     #[cfg(all(test, feature = "regtest-harness"))]
     test_ancestry_history: Option<TestAncestryHistory>,
-    /// Test-only: let the Claim build search for input ancestry although the
-    /// production gate is closed. Production builds cannot set or read this.
-    #[cfg(test)]
-    test_ancestry_discovery: bool,
 }
 
 impl std::fmt::Debug for CoincubeClient {
@@ -123,8 +119,6 @@ impl CoincubeClient {
             identity_headers,
             #[cfg(all(test, feature = "regtest-harness"))]
             test_ancestry_history: None,
-            #[cfg(test)]
-            test_ancestry_discovery: false,
         }
     }
 
@@ -621,7 +615,6 @@ impl CoincubeClient {
             identity_headers: reqwest::header::HeaderMap::new(),
             #[cfg(feature = "regtest-harness")]
             test_ancestry_history: None,
-            test_ancestry_discovery: false,
         }
     }
 
@@ -650,20 +643,6 @@ impl CoincubeClient {
             shared_history_height,
             shared_history_hash,
         });
-        // The live ancestry case exercises the automatic search end to end.
-        self.open_ancestry_discovery_for_test();
-    }
-
-    /// Let this test client's Claim builds run ancestry discovery while the
-    /// production gate stays closed. Signing remains refused by the gate.
-    #[cfg(test)]
-    pub(crate) fn open_ancestry_discovery_for_test(&mut self) {
-        self.test_ancestry_discovery = true;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn ancestry_discovery_opened_for_test(&self) -> bool {
-        self.test_ancestry_discovery
     }
 
     #[cfg(all(test, feature = "regtest-harness"))]

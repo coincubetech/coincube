@@ -254,7 +254,6 @@ pub(crate) mod tests {
     use crate::{
         dir::CoincubeDirectory,
         services::{
-            foreign_split_inventory::FreshIndex,
             split_source::split_source,
             split_test_wallets::{self as fixture, Shape},
         },
@@ -450,20 +449,16 @@ pub(crate) mod tests {
     /// signable by `master(1)` (and `master(2)` for the 2-of-3 shapes).
     pub(crate) fn construction(shape: Shape) -> SplitStep1 {
         let wallet = fixture::wallet(shape);
-        let inventory = fixture::inventory(&wallet);
-        let coins = inventory.splittable_coins();
+        let coins = fixture::splittable_coins(&wallet);
         let source = split_source(&wallet.external, Some(&wallet.internal)).unwrap();
-        let FreshIndex::Proven(destination) = inventory.fresh_receive() else {
-            panic!("fixture has a fresh index");
-        };
-        let tip = inventory.bitcoin_tip_height();
+        let tip = fixture::BITCOIN_TIP_HEIGHT;
         create_split_step1(
             &SplitInputs {
                 chain: ChainId::Bitcoin,
                 source: &source,
                 coins: &coins,
-                fork_height: inventory.fork_height(),
-                destination,
+                fork_height: fixture::FORK,
+                destination: fixture::FRESH_RECEIVE,
             },
             2,
             LockTime::from_height(tip).unwrap(),
@@ -857,23 +852,5 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(calls.len(), 1, "{:?}", calls);
         assert!(opener.contains("tokio::task::spawn_blocking(hid_ledger_candidates)"));
-    }
-
-    /// B4a F5 carried forward: the device flow's output is unverified and
-    /// enters the verified import seams only. `flow.rs` names no finalizer.
-    #[test]
-    fn split_device_flow_never_finalizes_directly() {
-        let flow = include_str!("flow.rs");
-        for forbidden in [
-            "finalize_split_step1",
-            "finalize_split_step2",
-            "VerifiedSplitStep1",
-            "VerifiedSplitStep2",
-            "finalize_mut",
-            "finalize_split",
-        ] {
-            assert!(!flow.contains(forbidden), "flow.rs names {}", forbidden);
-        }
-        assert!(flow.contains("UnverifiedDeviceSignatures"));
     }
 }

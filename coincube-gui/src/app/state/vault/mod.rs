@@ -1,10 +1,8 @@
-pub mod claim;
 pub mod coins;
 pub mod export;
 pub mod keychain_sign;
 pub mod label;
 pub mod overview;
-pub mod paired_summary;
 pub mod psbt;
 pub mod psbts;
 pub mod receive;
@@ -12,7 +10,6 @@ pub mod replay;
 pub mod settings;
 pub mod signers;
 pub mod spend;
-pub mod split;
 pub mod split_hub;
 #[cfg(test)]
 pub mod test_support;

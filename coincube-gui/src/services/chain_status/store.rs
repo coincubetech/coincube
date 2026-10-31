@@ -1,5 +1,7 @@
-//! The Vault's ancestry check results, kept next to its daemon data so the
-//! Chains column does not fall back to *checking* on every launch.
+//! The Vault's ancestry check results, kept next to its daemon data. A coin
+//! with no qualifying path is not searched again on every launch, and a
+//! found path is kept so it can be written back while it waits to be
+//! re-checked.
 //!
 //! Only display state lives here. Each verified path is decoded against the
 //! outpoint it is filed under and structurally re-verified on load; a record

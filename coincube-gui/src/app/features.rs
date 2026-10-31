@@ -460,12 +460,11 @@ pub struct ClaimSourceCube {
     pub already_claimed: bool,
 }
 
-/// Whether this Cube may take part in a Bitcoin Blake2b claim at all. Both
-/// halves of the gate — [`bitcoin_blake2b`] for the build/account, and the
-/// source Cube's own shape. What the entry *does* is [`claim_entry`]'s call:
-/// a Cube that already has a claim target is still a claim source, because
-/// the claim itself (step 1, the poison self-transfer) happens after the
-/// target exists.
+/// Whether this Cube may have a Bitcoin Blake2b copy (Tools › Split coins →
+/// Create copy). Both halves of the gate — [`bitcoin_blake2b`] for the
+/// build/account, and the source Cube's own shape. Whether a copy already
+/// exists is a separate question (`already_claimed`): the caller refuses a
+/// second copy, which would watch the same addresses twice.
 pub fn claim_blake2b(source: ClaimSourceCube) -> Availability {
     let account = bitcoin_blake2b(BitcoinBlake2bServerFlag {
         server_enabled: source.server_enabled,
@@ -484,58 +483,6 @@ pub fn claim_blake2b(source: ClaimSourceCube) -> Availability {
         };
     }
     Availability::Available
-}
-
-/// Imported Bitcoin policies can fund a fork claim without becoming a Vault.
-/// Keep this separate from `claim_blake2b` so imported descriptors never
-/// acquire the inheritance or Connect `hasVault` capability.
-pub fn imported_claim_blake2b(
-    chain: ChainId,
-    has_imported_bitcoin: bool,
-    server_enabled: bool,
-) -> Availability {
-    let account = bitcoin_blake2b(BitcoinBlake2bServerFlag { server_enabled });
-    if !account.is_available() {
-        return account;
-    }
-    if chain != ChainId::Bitcoin {
-        return Availability::Unavailable {
-            reason: "Only a Bitcoin imported wallet can be claimed onto Bitcoin Blake2b."
-                .to_string(),
-        };
-    }
-    if !has_imported_bitcoin {
-        return Availability::Unavailable {
-            reason: "This Cube has no imported Bitcoin wallet to claim.".to_string(),
-        };
-    }
-    Availability::Available
-}
-
-/// What the claim entry does for this Cube, once [`claim_blake2b`] admits it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClaimEntry {
-    /// No Bitcoin Blake2b Cube reuses this descriptor yet: start the
-    /// claim-target installer (Lane B1.4).
-    CreateTarget,
-    /// The target exists: open claim step 1, the poison self-transfer on
-    /// Bitcoin (Lane B1.5). A second target would watch the same addresses
-    /// twice, so the installer is never offered again.
-    Step1,
-}
-
-/// Which entry a claim from this Cube takes, or `None` when
-/// [`claim_blake2b`] refuses. One decision, made where the App and the rail
-/// can both ask it — never by comparing the card's copy.
-pub fn claim_entry(source: ClaimSourceCube) -> Option<ClaimEntry> {
-    if !claim_blake2b(source).is_available() {
-        return None;
-    }
-    Some(if source.already_claimed {
-        ClaimEntry::Step1
-    } else {
-        ClaimEntry::CreateTarget
-    })
 }
 
 #[cfg(test)]
@@ -590,19 +537,13 @@ mod tests {
         })
         .is_available());
 
-        // Already claimed: still a claim source (step 1 happens after the
-        // target exists), but the entry is the step-1 panel, never a second
-        // target — that would watch the same addresses twice.
+        // Already copied: still an eligible source; the caller refuses a
+        // second copy, which would watch the same addresses twice.
         let claimed = ClaimSourceCube {
             already_claimed: true,
             ..claim_source(ChainId::Bitcoin)
         };
         assert!(claim_blake2b(claimed).is_available());
-        assert_eq!(claim_entry(claimed), Some(ClaimEntry::Step1));
-        assert_eq!(
-            claim_entry(claim_source(ChainId::Bitcoin)),
-            Some(ClaimEntry::CreateTarget)
-        );
 
         // Account half absent — fails closed, and keeps the account-level
         // wording rather than a per-Cube one.
@@ -1049,14 +990,5 @@ mod tests {
             Some("Bitcoin Blake2b isn't enabled for this account.")
         );
         assert!(bitcoin_blake2b_with(RuntimeSupport::Supported, ON).is_available());
-    }
-
-    #[test]
-    fn imported_claim_requires_mainnet_attachment_and_account_grant() {
-        assert!(imported_claim_blake2b(ChainId::Bitcoin, true, true).is_available());
-        assert!(!imported_claim_blake2b(ChainId::Bitcoin, true, false).is_available());
-        assert!(!imported_claim_blake2b(ChainId::Bitcoin, false, true).is_available());
-        assert!(!imported_claim_blake2b(ChainId::BitcoinBlake2b, true, true).is_available());
-        assert!(!imported_claim_blake2b(ChainId::Testnet4, true, true).is_available());
     }
 }

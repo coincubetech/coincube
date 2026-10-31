@@ -1050,7 +1050,7 @@ mod tests {
         });
         register_managed_tor(cleanup.0.clone());
         let alive = || process.lock().unwrap().try_wait().unwrap().is_none();
-        let (mut app, _) = crate::app::claim_step1_tests::bitcoin_app(root.path());
+        let (mut app, _) = crate::app::shell_tests::bitcoin_app(root.path());
         app.stop();
         assert!(alive(), "locking an App cannot stop process-global Tor");
         let (mut loader, startup) = crate::loader::Loader::new(

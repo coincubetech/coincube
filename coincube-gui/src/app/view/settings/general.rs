@@ -898,7 +898,7 @@ fn escrow_copy(tier: Option<EscrowTier>) -> &'static str {
         }
         Some(EscrowTier::FullCube) => {
             "Full Cube: seals this Cube's seed AND descriptor to each keyholder's own key. A \
-             keyholder can restore the entire Cube — Liquid, Spark and Vault. COINCUBE can never \
+             keyholder can restore the entire Cube — Spark and Vault. COINCUBE can never \
              read either; only the keyholder's key can. You'll re-confirm your PIN to include the \
              seed."
         }
@@ -2613,5 +2613,22 @@ mod tests {
             later_timestamp(Some("not-a-date"), Some("2026-02-01T00:00:00Z")).as_deref(),
             Some("2026-02-01T00:00:00Z")
         );
+    }
+
+    /// Tenshu v175 hides Liquid (master §3 decision 2), so no escrow tier
+    /// promises a keyholder a Liquid wallet. Restore "Liquid" in the Full Cube
+    /// copy when Liquid reopens.
+    #[test]
+    fn escrow_copy_names_no_liquid_wallet() {
+        assert!(escrow_copy(Some(EscrowTier::FullCube))
+            .contains("restore the entire Cube — Spark and Vault."));
+        for tier in [
+            None,
+            Some(EscrowTier::Off),
+            Some(EscrowTier::VaultOnly),
+            Some(EscrowTier::FullCube),
+        ] {
+            assert!(!escrow_copy(tier).contains("Liquid"), "{:?}", tier);
+        }
     }
 }

@@ -117,10 +117,6 @@ impl AppGeneration {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
     }
-
-    pub(crate) fn value(self) -> u64 {
-        self.0
-    }
 }
 
 /// Where an entanglement lookup was issued from: the `App` instance, and the
@@ -284,11 +280,6 @@ pub struct Cache {
     /// not about the session, and a Connect outage must not make an existing
     /// claim target look absent.
     pub btcb2_already_claimed: bool,
-    /// A local paired Claim can be resumed from this fork Vault; not authority.
-    pub btcb2_claim_resume: bool,
-    /// Display-only evidence from the open Claim panel. Never spend authority;
-    /// removed when that panel no longer has a current paired review.
-    pub split_deposit: Option<(coincube_core::miniscript::bitcoin::OutPoint, Instant)>,
     /// Other-chain transaction presence for either side of the fork,
     /// keyed by the deposit's txid: whether the same transaction exists on
     /// the twin Bitcoin chain, and when that was resolved. Only *resolved*
@@ -319,8 +310,12 @@ pub struct Cache {
     /// shown as split but unconfirmed.
     pub split_unconfirmed: std::collections::HashSet<coincube_core::miniscript::bitcoin::OutPoint>,
     /// Coins whose twin copy a split-key split on the twin Cube spent, as
-    /// Connect last showed it deep on the twin chain.
-    pub separated: std::collections::HashSet<coincube_core::miniscript::bitcoin::OutPoint>,
+    /// Connect last showed it deep on the twin chain, each with the instant
+    /// that check stops counting. Read through
+    /// [`crate::services::split_coins::is_separated`], so an expired check
+    /// stops counting even if no refresh pass lands.
+    pub separated:
+        std::collections::HashMap<coincube_core::miniscript::bitcoin::OutPoint, std::time::Instant>,
     /// Current theme mode (dark/light) — used for theme-aware widget rendering
     pub theme_mode: coincube_ui::theme::palette::ThemeMode,
     /// Presentation input for the shared top-bar balance eye. `None` until the
@@ -483,15 +478,13 @@ impl std::default::Default for Cache {
             marketplace_flags: crate::app::features::MarketplaceServerFlags::OFF,
             btcb2_server_enabled: false,
             btcb2_already_claimed: false,
-            btcb2_claim_resume: false,
             liquid_gate: crate::app::features::LiquidGate::HIDDEN,
             entangled: std::collections::HashMap::new(),
             chain_proofs: std::collections::HashMap::new(),
             split_records: Vec::new(),
             splitting: std::collections::HashMap::new(),
             split_unconfirmed: std::collections::HashSet::new(),
-            separated: std::collections::HashSet::new(),
-            split_deposit: None,
+            separated: std::collections::HashMap::new(),
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
             balance_privacy: None,
             cube_switcher_open: false,
@@ -647,6 +640,15 @@ impl Cache {
         &self,
         outpoint: &coincube_core::miniscript::bitcoin::OutPoint,
     ) -> crate::services::chain_status::CoinEvidence {
+        self.chain_evidence_at(outpoint, std::time::Instant::now())
+    }
+
+    /// [`Self::chain_evidence`] as of `now`.
+    pub fn chain_evidence_at(
+        &self,
+        outpoint: &coincube_core::miniscript::bitcoin::OutPoint,
+        now: std::time::Instant,
+    ) -> crate::services::chain_status::CoinEvidence {
         crate::services::chain_status::CoinEvidence {
             entanglement: self
                 .entangled
@@ -658,7 +660,7 @@ impl Cache {
                 .and_then(|entry| entry.outcome()),
             splitting: self.splitting.get(outpoint).copied(),
             signature_split: self.split_unconfirmed.contains(outpoint),
-            separated: self.separated.contains(outpoint),
+            separated: crate::services::split_coins::is_separated(&self.separated, outpoint, now),
         }
     }
 
@@ -707,6 +709,56 @@ impl Cache {
         // The smallest key wastes the least when it is spent with the coins.
         keys.sort_by_key(|(coin, _)| (coin.amount, coin.outpoint));
         keys
+    }
+
+    /// The proof to re-qualify for `key` as a split key of the spend `spend`:
+    /// the path a check verified in this session, else the one the split's
+    /// journal record was built with (a restart leaves only a
+    /// [`crate::services::chain_status::ProofEntry::Saved`] copy). Neither
+    /// counts by itself; the PSBT screen re-qualifies it against both chains.
+    pub fn split_key_path(
+        &self,
+        spend: coincube_core::miniscript::bitcoin::Txid,
+        key: coincube_core::miniscript::bitcoin::OutPoint,
+    ) -> Option<coincube_core::claim_ancestry::retained::RetainedPath> {
+        use coincube_core::claim_ancestry::retained::RetainedPath;
+        if let Some(crate::services::chain_status::ProofEntry::Verified(path)) =
+            self.chain_proofs.get(&key)
+        {
+            return Some(path.clone());
+        }
+        self.split_records
+            .iter()
+            .find(|record| record.txid == spend && record.key == Some(key))
+            .and_then(|record| hex::decode(record.key_path.as_ref()?).ok())
+            .and_then(|bytes| RetainedPath::decode(key, &bytes).ok())
+    }
+
+    /// Whether [`Self::split_key_path`] has a proof to offer, without
+    /// copying or decoding it (the PSBT screen asks on every render).
+    pub fn has_split_key_path(
+        &self,
+        spend: coincube_core::miniscript::bitcoin::Txid,
+        key: coincube_core::miniscript::bitcoin::OutPoint,
+    ) -> bool {
+        matches!(
+            self.chain_proofs.get(&key),
+            Some(crate::services::chain_status::ProofEntry::Verified(_))
+        ) || self.split_records.iter().any(|record| {
+            record.txid == spend && record.key == Some(key) && record.key_path.is_some()
+        })
+    }
+
+    /// The split key of `spend` if this Cube's journal records it as a
+    /// split-key split.
+    pub fn recorded_split_key(
+        &self,
+        spend: coincube_core::miniscript::bitcoin::Txid,
+    ) -> Option<coincube_core::miniscript::bitcoin::OutPoint> {
+        self.split_records
+            .iter()
+            .find(|record| record.txid == spend)
+            .and_then(|record| record.key)
     }
 
     /// An ancestry check batch landed. Like [`Self::entangled_batch_landed`],
@@ -1121,8 +1173,16 @@ mod entangled_cache_tests {
                 .unwrap(),
             ),
         );
-        cache.separated.insert(separated);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        cache.separated.insert(separated, until);
         assert_eq!(cache.chain_status(&separated), ChainStatus::OnlyHere);
+        assert_ne!(
+            crate::services::chain_status::classify(
+                cache.chain_evidence_at(&separated, until + std::time::Duration::from_secs(1))
+            ),
+            ChainStatus::OnlyHere,
+            "an expired twin check stops showing the coin as one-chain without a refresh"
+        );
         let keys: Vec<_> = cache.split_keys().iter().map(|(c, _)| c.outpoint).collect();
         assert_eq!(keys, vec![key]);
     }
