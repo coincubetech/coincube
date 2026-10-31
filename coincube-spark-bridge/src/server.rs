@@ -196,7 +196,7 @@ struct ServerState {
     auto_convert: std::sync::OnceLock<Arc<Mutex<AutoConvert>>>,
     /// The wallet's own Spark address, the destination of every
     /// auto-convert self-transfer. Read from the SDK once.
-    own_spark_address: OnceCell<String>,
+    own_spark_address: Arc<OnceCell<String>>,
 }
 
 impl ServerState {
@@ -208,41 +208,35 @@ impl ServerState {
             pending_lnurl_prepares: Mutex::new(HashMap::new()),
             event_tx,
             auto_convert: std::sync::OnceLock::new(),
-            own_spark_address: OnceCell::new(),
+            own_spark_address: Arc::new(OnceCell::new()),
         }
     }
 }
 
-/// The auto-convert worker: woken each time the listener counts a receive
-/// ([`AutoConvert::note_receive`]), it converts the pending sats
-/// ([`auto_convert::convert_pending`]). One task, so conversions never
-/// overlap; wake-ups that queue while one runs collapse into one more pass.
-///
-/// Holds the server state only weakly, and the SDK only while it works, so
-/// it doesn't keep the SDK (whose event listener holds the sending half of
-/// `wake`) or the stdout writer alive past shutdown.
-async fn run_auto_convert(
-    mut wake: tokio::sync::mpsc::UnboundedReceiver<()>,
-    state: std::sync::Weak<ServerState>,
-) {
-    while wake.recv().await.is_some() {
-        while wake.try_recv().is_ok() {}
-        let Some(state) = state.upgrade() else {
-            break;
-        };
-        let (Some(auto_convert), Some(sdk)) = (
-            state.auto_convert.get().cloned(),
-            state.sdk.read().await.clone(),
-        ) else {
-            // Not connected yet: the receive is counted and saved, and
-            // converts with the next one.
-            continue;
-        };
-        let converter = SdkConverter::new(&sdk, &state.own_spark_address);
-        let emit = |event| {
-            let _ = state.event_tx.send(Frame::Event(event));
-        };
-        auto_convert::convert_pending(&auto_convert, &converter, &emit).await;
+/// Whether SDK Stable Balance was on for this Cube before S2b: its saved
+/// active label, read without configuring Stable Balance
+/// ([`auto_convert::legacy_stable_balance_label`]). Any failure reads as off,
+/// which converts nothing.
+async fn legacy_stable_balance_on(storage_dir: &str, sdk: &SdkHandle) -> bool {
+    let identity = match sdk
+        .sdk
+        .get_info(GetInfoRequest {
+            ensure_synced: Some(false),
+        })
+        .await
+    {
+        Ok(info) => info.identity_pubkey,
+        Err(e) => {
+            tracing::warn!("could not read the wallet identity to migrate Stable Balance: {e}");
+            return false;
+        }
+    };
+    match auto_convert::legacy_stable_balance_label(storage_dir, &identity).await {
+        Ok(label) => label.as_deref() == Some(auto_convert::LEGACY_USDB_LABEL),
+        Err(e) => {
+            tracing::warn!("could not read the SDK Stable Balance setting to migrate it: {e}");
+            false
+        }
     }
 }
 
@@ -325,6 +319,7 @@ async fn handle_init(
         );
     }
 
+    let storage_dir_str = params.storage_dir.clone();
     let storage_dir = std::path::PathBuf::from(&params.storage_dir);
     match sdk_adapter::connect_mainnet(
         params.api_key,
@@ -336,11 +331,39 @@ async fn handle_init(
     {
         Ok(handle) => {
             // Auto-convert's state is in place, and its worker running,
-            // before the listener can report a receive.
-            let auto_convert = Arc::new(Mutex::new(AutoConvert::load(&storage_dir)));
+            // before the listener can report a receive. A Cube with no
+            // bridge state yet adopts SDK Stable Balance's "on".
+            let legacy_on = !AutoConvert::has_state_file(&storage_dir)
+                && legacy_stable_balance_on(&storage_dir_str, &handle).await;
+            let auto_convert = Arc::new(Mutex::new(AutoConvert::load_or_adopt(
+                &storage_dir,
+                legacy_on,
+            )));
             let _ = state.auto_convert.set(Arc::clone(&auto_convert));
             let (wake_tx, wake_rx) = tokio::sync::mpsc::unbounded_channel();
-            tokio::spawn(run_auto_convert(wake_rx, Arc::downgrade(&state)));
+            // Each pass borrows the SDK and the stdout sender only while it
+            // runs, through a weak state reference, so the worker doesn't keep
+            // either alive past shutdown. Before the SDK is published a pass
+            // is skipped, and the wake below follows publication.
+            let weak = Arc::downgrade(&state);
+            tokio::spawn(auto_convert::run_worker(
+                wake_rx,
+                Arc::clone(&auto_convert),
+                move || {
+                    let weak = weak.clone();
+                    async move {
+                        let state = weak.upgrade()?;
+                        let sdk = state.sdk.read().await.clone()?;
+                        let events = state.event_tx.clone();
+                        let converter =
+                            SdkConverter::new(sdk, Arc::clone(&state.own_spark_address));
+                        let emit = move |event| {
+                            let _ = events.send(Frame::Event(event));
+                        };
+                        Some((converter, emit))
+                    }
+                },
+            ));
 
             // Register an event listener before making the handle
             // visible to other request handlers. `add_event_listener`
@@ -351,11 +374,13 @@ async fn handle_init(
             let listener = BridgeEventListener {
                 tx: state.event_tx.clone(),
                 auto_convert,
-                wake_auto_convert: wake_tx,
-                synced_once: std::sync::atomic::AtomicBool::new(false),
+                wake_auto_convert: wake_tx.clone(),
             };
             let _listener_id = handle.sdk.add_event_listener(Box::new(listener)).await;
             *state.sdk.write().await = Some(handle);
+            // Now that passes can convert: anything left pending by the last
+            // session, or counted while the SDK wasn't published yet.
+            let _ = wake_tx.send(());
             Response::ok(id, OkPayload::Init {})
         }
         Err(e) => Response::err(id, ErrorKind::Sdk, format!("spark connect failed: {e}")),
@@ -375,29 +400,16 @@ struct BridgeEventListener {
     /// Counts each incoming bitcoin payment as it is reported, so it is
     /// saved even if a conversion is running or the bridge stops next.
     auto_convert: Arc<Mutex<AutoConvert>>,
-    /// Wakes [`run_auto_convert`] after a receive counted, and once after
-    /// the first sync.
+    /// Wakes the auto-convert worker ([`auto_convert::run_worker`]) after a
+    /// receive counted.
     wake_auto_convert: tokio::sync::mpsc::UnboundedSender<()>,
-    /// Set by the first `Synced`. That one wake converts sats left pending
-    /// by the last session, or counted before the SDK was ready, without
-    /// waiting for the next receive. Waiting for a sync means the balance
-    /// and pool reads are current, as the SDK's own conversion worker does.
-    synced_once: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait]
 impl EventListener for BridgeEventListener {
     async fn on_event(&self, event: SdkEvent) {
         let protocol_event = match event {
-            SdkEvent::Synced => {
-                if !self
-                    .synced_once
-                    .swap(true, std::sync::atomic::Ordering::Relaxed)
-                {
-                    let _ = self.wake_auto_convert.send(());
-                }
-                Some(ProtocolEvent::Synced)
-            }
+            SdkEvent::Synced => Some(ProtocolEvent::Synced),
             SdkEvent::PaymentSucceeded { payment } => {
                 if let Some(receipt) = auto_convert::eligible_receive(&payment) {
                     if self.auto_convert.lock().await.note_receive(&receipt) {
@@ -3575,7 +3587,6 @@ mod auto_convert_handler_tests {
             tx,
             auto_convert: Arc::clone(&auto_convert),
             wake_auto_convert: wake_tx,
-            synced_once: std::sync::atomic::AtomicBool::new(false),
         };
         (listener, auto_convert, frames, wakes)
     }
@@ -3594,23 +3605,18 @@ mod auto_convert_handler_tests {
         }
     }
 
-    /// The first sync wakes the worker once, so sats pending from the last
-    /// session convert without waiting for the next receive. Later syncs
-    /// don't, and every sync still reaches the gui.
+    /// Syncs reach the gui and don't wake the worker: the start-up wake
+    /// follows `init` publishing the SDK.
     #[tokio::test]
-    async fn the_first_sync_wakes_the_worker_once() {
+    async fn syncs_are_forwarded_without_waking_the_worker() {
         let dir = TempDir::new();
         let (listener, _ac, mut frames, mut wakes) = listener(&dir);
         listener.on_event(SdkEvent::Synced).await;
-        listener.on_event(SdkEvent::Synced).await;
-        assert!(wakes.try_recv().is_ok());
-        assert!(wakes.try_recv().is_err(), "one wake, not one per sync");
-        for _ in 0..2 {
-            assert!(matches!(
-                frames.try_recv(),
-                Ok(Frame::Event(ProtocolEvent::Synced))
-            ));
-        }
+        assert!(wakes.try_recv().is_err());
+        assert!(matches!(
+            frames.try_recv(),
+            Ok(Frame::Event(ProtocolEvent::Synced))
+        ));
     }
 
     /// A receive is counted and saved by the listener as it arrives, then

@@ -18,19 +18,25 @@
 //!   ([`FailureTracker`]).
 //!
 //! The switch, the breaker and the pending sats persist per Cube in
-//! [`STATE_FILE`], in the Cube's Spark storage directory.
+//! [`STATE_FILE`], in the Cube's Spark storage directory. A Cube without
+//! that file adopts the "on" it had under SDK Stable Balance
+//! ([`legacy_stable_balance_label`]).
 
 use std::collections::{HashSet, VecDeque};
 use std::fs;
+use std::future::Future;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use breez_sdk_spark::{
-    ConversionOptions, ConversionType, FetchConversionLimitsRequest, GetInfoRequest, Payment,
-    PaymentDetails, PaymentMethod, PaymentRequest, PaymentStatus, PaymentType,
-    PrepareSendPaymentRequest, PrepareSendPaymentResponse, ReceivePaymentMethod,
-    ReceivePaymentRequest, SendPaymentMethod, SendPaymentRequest,
+    default_storage_path, ConversionOptions, ConversionType, FetchConversionLimitsRequest,
+    GetInfoRequest, Network as SparkNetwork, Payment, PaymentDetails, PaymentMethod,
+    PaymentRequest, PaymentStatus, PaymentType, PrepareSendPaymentRequest,
+    PrepareSendPaymentResponse, PublicKey, ReceivePaymentMethod, ReceivePaymentRequest,
+    SendPaymentMethod, SendPaymentRequest, SqliteStorage, Storage,
 };
 use coincube_spark_protocol::{
     AutoConvertBreaker, AutoConvertState, Event as ProtocolEvent, CONVERSION_MAX_SLIPPAGE_BPS,
@@ -58,6 +64,14 @@ const SIZING_ROUNDS: usize = 3;
 
 /// Receives remembered so a repeated `PaymentSucceeded` isn't counted twice.
 const SEEN_PAYMENTS: usize = 256;
+
+/// Where SDK Stable Balance saved its on/off choice: the SDK's
+/// `STABLE_BALANCE_ACTIVE_LABEL_KEY` (`persist/mod.rs` at the pin), a
+/// `settings` row in its SQLite store. The value is the active token's label.
+const LEGACY_LABEL_KEY: &str = "stable_balance_active_label";
+
+/// The label the bridge gave USDB when it configured SDK Stable Balance.
+pub const LEGACY_USDB_LABEL: &str = "USDB";
 
 /// What [`STATE_FILE`] holds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -325,18 +339,30 @@ pub fn checked_sats_in(
     Ok(estimate.amount_in)
 }
 
-/// The sats a conversion of `budget` aims to spend.
-///
-/// Sending re-prices a bitcoin → USDB target: the SDK resolves the
-/// conversion again and spends the sats the pool asks for then
-/// (`FlashnetTokenConverter::convert` → `resolve_conversion`,
-/// `token_conversion/flashnet.rs` at the pin), not the quote's figure. Aiming
-/// below the budget by the slippage cap keeps a price move up to the cap,
-/// plus the pool's rounding, within the budget. What this leaves stays
-/// bitcoin (see [`AutoConvert::record_success`]).
+/// The sats a conversion of `budget` aims to spend: a little under it, so the
+/// pool's rounding doesn't push a quote over. A send spends exactly the
+/// quote's sats ([`exact_input`]), so this margin is only for sizing. What it
+/// leaves stays bitcoin (see [`AutoConvert::record_success`]).
 fn sizing_aim(budget: u128) -> u128 {
-    let margin = (budget * u128::from(CONVERSION_MAX_SLIPPAGE_BPS)).div_ceil(10_000) + 1;
-    budget.saturating_sub(margin)
+    budget.saturating_sub(budget / 1_000 + 1)
+}
+
+/// Make a checked auto-convert prepare spend exactly its quoted sats.
+///
+/// As prepared, the send converts toward a USDB target, and sending resolves
+/// the conversion again and spends whatever sats the pool asks for then
+/// (`FlashnetTokenConverter::convert` → `resolve_conversion` at the pin), so
+/// a price move could spend more than was received. The SDK sends an exact
+/// input, `ConversionAmount::AmountIn(estimate.amount_in)`, when the prepared
+/// amount is at least the estimate's output (`uses_amount_in` in
+/// `sdk/payments/conversion.rs` at the pin): the same exact-sats conversion
+/// its own Stable Balance ran per receive. So the amount is set to the
+/// output, in the same USDB units. The pool then takes exactly `amount_in`
+/// sats, and the slippage cap bounds the USDB out at send time.
+pub fn exact_input(prepared: &mut PrepareSendPaymentResponse) {
+    if let Some(estimate) = &prepared.conversion_estimate {
+        prepared.amount = estimate.amount_out;
+    }
 }
 
 /// `target` scaled to spend at most `budget_sats`, given that it was quoted
@@ -379,14 +405,14 @@ pub trait Converter: Send + Sync {
 }
 
 /// [`Converter`] on the Spark SDK.
-pub struct SdkConverter<'a> {
-    sdk: &'a SdkHandle,
-    own_address: &'a OnceCell<String>,
+pub struct SdkConverter {
+    sdk: SdkHandle,
+    own_address: Arc<OnceCell<String>>,
 }
 
-impl<'a> SdkConverter<'a> {
+impl SdkConverter {
     /// `own_address` caches the wallet's Spark address across conversions.
-    pub fn new(sdk: &'a SdkHandle, own_address: &'a OnceCell<String>) -> Self {
+    pub fn new(sdk: SdkHandle, own_address: Arc<OnceCell<String>>) -> Self {
         Self { sdk, own_address }
     }
 
@@ -408,7 +434,7 @@ impl<'a> SdkConverter<'a> {
 }
 
 #[async_trait]
-impl Converter for SdkConverter<'_> {
+impl Converter for SdkConverter {
     type Prepared = PrepareSendPaymentResponse;
 
     async fn limits(&self) -> Result<Limits, String> {
@@ -428,10 +454,12 @@ impl Converter for SdkConverter<'_> {
     }
 
     async fn balance_sats(&self) -> Result<u64, String> {
+        // Synced, so a pass right after start-up doesn't size from a stale
+        // balance.
         self.sdk
             .sdk
             .get_info(GetInfoRequest {
-                ensure_synced: None,
+                ensure_synced: Some(true),
             })
             .await
             .map(|info| info.balance_sats)
@@ -440,13 +468,14 @@ impl Converter for SdkConverter<'_> {
 
     async fn quote(&self, usdb_target: u128) -> Result<Quote<Self::Prepared>, String> {
         let own_address = self.own_address().await?;
-        let prepared = self
+        let mut prepared = self
             .sdk
             .sdk
             .prepare_send_payment(prepare_request(own_address, usdb_target))
             .await
             .map_err(|e| e.to_string())?;
         let sats_in = checked_sats_in(&prepared, own_address)?;
+        exact_input(&mut prepared);
         Ok(Quote { sats_in, prepared })
     }
 
@@ -474,6 +503,8 @@ enum Shortfall {
     TooSmall,
     /// The attempt failed. `sent` is whether funds may have moved.
     Failed { reason: String, sent: bool },
+    /// The switch changed before sending: nothing was sent.
+    Cancelled,
 }
 
 fn not_sent(reason: String) -> Shortfall {
@@ -488,10 +519,16 @@ fn not_sent(reason: String) -> Shortfall {
 /// A quote at a probe target gives the price. The target is scaled to the
 /// budget and re-quoted, shrinking it while the pool's rounding and slippage
 /// pad overshoot, and is sent only once a quote fits the budget.
+///
+/// The switch is checked under the lock just before sending: the moment the
+/// conversion is committed. A switch made after that check finds the send
+/// already begun; one made before it stops the send.
 async fn convert<C: Converter>(
     converter: &C,
     budget_sats: u64,
     limits: Limits,
+    auto_convert: &Mutex<AutoConvert>,
+    epoch: u64,
 ) -> Result<u128, Shortfall> {
     let budget = u128::from(budget_sats);
     let aim = sizing_aim(budget);
@@ -505,6 +542,9 @@ async fn convert<C: Converter>(
         }
         let quote = converter.quote(target).await.map_err(not_sent)?;
         if quote.sats_in <= budget {
+            if !auto_convert.lock().await.still_wanted(epoch) {
+                return Err(Shortfall::Cancelled);
+            }
             converter
                 .send(quote.prepared)
                 .await
@@ -546,6 +586,29 @@ pub struct AutoConvert {
 }
 
 impl AutoConvert {
+    /// Whether the Cube has a bridge state file yet. Without one, it may
+    /// have an SDK Stable Balance choice to adopt ([`Self::load_or_adopt`]).
+    pub fn has_state_file(storage_dir: &Path) -> bool {
+        storage_dir.join(STATE_FILE).exists()
+    }
+
+    /// Load the Cube's state; if it has no state file yet and SDK Stable
+    /// Balance was on (`legacy_on`), start on, as the user had it. Only
+    /// bitcoin received from now on converts: nothing is pending, and the
+    /// existing balances stay as they are.
+    pub fn load_or_adopt(storage_dir: &Path, legacy_on: bool) -> Self {
+        let first_run = !Self::has_state_file(storage_dir);
+        let mut ac = Self::load(storage_dir);
+        if first_run && legacy_on {
+            tracing::info!("auto-convert starts on: SDK Stable Balance was on for this Cube");
+            ac.adopt(Saved {
+                enabled: true,
+                ..Saved::default()
+            });
+        }
+        ac
+    }
+
     /// Load the Cube's state from its Spark storage directory.
     pub fn load(storage_dir: &Path) -> Self {
         let path = storage_dir.join(STATE_FILE);
@@ -642,6 +705,11 @@ impl AutoConvert {
         true
     }
 
+    /// Whether a conversion decided at `epoch` may still be sent.
+    fn still_wanted(&self, epoch: u64) -> bool {
+        self.epoch == epoch && self.saved.enabled
+    }
+
     pub fn has_pending(&self) -> bool {
         self.saved.enabled && self.saved.pending_sats > 0
     }
@@ -682,10 +750,11 @@ impl AutoConvert {
     }
 
     /// A conversion went through. Nothing of its budget goes back to the
-    /// pending total: the send re-priced it, so the sats it actually spent
-    /// may exceed the quoted `spent_sats` by up to the cap, and booking the
-    /// quote's leftover could later sweep bitcoin the user held before
-    /// turning auto-convert on. The few received sats left over stay bitcoin.
+    /// pending total. The send spends the quoted `spent_sats` only through
+    /// the SDK's exact-input selection ([`exact_input`]), and the actual
+    /// debit isn't observed. Booking the quote's leftover could then later
+    /// sweep bitcoin the user held before turning auto-convert on. The few
+    /// received sats left over stay bitcoin.
     fn record_success(&mut self, budget_sats: u64, spent_sats: u128) {
         let forgotten = self.failures.record_success();
         if forgotten > 0 {
@@ -770,7 +839,7 @@ pub async fn convert_pending<C: Converter>(
         }
     };
 
-    let outcome = convert(converter, budget_sats, limits).await;
+    let outcome = convert(converter, budget_sats, limits, auto_convert, epoch).await;
     let mut ac = auto_convert.lock().await;
     if ac.epoch != epoch {
         // Switched off (and maybe on again) meanwhile, which dropped the
@@ -785,10 +854,66 @@ pub async fn convert_pending<C: Converter>(
             ac.record_success(budget_sats, spent_sats);
         }
         Err(Shortfall::TooSmall) => ac.give_back(budget_sats),
+        // Only after the switch changed, which the epoch check above
+        // already returns for.
+        Err(Shortfall::Cancelled) => {}
         Err(Shortfall::Failed { reason, sent }) => {
             trip(&mut ac, budget_sats, &reason, sent, emit);
         }
     }
+}
+
+/// The auto-convert worker: one [`convert_pending`] pass per wake-up, so
+/// conversions never overlap. Wake-ups that queue during a pass collapse into
+/// one more.
+///
+/// `connected` gives the converter and the event emitter for a pass, or
+/// `None` before the SDK is ready. A pass skipped for that keeps everything
+/// pending, so the server wakes the worker again once the SDK is published.
+/// Exits when every wake sender is gone.
+pub async fn run_worker<C, E, F, Fut>(
+    mut wake: tokio::sync::mpsc::UnboundedReceiver<()>,
+    auto_convert: Arc<Mutex<AutoConvert>>,
+    mut connected: F,
+) where
+    C: Converter,
+    E: Fn(ProtocolEvent) + Send + Sync,
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Option<(C, E)>>,
+{
+    while wake.recv().await.is_some() {
+        while wake.try_recv().is_ok() {}
+        let Some((converter, emit)) = connected().await else {
+            continue;
+        };
+        convert_pending(&auto_convert, &converter, &emit).await;
+    }
+}
+
+/// The token label SDK Stable Balance saved as active for the wallet with
+/// identity `identity_pubkey` (hex), or `None` if it saved none.
+///
+/// Read-only: it opens the SDK's own SQLite store for that identity, under
+/// `storage_dir`, as the SDK's builder does (`default_storage_path`,
+/// `SqliteStorage::new`, already migrated by the running SDK), and reads one
+/// `settings` row. Nothing is written or deleted, and no Stable Balance is
+/// configured, so nothing converts. A missing store is `None`, without
+/// creating one.
+pub async fn legacy_stable_balance_label(
+    storage_dir: &str,
+    identity_pubkey: &str,
+) -> Result<Option<String>, String> {
+    let identity = PublicKey::from_str(identity_pubkey).map_err(|e| e.to_string())?;
+    let db_dir = default_storage_path(storage_dir, &SparkNetwork::Mainnet, &identity)
+        .map_err(|e| e.to_string())?;
+    if !db_dir.exists() {
+        return Ok(None);
+    }
+    SqliteStorage::new(&db_dir)
+        .map_err(|e| e.to_string())?
+        .get_cached_item(LEGACY_LABEL_KEY.to_string())
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Record a failure and, when it pauses auto-convert, emit the pause. The
@@ -891,12 +1016,11 @@ mod tests {
         balance_sats: u64,
         sats_per_unit_x1e6: u128,
         pad_bps: u128,
-        /// How far the price has moved by the time a send re-prices it.
-        send_drift_bps: u128,
         fail_quote: StdMutex<Script<String>>,
         fail_send: StdMutex<Script<String>>,
         calls: StdMutex<Vec<Call>>,
-        /// Sats each send actually spent, re-priced as the SDK does.
+        /// Sats each send spent: exactly the quote's, as the SDK's exact-input
+        /// conversion does ([`exact_input`]).
         spent: StdMutex<Vec<u128>>,
     }
 
@@ -911,7 +1035,6 @@ mod tests {
                 // 1 USDB (10^6 units) costs 1,000 sats.
                 sats_per_unit_x1e6: 1_000,
                 pad_bps: 50,
-                send_drift_bps: 0,
                 fail_quote: StdMutex::new(Script::new()),
                 fail_send: StdMutex::new(Script::new()),
                 calls: StdMutex::new(Vec::new()),
@@ -969,12 +1092,26 @@ mod tests {
             if let Some(reason) = self.fail_send.lock().unwrap().pop_front() {
                 return Err(reason);
             }
-            let quoted = self.sats_for(prepared);
-            self.spent
-                .lock()
-                .unwrap()
-                .push((quoted * (10_000 + self.send_drift_bps)).div_ceil(10_000));
+            self.spent.lock().unwrap().push(self.sats_for(prepared));
             Ok(())
+        }
+    }
+
+    /// A shared pool, for the worker tests that run in a spawned task.
+    #[async_trait]
+    impl Converter for Arc<FakePool> {
+        type Prepared = u128;
+        async fn limits(&self) -> Result<Limits, String> {
+            self.as_ref().limits().await
+        }
+        async fn balance_sats(&self) -> Result<u64, String> {
+            self.as_ref().balance_sats().await
+        }
+        async fn quote(&self, target: u128) -> Result<Quote<u128>, String> {
+            self.as_ref().quote(target).await
+        }
+        async fn send(&self, prepared: u128) -> Result<(), String> {
+            self.as_ref().send(prepared).await
         }
     }
 
@@ -1271,8 +1408,8 @@ mod tests {
             spent >= 19_800,
             "spent only {spent}: the target was undersized"
         );
-        // The few sats left over stay bitcoin: the send re-prices, so the
-        // quote's leftover isn't known to be unspent.
+        // The few sats left over stay bitcoin: the actual debit isn't
+        // observed, so the quote's leftover isn't known to be unspent.
         assert_eq!(ac.lock().await.saved.pending_sats, 0);
     }
 
@@ -1546,19 +1683,78 @@ mod tests {
         assert!(events.is_empty(), "two failures after a resume don't pause");
     }
 
-    /// Sending re-prices the conversion. A price move up to the slippage cap
-    /// between the quote and the send still spends no more than was received.
+    /// The send spends exactly the quoted sats: the prepared amount becomes
+    /// the estimate's output, which makes the SDK convert
+    /// `AmountIn(estimate.amount_in)` instead of re-pricing a target. Its
+    /// selector is `amount >= amount_out` (`uses_amount_in` at the pin).
+    #[test]
+    fn a_send_spends_exactly_the_quoted_sats() {
+        let mut prepared = prepared(
+            OWN,
+            Some(USDB_MAINNET_TOKEN_IDENTIFIER),
+            conversion_options(),
+        );
+        let estimate = prepared.conversion_estimate.clone().unwrap();
+        assert!(
+            prepared.amount < estimate.amount_out,
+            "a target, as prepared"
+        );
+        exact_input(&mut prepared);
+        assert_eq!(prepared.amount, estimate.amount_out);
+        assert!(prepared.amount >= estimate.amount_out);
+        // Still the checked self-transfer, at the same sats.
+        assert_eq!(checked_sats_in(&prepared, OWN), Ok(estimate.amount_in));
+
+        let mut plain = prepared.clone();
+        plain.conversion_estimate = None;
+        plain.amount = 7;
+        exact_input(&mut plain);
+        assert_eq!(plain.amount, 7, "nothing to do without a conversion");
+    }
+
+    /// Turning auto-convert off while a quote is in flight stops the send:
+    /// the switch is checked under the lock right before sending.
     #[tokio::test]
-    async fn a_price_move_up_to_the_cap_stays_within_the_received_sats() {
+    async fn turning_it_off_during_a_quote_stops_the_send() {
+        struct OffDuringQuote<'a> {
+            pool: &'a FakePool,
+            ac: &'a Mutex<AutoConvert>,
+        }
+        #[async_trait]
+        impl Converter for OffDuringQuote<'_> {
+            type Prepared = u128;
+            async fn limits(&self) -> Result<Limits, String> {
+                self.pool.limits().await
+            }
+            async fn balance_sats(&self) -> Result<u64, String> {
+                self.pool.balance_sats().await
+            }
+            async fn quote(&self, target: u128) -> Result<Quote<u128>, String> {
+                let quote = self.pool.quote(target).await?;
+                if target != 1_000_000 {
+                    self.ac.lock().await.set_enabled(false).unwrap();
+                }
+                Ok(quote)
+            }
+            async fn send(&self, prepared: u128) -> Result<(), String> {
+                self.pool.send(prepared).await
+            }
+        }
+
         let dir = TempDir::new();
         let ac = Mutex::new(enabled(&dir));
-        let mut pool = FakePool::new(20_000);
-        pool.send_drift_bps = 49;
-
-        process(&ac, Some(&pool), &[receipt("a", 20_000)]).await;
-        let spent = pool.spent.lock().unwrap().clone();
-        assert_eq!(spent.len(), 1);
-        assert!(spent[0] <= 20_000, "spent {} of 20,000", spent[0]);
+        let pool = FakePool::new(100_000);
+        let off = OffDuringQuote {
+            pool: &pool,
+            ac: &ac,
+        };
+        let events = process(&ac, Some(&off), &[receipt("a", 20_000)]).await;
+        assert!(events.is_empty());
+        assert!(pool.sends().is_empty(), "sent after Off");
+        let ac = ac.lock().await;
+        assert!(!ac.state().enabled);
+        assert_eq!(ac.saved.pending_sats, 0);
+        assert_eq!(ac.failures.consecutive, 0);
     }
 
     /// A conversion that was running when the user switched off (and on
@@ -1698,11 +1894,164 @@ mod tests {
     }
 
     #[test]
-    fn the_sizing_aim_leaves_room_for_the_cap() {
-        assert_eq!(sizing_aim(20_000), 20_000 - 100 - 1);
-        assert_eq!(sizing_aim(1_300), 1_300 - 7 - 1);
+    fn the_sizing_aim_leaves_room_for_rounding() {
+        assert_eq!(sizing_aim(20_000), 20_000 - 20 - 1);
+        assert_eq!(sizing_aim(1_300), 1_300 - 1 - 1);
         assert_eq!(sizing_aim(1), 0);
         assert_eq!(sizing_aim(0), 0);
+    }
+
+    // ---- the worker ----
+
+    /// Poll until `done` holds, for up to a second.
+    async fn eventually(done: impl Fn() -> bool) {
+        for _ in 0..200 {
+            if done() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("condition not met within a second");
+    }
+
+    type Emitted = Arc<StdMutex<Vec<ProtocolEvent>>>;
+
+    /// Start [`run_worker`] with `pool` as the converter once `connected` is
+    /// set. Returns the wake sender.
+    fn start_worker(
+        ac: &Arc<Mutex<AutoConvert>>,
+        pool: &Arc<FakePool>,
+        connected: &Arc<std::sync::atomic::AtomicBool>,
+        emitted: &Emitted,
+    ) -> tokio::sync::mpsc::UnboundedSender<()> {
+        let (wake, wakes) = tokio::sync::mpsc::unbounded_channel();
+        let (pool, connected, emitted) = (pool.clone(), connected.clone(), emitted.clone());
+        tokio::spawn(run_worker(wakes, ac.clone(), move || {
+            let (pool, connected, emitted) = (pool.clone(), connected.clone(), emitted.clone());
+            async move {
+                connected
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    .then(|| {
+                        let emit = move |event| emitted.lock().unwrap().push(event);
+                        (pool, emit)
+                    })
+            }
+        }));
+        wake
+    }
+
+    /// A receive the listener counted before the SDK was published wakes a
+    /// pass that can't convert. The sats stay pending, and the wake `init`
+    /// sends after publishing the SDK converts them, with no new receive.
+    #[tokio::test]
+    async fn a_wake_before_the_sdk_is_published_is_not_lost() {
+        let dir = TempDir::new();
+        let ac = Arc::new(Mutex::new(enabled(&dir)));
+        let pool = Arc::new(FakePool::new(100_000));
+        let connected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let wake = start_worker(&ac, &pool, &connected, &Emitted::default());
+
+        assert!(ac.lock().await.note_receive(&receipt("early", 20_000)));
+        wake.send(()).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(pool.calls().is_empty());
+        assert_eq!(ac.lock().await.saved.pending_sats, 20_000);
+
+        // `init`: publish the SDK, then wake.
+        connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        wake.send(()).unwrap();
+        eventually(|| pool.sends().len() == 1).await;
+    }
+
+    /// Sats saved pending by the last session convert on the start-up wake.
+    #[tokio::test]
+    async fn sats_pending_from_the_last_session_convert_at_start_up() {
+        let dir = TempDir::new();
+        {
+            let mut last = enabled(&dir);
+            assert!(last.note_receive(&receipt("before-restart", 9_000)));
+        }
+        let ac = Arc::new(Mutex::new(AutoConvert::load(&dir.0)));
+        assert_eq!(ac.lock().await.saved.pending_sats, 9_000);
+        let pool = Arc::new(FakePool::new(100_000));
+        let connected = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let wake = start_worker(&ac, &pool, &connected, &Emitted::default());
+
+        wake.send(()).unwrap();
+        eventually(|| pool.sends().len() == 1).await;
+        let spent = pool.spent.lock().unwrap()[0];
+        assert!((8_900..=9_000).contains(&spent), "spent {spent}");
+    }
+
+    // ---- migrating SDK Stable Balance's choice ----
+
+    /// The secp256k1 generator, as a stand-in identity.
+    const IDENTITY: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+    /// The label is read from the same SQLite store, row and key the SDK
+    /// wrote it to. Nothing is created where there was no store.
+    #[tokio::test]
+    async fn the_legacy_label_is_read_from_the_sdk_store() {
+        let dir = TempDir::new();
+        let root = dir.0.to_str().unwrap();
+        assert_eq!(legacy_stable_balance_label(root, IDENTITY).await, Ok(None));
+        assert_eq!(
+            fs::read_dir(&dir.0).unwrap().count(),
+            0,
+            "no store is created"
+        );
+
+        let identity = PublicKey::from_str(IDENTITY).unwrap();
+        let db_dir = default_storage_path(root, &SparkNetwork::Mainnet, &identity).unwrap();
+        let sdk_store = SqliteStorage::new(&db_dir).unwrap();
+        assert_eq!(legacy_stable_balance_label(root, IDENTITY).await, Ok(None));
+        // Written the way the SDK's `save_stable_balance_active_label` does,
+        // under its own key, spelled out here so a drifting constant fails.
+        sdk_store
+            .set_cached_item("stable_balance_active_label".into(), "USDB".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            legacy_stable_balance_label(root, IDENTITY).await,
+            Ok(Some(LEGACY_USDB_LABEL.to_string()))
+        );
+        // Read-only: the SDK's row is still there.
+        assert_eq!(
+            sdk_store
+                .get_cached_item("stable_balance_active_label".into())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(LEGACY_USDB_LABEL)
+        );
+    }
+
+    /// A Cube that had SDK Stable Balance on and no bridge state yet starts
+    /// on, with nothing pending; a Cube with a state file keeps its own.
+    #[test]
+    fn a_legacy_on_choice_is_adopted_only_on_the_first_run() {
+        let dir = TempDir::new();
+        let ac = AutoConvert::load_or_adopt(&dir.0, true);
+        assert_eq!(
+            ac.state(),
+            AutoConvertState {
+                enabled: true,
+                breaker: AutoConvertBreaker::Ready,
+            }
+        );
+        assert_eq!(ac.saved.pending_sats, 0);
+        assert!(AutoConvert::load(&dir.0).state().enabled, "saved");
+
+        let mut ac = ac;
+        ac.set_enabled(false).unwrap();
+        assert!(
+            !AutoConvert::load_or_adopt(&dir.0, true).state().enabled,
+            "the user's later off wins over the old SDK choice"
+        );
+
+        let fresh = TempDir::new();
+        assert!(!AutoConvert::load_or_adopt(&fresh.0, false).state().enabled);
+        assert!(!fresh.file().exists(), "nothing to save");
     }
 
     #[test]
