@@ -422,8 +422,8 @@ impl PsbtState {
     /// The signer picker is open on a recorded split whose key failed its
     /// re-qualification (or is no longer a split key): take it down, as the
     /// Broadcast dialog is, unless a local signer is mid-operation. Keychain
-    /// sessions are cancelled once; a hidden picker may stay mounted to drain
-    /// them.
+    /// sessions are cancelled once, including those of a picker hidden while
+    /// a device signed; the dismissed picker may stay mounted to drain them.
     fn close_picker_if_split_key_refused(&mut self, cache: &Cache) -> Task<Message> {
         if matches!(self.split_key_check, SplitKeyCheck::InFlight { .. })
             || self.split_key_refusal(cache).is_none()
@@ -433,10 +433,13 @@ impl PsbtState {
         let Some(PsbtModal::Sign(sign)) = self.modal.as_mut() else {
             return Task::none();
         };
-        // A hidden picker takes no picks (re-showing it is gated) and may be
-        // draining an earlier dismissal; cancelling again would re-send
-        // every pending Keychain cancel on each message.
-        if sign.is_signing() || !sign.display_modal {
+        // A picker already dismissed is only draining its cancelled
+        // Keychain sessions; dismissing it again would re-send every pending
+        // cancel on each message. One merely hidden while a local signer
+        // worked still has live sessions, so it is dismissed now.
+        let dismissed =
+            !sign.display_modal && sign.keychain.as_ref().is_some_and(|k| k.is_dismissed());
+        if sign.is_signing() || dismissed {
             return Task::none();
         }
         let (cancel, keep) = sign.begin_dismiss();
@@ -5968,17 +5971,24 @@ mod tests {
             assert!(state.tx.psbt.inputs[0].partial_sigs.is_empty());
         }
 
-        /// A picker already hidden (dismissed, draining its Keychain
-        /// sessions) is left alone when the key is refused: dismissing it
-        /// again on every message would re-send each pending cancel.
+        /// After a refusal the picker's Keychain sessions are cancelled
+        /// exactly once: also when the picker was only hidden (Cancel while a
+        /// device signed) with sessions still live, and never again while the
+        /// dismissed picker drains them.
         #[tokio::test]
-        async fn a_hidden_picker_is_not_dismissed_again_for_the_split_key() {
+        async fn a_refused_split_cancels_its_keychain_sessions_once() {
+            use crate::app::state::vault::keychain_sign::tests::{
+                all_cancel_requested, modal_with_live_session,
+            };
             let (mut state, cache, spend, key) = journaled_split();
             let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
                 crate::daemon::client::Coincubed::new(MockDaemon::new(vec![]).run()),
             );
             open_fresh_picker(&mut state, &cache, spend, key, &daemon);
+            // Hidden by Cancel while a device signed: not dismissed, and its
+            // phone session is still live.
             if let Some(PsbtModal::Sign(sign)) = state.modal.as_mut() {
+                sign.set_keychain(Some(modal_with_live_session()));
                 sign.display_modal = false;
             }
             state.split_key_check = SplitKeyCheck::Done {
@@ -5987,13 +5997,23 @@ mod tests {
                 result: Err("reorg".into()),
             };
             assert!(state.split_key_refusal(&cache).is_some());
+
+            let _ = state.close_picker_if_split_key_refused(&cache);
+            let Some(PsbtModal::Sign(sign)) = &state.modal else {
+                panic!("mounted to drain its sessions");
+            };
+            let keychain = sign.keychain.as_ref().unwrap();
+            assert!(keychain.is_dismissed(), "dismissed now");
+            assert!(
+                all_cancel_requested(keychain),
+                "the live session is cancelled"
+            );
+
+            // Draining: left alone, nothing sent again.
             for _ in 0..2 {
-                let cancel = state.close_picker_if_split_key_refused(&cache);
-                assert_eq!(cancel.units(), 0, "no cancel sent again");
-                assert!(
-                    matches!(&state.modal, Some(PsbtModal::Sign(sign)) if !sign.display_modal),
-                    "left mounted and hidden, not dismissed again"
-                );
+                let again = state.close_picker_if_split_key_refused(&cache);
+                assert_eq!(again.units(), 0, "no cancel sent again");
+                assert!(matches!(&state.modal, Some(PsbtModal::Sign(sign)) if !sign.display_modal));
             }
         }
 
