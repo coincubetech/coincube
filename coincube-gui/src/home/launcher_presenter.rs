@@ -60,6 +60,9 @@ const AVATAR_WIDTH: f32 = 44.0;
 const NETWORK_WIDTH: f32 = 145.0;
 const WALLETS_WIDTH: f32 = 160.0;
 const BACKUP_WIDTH: f32 = 145.0;
+/// The face's term column; the details snapshot sets its values at the same
+/// x (28px margin + this + the 12px gap).
+pub(super) const FACE_TERM_WIDTH: f32 = 84.0;
 const ACTION_WIDTH: f32 = 72.0;
 const CELL_GAP: f32 = 14.0;
 
@@ -220,7 +223,7 @@ pub(super) fn local_wallets(
 
 /// Matches the Cube's own "Backup not confirmed" warning: `backed_up` is set
 /// once the user confirms the seed phrase backup. The Recovery Kit is a
-/// Connect fact and shows on the Connect line. A Cube with no recorded master
+/// Connect fact and shows on the Recovery Kit line. A Cube with no recorded master
 /// seed (created before it was tracked, or elsewhere) may hold no seed on
 /// this device at all, so its status is unknown rather than a warning.
 pub(super) fn backup_mark(cube: &crate::app::settings::CubeSettings) -> BackupMark {
@@ -397,7 +400,7 @@ fn detail_line<'a>(
     Row::new()
         .spacing(16)
         .width(Length::Fill)
-        .push(tenshu::caption(label).width(Length::Fixed(72.0)))
+        .push(tenshu::caption(label).width(Length::Fixed(88.0)))
         .push(value)
         .into()
 }
@@ -436,7 +439,7 @@ fn details<'a>(row: &launcher_catalog::LocalRow<'_>, light: bool) -> Element<'a,
             tenshu::body(lock_state(row.open)).into(),
         ))
         .push(detail_line(
-            "Backup",
+            "Seed phrase",
             tenshu::body(backup_text)
                 .style(text_tone(backup_tone))
                 .into(),
@@ -452,7 +455,7 @@ fn details<'a>(row: &launcher_catalog::LocalRow<'_>, light: bool) -> Element<'a,
             tenshu::body(row.wallets.clone()).into(),
         ))
         .push(detail_line(
-            "Connect",
+            "Recovery Kit",
             tenshu::body(row.connect.1.clone())
                 .wrapping(Wrapping::WordOrGlyph)
                 .into(),
@@ -523,14 +526,15 @@ pub(crate) fn face_words<'a>(
         })
 }
 
-/// `.pdl div`: a 64px muted term, 12px gap, then the value on a 22px line.
+/// `.pdl div`: an 84px muted term, wide enough for "Recovery Kit", a 12px
+/// gap, then the value on a 22px line.
 fn face_fact<'a>(label: &'static str, value: Element<'a, ViewMessage>) -> Element<'a, ViewMessage> {
     Row::new()
         .spacing(12)
         .width(Length::Fill)
         .push(
             Container::new(face_words(label, 13.0, coincube_ui::font::REGULAR, true))
-                .width(Length::Fixed(64.0))
+                .width(Length::Fixed(FACE_TERM_WIDTH))
                 .height(Length::Fixed(22.0))
                 .center_y(Length::Fixed(22.0)),
         )
@@ -718,13 +722,13 @@ fn floor_details<'a>(
             face_words(lock_state(row.open), 14.0, font::REGULAR, false).into(),
         ))
         .push(face_fact(
-            "Backup",
+            "Seed phrase",
             face_words(backup_text, 14.0, font::REGULAR, false)
                 .style(text_tone(backup_tone))
                 .into(),
         ))
         .push(face_fact(
-            "Connect",
+            "Recovery Kit",
             face_words(row.connect.1.clone(), 14.0, font::REGULAR, false).into(),
         ))
         .push(face_fact(
@@ -831,7 +835,7 @@ fn ghost_avatar<'a, M: 'a>(size: f32) -> Element<'a, M> {
         .into()
 }
 
-/// The Backup fact on a ghost's face, and the note under the facts.
+/// The Recovery fact on a ghost's face, and the note under the facts.
 fn ghost_copy(cube: &super::RemoteCube) -> (&'static str, tenshu::Tone, &'static str) {
     let restore = launcher_catalog::remote_restore(cube);
     match restore.action {
@@ -876,7 +880,7 @@ fn ghost_details<'a>(
             face_words("In Connect, not on this device", 14.0, font::REGULAR, true).into(),
         ))
         .push(face_fact(
-            "Backup",
+            "Recovery",
             face_words(backup_text, 14.0, font::REGULAR, false)
                 .style(text_tone(backup_tone))
                 .into(),
@@ -1109,7 +1113,7 @@ fn table_header<'a>() -> Element<'a, ViewMessage> {
         .push(tenshu::caption("Cube").width(Length::Fill))
         .push(tenshu::caption("Network").width(Length::Fixed(NETWORK_WIDTH)))
         .push(tenshu::caption("Wallets").width(Length::Fixed(WALLETS_WIDTH)))
-        .push(tenshu::caption("Backup").width(Length::Fixed(BACKUP_WIDTH)))
+        .push(tenshu::caption("Seed phrase").width(Length::Fixed(BACKUP_WIDTH)))
         .push(Space::new().width(Length::Fixed(ACTION_WIDTH)))
         .into()
 }
@@ -2633,7 +2637,7 @@ mod tests {
             page: 0,
             selected_slot: 0,
             backup: "Not confirmed",
-            connect: "Sovereign — local only".into(),
+            connect: "None — local only".into(),
             wallets: "Spark".into(),
             peers: vec![
                 launcher_catalog::LauncherScenePeer {
