@@ -186,12 +186,15 @@ pub fn network_line(cache: &Cache, name: &str) -> String {
     format!("{name} · {}", nav::shell::network_label(cache.chain()))
 }
 
-/// The Cube's name, or "Cube" while it has none.
-pub fn cube_display_name(cache: &Cache) -> &str {
+/// The Cube's name as the side panel shows it, or "Cube" while it has none.
+/// Names are saved without a length limit and may hold line breaks, and a
+/// pinned head doesn't scroll, so heads get the same one-line, 16-character
+/// cut.
+pub fn cube_display_name(cache: &Cache) -> String {
     if cache.cube_name.is_empty() {
-        "Cube"
+        "Cube".to_owned()
     } else {
-        cache.cube_name.as_str()
+        nav::shell::short_cube_name(&cache.cube_name)
     }
 }
 
@@ -203,7 +206,7 @@ pub fn page_head<'a>(
 ) -> PageHead<'a, Message> {
     coincube_ui::component::tenshu::page_head(title, Message::FocusAction).context(
         cube_coin(cache),
-        network_line(cache, cube_display_name(cache)),
+        network_line(cache, &cube_display_name(cache)),
     )
 }
 
@@ -231,7 +234,7 @@ pub fn wallet_sub_page_head<'a>(
         format!(
             "{} · {}",
             nav::shell::wallet_label(wallet, name),
-            network_line(cache, cube_display_name(cache))
+            network_line(cache, &cube_display_name(cache))
         ),
     )
 }
@@ -381,6 +384,7 @@ fn dashboard_with_info_layout<'a, T: Into<Element<'a, Message>>>(
     width: PageWidth,
 ) -> Element<'a, Message> {
     let head = head
+        .map(|head| vault::tools::with_back(menu, head))
         .or_else(|| settings::frame::page_head(menu, cache))
         .or_else(|| vault::tools::page_head(menu, cache));
     let body = page(
@@ -1033,10 +1037,11 @@ mod page_tests {
 #[cfg(test)]
 mod page_head_tests {
     use super::{
-        dashboard_headed, page_head, spark_page_head, vault_page_head, wallet_page_head, Message,
+        dashboard, dashboard_headed, page_head, spark_page_head, vault_page_head, wallet_page_head,
+        Message,
     };
     use crate::app::cache::{Cache, WalletNames};
-    use crate::app::menu::{CubeSubMenu, Menu};
+    use crate::app::menu::{CubeSettingsOption, CubeSubMenu, Menu, VaultSubMenu};
     use coincube_ui::component::tenshu::PageHead;
     use coincube_ui::widget::{Column, Element};
     use iced::advanced::widget::operation::{Focusable, Scrollable};
@@ -1295,6 +1300,94 @@ mod page_head_tests {
             let (_, probe) = frame(&mut tree, &renderer, &mut element);
             probe.text(title);
             probe.text(line);
+        }
+    }
+
+    fn rows<'a>() -> Column<'a, Message> {
+        (0..4).fold(Column::new(), |column, row| {
+            column.push(iced::widget::text(format!("Row {}", row)))
+        })
+    }
+
+    #[test]
+    fn heads_cut_a_long_cube_name_as_the_side_panel_does() {
+        let renderer = renderer();
+        let named = |name: &str| Cache {
+            cube_name: name.into(),
+            ..Cache::default()
+        };
+        // Saved names have no length limit and may hold line breaks; the
+        // head doesn't scroll, so it shows the side panel's 16-character cut.
+        let long = named("A very long Cube name\nthat goes on and on, line after line");
+        let short = named("Everyday");
+        let overview = Menu::Cube(CubeSubMenu::Overview);
+        let settings = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::General));
+        let tools = Menu::Vault(VaultSubMenu::Recovery);
+        let send = Menu::Vault(VaultSubMenu::Send);
+        type Page = for<'a> fn(&'a Menu, &'a Cache) -> Element<'a, Message>;
+        let cases: [(&Menu, Page, &str); 4] = [
+            (
+                &overview,
+                |menu, cache| dashboard_headed(menu, cache, page_head(cache, "Overview"), rows()),
+                "A very long Cube… · Bitcoin mainnet",
+            ),
+            (
+                &settings,
+                |menu, cache| dashboard(menu, cache, rows()),
+                "Cube · A very long Cube… · Bitcoin mainnet",
+            ),
+            (
+                &tools,
+                |menu, cache| dashboard(menu, cache, rows()),
+                "A very long Cube… · Bitcoin mainnet",
+            ),
+            (
+                &send,
+                |menu, cache| dashboard_headed(menu, cache, vault_page_head(cache, "Send"), rows()),
+                "Vault · A very long Cube… · Bitcoin mainnet",
+            ),
+        ];
+        for (menu, page, line) in cases {
+            let viewport = |cache: &Cache, line: Option<&str>| {
+                let mut element = page(menu, cache);
+                let mut tree = Tree::new(element.as_widget());
+                let (_, probe) = frame(&mut tree, &renderer, &mut element);
+                if let Some(line) = line {
+                    probe.text(line);
+                }
+                probe.scroller_of(probe.text("Row 0")).0
+            };
+            // The head is as tall as it is with a short name.
+            assert_eq!(
+                viewport(&long, Some(line)).y,
+                viewport(&short, None).y,
+                "{:?}",
+                menu
+            );
+        }
+    }
+
+    #[test]
+    fn a_vault_tool_step_keeps_back_to_vault_under_its_own_title() {
+        let renderer = renderer();
+        let cache = Cache::default();
+        // Recovery's compose and review steps pass their own head on the
+        // Recovery tool route; the Tools head's Back to Vault stays.
+        for (menu, back) in [
+            (Menu::Vault(VaultSubMenu::Recovery), true),
+            (Menu::Vault(VaultSubMenu::Send), false),
+        ] {
+            let mut element =
+                dashboard_headed(&menu, &cache, vault_page_head(&cache, "Recovery"), rows());
+            let mut tree = Tree::new(element.as_widget());
+            let (_, probe) = frame(&mut tree, &renderer, &mut element);
+            probe.text("Recovery");
+            assert_eq!(
+                probe.text.iter().any(|(text, _)| text == "Back to Vault"),
+                back,
+                "{:?}",
+                menu
+            );
         }
     }
 }

@@ -61,13 +61,24 @@ fn tab_icon(route: &Menu) -> Text<'static> {
 /// The Tools head for a Vault tool route, `None` elsewhere.
 pub fn page_head(menu: &Menu, cache: &Cache) -> Option<PageHead<'static, Message>> {
     is_tool(menu).then(|| {
-        coincube_ui::component::tenshu::page_head("Tools", Message::FocusAction)
-            .context(
+        with_back(
+            menu,
+            coincube_ui::component::tenshu::page_head("Tools", Message::FocusAction).context(
                 crate::app::view::cube_coin(cache),
-                crate::app::view::network_line(cache, crate::app::view::cube_display_name(cache)),
-            )
-            .back("Vault", Message::Menu(Menu::Vault(VaultSubMenu::Overview)))
+                crate::app::view::network_line(cache, &crate::app::view::cube_display_name(cache)),
+            ),
+        )
     })
+}
+
+/// `head` with the Tools head's Back to Vault on a Vault tool route, so a
+/// tool's own steps (Recovery's compose and review) keep the way back.
+pub fn with_back<'a>(menu: &Menu, head: PageHead<'a, Message>) -> PageHead<'a, Message> {
+    if is_tool(menu) {
+        head.back("Vault", Message::Menu(Menu::Vault(VaultSubMenu::Overview)))
+    } else {
+        head
+    }
 }
 
 /// The tab bar for a Vault tool route, `None` elsewhere.

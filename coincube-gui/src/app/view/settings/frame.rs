@@ -221,7 +221,13 @@ fn scope_name(scope: RouteScope, scopes: &[RouteChoice]) -> String {
 /// network. `None` off the Settings routes.
 pub fn page_head(menu: &Menu, cache: &Cache) -> Option<PageHead<'static, Message>> {
     let scope = route_scope(menu)?;
-    let name = scope_name(scope, &route_choices(menu, cache));
+    // The Cube's name cut as the side panel cuts it: the head doesn't scroll.
+    let name = match scope {
+        RouteScope::Cube if !cache.cube_name.is_empty() => {
+            format!("Cube · {}", crate::app::view::cube_display_name(cache))
+        }
+        _ => scope_name(scope, &route_choices(menu, cache)),
+    };
     Some(
         coincube_ui::component::tenshu::page_head("Settings", Message::FocusAction).context(
             crate::app::view::cube_coin(cache),
