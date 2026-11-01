@@ -10449,31 +10449,34 @@ mod tests {
 
     #[test]
     fn pure_home_view_helpers_build_for_local_remote_and_form_variants() {
-        use launcher_catalog::{connect_caption, remote_restore, Tone};
+        use launcher_catalog::{recovery_kit_caption, remote_restore, Tone};
         let mut local = cube("local-a", "Local A", Network::Bitcoin);
         assert_eq!(
-            connect_caption(&local, false, None),
-            (Tone::Warn, "Sovereign — local only".to_string())
+            recovery_kit_caption(&local, false, None),
+            (Tone::Warn, "None — local only".to_string())
         );
         // Sovereign + signed in, with the server's refusal recorded: the
         // warning variant, carrying the server's reason as visible text.
         assert_eq!(
-            connect_caption(&local, true, Some("Out of Cube slots".to_string())),
+            recovery_kit_caption(&local, true, Some("Out of Cube slots".to_string())),
             (Tone::Warn, "Out of Cube slots".to_string())
         );
         assert_eq!(
-            connect_caption(&local, true, None),
-            (
-                Tone::Muted,
-                "Not yet synced to Connect. It will sync automatically in a moment.".to_string()
-            )
+            recovery_kit_caption(&local, true, None),
+            (Tone::Muted, "None yet — syncing to Connect".to_string())
         );
 
         local.remote_synced = true;
-        let _ = connect_caption(&local, true, None);
+        assert_eq!(
+            recovery_kit_caption(&local, true, None),
+            (Tone::Muted, "None yet".to_string())
+        );
 
         local.recovery_kit_last_backed_up_descriptor_fingerprint = Some("hash".to_string());
-        let _ = connect_caption(&local, true, None);
+        assert_eq!(
+            recovery_kit_caption(&local, true, None),
+            (Tone::Good, "On Connect".to_string())
+        );
 
         let mut remote = remote_cube("remote-a", "Remote A", Network::Bitcoin);
         let restore = remote_restore(&remote);

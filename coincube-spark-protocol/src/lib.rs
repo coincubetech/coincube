@@ -313,8 +313,8 @@ pub enum Method {
     ///
     /// The gui treats [`ErrorKind::NotConnected`] as an unknown outcome. Its
     /// client makes that answer up for every request still in flight when
-    /// the bridge dies, so it can't be told apart from the bridge's own
-    /// pre-`init` refusal; reconciling after that refusal finds nothing moved.
+    /// the bridge dies. The bridge itself refuses a swap before `init` with
+    /// `BadRequest`.
     ///
     /// An [`ErrorKind::Sdk`] error can come after the SDK has sent the input
     /// to the pool: at `a38117d` it gives up waiting for the output after
@@ -323,6 +323,14 @@ pub enum Method {
     /// Activity before it offers another swap. A retry can't be made safe
     /// with an idempotency key, because the bridge drops the key for any
     /// conversion leg.
+    ///
+    /// After an `Sdk` error on a swap out of USDB, auto-convert counts no
+    /// bitcoin received until its switch next changes, since the swap's
+    /// output may arrive as an ordinary receive (S3b). The bridge saves this
+    /// hold before sending, so it also holds after a bridge restart during
+    /// the swap, and refuses the swap with `BadRequest` if it can't be
+    /// saved. [`AutoConvertState::held_after_swap`] shows it, and
+    /// [`Event::AutoConvertStateChanged`] announces it.
     Swap(SwapParams),
     /// [`Method::PrepareSend`] with an explicit balance to pay from. Returns
     /// [`OkPayload::PrepareSendFrom`]; the handle executes through the
@@ -882,6 +890,17 @@ pub struct AutoConvertState {
     /// The circuit breaker on repeated conversion failures. When it trips,
     /// the bridge also turns auto-convert off, so `enabled` is `false`.
     pub breaker: AutoConvertBreaker,
+    /// True while auto-convert is on but counts no bitcoin received, because
+    /// a swap out of USDB may still deliver its bitcoin as an ordinary
+    /// receive: its send ended in an error, or the bridge stopped while
+    /// sending it. Sats already pending still convert. Turning auto-convert
+    /// off ends it. Always `false` while off.
+    ///
+    /// Added in S3b and left out of the wire while `false`, so every other
+    /// state reads as before. A bridge from before it never sends it, which
+    /// reads as `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held_after_swap: bool,
 }
 
 /// Circuit breaker on auto-convert failures. Tagged so a pause can't be
@@ -900,7 +919,9 @@ pub enum AutoConvertBreaker {
 /// minimum on that side.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ConversionLimits {
-    /// Least that can be converted, in the asset converted out of.
+    /// Least that can be converted, in the asset converted out of. Out of
+    /// bitcoin the bridge reports the least its sizing can convert, about
+    /// 0.2% above the pool's own minimum (S3b).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_from: Option<AssetAmount>,
     /// Least that can be received, in the asset converted into.
@@ -932,12 +953,18 @@ pub struct ConversionQuote {
     /// Estimated amount received. The least the conversion will deliver
     /// depends on the SDK's path (`flashnet.rs` at `a38117d`):
     ///
-    /// - a swap out of USDB, which is an exact input: the SDK has already taken
-    ///   [`Self::max_slippage_bps`] off the simulated output and signs this
-    ///   figure as the minimum, so this is the least it delivers;
-    /// - toward a target (a swap out of bitcoin, or a pay-from conversion):
-    ///   this is the simulated output, and the minimum is the target, about
-    ///   this figure less [`Self::max_slippage_bps`].
+    /// - a swap, which is an exact input in both directions (S3b). This is
+    ///   not a floor: the SDK prices an exact input again when it is sent and
+    ///   signs that price less [`Self::max_slippage_bps`] as the minimum. Out
+    ///   of USDB this figure already has the cap taken off the simulated
+    ///   output; out of bitcoin it is the simulated output. The bridge
+    ///   refuses a swap whose price moved against the user by more than the
+    ///   cap since this estimate, so the least it delivers is about this
+    ///   figure less the cap out of USDB, and less twice the cap out of
+    ///   bitcoin;
+    /// - toward a target (a pay-from conversion): this is the simulated
+    ///   output, and the minimum is the target, about this figure less
+    ///   [`Self::max_slippage_bps`].
     ///
     /// Below the minimum the conversion fails and is refunded.
     pub amount_out: AssetAmount,
@@ -996,6 +1023,12 @@ pub struct SwapOk {
     /// child, so the bridge reports that receive payment's id. Read from the
     /// SDK source at `a38117d`; not yet run.
     pub swap_id: String,
+    /// The swap's status as the SDK answered it, worked out as
+    /// [`PaymentConversionSummary::status`] is. Usually `Completed`: the SDK
+    /// answers a self-transfer once the converted funds have arrived. It is
+    /// `Pending` when the SDK answers before it has stored the receive with
+    /// its conversion information; the bridge then follows the swap and
+    /// emits [`Event::SwapStatusChanged`].
     pub status: SwapStatus,
 }
 
@@ -1118,10 +1151,10 @@ pub struct PaymentDetailSummary {
     /// Bitcoin txid of a deposit or withdrawal, or a token transaction hash.
     #[serde(default)]
     pub tx_id: Option<String>,
-    /// The BTC ⇄ USDB conversion behind this payment, from the SDK's
-    /// `conversion_details`. Set on a swap's row and on a send funded by a
-    /// conversion. `None` from a bridge older than this field, and from every
-    /// bridge until S3b fills it in.
+    /// The BTC ⇄ USDB conversion behind this payment. Set on a swap's or an
+    /// auto-convert's row, on a refund of one, and on a send funded by a
+    /// conversion; a cross-chain provider's conversion isn't one. `None` on
+    /// every other row, and from a bridge older than S3b.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversion: Option<PaymentConversionSummary>,
 }
@@ -1129,12 +1162,19 @@ pub struct PaymentDetailSummary {
 /// A payment's conversion, as Activity shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaymentConversionSummary {
-    /// The SDK's overall `ConversionDetails.status`. Updated in place by
-    /// [`Event::SwapStatusChanged`].
+    /// The SDK's `conversion_details.status` when the payment has them,
+    /// otherwise the row's own AMM `conversion_info` status, otherwise
+    /// `Pending`. A self-transfer's row has no `conversion_details` at
+    /// `a38117d`, so a swap's status comes from its AMM information.
+    /// `Completed` only once the payment itself is completed; a completed
+    /// conversion on a payment that failed is `Failed`, since nothing
+    /// arrived. Updated in place by [`Event::SwapStatusChanged`].
     pub status: SwapStatus,
     /// What the BTC ⇄ USDB step converted. `None` until the SDK fills in the
     /// steps, which it does later from child payments, or when there is no
-    /// BTC ⇄ USDB step.
+    /// BTC ⇄ USDB step. The SDK builds steps only for a payment with
+    /// `conversion_details`, so a swap's own row has none: Activity shows its
+    /// own amount.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub amounts: Option<ConversionAmounts>,
 }
@@ -1522,8 +1562,10 @@ pub enum Event {
     /// failure's text (e.g. `Pool has no liquidity`) for the gui to show;
     /// `failures` is how many failed in a row.
     StableBalancePaused { reason: String, failures: u32 },
-    /// Bridge-driven auto-convert changed: switched on or off, or its breaker
-    /// tripped. Settings re-renders from `state`.
+    /// Bridge-driven auto-convert changed: switched on or off, its breaker
+    /// tripped, or it holds receives after a swap
+    /// ([`AutoConvertState::held_after_swap`]). Settings re-renders from
+    /// `state`.
     ///
     /// Emitted from S2b on. A gui built before this variant (#952) can't
     /// parse it, and its reader stops on an unparseable line, so such a gui
@@ -1534,8 +1576,11 @@ pub enum Event {
     /// A swap from [`Method::Swap`] moved to `status`. `swap_id` is
     /// [`SwapOk::swap_id`], the [`PaymentSummary::id`] of the swap's Activity
     /// row, so the gui updates that row's
-    /// [`PaymentDetailSummary::conversion`]. Not emitted until S3b; the same
-    /// caution as [`Event::AutoConvertStateChanged`] applies.
+    /// [`PaymentDetailSummary::conversion`]. Emitted from S3b on, only for a
+    /// swap whose [`SwapOk::status`] wasn't finished: the bridge re-reads it
+    /// on each sync until it is, and only within the session that ran it.
+    /// In a rare race it can arrive just before the [`SwapOk`] it follows.
+    /// The same caution as [`Event::AutoConvertStateChanged`] applies.
     SwapStatusChanged { swap_id: String, status: SwapStatus },
 }
 
@@ -2371,6 +2416,7 @@ mod tests {
         let ready = AutoConvertState {
             enabled: true,
             breaker: AutoConvertBreaker::Ready,
+            held_after_swap: false,
         };
         assert_eq!(
             response_json(1, OkPayload::AutoConvert(ready.clone())),
@@ -2394,6 +2440,7 @@ mod tests {
                 failures: STABLE_BALANCE_PAUSE_THRESHOLD,
                 reason: "Pool has no liquidity".into(),
             },
+            held_after_swap: false,
         };
         assert_eq!(
             serde_json::to_value(&paused).expect("serialize"),
@@ -2407,6 +2454,74 @@ mod tests {
             panic!("expected auto_convert");
         };
         assert_eq!(back, paused);
+    }
+
+    /// The hold after a swap is on the wire only while set, so every other
+    /// state reads as before. A state from a bridge without it reads as not
+    /// held, and a gui without it ignores it.
+    #[test]
+    fn the_hold_after_a_swap_is_on_the_wire_only_while_set() {
+        let held = AutoConvertState {
+            enabled: true,
+            breaker: AutoConvertBreaker::Ready,
+            held_after_swap: true,
+        };
+        assert_eq!(
+            response_json(1, OkPayload::AutoConvert(held.clone())),
+            json!({
+                "type": "response", "id": 1,
+                "ok": {
+                    "kind": "auto_convert",
+                    "data": {
+                        "enabled": true,
+                        "breaker": { "status": "ready" },
+                        "held_after_swap": true
+                    }
+                }
+            })
+        );
+        let OkPayload::AutoConvert(back) = ok_round_trip(OkPayload::AutoConvert(held.clone()))
+        else {
+            panic!("expected auto_convert");
+        };
+        assert_eq!(back, held);
+        let Event::AutoConvertStateChanged { state: back } =
+            event_round_trip(Event::AutoConvertStateChanged {
+                state: held.clone(),
+            })
+        else {
+            panic!("expected auto_convert_state_changed");
+        };
+        assert_eq!(back, held);
+
+        let not_held = AutoConvertState {
+            held_after_swap: false,
+            ..held.clone()
+        };
+        let wire = serde_json::to_value(&not_held).expect("serialize");
+        assert_eq!(
+            wire,
+            json!({ "enabled": true, "breaker": { "status": "ready" } })
+        );
+        let from_an_older_bridge: AutoConvertState = serde_json::from_value(wire).expect("parse");
+        assert_eq!(from_an_older_bridge, not_held);
+
+        /// [`AutoConvertState`] as a gui from before the hold has it.
+        #[derive(Debug, PartialEq, Deserialize)]
+        struct Before {
+            enabled: bool,
+            breaker: AutoConvertBreaker,
+        }
+        let in_an_older_gui: Before =
+            serde_json::from_value(serde_json::to_value(&held).expect("serialize"))
+                .expect("an older gui ignores the field");
+        assert_eq!(
+            in_an_older_gui,
+            Before {
+                enabled: true,
+                breaker: AutoConvertBreaker::Ready
+            }
+        );
     }
 
     #[test]
@@ -2603,6 +2718,7 @@ mod tests {
                 failures: 3,
                 reason: "Pool has no liquidity".into(),
             },
+            held_after_swap: false,
         };
         assert_eq!(
             serde_json::to_value(Frame::Event(Event::AutoConvertStateChanged {

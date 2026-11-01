@@ -1071,35 +1071,29 @@ pub(super) enum Tone {
     Warn,
 }
 
-/// The local Cube's Connect caption. Same states and copy as the former list
-/// card's tooltip, now visible text.
-pub(super) fn connect_caption(
+/// The local Cube's Recovery Kit line: whether Connect holds its encrypted
+/// Kit. The tones are the former Connect caption's, which also tint the
+/// avatar; a registration refusal still reads as the server's reason.
+pub(super) fn recovery_kit_caption(
     cube: &CubeSettings,
     signed_in: bool,
     sync_error: Option<String>,
 ) -> (Tone, String) {
     match cube.connect_state() {
-        CubeConnectState::BackedUp => (
-            Tone::Good,
-            "Backed up to Connect — recovery kit ready".to_string(),
-        ),
+        CubeConnectState::BackedUp => (Tone::Good, "On Connect".to_string()),
         CubeConnectState::Registered => (
             Tone::Muted,
             if cube.has_imported_bitcoin() && cube.has_recovery_kit() {
-                "Registered to Connect — Recovery Kit needs updating for imported wallet"
-                    .to_string()
+                "Needs updating for imported wallet".to_string()
             } else {
-                "Registered to Connect — no recovery kit".to_string()
+                "None yet".to_string()
             },
         ),
         CubeConnectState::Sovereign if signed_in => match sync_error {
             Some(reason) => (Tone::Warn, reason),
-            None => (
-                Tone::Muted,
-                "Not yet synced to Connect. It will sync automatically in a moment.".to_string(),
-            ),
+            None => (Tone::Muted, "None yet — syncing to Connect".to_string()),
         },
-        CubeConnectState::Sovereign => (Tone::Warn, "Sovereign — local only".to_string()),
+        CubeConnectState::Sovereign => (Tone::Warn, "None — local only".to_string()),
     }
 }
 
@@ -1518,7 +1512,7 @@ pub(super) fn project(home: &Home) -> Projection<'_> {
                 hidden += 1;
                 continue;
             }
-            let connect = connect_caption(cube, signed_in, home.cube_sync_hint(cube));
+            let connect = recovery_kit_caption(cube, signed_in, home.cube_sync_hint(cube));
             let sync_warning = (signed_in && connect.0 == Tone::Warn)
                 .then(|| connect.1.lines().next().unwrap_or_default().to_string());
             locals.push(LocalRow {
@@ -1718,7 +1712,7 @@ fn muted(theme: &theme::Theme) -> iced::widget::text::Style {
     }
 }
 
-/// The Launcher presenter's Backup line, in the List's tones.
+/// The Launcher presenter's Seed phrase line, in the List's tones.
 fn backup_caption(cube: &CubeSettings) -> (Tone, &'static str) {
     let (text, tone) = super::launcher_presenter::backup(cube);
     let tone = match tone {
@@ -1951,7 +1945,7 @@ fn details_panel<'a>(row: &LocalRow<'_>) -> Element<'a, ViewMessage> {
                     .into(),
             ))
             .push(detail_line(
-                "Backup",
+                "Seed phrase",
                 p2_regular(backup).style(tone_style(backup_tone)).into(),
             ))
             .push(detail_line(
@@ -1961,7 +1955,7 @@ fn details_panel<'a>(row: &LocalRow<'_>) -> Element<'a, ViewMessage> {
                     .into(),
             ))
             .push(detail_line(
-                "Connect",
+                "Recovery Kit",
                 p2_regular(caption)
                     .style(tone_style(tone))
                     .wrapping(Wrapping::WordOrGlyph)
@@ -2050,7 +2044,7 @@ fn table_heading<'a>() -> Element<'a, ViewMessage> {
                 .width(Length::Fixed(WALLETS_WIDTH)),
         )
         .push(
-            p2_regular("Backup")
+            p2_regular("Seed phrase")
                 .style(muted)
                 .width(Length::Fixed(BACKUP_WIDTH)),
         )
@@ -2915,7 +2909,7 @@ mod tests {
         cube.master_signer_fingerprint = Some([1, 2, 3, 4].into());
         // Matches the open Cube's "Backup not confirmed" warning.
         assert_eq!(backup_caption(cube), (Tone::Warn, "Not confirmed"));
-        // A Recovery Kit is shown on the Connect line, not here.
+        // A Recovery Kit is shown on the Recovery Kit line, not here.
         cube.recovery_kit_password_backed_up = true;
         assert_eq!(backup_caption(cube), (Tone::Warn, "Not confirmed"));
         cube.backed_up = true;
