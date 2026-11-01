@@ -3743,7 +3743,8 @@ mod tests {
         ] {
             assert!(browsing.contains(fact), "missing {:?}", fact);
         }
-        // The dock names the block and its source; its menu offers the others.
+        // The dock names the control; its menu gives the block and its
+        // source, and offers the others.
         let launcher = |home: &Home, name: &str| {
             capture::inspect_filled(
                 name,
@@ -3765,7 +3766,8 @@ mod tests {
             (1440, 900),
         );
         assert!(light.contains("NEXT HALVING"));
-        assert!(dock.contains("Block 968,412 · COINCUBE | Connect"));
+        assert!(dock.contains("Network activity"));
+        assert!(!dock.contains("Block 968,412"));
         assert!(!dock.contains("Turn off in App preferences"));
         // The narrowest window still fits the selector beside the limit text.
         let narrow = capture::inspect_filled(
@@ -3776,12 +3778,13 @@ mod tests {
             theme::Theme::dark(),
             (1024, 768),
         );
-        assert!(narrow.contains("Block 968,412 · COINCUBE | Connect"));
+        assert!(narrow.contains("Network activity"));
         assert!(narrow.contains("Key"));
         let _ = home.update_catalog(CatalogMessage::Activity(ActivityMessage::Menu(true)));
         let menu = launcher(&home, "launcher-activity-menu");
         for item in [
             "Network activity · Bitcoin mainnet",
+            "Block 968,412 · COINCUBE | Connect",
             "Automatic",
             "Local node",
             "Turn off in App preferences",
@@ -3825,6 +3828,53 @@ mod tests {
             .current(ChainId::BitcoinBlake2b)
             .is_none());
         assert!(home.catalog.activity.current(ChainId::Bitcoin).is_some());
+    }
+
+    #[test]
+    fn the_activity_menu_switches_between_bitcoin_and_blake2b() {
+        use super::super::launcher_activity::{sample_snapshot, ActivityMessage};
+        use super::super::launcher_catalog::NetworkFilter;
+        let menu = |home: &Home, name: &str| {
+            capture::inspect_filled(
+                name,
+                super::super::launcher_catalog::launcher_view(home),
+                (1440, 900),
+                "dark",
+                theme::Theme::dark(),
+                (1440, 900),
+            )
+        };
+        let mut home = home_with_floor(4);
+        home.catalog
+            .activity
+            .show_for_test(ChainId::Bitcoin, Ok(sample_snapshot()));
+        let _ = home.update_catalog(CatalogMessage::Activity(ActivityMessage::Menu(true)));
+        // Without Bitcoin Blake2b there is nothing to switch to.
+        assert!(!home.activity_blake2b_offered());
+        assert!(!menu(&home, "launcher-activity-no-b2b").contains("Bitcoin Blake2b"));
+        let _ = home.update_catalog(CatalogMessage::Activity(ActivityMessage::Blake2b(true)));
+        assert_eq!(home.activity_chain(), ChainId::Bitcoin);
+
+        // Listed: the menu offers both, and the choice moves the activity.
+        home.displayed_networks = vec![ChainId::Bitcoin, ChainId::BitcoinBlake2b];
+        assert!(home.activity_blake2b_offered());
+        assert!(menu(&home, "launcher-activity-b2b").contains("Bitcoin Blake2b"));
+        let _ = home.update_catalog(CatalogMessage::Activity(ActivityMessage::Blake2b(true)));
+        assert_eq!(home.activity_chain(), ChainId::BitcoinBlake2b);
+        assert!(menu(&home, "launcher-activity-b2b-on")
+            .contains("Network activity · Bitcoin Blake2b mainnet"));
+        let _ = home.update_catalog(CatalogMessage::Activity(ActivityMessage::Blake2b(false)));
+        assert_eq!(home.activity_chain(), ChainId::Bitcoin);
+
+        // A filter naming one network wins, and the switch steps aside.
+        let _ = home.update_catalog(CatalogMessage::Activity(ActivityMessage::Blake2b(true)));
+        home.catalog.filter = NetworkFilter::Network(ChainId::Bitcoin);
+        assert!(!home.activity_blake2b_offered());
+        assert_eq!(home.activity_chain(), ChainId::Bitcoin);
+        // Withdrawn Bitcoin Blake2b falls back to Bitcoin.
+        home.catalog.filter = NetworkFilter::All;
+        home.displayed_networks = vec![ChainId::Bitcoin];
+        assert_eq!(home.activity_chain(), ChainId::Bitcoin);
     }
 
     #[test]

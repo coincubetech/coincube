@@ -233,6 +233,7 @@ impl CatalogState {
     pub(super) fn dismiss_popovers(&mut self) {
         self.key = KeyCard::default();
         self.network_menu = false;
+        self.plan_menu = false;
     }
 
     pub(super) fn key_open(&self) -> bool {
@@ -255,6 +256,8 @@ pub(super) struct CatalogState {
     pub(super) key: KeyCard,
     /// The top bar's network menu is open.
     pub(super) network_menu: bool,
+    /// The dock's plan menu is open.
+    pub(super) plan_menu: bool,
     /// Which networks' Cubes the Launcher shows (P-Launcher's chips and
     /// Network menu). Presentation only; it never changes a Cube's network.
     pub(super) filter: NetworkFilter,
@@ -563,6 +566,8 @@ pub enum CatalogMessage {
     KeyClose,
     /// Opens or closes the top bar's network menu.
     NetworkMenu(bool),
+    /// Opens or closes the dock's plan menu.
+    PlanMenu(bool),
     /// All / Live / Test networks, or one network from the menu.
     Filter(NetworkFilter),
     ClearSelection,
@@ -793,6 +798,14 @@ impl Home {
             }
             CatalogMessage::NetworkMenu(open) => {
                 self.catalog.network_menu = open;
+                Task::none()
+            }
+            CatalogMessage::PlanMenu(open) => {
+                // One dock menu at a time.
+                self.catalog.plan_menu = open;
+                if open {
+                    self.catalog.activity.menu = false;
+                }
                 Task::none()
             }
             CatalogMessage::Filter(filter) => {
@@ -2116,6 +2129,7 @@ pub(super) fn launcher_view(home: &Home) -> Element<'_, ViewMessage> {
             .push(screen)
             .push(super::launcher_chrome::key_layer(home))
             .push(super::launcher_chrome::activity_layer(home))
+            .push(super::launcher_chrome::plan_layer(home, &projection))
             .push(super::launcher_chrome::network_layer(home, &projection)),
     )
     .width(Length::Fill)
@@ -3537,7 +3551,8 @@ mod tests {
     /// The limit is per network and counts Cubes registered from other
     /// devices: five here plus two only in Connect fill a 7-Cube Bitcoin
     /// mainnet, while Testnet4's three stay well under it. The dock names
-    /// every network's count instead of one bare ratio.
+    /// the plan; its menu gives every network's count instead of one bare
+    /// ratio.
     #[test]
     fn plan_usage_is_shown_per_network_and_counts_remote_cubes() {
         let mut home = home_with(&[
@@ -3581,15 +3596,34 @@ mod tests {
         );
         assert!(projection.at_limit());
         // The narrowest window the app allows, with every dock control the
-        // multi-network state brings (the "New Cubes" caption among them).
+        // multi-network state brings. The dock names the plan alone.
         for (scenario, window) in [("plan-usage", WIDE), ("plan-usage-1024", (1024, 768))] {
             let tree = home_tree(scenario, &home, window, "dark", theme::Theme::dark());
-            assert!(tree.contains("Estate plan: 7 per network"));
-            assert!(tree.contains("Bitcoin mainnet 7/7 full (2 only in Connect)"));
-            assert!(tree
-                .contains("Testnet4 3/7. Upgrade, or delete a Bitcoin mainnet Cube, to add one."));
-            assert!(tree.contains("New Cubes: Bitcoin mainnet"));
+            assert!(tree.contains("Estate plan"));
+            assert!(!tree.contains("per network"));
+            assert!(!tree.contains("New Cubes"));
             assert!(!tree.has(&create_id()));
+            assert!(!tree.has(&import_id()));
+        }
+        // Its menu holds each network's use of the limit.
+        home.catalog.plan_menu = true;
+        for (scenario, window) in [
+            ("plan-usage-menu", WIDE),
+            ("plan-usage-menu-1024", (1024, 768)),
+        ] {
+            let tree = home_tree(scenario, &home, window, "dark", theme::Theme::dark());
+            for line in [
+                "Estate plan · 7 Cubes per network",
+                "Bitcoin mainnet",
+                "7 of 7",
+                "Full",
+                "2 only in Connect",
+                "Testnet4",
+                "3 of 7",
+                "Upgrade, or delete a Bitcoin mainnet Cube, to add one.",
+            ] {
+                assert!(tree.contains(line), "missing {:?}", line);
+            }
         }
 
         // Developer mode off lists Bitcoin alone, but a Signet Cube held only
@@ -3613,8 +3647,8 @@ mod tests {
             "dark",
             theme::Theme::dark(),
         );
-        assert!(tree.contains("Signet 1 in Connect, this device not counted"));
-        assert!(!tree.contains("Signet 1/7"));
+        assert!(tree.contains("1 in Connect; this device not counted"));
+        assert!(!tree.contains("1 of 7"));
         home.remote_cubes.pop();
 
         // A Cube going elsewhere frees the slot; the line stays as a quota.
@@ -3622,9 +3656,12 @@ mod tests {
         let projection = project(&home);
         assert!(!projection.at_limit());
         let tree = home_tree("plan-usage-free", &home, WIDE, "dark", theme::Theme::dark());
-        assert!(!tree.contains("full"));
-        assert!(tree.contains("Bitcoin mainnet 6/7 (1 only in Connect)"));
+        assert!(!tree.contains("Full"));
+        assert!(!tree.contains("Upgrade"));
+        assert!(tree.contains("6 of 7"));
+        assert!(tree.contains("1 only in Connect"));
         assert!(tree.has(&create_id()));
+        assert!(tree.has(&import_id()));
     }
 
     /// Switching network makes it current before its list is read (and keeps
@@ -3664,9 +3701,12 @@ mod tests {
             .find(|u| u.chain == ChainId::Testnet4)
             .expect("the current network is always listed");
         assert_eq!(current.local, None);
+        home.catalog.plan_menu = true;
         let tree = home_tree("pending-switch", &home, WIDE, "dark", theme::Theme::dark());
-        assert!(tree.contains("Testnet4 not counted"));
-        assert!(tree.contains("Bitcoin mainnet 7/7 full"));
+        assert!(tree.contains("Not counted"));
+        assert!(tree.contains("This device's Cubes could not be counted"));
+        assert!(tree.contains("7 of 7"));
+        assert!(tree.contains("Full"));
         assert!(!tree.contains("delete a Bitcoin Testnet4 Cube"));
         assert!(!tree.contains("Upgrade, or delete"));
         let summary = home.cube_limit_summary(ChainId::Testnet4);
@@ -3691,7 +3731,18 @@ mod tests {
         );
         assert!(!tree.has(&create_id()));
         assert!(!tree.has(&import_id()));
-        assert!(tree.contains("Bitcoin mainnet 2/2 full"));
+        assert!(tree.has(&super::super::launcher_chrome::plan_id()));
+        // The plan's menu says why.
+        home.catalog.plan_menu = true;
+        let tree = home_tree(
+            "r05b-limit-menu",
+            &home,
+            (1024, 768),
+            "light",
+            theme::Theme::light(),
+        );
+        assert!(tree.contains("2 of 2"));
+        assert!(tree.contains("Full"));
         assert!(tree.contains("Upgrade, or delete a Bitcoin mainnet Cube, to add one."));
 
         // Import is offered only where the flow exists.
@@ -3989,6 +4040,7 @@ mod tests {
             open_id(&key("b")),
             create_id(),
             import_id(),
+            super::super::launcher_chrome::plan_id(),
             key_id(),
         ];
         let mut forward = Vec::new();
@@ -5125,9 +5177,9 @@ mod tests {
         assert_eq!(home.filter_target(NetworkFilter::Test), None);
         assert_eq!(home.filter_target(NetworkFilter::All), None);
         home.network = ChainId::Bitcoin;
-        // The dock names the network Create and Import use.
+        // The dock no longer captions the network: the filter keeps it shown.
         let tree = home_tree("dock-target", &home, WIDE, "dark", theme::Theme::dark());
-        assert!(tree.contains("New Cubes: Bitcoin mainnet"));
+        assert!(!tree.contains("New Cubes"));
     }
 
     /// Developer mode on Testnet4 with its two Cubes checked, Signet's read
@@ -5446,14 +5498,16 @@ mod tests {
     }
 
     #[test]
-    fn the_pin_screen_snapshot_keeps_the_new_cubes_caption() {
+    fn the_pin_screen_snapshot_keeps_the_plan_button() {
         let home = all_networks();
         let chrome = super::super::launcher_chrome::snapshot(&home, &project(&home));
-        assert_eq!(chrome.target.as_deref(), Some("New Cubes: Bitcoin mainnet"));
-        let mut one = home_with(&[("a", "Alpha")]);
-        one.catalog.mode = LauncherMode::Cubes;
-        let chrome = super::super::launcher_chrome::snapshot(&one, &project(&one));
-        assert_eq!(chrome.target, None, "one listed network needs no caption");
+        assert_eq!(
+            chrome.plan,
+            (
+                format!("{} plan", home.account_tier.display_name()),
+                project(&home).at_limit()
+            )
+        );
     }
 
     #[test]
@@ -5692,8 +5746,10 @@ mod tests {
 
             let (mut limited, theme) = themed(rows(2), appearance);
             limited.server_cube_limit = Some(2);
+            limited.catalog.plan_menu = true;
             let tree = home_tree("r05b-plan-limit", &limited, compact, appearance, theme);
-            assert!(tree.contains("Bitcoin mainnet 2/2 full"));
+            assert!(tree.contains("2 of 2"));
+            assert!(tree.contains("Full"));
             assert!(!tree.has(&create_id()));
 
             let (mut refused, theme) = themed(rows(3), appearance);
