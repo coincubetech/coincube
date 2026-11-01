@@ -94,16 +94,23 @@ fn network_coin<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
 
 pub(crate) fn short_cube_name(name: &str) -> String {
     // Names are persisted without a length limit and may contain line breaks.
-    // Keep fixed sidebar regions to one short, predictable label.
-    let mut chars = name.chars().map(|ch| {
-        if ch.is_whitespace() || ch.is_control() {
-            ' '
-        } else {
-            ch
-        }
-    });
-    let prefix: String = chars.by_ref().take(16).collect();
-    if chars.next().is_some() {
+    // Keep fixed sidebar regions to one short, predictable label. The cut
+    // counts graphemes, so an accent, an emoji sequence or a flag is never
+    // split from the rest of its character.
+    use unicode_segmentation::UnicodeSegmentation;
+    let flat: String = name
+        .chars()
+        .map(|ch| {
+            if ch.is_whitespace() || ch.is_control() {
+                ' '
+            } else {
+                ch
+            }
+        })
+        .collect();
+    let mut graphemes = flat.graphemes(true);
+    let prefix: String = graphemes.by_ref().take(16).collect();
+    if graphemes.next().is_some() {
         format!("{prefix}…")
     } else {
         prefix
@@ -971,5 +978,39 @@ mod privacy_eye_tests {
             ..shown
         };
         assert_eq!(busy.intent(), None);
+    }
+}
+
+#[cfg(test)]
+mod short_cube_name_tests {
+    use super::short_cube_name;
+
+    /// The 16-character cut counts graphemes: an accent typed as a combining
+    /// mark, an emoji sequence and a flag stay whole at the boundary.
+    #[test]
+    fn the_cut_never_splits_a_grapheme() {
+        let a15 = "a".repeat(15);
+        // "é" as "e" plus a combining acute accent.
+        assert_eq!(
+            short_cube_name(&format!("{a15}e\u{301}xyz")),
+            format!("{a15}e\u{301}…")
+        );
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        assert_eq!(
+            short_cube_name(&format!("{a15}{family}tail")),
+            format!("{a15}{family}…")
+        );
+        let flag = "\u{1F1F2}\u{1F1FD}";
+        assert_eq!(
+            short_cube_name(&format!("{a15}{flag}tail")),
+            format!("{a15}{flag}…")
+        );
+        // Exactly 16 graphemes need no cut, however many chars they take.
+        assert_eq!(
+            short_cube_name(&format!("{a15}{family}")),
+            format!("{a15}{family}")
+        );
+        // Line breaks and other spacing still read as one space each.
+        assert_eq!(short_cube_name("Every\nday\tCube"), "Every day Cube");
     }
 }
