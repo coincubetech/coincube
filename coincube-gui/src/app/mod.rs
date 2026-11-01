@@ -4560,6 +4560,12 @@ impl App {
         &self.datadir
     }
 
+    /// Whether the Spark wallet has settled: it returned a synced balance,
+    /// reported a failure, or this Cube has none. The opening waits on it.
+    pub fn spark_settled(&self) -> bool {
+        self.panels.global_home.spark_settled()
+    }
+
     pub fn cube_settings(&self) -> &settings::CubeSettings {
         &self.cube_settings
     }

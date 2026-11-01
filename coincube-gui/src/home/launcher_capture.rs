@@ -615,6 +615,7 @@ fn launcher_capture_opening() {
                 stage,
                 stalled: opening.stalled(now),
                 cancel: || (),
+                without_spark: || (),
             };
             let base: Element<'_, ()> = match opening.floor() {
                 Some(floor) => {

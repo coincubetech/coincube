@@ -510,6 +510,12 @@ pub struct GlobalHome {
 impl GlobalHome {
     /// Follow the Liquid gate. Hiding Liquid also hides a restored
     /// Liquid → Vault transfer at once (the view reads this flag).
+    /// No Spark backend, or a synced balance. A failed fetch is not enough:
+    /// one can land before the sync that a later fetch completes.
+    pub(crate) fn spark_settled(&self) -> bool {
+        self.spark_backend.is_none() || self.spark_balance_loaded
+    }
+
     pub fn set_liquid_shown(&mut self, shown: bool) {
         self.liquid_shown = shown;
     }
@@ -4528,6 +4534,31 @@ mod tests {
             home.spark_stable_balance.as_ref().map(|s| s.balance),
             Some(fresh.balance)
         );
+    }
+
+    #[test]
+    fn spark_settles_on_a_synced_balance_not_a_failed_fetch() {
+        let mut home = panel();
+        assert!(
+            home.spark_settled(),
+            "a Cube with no Spark has nothing to wait for"
+        );
+
+        home.spark_backend = Some(Arc::new(SparkBackend::new(Arc::new(
+            crate::app::breez_spark::SparkClient::disconnected_for_test(),
+        ))));
+        assert!(!home.spark_settled());
+        send(&mut home, HomeMessage::SparkLoadFailed);
+        assert!(!home.spark_settled(), "a failed fetch can precede the sync");
+        send(&mut home, HomeMessage::SparkSyncedObserved);
+        send(
+            &mut home,
+            HomeMessage::SparkBalanceUpdated {
+                btc: Amount::from_sat(1_000),
+                stable_balance: None,
+            },
+        );
+        assert!(home.spark_settled());
     }
 
     /// A refresh blip must not throw away a balance the user already has.

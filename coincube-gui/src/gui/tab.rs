@@ -443,6 +443,8 @@ pub enum Message {
     OpeningTick(Instant),
     /// Cancel on a stalled opening: back to the Launcher, the Cube locked.
     CancelOpening,
+    /// Go on into the Cube while its Spark wallet is still loading.
+    OpenWithoutSpark,
     /// Messages from the cryptic "Duress Mode Activated" screen.
     Duress(crate::app::view::duress::active_screen::Message),
     /// The background activation-queue drainer finished (queue emptied). No-op
@@ -938,6 +940,8 @@ struct CubeOpening {
     quote: coincube_ui::component::quote_display::Quote,
     /// The unlock's wallet loads, aborted by Cancel before the Loader exists.
     loads: Vec<iced::task::Handle>,
+    /// The user chose to go on while Spark was still loading.
+    without_spark: bool,
 }
 
 pub struct Tab {
@@ -1603,6 +1607,13 @@ impl Tab {
                 return Task::none();
             }
             Message::CancelOpening => return self.cancel_opening(),
+            Message::OpenWithoutSpark => {
+                if let Some(opening) = self.opening.as_mut() {
+                    opening.without_spark = true;
+                }
+                self.sync_opening(Instant::now());
+                return Task::none();
+            }
             message @ Message::BreezClientLoadedAfterPin { .. } if self.opening_cancelled => {
                 // A load the user cancelled finished anyway: drop it and
                 // stop anything it started, as for a closed loader.
@@ -4629,6 +4640,7 @@ impl Tab {
                 stage: opening.scene.stage(),
                 stalled: opening.scene.stalled(now),
                 cancel: || Message::CancelOpening,
+                without_spark: || Message::OpenWithoutSpark,
             };
             match opening.scene.floor() {
                 Some(floor) => home::launcher_presenter::opening_on_floor(
@@ -4763,6 +4775,14 @@ impl Tab {
                 Some(unlocked(&passkey.on_success))
             }
             State::Loader(loader) => Some(loader.opening_stage()),
+            // The App is up, but its Spark wallet may still be loading:
+            // the face waits for it unless the user goes on without it.
+            State::App(app)
+                if !app.spark_settled()
+                    && !self.opening.as_ref().is_some_and(|o| o.without_spark) =>
+            {
+                Some(Some(Stage::Spark))
+            }
             State::App(_) => Some(Some(Stage::Ready)),
             _ => None,
         }
@@ -4801,6 +4821,7 @@ impl Tab {
                     ),
                     quote,
                     loads: Vec::new(),
+                    without_spark: false,
                 });
             }
         }
@@ -8393,6 +8414,7 @@ mod opening_tests {
                 contexts: Vec::new(),
             },
             loads: Vec::new(),
+            without_spark: false,
         });
         // The loader fails; the error page holds the wait once, then the
         // tab goes to the background and gets no more ticks.

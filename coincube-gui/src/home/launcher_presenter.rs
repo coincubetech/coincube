@@ -2253,13 +2253,15 @@ pub(crate) fn unlock_turn_with_floor_controls<'a, M: 'a + 'static>(
 }
 
 /// What the loading face says: its heading, the loader's quote, the stage
-/// line and, once a stage has held past the wait, Cancel.
+/// line and, once a stage has held past the wait, Cancel (or, waiting on
+/// Spark, going on without it).
 pub(crate) struct OpeningFace<'a, M> {
     pub cube: &'a crate::app::settings::CubeSettings,
     pub quote: &'a Quote,
     pub stage: super::launcher_opening::Stage,
     pub stalled: bool,
     pub cancel: fn() -> M,
+    pub without_spark: fn() -> M,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2368,27 +2370,29 @@ fn opening_content<'a, M: 'a>(
             .line_height(iced::widget::text::LineHeight::Absolute(22.0.into())),
         );
     if face.stalled {
+        let (note, label, action) = if face.stage == super::launcher_opening::Stage::Spark {
+            (
+                "Spark is taking longer than usual.",
+                "Continue without Spark",
+                face.without_spark,
+            )
+        } else {
+            ("Taking longer than usual.", "Cancel", face.cancel)
+        };
         body = body.push(Space::new().height(Length::Fixed(18.0))).push(
             Row::new()
                 .spacing(4)
                 .align_y(Alignment::Center)
-                .push(opening_words(
-                    "Taking longer than usual.",
-                    13.0,
-                    font::REGULAR,
-                    Tone::Muted,
-                    alpha,
-                ))
+                .push(opening_words(note, 13.0, font::REGULAR, Tone::Muted, alpha))
                 .push({
                     // A button's message must be `Clone`; the caller's need
-                    // not be, so the press maps through `cancel`.
-                    let cancel = face.cancel;
-                    let press: Element<'a, ()> = iced::widget::button(face_link_label("Cancel"))
+                    // not be, so the press maps through `action`.
+                    let press: Element<'a, ()> = iced::widget::button(face_link_label(label))
                         .padding([2.0, 4.0])
                         .style(face_link_style)
                         .on_press(())
                         .into();
-                    press.map(move |()| cancel())
+                    press.map(move |()| action())
                 }),
         );
     }
