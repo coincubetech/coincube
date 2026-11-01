@@ -699,8 +699,15 @@ impl GlobalHome {
     }
 }
 
-impl State for GlobalHome {
-    fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
+impl GlobalHome {
+    /// The Overview. App passes its "Recent activity", read from Activity
+    /// (`view::activity::recent_activity`), to sit under the wallet cards.
+    pub fn view_with_recent_activity<'a>(
+        &'a self,
+        menu: &'a Menu,
+        cache: &'a Cache,
+        recent_activity: Option<Element<'a, view::Message>>,
+    ) -> Element<'a, view::Message> {
         let vault_balance = cache
             .coins()
             .iter()
@@ -767,7 +774,7 @@ impl State for GlobalHome {
                 vault_pending,
             });
 
-        let (overview, transfer) = view::global_home::global_home_view(GlobalViewConfig {
+        let config = GlobalViewConfig {
             cube_id: &self.cube_id,
             liquid_balance,
             spark_balance: self.spark_balance,
@@ -857,9 +864,16 @@ impl State for GlobalHome {
                 unlocked: self.other_scope.is_some() && self.other_address.is_some(),
                 locked_again: self.other_locked_again,
             },
-        });
-        let content =
-            view::dashboard_headed(menu, cache, view::page_head(cache, "Overview"), overview);
+        };
+        let transfer_action = view::global_home::transfer_head_action(&config);
+        let (overview, transfer) = view::global_home::global_home_view(config);
+        let content = view::global_home::overview_page(
+            menu,
+            cache,
+            transfer_action,
+            overview,
+            recent_activity,
+        );
         // A QR card or the signer can open over Review. Iced draws only the
         // root widget's overlay, so beneath one of those the transfer dialog
         // is laid out in the base instead (the upper modal already blocks the
@@ -893,6 +907,12 @@ impl State for GlobalHome {
         coincube_ui::widget::modal::Modal::new(content, overlay)
             .on_blur(Some(view::Message::Close))
             .into()
+    }
+}
+
+impl State for GlobalHome {
+    fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
+        self.view_with_recent_activity(menu, cache, None)
     }
 
     fn subscription(&self) -> Subscription<Message> {

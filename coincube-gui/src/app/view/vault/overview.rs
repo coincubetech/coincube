@@ -430,7 +430,7 @@ pub fn vault_overview_view<'a>(
                 )
             })
             // "Recent activity": App mounts Activity's rows for the Vault
-            // (`view::activity::wallet_recent_activity`).
+            // (`view::activity::recent_activity`).
             .push_maybe(recent_activity)
             .push_maybe((!tools.is_empty()).then(|| vault_tools(cube_id, tools)))
             .push(Space::new().height(Length::Fixed(40.0)))

@@ -490,7 +490,7 @@ fn connected_view<'a>(
     }
 
     // "Recent activity" follows the balance; App mounts it from Activity
-    // (`view::activity::wallet_recent_activity`).
+    // (`view::activity::recent_activity`).
     content = content.push(iced::widget::Space::new().height(Length::Fixed(20.0)));
 
     Container::new(content).padding([0, 16]).into()
@@ -649,14 +649,14 @@ mod tests {
                                     .map(view::Message::SparkOverview),
                                 )
                                 .push(
-                                    iced::widget::container(
-                                        view::activity::wallet_recent_activity(
-                                            activity,
-                                            cache,
+                                    iced::widget::container(view::activity::recent_activity(
+                                        activity,
+                                        cache,
+                                        view::activity::RecentScope::Wallet(
                                             view::activity::WalletFilter::Spark,
-                                            None,
                                         ),
-                                    )
+                                        None,
+                                    ))
                                     .padding([0, 16]),
                                 )
                                 .push(spark_landing_context(

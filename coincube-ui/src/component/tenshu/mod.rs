@@ -8,10 +8,13 @@
 pub mod action;
 pub mod asset_row;
 pub mod balance;
+pub mod bleed;
+pub mod cards;
 pub mod chip;
 pub mod copy_field;
 pub mod disclosure;
 pub mod field;
+pub mod fit_row;
 pub mod page;
 pub mod page_head;
 mod scope;
@@ -29,10 +32,13 @@ mod gallery;
 pub use action::{chip_action, eye_action, transfer_action, ActionButton};
 pub use asset_row::asset_row;
 pub use balance::{balance, AmountVisibility, BalanceTier, BalanceValue, Figure, MASK};
+pub use bleed::{bleed, Bleed};
+pub use cards::{cards, Cards, CARD_GAP, CARD_MIN_WIDTH};
 pub use chip::{status_badge, status_chip, StatusBadge, StatusChip};
 pub use copy_field::{copy_field, CopyField};
 pub use disclosure::{disclosure, Disclosure};
 pub use field::{search_field, text_field, FieldSize, TextField};
+pub use fit_row::{fit_row, FitRow};
 pub use page::{content_frame, gutter_for_window, page, Page, PageWidth, PAGE_MAX};
 pub use page_head::{page_head, PageHead};
 pub use segmented::{
