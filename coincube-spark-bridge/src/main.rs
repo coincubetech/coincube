@@ -17,6 +17,7 @@
 mod auto_convert;
 mod sdk_adapter;
 mod server;
+mod swap;
 
 use clap::Parser;
 use tracing_subscriber::prelude::*;

@@ -33,11 +33,12 @@ use breez_sdk_spark::{
 };
 use coincube_spark_protocol::{
     AutoConvertState, CheckLightningAddressAvailableOk, ClaimDepositOk, DepositInfo, ErrorKind,
-    Event as ProtocolEvent, Frame, GetInfoOk, GetLightningAddressOk, GetUserSettingsOk,
-    LightningAddressInfo as ProtocolLightningAddressInfo, ListPaymentsOk, ListUnclaimedDepositsOk,
-    Method, OkPayload, ParseInputKind, ParseInputOk, PaymentDetailSummary, PaymentSummary,
-    PrepareSendOk, ReceivePaymentOk, RegisterLightningAddressOk, Request, Response, SendPaymentOk,
-    SetAutoConvertParams, SetStableBalanceParams, StableBalanceSnapshot, UsdbBalanceSnapshot,
+    Event as ProtocolEvent, Frame, GetConversionLimitsParams, GetInfoOk, GetLightningAddressOk,
+    GetUserSettingsOk, LightningAddressInfo as ProtocolLightningAddressInfo, ListPaymentsOk,
+    ListUnclaimedDepositsOk, Method, OkPayload, ParseInputKind, ParseInputOk, PaymentDetailSummary,
+    PaymentSummary, PrepareSendOk, PrepareSwapOk, PrepareSwapParams, ReceivePaymentOk,
+    RegisterLightningAddressOk, Request, Response, SendPaymentOk, SetAutoConvertParams,
+    SetStableBalanceParams, StableBalanceSnapshot, SwapOk, SwapParams, UsdbBalanceSnapshot,
     CONVERSION_MAX_SLIPPAGE_BPS,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -46,6 +47,7 @@ use uuid::Uuid;
 
 use crate::auto_convert::{self, AutoConvert, SdkConverter};
 use crate::sdk_adapter::{self, SdkHandle};
+use crate::swap;
 
 /// How long a pending prepare lives before the background sweep evicts
 /// it. Picked at 5 minutes — long enough to cover human dwell time on
@@ -185,6 +187,14 @@ struct ServerState {
     /// right SDK method based on which one contains the handle. Same
     /// TTL eviction policy as `pending_prepares`.
     pending_lnurl_prepares: Mutex<HashMap<String, (Instant, PrepareLnurlPayResponse)>>,
+    /// Pending `prepare_swap` answers, under the handle the gui echoes back
+    /// on `swap`. Separate from the send maps, so `send_payment` can never
+    /// execute a swap and `swap` never a send. Single-use, and swept with
+    /// the same TTL.
+    pending_swaps: Mutex<HashMap<String, (Instant, swap::PreparedSwap)>>,
+    /// Swaps answered before they finished, re-read on every sync
+    /// ([`swap::refresh`]).
+    swaps: Arc<Mutex<swap::SwapTracker>>,
     /// Clone of the outbound frame sender. Stored here so `handle_init`
     /// can hand a copy to the Spark SDK event listener — the listener
     /// pushes `Frame::Event`s on this channel the same way request
@@ -194,6 +204,9 @@ struct ServerState {
     /// from its Spark storage directory by a successful `init`. See
     /// [`crate::auto_convert`].
     auto_convert: std::sync::OnceLock<Arc<Mutex<AutoConvert>>>,
+    /// Wakes the auto-convert worker; set with [`Self::auto_convert`]. A
+    /// swap out of USDB holds the worker's passes, and wakes it once done.
+    wake_auto_convert: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<()>>,
     /// The wallet's own Spark address, the destination of every
     /// auto-convert self-transfer. Read from the SDK once.
     own_spark_address: Arc<OnceCell<String>>,
@@ -206,8 +219,11 @@ impl ServerState {
             init_lock: Mutex::new(()),
             pending_prepares: Mutex::new(HashMap::new()),
             pending_lnurl_prepares: Mutex::new(HashMap::new()),
+            pending_swaps: Mutex::new(HashMap::new()),
+            swaps: Arc::new(Mutex::new(swap::SwapTracker::default())),
             event_tx,
             auto_convert: std::sync::OnceLock::new(),
+            wake_auto_convert: std::sync::OnceLock::new(),
             own_spark_address: Arc::new(OnceCell::new()),
         }
     }
@@ -271,11 +287,13 @@ async fn handle_request(request: Request, state: Arc<ServerState>) -> Response {
         Method::DeleteLightningAddress => handle_delete_lightning_address(id, state).await,
         Method::GetAutoConvert => handle_get_auto_convert(id, state).await,
         Method::SetAutoConvert(params) => handle_set_auto_convert(id, params, state).await,
+        Method::GetConversionLimits(params) => {
+            handle_get_conversion_limits(id, params, state).await
+        }
+        Method::PrepareSwap(params) => handle_prepare_swap(id, params, state).await,
+        Method::Swap(params) => handle_swap(id, params, state).await,
         // Wire contract only (#950 P0). Each method refuses, without touching
         // the SDK, until the PR that implements it.
-        Method::GetConversionLimits(_) | Method::PrepareSwap(_) | Method::Swap(_) => {
-            not_implemented(id, "swap", "S3b")
-        }
         Method::PrepareSendFrom(_) | Method::PrepareLnurlPayFrom(_) => {
             not_implemented(id, "pay-from", "S4b")
         }
@@ -341,6 +359,7 @@ async fn handle_init(
             )));
             let _ = state.auto_convert.set(Arc::clone(&auto_convert));
             let (wake_tx, wake_rx) = tokio::sync::mpsc::unbounded_channel();
+            let _ = state.wake_auto_convert.set(wake_tx.clone());
             // Each pass borrows the SDK and the stdout sender only while it
             // runs, through a weak state reference, so the worker doesn't keep
             // either alive past shutdown. Before the SDK is published a pass
@@ -365,6 +384,28 @@ async fn handle_init(
                 },
             ));
 
+            // Swaps answered before they finished are re-read on each sync,
+            // through a weak state reference as above.
+            let (swap_wake_tx, swap_wake_rx) = tokio::sync::mpsc::unbounded_channel();
+            let weak = Arc::downgrade(&state);
+            tokio::spawn(swap::run_status_worker(
+                swap_wake_rx,
+                Arc::clone(&state.swaps),
+                move || {
+                    let weak = weak.clone();
+                    async move {
+                        let state = weak.upgrade()?;
+                        let sdk = state.sdk.read().await.clone()?;
+                        let events = state.event_tx.clone();
+                        let backend = SdkConverter::new(sdk, Arc::clone(&state.own_spark_address));
+                        let emit = move |event| {
+                            let _ = events.send(Frame::Event(event));
+                        };
+                        Some((backend, emit))
+                    }
+                },
+            ));
+
             // Register an event listener before making the handle
             // visible to other request handlers. `add_event_listener`
             // returns a listener id string (not a Result) that we could
@@ -375,6 +416,7 @@ async fn handle_init(
                 tx: state.event_tx.clone(),
                 auto_convert,
                 wake_auto_convert: wake_tx.clone(),
+                wake_swap_status: swap_wake_tx,
             };
             let _listener_id = handle.sdk.add_event_listener(Box::new(listener)).await;
             *state.sdk.write().await = Some(handle);
@@ -403,13 +445,19 @@ struct BridgeEventListener {
     /// Wakes the auto-convert worker ([`auto_convert::run_worker`]) after a
     /// receive counted.
     wake_auto_convert: tokio::sync::mpsc::UnboundedSender<()>,
+    /// Wakes the swap status worker ([`swap::run_status_worker`]) on each
+    /// sync.
+    wake_swap_status: tokio::sync::mpsc::UnboundedSender<()>,
 }
 
 #[async_trait]
 impl EventListener for BridgeEventListener {
     async fn on_event(&self, event: SdkEvent) {
         let protocol_event = match event {
-            SdkEvent::Synced => Some(ProtocolEvent::Synced),
+            SdkEvent::Synced => {
+                let _ = self.wake_swap_status.send(());
+                Some(ProtocolEvent::Synced)
+            }
             SdkEvent::PaymentSucceeded { payment } => {
                 if let Some(receipt) = auto_convert::eligible_receive(&payment) {
                     if self.auto_convert.lock().await.note_receive(&receipt) {
@@ -662,6 +710,8 @@ fn payment_to_summary(p: breez_sdk_spark::Payment) -> PaymentSummary {
         _ => None,
     };
     let is_token = matches!(p.method, breez_sdk_spark::PaymentMethod::Token);
+    let mut details = detail_summary(p.details.as_ref());
+    details.conversion = swap::conversion_summary(&p);
 
     let (amount_sat, fees_sat, token_amount, token_decimals, token_ticker) = if is_token {
         let metadata = token_metadata;
@@ -699,11 +749,12 @@ fn payment_to_summary(p: breez_sdk_spark::Payment) -> PaymentSummary {
         direction: format!("{:?}", p.payment_type),
         method: format!("{}", p.method),
         description,
-        details: detail_summary(p.details.as_ref()),
+        details,
     }
 }
 
-/// The identifiers and destination Activity shows for one payment.
+/// The identifiers and destination Activity shows for one payment. The
+/// conversion is read from the whole payment ([`payment_to_summary`]).
 fn detail_summary(details: Option<&PaymentDetails>) -> PaymentDetailSummary {
     let non_empty = |value: &str| Some(value.to_owned()).filter(|value| !value.is_empty());
     match details {
@@ -720,7 +771,7 @@ fn detail_summary(details: Option<&PaymentDetails>) -> PaymentDetailSummary {
                 .and_then(|info| info.ln_address.as_deref())
                 .and_then(non_empty),
             tx_id: None,
-            // S3b reports it.
+            // From the whole payment: `swap::conversion_summary`.
             conversion: None,
         },
         Some(PaymentDetails::Spark {
@@ -2421,6 +2472,146 @@ async fn set_auto_convert(
 }
 
 // ---------------------------------------------------------------------------
+// #950 S3b: BTC ⇄ USDB swaps (see `crate::swap`)
+// ---------------------------------------------------------------------------
+
+async fn handle_get_conversion_limits(
+    id: u64,
+    params: GetConversionLimitsParams,
+    state: Arc<ServerState>,
+) -> Response {
+    let Some(sdk) = state.sdk.read().await.clone() else {
+        return Response::err(
+            id,
+            ErrorKind::NotConnected,
+            "init must succeed before get_conversion_limits",
+        );
+    };
+    let backend = SdkConverter::new(sdk, Arc::clone(&state.own_spark_address));
+    match swap::limits(&backend, params.from).await {
+        Ok(limits) => Response::ok(id, OkPayload::GetConversionLimits(limits)),
+        Err(e) => Response::err(
+            id,
+            ErrorKind::Sdk,
+            format!("get_conversion_limits failed: {e}"),
+        ),
+    }
+}
+
+async fn handle_prepare_swap(
+    id: u64,
+    params: PrepareSwapParams,
+    state: Arc<ServerState>,
+) -> Response {
+    let max_slippage_bps = match swap::slippage_cap(params.max_slippage_bps) {
+        Ok(cap) => cap,
+        Err(e) => return Response::err(id, ErrorKind::BadRequest, e),
+    };
+    let Some(sdk) = state.sdk.read().await.clone() else {
+        return Response::err(
+            id,
+            ErrorKind::NotConnected,
+            "init must succeed before prepare_swap",
+        );
+    };
+    let backend =
+        SdkConverter::new(sdk, Arc::clone(&state.own_spark_address)).at_slippage(max_slippage_bps);
+    match swap::prepare(&backend, params.amount, max_slippage_bps).await {
+        Ok(swap::Prepared {
+            swap,
+            quote,
+            limits,
+        }) => {
+            let handle = Uuid::new_v4().to_string();
+            state
+                .pending_swaps
+                .lock()
+                .await
+                .insert(handle.clone(), (Instant::now(), swap));
+            Response::ok(
+                id,
+                OkPayload::PrepareSwap(PrepareSwapOk {
+                    handle,
+                    quote,
+                    limits,
+                }),
+            )
+        }
+        Err(refusal) => swap_refusal(id, "prepare_swap", refusal),
+    }
+}
+
+/// Execute a prepared swap. Every refusal before the SDK is asked to send is
+/// `BadRequest`, including the one before `init` (there can be no handle
+/// then), so the gui can treat it as definite ([`Method::Swap`]).
+async fn handle_swap(id: u64, params: SwapParams, state: Arc<ServerState>) -> Response {
+    // Single-use: taken before anything else, so a refused swap must be
+    // prepared again.
+    let taken = state
+        .pending_swaps
+        .lock()
+        .await
+        .remove(&params.prepare_handle);
+    let Some((_inserted_at, prepared)) = taken else {
+        return Response::err(
+            id,
+            ErrorKind::BadRequest,
+            format!(
+                "no pending swap for handle {} (consumed, expired, or never existed). Nothing \
+                 was sent.",
+                params.prepare_handle
+            ),
+        );
+    };
+    let Some(sdk) = state.sdk.read().await.clone() else {
+        return Response::err(
+            id,
+            ErrorKind::BadRequest,
+            "init must succeed before swap. Nothing was sent.",
+        );
+    };
+    let backend = SdkConverter::new(sdk, Arc::clone(&state.own_spark_address))
+        .at_slippage(prepared.max_slippage_bps());
+    let auto_convert = state.auto_convert.get().map(|ac| ac.as_ref());
+    let emit = |event| {
+        let _ = state.event_tx.send(Frame::Event(event));
+    };
+    let outcome = swap::execute(&backend, prepared, auto_convert, &emit).await;
+    // Passes held during a swap out of USDB run now; otherwise this finds
+    // nothing new to do.
+    if let Some(wake) = state.wake_auto_convert.get() {
+        let _ = wake.send(());
+    }
+    match outcome {
+        Ok((swap_id, status)) => {
+            // Followed before the answer is written, so in a rare race a
+            // `SwapStatusChanged` can reach the gui just before its `SwapOk`.
+            state.swaps.lock().await.track(&swap_id, status);
+            Response::ok(id, OkPayload::Swap(SwapOk { swap_id, status }))
+        }
+        // The SDK's whole text: after an unknown outcome it is the only
+        // record the gui logs of what happened.
+        Err(swap::Refusal::Sdk(message)) => {
+            Response::err(id, ErrorKind::Sdk, format!("swap failed: {message}"))
+        }
+        Err(refusal) => swap_refusal(id, "swap", refusal),
+    }
+}
+
+/// A swap refusal as a response. An SDK error keeps only the human part of
+/// a Flashnet error ([`conversion_failure_reason`]).
+fn swap_refusal(id: u64, what: &str, refusal: swap::Refusal) -> Response {
+    match refusal {
+        swap::Refusal::BadRequest(message) => Response::err(id, ErrorKind::BadRequest, message),
+        swap::Refusal::Sdk(message) => Response::err(
+            id,
+            ErrorKind::Sdk,
+            format!("{what} failed: {}", conversion_failure_reason(&message)),
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Phase 4g: Breez-hosted LNURL / Lightning Address management
 // ---------------------------------------------------------------------------
 
@@ -2575,7 +2766,7 @@ fn clamp_u128_to_u64(v: u128) -> u64 {
     }
 }
 
-/// Phase 4f: walk both pending-prepare maps and drop entries whose
+/// Phase 4f: walk the pending-prepare maps and drop entries whose
 /// insertion timestamp is older than [`PREPARE_TTL`]. Called from the
 /// background sweep task in `run()`.
 ///
@@ -2606,12 +2797,24 @@ async fn sweep_expired_prepares(state: &Arc<ServerState>) {
             keep
         });
     }
+    let mut evicted_swaps = 0usize;
+    {
+        let mut guard = state.pending_swaps.lock().await;
+        guard.retain(|_handle, (inserted_at, _swap)| {
+            let keep = now.duration_since(*inserted_at) < PREPARE_TTL;
+            if !keep {
+                evicted_swaps += 1;
+            }
+            keep
+        });
+    }
 
-    if evicted_regular > 0 || evicted_lnurl > 0 {
+    if evicted_regular > 0 || evicted_lnurl > 0 || evicted_swaps > 0 {
         tracing::debug!(
-            "evicted {} expired prepare(s), {} expired lnurl prepare(s)",
+            "evicted {} expired prepare(s), {} expired lnurl prepare(s), {} expired swap(s)",
             evicted_regular,
-            evicted_lnurl
+            evicted_lnurl,
+            evicted_swaps
         );
     }
 }
@@ -3562,39 +3765,7 @@ mod p0_stub_tests {
         .await;
         assert_eq!(control.kind, ErrorKind::NotConnected);
 
-        let usdb = AssetAmount {
-            asset: WalletAsset::Usdb,
-            amount: 1_000_000,
-        };
         for (method, lands_in) in [
-            (
-                Method::GetConversionLimits(GetConversionLimitsParams {
-                    from: WalletAsset::Bitcoin,
-                }),
-                "S3b",
-            ),
-            (
-                Method::PrepareSwap(PrepareSwapParams {
-                    amount: SwapAmount::Exact { amount_in: usdb },
-                    max_slippage_bps: None,
-                }),
-                "S3b",
-            ),
-            (
-                Method::PrepareSwap(PrepareSwapParams {
-                    amount: SwapAmount::Max {
-                        from: WalletAsset::Usdb,
-                    },
-                    max_slippage_bps: Some(50),
-                }),
-                "S3b",
-            ),
-            (
-                Method::Swap(SwapParams {
-                    prepare_handle: "swap-h".into(),
-                }),
-                "S3b",
-            ),
             (
                 Method::PrepareSendFrom(PrepareSendFromParams {
                     input: "lnbc1".into(),
@@ -3628,6 +3799,113 @@ mod p0_stub_tests {
         assert!(rx.try_recv().is_err(), "a stub emitted a frame");
         assert!(state.pending_prepares.lock().await.is_empty());
         assert!(state.pending_lnurl_prepares.lock().await.is_empty());
+    }
+
+    fn usdb(amount: u128) -> AssetAmount {
+        AssetAmount {
+            asset: WalletAsset::Usdb,
+            amount,
+        }
+    }
+
+    /// S3b's reads refuse before `init` like every other read, after a
+    /// cap outside the protocol's range is refused on its own.
+    #[tokio::test]
+    async fn swap_reads_need_init_and_a_cap_in_range() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = Arc::new(ServerState::new(tx));
+
+        for method in [
+            Method::GetConversionLimits(GetConversionLimitsParams {
+                from: WalletAsset::Bitcoin,
+            }),
+            Method::GetConversionLimits(GetConversionLimitsParams {
+                from: WalletAsset::Usdb,
+            }),
+            Method::PrepareSwap(PrepareSwapParams {
+                amount: SwapAmount::Exact {
+                    amount_in: usdb(1_000_000),
+                },
+                max_slippage_bps: None,
+            }),
+            Method::PrepareSwap(PrepareSwapParams {
+                amount: SwapAmount::Max {
+                    from: WalletAsset::Bitcoin,
+                },
+                max_slippage_bps: Some(500),
+            }),
+        ] {
+            let label = format!("{method:?}");
+            let err = answer(&state, method).await;
+            assert_eq!(err.kind, ErrorKind::NotConnected, "{label}");
+            assert!(err.message.contains("init must succeed"), "{label}");
+        }
+
+        for bps in [0, 9, 501, u32::MAX] {
+            let err = answer(
+                &state,
+                Method::PrepareSwap(PrepareSwapParams {
+                    amount: SwapAmount::Exact {
+                        amount_in: usdb(1_000_000),
+                    },
+                    max_slippage_bps: Some(bps),
+                }),
+            )
+            .await;
+            assert_eq!(err.kind, ErrorKind::BadRequest, "{bps} bps");
+            assert!(
+                err.message.contains("between 10 and 500"),
+                "{}",
+                err.message
+            );
+        }
+
+        assert!(rx.try_recv().is_err());
+        assert!(state.pending_swaps.lock().await.is_empty());
+    }
+
+    /// A prepared Spark send, for a test that only needs one to exist.
+    fn send_prepare() -> PrepareSendPaymentResponse {
+        PrepareSendPaymentResponse {
+            payment_method: SendPaymentMethod::SparkAddress {
+                address: "spark1someoneelse".into(),
+                fee: 0,
+                token_identifier: None,
+            },
+            amount: 1_000,
+            token_identifier: None,
+            conversion_estimate: None,
+            fee_policy: breez_sdk_spark::FeePolicy::FeesExcluded,
+        }
+    }
+
+    /// A handle `swap` doesn't hold is refused as `BadRequest`, the definite
+    /// kind, saying nothing was sent: an unknown one, and a send's, which
+    /// `swap` never executes and leaves for `send_payment`.
+    #[tokio::test]
+    async fn swap_refuses_handles_it_does_not_hold() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = Arc::new(ServerState::new(tx));
+        state
+            .pending_prepares
+            .lock()
+            .await
+            .insert("send-h".into(), (Instant::now(), send_prepare()));
+
+        for handle in ["swap-h", "send-h"] {
+            let err = answer(
+                &state,
+                Method::Swap(SwapParams {
+                    prepare_handle: handle.into(),
+                }),
+            )
+            .await;
+            assert_eq!(err.kind, ErrorKind::BadRequest, "{handle}");
+            assert!(err.message.contains("no pending swap"), "{}", err.message);
+            assert!(err.message.contains("Nothing was sent"), "{}", err.message);
+        }
+        assert!(state.pending_prepares.lock().await.contains_key("send-h"));
+        assert!(rx.try_recv().is_err());
     }
 }
 
@@ -3679,6 +3957,7 @@ mod auto_convert_handler_tests {
         AutoConvertState {
             enabled: true,
             breaker: AutoConvertBreaker::Ready,
+            held_after_swap: false,
         }
     }
 
@@ -3771,6 +4050,7 @@ mod auto_convert_handler_tests {
                 failures: 3,
                 reason: "Pool has no liquidity".into(),
             },
+            held_after_swap: false,
         };
         let ok = user_settings_ok(&on(), true);
         assert!(ok.stable_balance_active && ok.private_mode_enabled);
@@ -3826,11 +4106,14 @@ mod auto_convert_handler_tests {
     ) {
         let (tx, frames) = tokio::sync::mpsc::unbounded_channel();
         let (wake_tx, wakes) = tokio::sync::mpsc::unbounded_channel();
+        // Swap status wakes aren't these tests' concern.
+        let (swap_wake_tx, _) = tokio::sync::mpsc::unbounded_channel();
         let auto_convert = Arc::new(Mutex::new(AutoConvert::load(&dir.0)));
         let listener = BridgeEventListener {
             tx,
             auto_convert: Arc::clone(&auto_convert),
             wake_auto_convert: wake_tx,
+            wake_swap_status: swap_wake_tx,
         };
         (listener, auto_convert, frames, wakes)
     }

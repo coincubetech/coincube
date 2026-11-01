@@ -2442,6 +2442,7 @@ mod p0_contract_tests {
         let state = AutoConvertState {
             enabled: true,
             breaker: AutoConvertBreaker::Ready,
+            held_after_swap: false,
         };
         let (result, method) = tokio::join!(
             client.get_auto_convert(),
@@ -2820,9 +2821,11 @@ mod p0_contract_tests {
     async fn each_call_sends_its_method_and_returns_its_payload() {
         let (client, mut requests) = fake_client();
 
+        // The hold after a swap comes through as the bridge sent it.
         let state = AutoConvertState {
             enabled: true,
             breaker: AutoConvertBreaker::Ready,
+            held_after_swap: true,
         };
         let (result, method) = tokio::join!(
             client.get_auto_convert(),

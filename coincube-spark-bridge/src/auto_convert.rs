@@ -13,14 +13,14 @@
 //!   ([`AutoConvert::note_receive`]);
 //! - one worker ([`convert_pending`]) converts the pending sats, bounded by
 //!   the bitcoin balance, once they reach the pool's minimum, with a
-//!   self-transfer to the wallet's own Spark address ([`prepare_request`]);
+//!   self-transfer to the wallet's own Spark address ([`prepare_request_at`]);
 //! - three failed conversions in a row turn auto-convert off and pause it
 //!   ([`FailureTracker`]).
 //!
-//! The switch, the breaker and the pending sats persist per Cube in
-//! [`STATE_FILE`], in the Cube's Spark storage directory. A Cube without
-//! that file adopts the "on" it had under SDK Stable Balance
-//! ([`legacy_stable_balance_label`]).
+//! The switch, the breaker, the pending sats and the hold after a swap out
+//! of USDB ([`AutoConvert::begin_swap`]) persist per Cube in [`STATE_FILE`],
+//! in the Cube's Spark storage directory. A Cube without that file adopts
+//! the "on" it had under SDK Stable Balance ([`legacy_stable_balance_label`]).
 
 use std::collections::{HashSet, VecDeque};
 use std::fs;
@@ -90,6 +90,18 @@ struct Saved {
     /// so far, or handed back by an attempt that failed before sending.
     #[serde(default)]
     pending_sats: u64,
+    /// Receives are held: a USDB → bitcoin swap may still deliver its
+    /// bitcoin as an ordinary receive. Saved while on, before such a swap is
+    /// sent, and cleared once every swap is delivered. Kept after one whose
+    /// send ended in an error, until the switch next changes. So a file
+    /// saved during or after such a swap loads held ([`AutoConvert::load`]).
+    ///
+    /// Added within version 1. A file without it loads with no hold. A
+    /// bridge from before it ignores it, so drops the hold, and its next
+    /// save leaves it out. Left out while unset, so a file with no hold is
+    /// what such a bridge writes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    unresolved_swap: bool,
 }
 
 impl Default for Saved {
@@ -99,6 +111,7 @@ impl Default for Saved {
             enabled: false,
             breaker: AutoConvertBreaker::Ready,
             pending_sats: 0,
+            unresolved_swap: false,
         }
     }
 }
@@ -279,44 +292,72 @@ fn carries_conversion(details: Option<&PaymentDetails>) -> bool {
     )
 }
 
-/// The conversion options on every auto-convert request: bitcoin to the
-/// token named by the request, with the slippage cap the gui shows.
+/// [`conversion_options_at`] at auto-convert's cap, the one the gui shows.
+#[cfg(test)]
 pub fn conversion_options() -> ConversionOptions {
+    conversion_options_at(CONVERSION_MAX_SLIPPAGE_BPS)
+}
+
+/// The conversion options on every bitcoin → USDB request: bitcoin to the
+/// token named by the request, at `max_slippage_bps`. Auto-convert uses the
+/// cap the gui shows; a swap (`crate::swap`) can ask for another.
+pub fn conversion_options_at(max_slippage_bps: u32) -> ConversionOptions {
     ConversionOptions {
         conversion_type: ConversionType::FromBitcoin,
-        max_slippage_bps: Some(CONVERSION_MAX_SLIPPAGE_BPS),
+        max_slippage_bps: Some(max_slippage_bps),
         // The SDK default: 30 s to see the converted USDB arrive.
         completion_timeout_secs: None,
     }
 }
 
+/// [`prepare_request_at`] at auto-convert's cap.
+#[cfg(test)]
+pub fn prepare_request(own_spark_address: &str, usdb_target: u128) -> PrepareSendPaymentRequest {
+    prepare_request_at(own_spark_address, usdb_target, CONVERSION_MAX_SLIPPAGE_BPS)
+}
+
 /// The prepare for an auto-convert: a self-transfer to the wallet's own Spark
-/// address that converts bitcoin into at least `usdb_target` USDB base units.
+/// address that converts bitcoin into at least `usdb_target` USDB base units,
+/// at `max_slippage_bps`.
 ///
 /// The SDK takes bitcoin → USDB only as a USDB target, never as an exact sats
 /// input (`sdk/payments/conversion.rs` at the pin), and pads the sats it
 /// spends by up to the slippage cap. [`convert`] sizes the target so the
 /// sats spent stay within what was received.
-pub fn prepare_request(own_spark_address: &str, usdb_target: u128) -> PrepareSendPaymentRequest {
+pub fn prepare_request_at(
+    own_spark_address: &str,
+    usdb_target: u128,
+    max_slippage_bps: u32,
+) -> PrepareSendPaymentRequest {
     PrepareSendPaymentRequest {
         payment_request: PaymentRequest::Input {
             input: own_spark_address.to_string(),
         },
         amount: Some(usdb_target),
         token_identifier: Some(USDB_MAINNET_TOKEN_IDENTIFIER.to_string()),
-        conversion_options: Some(conversion_options()),
+        conversion_options: Some(conversion_options_at(max_slippage_bps)),
         // Fees excluded: the SDK refuses `FeesIncluded` with `FromBitcoin`.
         fee_policy: None,
     }
 }
 
-/// The sats a prepared auto-convert spends, after checking the SDK prepared
-/// what [`prepare_request`] asked for: a self-transfer to `own_spark_address`
-/// carrying a bitcoin → USDB conversion at the 50 bps cap. Anything else is
-/// refused before it can be sent.
+/// [`checked_sats_in_at`] at auto-convert's cap.
+#[cfg(test)]
 pub fn checked_sats_in(
     prepared: &PrepareSendPaymentResponse,
     own_spark_address: &str,
+) -> Result<u128, String> {
+    checked_sats_in_at(prepared, own_spark_address, CONVERSION_MAX_SLIPPAGE_BPS)
+}
+
+/// The sats a prepared auto-convert spends, after checking the SDK prepared
+/// what [`prepare_request_at`] asked for: a self-transfer to
+/// `own_spark_address` carrying a bitcoin → USDB conversion at
+/// `max_slippage_bps`. Anything else is refused before it can be sent.
+pub fn checked_sats_in_at(
+    prepared: &PrepareSendPaymentResponse,
+    own_spark_address: &str,
+    max_slippage_bps: u32,
 ) -> Result<u128, String> {
     match &prepared.payment_method {
         SendPaymentMethod::SparkAddress { address, .. } if address == own_spark_address => {}
@@ -336,7 +377,7 @@ pub fn checked_sats_in(
     if !matches!(
         estimate.options.conversion_type,
         ConversionType::FromBitcoin
-    ) || estimate.options.max_slippage_bps != Some(CONVERSION_MAX_SLIPPAGE_BPS)
+    ) || estimate.options.max_slippage_bps != Some(max_slippage_bps)
     {
         return Err(format!(
             "the SDK prepared a different conversion: {:?}",
@@ -350,7 +391,7 @@ pub fn checked_sats_in(
 /// pool's rounding doesn't push a quote over. A send spends exactly the
 /// quote's sats ([`exact_input`]), so this margin is only for sizing. What it
 /// leaves stays bitcoin (see [`AutoConvert::record_success`]).
-fn sizing_aim(budget: u128) -> u128 {
+pub(crate) fn sizing_aim(budget: u128) -> u128 {
     budget.saturating_sub(budget / 1_000 + 1)
 }
 
@@ -360,7 +401,7 @@ fn sizing_aim(budget: u128) -> u128 {
 /// quote, and the refusal doesn't say so in a form the bridge can rely on
 /// (a Flashnet error string at the pin), so it would count as a failure.
 /// Short of that, the sats wait for the next receive.
-fn clears_min_input(budget: u128, min_sats: u128) -> bool {
+pub(crate) fn clears_min_input(budget: u128, min_sats: u128) -> bool {
     sizing_aim(sizing_aim(budget)) >= min_sats
 }
 
@@ -425,12 +466,40 @@ pub trait Converter: Send + Sync {
 pub struct SdkConverter {
     sdk: SdkHandle,
     own_address: Arc<OnceCell<String>>,
+    /// The slippage cap on every prepare: the gui's 50 bps for auto-convert,
+    /// or the one a swap asked for ([`Self::at_slippage`]).
+    max_slippage_bps: u32,
 }
 
 impl SdkConverter {
     /// `own_address` caches the wallet's Spark address across conversions.
     pub fn new(sdk: SdkHandle, own_address: Arc<OnceCell<String>>) -> Self {
-        Self { sdk, own_address }
+        Self {
+            sdk,
+            own_address,
+            max_slippage_bps: CONVERSION_MAX_SLIPPAGE_BPS,
+        }
+    }
+
+    /// The same converter, preparing at `max_slippage_bps` instead.
+    pub fn at_slippage(self, max_slippage_bps: u32) -> Self {
+        Self {
+            max_slippage_bps,
+            ..self
+        }
+    }
+
+    /// The wallet's own Spark address, read from the SDK once.
+    pub async fn own_spark_address(&self) -> Result<&str, String> {
+        self.own_address().await
+    }
+
+    pub fn sdk(&self) -> &SdkHandle {
+        &self.sdk
+    }
+
+    pub fn max_slippage_bps(&self) -> u32 {
+        self.max_slippage_bps
     }
 
     async fn own_address(&self) -> Result<&str, String> {
@@ -488,10 +557,14 @@ impl Converter for SdkConverter {
         let mut prepared = self
             .sdk
             .sdk
-            .prepare_send_payment(prepare_request(own_address, usdb_target))
+            .prepare_send_payment(prepare_request_at(
+                own_address,
+                usdb_target,
+                self.max_slippage_bps,
+            ))
             .await
             .map_err(|e| e.to_string())?;
-        let sats_in = checked_sats_in(&prepared, own_address)?;
+        let sats_in = checked_sats_in_at(&prepared, own_address, self.max_slippage_bps)?;
         exact_input(&mut prepared);
         Ok(Quote { sats_in, prepared })
     }
@@ -514,7 +587,7 @@ impl Converter for SdkConverter {
 
 /// How a conversion attempt ended short of a conversion.
 #[derive(Debug, PartialEq, Eq)]
-enum Shortfall {
+pub(crate) enum Shortfall {
     /// The pending sats buy less USDB than the pool's minimum output. Not a
     /// failure: they wait for the next receive.
     TooSmall,
@@ -533,14 +606,8 @@ fn not_sent(reason: String) -> Shortfall {
 
 /// Convert at most `budget_sats` into USDB. Returns the sats the quote spent.
 ///
-/// A quote at a probe target gives the price. The target is scaled to the
-/// budget and re-quoted, shrinking it while the pool's rounding and slippage
-/// pad overshoot, and is sent only once a quote fits the budget.
-///
-/// Flashnet states a minimum for one side of a pair only
-/// (`get_min_amounts` at the pin). With a minimum output, the probe asks for
-/// at least that. With only a minimum input, a probe that costs fewer sats is
-/// refused, so a refused probe is retried larger ([`PROBE_ESCALATIONS`]).
+/// The quote comes from [`fitted_quote`], and is sent only once it fits the
+/// budget.
 ///
 /// The send runs under the send gate ([`AutoConvert::send_gate`]), with the
 /// switch checked under the state lock once the gate is held. Every switch
@@ -554,6 +621,35 @@ async fn convert<C: Converter>(
     auto_convert: &Mutex<AutoConvert>,
     epoch: u64,
 ) -> Result<u128, Shortfall> {
+    let quote = fitted_quote(converter, budget_sats, limits).await?;
+    let gate = auto_convert.lock().await.send_gate();
+    let _sending = gate.lock().await;
+    if !auto_convert.lock().await.still_wanted(epoch) {
+        return Err(Shortfall::Cancelled);
+    }
+    converter
+        .send(quote.prepared)
+        .await
+        .map_err(|reason| Shortfall::Failed { reason, sent: true })?;
+    Ok(quote.sats_in)
+}
+
+/// A prepared bitcoin → USDB conversion whose sats fit `budget_sats`. Also
+/// sizes a swap out of bitcoin (`crate::swap`).
+///
+/// A quote at a probe target gives the price. The target is scaled to the
+/// budget and re-quoted, shrinking it while the pool's rounding and slippage
+/// pad overshoot, until a quote fits the budget.
+///
+/// Flashnet states a minimum for one side of a pair only
+/// (`get_min_amounts` at the pin). With a minimum output, the probe asks for
+/// at least that. With only a minimum input, a probe that costs fewer sats is
+/// refused, so a refused probe is retried larger ([`PROBE_ESCALATIONS`]).
+pub(crate) async fn fitted_quote<C: Converter>(
+    converter: &C,
+    budget_sats: u64,
+    limits: Limits,
+) -> Result<Quote<C::Prepared>, Shortfall> {
     let budget = u128::from(budget_sats);
     let aim = sizing_aim(budget);
     let mut probe_target = limits.min_to_units.unwrap_or(0).max(PROBE_TARGET_UNITS);
@@ -576,34 +672,37 @@ async fn convert<C: Converter>(
         }
         let quote = converter.quote(target).await.map_err(not_sent)?;
         if quote.sats_in <= budget {
-            let gate = auto_convert.lock().await.send_gate();
-            let _sending = gate.lock().await;
-            if !auto_convert.lock().await.still_wanted(epoch) {
-                return Err(Shortfall::Cancelled);
-            }
-            converter
-                .send(quote.prepared)
-                .await
-                .map_err(|reason| Shortfall::Failed { reason, sent: true })?;
-            return Ok(quote.sats_in);
+            return Ok(quote);
         }
         target = scale_target(target, quote.sats_in, aim)
             .ok_or_else(|| not_sent("the pool quoted no bitcoin input".to_string()))?;
     }
     Err(not_sent(format!(
-        "could not fit the conversion within the {budget_sats} sats received"
+        "could not fit the conversion within {budget_sats} sats"
     )))
 }
 
 /// What the next conversion attempt should do.
 #[derive(Debug, PartialEq, Eq)]
 enum Step {
-    /// Off, or nothing pending.
+    /// Off, nothing pending, or a USDB → bitcoin swap is being sent.
     Idle,
     /// Below the pool's minimum: keep the sats pending for the next receive.
     Defer,
     /// Convert this many sats. They are no longer pending.
     Convert { budget_sats: u64 },
+}
+
+/// How the send of a USDB → bitcoin swap ended ([`AutoConvert::end_swap`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwapEnd<'a> {
+    /// The send went through. `payment_id` is the receive that delivered the
+    /// swap's bitcoin.
+    Delivered { payment_id: &'a str },
+    /// The send ended in an error. The pool may have run the swap anyway
+    /// (`flashnet.rs` at the pin can answer an error after it ran), so its
+    /// bitcoin may already have been counted, or may arrive later.
+    Unknown,
 }
 
 /// Bridge-owned auto-convert for one Cube.
@@ -624,6 +723,18 @@ pub struct AutoConvert {
     /// Separate from the state lock, which the SDK listener needs while a
     /// send waits on the SDK's own payment event.
     send_gate: Arc<Mutex<()>>,
+    /// USDB → bitcoin swaps being sent ([`Self::begin_swap`]). While any is,
+    /// no pass takes pending sats.
+    swaps_in_flight: u32,
+    /// Receives seen while a swap was being sent, not counted yet: any of
+    /// them may be a swap's own bitcoin. In memory only, so the bridge
+    /// stopping leaves them bitcoin.
+    held_receives: Vec<Receipt>,
+    /// A swap's send ended in an error ([`SwapEnd::Unknown`]), or the bridge
+    /// stopped while one was sent, so its bitcoin may still arrive as an
+    /// ordinary receive. Until the switch next changes, receives aren't
+    /// counted. Loaded from [`Saved::unresolved_swap`].
+    unresolved_swap: bool,
 }
 
 impl AutoConvert {
@@ -651,16 +762,30 @@ impl AutoConvert {
     }
 
     /// Load the Cube's state from its Spark storage directory.
+    ///
+    /// A saved hold ([`Saved::unresolved_swap`]) is restored: the bridge
+    /// stopped while a swap out of USDB was sent, or after one ended in an
+    /// error, so that swap's bitcoin may still arrive.
     pub fn load(storage_dir: &Path) -> Self {
         let path = storage_dir.join(STATE_FILE);
+        let saved = load(&path);
+        if saved.enabled && saved.unresolved_swap {
+            tracing::warn!(
+                "a swap out of USDB may not have finished; bitcoin received from now on isn't \
+                 counted until auto-convert is switched again"
+            );
+        }
         Self {
-            saved: load(&path),
+            unresolved_swap: saved.unresolved_swap,
+            saved,
             path,
             failures: FailureTracker::default(),
             seen: SeenPayments::default(),
             epoch: 0,
             unsaved: false,
             send_gate: Arc::new(Mutex::new(())),
+            swaps_in_flight: 0,
+            held_receives: Vec::new(),
         }
     }
 
@@ -668,6 +793,7 @@ impl AutoConvert {
         AutoConvertState {
             enabled: self.saved.enabled,
             breaker: self.saved.breaker.clone(),
+            held_after_swap: self.saved.enabled && self.unresolved_swap,
         }
     }
 
@@ -701,6 +827,11 @@ impl AutoConvert {
     /// On resets the breaker and starts with nothing pending, so only bitcoin
     /// received from now on converts. Off drops the pending sats; the
     /// existing USDB stays USDB. Off keeps a pause's reason readable.
+    ///
+    /// Either ends the hold left by a swap whose send ended in an error
+    /// ([`SwapEnd::Unknown`]): switching is how the user resumes counting.
+    /// A swap still being sent keeps its own hold: on saves it again, and
+    /// receives held so far are dropped with the pending sats.
     pub fn set_enabled(&mut self, enabled: bool) -> io::Result<bool> {
         let before = self.state();
         let next = if enabled {
@@ -716,17 +847,21 @@ impl AutoConvert {
                 enabled: true,
                 breaker: AutoConvertBreaker::Ready,
                 pending_sats: 0,
+                unresolved_swap: self.swaps_in_flight > 0,
                 ..self.saved.clone()
             }
         } else {
             Saved {
                 enabled: false,
                 pending_sats: 0,
+                unresolved_swap: false,
                 ..self.saved.clone()
             }
         };
         self.commit(next)?;
         self.epoch += 1;
+        self.unresolved_swap = false;
+        self.held_receives.clear();
         if enabled {
             self.failures.reset();
         }
@@ -737,11 +872,29 @@ impl AutoConvert {
     /// while off, and the second time the same payment is seen. Returns
     /// whether it counted, i.e. whether to wake [`convert_pending`].
     ///
+    /// Seen but not counted after a swap whose send ended in an error, until
+    /// the switch next changes ([`SwapEnd::Unknown`]): it may be the swap's
+    /// bitcoin. Held, not counted yet, while a swap out of USDB is sent
+    /// ([`Self::end_swap`] decides).
+    ///
     /// Called from the SDK's event listener as each payment is reported, so
     /// a receive is saved even while a conversion runs or the bridge stops:
-    /// the SDK reports a payment once.
+    /// the SDK reports a payment once. A held receive isn't saved, so the
+    /// bridge stopping during the swap leaves it bitcoin.
     pub fn note_receive(&mut self, receipt: &Receipt) -> bool {
         if !self.saved.enabled || !self.seen.insert(&receipt.payment_id) {
+            return false;
+        }
+        if self.unresolved_swap {
+            tracing::info!(
+                "{} sats received aren't counted: a swap whose send failed may still deliver \
+                 its bitcoin",
+                receipt.sats
+            );
+            return false;
+        }
+        if self.swaps_in_flight > 0 {
+            self.held_receives.push(receipt.clone());
             return false;
         }
         let next = Saved {
@@ -768,6 +921,107 @@ impl AutoConvert {
         self.saved.enabled && self.saved.pending_sats > 0
     }
 
+    /// Whether a pass may convert now: something is pending and no USDB →
+    /// bitcoin swap is being sent ([`Self::begin_swap`]).
+    fn may_convert(&self) -> bool {
+        self.has_pending() && self.swaps_in_flight == 0
+    }
+
+    /// A USDB → bitcoin swap (`crate::swap`) is about to be sent. Until
+    /// [`Self::end_swap`], no pass takes pending sats, and each receive is
+    /// held, not counted, since it may be the swap's.
+    ///
+    /// Why: the SDK marks the bitcoin a swap delivers as a conversion's only
+    /// once the pool has answered (`update_payment_conversion_info` in
+    /// `flashnet.rs` at the pin). If the wallet claims that transfer first,
+    /// the SDK reports it as an ordinary receive, which counts. Holding
+    /// passes keeps it unconverted until the swap says which payment it was.
+    /// The SDK guards its own conversions the same way
+    /// (`acquire_payment_guard`).
+    ///
+    /// While on, the hold is saved first ([`Saved::unresolved_swap`]), so a
+    /// restart before the swap is answered keeps it. So is an off that
+    /// couldn't be saved ([`Self::adopt`]), so a restart can't load the
+    /// file's on without the hold. If that can't be saved, this is an error,
+    /// nothing changes, and the swap must not be sent.
+    pub fn begin_swap(&mut self) -> io::Result<()> {
+        if self.saved.enabled || self.unsaved {
+            self.commit(Saved {
+                unresolved_swap: self.saved.enabled,
+                ..self.saved.clone()
+            })?;
+        }
+        self.swaps_in_flight = self.swaps_in_flight.saturating_add(1);
+        Ok(())
+    }
+
+    /// A swap begun with [`Self::begin_swap`] was answered. Returns whether
+    /// to wake [`convert_pending`]: passes are held no longer.
+    ///
+    /// - [`SwapEnd::Delivered`]: that receive is the swap's, so it is dropped
+    ///   from the held receives, and remembered so a later report of it
+    ///   can't count.
+    /// - [`SwapEnd::Unknown`]: any receive held while swaps were sent may be
+    ///   this one's bitcoin, so none of them count, and no receive counts
+    ///   until the switch next changes ([`Self::note_receive`]). Failing
+    ///   closed leaves bitcoin as bitcoin, where the other way could convert
+    ///   back what the user just swapped for. The hold stays saved, so it
+    ///   outlasts the bridge.
+    ///
+    /// Once no swap is being sent, and none ended in an error since the
+    /// switch last changed, the held receives count, in the same write that
+    /// clears the saved hold. A switch change during the swap already
+    /// dropped those held before it. The sats pending before the swap stay
+    /// pending either way, and may convert.
+    pub fn end_swap(&mut self, end: SwapEnd<'_>) -> bool {
+        self.swaps_in_flight = self.swaps_in_flight.saturating_sub(1);
+        match end {
+            SwapEnd::Delivered { payment_id } => {
+                self.seen.insert(payment_id);
+                self.held_receives
+                    .retain(|receipt| receipt.payment_id != payment_id);
+            }
+            SwapEnd::Unknown => {
+                tracing::warn!(
+                    "a swap's send failed; bitcoin received from now on isn't counted until \
+                     auto-convert is switched again"
+                );
+                self.unresolved_swap = true;
+            }
+        }
+        if self.swaps_in_flight > 0 {
+            return false;
+        }
+        let held = std::mem::take(&mut self.held_receives)
+            .iter()
+            .fold(0u64, |sum, receipt| sum.saturating_add(receipt.sats));
+        let counted = if self.unresolved_swap {
+            if held > 0 {
+                tracing::info!(
+                    "{held} sats received while a swap was sent may be its own bitcoin; they \
+                     won't be converted"
+                );
+            }
+            0
+        } else {
+            held
+        };
+        let next = Saved {
+            pending_sats: self.saved.pending_sats.saturating_add(counted),
+            unresolved_swap: self.saved.enabled && self.unresolved_swap,
+            ..self.saved.clone()
+        };
+        if next != self.saved || self.unsaved {
+            self.adopt(next);
+        }
+        true
+    }
+
+    #[cfg(test)]
+    pub fn pending_sats(&self) -> u64 {
+        self.saved.pending_sats
+    }
+
     /// Decide the next attempt from the current bitcoin balance and the
     /// pool's minimum input. The budget is the pending sats, never more than
     /// the balance. A conversion takes its budget out of the pending total,
@@ -775,7 +1029,7 @@ impl AutoConvert {
     /// twice. If that can't be saved, nothing is taken and nothing may be
     /// sent.
     fn take(&mut self, balance_sats: u64, min_from_sats: Option<u128>) -> io::Result<Step> {
-        if !self.has_pending() {
+        if !self.may_convert() {
             return Ok(Step::Idle);
         }
         let budget_sats = self.saved.pending_sats.min(balance_sats);
@@ -869,7 +1123,7 @@ pub async fn convert_pending<C: Converter>(
     converter: &C,
     emit: &(dyn Fn(ProtocolEvent) + Send + Sync),
 ) {
-    if !auto_convert.lock().await.has_pending() {
+    if !auto_convert.lock().await.may_convert() {
         return;
     }
 
@@ -1397,6 +1651,7 @@ mod tests {
             AutoConvertState {
                 enabled: false,
                 breaker: AutoConvertBreaker::Ready,
+                held_after_swap: false,
             }
         );
         assert!(!dir.file().exists(), "loading writes nothing");
@@ -1629,6 +1884,7 @@ mod tests {
             AutoConvertState {
                 enabled: true,
                 breaker: AutoConvertBreaker::Ready,
+                held_after_swap: false,
             }
         );
         assert_eq!(ac.failures.consecutive, 0);
@@ -1832,6 +2088,7 @@ mod tests {
                 failures: 3,
                 reason: "Pool has no liquidity".to_string(),
             },
+            held_after_swap: false,
         };
         assert_eq!(events.len(), 2, "{events:?}");
         assert!(matches!(
@@ -1895,6 +2152,7 @@ mod tests {
             AutoConvertState {
                 enabled: true,
                 breaker: AutoConvertBreaker::Ready,
+                held_after_swap: false,
             }
         );
         for _ in 0..2 {
@@ -2294,6 +2552,7 @@ mod tests {
             AutoConvertState {
                 enabled: true,
                 breaker: AutoConvertBreaker::Ready,
+                held_after_swap: false,
             }
         );
         assert_eq!(ac.saved.pending_sats, 0);
@@ -2380,5 +2639,369 @@ mod tests {
         assert_eq!(scale_target(1_000_000, 1_005, 1_000), Some(995_024));
         assert_eq!(scale_target(1_000_000, 0, 1_000), None);
         assert_eq!(scale_target(u128::MAX, 2, 3), None);
+    }
+
+    // ---- swaps out of USDB (S3b) ----
+
+    /// While a USDB → bitcoin swap is sent no pass takes anything, not even
+    /// what was pending before; once it is answered the next pass converts.
+    #[tokio::test]
+    async fn passes_take_nothing_while_a_usdb_swap_is_sent() {
+        let dir = TempDir::new();
+        let ac = Mutex::new(enabled(&dir));
+        let pool = FakePool::new(100_000);
+        assert!(ac.lock().await.note_receive(&receipt("r1", 20_000)));
+        ac.lock().await.begin_swap().expect("saved");
+        convert_pending(&ac, &pool, &|_| {}).await;
+        assert!(pool.calls().is_empty(), "{:?}", pool.calls());
+        assert_eq!(ac.lock().await.pending_sats(), 20_000);
+
+        assert!(ac.lock().await.end_swap(delivered("swap-recv")));
+        convert_pending(&ac, &pool, &|_| {}).await;
+        assert_eq!(pool.sends().len(), 1);
+    }
+
+    fn delivered(payment_id: &str) -> SwapEnd<'_> {
+        SwapEnd::Delivered { payment_id }
+    }
+
+    /// Receives during a swap are held, not counted. Once every swap is
+    /// delivered they count, in the write that clears the saved hold, except
+    /// each swap's own, which can't count later either. A switch change
+    /// during a swap drops what was held before it. Passes stay held until
+    /// every swap in flight is answered.
+    #[test]
+    fn held_receives_count_once_delivered_except_the_swaps_own() {
+        let dir = TempDir::new();
+        let mut ac = enabled(&dir);
+        ac.begin_swap().expect("saved");
+        assert!(!ac.note_receive(&receipt("swap-recv", 9_950)));
+        assert!(!ac.note_receive(&receipt("gift", 5_000)));
+        assert_eq!(ac.pending_sats(), 0, "held, not counted");
+        assert!(ac.end_swap(delivered("swap-recv")));
+        assert_eq!(ac.pending_sats(), 5_000);
+        assert!(!ac.note_receive(&receipt("swap-recv", 9_950)));
+        let reloaded = AutoConvert::load(&dir.0);
+        assert_eq!(reloaded.pending_sats(), 5_000);
+        assert!(!reloaded.saved.unresolved_swap, "the hold is cleared");
+
+        ac.begin_swap().expect("saved");
+        assert!(!ac.note_receive(&receipt("swap-recv-2", 9_950)));
+        assert!(!ac.note_receive(&receipt("gift-before-off", 3_000)));
+        assert!(ac.set_enabled(false).expect("saved"));
+        assert!(ac.set_enabled(true).expect("saved"));
+        assert!(!ac.note_receive(&receipt("gift-2", 7_000)));
+        assert!(ac.end_swap(delivered("swap-recv-2")));
+        assert_eq!(ac.pending_sats(), 7_000);
+
+        ac.begin_swap().expect("saved");
+        ac.begin_swap().expect("saved");
+        assert!(!ac.note_receive(&receipt("first-recv", 9_950)));
+        assert!(!ac.note_receive(&receipt("gift-3", 2_000)));
+        assert!(!ac.note_receive(&receipt("second-recv", 9_950)));
+        assert!(!ac.end_swap(delivered("first-recv")));
+        assert_eq!(ac.pending_sats(), 7_000, "the other swap still holds");
+        assert!(AutoConvert::load(&dir.0).saved.unresolved_swap);
+        assert!(ac.end_swap(delivered("second-recv")));
+        assert_eq!(ac.pending_sats(), 9_000);
+        assert!(!AutoConvert::load(&dir.0).saved.unresolved_swap);
+    }
+
+    /// The switch can change during a swap and before its receive is seen:
+    /// off → begin → on, or on → off → on, then the receive. On saves the
+    /// hold again, so a restart then still holds; off saves no hold. The
+    /// receive is the swap's, so it never counts.
+    #[test]
+    fn a_switch_change_during_a_swap_keeps_its_hold() {
+        let dir = TempDir::new();
+        let mut ac = enabled(&dir);
+        assert!(ac.set_enabled(false).expect("saved"));
+        ac.begin_swap().expect("nothing to save while off");
+        assert!(!AutoConvert::load(&dir.0).saved.unresolved_swap);
+        assert!(ac.set_enabled(true).expect("saved"));
+        assert!(AutoConvert::load(&dir.0).state().held_after_swap);
+        assert!(!ac.note_receive(&receipt("swap-recv", 9_950)));
+        assert!(ac.end_swap(delivered("swap-recv")));
+        assert_eq!(ac.pending_sats(), 0);
+        assert!(!AutoConvert::load(&dir.0).saved.unresolved_swap);
+
+        ac.begin_swap().expect("saved");
+        assert!(ac.set_enabled(false).expect("saved"));
+        assert_eq!(
+            AutoConvert::load(&dir.0).state(),
+            AutoConvertState {
+                enabled: false,
+                breaker: AutoConvertBreaker::Ready,
+                held_after_swap: false,
+            }
+        );
+        assert!(ac.set_enabled(true).expect("saved"));
+        assert!(!ac.state().held_after_swap, "nothing is unresolved yet");
+        assert!(AutoConvert::load(&dir.0).state().held_after_swap);
+        assert!(!ac.note_receive(&receipt("swap-recv-2", 9_950)));
+        assert!(ac.end_swap(delivered("swap-recv-2")));
+        assert_eq!(ac.pending_sats(), 0);
+    }
+
+    /// A swap whose send ended in an error may have run. No receive held
+    /// while it was sent counts, since any may be its bitcoin; what was
+    /// pending before it stays, and may still convert. Until the switch
+    /// changes, a later receive, which may be the swap's, isn't counted,
+    /// then or afterwards. The state shows the hold while on.
+    #[test]
+    fn after_an_unknown_swap_receives_dont_count_until_the_switch_changes() {
+        let dir = TempDir::new();
+        let mut ac = enabled(&dir);
+        assert!(ac.note_receive(&receipt("before", 3_000)));
+        ac.begin_swap().expect("saved");
+        assert!(!ac.note_receive(&receipt("early", 9_950)));
+        assert!(ac.end_swap(SwapEnd::Unknown));
+        assert!(ac.state().held_after_swap);
+        assert_eq!(ac.pending_sats(), 3_000);
+        assert!(ac.may_convert());
+        assert!(!ac.note_receive(&receipt("late", 9_950)));
+        assert_eq!(ac.pending_sats(), 3_000);
+        assert_eq!(AutoConvert::load(&dir.0).pending_sats(), 3_000);
+
+        assert!(ac.set_enabled(false).expect("saved"));
+        assert!(!ac.state().held_after_swap, "never shown while off");
+        assert!(ac.set_enabled(true).expect("saved"));
+        assert!(!ac.state().held_after_swap);
+        assert!(!ac.note_receive(&receipt("late", 9_950)));
+        assert!(ac.note_receive(&receipt("next", 4_000)));
+        assert_eq!(ac.pending_sats(), 4_000);
+    }
+
+    /// The hold is never shown or saved as on while off: not after a swap
+    /// sent while off ends in an error, nor after a pause while held.
+    #[test]
+    fn the_hold_is_never_shown_while_off() {
+        let dir = TempDir::new();
+        let mut ac = enabled(&dir);
+        assert!(ac.set_enabled(false).expect("saved"));
+        ac.begin_swap().expect("nothing to save while off");
+        assert!(ac.end_swap(SwapEnd::Unknown));
+        assert!(!ac.state().held_after_swap);
+        assert!(!AutoConvert::load(&dir.0).saved.unresolved_swap);
+
+        assert!(ac.set_enabled(true).expect("saved"));
+        ac.begin_swap().expect("saved");
+        assert!(ac.end_swap(SwapEnd::Unknown));
+        assert!(ac.state().held_after_swap);
+        for _ in 0..STABLE_BALANCE_PAUSE_THRESHOLD {
+            ac.record_failure(0, "busy", false);
+        }
+        assert!(!ac.state().enabled);
+        assert!(!ac.state().held_after_swap, "a pause is off");
+        assert!(!AutoConvert::load(&dir.0).state().held_after_swap);
+    }
+
+    /// Overlapping swaps, one delivered and one unknown, in either order:
+    /// nothing held while they were sent counts, the hold stays saved once
+    /// both are answered, and what was pending before them may convert.
+    #[test]
+    fn overlapping_delivered_and_unknown_swaps_count_nothing_held() {
+        for unknown_first in [true, false] {
+            let dir = TempDir::new();
+            let mut ac = enabled(&dir);
+            assert!(ac.note_receive(&receipt("before", 3_000)));
+            ac.begin_swap().expect("saved");
+            ac.begin_swap().expect("saved");
+            assert!(!ac.note_receive(&receipt("swap-recv", 9_950)));
+            assert!(!ac.note_receive(&receipt("gift", 5_000)));
+            let (first, second) = if unknown_first {
+                (SwapEnd::Unknown, delivered("swap-recv"))
+            } else {
+                (delivered("swap-recv"), SwapEnd::Unknown)
+            };
+            assert!(!ac.end_swap(first));
+            assert!(!ac.may_convert(), "the other swap still holds passes");
+            assert!(ac.end_swap(second));
+            assert_eq!(ac.pending_sats(), 3_000, "{unknown_first}");
+            assert!(ac.may_convert());
+            assert!(ac.state().held_after_swap);
+            assert!(!ac.note_receive(&receipt("late", 9_950)));
+
+            let reloaded = AutoConvert::load(&dir.0);
+            assert!(reloaded.state().held_after_swap, "{unknown_first}");
+            assert_eq!(reloaded.pending_sats(), 3_000);
+        }
+    }
+
+    /// G2 (#975): the hold after a swap whose send ended in an error
+    /// outlasts a bridge restart, until the switch next changes.
+    #[test]
+    fn the_hold_after_an_unknown_swap_survives_a_restart() {
+        let dir = TempDir::new();
+        let mut ac = enabled(&dir);
+        assert!(ac.note_receive(&receipt("before", 3_000)));
+        ac.begin_swap().expect("saved");
+        assert!(ac.end_swap(SwapEnd::Unknown));
+        drop(ac);
+
+        let json: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.file()).unwrap()).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "version": 1,
+                "enabled": true,
+                "breaker": { "status": "ready" },
+                "pending_sats": 3_000,
+                "unresolved_swap": true,
+            })
+        );
+        let mut ac = AutoConvert::load(&dir.0);
+        assert_eq!(
+            ac.state(),
+            AutoConvertState {
+                enabled: true,
+                breaker: AutoConvertBreaker::Ready,
+                held_after_swap: true,
+            }
+        );
+        assert_eq!(ac.pending_sats(), 3_000);
+        assert!(ac.may_convert(), "what was pending before still converts");
+        assert!(!ac.note_receive(&receipt("late", 9_950)));
+        assert_eq!(ac.pending_sats(), 3_000);
+
+        assert!(ac.set_enabled(false).expect("saved"));
+        assert!(ac.set_enabled(true).expect("saved"));
+        assert!(ac.note_receive(&receipt("next", 4_000)));
+        drop(ac);
+        let ac = AutoConvert::load(&dir.0);
+        assert!(!ac.state().held_after_swap);
+        assert_eq!(ac.pending_sats(), 4_000);
+    }
+
+    /// The bridge can stop while a swap out of USDB is sent, after its
+    /// bitcoin was reported as an ordinary receive (#975 review). That
+    /// receive was never saved as pending, and the restart holds, so neither
+    /// it nor a later report of the swap's bitcoin converts.
+    #[test]
+    fn a_restart_during_a_usdb_swap_holds_and_counts_nothing_seen_during_it() {
+        let dir = TempDir::new();
+        let mut ac = enabled(&dir);
+        assert!(ac.note_receive(&receipt("before", 3_000)));
+        ac.begin_swap().expect("saved");
+        assert!(!ac.note_receive(&receipt("swap-recv", 9_950)));
+        // The bridge stops before the swap is answered.
+        drop(ac);
+
+        let mut ac = AutoConvert::load(&dir.0);
+        assert!(ac.state().held_after_swap);
+        assert_eq!(ac.pending_sats(), 3_000);
+        assert!(ac.may_convert());
+        assert!(!ac.note_receive(&receipt("late", 9_950)));
+        assert_eq!(AutoConvert::load(&dir.0).pending_sats(), 3_000);
+    }
+
+    /// A file saved before the hold existed loads with no hold.
+    #[test]
+    fn a_file_from_before_the_hold_loads_without_one() {
+        let dir = TempDir::new();
+        fs::write(
+            dir.file(),
+            serde_json::json!({
+                "version": 1,
+                "enabled": true,
+                "breaker": { "status": "ready" },
+                "pending_sats": 400,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut ac = AutoConvert::load(&dir.0);
+        assert!(!ac.state().held_after_swap);
+        assert_eq!(ac.pending_sats(), 400);
+        assert!(ac.note_receive(&receipt("a", 600)));
+        assert_eq!(ac.pending_sats(), 1_000);
+    }
+
+    /// Rollback format only: a bridge from before the hold parses a file
+    /// saved with it. That bridge doesn't have this protection: it drops the
+    /// hold, and its next save leaves the field out.
+    #[test]
+    fn a_bridge_from_before_the_hold_parses_a_held_file() {
+        /// [`Saved`] as a bridge from before the hold has it.
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct Before {
+            version: u32,
+            enabled: bool,
+            breaker: AutoConvertBreaker,
+            #[serde(default)]
+            pending_sats: u64,
+        }
+        let dir = TempDir::new();
+        let mut ac = enabled(&dir);
+        assert!(ac.note_receive(&receipt("before", 3_000)));
+        ac.begin_swap().expect("saved");
+        let bytes = fs::read(dir.file()).unwrap();
+        assert!(AutoConvert::load(&dir.0).saved.unresolved_swap);
+
+        let before: Before = serde_json::from_slice(&bytes).expect("an older bridge parses it");
+        assert_eq!(
+            before,
+            Before {
+                version: STATE_VERSION,
+                enabled: true,
+                breaker: AutoConvertBreaker::Ready,
+                pending_sats: 3_000,
+            }
+        );
+        let resaved = serde_json::to_value(&before).unwrap();
+        assert!(resaved.get("unresolved_swap").is_none(), "{resaved}");
+        fs::write(dir.file(), resaved.to_string()).unwrap();
+        assert!(!AutoConvert::load(&dir.0).state().held_after_swap);
+    }
+
+    /// The hold must be on disk before a swap out of USDB is sent. If it
+    /// can't be saved, nothing changes and the caller must not send. While
+    /// off there is nothing to save, so a swap can go ahead.
+    #[test]
+    fn a_swap_hold_that_cannot_be_saved_changes_nothing() {
+        let dir = TempDir::new();
+        let cube = dir.0.join("cube");
+        fs::create_dir_all(&cube).unwrap();
+        let mut ac = AutoConvert::load(&cube);
+        ac.set_enabled(true).unwrap();
+        assert!(ac.note_receive(&receipt("before", 3_000)));
+
+        let moved = dir.0.join("moved");
+        fs::rename(&cube, &moved).unwrap();
+        assert!(ac.begin_swap().is_err());
+        assert!(ac.may_convert(), "no swap is in flight");
+        assert!(!ac.saved.unresolved_swap);
+        assert!(ac.note_receive(&receipt("next", 1_000)), "nothing held");
+
+        let mut off = AutoConvert::load(&dir.0.join("never-written"));
+        off.begin_swap().expect("nothing to save while off");
+        assert!(!dir.0.join("never-written").exists());
+    }
+
+    /// A pause the disk refused leaves "on" in the file. A swap sent while
+    /// paused saves the pause first, so a restart during it loads off, not
+    /// on without the hold. If it still can't be saved, the swap is refused.
+    #[test]
+    fn a_swap_while_an_unsaved_pause_saves_the_pause_first() {
+        let dir = TempDir::new();
+        let cube = dir.0.join("cube");
+        fs::create_dir_all(&cube).unwrap();
+        let mut ac = AutoConvert::load(&cube);
+        ac.set_enabled(true).unwrap();
+        let moved = dir.0.join("moved");
+        fs::rename(&cube, &moved).unwrap();
+        for _ in 0..STABLE_BALANCE_PAUSE_THRESHOLD {
+            ac.record_failure(0, "busy", false);
+        }
+        assert!(!ac.state().enabled);
+        assert!(ac.begin_swap().is_err(), "the pause still can't be saved");
+
+        fs::rename(&moved, &cube).unwrap();
+        assert!(AutoConvert::load(&cube).state().enabled, "not saved yet");
+        ac.begin_swap().expect("saved");
+        let reloaded = AutoConvert::load(&cube);
+        assert!(!reloaded.state().enabled);
+        assert!(!reloaded.saved.unresolved_swap);
     }
 }
