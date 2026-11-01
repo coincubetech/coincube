@@ -10654,7 +10654,7 @@ impl App {
     pub fn view(&self) -> Element<'_, Message> {
         let view = if self.show_received_celebration {
             // Global celebration overlay takes precedence over the normal panel view.
-            view::dashboard(
+            view::replacement_page(
                 &self.panels.current,
                 &self.cache,
                 self.received_celebration_view(),
@@ -10688,8 +10688,9 @@ impl App {
             // before `connect_settings_content` so a gated route that also
             // happens to be a Connect-settings page (e.g. Spark → Settings →
             // Lightning Address on a network where Spark is unavailable)
-            // shows the placeholder instead of the live Connect UI.
-            view::dashboard(
+            // shows the placeholder instead of the live Connect UI. The
+            // route's Settings head and tabs would only lead to more of it.
+            view::replacement_page(
                 &self.panels.current,
                 &self.cache,
                 view::feature_unavailable_panel(reason),
@@ -16012,6 +16013,44 @@ mod settings_navigation_integration_tests {
         assert!(mounted.contains("Signers"));
         assert!(!mounted.contains("Open Wallet & signers to review"));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A full-page replacement on a Settings route (the received-payment
+    /// celebration, the unavailable placeholder) shows neither the Settings
+    /// head nor its tabs.
+    #[test]
+    fn replacement_pages_on_settings_routes_take_no_route_chrome() {
+        let cache = Cache {
+            has_vault: true,
+            cube_name: "Everyday".into(),
+            ..Cache::default()
+        };
+        let menu = Menu::Spark(menu::SparkSubMenu::Settings(Some(
+            menu::SparkSettingsOption::Connections,
+        )));
+        let routed = capture::inspect(
+            "settings-route-page",
+            view::dashboard(&menu, &cache, iced::widget::text("Page body")),
+            (1024, 768),
+            "dark",
+            ui_theme::Theme::dark(),
+        );
+        assert!(routed.contains("Page body"));
+        assert!(routed.contains("Spark · Everyday · Bitcoin mainnet"));
+        assert!(routed.contains("Balances & conversion"));
+        assert!(routed.contains("Lightning address"));
+
+        let replaced = capture::inspect(
+            "settings-route-replacement",
+            view::replacement_page(&menu, &cache, iced::widget::text("Page body")),
+            (1024, 768),
+            "dark",
+            ui_theme::Theme::dark(),
+        );
+        assert!(replaced.contains("Page body"));
+        assert!(!replaced.contains("Spark · Everyday · Bitcoin mainnet"));
+        assert!(!replaced.contains("Balances & conversion"));
+        assert!(!replaced.contains("Lightning address"));
     }
 
     /// Every message a task produces, in order.
