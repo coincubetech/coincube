@@ -122,11 +122,7 @@ impl VaultOverview {
         if let Some(page) = self.full_page_view(menu, cache) {
             return page;
         }
-        let unknown_history = self.history_unknown().then_some(
-            // Nothing is listed until the history is in: an empty answer
-            // from an unfinished scan says nothing about the payments.
-            "Transactions appear once the Vault's history has loaded",
-        );
+        let unknown_history = self.unknown_history_note();
         view::dashboard_with_detail(
             menu,
             cache,
@@ -134,6 +130,15 @@ impl VaultOverview {
             move || self.page_body(cache, Some(recent_activity(unknown_history))),
             detail,
         )
+    }
+
+    /// What a "Recent activity" table that lists the Vault's rows says in
+    /// place of "No transactions yet" while the Vault's history is not known:
+    /// an empty answer from an unfinished scan says nothing about the
+    /// payments. The Vault page and the Overview share it.
+    pub fn unknown_history_note(&self) -> Option<&'static str> {
+        self.history_unknown()
+            .then_some("Transactions appear once the Vault's history has loaded")
     }
 
     /// The balance row's own test: the Vault's history is not known yet.

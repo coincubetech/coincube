@@ -2155,11 +2155,24 @@ fn render_at_width<'a>(
         })
         .collect();
     // A retained selection may be outside the current filter or the complete
-    // history window. Only a row in the visible feed may own the detail pane.
-    let selected = activity
-        .selected_id
-        .as_ref()
-        .and_then(|id| visible.iter().copied().find(|entry| &entry.id == id));
+    // history window. Only a row in the visible feed may own the detail pane,
+    // except the row an Overview row opened: it may sit past the cutoff, and
+    // still passes the filters.
+    let selected = activity.selected_id.as_ref().and_then(|id| {
+        visible
+            .iter()
+            .copied()
+            .find(|entry| &entry.id == id)
+            .or_else(|| {
+                (activity.opened_id.as_ref() == Some(id))
+                    .then(|| {
+                        entries
+                            .iter()
+                            .find(|entry| &entry.id == id && activity.filters.includes(entry))
+                    })
+                    .flatten()
+            })
+    });
     let beside = detail_beside_list(width);
     let frame = column_frame(width, beside && selected.is_some());
     let shown = visible.len();

@@ -60,6 +60,12 @@ pub struct Activity {
     refundables: Vec<DomainRefundableSwap>,
     pub filters: view::activity::Filters,
     pub selected_id: Option<String>,
+    /// The row an Overview row opened ([`ActivityMessage::Open`]). While it
+    /// is still the selected row it owns the detail pane even past
+    /// [`Self::complete_through`]: the Overview lists the newest rows without
+    /// that cutoff, so a row it opens may sit at a timestamp the first pages
+    /// leave incomplete.
+    pub opened_id: Option<String>,
     pub vault_loading: bool,
     pub psbt_loading: bool,
     pub spark_loading: bool,
@@ -114,6 +120,7 @@ impl Activity {
             refundables: Vec::new(),
             filters: Default::default(),
             selected_id: None,
+            opened_id: None,
             vault_loading: false,
             psbt_loading: false,
             spark_loading: false,
@@ -232,6 +239,7 @@ impl Activity {
     /// No row selected: a wallet page opens without a detail pane.
     pub fn clear_selection(&mut self) {
         self.selected_id = None;
+        self.opened_id = None;
         self.details_open = None;
         self.label_draft = None;
     }
@@ -783,6 +791,7 @@ impl State for Activity {
                     {
                         self.label_draft = None;
                     }
+                    self.opened_id = None;
                     self.selected_id = Some(id);
                 }
                 ActivityMessage::ToggleDetails(open) => {
@@ -798,6 +807,7 @@ impl State for Activity {
                 ActivityMessage::CloseDetail => {
                     self.details_open = None;
                     self.label_draft = None;
+                    self.opened_id = None;
                     let selected = self.selected_id.take();
                     return selected.map_or_else(Task::none, |id| {
                         iced::widget::operation::focus(view::activity::row_focus_id(&id))
@@ -825,6 +835,7 @@ impl State for Activity {
                     // a list, so the selection holds while the page reloads.
                     self.clear_selection();
                     self.filters = Default::default();
+                    self.opened_id = Some(id.clone());
                     self.selected_id = Some(id);
                 }
             },

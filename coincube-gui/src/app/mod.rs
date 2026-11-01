@@ -6107,6 +6107,7 @@ impl App {
             return Task::none();
         };
         let was_ready = self.panels.global_home.imported_balance.is_some();
+        let before = self.cache.daemon_cache.clone();
         let ready = panel.sync_cache(&mut self.cache);
         if !ready {
             self.cache.daemon_cache.coins.clear();
@@ -6142,6 +6143,21 @@ impl App {
         }
         if ready {
             tasks.push(Task::done(Message::CacheUpdated));
+            // The imported runtime never sends `UpdateDaemonCache`: the
+            // Overview's Vault rows follow it here, once its history is in
+            // and whenever a refresh can have changed it.
+            if matches!(self.panels.current, Menu::Cube(menu::CubeSubMenu::Overview))
+                && (first_load
+                    || !was_ready
+                    || runtime_changed
+                    || overview_activity_vault_changed(&before, &self.cache.daemon_cache))
+            {
+                tasks.push(self.panels.activity.refresh_wallet(
+                    view::activity::WalletFilter::Vault,
+                    Some(daemon.clone()),
+                    Some(wallet.clone()),
+                ));
+            }
             if first_load || !was_ready || runtime_changed {
                 if let Some(overview) = self.panels.vault_overview.as_mut() {
                     tasks.push(overview.reload(Some(daemon.clone()), Some(wallet.clone())));
@@ -8040,14 +8056,14 @@ impl App {
                         } else {
                             None
                         };
-                        let coins_moved = overview_activity_vault_coins_moved(
-                            &self.cache.daemon_cache.coins,
-                            &daemon_cache.coins,
+                        let vault_changed = overview_activity_vault_changed(
+                            &self.cache.daemon_cache,
+                            &daemon_cache,
                         );
                         self.cache.daemon_cache = daemon_cache;
                         // The Vault page's rows follow its own reload
                         // (`Message::Payments`).
-                        let recent = if coins_moved
+                        let recent = if vault_changed
                             && matches!(
                                 self.panels.current,
                                 Menu::Cube(menu::CubeSubMenu::Overview)
@@ -10748,8 +10764,14 @@ impl App {
             )
         } else if matches!(self.panels.current, Menu::Cube(menu::CubeSubMenu::Overview)) {
             // The Overview's "Recent activity" is Activity's rows, Spark and
-            // the Vault together; a row opens in Activity.
+            // the Vault together; a row opens in Activity. Until the Vault's
+            // history is known, an empty table says so, as the Vault page does.
             let (activity, cache) = (&self.panels.activity, &self.cache);
+            let unknown_history = self
+                .panels
+                .vault_overview
+                .as_ref()
+                .and_then(|vault| vault.unknown_history_note());
             self.panels.global_home.view_with_recent_activity(
                 &self.panels.current,
                 cache,
@@ -10757,7 +10779,7 @@ impl App {
                     activity,
                     cache,
                     view::activity::RecentScope::Cube,
-                    None,
+                    unknown_history,
                 )),
             )
         } else if let Some(content) = self.connect_settings_content() {
@@ -11193,13 +11215,13 @@ fn overview_activity_spark_event(event: &coincube_spark_protocol::Event) -> bool
     )
 }
 
-/// Whether a daemon poll moved the Vault's coins: one arrived, confirmed, was
-/// spent, or its spend confirmed. The Overview re-reads the Vault's history
-/// then, rather than on every poll.
-fn overview_activity_vault_coins_moved(
-    before: &[crate::daemon::model::Coin],
-    after: &[crate::daemon::model::Coin],
-) -> bool {
+/// Whether a daemon poll can have changed the Vault's newest history rows:
+/// a coin arrived, confirmed, was spent or its spend confirmed, or a block
+/// arrived. The cached coins hold only unspent ones, so a spend with no
+/// change output leaves them as they were when it confirms; the new block
+/// is the only sign of that. The Overview re-reads the Vault's history then,
+/// rather than on every poll.
+fn overview_activity_vault_changed(before: &DaemonCache, after: &DaemonCache) -> bool {
     let state = |coins: &[crate::daemon::model::Coin]| {
         coins
             .iter()
@@ -11212,7 +11234,7 @@ fn overview_activity_vault_coins_moved(
             })
             .collect::<HashSet<_>>()
     };
-    state(before) != state(after)
+    before.blockheight != after.blockheight || state(&before.coins) != state(&after.coins)
 }
 
 #[cfg(test)]
@@ -11261,13 +11283,18 @@ pub(crate) mod tests {
         ))
     }
 
-    #[test]
-    fn imported_policy_loads_as_the_existing_vault_wallet() {
+    /// An App opened on a wallet-less Cube whose imported Vault policy is
+    /// attached and syncing: its runtime daemon (unstarted) and attachment.
+    fn imported_vault_app(
+        root: &std::path::Path,
+    ) -> (
+        App,
+        Arc<dyn Daemon + Send + Sync>,
+        settings::ImportedWalletAttachment,
+    ) {
         use coincube_core::{chain::ChainId, wallet_descriptor::ImportedWalletDescriptor};
         use coincubed::config::{BitcoinBackend, BitcoinConfig, ElectrumConfig};
-        let root =
-            std::env::temp_dir().join(format!("imported-vault-app-{}", uuid::Uuid::new_v4()));
-        let datadir = CoincubeDirectory::new(root.clone());
+        let datadir = CoincubeDirectory::new(root.to_path_buf());
         let descriptor = ImportedWalletDescriptor::parse(
             "wpkh([6cb116eb/84h/0h/0h]xpub6C6c6ShFaUMjohRwYGnrDr5kbrnUjBeGh5U8BPAjtZnZ2D7WpRidu2SUNpBVfmMaw8TpDA7quYNW4iNwGYaq9iAwp5fzHLCXJwTqe76WpmF/<0;1>/*)",
             None, ChainId::Bitcoin,
@@ -11301,7 +11328,7 @@ pub(crate) mod tests {
         daemon_config.import_initial_lookahead = Some(20);
         let daemon: Arc<dyn Daemon + Send + Sync> =
             Arc::new(EmbeddedDaemon::unstarted_for_test(daemon_config, None));
-        let (mut app, startup) = App::new_inner(
+        let (app, startup) = App::new_inner(
             Cache {
                 network: bitcoin::Network::Bitcoin,
                 fiat_chain: ChainId::Bitcoin,
@@ -11319,6 +11346,14 @@ pub(crate) mod tests {
             None,
         );
         drop(startup);
+        (app, daemon, attachment)
+    }
+
+    #[test]
+    fn imported_policy_loads_as_the_existing_vault_wallet() {
+        let root =
+            std::env::temp_dir().join(format!("imported-vault-app-{}", uuid::Uuid::new_v4()));
+        let (mut app, daemon, attachment) = imported_vault_app(&root);
         assert!(app.wallet.as_ref().unwrap().is_imported());
         assert!(Arc::ptr_eq(app.daemon.as_ref().unwrap(), &daemon));
         assert!(app.panels.vault_overview.is_some());
@@ -11379,6 +11414,60 @@ pub(crate) mod tests {
         assert!(app.authenticated_coincube_client().is_some());
         assert!(app.panels.connect.account.bitcoin_blake2b_enabled());
         assert!(app.claim_connect_session().is_none());
+    }
+
+    /// The imported runtime never sends `UpdateDaemonCache`, so the Overview's
+    /// Vault rows follow its adoption: once the scan completes, then on each
+    /// refresh that moves a coin or a block, never while the scan runs, for
+    /// an unchanged snapshot, or on another page.
+    #[test]
+    fn the_overview_follows_the_imported_vaults_history() {
+        let _guard = crate::app::session::test_guard();
+        let root =
+            std::env::temp_dir().join(format!("imported-vault-overview-{}", uuid::Uuid::new_v4()));
+        let (mut app, _daemon, _) = imported_vault_app(&root);
+        app.panels.current = Menu::Cube(menu::CubeSubMenu::Overview);
+        let settle = |app: &mut App| {
+            let generation = app.panels.activity.generation_for_tests();
+            drop(app.update(Message::ActivityVaultLoaded(
+                generation,
+                Ok((Vec::new(), false)),
+            )));
+            assert!(!app.panels.activity.vault_loading);
+        };
+        let scanned = |app: &mut App, block_height: i32| {
+            app.panels
+                .imported_bitcoin
+                .as_mut()
+                .unwrap()
+                .complete_scan_for_tests(block_height, Vec::new());
+            drop(app.adopt_imported_runtime());
+        };
+        settle(&mut app);
+
+        drop(app.adopt_imported_runtime());
+        assert!(
+            !app.panels.activity.vault_loading,
+            "the scan is still running"
+        );
+
+        scanned(&mut app, 100);
+        assert!(app.panels.activity.vault_loading, "the history is in");
+        settle(&mut app);
+
+        scanned(&mut app, 100);
+        assert!(!app.panels.activity.vault_loading, "nothing changed");
+
+        scanned(&mut app, 101);
+        assert!(app.panels.activity.vault_loading, "a block arrived");
+        settle(&mut app);
+
+        app.panels.current = Menu::Cube(menu::CubeSubMenu::Settings(
+            menu::CubeSettingsOption::General,
+        ));
+        scanned(&mut app, 102);
+        assert!(!app.panels.activity.vault_loading, "another page");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -16839,6 +16928,120 @@ mod wallet_recent_activity_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// While the Vault's history is unknown (its first full scan still
+    /// running), the Overview's empty "Recent activity" says so, as the Vault
+    /// page does, instead of "No transactions yet"; once known, it doesn't.
+    #[test]
+    fn the_overview_never_reads_an_unknown_vault_history_as_empty() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("recent-unknown-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
+        app.panels.current = Menu::Cube(menu::CubeSubMenu::Overview);
+        let generation = app.panels.activity.generation_for_tests();
+        drop(app.update(Message::ActivityVaultLoaded(
+            generation,
+            Ok((Vec::new(), false)),
+        )));
+        drop(app.update(Message::ActivitySparkLoaded(
+            generation,
+            Ok((Vec::new(), false)),
+        )));
+        let note = "Transactions appear once the Vault's history has loaded";
+        let page = |app: &App| {
+            crate::app::view::shared::landing::capture::inspect(
+                "overview-recent-unknown",
+                app.view(),
+                (1440, 900),
+                "dark",
+                coincube_ui::theme::Theme::dark(),
+            )
+        };
+        let wallet = app.wallet.clone().unwrap();
+        for (sync, unknown) in [
+            (
+                SyncStatus::WalletFullScan {
+                    progress: Some(0.4),
+                },
+                true,
+            ),
+            (SyncStatus::Synced, false),
+        ] {
+            app.panels.vault_overview =
+                Some(VaultOverview::new(wallet.clone(), &[], sync, 0, false));
+            let shown = page(&app);
+            assert!(shown.contains("Recent activity"));
+            assert_eq!(shown.contains(note), unknown);
+            assert_eq!(shown.contains("No transactions yet"), !unknown);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A row the Overview opens gets Activity's detail pane even when it sits
+    /// past the complete-history cutoff, which hides it from Activity's own
+    /// list: here Spark's whole first page shares one timestamp and more pages
+    /// remain. A row picked on Activity itself gets no such exception.
+    #[test]
+    fn an_overview_row_past_the_history_cutoff_still_opens_in_activity() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("recent-cutoff-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
+        app.panels.current = Menu::Cube(menu::CubeSubMenu::Overview);
+        let at = |id: &str| coincube_spark_protocol::PaymentSummary {
+            timestamp: 1_760_000_000,
+            description: Some(format!("Receipt {id}")),
+            ..receipt(id)
+        };
+        let rows = || vec![at("chosen"), at("other")];
+        let load = |app: &mut App| {
+            let generation = app.panels.activity.generation_for_tests();
+            drop(app.update(Message::ActivitySparkLoaded(generation, Ok((rows(), true)))));
+        };
+        load(&mut app);
+        let entries = app
+            .panels
+            .activity
+            .recent_entries(view::activity::RecentScope::Cube);
+        let id = |title: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.title == title)
+                .unwrap()
+                .id
+                .clone()
+        };
+        let (chosen, other) = (id("Receipt chosen"), id("Receipt other"));
+
+        drop(app.update(Message::View(view::Message::Activity(
+            view::activity::ActivityMessage::Open(chosen.clone()),
+        ))));
+        load(&mut app);
+        assert_eq!(app.panels.activity.complete_through(), Some(1_760_000_000));
+        let count = |app: &App, title: &str| {
+            view::shared::landing::capture::inspect_filled(
+                "overview-open-past-cutoff",
+                view::activity::render(&app.panels.activity, &app.cache),
+                (1440, 900),
+                "dark",
+                coincube_ui::theme::Theme::dark(),
+                (1192, 835),
+            )
+            .text
+            .iter()
+            .filter(|(value, _)| value == title)
+            .count()
+        };
+        assert_eq!(count(&app, "Receipt chosen"), 1, "its pane, not a row");
+        assert_eq!(count(&app, "Receipt other"), 0);
+
+        // Picked on Activity, a row past the cutoff owns no pane.
+        drop(app.update(Message::View(view::Message::Activity(
+            view::activity::ActivityMessage::Select(other),
+        ))));
+        assert_eq!(count(&app, "Receipt other"), 0);
+        assert_eq!(count(&app, "Receipt chosen"), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The Overview reads Activity's Spark and Vault rows when it opens, when
     /// a Spark event can change Spark's payments, and when a poll moves the
     /// Vault's coins; never because it was drawn again, and never for a
@@ -16914,6 +17117,13 @@ mod wallet_recent_activity_tests {
             .push(vault_payment().coins.into_values().next().unwrap());
         drop(app.update(Message::UpdateDaemonCache(Ok(poll.clone()))));
         assert!(app.panels.activity.vault_loading, "a coin arrived");
+        settle_vault(&mut app);
+        // A block with the coins unchanged re-reads too: the cache holds
+        // unspent coins only, so a spend with no change output confirms
+        // without moving them.
+        poll.blockheight += 1;
+        drop(app.update(Message::UpdateDaemonCache(Ok(poll.clone()))));
+        assert!(app.panels.activity.vault_loading, "a block arrived");
         settle_vault(&mut app);
 
         // On another page neither reads the Overview's rows.
