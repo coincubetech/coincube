@@ -4570,6 +4570,12 @@ impl App {
         &self.datadir
     }
 
+    /// Whether the Spark wallet has settled: it returned a synced balance,
+    /// or this Cube has none. The opening waits on it.
+    pub fn spark_settled(&self) -> bool {
+        self.panels.global_home.spark_settled()
+    }
+
     pub fn cube_settings(&self) -> &settings::CubeSettings {
         &self.cube_settings
     }
@@ -5250,6 +5256,7 @@ impl App {
             .unwrap_or(&self.panels.global_home)
             .subscription();
         subscriptions.push(current_subscription);
+        subscriptions.extend(self.panels.global_home.spark_load_poll());
 
         if let Some(imported) = self.panels.imported_bitcoin.as_ref() {
             if !imported.handles_route(&self.panels.current) {
