@@ -1807,6 +1807,15 @@ impl Home {
                     self.set_error("Import a Bitcoin wallet from the Bitcoin Cube list.");
                     return Task::none();
                 }
+                // Every entry is disabled at the limit; this refuses a queued
+                // or stale press before the user fills in a name and PIN.
+                if launcher_catalog::project(self).at_limit() {
+                    self.set_error(
+                        "Bitcoin mainnet has no free Cube slot on your plan. Upgrade, or delete \
+                         a Bitcoin mainnet Cube, to import a wallet.",
+                    );
+                    return Task::none();
+                }
                 if self.pending_bitcoin_import.is_none() {
                     self.pending_bitcoin_import = Some(Box::new(BitcoinImport::pending()));
                 }
@@ -2770,7 +2779,10 @@ impl Home {
                 self.network = network;
                 self.open_created_import_cube = None;
                 if network != ChainId::Bitcoin {
+                    // Import or restore is Bitcoin only; leaving Bitcoin
+                    // leaves it, so the next list does not reopen it.
                     self.pending_bitcoin_import = None;
+                    self.restore_hub = false;
                 }
                 self.error = None;
                 // Clear stale limit from previous network
@@ -4976,7 +4988,7 @@ impl Home {
                 passkey_mode: self.passkey_mode,
                 signed_in: self.connect_account.authenticated_client().is_some(),
                 importing_bitcoin: self.pending_bitcoin_import.is_some(),
-                can_import_bitcoin: self.network == ChainId::Bitcoin,
+                can_import_bitcoin: self.can_start_bitcoin_import(),
                 submit_in_form,
             },
         )
@@ -5174,6 +5186,12 @@ impl Home {
     /// state machines. The controls below dispatch their original messages;
     /// the journey does not hold a second copy of any wallet material.
     fn create_journey_view(&self) -> Element<Message> {
+        self.create_journey_frame().map(Message::View)
+    }
+
+    /// The journey before it is mapped into Home's messages, so tests can
+    /// press its controls as the user does.
+    fn create_journey_frame(&self) -> Element<ViewMessage> {
         let backing_up = matches!(self.state, State::CreationBackup(_));
         // Import or restore (P-Restore) shares this frame. Its import path is
         // Bitcoin only, so it never shows the network step.
@@ -5404,6 +5422,9 @@ impl Home {
                 )
                 .push(Space::new().width(Length::Fill))
                 .push(
+                    // Close leaves Import or restore whenever no Cube is being
+                    // made: to the Cube list, or with none to list, to the
+                    // plain Create form `ShowCreateCube(false)` falls back to.
                     button::secondary_action(
                         RESTORE_CLOSE_ID,
                         Some(icon::cross_icon()),
@@ -5411,7 +5432,10 @@ impl Home {
                         create_journey_focus,
                     )
                     .width(Length::Shrink)
-                    .on_press_maybe(leave.then_some(ViewMessage::ShowCreateCube(false))),
+                    .on_press_maybe(
+                        (!backing_up && !self.creating_cube)
+                            .then_some(ViewMessage::ShowCreateCube(false)),
+                    ),
                 )
         } else {
             Row::new()
@@ -5829,13 +5853,11 @@ impl Home {
         .padding([28, 24])
         .center_x(Length::Fill)
         .height(Length::Fill);
-        let frame: Element<ViewMessage> =
-            Container::new(Column::new().height(Length::Fill).push(top_bar).push(stage))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(theme::container::background)
-                .into();
-        frame.map(Message::View)
+        Container::new(Column::new().height(Length::Fill).push(top_bar).push(stage))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(theme::container::background)
+            .into()
     }
 
     /// Import Bitcoin wallet is open while Bitcoin mainnet is current and
@@ -6016,7 +6038,15 @@ impl Home {
                 )
                 .into();
         }
-        if projection.remotes.is_empty() {
+        // Every Connect Cube on this network: the Launcher's search and
+        // network filter narrow its own lists, not this one.
+        let network = settings::network_to_api_string(self.network);
+        let remotes: Vec<&RemoteCube> = self
+            .remote_cubes
+            .iter()
+            .filter(|cube| !self.network.is_blake2b() && cube.network == network)
+            .collect();
+        if remotes.is_empty() {
             return content
                 .push(
                     p2_regular(format!(
@@ -6028,7 +6058,7 @@ impl Home {
                 .into();
         }
         let mut cubes = Column::new();
-        for cube in &projection.remotes {
+        for cube in remotes {
             let restore = launcher_catalog::remote_restore(cube);
             let mut row = Row::new()
                 .spacing(12)

@@ -966,6 +966,8 @@ pub(super) struct PlanRow {
     pub(super) used: String,
     pub(super) note: Option<String>,
     pub(super) full: bool,
+    /// The network Create and Import act on.
+    pub(super) current: bool,
 }
 
 /// The plan's per-network limit and each network's use of it. Cubes that are
@@ -990,6 +992,7 @@ pub(super) fn plan_rows(projection: &Projection<'_>) -> Vec<PlanRow> {
                         "This device's Cubes could not be counted".to_string()
                     }),
                     full: false,
+                    current: usage.chain == projection.network,
                 };
             };
             PlanRow {
@@ -997,6 +1000,7 @@ pub(super) fn plan_rows(projection: &Projection<'_>) -> Vec<PlanRow> {
                 used: format!("{total} of {limit}"),
                 note: (usage.remote > 0).then(|| format!("{} only in Connect", usage.remote)),
                 full: total >= limit,
+                current: usage.chain == projection.network,
             }
         })
         .collect()
@@ -1024,12 +1028,17 @@ pub(super) fn plan_layer<'a>(
     let close = ViewMessage::Catalog(CatalogMessage::PlanMenu(false));
     let mut rows = Column::new().spacing(0);
     for row in plan_rows(projection) {
-        let mut name = Column::new().spacing(2).width(Length::Fill).push(words(
+        let mut title = Row::new().spacing(6).align_y(Alignment::Center).push(words(
             row.network,
             13.0,
             font::REGULAR,
             Ink::Body,
         ));
+        if row.current {
+            // Create and Import add Cubes here; the dock no longer captions it.
+            title = title.push(words("New Cubes", 12.0, font::MEDIUM, Ink::Accent));
+        }
+        let mut name = Column::new().spacing(2).width(Length::Fill).push(title);
         if let Some(note) = row.note {
             name = name.push(words(note, 12.0, font::REGULAR, Ink::Muted));
         }
@@ -1437,7 +1446,9 @@ pub(super) fn network_layer<'a>(
 
 /// The Key card's layer: bottom-right, 8px above the dock.
 pub(super) fn key_layer<'a>(home: &Home) -> Option<Element<'a, ViewMessage>> {
-    home.catalog.key_open().then(|| {
+    // A hover peek waits while a dock menu is open: one popover at a time.
+    let menu = home.catalog.plan_menu || home.catalog.activity.menu;
+    (home.catalog.key_open() && !menu).then(|| {
         // `bottom: calc(100% + 8px)` of the 32px button centred in the dock.
         // The 8px gap stays inside the hover area so a peek survives the
         // pointer's way up from the button to the card.

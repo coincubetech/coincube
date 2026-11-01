@@ -789,7 +789,12 @@ impl Home {
                 Task::none()
             }
             CatalogMessage::KeyToggle => {
+                // One dock popover at a time.
                 self.catalog.key.click();
+                if self.catalog.key_open() {
+                    self.catalog.plan_menu = false;
+                    self.catalog.activity.menu = false;
+                }
                 Task::none()
             }
             CatalogMessage::KeyClose => {
@@ -805,6 +810,7 @@ impl Home {
                 self.catalog.plan_menu = open;
                 if open {
                     self.catalog.activity.menu = false;
+                    self.catalog.key = KeyCard::default();
                 }
                 Task::none()
             }
@@ -1044,6 +1050,11 @@ impl Home {
         // filter shows.
         if project(self).filtered_total == 0 {
             self.catalog.key = KeyCard::default();
+        }
+        // A Bitcoin Blake2b activity choice lapses when the menu stops
+        // offering it, so it cannot return unseen when Blake2b is listed again.
+        if !self.activity_blake2b_offered() {
+            self.catalog.activity.blake2b = false;
         }
         let pages = floor_pages(project(self).floor_len(), self.catalog.page_size());
         self.catalog.page = self.catalog.page.min(pages - 1);
@@ -6286,5 +6297,160 @@ mod tests {
             message,
             ViewMessage::Catalog(CatalogMessage::ClearSelection)
         )));
+    }
+
+    /// Presses `target` in the Create journey with the keyboard, as a user
+    /// does: focus, then Enter. A disabled control is not focusable, so it
+    /// yields nothing.
+    fn press_in_journey(home: &Home, target: &'static str) -> Vec<ViewMessage> {
+        use iced::advanced::widget::operation::focusable;
+        let target = Id::new(target);
+        let mut mounted = mount_window(home.create_journey_frame(), 1440.0, 900.0);
+        mounted.operate(focusable::focus::<()>(target.clone()));
+        if mounted.focused() != Some(target) {
+            return Vec::new();
+        }
+        let none = iced::mouse::Cursor::Unavailable;
+        let mut messages = mounted.send(enter(true), none);
+        messages.extend(mounted.send(enter(false), none));
+        messages
+            .into_iter()
+            .filter(|message| !matches!(message, ViewMessage::Catalog(CatalogMessage::Focus(_))))
+            .collect()
+    }
+
+    /// A first-run device has no Cube list to go back to; Close still
+    /// leaves Import or restore, for the plain Create form.
+    #[test]
+    fn close_leaves_import_or_restore_on_a_device_with_no_cubes() {
+        let mut home = home_with(&[]);
+        home.state = State::NoCube { create_cube: true };
+        let _ = home.update(Message::View(ViewMessage::ShowImportBitcoin));
+        assert!(home.showing_import_or_restore());
+        let pressed = press_in_journey(&home, super::super::RESTORE_CLOSE_ID);
+        assert!(
+            matches!(pressed.as_slice(), [ViewMessage::ShowCreateCube(false)]),
+            "{:?}",
+            pressed
+        );
+        for message in pressed {
+            let _ = home.update(Message::View(message));
+        }
+        assert!(!home.showing_import_or_restore());
+        assert!(home.pending_bitcoin_import.is_none());
+        assert!(home.showing_create_journey(), "the plain Create form");
+
+        // From the Overview too.
+        let _ = home.update(Message::View(ViewMessage::ShowRestoreHub));
+        let pressed = press_in_journey(&home, super::super::RESTORE_CLOSE_ID);
+        assert!(matches!(
+            pressed.as_slice(),
+            [ViewMessage::ShowCreateCube(false)]
+        ));
+    }
+
+    /// With no free Bitcoin slot, no Import entry can be pressed and the
+    /// handler refuses a stale press before any name or PIN is typed.
+    #[test]
+    fn every_import_entry_closes_when_bitcoin_is_full() {
+        let mut home = home_with(&[("a", "Alpha"), ("b", "Beta")]);
+        home.server_cube_limit = Some(2);
+        assert!(project(&home).at_limit());
+        // The dock.
+        let tree = home_tree(
+            "import-full-dock",
+            &home,
+            WIDE,
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(!tree.has(&import_id()));
+        // The handler, and so the Create form's own Import button, which
+        // takes the same predicate.
+        let _ = home.update(Message::View(ViewMessage::ShowImportBitcoin));
+        assert!(home.pending_bitcoin_import.is_none());
+        assert!(!home.can_start_bitcoin_import());
+        // The Overview's Start and its path list.
+        let _ = home.update(Message::View(ViewMessage::ShowRestoreHub));
+        assert!(home.restore_hub);
+        assert!(press_in_journey(&home, super::super::RESTORE_START_IMPORT_ID).is_empty());
+        assert!(press_in_journey(&home, super::super::RESTORE_IMPORT_ID).is_empty());
+
+        // A free slot opens them again.
+        home.server_cube_limit = Some(3);
+        assert!(matches!(
+            press_in_journey(&home, super::super::RESTORE_START_IMPORT_ID).as_slice(),
+            [ViewMessage::ShowImportBitcoin]
+        ));
+    }
+
+    /// The Overview lists every Connect Cube on the network, whatever the
+    /// Launcher's search says.
+    #[test]
+    fn the_overview_lists_connect_cubes_whatever_the_search() {
+        let mut home = home_with(&[("a", "Alpha")]);
+        crate::home::tests::enable_btcb2(&mut home);
+        home.remote_cubes = vec![remote("r1", "Elsewhere", true, true, false, false)];
+        catalog(&mut home, CatalogMessage::Query("zzz".to_string()));
+        assert!(project(&home).remotes.is_empty());
+        let _ = home.update(Message::View(ViewMessage::ShowRestoreHub));
+        let pressed = press_in_journey(&home, "tenshu.restore:remote:r1");
+        assert!(
+            matches!(
+                pressed.as_slice(),
+                [ViewMessage::RestoreFromRecoveryKit(uuid)] if uuid == "r1"
+            ),
+            "{:?}",
+            pressed
+        );
+    }
+
+    #[test]
+    fn leaving_bitcoin_leaves_import_or_restore() {
+        let mut home = all_networks();
+        let _ = home.update(Message::View(ViewMessage::ShowRestoreHub));
+        assert!(home.restore_hub);
+        let _ = home.update(Message::View(ViewMessage::SelectNetwork(ChainId::Testnet4)));
+        assert!(!home.restore_hub);
+        assert!(!home.showing_import_or_restore());
+    }
+
+    /// The plan menu, the activity menu and the Key card: one at a time.
+    #[test]
+    fn dock_popovers_open_one_at_a_time() {
+        use super::super::launcher_activity::ActivityMessage;
+        let mut home = home_with(&[("a", "Alpha")]);
+        catalog(&mut home, CatalogMessage::PlanMenu(true));
+        catalog(&mut home, CatalogMessage::KeyToggle);
+        assert!(home.catalog.key_open());
+        assert!(!home.catalog.plan_menu);
+        catalog(&mut home, CatalogMessage::PlanMenu(true));
+        assert!(!home.catalog.key_open());
+        catalog(&mut home, CatalogMessage::KeyToggle);
+        catalog(
+            &mut home,
+            CatalogMessage::Activity(ActivityMessage::Menu(true)),
+        );
+        assert!(!home.catalog.key_open());
+        assert!(!home.catalog.plan_menu);
+        // A hover peek waits while a menu is up.
+        catalog(&mut home, CatalogMessage::KeyHover(KeyPart::Button, true));
+        assert!(super::super::launcher_chrome::key_layer(&home).is_none());
+    }
+
+    /// The plan menu marks the network Create and Import act on, now that
+    /// the dock no longer captions it.
+    #[test]
+    fn the_plan_menu_marks_the_network_new_cubes_go_to() {
+        let mut home = all_networks();
+        home.network = ChainId::Testnet4;
+        let projection = project(&home);
+        let rows = super::super::launcher_chrome::plan_rows(&projection);
+        let current: Vec<_> = rows.iter().filter(|row| row.current).collect();
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].network, "Bitcoin Testnet4");
+        home.catalog.plan_menu = true;
+        let tree = home_tree("plan-current", &home, WIDE, "dark", theme::Theme::dark());
+        assert!(tree.contains("New Cubes"));
     }
 }

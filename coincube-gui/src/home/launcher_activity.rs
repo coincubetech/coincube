@@ -692,6 +692,7 @@ impl Home {
                 self.catalog.activity.menu = open && self.catalog.activity.enabled;
                 if self.catalog.activity.menu {
                     self.catalog.plan_menu = false;
+                    self.catalog.key = super::launcher_catalog::KeyCard::default();
                 }
                 Task::none()
             }
