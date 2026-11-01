@@ -14,6 +14,7 @@
 //! crypto, no duplicated error mapping, and (importantly) one place
 //! to audit for zeroization correctness.
 
+use serde::Deserialize;
 use zeroize::Zeroizing;
 
 use super::{decrypt, DescriptorBlob, RecoveryError, SeedBlob, BLOB_VERSION};
@@ -207,21 +208,24 @@ pub fn decrypt_wallet_descriptor_blob(
 /// Keychain envelopes share this version dispatch; heir recovery continues to
 /// use its Vault-only descriptor parser.
 pub fn parse_wallet_descriptor_blob(bytes: &[u8]) -> Result<RecoveredWalletBlob, RestoreError> {
-    let value: serde_json::Value = serde_json::from_slice(bytes)
+    // Inspect only the version first. A future key-bearing imported payload
+    // must never be materialized in serde_json::Value (or the Clone UI enum)
+    // just to reject an unsupported version here.
+    #[derive(Deserialize)]
+    struct VersionOnly {
+        version: u64,
+    }
+    let header: VersionOnly = serde_json::from_slice(bytes)
         .map_err(|e| RestoreError::BlobParse(format!("descriptor blob: {e}")))?;
-    let version = value
-        .get("version")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| RestoreError::BlobParse("descriptor blob: missing version".into()))?;
-    match version {
+    match header.version {
         1 => {
-            let vault: DescriptorBlob = serde_json::from_value(value)
+            let vault: DescriptorBlob = serde_json::from_slice(bytes)
                 .map_err(|e| RestoreError::BlobParse(format!("descriptor blob: {e}")))?;
             Ok(RecoveredWalletBlob::Vault(vault))
         }
         2 => {
             let imported: super::imported::ImportedDescriptorBlob =
-                serde_json::from_value(value)
+                serde_json::from_slice(bytes)
                     .map_err(|e| RestoreError::BlobParse(format!("descriptor blob: {e}")))?;
             imported
                 .validate(imported.wallet.descriptor.chain())
@@ -229,7 +233,8 @@ pub fn parse_wallet_descriptor_blob(bytes: &[u8]) -> Result<RecoveredWalletBlob,
             Ok(RecoveredWalletBlob::Imported(imported))
         }
         _ => Err(RestoreError::BlobParse(format!(
-            "descriptor blob version {version} is not supported; update Tenshu"
+            "descriptor blob version {} is not supported; update Tenshu",
+            header.version
         ))),
     }
 }
