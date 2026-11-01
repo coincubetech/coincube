@@ -272,23 +272,33 @@ impl<M> Widget<M, Theme, Renderer> for HeadRow<'_, M> {
             let width = if width.is_finite() { width } else { size.width };
             return layout::Node::with_children(Size::new(width, size.height), vec![title]);
         };
-        let actions_node = actions
-            .as_widget_mut()
-            .layout(actions_tree, renderer, &bounded(width));
-        let actions_size = actions_node.size();
-        // The title's one-line width: laid out with no bound, it never wraps.
+        // The one-line widths: laid out with no bound, neither the title nor
+        // the actions' wrapping row breaks a line. At the column's bound the
+        // actions report only their widest wrapped line, which would put a
+        // stack of them beside a short title.
         let one_line = title
             .as_widget_mut()
             .layout(title_tree, renderer, &bounded(f32::INFINITY))
             .size()
             .width;
+        let actions_one_line = actions
+            .as_widget_mut()
+            .layout(actions_tree, renderer, &bounded(f32::INFINITY))
+            .size()
+            .width;
         let width = if width.is_finite() {
             width
         } else {
-            one_line + ROW_GAP + actions_size.width
+            one_line + ROW_GAP + actions_one_line
         };
+        // Then at the column's bound: on one line beside the title, wrapped
+        // under it.
+        let actions_node = actions
+            .as_widget_mut()
+            .layout(actions_tree, renderer, &bounded(width));
+        let actions_size = actions_node.size();
         let (title_node, actions_node, height) =
-            if actions_beside(width, one_line, actions_size.width) {
+            if actions_beside(width, one_line, actions_one_line) {
                 let title_node = title.as_widget_mut().layout(
                     title_tree,
                     renderer,
@@ -619,6 +629,49 @@ mod tests {
         assert!(
             (size.height - (lowest + HEAD_BOTTOM + 1.0)).abs() < 0.5,
             "{size:?}"
+        );
+    }
+
+    /// A short title leaves room beside it for the actions' widest wrapped
+    /// line, but not for all of them on one line. They go under the title,
+    /// not beside it as a stack.
+    #[test]
+    fn actions_that_wrap_go_under_a_short_title() {
+        let pane = 360.0;
+        let (probe, _) = probe(
+            page_head("Send", Msg::Focus)
+                .back("Spark", Msg::Back)
+                .action(action("settings", "Wallet settings", Msg::Settings))
+                .action(action("tools", "Tools", Msg::Tools)),
+            pane,
+        );
+        let mut lines: Vec<i32> = probe
+            .focus
+            .iter()
+            .map(|(_, bounds)| bounds.center_y().round() as i32)
+            .collect();
+        lines.sort_unstable();
+        lines.dedup();
+        assert!(lines.len() > 1, "the actions wrap: {:?}", probe.focus);
+
+        let title = probe.text("Send");
+        assert!((title.y - HEAD_TOP).abs() < 0.5, "{title:?}");
+        for (name, bounds) in &probe.focus {
+            assert!(
+                bounds.y >= title.y + title.height + ROW_GAP - 0.5,
+                "{name} sits under the title: {bounds:?} {title:?}"
+            );
+            assert!(
+                bounds.x >= GUTTER - 0.5 && bounds.x + bounds.width <= pane - GUTTER + 0.5,
+                "{name} stays inside the gutters: {bounds:?}"
+            );
+        }
+        let order = probe.reading_order();
+        assert_eq!(order, ["settings", "tools", "back"]);
+        let settings = probe.focus("settings");
+        assert!(
+            (settings.x - GUTTER).abs() < 0.5,
+            "the actions start on the column's left edge: {settings:?}"
         );
     }
 

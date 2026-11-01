@@ -256,14 +256,6 @@ fn transaction_row<'a>(
     .into()
 }
 
-/// Render the single-payment detail pane. Consumed by
-/// `SparkTransactions` state when `selected_payment` is `Some`, and
-/// also by Overview/Send/Receive's preselect flow. Richer than the
-/// Liquid detail view: surfaces the raw Spark payment ID (with a
-/// copy-to-clipboard affordance), a humanised payment-method row
-/// (Lightning / On-chain Bitcoin / Spark transfer), and a Status row
-/// that reflects every `DomainPaymentStatus` variant the bridge can
-/// emit — not just Complete/Pending.
 /// The detail page's title, shown in its page head.
 pub fn transaction_detail_title(tx: &SparkRecentTransaction) -> &'static str {
     if tx.is_incoming {
@@ -273,8 +265,16 @@ pub fn transaction_detail_title(tx: &SparkRecentTransaction) -> &'static str {
     }
 }
 
-/// The detail body. Its title goes in the page head
-/// ([`transaction_detail_title`]).
+/// Render the single-payment detail pane. Consumed by
+/// `SparkTransactions` state when `selected_payment` is `Some`, and
+/// also by Overview/Send/Receive's preselect flow. Richer than the
+/// Liquid detail view: surfaces the raw Spark payment ID (with a
+/// copy-to-clipboard affordance), a humanised payment-method row
+/// (Lightning / On-chain Bitcoin / Spark transfer), and a Status row
+/// that reflects every `DomainPaymentStatus` variant the bridge can
+/// emit — not just Complete/Pending.
+///
+/// Its title goes in the page head ([`transaction_detail_title`]).
 pub fn transaction_detail_view<'a>(
     tx: &'a SparkRecentTransaction,
     fiat_converter: Option<FiatAmountConverter>,
