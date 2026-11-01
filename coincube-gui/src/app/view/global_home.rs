@@ -353,54 +353,60 @@ fn wallet_card<'a>(
             // route through Menu navigation (`send_action`/`receive_action`).
             let btc_fiat_text =
                 fiat_balance.map(|f| f.to_text().size(P2_SIZE).style(theme::text::secondary));
-            let btc_row = Row::new()
-                .spacing(8)
-                .align_y(Alignment::Center)
-                .push(coincube_ui::image::asset_network_logo::<Message>(
-                    "btc", "bitcoin", 32.0,
-                ))
-                .push(text("BTC").size(P1_SIZE).bold().width(Length::Fixed(60.0)))
-                .push(if balance_masked {
-                    Row::new().push(text("********").size(P1_SIZE))
-                } else if !loaded {
-                    Row::new().push(spinner::typing_text_carousel(
-                        "...",
-                        false,
-                        Duration::from_millis(400),
-                        |content| text(content).size(P1_SIZE).style(theme::text::secondary),
+            // `fit_row`: the actions drop below the amounts in a card too
+            // narrow for both, rather than being squeezed out of it.
+            let btc_row = coincube_ui::component::tenshu::fit_row(
+                Row::new()
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .push(coincube_ui::image::asset_network_logo::<Message>(
+                        "btc", "bitcoin", 32.0,
                     ))
-                } else {
-                    amount_with_size_and_unit(balance, P1_SIZE, bitcoin_unit)
-                })
-                .push_maybe(
-                    (!balance_masked && loaded)
-                        .then_some(btc_fiat_text)
-                        .flatten(),
-                )
-                .push(Space::new().width(Length::Fill))
-                .push(
-                    landing_button(
-                        landing_control_id(cube_id, title, "send-btc"),
-                        "Send",
-                        None,
-                        Message::FocusAction,
-                        Some(send_action),
-                        theme::button::primary,
+                    .push(text("BTC").size(P1_SIZE).bold().width(Length::Fixed(60.0)))
+                    .push(if balance_masked {
+                        Row::new().push(text("********").size(P1_SIZE))
+                    } else if !loaded {
+                        Row::new().push(spinner::typing_text_carousel(
+                            "...",
+                            false,
+                            Duration::from_millis(400),
+                            |content| text(content).size(P1_SIZE).style(theme::text::secondary),
+                        ))
+                    } else {
+                        amount_with_size_and_unit(balance, P1_SIZE, bitcoin_unit)
+                    })
+                    .push_maybe(
+                        (!balance_masked && loaded)
+                            .then_some(btc_fiat_text)
+                            .flatten(),
+                    ),
+                Row::new()
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .push(
+                        landing_button(
+                            landing_control_id(cube_id, title, "send-btc"),
+                            "Send",
+                            None,
+                            Message::FocusAction,
+                            Some(send_action),
+                            theme::button::primary,
+                        )
+                        .width(Length::Fixed(90.0)),
                     )
-                    .width(Length::Fixed(90.0)),
-                )
-                .push(Space::new().width(Length::Fixed(8.0)))
-                .push(
-                    landing_button(
-                        landing_control_id(cube_id, title, "receive-btc"),
-                        "Receive",
-                        None,
-                        Message::FocusAction,
-                        Some(receive_action),
-                        theme::button::orange_outline,
-                    )
-                    .width(Length::Fixed(90.0)),
-                );
+                    .push(Space::new().width(Length::Fixed(8.0)))
+                    .push(
+                        landing_button(
+                            landing_control_id(cube_id, title, "receive-btc"),
+                            "Receive",
+                            None,
+                            Message::FocusAction,
+                            Some(receive_action),
+                            theme::button::orange_outline,
+                        )
+                        .width(Length::Fixed(90.0)),
+                    ),
+            );
 
             // Headline — animated dots while the daemon hasn't
             // reported a first balance. Pending send/receive counts
@@ -3000,61 +3006,66 @@ pub fn global_home_view<'a>(
         let spark_btc_fiat = fiat_converter
             .as_ref()
             .map(|c| c.convert(spark_btc_balance));
-        let spark_btc_row = Row::new()
-            .spacing(8)
-            .align_y(Alignment::Center)
-            .push(coincube_ui::image::asset_network_logo::<Message>(
-                "btc", "spark", 32.0,
-            ))
-            .push(text("BTC").size(P1_SIZE).bold().width(Length::Fixed(60.0)))
-            .push(if wallet_balance_masked {
-                Row::new().push(text(AmountCell::masked().primary).size(P1_SIZE))
-            } else if spark_balance_error && !spark_balance_loaded {
-                Row::new().push(
-                    text("Balance unavailable")
-                        .size(P1_SIZE)
-                        .style(theme::text::warning),
-                )
-            } else if !spark_balance_loaded {
-                // Pre-Synced placeholder — see the comment on the
-                // Spark wallet_header below for why we don't render
-                // the raw value yet. Animated dots mirror the Total
-                // Balance loading treatment for visual consistency.
-                Row::new().push(spinner::typing_text_carousel(
-                    "...",
-                    false,
-                    Duration::from_millis(400),
-                    |content| text(content).size(P1_SIZE).style(theme::text::secondary),
+        // `fit_row`, as on the Vault card.
+        let spark_btc_row = coincube_ui::component::tenshu::fit_row(
+            Row::new()
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .push(coincube_ui::image::asset_network_logo::<Message>(
+                    "btc", "spark", 32.0,
                 ))
-            } else {
-                amount_with_size_and_unit(&spark_btc_balance, P1_SIZE, bitcoin_unit)
-            })
-            .push_maybe(
-                (!wallet_balance_masked && spark_balance_loaded)
-                    .then(|| {
-                        spark_btc_fiat
-                            .as_ref()
-                            .map(|f| f.to_text().size(P2_SIZE).style(theme::text::secondary))
-                    })
-                    .flatten(),
-            )
-            .push(Space::new().width(Length::Fill))
-            .push(
-                landing_button(
-                    landing_control_id(cube_id, "Spark", "send-btc"),
-                    "Send",
-                    None,
-                    Message::FocusAction,
-                    Some(Message::Home(HomeMessage::SendSparkBtc)),
-                    theme::button::primary,
+                .push(text("BTC").size(P1_SIZE).bold().width(Length::Fixed(60.0)))
+                .push(if wallet_balance_masked {
+                    Row::new().push(text(AmountCell::masked().primary).size(P1_SIZE))
+                } else if spark_balance_error && !spark_balance_loaded {
+                    Row::new().push(
+                        text("Balance unavailable")
+                            .size(P1_SIZE)
+                            .style(theme::text::warning),
+                    )
+                } else if !spark_balance_loaded {
+                    // Pre-Synced placeholder — see the comment on the
+                    // Spark wallet_header below for why we don't render
+                    // the raw value yet. Animated dots mirror the Total
+                    // Balance loading treatment for visual consistency.
+                    Row::new().push(spinner::typing_text_carousel(
+                        "...",
+                        false,
+                        Duration::from_millis(400),
+                        |content| text(content).size(P1_SIZE).style(theme::text::secondary),
+                    ))
+                } else {
+                    amount_with_size_and_unit(&spark_btc_balance, P1_SIZE, bitcoin_unit)
+                })
+                .push_maybe(
+                    (!wallet_balance_masked && spark_balance_loaded)
+                        .then(|| {
+                            spark_btc_fiat
+                                .as_ref()
+                                .map(|f| f.to_text().size(P2_SIZE).style(theme::text::secondary))
+                        })
+                        .flatten(),
+                ),
+            Row::new()
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .push(
+                    landing_button(
+                        landing_control_id(cube_id, "Spark", "send-btc"),
+                        "Send",
+                        None,
+                        Message::FocusAction,
+                        Some(Message::Home(HomeMessage::SendSparkBtc)),
+                        theme::button::primary,
+                    )
+                    .width(Length::Fixed(90.0)),
                 )
-                .width(Length::Fixed(90.0)),
-            )
-            .push(orange_outline_btn(
-                "Spark",
-                "receive-btc",
-                Message::Home(HomeMessage::ReceiveSparkBtc),
-            ));
+                .push(orange_outline_btn(
+                    "Spark",
+                    "receive-btc",
+                    Message::Home(HomeMessage::ReceiveSparkBtc),
+                )),
+        );
 
         // Headline balance — placeholder while the bridge hasn't
         // corroborated the Spark balance with a `Synced` event yet,
@@ -4498,6 +4509,87 @@ mod tests {
                     assert!(!two_columns(width), "{}", width);
                     assert_eq!(spark.x, vault.x, "stacked");
                     assert!(vault.y > spark.y);
+                }
+            }
+        }
+    }
+
+    /// At the narrowest width that still sets two cards side by side (each
+    /// 472px), a wallet's bitcoin row with the largest balance and its fiat
+    /// value keeps Send and Receive whole and inside its card, clear of the
+    /// amounts, in both themes.
+    #[test]
+    fn wallet_card_rows_fit_at_the_two_column_breakpoint() {
+        use coincube_ui::component::tenshu::{cards::two_columns, CARD_GAP, CARD_MIN_WIDTH};
+        let fixture = ViewFixture::new();
+        let width = 2.0 * CARD_MIN_WIDTH + CARD_GAP;
+        assert!(two_columns(width));
+        let column = (width - CARD_GAP) / 2.0;
+        // Every sat there will ever be, in each wallet.
+        let most = Amount::from_sat(2_099_999_997_690_000);
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            let mut config = fixture.config(0, None, None);
+            config.has_liquid = false;
+            config.spark_balance = most;
+            config.spark_btc_balance = most;
+            config.vault_balance = most;
+            let shown = capture::inspect_wide_content(
+                "overview-cards-breakpoint",
+                overview(config),
+                (1440, 900),
+                appearance,
+                theme,
+                width as u32,
+            );
+            let at = |wallet: &str, control: &str| {
+                let id = landing_control_id("test-cube", wallet, control);
+                shown
+                    .focus
+                    .iter()
+                    .find(|(focus, _)| *focus == id)
+                    .unwrap_or_else(|| panic!("no {} {}", wallet, control))
+                    .1
+            };
+            for (index, wallet) in ["Spark", "Vault"].into_iter().enumerate() {
+                let left = index as f32 * (column + CARD_GAP);
+                let (send, receive) = (at(wallet, "send-btc"), at(wallet, "receive-btc"));
+                assert!(
+                    send.width >= 89.5 && receive.width >= 89.5,
+                    "{}: {:?} {:?}",
+                    wallet,
+                    send,
+                    receive
+                );
+                assert!(
+                    send.x >= left && receive.x + receive.width <= left + column + 0.5,
+                    "{} ({}): {:?} {:?} outside {}..{}",
+                    wallet,
+                    appearance,
+                    send,
+                    receive,
+                    left,
+                    left + column
+                );
+                // No text in the card overlaps the two actions' row band
+                // horizontally unless it sits beside them, left of Send.
+                let band = send.y..send.y + send.height;
+                for (value, bounds) in &shown.text {
+                    let in_card = bounds.x >= left && bounds.x < left + column;
+                    let in_band = band.contains(&(bounds.y + bounds.height / 2.0));
+                    if in_card && in_band && value != "Send" && value != "Receive" {
+                        assert!(
+                            bounds.x + bounds.width <= send.x + 0.5,
+                            "{} ({}): {:?} {:?} runs under Send {:?}",
+                            wallet,
+                            appearance,
+                            value,
+                            bounds,
+                            send
+                        );
+                    }
                 }
             }
         }

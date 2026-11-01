@@ -60,12 +60,13 @@ pub struct Activity {
     refundables: Vec<DomainRefundableSwap>,
     pub filters: view::activity::Filters,
     pub selected_id: Option<String>,
-    /// The row an Overview row opened ([`ActivityMessage::Open`]). While it
-    /// is still the selected row it owns the detail pane even past
-    /// [`Self::complete_through`]: the Overview lists the newest rows without
-    /// that cutoff, so a row it opens may sit at a timestamp the first pages
-    /// leave incomplete.
-    pub opened_id: Option<String>,
+    /// The row an Overview row opened ([`ActivityMessage::Open`]), as the
+    /// Overview listed it. While it is still the selected row it owns the
+    /// detail pane even when Activity doesn't list it: the Overview lists the
+    /// newest rows without [`Self::complete_through`]'s cutoff, and the
+    /// reload on entry clears the rows, so a failed read would otherwise
+    /// leave nothing to show. A fresh copy of the row wins once it loads.
+    pub opened: Option<view::activity::Entry>,
     pub vault_loading: bool,
     pub psbt_loading: bool,
     pub spark_loading: bool,
@@ -120,7 +121,7 @@ impl Activity {
             refundables: Vec::new(),
             filters: Default::default(),
             selected_id: None,
-            opened_id: None,
+            opened: None,
             vault_loading: false,
             psbt_loading: false,
             spark_loading: false,
@@ -239,7 +240,7 @@ impl Activity {
     /// No row selected: a wallet page opens without a detail pane.
     pub fn clear_selection(&mut self) {
         self.selected_id = None;
-        self.opened_id = None;
+        self.opened = None;
         self.details_open = None;
         self.label_draft = None;
     }
@@ -791,7 +792,7 @@ impl State for Activity {
                     {
                         self.label_draft = None;
                     }
-                    self.opened_id = None;
+                    self.opened = None;
                     self.selected_id = Some(id);
                 }
                 ActivityMessage::ToggleDetails(open) => {
@@ -807,7 +808,7 @@ impl State for Activity {
                 ActivityMessage::CloseDetail => {
                     self.details_open = None;
                     self.label_draft = None;
-                    self.opened_id = None;
+                    self.opened = None;
                     let selected = self.selected_id.take();
                     return selected.map_or_else(Task::none, |id| {
                         iced::widget::operation::focus(view::activity::row_focus_id(&id))
@@ -833,9 +834,12 @@ impl State for Activity {
                     // App switches to Activity; it opens unfiltered with this
                     // row selected. The id is the row's own, not its place in
                     // a list, so the selection holds while the page reloads.
+                    // App keeps the row as the Overview listed it
+                    // (`Self::opened`), read before the reload cleared it.
+                    let opened = self.entries().into_iter().find(|entry| entry.id == id);
                     self.clear_selection();
                     self.filters = Default::default();
-                    self.opened_id = Some(id.clone());
+                    self.opened = opened;
                     self.selected_id = Some(id);
                 }
             },

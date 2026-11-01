@@ -8722,15 +8722,27 @@ impl App {
             }
             Message::View(view::Message::Activity(view::activity::ActivityMessage::Open(id))) => {
                 // An Overview row: Activity opens unfiltered on it. Selected
-                // after the switch, so leaving a page can't clear it.
+                // after the switch, so leaving a page can't clear it. The row
+                // as the Overview listed it is read first: the switch's reload
+                // clears Activity's rows, and its pane shows that copy until
+                // (or unless) the read brings a fresh one.
+                let opened = self
+                    .panels
+                    .activity
+                    .recent_entries(view::activity::RecentScope::Cube)
+                    .into_iter()
+                    .find(|entry| entry.id == id);
                 let load = self.set_current_panel(Menu::Cube(menu::CubeSubMenu::Activity));
                 let select = self.panels.activity.update(
                     self.daemon.clone(),
                     &self.cache,
                     Message::View(view::Message::Activity(
-                        view::activity::ActivityMessage::Open(id),
+                        view::activity::ActivityMessage::Open(id.clone()),
                     )),
                 );
+                if self.panels.activity.selected_id.as_deref() == Some(id.as_str()) {
+                    self.panels.activity.opened = opened;
+                }
                 return Task::batch([load, select]);
             }
             msg @ Message::View(view::Message::Activity(_)) => {
@@ -11216,11 +11228,13 @@ fn overview_activity_spark_event(event: &coincube_spark_protocol::Event) -> bool
 }
 
 /// Whether a daemon poll can have changed the Vault's newest history rows:
-/// a coin arrived, confirmed, was spent or its spend confirmed, or a block
-/// arrived. The cached coins hold only unspent ones, so a spend with no
-/// change output leaves them as they were when it confirms; the new block
-/// is the only sign of that. The Overview re-reads the Vault's history then,
-/// rather than on every poll.
+/// a coin arrived, confirmed, was spent or its spend confirmed, a block
+/// arrived, or a full scan or rescan finished. The cached coins hold only
+/// unspent ones, so a spend with no change output leaves them as they were
+/// when it confirms; the new block is the only sign of that. A scan can
+/// likewise find only spent history at the same tip; its completion is the
+/// only sign of that. The Overview re-reads the Vault's history then, rather
+/// than on every poll.
 fn overview_activity_vault_changed(before: &DaemonCache, after: &DaemonCache) -> bool {
     let state = |coins: &[crate::daemon::model::Coin]| {
         coins
@@ -11234,7 +11248,10 @@ fn overview_activity_vault_changed(before: &DaemonCache, after: &DaemonCache) ->
             })
             .collect::<HashSet<_>>()
     };
-    before.blockheight != after.blockheight || state(&before.coins) != state(&after.coins)
+    before.blockheight != after.blockheight
+        || before.history_sync.full_scan_completed_at != after.history_sync.full_scan_completed_at
+        || (before.rescan_progress.is_some() && after.rescan_progress.is_none())
+        || state(&before.coins) != state(&after.coins)
 }
 
 #[cfg(test)]
@@ -16928,6 +16945,78 @@ mod wallet_recent_activity_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A row the Overview opens keeps its detail pane when Activity's own
+    /// read fails: the switch's reload clears the rows, so the pane shows the
+    /// row as the Overview listed it, beside the list and in the compact
+    /// layout alike.
+    #[test]
+    fn an_overview_row_keeps_its_pane_when_activitys_read_fails() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("recent-failed-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
+        app.panels.current = Menu::Cube(menu::CubeSubMenu::Overview);
+        let at = |n: u64, id: &str| coincube_spark_protocol::PaymentSummary {
+            timestamp: 1_760_000_000 + n,
+            description: Some(format!("Receipt {id}")),
+            ..receipt(id)
+        };
+        let generation = app.panels.activity.generation_for_tests();
+        drop(app.update(Message::ActivitySparkLoaded(
+            generation,
+            Ok((vec![at(2, "chosen"), at(1, "older")], false)),
+        )));
+        let chosen = app
+            .panels
+            .activity
+            .recent_entries(view::activity::RecentScope::Cube)
+            .into_iter()
+            .find(|entry| entry.title == "Receipt chosen")
+            .unwrap()
+            .id;
+        drop(app.update(Message::View(view::Message::Activity(
+            view::activity::ActivityMessage::Open(chosen.clone()),
+        ))));
+        let generation = app.panels.activity.generation_for_tests();
+        drop(app.update(Message::ActivitySparkLoaded(
+            generation,
+            Err("bridge offline".into()),
+        )));
+        assert!(app.panels.activity.entries().is_empty(), "the read failed");
+        for (outer, pane) in [((1440, 900), (1192, 835)), ((1024, 768), (816, 703))] {
+            let page = view::shared::landing::capture::inspect_filled(
+                "overview-open-failed-read",
+                view::activity::render(&app.panels.activity, &app.cache),
+                outer,
+                "dark",
+                coincube_ui::theme::Theme::dark(),
+                pane,
+            );
+            let titles = page
+                .text
+                .iter()
+                .filter(|(value, _)| value == "Receipt chosen")
+                .count();
+            assert_eq!(titles, 1, "its pane at {:?}", outer);
+            assert!(page.has_focus(iced::advanced::widget::Id::from(
+                view::activity::DETAIL_CLOSE_ID
+            )));
+        }
+        // Once a read succeeds the fresh row takes over.
+        drop(app.update(Message::View(view::Message::Activity(
+            view::activity::ActivityMessage::Retry,
+        ))));
+        let generation = app.panels.activity.generation_for_tests();
+        drop(app.update(Message::ActivitySparkLoaded(
+            generation,
+            Ok((vec![at(2, "chosen"), at(1, "older")], false)),
+        )));
+        assert_eq!(
+            app.panels.activity.selected_id.as_deref(),
+            Some(chosen.as_str())
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// While the Vault's history is unknown (its first full scan still
     /// running), the Overview's empty "Recent activity" says so, as the Vault
     /// page does, instead of "No transactions yet"; once known, it doesn't.
@@ -17016,22 +17105,29 @@ mod wallet_recent_activity_tests {
         ))));
         load(&mut app);
         assert_eq!(app.panels.activity.complete_through(), Some(1_760_000_000));
-        let count = |app: &App, title: &str| {
+        // Beside the list at 1440, under its place at the 1024 minimum.
+        let count_at = |app: &App, title: &str, outer: (u32, u32), pane: (u32, u32)| {
             view::shared::landing::capture::inspect_filled(
                 "overview-open-past-cutoff",
                 view::activity::render(&app.panels.activity, &app.cache),
-                (1440, 900),
+                outer,
                 "dark",
                 coincube_ui::theme::Theme::dark(),
-                (1192, 835),
+                pane,
             )
             .text
             .iter()
             .filter(|(value, _)| value == title)
             .count()
         };
+        let count = |app: &App, title: &str| count_at(app, title, (1440, 900), (1192, 835));
         assert_eq!(count(&app, "Receipt chosen"), 1, "its pane, not a row");
         assert_eq!(count(&app, "Receipt other"), 0);
+        assert_eq!(
+            count_at(&app, "Receipt chosen", (1024, 768), (816, 703)),
+            1,
+            "compact: its pane, at the top"
+        );
 
         // Picked on Activity, a row past the cutoff owns no pane.
         drop(app.update(Message::View(view::Message::Activity(
@@ -17124,6 +17220,18 @@ mod wallet_recent_activity_tests {
         poll.blockheight += 1;
         drop(app.update(Message::UpdateDaemonCache(Ok(poll.clone()))));
         assert!(app.panels.activity.vault_loading, "a block arrived");
+        settle_vault(&mut app);
+        // A scan can find only spent history at the same tip: its end re-reads.
+        poll.rescan_progress = Some(0.5);
+        drop(app.update(Message::UpdateDaemonCache(Ok(poll.clone()))));
+        assert!(!app.panels.activity.vault_loading, "a rescan is running");
+        poll.rescan_progress = None;
+        drop(app.update(Message::UpdateDaemonCache(Ok(poll.clone()))));
+        assert!(app.panels.activity.vault_loading, "the rescan finished");
+        settle_vault(&mut app);
+        poll.history_sync.full_scan_completed_at = Some(1_760_000_000);
+        drop(app.update(Message::UpdateDaemonCache(Ok(poll.clone()))));
+        assert!(app.panels.activity.vault_loading, "a full scan finished");
         settle_vault(&mut app);
 
         // On another page neither reads the Overview's rows.

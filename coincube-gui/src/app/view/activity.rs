@@ -1637,10 +1637,12 @@ pub fn recent_activity<'a>(
             row![
                 glyph::glyph(glyph::WARNING, 16.0, glyph::warn),
                 words(
+                    // The reason shows whether or not any of the source's
+                    // rows made the table.
                     if shown {
                         format!("Last known activity · {source} couldn't load: {error}")
                     } else {
-                        format!("{source} couldn't load")
+                        format!("{source} couldn't load: {error}")
                     },
                     13.0,
                     font::REGULAR,
@@ -2156,23 +2158,29 @@ fn render_at_width<'a>(
         .collect();
     // A retained selection may be outside the current filter or the complete
     // history window. Only a row in the visible feed may own the detail pane,
-    // except the row an Overview row opened: it may sit past the cutoff, and
-    // still passes the filters.
+    // except the row an Overview row opened: it may sit past the cutoff, or
+    // be missing while a read fails, and still passes the filters. Its fresh
+    // copy wins once loaded.
     let selected = activity.selected_id.as_ref().and_then(|id| {
         visible
             .iter()
             .copied()
             .find(|entry| &entry.id == id)
             .or_else(|| {
-                (activity.opened_id.as_ref() == Some(id))
-                    .then(|| {
+                activity
+                    .opened
+                    .as_ref()
+                    .filter(|opened| &opened.id == id && activity.filters.includes(opened))
+                    .map(|opened| {
                         entries
                             .iter()
-                            .find(|entry| &entry.id == id && activity.filters.includes(entry))
+                            .find(|entry| entry.id == opened.id)
+                            .unwrap_or(opened)
                     })
-                    .flatten()
             })
     });
+    let selected_listed =
+        selected.is_some_and(|selected| visible.iter().any(|entry| entry.id == selected.id));
     let beside = detail_beside_list(width);
     let frame = column_frame(width, beside && selected.is_some());
     let shown = visible.len();
@@ -2304,6 +2312,13 @@ fn render_at_width<'a>(
         );
     }
     let mut selected_detail = selected.map(|entry| detail_pane(activity, entry, cache));
+    // Compact detail sits under its row; an opened row the list doesn't show
+    // has it at the top instead.
+    if !beside && !selected_listed {
+        if let Some(detail) = selected_detail.take() {
+            list = list.push(column![detail_surface(detail), rule::horizontal(1)]);
+        }
+    }
     let today = Local::now().date_naive();
     let mut previous_day = None;
     let mut first_day = true;
@@ -3841,6 +3856,36 @@ mod tests {
         }
         messages.retain(|message| !matches!(message, Message::FocusAction(_)));
         messages
+    }
+
+    /// A wallet whose history failed to load names the reason whether or not
+    /// any of its rows made the table.
+    #[test]
+    fn recent_activity_names_a_failed_wallets_reason() {
+        let base = 1_760_000_000;
+        let mut activity = loaded(Vec::new(), vault_payments_at(&[base + 30]));
+        drop(activity.update(
+            None,
+            &Cache::default(),
+            crate::app::message::Message::ActivitySparkLoaded(0, Err("bridge offline".into())),
+        ));
+        let mounted = mount(
+            "overview-recent-activity-failed-source",
+            recent_activity(&activity, &Cache::default(), RecentScope::Cube, None),
+            (1440, 900),
+            "dark",
+            coincube_ui::theme::Theme::dark(),
+            1106,
+        );
+        assert!(
+            mounted
+                .text
+                .iter()
+                .any(|(value, _)| value.contains("couldn't load: bridge offline")
+                    && !value.starts_with("Last known activity")),
+            "{:?}",
+            mounted.text
+        );
     }
 
     /// Day headings group the Overview's rows as Activity's do: pending rows
