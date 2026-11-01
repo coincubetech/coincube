@@ -370,8 +370,8 @@ fn body_top(headed: bool) -> f32 {
 }
 
 /// `head` is the page's own; without one, Settings and the Vault's Tools
-/// take theirs from the route. Their scope chips, tabs and tool tabs stay in
-/// the body for now (plan W5, W6).
+/// take theirs from the route. Settings carries its scope switch and tabs in
+/// the head; the Tools tabs stay in the body for now (plan W6).
 #[allow(clippy::too_many_arguments)]
 fn dashboard_with_info_layout<'a, T: Into<Element<'a, Message>>>(
     menu: &'a Menu,
@@ -389,7 +389,6 @@ fn dashboard_with_info_layout<'a, T: Into<Element<'a, Message>>>(
         .or_else(|| vault::tools::page_head(menu, cache));
     let body = page(
         Column::new()
-            .push_maybe(settings::frame::in_content_navigation(menu, cache))
             .push_maybe(vault::tools::in_content_navigation(menu, cache))
             .push(content.into())
             .width(Length::Fill),
@@ -440,10 +439,7 @@ pub fn dashboard_with_detail<'a>(
                 Container::new(
                     scrollable(
                         page(
-                            Column::new()
-                                .push_maybe(settings::frame::in_content_navigation(menu, cache))
-                                .push(content())
-                                .width(Length::Fill),
+                            Column::new().push(content()).width(Length::Fill),
                             PageWidth::Reading,
                         )
                         .vertical(BODY_TOP, PAGE_BOTTOM),

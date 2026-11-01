@@ -1,23 +1,27 @@
-//! Spark Settings — General sub-page.
+//! Spark Settings: the Balances & conversion and Connections tabs.
 //!
-//! Two cards:
+//! Balances & conversion holds:
 //! - A "Stable Balance" toggle (Phase 6) — enables or disables the
 //!   Spark SDK's USD-pegged balance feature via
 //!   `update_user_settings(stable_balance_active_label)`.
-//! - A "Bridge status" diagnostic card that shows whether the last
-//!   `get_info` round-trip to the `coincube-spark-bridge` subprocess
-//!   succeeded.
+//! - The Spark nickname (master plan §3 decision 2), which the App saves
+//!   to this Cube's settings as [`CubeSettings::spark_alias`].
 //!
-//! The Lightning Address sub-page is rendered at the App level
+//! Connections shows whether the last `get_info` round-trip to the
+//! `coincube-spark-bridge` subprocess succeeded.
+//!
+//! The Lightning address tab is rendered at the App level
 //! ([`crate::app::view::spark::settings::lightning_address`]) because
 //! it needs a borrow of `ConnectCubePanel` that this panel can't
 //! receive through the `State::view` trait signature.
+//!
+//! [`CubeSettings::spark_alias`]: crate::app::settings::CubeSettings::spark_alias
 
 use std::sync::Arc;
 
 use coincube_spark_protocol::GetUserSettingsOk;
-use coincube_ui::widget::Element;
-use iced::Task;
+use coincube_ui::widget::{Column, Element};
+use iced::{Length, Task};
 
 use crate::app::cache::Cache;
 use crate::app::menu::Menu;
@@ -25,6 +29,7 @@ use crate::app::message::Message;
 use crate::app::state::State;
 use crate::app::view::spark::{SparkSettingsStatus, SparkSettingsView};
 use crate::app::wallets::SparkBackend;
+use crate::services::connect::client::backend::api::WALLET_ALIAS_MAXIMUM_LENGTH;
 
 pub struct SparkSettings {
     backend: Option<Arc<SparkBackend>>,
@@ -41,6 +46,8 @@ pub struct SparkSettings {
     /// Phase 6: `true` while a `set_stable_balance` RPC is in
     /// flight — the toggle is disabled in that window.
     stable_balance_saving: bool,
+    /// A Spark nickname typed but not saved yet. `None` shows the saved one.
+    nickname_input: Option<String>,
 }
 
 impl SparkSettings {
@@ -55,20 +62,35 @@ impl SparkSettings {
             status,
             stable_balance_active: None,
             stable_balance_saving: false,
+            nickname_input: None,
         }
     }
 }
 
+/// Whether a typed Spark nickname is short enough to save. The limit is the
+/// Vault alias's, so both wallets' names follow one rule.
+pub fn nickname_fits(input: &str) -> bool {
+    input.trim().chars().count() < WALLET_ALIAS_MAXIMUM_LENGTH
+}
+
+/// A typed Spark nickname as saved: trimmed, and `None` when blank, which
+/// shows plain "Spark".
+pub fn saved_nickname(input: &str) -> Option<String> {
+    Some(input.trim())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+}
+
 impl SparkSettings {
-    /// The Spark tab's Stable Balance group without the dashboard, so the
-    /// App can add the Lightning Address group beneath it.
-    pub fn spark_content<'a>(&'a self) -> Element<'a, crate::app::view::Message> {
-        SparkSettingsView {
-            status: self.status.clone(),
-            stable_balance_active: self.stable_balance_active,
-            stable_balance_saving: self.stable_balance_saving,
-        }
-        .render()
+    /// A typed nickname that would change the saved one (`saved`), to save
+    /// when the user leaves Balances & conversion without pressing Return.
+    /// One too long to save stays in the field with its error instead.
+    pub fn pending_nickname(&self, saved: Option<&str>) -> Option<String> {
+        self.nickname_input
+            .as_deref()
+            .filter(|input| nickname_fits(input))
+            .filter(|input| saved_nickname(input).as_deref() != saved)
+            .map(str::to_owned)
     }
 }
 
@@ -91,7 +113,14 @@ impl State for SparkSettings {
         ) {
             view.render_connections(cache)
         } else {
-            view.render()
+            Column::new()
+                .width(Length::Fill)
+                .push(view.render())
+                .push(crate::app::view::spark::settings::nickname_group(
+                    self.nickname_input.as_deref(),
+                    cache.wallet_names.spark.as_deref(),
+                ))
+                .into()
         };
         crate::app::view::dashboard(menu, cache, content)
     }
@@ -203,6 +232,21 @@ impl State for SparkSettings {
                         }
                     }
                 }
+                crate::app::view::SparkSettingsMessage::NicknameEdited(input) => {
+                    self.nickname_input = Some(input);
+                }
+                // The App saves it.
+                crate::app::view::SparkSettingsMessage::NicknameSubmitted(_) => {}
+                // Keep a name typed while the save was in flight.
+                crate::app::view::SparkSettingsMessage::NicknameSaved(saved) => {
+                    if self
+                        .nickname_input
+                        .as_deref()
+                        .is_none_or(|input| saved_nickname(input) == saved)
+                    {
+                        self.nickname_input = None;
+                    }
+                }
             }
         }
         Task::none()
@@ -309,6 +353,84 @@ mod tests {
 
         assert_eq!(panel.stable_balance_active, Some(true));
         assert!(!panel.stable_balance_saving);
+    }
+
+    #[test]
+    fn nickname_is_trimmed_blank_is_plain_spark_and_long_is_refused() {
+        assert_eq!(
+            saved_nickname("  Daily spending \n"),
+            Some("Daily spending".to_owned())
+        );
+        assert_eq!(saved_nickname("   "), None);
+        assert!(nickname_fits(&"a".repeat(WALLET_ALIAS_MAXIMUM_LENGTH - 1)));
+        assert!(!nickname_fits(&"a".repeat(WALLET_ALIAS_MAXIMUM_LENGTH)));
+        // Characters, not bytes: 63 two-byte letters still fit.
+        assert!(nickname_fits(&"é".repeat(WALLET_ALIAS_MAXIMUM_LENGTH - 1)));
+    }
+
+    #[test]
+    fn a_typed_nickname_is_pending_only_while_it_would_change_the_saved_one() {
+        let mut panel = SparkSettings::new(None);
+        assert_eq!(panel.pending_nickname(None), None);
+
+        update(
+            &mut panel,
+            SparkSettingsMessage::NicknameEdited(" Daily spending ".to_owned()),
+        );
+        assert_eq!(
+            panel.pending_nickname(None).as_deref(),
+            Some(" Daily spending ")
+        );
+        assert_eq!(panel.pending_nickname(Some("Daily spending")), None);
+
+        // Clearing the field to go back to plain "Spark" is a change too.
+        update(
+            &mut panel,
+            SparkSettingsMessage::NicknameEdited(String::new()),
+        );
+        assert_eq!(
+            panel.pending_nickname(Some("Daily spending")).as_deref(),
+            Some("")
+        );
+        assert_eq!(panel.pending_nickname(None), None);
+
+        update(
+            &mut panel,
+            SparkSettingsMessage::NicknameEdited("a".repeat(WALLET_ALIAS_MAXIMUM_LENGTH)),
+        );
+        assert_eq!(panel.pending_nickname(None), None);
+    }
+
+    #[test]
+    fn a_save_clears_the_field_unless_another_name_was_typed_meanwhile() {
+        let mut panel = SparkSettings::new(None);
+        update(
+            &mut panel,
+            SparkSettingsMessage::NicknameEdited("Daily".to_owned()),
+        );
+        update(
+            &mut panel,
+            SparkSettingsMessage::NicknameSaved(Some("Daily".to_owned())),
+        );
+        assert_eq!(panel.nickname_input, None);
+
+        // Saved "Daily", but the user has typed on to "Daily spending".
+        update(
+            &mut panel,
+            SparkSettingsMessage::NicknameEdited("Daily spending".to_owned()),
+        );
+        update(
+            &mut panel,
+            SparkSettingsMessage::NicknameSaved(Some("Daily".to_owned())),
+        );
+        assert_eq!(panel.nickname_input.as_deref(), Some("Daily spending"));
+
+        update(
+            &mut panel,
+            SparkSettingsMessage::NicknameEdited("  ".to_owned()),
+        );
+        update(&mut panel, SparkSettingsMessage::NicknameSaved(None));
+        assert_eq!(panel.nickname_input, None);
     }
 
     #[test]

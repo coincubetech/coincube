@@ -42,6 +42,9 @@ pub enum Message {
         cube_id: String,
         result: Result<(), String>,
     },
+    /// The Spark nickname typed in Settings was written to this device's
+    /// Cube settings (`Ok`, `None` for plain "Spark") or could not be.
+    SparkNicknameSaved(Result<Option<String>, String>),
     ActivityVaultLoaded(u64, Result<(Vec<HistoryTransaction>, bool), String>),
     ActivityPsbtLoaded(u64, Result<Vec<SpendTx>, String>),
     ActivitySparkLoaded(
