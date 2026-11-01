@@ -12,6 +12,7 @@
 
 use std::{
     collections::HashSet,
+    convert::TryInto,
     fs::{self, File, OpenOptions},
     io::{ErrorKind, Read, Write},
     path::{Path, PathBuf},
@@ -425,11 +426,37 @@ impl<'a> LocalKeyRepository<'a> {
         let mut has_prior = false;
         let mut has_prepared = false;
         let mut has_intent = false;
+        let mut intent_tmp = None;
+        let mut batch_tag = None;
         for entry in
             fs::read_dir(self.root()).map_err(|_| "Cannot inspect imported key storage.")?
         {
             let entry = entry.map_err(|_| "Cannot inspect imported key storage.")?;
             let name = entry.file_name().to_string_lossy().into_owned();
+            if let Some(raw) = name
+                .strip_prefix(".intent-")
+                .and_then(|rest| rest.strip_suffix(".tmp"))
+            {
+                let id = Uuid::parse_str(raw)
+                    .map_err(|_| "Imported inventory has an unknown transaction file.")?;
+                if id.is_nil() || raw != id.to_string() || intent_tmp.replace(id).is_some() {
+                    return Err("Imported inventory has an unknown transaction file.".into());
+                }
+                reject_non_file(&entry.path())?;
+                continue;
+            }
+            if let Some(raw) = name
+                .strip_prefix(".batch-")
+                .and_then(|rest| rest.strip_suffix(".tag"))
+            {
+                let id = Uuid::parse_str(raw)
+                    .map_err(|_| "Imported inventory has an unknown transaction file.")?;
+                if id.is_nil() || raw != id.to_string() || batch_tag.replace(id).is_some() {
+                    return Err("Imported inventory has an unknown transaction file.".into());
+                }
+                reject_non_file(&entry.path())?;
+                continue;
+            }
             let parsed = IntoIterator::into_iter([
                 (".prior-", ".manifest", &mut has_prior),
                 (".prepared-", ".manifest", &mut has_prepared),
@@ -456,13 +483,42 @@ impl<'a> LocalKeyRepository<'a> {
             } else if name.starts_with(".prior-")
                 || name.starts_with(".prepared-")
                 || name.starts_with(".intent-")
+                || name.starts_with(".batch-")
             {
                 return Err("Imported inventory has an unknown transaction file.".into());
             }
         }
+        if let Some(tmp_id) = intent_tmp {
+            if txn.is_some() || batch_tag.is_some() {
+                return Err("Imported inventory has an unknown transaction file.".into());
+            }
+            // The canonical intent is published only by rename after its
+            // bytes are synced. A stranded temporary file can be discarded
+            // if no key file exists outside the unchanged anchored manifest.
+            let published = self.root().join(MANIFEST);
+            let bytes = read_manifest_bytes(&published)?;
+            if anchor::digest(&bytes) != *digest {
+                return Err(
+                    "Uncommitted imported inventory has no unchanged anchored prior.".into(),
+                );
+            }
+            self.read_manifest_file(&published, &[], false)?;
+            if anchor::load(&authority.scope)?.as_ref() != Some(&authority)
+                || read_manifest_bytes(&published)? != bytes
+            {
+                return Err("Imported inventory authority changed before staging cleanup.".into());
+            }
+            return remove_staged(&self.intent_tmp(tmp_id));
+        }
         let Some(txn_id) = txn else {
+            if batch_tag.is_some() {
+                return Err("Imported inventory has an unknown transaction file.".into());
+            }
             return Ok(());
         };
+        if batch_tag.is_some_and(|id| id != txn_id) {
+            return Err("Imported inventory has an unknown transaction file.".into());
+        }
         if !has_intent || (!has_prior && has_prepared) {
             return Err("Imported inventory has an unproven precommit transaction.".into());
         }
@@ -474,9 +530,49 @@ impl<'a> LocalKeyRepository<'a> {
         }
         let published = self.root().join(MANIFEST);
         let published_bytes = read_manifest_bytes(&published)?;
-        if anchor::digest(&published_bytes) != *digest
-            || (has_prior && read_manifest_bytes(&self.prior(txn_id))? != published_bytes)
-        {
+        if anchor::digest(&published_bytes) != *digest {
+            return Err("Uncommitted imported inventory has no unchanged anchored prior.".into());
+        }
+        if let Ok(old) = self.read_manifest_file(&published, &[], false) {
+            // A crash may interrupt the prior or prepared writes. If no
+            // candidate ciphertext exists, none has authority: discard the
+            // incomplete transaction while retaining the unchanged inventory.
+            // A legacy single-key admission always stages its ciphertext
+            // before the prepared manifest. If that manifest is complete
+            // but its candidate key is missing, a deletion may have been
+            // interrupted: keep the transaction fail closed. Batch admission
+            // instead records its authenticated tag before staging any key.
+            if has_prepared && batch_tag.is_none() {
+                if let Ok(next) = self.read_manifest_structure(&self.prepared(txn_id), false) {
+                    let old_names: HashSet<_> =
+                        old.records.iter().map(LocalKeyRecord::file_name).collect();
+                    if next
+                        .records
+                        .iter()
+                        .map(LocalKeyRecord::file_name)
+                        .any(|name| !old_names.contains(&name))
+                    {
+                        return Err("Imported inventory has a missing single-key candidate.".into());
+                    }
+                }
+            }
+            if anchor::load(&authority.scope)?.as_ref() != Some(&authority)
+                || read_manifest_bytes(&published)? != published_bytes
+            {
+                return Err("Imported inventory authority changed before staging cleanup.".into());
+            }
+            if has_prepared {
+                remove_staged(&self.prepared(txn_id))?;
+            }
+            if batch_tag.is_some() {
+                remove_staged(&self.batch_tag(txn_id))?;
+            }
+            if has_prior {
+                remove_staged(&self.prior(txn_id))?;
+            }
+            return remove_staged(&self.intent(txn_id));
+        }
+        if has_prior && read_manifest_bytes(&self.prior(txn_id))? != published_bytes {
             return Err("Uncommitted imported inventory has no unchanged anchored prior.".into());
         }
         let mut new_files = Vec::new();
@@ -490,7 +586,15 @@ impl<'a> LocalKeyRepository<'a> {
                 .collect();
             let prepared = self.prepared(txn_id);
             let prepared_bytes = read_manifest_bytes(&prepared)?;
-            let next = self.read_manifest_file(&prepared, &old_names, false)?;
+            // The transaction intent and anchored prior were written before a
+            // batch starts staging ciphertext. A crash can leave only some of
+            // the candidate records. Their names are still bounded by the
+            // canonical prepared manifest; none has admission authority.
+            let next = if batch_tag.is_some() {
+                self.read_manifest_structure(&prepared, false)?
+            } else {
+                self.read_manifest_file(&prepared, &old_names, false)?
+            };
             let next_names: Vec<_> = next.records.iter().map(LocalKeyRecord::file_name).collect();
             let old = self.read_manifest_file(&published, &next_names, false)?;
             if serde_json::to_vec(&old).ok().as_deref() != Some(published_bytes.as_slice()) {
@@ -501,7 +605,13 @@ impl<'a> LocalKeyRepository<'a> {
                 .into_iter()
                 .filter(|name| !admitted.contains(name))
                 .collect();
-            if !old.records.is_empty() || !next.records.is_empty() {
+            if batch_tag.is_some() {
+                if !old.records.is_empty() {
+                    return Err("Imported batch cannot replace an existing signer set.".into());
+                }
+                let device = device()?;
+                self.verify_batch_tag(txn_id, &authority, &prepared_bytes, &device)?;
+            } else if !old.records.is_empty() || !next.records.is_empty() {
                 let credential = credential()?;
                 let device = device()?;
                 self.verify_records(&old, &credential, &device)?;
@@ -522,14 +632,22 @@ impl<'a> LocalKeyRepository<'a> {
         {
             return Err("Imported inventory authority changed before staging cleanup.".into());
         }
-        // Preserve the manifests and intent while deleting authenticated new
+        // Preserve the manifests and intent while deleting candidate
         // ciphertext: a crash must not leave a key with no candidate identity.
         // A partial deletion can still require owner-assisted recovery.
         for name in new_files {
-            remove_staged(&self.root().join(name))?;
+            let path = self.root().join(name);
+            match fs::symlink_metadata(&path) {
+                Err(error) if error.kind() == ErrorKind::NotFound && batch_tag.is_some() => {}
+                Err(_) => return Err("Cannot inspect staged imported key.".into()),
+                Ok(_) => remove_staged(&path)?,
+            }
         }
         if has_prepared {
             remove_staged(&self.prepared(txn_id))?;
+        }
+        if batch_tag.is_some() {
+            remove_staged(&self.batch_tag(txn_id))?;
         }
         if has_prior {
             remove_staged(&self.prior(txn_id))?;
@@ -550,14 +668,69 @@ impl<'a> LocalKeyRepository<'a> {
         self.root().join(format!(".intent-{txn_id}.anchor"))
     }
 
+    fn intent_tmp(&self, txn_id: Uuid) -> PathBuf {
+        self.root().join(format!(".intent-{txn_id}.tmp"))
+    }
+
+    fn batch_tag(&self, txn_id: Uuid) -> PathBuf {
+        self.root().join(format!(".batch-{txn_id}.tag"))
+    }
+
+    fn batch_tag_message(
+        &self,
+        txn_id: Uuid,
+        authority: &Anchor,
+        next_bytes: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let mut message = b"coincube-imported-key-batch-v1".to_vec();
+        message.extend_from_slice(txn_id.as_bytes());
+        message.extend_from_slice(&anchor::digest(&authority.encode()?));
+        message.extend_from_slice(&anchor::digest(next_bytes));
+        Ok(message)
+    }
+
+    fn write_batch_tag(
+        &self,
+        txn_id: Uuid,
+        authority: &Anchor,
+        next_bytes: &[u8],
+        device: &coincube_core::seed_crypt::DeviceSecret,
+    ) -> Result<(), String> {
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &device[..]);
+        let message = self.batch_tag_message(txn_id, authority, next_bytes)?;
+        let tag = ring::hmac::sign(&key, &message);
+        write_new(&self.batch_tag(txn_id), tag.as_ref())
+    }
+
+    fn verify_batch_tag(
+        &self,
+        txn_id: Uuid,
+        authority: &Anchor,
+        next_bytes: &[u8],
+        device: &coincube_core::seed_crypt::DeviceSecret,
+    ) -> Result<(), String> {
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &device[..]);
+        let message = self.batch_tag_message(txn_id, authority, next_bytes)?;
+        let tag = read_batch_tag(&self.batch_tag(txn_id))?;
+        ring::hmac::verify(&key, &message, &tag)
+            .map_err(|_| "Imported batch authority tag is invalid.".into())
+    }
+
     fn stage_manifests(
         &self,
         authority: &Anchor,
         txn_id: Uuid,
         old_bytes: &[u8],
         next_bytes: &[u8],
+        batch_device: Option<&coincube_core::seed_crypt::DeviceSecret>,
     ) -> Result<(), String> {
-        write_new(&self.intent(txn_id), &authority.encode()?)?;
+        let tmp = self.intent_tmp(txn_id);
+        write_new(&tmp, &authority.encode()?)?;
+        if fs::rename(&tmp, self.intent(txn_id)).is_err() {
+            remove_staged(&tmp)?;
+            return Err("Cannot publish imported transaction intent.".into());
+        }
+        sync_parent(&self.intent(txn_id))?;
         let prior = self.prior(txn_id);
         if let Err(error) = write_new(&prior, old_bytes) {
             if anchor::load(&authority.scope)?.as_ref() != Some(authority) {
@@ -566,8 +739,21 @@ impl<'a> LocalKeyRepository<'a> {
             remove_staged(&self.intent(txn_id))?;
             return Err(error);
         }
+        // A complete batch prepared manifest must never be durable without
+        // its authenticated tag. Recovery treats a tagless complete candidate
+        // as a legacy single-key transaction and keeps it fail closed.
+        if let Some(device) = batch_device {
+            if let Err(error) = self.write_batch_tag(txn_id, authority, next_bytes, device) {
+                self.discard_candidate_before_intent(authority, txn_id, &[])?;
+                return Err(error);
+            }
+        }
         if let Err(error) = write_new(&self.prepared(txn_id), next_bytes) {
-            self.discard_before_intent(authority, txn_id, false)?;
+            if batch_device.is_some() {
+                self.discard_candidate_before_intent(authority, txn_id, &[])?;
+            } else {
+                self.discard_before_intent(authority, txn_id, false)?;
+            }
             return Err(error);
         }
         Ok(())
@@ -593,6 +779,7 @@ impl<'a> LocalKeyRepository<'a> {
         let prior = allowed.map(|txn| format!(".prior-{txn}.manifest"));
         let prepared = allowed.map(|txn| format!(".prepared-{txn}.manifest"));
         let intent = allowed.map(|txn| format!(".intent-{txn}.anchor"));
+        let batch_tag = allowed.map(|txn| format!(".batch-{txn}.tag"));
         for entry in
             fs::read_dir(self.root()).map_err(|_| "Cannot inspect imported key storage.")?
         {
@@ -604,10 +791,12 @@ impl<'a> LocalKeyRepository<'a> {
             if name.starts_with(".prior-")
                 || name.starts_with(".prepared-")
                 || name.starts_with(".intent-")
+                || name.starts_with(".batch-")
             {
                 if prior.as_deref() != Some(name.as_str())
                     && prepared.as_deref() != Some(name.as_str())
                     && intent.as_deref() != Some(name.as_str())
+                    && batch_tag.as_deref() != Some(name.as_str())
                 {
                     return Err("Imported inventory has an unknown transaction file.".into());
                 }
@@ -777,6 +966,13 @@ impl<'a> LocalKeyRepository<'a> {
             Err(error) if error.kind() == ErrorKind::NotFound => (),
             Err(_) => return Err("Cannot clean prepared imported manifest.".into()),
         }
+        let batch_tag = self.batch_tag(*txn);
+        reject_non_file(&batch_tag)?;
+        match fs::remove_file(&batch_tag) {
+            Ok(()) => sync_parent(&batch_tag)?,
+            Err(error) if error.kind() == ErrorKind::NotFound => (),
+            Err(_) => return Err("Cannot clean imported batch authority tag.".into()),
+        }
         let prior = self.prior(*txn);
         reject_non_file(&prior)?;
         match fs::remove_file(&prior) {
@@ -827,6 +1023,30 @@ impl<'a> LocalKeyRepository<'a> {
         is_current: impl Fn() -> bool,
         check_active: impl Fn() -> Result<(), String>,
     ) -> Result<(), String> {
+        self.publish_manifest_with_stage(
+            old,
+            next,
+            credential,
+            device,
+            is_current,
+            check_active,
+            false,
+            || Ok(()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn publish_manifest_with_stage(
+        &self,
+        old: &Manifest,
+        next: &Manifest,
+        credential: &str,
+        device: &coincube_core::seed_crypt::DeviceSecret,
+        is_current: impl Fn() -> bool,
+        check_active: impl Fn() -> Result<(), String>,
+        batch: bool,
+        stage_keys: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
         let authority =
             anchor::load(&self.anchor_scope())?.ok_or("Imported inventory anchor is missing.")?;
         let (generation, old_digest) = match &authority.state {
@@ -848,6 +1068,8 @@ impl<'a> LocalKeyRepository<'a> {
         }
         let next_bytes = serde_json::to_vec(next).map_err(|_| "Cannot encode key manifest.")?;
         let next_names: HashSet<_> = next.records.iter().map(LocalKeyRecord::file_name).collect();
+        let old_names: HashSet<_> = old.records.iter().map(LocalKeyRecord::file_name).collect();
+        let new_files: Vec<_> = next_names.difference(&old_names).cloned().collect();
         let mut retire_files: Vec<_> = old
             .records
             .iter()
@@ -856,13 +1078,23 @@ impl<'a> LocalKeyRepository<'a> {
             .collect();
         retire_files.sort();
         let txn_id = Uuid::new_v4();
-        self.stage_manifests(&authority, txn_id, &old_bytes, &next_bytes)?;
+        self.stage_manifests(
+            &authority,
+            txn_id,
+            &old_bytes,
+            &next_bytes,
+            batch.then_some(device),
+        )?;
+        if let Err(error) = stage_keys() {
+            self.discard_candidate_before_intent(&authority, txn_id, &new_files)?;
+            return Err(error);
+        }
         if let Err(error) = check_active() {
-            self.discard_before_intent(&authority, txn_id, true)?;
+            self.discard_candidate_before_intent(&authority, txn_id, &new_files)?;
             return Err(error);
         }
         if !is_current() {
-            self.discard_before_intent(&authority, txn_id, true)?;
+            self.discard_candidate_before_intent(&authority, txn_id, &new_files)?;
             return Err("Imported inventory mutation was cancelled before commit intent.".into());
         }
         let pending = Anchor {
@@ -885,6 +1117,41 @@ impl<'a> LocalKeyRepository<'a> {
             log::warn!("Imported inventory committed with cleanup pending: {error}");
         }
         Ok(())
+    }
+
+    fn discard_candidate_before_intent(
+        &self,
+        authority: &Anchor,
+        txn_id: Uuid,
+        new_files: &[String],
+    ) -> Result<(), String> {
+        if anchor::load(&authority.scope)?.as_ref() != Some(authority) {
+            return Err("Imported inventory anchor changed before staging cleanup.".into());
+        }
+        for name in new_files {
+            let path = self.root().join(name);
+            match fs::symlink_metadata(&path) {
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(_) => return Err("Cannot inspect staged imported key.".into()),
+                Ok(_) => remove_staged(&path)?,
+            }
+        }
+        // Keep the tag until the prepared manifest is gone. A crash at any
+        // cleanup prefix then either has an authenticated batch candidate or
+        // no candidate at all; it cannot look like a missing legacy key.
+        let prepared = self.prepared(txn_id);
+        match fs::symlink_metadata(&prepared) {
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(_) => return Err("Cannot inspect imported prepared manifest.".into()),
+            Ok(_) => remove_staged(&prepared)?,
+        }
+        let batch_tag = self.batch_tag(txn_id);
+        match fs::symlink_metadata(&batch_tag) {
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(_) => return Err("Cannot inspect imported batch authority tag.".into()),
+            Ok(_) => remove_staged(&batch_tag)?,
+        }
+        self.discard_before_intent(authority, txn_id, false)
     }
 
     /// Only a provably empty, live operation can acquire its first authority.
@@ -970,6 +1237,19 @@ impl<'a> LocalKeyRepository<'a> {
         retired: &[String],
         allow_missing: bool,
     ) -> Result<Manifest, String> {
+        let manifest = self.read_manifest_structure(path, allow_missing)?;
+        self.check_inventory(&manifest, retired)?;
+        Ok(manifest)
+    }
+
+    /// Check scope and canonical record identities without requiring every
+    /// staged ciphertext to exist yet. Recovery uses this to discard a
+    /// precommit transaction after an interrupted batch write.
+    fn read_manifest_structure(
+        &self,
+        path: &Path,
+        allow_missing: bool,
+    ) -> Result<Manifest, String> {
         reject_non_file(path)?;
         let mut options = OpenOptions::new();
         options.read(true);
@@ -1045,7 +1325,6 @@ impl<'a> LocalKeyRepository<'a> {
         }) {
             return Err("Imported key manifest records are not canonically ordered.".into());
         }
-        self.check_inventory(&manifest, retired)?;
         Ok(manifest)
     }
 
@@ -1134,6 +1413,137 @@ impl<'a> LocalKeyRepository<'a> {
         )
     }
 
+    /// Admit a complete set of new local accounts in one anchor generation.
+    /// Recovery Kit restore starts with an empty inventory. An exact retry
+    /// after an uncertain commit returns the authenticated existing records;
+    /// any different signer set must be reconciled explicitly.
+    pub fn admit_new_batch(
+        &self,
+        entries: Vec<(ImportedAccount, ImportedKeySecret)>,
+        is_current: impl Fn() -> bool,
+    ) -> Result<Vec<LocalKeyRecord>, String> {
+        if !is_current() {
+            return Err("Imported key admission was cancelled.".into());
+        }
+        let credential = self.check_active()?;
+        let lock = self.lock()?;
+        self.provision_empty()?;
+        let manifest = self.read_manifest_recoverable(&lock)?;
+        let device = self.device(manifest.records.is_empty())?;
+        self.admit_new_batch_locked(manifest, entries, &credential, &device, || {
+            self.check_active().is_ok() && is_current()
+        })
+    }
+
+    fn admit_new_batch_locked(
+        &self,
+        manifest: Manifest,
+        entries: Vec<(ImportedAccount, ImportedKeySecret)>,
+        credential: &str,
+        device: &coincube_core::seed_crypt::DeviceSecret,
+        is_current: impl Fn() -> bool,
+    ) -> Result<Vec<LocalKeyRecord>, String> {
+        if entries.is_empty() || entries.len() > MAX_RECORDS {
+            return Err("Imported key batch has an invalid size.".into());
+        }
+        if !manifest.records.is_empty() {
+            // A commit may have succeeded before the caller received its
+            // result. Reopen only the identical, fully authenticated signer
+            // set so a restore can resume after an uncertain response.
+            if manifest.records.len() != entries.len() {
+                return Err("Imported key batch conflicts with the current inventory.".into());
+            }
+            self.verify_records(&manifest, credential, device)?;
+            let mut seen = Vec::with_capacity(entries.len());
+            for (account, secret) in &entries {
+                self.verify_batch_account(account, secret)?;
+                if seen.contains(account)
+                    || !manifest
+                        .records
+                        .iter()
+                        .any(|record| record.account().ok().as_ref() == Some(account))
+                {
+                    return Err("Imported key batch conflicts with the current inventory.".into());
+                }
+                seen.push(account.clone());
+            }
+            if !is_current() {
+                return Err("Imported key admission was cancelled.".into());
+            }
+            return Ok(manifest.records);
+        }
+        let mut records = Vec::with_capacity(entries.len());
+        let mut ciphertexts = Vec::with_capacity(entries.len());
+        for (account, secret) in entries {
+            if records
+                .iter()
+                .any(|record: &LocalKeyRecord| record.account().ok().as_ref() == Some(&account))
+            {
+                return Err("Imported key batch contains a duplicate account.".into());
+            }
+            self.verify_batch_account(&account, &secret)?;
+            let record = LocalKeyRecord::from_account(&account, Uuid::new_v4(), Uuid::new_v4());
+            let ciphertext = imported_key_crypt::seal(
+                &secret,
+                credential,
+                &self.binding(&record)?,
+                Protection::DeviceBound(device),
+            )
+            .map_err(|_| "Cannot encrypt imported key.")?;
+            records.push(record);
+            ciphertexts.push(ciphertext);
+        }
+        let mut next = self.manifest(records.clone());
+        next.records.sort_by(|left, right| {
+            (&left.fingerprint, &left.origin, &left.xpub).cmp(&(
+                &right.fingerprint,
+                &right.origin,
+                &right.xpub,
+            ))
+        });
+        if !is_current() {
+            return Err("Imported key admission was cancelled.".into());
+        }
+        self.publish_manifest_with_stage(
+            &manifest,
+            &next,
+            credential,
+            device,
+            is_current,
+            || {
+                #[cfg(not(test))]
+                self.check_active().map(|_| ())?;
+                Ok(())
+            },
+            true,
+            || {
+                for (record, ciphertext) in records.iter().zip(ciphertexts.iter()) {
+                    write_new(&self.root().join(record.file_name()), ciphertext)?;
+                }
+                Ok(())
+            },
+        )?;
+        Ok(records)
+    }
+
+    fn verify_batch_account(
+        &self,
+        account: &ImportedAccount,
+        secret: &ImportedKeySecret,
+    ) -> Result<(), String> {
+        let verified = verify_imported_account(
+            &self.attachment.descriptor,
+            &account.origin,
+            Zeroizing::new(secret.words().to_owned()),
+            Zeroizing::new(secret.passphrase().to_owned()),
+        )
+        .map_err(|_| "The supplied words do not match this exact wallet account.")?;
+        if verified.account() != account {
+            return Err("The supplied words do not match this exact wallet account.".into());
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn admit_locked(
         &self,
@@ -1208,7 +1618,8 @@ impl<'a> LocalKeyRepository<'a> {
                 // Keep a staged ciphertext if an uncertain anchor read left a
                 // complete pre-Pending pair. The next locked read must first
                 // authenticate that candidate before discarding it.
-                if anchor::load(&self.anchor_scope())?.as_ref() == before.as_ref()
+                if staged.exists()
+                    && anchor::load(&self.anchor_scope())?.as_ref() == before.as_ref()
                     && self.check_transaction_files(None).is_ok()
                 {
                     remove_staged(&staged)?;
@@ -1446,6 +1857,43 @@ fn read_manifest_bytes(path: &Path) -> Result<Vec<u8>, String> {
         return Err("Imported key manifest is oversized.".into());
     }
     Ok(bytes)
+}
+
+fn read_batch_tag(path: &Path) -> Result<[u8; 32], String> {
+    reject_non_file(path)?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // O_NONBLOCK prevents a raced-in FIFO from hanging at open while the
+        // inventory lock is held. O_NOFOLLOW closes the symlink race.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(path)
+        .map_err(|_| "Cannot read imported batch authority tag.")?;
+    let meta = file
+        .metadata()
+        .map_err(|_| "Cannot inspect imported batch authority tag.")?;
+    if !meta.is_file() {
+        return Err("Imported batch authority tag endpoint is unsafe.".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o077 != 0 {
+            return Err("Imported key file permissions are unsafe.".into());
+        }
+    }
+    let mut bytes = Vec::with_capacity(33);
+    file.take(33)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Cannot read imported batch authority tag.")?;
+    let tag: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| "Imported batch authority tag has an invalid length.")?;
+    Ok(tag)
 }
 
 /// Read from one opened endpoint with a fixed upper bound. The file can
@@ -1944,6 +2392,334 @@ mod tests {
     }
 
     #[test]
+    fn batch_admission_commits_all_accounts_in_one_generation() {
+        let fixture = Fixture::new();
+        let repository = fixture.repository();
+        let device = Zeroizing::new([31u8; 32]);
+        let entries = (0..3)
+            .map(|index| {
+                (
+                    fixture.accounts[index].clone(),
+                    ImportedKeySecret::new(
+                        Zeroizing::new(fixture.phrases[index].clone()),
+                        Zeroizing::new(String::new()),
+                    )
+                    .unwrap(),
+                )
+            })
+            .collect();
+        let records = repository
+            .admit_new_batch_locked(
+                repository.read_manifest().unwrap(),
+                entries,
+                "synthetic unlock",
+                &device,
+                || true,
+            )
+            .unwrap();
+        assert_eq!(records.len(), 3);
+        let reopened = fixture.repository();
+        let manifest = reopened.read_manifest().unwrap();
+        assert_eq!(manifest.records.len(), 3);
+        assert!(records
+            .iter()
+            .all(|record| manifest.records.contains(record)));
+        for record in &records {
+            assert_eq!(
+                reopened
+                    .read_key(record, "synthetic unlock", &device)
+                    .unwrap()
+                    .account(),
+                &record.account().unwrap()
+            );
+        }
+        let authority = anchor::load(&repository.anchor_scope()).unwrap().unwrap();
+        assert!(matches!(
+            authority.state,
+            AnchorState::Committed { generation: 1, .. }
+        ));
+        let retry_entries = (0..3)
+            .map(|index| {
+                (
+                    fixture.accounts[index].clone(),
+                    ImportedKeySecret::new(
+                        Zeroizing::new(fixture.phrases[index].clone()),
+                        Zeroizing::new(String::new()),
+                    )
+                    .unwrap(),
+                )
+            })
+            .collect();
+        let retried = repository
+            .admit_new_batch_locked(
+                manifest.clone(),
+                retry_entries,
+                "synthetic unlock",
+                &device,
+                || true,
+            )
+            .unwrap();
+        assert_eq!(retried.len(), records.len());
+        assert!(retried.iter().all(|record| records.contains(record)));
+        assert!(repository
+            .admit_new_batch_locked(manifest, vec![], "synthetic unlock", &device, || true)
+            .is_err());
+    }
+
+    #[test]
+    fn interrupted_precommit_batch_discards_only_candidate_keys() {
+        let fixture = Fixture::new();
+        let repository = fixture.repository();
+        let device = Zeroizing::new([32u8; 32]);
+        let old = repository.read_manifest().unwrap();
+        let records: Vec<_> = fixture.accounts[..2]
+            .iter()
+            .map(|account| LocalKeyRecord::from_account(account, Uuid::new_v4(), Uuid::new_v4()))
+            .collect();
+        let mut next = repository.manifest(records.clone());
+        next.records.sort_by(|left, right| {
+            (&left.fingerprint, &left.origin, &left.xpub).cmp(&(
+                &right.fingerprint,
+                &right.origin,
+                &right.xpub,
+            ))
+        });
+        let authority = anchor::load(&repository.anchor_scope()).unwrap().unwrap();
+        let txn = Uuid::new_v4();
+        repository
+            .stage_manifests(
+                &authority,
+                txn,
+                &serde_json::to_vec(&old).unwrap(),
+                &serde_json::to_vec(&next).unwrap(),
+                Some(&device),
+            )
+            .unwrap();
+        let secret = ImportedKeySecret::new(
+            Zeroizing::new(fixture.phrases[0].clone()),
+            Zeroizing::new(String::new()),
+        )
+        .unwrap();
+        let ciphertext = imported_key_crypt::seal(
+            &secret,
+            "synthetic unlock",
+            &repository.binding(&records[0]).unwrap(),
+            Protection::DeviceBound(&device),
+        )
+        .unwrap();
+        write_new(&repository.root().join(records[0].file_name()), &ciphertext).unwrap();
+        // Simulate a restart before the second key is written and before the
+        // anchor's Pending transition. No partial signer may become readable.
+        assert!(repository.read_manifest().is_err());
+        let reopened = fixture.repository();
+        reopened
+            .discard_proven_uncommitted_stage_with(
+                || Ok(Zeroizing::new("synthetic unlock".into())),
+                || Ok(Zeroizing::new([32u8; 32])),
+            )
+            .unwrap();
+        assert!(reopened.read_manifest().unwrap().records.is_empty());
+        assert!(!reopened.root().join(records[0].file_name()).exists());
+        reopened.check_transaction_files(None).unwrap();
+    }
+
+    #[test]
+    fn complete_batch_prepared_without_keys_and_cleanup_prefixes_recover() {
+        for removed_prefix in 0..=3 {
+            let fixture = Fixture::new();
+            let repository = fixture.repository();
+            let device = Zeroizing::new([42u8; 32]);
+            let old = repository.read_manifest().unwrap();
+            let record =
+                LocalKeyRecord::from_account(&fixture.accounts[0], Uuid::new_v4(), Uuid::new_v4());
+            let next = repository.manifest(vec![record]);
+            let authority = anchor::load(&repository.anchor_scope()).unwrap().unwrap();
+            let txn = Uuid::new_v4();
+            repository
+                .stage_manifests(
+                    &authority,
+                    txn,
+                    &serde_json::to_vec(&old).unwrap(),
+                    &serde_json::to_vec(&next).unwrap(),
+                    Some(&device),
+                )
+                .unwrap();
+            assert!(repository.batch_tag(txn).exists());
+            assert!(repository.prepared(txn).exists());
+            // Every durable prefix of the in-process cleanup order is safe:
+            // prepared, tag, prior, then intent. None has staged a key.
+            if removed_prefix >= 1 {
+                remove_staged(&repository.prepared(txn)).unwrap();
+            }
+            if removed_prefix >= 2 {
+                remove_staged(&repository.batch_tag(txn)).unwrap();
+            }
+            if removed_prefix >= 3 {
+                remove_staged(&repository.prior(txn)).unwrap();
+            }
+            let reopened = fixture.repository();
+            reopened
+                .discard_proven_uncommitted_stage_with(
+                    || Ok(Zeroizing::new("synthetic unlock".into())),
+                    || Ok(Zeroizing::new([42u8; 32])),
+                )
+                .unwrap();
+            assert!(reopened.read_manifest().unwrap().records.is_empty());
+            reopened.check_transaction_files(None).unwrap();
+        }
+    }
+
+    #[test]
+    fn batch_tag_reader_rejects_oversize_and_symlink() {
+        let fixture = Fixture::new();
+        let repository = fixture.repository();
+        repository.ensure_root().unwrap();
+        let path = repository.batch_tag(Uuid::new_v4());
+        write_new(&path, &[7u8; 32]).unwrap();
+        assert_eq!(read_batch_tag(&path).unwrap(), [7u8; 32]);
+        write_replace(&path, &[7u8; 33]).unwrap();
+        assert!(read_batch_tag(&path).is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let target = repository.root().join("tag-target");
+            write_new(&target, &[7u8; 32]).unwrap();
+            fs::remove_file(&path).unwrap();
+            symlink(&target, &path).unwrap();
+            assert!(read_batch_tag(&path).is_err());
+        }
+    }
+
+    #[test]
+    fn tampered_batch_tag_cannot_discard_a_candidate_key() {
+        let fixture = Fixture::new();
+        let repository = fixture.repository();
+        let device = Zeroizing::new([36u8; 32]);
+        let old = repository.read_manifest().unwrap();
+        let record =
+            LocalKeyRecord::from_account(&fixture.accounts[0], Uuid::new_v4(), Uuid::new_v4());
+        let next = repository.manifest(vec![record.clone()]);
+        let authority = anchor::load(&repository.anchor_scope()).unwrap().unwrap();
+        let txn = Uuid::new_v4();
+        let next_bytes = serde_json::to_vec(&next).unwrap();
+        repository
+            .stage_manifests(
+                &authority,
+                txn,
+                &serde_json::to_vec(&old).unwrap(),
+                &next_bytes,
+                Some(&device),
+            )
+            .unwrap();
+        let staged = repository.root().join(record.file_name());
+        write_new(&staged, b"partial ciphertext").unwrap();
+        write_replace(&repository.batch_tag(txn), b"tampered tag").unwrap();
+        assert!(repository
+            .discard_proven_uncommitted_stage_with(
+                || Ok(Zeroizing::new("synthetic unlock".into())),
+                || Ok(Zeroizing::new([36u8; 32])),
+            )
+            .is_err());
+        assert!(staged.exists());
+        assert!(repository.prepared(txn).exists());
+    }
+
+    #[test]
+    fn cancelled_batch_leaves_no_partial_inventory() {
+        let fixture = Fixture::new();
+        let repository = fixture.repository();
+        let device = Zeroizing::new([33u8; 32]);
+        let secret = ImportedKeySecret::new(
+            Zeroizing::new(fixture.phrases[0].clone()),
+            Zeroizing::new(String::new()),
+        )
+        .unwrap();
+        assert!(repository
+            .admit_new_batch_locked(
+                repository.read_manifest().unwrap(),
+                vec![(fixture.accounts[0].clone(), secret)],
+                "synthetic unlock",
+                &device,
+                || false,
+            )
+            .is_err());
+        assert!(repository.read_manifest().unwrap().records.is_empty());
+        assert!(!fs::read_dir(repository.root()).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".key")));
+        repository.check_transaction_files(None).unwrap();
+    }
+
+    #[test]
+    fn invalid_batch_never_stages_a_signer() {
+        let fixture = Fixture::new();
+        let repository = fixture.repository();
+        let device = Zeroizing::new([35u8; 32]);
+        let secret = |index: usize| {
+            ImportedKeySecret::new(
+                Zeroizing::new(fixture.phrases[index].clone()),
+                Zeroizing::new(String::new()),
+            )
+            .unwrap()
+        };
+        for entries in [
+            vec![
+                (fixture.accounts[0].clone(), secret(0)),
+                (fixture.accounts[0].clone(), secret(0)),
+            ],
+            vec![(fixture.accounts[1].clone(), secret(0))],
+        ] {
+            assert!(repository
+                .admit_new_batch_locked(
+                    repository.read_manifest().unwrap(),
+                    entries,
+                    "synthetic unlock",
+                    &device,
+                    || true,
+                )
+                .is_err());
+            assert!(repository.read_manifest().unwrap().records.is_empty());
+            assert!(!fs::read_dir(repository.root()).unwrap().any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".key")));
+        }
+    }
+
+    #[test]
+    fn failed_batch_stage_discards_partial_ciphertext_before_intent() {
+        let fixture = Fixture::new();
+        let repository = fixture.repository();
+        let device = Zeroizing::new([34u8; 32]);
+        let old = repository.read_manifest().unwrap();
+        let record =
+            LocalKeyRecord::from_account(&fixture.accounts[0], Uuid::new_v4(), Uuid::new_v4());
+        let next = repository.manifest(vec![record.clone()]);
+        let staged = repository.root().join(record.file_name());
+        assert!(repository
+            .publish_manifest_with_stage(
+                &old,
+                &next,
+                "synthetic unlock",
+                &device,
+                || true,
+                || Ok(()),
+                true,
+                || {
+                    write_new(&staged, b"interrupted ciphertext")?;
+                    Err("Synthetic batch write failure.".into())
+                },
+            )
+            .is_err());
+        assert!(!staged.exists());
+        assert!(repository.read_manifest().unwrap().records.is_empty());
+        repository.check_transaction_files(None).unwrap();
+    }
+
+    #[test]
     fn two_independent_records_survive_repository_reopen() {
         let fixture = Fixture::new();
         let repository = fixture.repository();
@@ -2314,7 +3090,7 @@ mod tests {
         // Force the second create_new to fail after the prior file is durable.
         write_new(&repository.prepared(txn), b"preexisting").unwrap();
         assert!(repository
-            .stage_manifests(&old, txn, &old_bytes, &old_bytes)
+            .stage_manifests(&old, txn, &old_bytes, &old_bytes, None)
             .is_err());
         assert!(!repository.prior(txn).exists());
         assert_eq!(fs::read(repository.prepared(txn)).unwrap(), b"preexisting");
@@ -2410,14 +3186,24 @@ mod tests {
 
     #[test]
     fn lone_prior_recovers_only_without_unidentified_key() {
-        for unknown_key in [false, true] {
+        for (truncated_prior, unknown_key) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
             let fixture = Fixture::new();
             let repository = fixture.repository();
             let old = read_manifest_bytes(&repository.root().join(MANIFEST)).unwrap();
             let txn = Uuid::new_v4();
             let authority = anchor::load(&repository.anchor_scope()).unwrap().unwrap();
             write_new(&repository.intent(txn), &authority.encode().unwrap()).unwrap();
-            write_new(&repository.prior(txn), &old).unwrap();
+            write_new(
+                &repository.prior(txn),
+                if truncated_prior {
+                    &b"partial prior"[..]
+                } else {
+                    old.as_slice()
+                },
+            )
+            .unwrap();
             if unknown_key {
                 write_new(
                     &repository
@@ -2439,13 +3225,68 @@ mod tests {
     }
 
     #[test]
-    fn lone_intent_recovers_only_without_unidentified_key() {
+    fn truncated_prepared_without_candidate_keys_can_be_retried() {
+        let fixture = Fixture::new();
+        let repository = fixture.repository();
+        let authority = anchor::load(&repository.anchor_scope()).unwrap().unwrap();
+        let old = read_manifest_bytes(&repository.root().join(MANIFEST)).unwrap();
+        let txn = Uuid::new_v4();
+        write_new(&repository.intent(txn), &authority.encode().unwrap()).unwrap();
+        write_new(&repository.prior(txn), &old).unwrap();
+        write_new(&repository.prepared(txn), b"partial prepared").unwrap();
+        repository
+            .discard_proven_uncommitted_stage_with(
+                || panic!("no new key requires no credential"),
+                || panic!("no new key requires no device secret"),
+            )
+            .unwrap();
+        assert!(repository.read_manifest().unwrap().records.is_empty());
+        repository.check_transaction_files(None).unwrap();
+    }
+
+    #[test]
+    fn interrupted_intent_temp_is_discarded_before_any_key_is_staged() {
         for unknown_key in [false, true] {
             let fixture = Fixture::new();
             let repository = fixture.repository();
             let txn = Uuid::new_v4();
+            write_new(&repository.intent_tmp(txn), b"partial intent").unwrap();
+            if unknown_key {
+                write_new(
+                    &repository
+                        .root()
+                        .join(format!("{}-{}.key", Uuid::new_v4(), Uuid::new_v4())),
+                    b"unidentified",
+                )
+                .unwrap();
+            }
+            let recovered = repository.discard_proven_uncommitted_stage_with(
+                || panic!("intent temp needs no credential"),
+                || panic!("intent temp needs no device secret"),
+            );
+            assert_eq!(recovered.is_ok(), !unknown_key);
+            assert_eq!(repository.intent_tmp(txn).exists(), unknown_key);
+            if !unknown_key {
+                assert!(repository.read_manifest().unwrap().records.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn lone_intent_recovers_only_without_unidentified_key() {
+        for (truncated_intent, unknown_key) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let fixture = Fixture::new();
+            let repository = fixture.repository();
+            let txn = Uuid::new_v4();
             let authority = anchor::load(&repository.anchor_scope()).unwrap().unwrap();
-            write_new(&repository.intent(txn), &authority.encode().unwrap()).unwrap();
+            let intent = if truncated_intent {
+                b"interrupted intent".to_vec()
+            } else {
+                authority.encode().unwrap()
+            };
+            write_new(&repository.intent(txn), &intent).unwrap();
             if unknown_key {
                 write_new(
                     &repository
@@ -2460,8 +3301,11 @@ mod tests {
                 || panic!("lone intent needs no credential"),
                 || panic!("lone intent needs no device secret"),
             );
-            assert_eq!(recovered.is_ok(), !unknown_key);
-            assert_eq!(repository.intent(txn).exists(), unknown_key);
+            assert_eq!(recovered.is_ok(), !unknown_key && !truncated_intent);
+            assert_eq!(
+                repository.intent(txn).exists(),
+                unknown_key || truncated_intent
+            );
             assert_eq!(anchor::load(&authority.scope).unwrap(), Some(authority));
         }
     }
@@ -2475,7 +3319,7 @@ mod tests {
             let bytes = read_manifest_bytes(&repository.root().join(MANIFEST)).unwrap();
             let txn = Uuid::new_v4();
             repository
-                .stage_manifests(&old, txn, &bytes, &bytes)
+                .stage_manifests(&old, txn, &bytes, &bytes, None)
                 .unwrap();
             let changed = if pending_state {
                 Anchor {
