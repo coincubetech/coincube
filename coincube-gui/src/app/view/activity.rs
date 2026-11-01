@@ -2159,8 +2159,8 @@ fn render_at_width<'a>(
     // A retained selection may be outside the current filter or the complete
     // history window. Only a row in the visible feed may own the detail pane,
     // except the row an Overview row opened: it may sit past the cutoff, or
-    // be missing while a read fails, and still passes the filters. Its fresh
-    // copy wins once loaded.
+    // be missing while a read fails. Its fresh copy wins once loaded, and the
+    // filters still apply to whichever copy is shown.
     let selected = activity.selected_id.as_ref().and_then(|id| {
         visible
             .iter()
@@ -2170,13 +2170,15 @@ fn render_at_width<'a>(
                 activity
                     .opened
                     .as_ref()
-                    .filter(|opened| &opened.id == id && activity.filters.includes(opened))
+                    .filter(|opened| &opened.id == id)
                     .map(|opened| {
                         entries
                             .iter()
                             .find(|entry| entry.id == opened.id)
                             .unwrap_or(opened)
                     })
+                    // The filters judge the copy shown, fresh or kept.
+                    .filter(|shown| activity.filters.includes(shown))
             })
     });
     let selected_listed =
@@ -3856,6 +3858,75 @@ mod tests {
         }
         messages.retain(|message| !matches!(message, Message::FocusAction(_)));
         messages
+    }
+
+    /// The row an Overview row opened keeps its label through a failed read:
+    /// it reads from the kept copy, a save is attempted rather than dropped,
+    /// and a saved label reaches the copy's title.
+    #[test]
+    fn an_opened_rows_label_reads_and_saves_from_its_kept_copy() {
+        use crate::app::state::State;
+        let cache = Cache::default();
+        let mut tx = outgoing_vault_payment();
+        let key = Entry::vault(tx.clone())
+            .label_key
+            .expect("a label key")
+            .to_string();
+        tx.labels.insert(key.clone(), "Rent".into());
+        let mut activity = loaded(Vec::new(), vec![tx]);
+        let entry = activity.entries().remove(0);
+        drop(activity.update(
+            None,
+            &cache,
+            crate::app::message::Message::View(Message::Activity(ActivityMessage::Open(
+                entry.id.clone(),
+            ))),
+        ));
+        // The switch to Activity reloads, and its read fails.
+        drop(activity.reload(None, None));
+        drop(activity.update(
+            None,
+            &cache,
+            crate::app::message::Message::ActivityVaultLoaded(
+                activity.generation_for_tests(),
+                Err("daemon unavailable".into()),
+            ),
+        ));
+        assert!(activity.entries().is_empty());
+        assert_eq!(activity.stored_label(&entry), "Rent");
+
+        drop(activity.update(
+            None,
+            &cache,
+            crate::app::message::Message::View(Message::Activity(ActivityMessage::LabelEdited(
+                "Rent May".into(),
+            ))),
+        ));
+        drop(activity.update(
+            None,
+            &cache,
+            crate::app::message::Message::View(Message::Activity(ActivityMessage::SaveLabel)),
+        ));
+        assert_eq!(
+            activity.label_error_for(&entry.id),
+            Some("The Vault isn't running, so the label can't be saved yet."),
+            "attempted, not dropped"
+        );
+
+        drop(activity.update(
+            None,
+            &cache,
+            crate::app::message::Message::ActivityLabelSaved(
+                1,
+                Ok((entry.id.clone(), key, Some("Rent May".into()))),
+            ),
+        ));
+        assert_eq!(activity.stored_label(&entry), "Rent May");
+        let opened = activity.opened.as_ref().expect("still kept");
+        assert_eq!(
+            (opened.id.as_str(), opened.title.as_str()),
+            (entry.id.as_str(), "Rent May")
+        );
     }
 
     /// A wallet whose history failed to load names the reason whether or not

@@ -4553,7 +4553,7 @@ mod tests {
                     .unwrap_or_else(|| panic!("no {} {}", wallet, control))
                     .1
             };
-            for (index, wallet) in ["Spark", "Vault"].into_iter().enumerate() {
+            for (index, wallet) in ["Spark", "Vault"].iter().copied().enumerate() {
                 let left = index as f32 * (column + CARD_GAP);
                 let (send, receive) = (at(wallet, "send-btc"), at(wallet, "receive-btc"));
                 assert!(

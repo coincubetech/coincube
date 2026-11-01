@@ -323,18 +323,33 @@ impl Activity {
         let Some(key) = entry.label_key.as_ref().map(ToString::to_string) else {
             return "";
         };
+        // The row an Overview row opened is read from its kept copy while
+        // the loaded rows lack it (a failed read).
+        let opened = self.opened.as_ref().map(|opened| &opened.target);
         let labels = match &entry.target {
             ActivityTarget::Vault(tx) => self
                 .vault
                 .iter()
                 .find(|row| row.txid == tx.txid)
-                .map(|row| &row.labels),
+                .map(|row| &row.labels)
+                .or(match opened {
+                    Some(ActivityTarget::Vault(row)) if row.txid == tx.txid => Some(&row.labels),
+                    _ => None,
+                }),
             ActivityTarget::Psbt(tx) => {
                 let txid = tx.psbt.unsigned_tx.compute_txid();
                 self.psbts
                     .iter()
                     .find(|row| row.psbt.unsigned_tx.compute_txid() == txid)
                     .map(|row| &row.labels)
+                    .or(match opened {
+                        Some(ActivityTarget::Psbt(row))
+                            if row.psbt.unsigned_tx.compute_txid() == txid =>
+                        {
+                            Some(&row.labels)
+                        }
+                        _ => None,
+                    })
             }
             _ => None,
         };
@@ -354,6 +369,18 @@ impl Activity {
                     .strip_prefix(&txid)
                     .is_some_and(|rest| rest.starts_with(':'))
         };
+        // The opened row's kept copy follows too, so its pane and title do.
+        let opened = self
+            .opened
+            .as_mut()
+            .and_then(|opened| match &mut opened.target {
+                ActivityTarget::Vault(tx) => Some((tx.txid.to_string(), &mut tx.labels)),
+                ActivityTarget::Psbt(tx) => Some((
+                    tx.psbt.unsigned_tx.compute_txid().to_string(),
+                    &mut tx.labels,
+                )),
+                _ => None,
+            });
         let rows = self
             .vault
             .iter_mut()
@@ -363,7 +390,8 @@ impl Activity {
                     tx.psbt.unsigned_tx.compute_txid().to_string(),
                     &mut tx.labels,
                 )
-            }));
+            }))
+            .chain(opened);
         for (txid, labels) in rows {
             if !owns(txid) && !labels.contains_key(key) {
                 continue;
@@ -372,6 +400,17 @@ impl Activity {
                 Some(label) => labels.insert(key.to_owned(), label.to_owned()),
                 None => labels.remove(key),
             };
+        }
+        if let Some(opened) = self.opened.as_mut() {
+            let rebuilt = match &opened.target {
+                ActivityTarget::Vault(tx) => Some(view::activity::Entry::vault(tx.clone())),
+                ActivityTarget::Psbt(tx) => Some(view::activity::Entry::psbt(tx.clone())),
+                _ => None,
+            };
+            if let Some(mut rebuilt) = rebuilt {
+                rebuilt.id = std::mem::take(&mut opened.id);
+                *opened = rebuilt;
+            }
         }
     }
 
@@ -382,10 +421,12 @@ impl Activity {
         if self.label_saving_for(&entry_id) {
             return Task::none();
         }
+        // The opened row's kept copy saves too while the loaded rows lack it.
         let Some(entry) = self
             .entries()
             .into_iter()
             .find(|entry| entry.id == entry_id)
+            .or_else(|| self.opened.clone().filter(|opened| opened.id == entry_id))
         else {
             self.label_draft = None;
             return Task::none();

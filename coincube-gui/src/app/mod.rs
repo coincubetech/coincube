@@ -17065,6 +17065,62 @@ mod wallet_recent_activity_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The filters judge the copy of an opened row that the pane shows: a
+    /// row opened while pending that completes during the reload shows no
+    /// pane under the Pending filter, which hides its row.
+    #[test]
+    fn an_opened_rows_pane_follows_the_filters_on_its_fresh_copy() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("recent-filter-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
+        app.panels.current = Menu::Cube(menu::CubeSubMenu::Overview);
+        let row = |status: &str| coincube_spark_protocol::PaymentSummary {
+            timestamp: 1_760_000_000,
+            status: status.into(),
+            description: Some("Receipt chosen".into()),
+            ..receipt("chosen")
+        };
+        let generation = app.panels.activity.generation_for_tests();
+        drop(app.update(Message::ActivitySparkLoaded(
+            generation,
+            Ok((vec![row("pending")], false)),
+        )));
+        let chosen = app
+            .panels
+            .activity
+            .recent_entries(view::activity::RecentScope::Cube)[0]
+            .id
+            .clone();
+        drop(app.update(Message::View(view::Message::Activity(
+            view::activity::ActivityMessage::Open(chosen),
+        ))));
+        let generation = app.panels.activity.generation_for_tests();
+        drop(app.update(Message::ActivitySparkLoaded(
+            generation,
+            Ok((vec![row("completed")], false)),
+        )));
+        let titles = |app: &App| {
+            view::shared::landing::capture::inspect_filled(
+                "overview-open-filtered",
+                view::activity::render(&app.panels.activity, &app.cache),
+                (1440, 900),
+                "dark",
+                coincube_ui::theme::Theme::dark(),
+                (1192, 835),
+            )
+            .text
+            .iter()
+            .filter(|(value, _)| value == "Receipt chosen")
+            .count()
+        };
+        assert_eq!(titles(&app), 2, "its row and its pane");
+        drop(app.update(Message::View(view::Message::Activity(
+            view::activity::ActivityMessage::Status(view::activity::StatusFilter::Pending),
+        ))));
+        assert_eq!(titles(&app), 0, "neither under Pending");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A row the Overview opens gets Activity's detail pane even when it sits
     /// past the complete-history cutoff, which hides it from Activity's own
     /// list: here Spark's whole first page shares one timestamp and more pages
