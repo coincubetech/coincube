@@ -12,6 +12,7 @@
 
 use std::{
     collections::HashSet,
+    convert::TryInto,
     fs::{self, File, OpenOptions},
     io::{ErrorKind, Read, Write},
     path::{Path, PathBuf},
@@ -710,8 +711,7 @@ impl<'a> LocalKeyRepository<'a> {
     ) -> Result<(), String> {
         let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &device[..]);
         let message = self.batch_tag_message(txn_id, authority, next_bytes)?;
-        let tag = fs::read(self.batch_tag(txn_id))
-            .map_err(|_| "Cannot read imported batch authority tag.")?;
+        let tag = read_batch_tag(&self.batch_tag(txn_id))?;
         ring::hmac::verify(&key, &message, &tag)
             .map_err(|_| "Imported batch authority tag is invalid.".into())
     }
@@ -722,6 +722,7 @@ impl<'a> LocalKeyRepository<'a> {
         txn_id: Uuid,
         old_bytes: &[u8],
         next_bytes: &[u8],
+        batch_device: Option<&coincube_core::seed_crypt::DeviceSecret>,
     ) -> Result<(), String> {
         let tmp = self.intent_tmp(txn_id);
         write_new(&tmp, &authority.encode()?)?;
@@ -738,8 +739,21 @@ impl<'a> LocalKeyRepository<'a> {
             remove_staged(&self.intent(txn_id))?;
             return Err(error);
         }
+        // A complete batch prepared manifest must never be durable without
+        // its authenticated tag. Recovery treats a tagless complete candidate
+        // as a legacy single-key transaction and keeps it fail closed.
+        if let Some(device) = batch_device {
+            if let Err(error) = self.write_batch_tag(txn_id, authority, next_bytes, device) {
+                self.discard_candidate_before_intent(authority, txn_id, &[])?;
+                return Err(error);
+            }
+        }
         if let Err(error) = write_new(&self.prepared(txn_id), next_bytes) {
-            self.discard_before_intent(authority, txn_id, false)?;
+            if batch_device.is_some() {
+                self.discard_candidate_before_intent(authority, txn_id, &[])?;
+            } else {
+                self.discard_before_intent(authority, txn_id, false)?;
+            }
             return Err(error);
         }
         Ok(())
@@ -1064,13 +1078,13 @@ impl<'a> LocalKeyRepository<'a> {
             .collect();
         retire_files.sort();
         let txn_id = Uuid::new_v4();
-        self.stage_manifests(&authority, txn_id, &old_bytes, &next_bytes)?;
-        if batch {
-            if let Err(error) = self.write_batch_tag(txn_id, &authority, &next_bytes, device) {
-                self.discard_candidate_before_intent(&authority, txn_id, &new_files)?;
-                return Err(error);
-            }
-        }
+        self.stage_manifests(
+            &authority,
+            txn_id,
+            &old_bytes,
+            &next_bytes,
+            batch.then_some(device),
+        )?;
         if let Err(error) = stage_keys() {
             self.discard_candidate_before_intent(&authority, txn_id, &new_files)?;
             return Err(error);
@@ -1122,13 +1136,22 @@ impl<'a> LocalKeyRepository<'a> {
                 Ok(_) => remove_staged(&path)?,
             }
         }
+        // Keep the tag until the prepared manifest is gone. A crash at any
+        // cleanup prefix then either has an authenticated batch candidate or
+        // no candidate at all; it cannot look like a missing legacy key.
+        let prepared = self.prepared(txn_id);
+        match fs::symlink_metadata(&prepared) {
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(_) => return Err("Cannot inspect imported prepared manifest.".into()),
+            Ok(_) => remove_staged(&prepared)?,
+        }
         let batch_tag = self.batch_tag(txn_id);
         match fs::symlink_metadata(&batch_tag) {
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(_) => return Err("Cannot inspect imported batch authority tag.".into()),
             Ok(_) => remove_staged(&batch_tag)?,
         }
-        self.discard_before_intent(authority, txn_id, true)
+        self.discard_before_intent(authority, txn_id, false)
     }
 
     /// Only a provably empty, live operation can acquire its first authority.
@@ -1836,6 +1859,43 @@ fn read_manifest_bytes(path: &Path) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+fn read_batch_tag(path: &Path) -> Result<[u8; 32], String> {
+    reject_non_file(path)?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // O_NONBLOCK prevents a raced-in FIFO from hanging at open while the
+        // inventory lock is held. O_NOFOLLOW closes the symlink race.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(path)
+        .map_err(|_| "Cannot read imported batch authority tag.")?;
+    let meta = file
+        .metadata()
+        .map_err(|_| "Cannot inspect imported batch authority tag.")?;
+    if !meta.is_file() {
+        return Err("Imported batch authority tag endpoint is unsafe.".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o077 != 0 {
+            return Err("Imported key file permissions are unsafe.".into());
+        }
+    }
+    let mut bytes = Vec::with_capacity(33);
+    file.take(33)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Cannot read imported batch authority tag.")?;
+    let tag: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| "Imported batch authority tag has an invalid length.")?;
+    Ok(tag)
+}
+
 /// Read from one opened endpoint with a fixed upper bound. The file can
 /// change after metadata inspection, so the actual returned length is the
 /// authority before any frame byte is indexed.
@@ -2432,14 +2492,7 @@ mod tests {
                 txn,
                 &serde_json::to_vec(&old).unwrap(),
                 &serde_json::to_vec(&next).unwrap(),
-            )
-            .unwrap();
-        repository
-            .write_batch_tag(
-                txn,
-                &authority,
-                &serde_json::to_vec(&next).unwrap(),
-                &device,
+                Some(&device),
             )
             .unwrap();
         let secret = ImportedKeySecret::new(
@@ -2471,6 +2524,73 @@ mod tests {
     }
 
     #[test]
+    fn complete_batch_prepared_without_keys_and_cleanup_prefixes_recover() {
+        for removed_prefix in 0..=3 {
+            let fixture = Fixture::new();
+            let repository = fixture.repository();
+            let device = Zeroizing::new([42u8; 32]);
+            let old = repository.read_manifest().unwrap();
+            let record =
+                LocalKeyRecord::from_account(&fixture.accounts[0], Uuid::new_v4(), Uuid::new_v4());
+            let next = repository.manifest(vec![record]);
+            let authority = anchor::load(&repository.anchor_scope()).unwrap().unwrap();
+            let txn = Uuid::new_v4();
+            repository
+                .stage_manifests(
+                    &authority,
+                    txn,
+                    &serde_json::to_vec(&old).unwrap(),
+                    &serde_json::to_vec(&next).unwrap(),
+                    Some(&device),
+                )
+                .unwrap();
+            assert!(repository.batch_tag(txn).exists());
+            assert!(repository.prepared(txn).exists());
+            // Every durable prefix of the in-process cleanup order is safe:
+            // prepared, tag, prior, then intent. None has staged a key.
+            if removed_prefix >= 1 {
+                remove_staged(&repository.prepared(txn)).unwrap();
+            }
+            if removed_prefix >= 2 {
+                remove_staged(&repository.batch_tag(txn)).unwrap();
+            }
+            if removed_prefix >= 3 {
+                remove_staged(&repository.prior(txn)).unwrap();
+            }
+            let reopened = fixture.repository();
+            reopened
+                .discard_proven_uncommitted_stage_with(
+                    || Ok(Zeroizing::new("synthetic unlock".into())),
+                    || Ok(Zeroizing::new([42u8; 32])),
+                )
+                .unwrap();
+            assert!(reopened.read_manifest().unwrap().records.is_empty());
+            reopened.check_transaction_files(None).unwrap();
+        }
+    }
+
+    #[test]
+    fn batch_tag_reader_rejects_oversize_and_symlink() {
+        let fixture = Fixture::new();
+        let repository = fixture.repository();
+        repository.ensure_root().unwrap();
+        let path = repository.batch_tag(Uuid::new_v4());
+        write_new(&path, &[7u8; 32]).unwrap();
+        assert_eq!(read_batch_tag(&path).unwrap(), [7u8; 32]);
+        write_replace(&path, &[7u8; 33]).unwrap();
+        assert!(read_batch_tag(&path).is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let target = repository.root().join("tag-target");
+            write_new(&target, &[7u8; 32]).unwrap();
+            fs::remove_file(&path).unwrap();
+            symlink(&target, &path).unwrap();
+            assert!(read_batch_tag(&path).is_err());
+        }
+    }
+
+    #[test]
     fn tampered_batch_tag_cannot_discard_a_candidate_key() {
         let fixture = Fixture::new();
         let repository = fixture.repository();
@@ -2488,10 +2608,8 @@ mod tests {
                 txn,
                 &serde_json::to_vec(&old).unwrap(),
                 &next_bytes,
+                Some(&device),
             )
-            .unwrap();
-        repository
-            .write_batch_tag(txn, &authority, &next_bytes, &device)
             .unwrap();
         let staged = repository.root().join(record.file_name());
         write_new(&staged, b"partial ciphertext").unwrap();
@@ -2972,7 +3090,7 @@ mod tests {
         // Force the second create_new to fail after the prior file is durable.
         write_new(&repository.prepared(txn), b"preexisting").unwrap();
         assert!(repository
-            .stage_manifests(&old, txn, &old_bytes, &old_bytes)
+            .stage_manifests(&old, txn, &old_bytes, &old_bytes, None)
             .is_err());
         assert!(!repository.prior(txn).exists());
         assert_eq!(fs::read(repository.prepared(txn)).unwrap(), b"preexisting");
@@ -3201,7 +3319,7 @@ mod tests {
             let bytes = read_manifest_bytes(&repository.root().join(MANIFEST)).unwrap();
             let txn = Uuid::new_v4();
             repository
-                .stage_manifests(&old, txn, &bytes, &bytes)
+                .stage_manifests(&old, txn, &bytes, &bytes, None)
                 .unwrap();
             let changed = if pending_state {
                 Anchor {
