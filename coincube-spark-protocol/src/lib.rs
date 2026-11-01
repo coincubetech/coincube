@@ -325,9 +325,12 @@ pub enum Method {
     /// conversion leg.
     ///
     /// After an `Sdk` error on a swap out of USDB, auto-convert counts no
-    /// bitcoin received until its switch next changes or the bridge
-    /// restarts, since the swap's output may arrive as an ordinary receive
-    /// (S3b). [`AutoConvertState`] doesn't show this hold.
+    /// bitcoin received until its switch next changes, since the swap's
+    /// output may arrive as an ordinary receive (S3b). The bridge saves this
+    /// hold before sending, so it also holds after a bridge restart during
+    /// the swap, and refuses the swap with `BadRequest` if it can't be
+    /// saved. [`AutoConvertState::held_after_swap`] shows it, and
+    /// [`Event::AutoConvertStateChanged`] announces it.
     Swap(SwapParams),
     /// [`Method::PrepareSend`] with an explicit balance to pay from. Returns
     /// [`OkPayload::PrepareSendFrom`]; the handle executes through the
@@ -887,6 +890,17 @@ pub struct AutoConvertState {
     /// The circuit breaker on repeated conversion failures. When it trips,
     /// the bridge also turns auto-convert off, so `enabled` is `false`.
     pub breaker: AutoConvertBreaker,
+    /// True while auto-convert is on but counts no bitcoin received, because
+    /// a swap out of USDB may still deliver its bitcoin as an ordinary
+    /// receive: its send ended in an error, or the bridge stopped while
+    /// sending it. Sats already pending still convert. Turning auto-convert
+    /// off ends it. Always `false` while off.
+    ///
+    /// Added in S3b and left out of the wire while `false`, so every other
+    /// state reads as before. A bridge from before it never sends it, which
+    /// reads as `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held_after_swap: bool,
 }
 
 /// Circuit breaker on auto-convert failures. Tagged so a pause can't be
@@ -1548,8 +1562,10 @@ pub enum Event {
     /// failure's text (e.g. `Pool has no liquidity`) for the gui to show;
     /// `failures` is how many failed in a row.
     StableBalancePaused { reason: String, failures: u32 },
-    /// Bridge-driven auto-convert changed: switched on or off, or its breaker
-    /// tripped. Settings re-renders from `state`.
+    /// Bridge-driven auto-convert changed: switched on or off, its breaker
+    /// tripped, or it holds receives after a swap
+    /// ([`AutoConvertState::held_after_swap`]). Settings re-renders from
+    /// `state`.
     ///
     /// Emitted from S2b on. A gui built before this variant (#952) can't
     /// parse it, and its reader stops on an unparseable line, so such a gui
@@ -2400,6 +2416,7 @@ mod tests {
         let ready = AutoConvertState {
             enabled: true,
             breaker: AutoConvertBreaker::Ready,
+            held_after_swap: false,
         };
         assert_eq!(
             response_json(1, OkPayload::AutoConvert(ready.clone())),
@@ -2423,6 +2440,7 @@ mod tests {
                 failures: STABLE_BALANCE_PAUSE_THRESHOLD,
                 reason: "Pool has no liquidity".into(),
             },
+            held_after_swap: false,
         };
         assert_eq!(
             serde_json::to_value(&paused).expect("serialize"),
@@ -2436,6 +2454,74 @@ mod tests {
             panic!("expected auto_convert");
         };
         assert_eq!(back, paused);
+    }
+
+    /// The hold after a swap is on the wire only while set, so every other
+    /// state reads as before. A state from a bridge without it reads as not
+    /// held, and a gui without it ignores it.
+    #[test]
+    fn the_hold_after_a_swap_is_on_the_wire_only_while_set() {
+        let held = AutoConvertState {
+            enabled: true,
+            breaker: AutoConvertBreaker::Ready,
+            held_after_swap: true,
+        };
+        assert_eq!(
+            response_json(1, OkPayload::AutoConvert(held.clone())),
+            json!({
+                "type": "response", "id": 1,
+                "ok": {
+                    "kind": "auto_convert",
+                    "data": {
+                        "enabled": true,
+                        "breaker": { "status": "ready" },
+                        "held_after_swap": true
+                    }
+                }
+            })
+        );
+        let OkPayload::AutoConvert(back) = ok_round_trip(OkPayload::AutoConvert(held.clone()))
+        else {
+            panic!("expected auto_convert");
+        };
+        assert_eq!(back, held);
+        let Event::AutoConvertStateChanged { state: back } =
+            event_round_trip(Event::AutoConvertStateChanged {
+                state: held.clone(),
+            })
+        else {
+            panic!("expected auto_convert_state_changed");
+        };
+        assert_eq!(back, held);
+
+        let not_held = AutoConvertState {
+            held_after_swap: false,
+            ..held.clone()
+        };
+        let wire = serde_json::to_value(&not_held).expect("serialize");
+        assert_eq!(
+            wire,
+            json!({ "enabled": true, "breaker": { "status": "ready" } })
+        );
+        let from_an_older_bridge: AutoConvertState = serde_json::from_value(wire).expect("parse");
+        assert_eq!(from_an_older_bridge, not_held);
+
+        /// [`AutoConvertState`] as a gui from before the hold has it.
+        #[derive(Debug, PartialEq, Deserialize)]
+        struct Before {
+            enabled: bool,
+            breaker: AutoConvertBreaker,
+        }
+        let in_an_older_gui: Before =
+            serde_json::from_value(serde_json::to_value(&held).expect("serialize"))
+                .expect("an older gui ignores the field");
+        assert_eq!(
+            in_an_older_gui,
+            Before {
+                enabled: true,
+                breaker: AutoConvertBreaker::Ready
+            }
+        );
     }
 
     #[test]
@@ -2632,6 +2718,7 @@ mod tests {
                 failures: 3,
                 reason: "Pool has no liquidity".into(),
             },
+            held_after_swap: false,
         };
         assert_eq!(
             serde_json::to_value(Frame::Event(Event::AutoConvertStateChanged {

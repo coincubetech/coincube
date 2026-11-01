@@ -35,12 +35,13 @@
 //! the SDK's cached balance (`ensure_synced` waits only for the first sync).
 //!
 //! The bitcoin a USDB → bitcoin swap delivers isn't auto-converted back:
-//! passes are held while it is sent ([`AutoConvert::begin_swap`]), and the
-//! swap's receive is taken back out if the SDK reported it before marking it
-//! a conversion's. A swap whose send ends in an error can't say which receive
-//! was its own, and the pool may have run it: every receive counted while it
-//! was sent is taken back, and none count until the switch next changes
-//! ([`SwapEnd::Unknown`]). That hold is in memory, so it ends with the bridge.
+//! passes and receives are held while it is sent
+//! ([`AutoConvert::begin_swap`]), and the swap's receive is dropped if the
+//! SDK reported it before marking it a conversion's. A swap whose send ends
+//! in an error can't say which receive was its own, and the pool may have
+//! run it: no receive held while it was sent counts, and none count until
+//! the switch next changes ([`SwapEnd::Unknown`]). The hold is saved before
+//! the swap is sent, so a bridge restart during or after it keeps it.
 //!
 //! [`Method::PrepareSwap`]: coincube_spark_protocol::Method::PrepareSwap
 //! [`Method::Swap`]: coincube_spark_protocol::Method::Swap
@@ -543,15 +544,18 @@ async fn current_price<B: SwapBackend>(
 /// the reviewed one, so a swap out of bitcoin spends exactly the reviewed
 /// sats.
 ///
-/// A swap out of USDB holds `auto_convert`'s passes while it is sent, so the
-/// bitcoin it delivers isn't converted back ([`AutoConvert::begin_swap`]).
-/// If its send ends in an error, no receive counts until the switch next
-/// changes ([`SwapEnd::Unknown`]). The caller wakes the auto-convert worker
-/// afterwards.
+/// A swap out of USDB holds `auto_convert`'s passes and receives while it is
+/// sent, so the bitcoin it delivers isn't converted back
+/// ([`AutoConvert::begin_swap`]). If that hold can't be saved, the swap is
+/// refused before sending. If its send ends in an error, no receive counts
+/// until the switch next changes ([`SwapEnd::Unknown`]), and `emit` gets the
+/// new [`ProtocolEvent::AutoConvertStateChanged`]. The caller wakes the
+/// auto-convert worker afterwards.
 pub async fn execute<B: SwapBackend>(
     backend: &B,
     swap: PreparedSwap,
     auto_convert: Option<&Mutex<AutoConvert>>,
+    emit: &(dyn Fn(ProtocolEvent) + Send + Sync),
 ) -> Result<(String, SwapStatus), Refusal> {
     let not_sent = |reason: String| Refusal::BadRequest(format!("{reason} Nothing was sent."));
     let fresh = current_price(backend, &swap).await.map_err(|e| {
@@ -595,7 +599,11 @@ pub async fn execute<B: SwapBackend>(
     // Only the bitcoin out of a USDB swap could count as a receive.
     let guard = auto_convert.filter(|_| swap.from == WalletAsset::Usdb);
     if let Some(auto_convert) = guard {
-        auto_convert.lock().await.begin_swap();
+        auto_convert.lock().await.begin_swap().map_err(|e| {
+            not_sent(format!(
+                "Could not save the auto-convert state before swapping: {e}."
+            ))
+        })?;
     }
     let sent = backend.execute(swap.prepared).await;
     if let Some(auto_convert) = guard {
@@ -606,7 +614,14 @@ pub async fn execute<B: SwapBackend>(
             },
             Err(_) => SwapEnd::Unknown,
         };
-        auto_convert.lock().await.end_swap(end);
+        let mut auto_convert = auto_convert.lock().await;
+        let before = auto_convert.state();
+        auto_convert.end_swap(end);
+        let after = auto_convert.state();
+        // Under the lock, so it can't land after a switch made just after.
+        if after != before {
+            emit(ProtocolEvent::AutoConvertStateChanged { state: after });
+        }
     }
     let payment = sent.map_err(Refusal::Sdk)?;
     let status = swap_status(&payment);
@@ -927,6 +942,7 @@ mod tests {
         Conversion, ConversionAsset, ConversionChain, FeePolicy, PaymentMethod, PaymentType,
         TokenMetadata, TokenTransactionType,
     };
+    use coincube_spark_protocol::{AutoConvertBreaker, AutoConvertState};
 
     use crate::auto_convert::Receipt;
 
@@ -1698,7 +1714,7 @@ mod tests {
         let Prepared { swap, .. } = prepared(&fake, exact(WalletAsset::Usdb, 10 * ONE_USDB)).await;
         fake.calls.lock().unwrap().clear();
         assert_eq!(
-            execute(&fake, swap, None).await,
+            execute(&fake, swap, None, &|_| {}).await,
             Ok(("recv-1".to_string(), SwapStatus::Completed))
         );
         assert_eq!(
@@ -1723,7 +1739,7 @@ mod tests {
         fake.set_price(1_002);
         fake.calls.lock().unwrap().clear();
         assert_eq!(
-            execute(&fake, swap, None).await,
+            execute(&fake, swap, None, &|_| {}).await,
             Ok(("recv-1".to_string(), SwapStatus::Completed))
         );
         assert_eq!(
@@ -1752,7 +1768,7 @@ mod tests {
             let fake = FakeSdk::new();
             let Prepared { swap, .. } = prepared(&fake, exact(from, amount)).await;
             fake.set_price(price);
-            let outcome = execute(&fake, swap, None).await;
+            let outcome = execute(&fake, swap, None, &|_| {}).await;
             if refused {
                 let message = refused_before_sending(outcome.expect_err("refused"));
                 assert!(message.contains("moved by more than 0.5%"), "{message}");
@@ -1769,8 +1785,11 @@ mod tests {
         let fake = FakeSdk::new();
         let Prepared { swap, .. } = prepared(&fake, exact(WalletAsset::Bitcoin, 100_000)).await;
         fake.balances.lock().unwrap().sats = 50_000;
-        let message =
-            refused_before_sending(execute(&fake, swap, None).await.expect_err("refused"));
+        let message = refused_before_sending(
+            execute(&fake, swap, None, &|_| {})
+                .await
+                .expect_err("refused"),
+        );
         assert!(
             message.contains("no longer holds enough bitcoin"),
             "{message}"
@@ -1780,14 +1799,21 @@ mod tests {
         let fake = FakeSdk::new();
         let Prepared { swap, .. } = prepared(&fake, exact(WalletAsset::Usdb, 10 * ONE_USDB)).await;
         fake.balances.lock().unwrap().usdb_units = ONE_USDB;
-        refused_before_sending(execute(&fake, swap, None).await.expect_err("refused"));
+        refused_before_sending(
+            execute(&fake, swap, None, &|_| {})
+                .await
+                .expect_err("refused"),
+        );
         assert!(!fake.executed());
 
         let fake = FakeSdk::new();
         let Prepared { swap, .. } = prepared(&fake, exact(WalletAsset::Usdb, 10 * ONE_USDB)).await;
         *fake.fail_quote.lock().unwrap() = Some("pool unavailable".to_string());
-        let message =
-            refused_before_sending(execute(&fake, swap, None).await.expect_err("refused"));
+        let message = refused_before_sending(
+            execute(&fake, swap, None, &|_| {})
+                .await
+                .expect_err("refused"),
+        );
         assert!(message.contains("pool unavailable"), "{message}");
         assert!(!fake.executed());
     }
@@ -1800,7 +1826,7 @@ mod tests {
         *fake.execute_answer.lock().unwrap() =
             Some(Err("Timeout waiting for conversion to complete".to_string()));
         assert_eq!(
-            execute(&fake, swap, None).await,
+            execute(&fake, swap, None, &|_| {}).await,
             Err(Refusal::Sdk(
                 "Timeout waiting for conversion to complete".to_string()
             ))
@@ -1816,7 +1842,7 @@ mod tests {
         receive.status = PaymentStatus::Pending;
         *fake.execute_answer.lock().unwrap() = Some(Ok(receive));
         assert_eq!(
-            execute(&fake, swap, None).await,
+            execute(&fake, swap, None, &|_| {}).await,
             Ok(("recv-9".to_string(), SwapStatus::Pending))
         );
     }
@@ -1866,14 +1892,21 @@ mod tests {
             Arc::clone(&auto_convert),
             vec![receipt("recv-1", delivered), receipt("gift", 5_000)],
         ));
+        let events = StdMutex::new(Vec::new());
         assert_eq!(
-            execute(&fake, swap, Some(&auto_convert)).await,
+            execute(&fake, swap, Some(&auto_convert), &|event| events
+                .lock()
+                .unwrap()
+                .push(event))
+            .await,
             Ok(("recv-1".to_string(), SwapStatus::Completed))
         );
+        assert!(events.lock().unwrap().is_empty(), "the state didn't change");
         let mut auto_convert = auto_convert.lock().await;
         assert_eq!(auto_convert.pending_sats(), 5_000);
         assert!(!auto_convert.note_receive(&receipt("recv-1", delivered)));
         assert_eq!(auto_convert.pending_sats(), 5_000);
+        assert!(!auto_convert.state().held_after_swap);
     }
 
     /// The SDK can answer an error after the pool ran a USDB swap
@@ -1897,15 +1930,71 @@ mod tests {
                     vec![receipt("recv-1", delivered)],
                 ));
             }
+            let events = StdMutex::new(Vec::new());
             assert_eq!(
-                execute(&fake, swap, Some(&auto_convert)).await,
+                execute(&fake, swap, Some(&auto_convert), &|event| events
+                    .lock()
+                    .unwrap()
+                    .push(event))
+                .await,
                 Err(Refusal::Sdk(error.to_string()))
             );
+            let held = AutoConvertState {
+                enabled: true,
+                breaker: AutoConvertBreaker::Ready,
+                held_after_swap: true,
+            };
+            let events = events.into_inner().unwrap();
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [ProtocolEvent::AutoConvertStateChanged { state }] if *state == held
+                ),
+                "{events:?}"
+            );
             let mut auto_convert = auto_convert.lock().await;
+            assert_eq!(auto_convert.state(), held);
             assert_eq!(auto_convert.pending_sats(), 0);
             assert!(!auto_convert.note_receive(&receipt("recv-1", delivered)));
             assert_eq!(auto_convert.pending_sats(), 0, "{counted_before_the_error}");
+            assert_eq!(AutoConvert::load(&dir.0).state(), held, "saved");
         }
+    }
+
+    /// The hold must be saved before a swap out of USDB is sent. If it can't
+    /// be, the swap is refused as not sent, and auto-convert is as it was.
+    #[tokio::test]
+    async fn a_usdb_swap_whose_hold_cannot_be_saved_is_not_sent() {
+        let dir = StateDir::new();
+        let cube = dir.0.join("cube");
+        std::fs::create_dir_all(&cube).unwrap();
+        let mut on = AutoConvert::load(&cube);
+        assert!(on.set_enabled(true).expect("saved"));
+        let auto_convert = Mutex::new(on);
+        let fake = FakeSdk::new();
+        let Prepared { swap, .. } = prepared(&fake, exact(WalletAsset::Usdb, 10 * ONE_USDB)).await;
+
+        std::fs::rename(&cube, dir.0.join("moved")).unwrap();
+        let events = StdMutex::new(Vec::new());
+        let refusal = execute(&fake, swap, Some(&auto_convert), &|event| {
+            events.lock().unwrap().push(event)
+        })
+        .await
+        .expect_err("refused");
+        let message = refused_before_sending(refusal);
+        assert!(
+            message.contains("Could not save the auto-convert state before swapping")
+                && message.ends_with("Nothing was sent."),
+            "{message}"
+        );
+        assert!(!fake.executed());
+        assert!(events.lock().unwrap().is_empty());
+        let mut auto_convert = auto_convert.lock().await;
+        assert!(!auto_convert.state().held_after_swap);
+        assert!(
+            auto_convert.note_receive(&receipt("gift", 5_000)),
+            "no swap holds receives"
+        );
     }
 
     /// A swap out of bitcoin delivers USDB, which never counts, so it
@@ -1918,7 +2007,9 @@ mod tests {
         let Prepared { swap, .. } = prepared(&fake, exact(WalletAsset::Bitcoin, 100_000)).await;
         *fake.reports_during_send.lock().unwrap() =
             Some((Arc::clone(&auto_convert), vec![receipt("gift", 5_000)]));
-        assert!(execute(&fake, swap, Some(&auto_convert)).await.is_ok());
+        assert!(execute(&fake, swap, Some(&auto_convert), &|_| {})
+            .await
+            .is_ok());
         let mut auto_convert = auto_convert.lock().await;
         assert_eq!(auto_convert.pending_sats(), 5_000);
         // Not marked seen: a receive with the swap's id would still count.

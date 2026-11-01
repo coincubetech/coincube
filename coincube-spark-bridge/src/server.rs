@@ -2573,7 +2573,10 @@ async fn handle_swap(id: u64, params: SwapParams, state: Arc<ServerState>) -> Re
     let backend = SdkConverter::new(sdk, Arc::clone(&state.own_spark_address))
         .at_slippage(prepared.max_slippage_bps());
     let auto_convert = state.auto_convert.get().map(|ac| ac.as_ref());
-    let outcome = swap::execute(&backend, prepared, auto_convert).await;
+    let emit = |event| {
+        let _ = state.event_tx.send(Frame::Event(event));
+    };
+    let outcome = swap::execute(&backend, prepared, auto_convert, &emit).await;
     // Passes held during a swap out of USDB run now; otherwise this finds
     // nothing new to do.
     if let Some(wake) = state.wake_auto_convert.get() {
@@ -3954,6 +3957,7 @@ mod auto_convert_handler_tests {
         AutoConvertState {
             enabled: true,
             breaker: AutoConvertBreaker::Ready,
+            held_after_swap: false,
         }
     }
 
@@ -4046,6 +4050,7 @@ mod auto_convert_handler_tests {
                 failures: 3,
                 reason: "Pool has no liquidity".into(),
             },
+            held_after_swap: false,
         };
         let ok = user_settings_ok(&on(), true);
         assert!(ok.stable_balance_active && ok.private_mode_enabled);
