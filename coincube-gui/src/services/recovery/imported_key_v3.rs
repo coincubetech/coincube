@@ -2,7 +2,7 @@
 //! does not enter the Clone UI restore enum or grant signer admission. A fresh
 //! device must first compare this payload with a trusted Connect checkpoint.
 
-use std::{collections::HashSet, fmt, str::FromStr};
+use std::{collections::HashSet, fmt, io, str::FromStr};
 
 use coincube_core::{
     imported_key_crypt::ImportedKeySecret,
@@ -12,7 +12,8 @@ use coincube_core::{
         hashes::{sha256, Hash},
     },
 };
-use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -77,32 +78,42 @@ struct WireKeyRef<'a> {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WireOwned {
+struct WireOwned<'a> {
     version: u8,
     public: ImportedDescriptorBlob,
     operation_id: Uuid,
     wallet_id: String,
     policy_hash: String,
     inventory_generation: u64,
-    local_keys: Vec<WireKeyOwned>,
+    #[serde(borrow)]
+    local_keys: Vec<WireKeyOwned<'a>>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WireKeyOwned {
+struct WireKeyOwned<'a> {
     record: LocalKeyRecord,
-    words: SecretText,
-    passphrase: SecretText,
+    #[serde(borrow)]
+    words: &'a RawValue,
+    #[serde(borrow)]
+    passphrase: &'a RawValue,
 }
 
-/// Wrap each parsed secret string immediately; never deserialize through a
-/// generic JSON Value or a Clone-bearing UI message.
-struct SecretText(Zeroizing<String>);
+/// The allocation never grows after secrets enter it. A serde write that
+/// would exceed the plaintext limit fails before copying bytes into storage.
+struct BoundedSecretWriter<'a>(&'a mut Vec<u8>);
 
-impl<'de> Deserialize<'de> for SecretText {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = String::deserialize(deserializer)?;
-        Ok(Self(Zeroizing::new(value)))
+impl io::Write for BoundedSecretWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > MAX_PLAINTEXT_BYTES - self.0.len() {
+            return Err(io::ErrorKind::WriteZero.into());
+        }
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -177,7 +188,7 @@ impl ImportedKeyKitV3 {
     /// must encrypt it before any persistence or network operation.
     pub fn encode_password_plaintext(&self) -> Result<Zeroizing<Vec<u8>>, String> {
         self.validate()?;
-        let mut bytes = Zeroizing::new(Vec::new());
+        let mut bytes = Zeroizing::new(Vec::with_capacity(MAX_PLAINTEXT_BYTES));
         let keys = self
             .local_keys
             .iter()
@@ -196,10 +207,8 @@ impl ImportedKeyKitV3 {
             inventory_generation: self.inventory_generation,
             local_keys: keys,
         };
-        serde_json::to_writer(&mut *bytes, &wire).map_err(|_| "Cannot encode imported key Kit.")?;
-        if bytes.len() > MAX_PLAINTEXT_BYTES {
-            return Err("Imported key Kit exceeds its size limit.".into());
-        }
+        serde_json::to_writer(BoundedSecretWriter(&mut bytes), &wire)
+            .map_err(|_| "Cannot encode imported key Kit or it exceeds its size limit.")?;
         Ok(bytes)
     }
 
@@ -207,7 +216,10 @@ impl ImportedKeyKitV3 {
         if bytes.len() > MAX_PLAINTEXT_BYTES {
             return Err("Imported key Kit exceeds its size limit.".into());
         }
-        let wire: WireOwned = parse(bytes)?;
+        // Borrow the raw JSON token for each secret. serde_json must not
+        // unescape it into its own non-zeroizing scratch allocation.
+        let wire: WireOwned<'_> =
+            serde_json::from_slice(bytes).map_err(|_| "Imported key Kit shape is invalid.")?;
         if wire.version != IMPORTED_KEY_BLOB_VERSION || wire.public.cube.uuid != cube_id {
             return Err("Imported key Kit version or Cube does not match.".into());
         }
@@ -217,8 +229,11 @@ impl ImportedKeyKitV3 {
             .map(|key| {
                 Ok(KitKey {
                     record: key.record,
-                    secret: ImportedKeySecret::new(key.words.0, key.passphrase.0)
-                        .map_err(|_| "Imported key Kit phrase is invalid.")?,
+                    secret: ImportedKeySecret::new(
+                        decode_secret_json(key.words)?,
+                        decode_secret_json(key.passphrase)?,
+                    )
+                    .map_err(|_| "Imported key Kit phrase is invalid.")?,
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -259,12 +274,94 @@ impl ImportedKeyKitV3 {
     }
 }
 
-fn parse<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
-    serde_json::from_slice(bytes).map_err(|_| "Imported key Kit shape is invalid.".into())
+/// Decode only a borrowed JSON string token into owned zeroizing storage.
+/// `RawValue` skips serde_json's normal string-unescape scratch buffer; this
+/// decoder preallocates the token length so secret bytes never reallocate.
+fn decode_secret_json(raw: &RawValue) -> Result<Zeroizing<String>, String> {
+    let bytes = raw.get().as_bytes();
+    let invalid = || "Imported key Kit secret string is invalid.".to_string();
+    if bytes.len() < 2 || bytes[0] != b'"' || bytes[bytes.len() - 1] != b'"' {
+        return Err(invalid());
+    }
+    let end = bytes.len() - 1;
+    let mut secret = Zeroizing::new(String::with_capacity(bytes.len()));
+    let mut start = 1;
+    let mut index = 1;
+    while index < end {
+        match bytes[index] {
+            b'\\' => {
+                secret.push_str(std::str::from_utf8(&bytes[start..index]).map_err(|_| invalid())?);
+                index += 1;
+                let escape = *bytes
+                    .get(index)
+                    .filter(|_| index < end)
+                    .ok_or_else(invalid)?;
+                index += 1;
+                match escape {
+                    b'"' => secret.push('"'),
+                    b'\\' => secret.push('\\'),
+                    b'/' => secret.push('/'),
+                    b'b' => secret.push('\u{0008}'),
+                    b'f' => secret.push('\u{000C}'),
+                    b'n' => secret.push('\n'),
+                    b'r' => secret.push('\r'),
+                    b't' => secret.push('\t'),
+                    b'u' => {
+                        let first = decode_json_hex4(bytes, index, end).ok_or_else(invalid)?;
+                        index += 4;
+                        let scalar = if (0xD800..=0xDBFF).contains(&first) {
+                            if bytes.get(index..index + 2) != Some(&b"\\u"[..]) {
+                                return Err(invalid());
+                            }
+                            index += 2;
+                            let second = decode_json_hex4(bytes, index, end).ok_or_else(invalid)?;
+                            index += 4;
+                            if !(0xDC00..=0xDFFF).contains(&second) {
+                                return Err(invalid());
+                            }
+                            0x10000
+                                + ((u32::from(first) - 0xD800) << 10)
+                                + (u32::from(second) - 0xDC00)
+                        } else if (0xDC00..=0xDFFF).contains(&first) {
+                            return Err(invalid());
+                        } else {
+                            u32::from(first)
+                        };
+                        secret.push(char::from_u32(scalar).ok_or_else(invalid)?);
+                    }
+                    _ => return Err(invalid()),
+                }
+                start = index;
+            }
+            b'"' | 0..=0x1F => return Err(invalid()),
+            _ => index += 1,
+        }
+    }
+    secret.push_str(std::str::from_utf8(&bytes[start..end]).map_err(|_| invalid())?);
+    Ok(secret)
+}
+
+fn decode_json_hex4(bytes: &[u8], start: usize, end: usize) -> Option<u16> {
+    if start.checked_add(4)? > end {
+        return None;
+    }
+    bytes[start..start + 4]
+        .iter()
+        .try_fold(0u16, |value, byte| {
+            let digit = match byte {
+                b'0'..=b'9' => u16::from(byte - b'0'),
+                b'a'..=b'f' => u16::from(byte - b'a' + 10),
+                b'A'..=b'F' => u16::from(byte - b'A' + 10),
+                _ => return None,
+            };
+            Some((value << 4) | digit)
+        })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use coincube_core::{
         imported_key_crypt::ImportedKeySecret,
         miniscript::bitcoin::{
@@ -343,6 +440,33 @@ mod tests {
                 .unwrap(),
             }],
         }
+    }
+
+    #[test]
+    fn secret_json_decoder_handles_escapes_without_serde_owned_scratch() {
+        for token in [
+            r#""simple words""#,
+            r#""quote: \" slash: \\ solidus: \/""#,
+            r#""controls: \b\f\n\r\t""#,
+            r#""unicode: \u00e9 \uD83D\uDE80 東京""#,
+            r#""""#,
+        ] {
+            let raw: &RawValue = serde_json::from_str(token).unwrap();
+            let expected: String = serde_json::from_str(token).unwrap();
+            let decoded = decode_secret_json(raw).unwrap();
+            assert_eq!(*decoded, expected);
+        }
+    }
+
+    #[test]
+    fn bounded_secret_writer_rejects_overflow_before_copying() {
+        let mut bytes = Vec::with_capacity(MAX_PLAINTEXT_BYTES);
+        let original_capacity = bytes.capacity();
+        let mut writer = BoundedSecretWriter(&mut bytes);
+        writer.write_all(&vec![b'x'; MAX_PLAINTEXT_BYTES]).unwrap();
+        assert!(writer.write_all(b"overflow").is_err());
+        assert_eq!(bytes.len(), MAX_PLAINTEXT_BYTES);
+        assert_eq!(bytes.capacity(), original_capacity);
     }
 
     #[test]
