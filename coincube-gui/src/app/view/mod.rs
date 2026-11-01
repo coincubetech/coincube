@@ -498,7 +498,8 @@ pub fn dashboard_with_detail<'a>(
 /// Use the same shell for panels with their own scroll handling, such as P2P
 /// chat. `body` owns its content and warnings; the shell owns all navigation.
 ///
-/// No pinned page head here (plan L3 exception): the chat lays out its own
+/// The shell adds no page head. P2P order details pins its own above its
+/// scrollable. The chats have none (plan L3 exception): each lays out its own
 /// header, message list and composer to the pane's full height, and a head
 /// above it would take that height from the messages.
 pub fn dashboard_shell<'a, T: Into<Element<'a, Message>>>(
@@ -1041,13 +1042,15 @@ mod page_head_tests {
     use iced::advanced::widget::operation::{Focusable, Scrollable};
     use iced::advanced::widget::{Id, Operation, Tree};
     use iced::advanced::{layout, renderer::Headless, Layout};
-    use iced::{mouse, Rectangle, Size, Vector};
+    use iced::{mouse, Point, Rectangle, Size, Vector};
 
     const WINDOW: Size = Size::new(1024.0, 768.0);
     const TITLE: &str = "A long page";
 
+    /// The text and scrollables of a laid-out page, as an [`Operation`] sees
+    /// them. Also used by the P2P order details test.
     #[derive(Default)]
-    struct Probe {
+    pub(crate) struct Probe {
         text: Vec<(String, Rectangle)>,
         scrollables: Vec<(Rectangle, Vector)>,
     }
@@ -1076,7 +1079,7 @@ mod page_head_tests {
     }
 
     impl Probe {
-        fn text(&self, value: &str) -> Rectangle {
+        pub(crate) fn text(&self, value: &str) -> Rectangle {
             self.text
                 .iter()
                 .find(|(text, _)| text == value)
@@ -1085,7 +1088,7 @@ mod page_head_tests {
         }
 
         /// The scrollable that holds `inner`, and how far it has scrolled.
-        fn scroller_of(&self, inner: Rectangle) -> (Rectangle, Vector) {
+        pub(crate) fn scroller_of(&self, inner: Rectangle) -> (Rectangle, Vector) {
             *self
                 .scrollables
                 .iter()
@@ -1095,7 +1098,7 @@ mod page_head_tests {
         }
     }
 
-    fn renderer() -> iced::Renderer {
+    pub(crate) fn renderer() -> iced::Renderer {
         for bytes in coincube_ui::font::load() {
             iced::advanced::graphics::text::font_system()
                 .write()
@@ -1117,8 +1120,9 @@ mod page_head_tests {
         dashboard_headed(menu, cache, page_head(cache, TITLE), rows)
     }
 
-    /// Lays the page out as a fresh view, as every frame does, and probes it.
-    fn frame(
+    /// Lays the page out in a 1024×768 window as a fresh view, as every frame
+    /// does, and probes it.
+    pub(crate) fn frame(
         tree: &mut Tree,
         renderer: &iced::Renderer,
         element: &mut Element<'_, Message>,
@@ -1134,6 +1138,32 @@ mod page_head_tests {
             .as_widget_mut()
             .operate(tree, Layout::new(&node), renderer, &mut probe);
         (node, probe)
+    }
+
+    /// Turns the mouse wheel `dy` pixels down the page with the cursor at
+    /// `at`, and returns the messages that publishes.
+    pub(crate) fn wheel(
+        tree: &mut Tree,
+        renderer: &iced::Renderer,
+        element: &mut Element<'_, Message>,
+        node: &layout::Node,
+        at: Point,
+        dy: f32,
+    ) -> Vec<Message> {
+        let mut messages = Vec::new();
+        element.as_widget_mut().update(
+            tree,
+            &iced::Event::Mouse(mouse::Event::WheelScrolled {
+                delta: mouse::ScrollDelta::Pixels { x: 0.0, y: -dy },
+            }),
+            Layout::new(node),
+            mouse::Cursor::Available(at),
+            renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut iced::advanced::Shell::new(&mut messages),
+            &Rectangle::with_size(WINDOW),
+        );
+        messages
     }
 
     #[test]
@@ -1159,18 +1189,13 @@ mod page_head_tests {
             viewport
         );
 
-        let mut messages = Vec::new();
-        element.as_widget_mut().update(
+        let messages = wheel(
             &mut tree,
-            &iced::Event::Mouse(mouse::Event::WheelScrolled {
-                delta: mouse::ScrollDelta::Pixels { x: 0.0, y: -400.0 },
-            }),
-            Layout::new(&node),
-            mouse::Cursor::Available(first_row.center()),
             &renderer,
-            &mut iced::advanced::clipboard::Null,
-            &mut iced::advanced::Shell::new(&mut messages),
-            &Rectangle::with_size(WINDOW),
+            &mut element,
+            &node,
+            first_row.center(),
+            400.0,
         );
         let scrolled = messages
             .iter()
