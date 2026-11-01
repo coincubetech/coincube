@@ -49,7 +49,7 @@ const APP_AT: Duration = Duration::from_millis(900);
 pub(crate) const STALL: Duration = Duration::from_secs(15);
 /// Waiting on Spark this long offers to go on without it, so a Spark or
 /// Breez outage never keeps a user from the rest of their Cube.
-pub(crate) const SPARK_WAIT: Duration = Duration::from_secs(8);
+pub(crate) const SPARK_WAIT: Duration = Duration::from_secs(16);
 
 /// `--lvl` for each stage index.
 const LEVELS: [f32; 6] = [0.35, 0.5, 0.65, 0.8, 0.9, 1.0];
@@ -559,12 +559,13 @@ mod tests {
     }
 
     #[test]
-    fn waiting_on_spark_offers_to_go_on_without_it_sooner_than_cancel() {
+    fn waiting_on_spark_offers_to_go_on_without_it_after_its_own_wait() {
         let t0 = Instant::now();
         let mut opening = Opening::new(Some(floor()), false, Stage::AlmostThere, t0);
         let spark = t0 + ms(2000);
         opening.set_stage(Stage::Spark, spark);
-        assert!(SPARK_WAIT < STALL);
+        // Spark gets its own, longer wait than the other stages' Cancel.
+        assert!(!opening.stalled(spark + STALL));
         assert!(!opening.stalled(spark + SPARK_WAIT - ms(1)));
         assert!(opening.stalled(spark + SPARK_WAIT));
         assert!(
@@ -575,8 +576,9 @@ mod tests {
             opening.level(spark + LEVEL_FADE) > Stage::AlmostThere.level(),
             "Spark is the brightest stage before Ready"
         );
-        opening.set_stage(Stage::Ready, spark + ms(9000));
-        assert!(!opening.stalled(spark + ms(9000)));
+        let ready = spark + SPARK_WAIT + ms(1000);
+        opening.set_stage(Stage::Ready, ready);
+        assert!(!opening.stalled(ready));
     }
 
     #[test]
