@@ -666,3 +666,82 @@ fn launcher_capture_opening() {
         );
     }
 }
+
+/// The dock's plan and Network activity menus, a full plan, and Import or
+/// restore's import path and Overview.
+#[test]
+#[ignore = "writes PNG frames; needs a GPU adapter"]
+fn launcher_capture_dock_and_restore() {
+    let Ok(directory) = std::env::var("LAUNCHER_CAPTURE_DIR") else {
+        return;
+    };
+    let directory = PathBuf::from(directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let mut renderer = renderer().expect("wgpu headless renderer");
+    let size = Size::new(1440.0, 900.0);
+    for light in [false, true] {
+        let appearance = if light { "light" } else { "dark" };
+        let palette = if light {
+            theme::Theme::light()
+        } else {
+            theme::Theme::dark()
+        };
+        let mut full = home(light);
+        full.server_cube_limit = Some(6);
+        let mut home = home(light);
+        home.server_cube_limit = Some(7);
+        home.displayed_networks = vec![ChainId::Bitcoin, ChainId::BitcoinBlake2b];
+        home.catalog.activity.show_for_test(
+            ChainId::Bitcoin,
+            Ok(super::launcher_activity::sample_snapshot()),
+        );
+        save(
+            &mut renderer,
+            super::launcher_catalog::launcher_view(&home),
+            size,
+            &palette,
+            directory.join(format!("{appearance}-dock.png")),
+        );
+        home.catalog.plan_menu = true;
+        save(
+            &mut renderer,
+            super::launcher_catalog::launcher_view(&home),
+            size,
+            &palette,
+            directory.join(format!("{appearance}-dock-plan.png")),
+        );
+        home.catalog.plan_menu = false;
+        home.catalog.activity.menu = true;
+        save(
+            &mut renderer,
+            super::launcher_catalog::launcher_view(&home),
+            size,
+            &palette,
+            directory.join(format!("{appearance}-dock-activity.png")),
+        );
+        home.catalog.activity.menu = false;
+        save(
+            &mut renderer,
+            super::launcher_catalog::launcher_view(&full),
+            size,
+            &palette,
+            directory.join(format!("{appearance}-dock-full.png")),
+        );
+        let _ = home.update(super::Message::View(super::ViewMessage::ShowImportBitcoin));
+        save(
+            &mut renderer,
+            home.create_journey_view(),
+            size,
+            &palette,
+            directory.join(format!("{appearance}-restore-import.png")),
+        );
+        let _ = home.update(super::Message::View(super::ViewMessage::ShowRestoreHub));
+        save(
+            &mut renderer,
+            home.create_journey_view(),
+            size,
+            &palette,
+            directory.join(format!("{appearance}-restore-overview.png")),
+        );
+    }
+}

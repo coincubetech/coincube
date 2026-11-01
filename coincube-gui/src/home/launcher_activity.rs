@@ -130,6 +130,9 @@ pub enum ActivityMessage {
     Frame(Instant),
     /// Opens or closes the dock's source menu.
     Menu(bool),
+    /// Follows Bitcoin Blake2b (`true`) or Bitcoin (`false`) where the
+    /// Network filter names no single network.
+    Blake2b(bool),
 }
 
 /// The Launcher's activity: its two device preferences and the last read.
@@ -146,6 +149,9 @@ pub(super) struct ActivityState {
     /// When the shown tip advanced; the rail slides for [`ARRIVAL`].
     pub(super) arrived: Option<Instant>,
     pub(super) menu: bool,
+    /// The menu's network choice: Bitcoin Blake2b rather than Bitcoin, for
+    /// this session. Applies only while Bitcoin Blake2b is listed.
+    pub(super) blake2b: bool,
 }
 
 impl Default for ActivityState {
@@ -159,6 +165,7 @@ impl Default for ActivityState {
             read_at: None,
             arrived: None,
             menu: false,
+            blake2b: false,
         }
     }
 }
@@ -257,12 +264,15 @@ impl ActivityState {
 }
 
 /// The network the activity follows: the filtered network, Testnet4 for the
-/// test networks, and Bitcoin otherwise.
-pub(super) fn chain_for(filter: NetworkFilter) -> ChainId {
-    match filter {
-        NetworkFilter::Network(chain) => chain,
-        NetworkFilter::Test => ChainId::Testnet4,
-        NetworkFilter::All | NetworkFilter::Live => ChainId::Bitcoin,
+/// test networks, and Bitcoin otherwise; with `blake2b`, the Bitcoin Blake2b
+/// network of the same kind.
+pub(super) fn chain_for(filter: NetworkFilter, blake2b: bool) -> ChainId {
+    match (filter, blake2b) {
+        (NetworkFilter::Network(chain), _) => chain,
+        (NetworkFilter::Test, false) => ChainId::Testnet4,
+        (NetworkFilter::Test, true) => ChainId::BitcoinBlake2bTestnet4,
+        (NetworkFilter::All | NetworkFilter::Live, false) => ChainId::Bitcoin,
+        (NetworkFilter::All | NetworkFilter::Live, true) => ChainId::BitcoinBlake2b,
     }
 }
 
@@ -615,7 +625,17 @@ pub(super) fn from_node(info: &Value, mempool: &Value, fee: &Value) -> Result<Sn
 
 impl Home {
     pub(super) fn activity_chain(&self) -> ChainId {
-        chain_for(self.catalog.filter)
+        let blake2b = self.catalog.activity.blake2b && self.activity_blake2b_offered();
+        chain_for(self.catalog.filter, blake2b)
+    }
+
+    /// The menu offers Bitcoin Blake2b beside Bitcoin while the filter names
+    /// no single network and the Blake2b network of that kind is listed.
+    pub(super) fn activity_blake2b_offered(&self) -> bool {
+        !matches!(self.catalog.filter, NetworkFilter::Network(_))
+            && self
+                .displayed_networks
+                .contains(&chain_for(self.catalog.filter, true))
     }
 
     /// Activity shows on the Cubes floor only, never in the List.
@@ -670,7 +690,17 @@ impl Home {
             }
             ActivityMessage::Menu(open) => {
                 self.catalog.activity.menu = open && self.catalog.activity.enabled;
+                if self.catalog.activity.menu {
+                    self.catalog.plan_menu = false;
+                    self.catalog.key = super::launcher_catalog::KeyCard::default();
+                }
                 Task::none()
+            }
+            ActivityMessage::Blake2b(on) => {
+                self.catalog.activity.blake2b = on && self.activity_blake2b_offered();
+                // The next tick reads the chosen network at once: `due` is
+                // true for a network that is not the one shown.
+                self.update_activity(ActivityMessage::Tick(Instant::now()))
             }
         }
     }
@@ -998,12 +1028,29 @@ mod tests {
 
     #[test]
     fn follows_the_network_filter() {
-        assert_eq!(chain_for(NetworkFilter::All), ChainId::Bitcoin);
-        assert_eq!(chain_for(NetworkFilter::Live), ChainId::Bitcoin);
-        assert_eq!(chain_for(NetworkFilter::Test), ChainId::Testnet4);
+        assert_eq!(chain_for(NetworkFilter::All, false), ChainId::Bitcoin);
+        assert_eq!(chain_for(NetworkFilter::Live, false), ChainId::Bitcoin);
+        assert_eq!(chain_for(NetworkFilter::Test, false), ChainId::Testnet4);
         assert_eq!(
-            chain_for(NetworkFilter::Network(ChainId::BitcoinBlake2b)),
+            chain_for(NetworkFilter::Network(ChainId::BitcoinBlake2b), false),
             ChainId::BitcoinBlake2b
+        );
+    }
+
+    #[test]
+    fn the_blake2b_choice_picks_the_same_kind_unless_one_network_is_filtered() {
+        assert_eq!(chain_for(NetworkFilter::All, true), ChainId::BitcoinBlake2b);
+        assert_eq!(
+            chain_for(NetworkFilter::Live, true),
+            ChainId::BitcoinBlake2b
+        );
+        assert_eq!(
+            chain_for(NetworkFilter::Test, true),
+            ChainId::BitcoinBlake2bTestnet4
+        );
+        assert_eq!(
+            chain_for(NetworkFilter::Network(ChainId::Bitcoin), true),
+            ChainId::Bitcoin
         );
     }
 

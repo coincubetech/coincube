@@ -462,6 +462,9 @@ pub struct Home {
     /// A stable operation identity selected before Cube creation. It is
     /// persisted with the Cube only after the normal backup gate succeeds.
     pending_bitcoin_import: Option<Box<BitcoinImport>>,
+    /// Import or restore shows its Overview (P-Restore's hub) rather than a
+    /// path. Presentation only: it holds no wallet material.
+    restore_hub: bool,
     /// Opens a newly created import Cube through the ordinary unlock path
     /// after the settings reload makes its row available.
     open_created_import_cube: Option<String>,
@@ -652,6 +655,7 @@ impl Home {
                 create_network_confirmed: false,
                 create_network_selection_pending: false,
                 pending_bitcoin_import: None,
+                restore_hub: false,
                 open_created_import_cube: None,
                 creating_cube: false,
                 pending_cube_id: None,
@@ -1122,8 +1126,13 @@ impl Home {
     fn showing_create_journey(&self) -> bool {
         !matches!(self.state, State::Unchecked)
             && matches!(self.active_section, HomeSection::Cubes)
-            && (matches!(self.state, State::CreationBackup(_))
-                || (self.showing_create_form() && self.pending_bitcoin_import.is_none()))
+            && (matches!(self.state, State::CreationBackup(_)) || self.showing_create_form())
+    }
+
+    /// The Create journey shows Import or restore (P-Restore): its Overview,
+    /// or the Bitcoin import path through Cube creation and its backup.
+    fn showing_import_or_restore(&self) -> bool {
+        self.restore_hub || self.pending_bitcoin_import.is_some()
     }
 
     /// "Back to Cube list" needs Cubes somewhere, not under the current
@@ -1167,15 +1176,17 @@ impl Home {
             self.activity_subscription(foreground),
         ]);
         // Escape closes the network menu first, then the activity source
-        // menu, then shuts the Key card.
+        // menu, then the plan menu, then shuts the Key card.
         let menu = self.catalog.network_menu;
         let activity = self.catalog.activity.menu;
+        let plan = self.catalog.plan_menu;
         if foreground
-            && (menu || activity || self.catalog.key_open())
+            && (menu || activity || plan || self.catalog.key_open())
             && launcher_catalog::catalog_visible(self)
         {
-            let escape = iced::keyboard::listen().with((menu, activity)).filter_map(
-                |((menu, activity), event)| match event {
+            let escape = iced::keyboard::listen()
+                .with((menu, activity, plan))
+                .filter_map(|((menu, activity, plan), event)| match event {
                     iced::keyboard::Event::KeyPressed {
                         key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
                         ..
@@ -1185,12 +1196,13 @@ impl Home {
                         launcher_catalog::CatalogMessage::Activity(
                             launcher_activity::ActivityMessage::Menu(false),
                         )
+                    } else if plan {
+                        launcher_catalog::CatalogMessage::PlanMenu(false)
                     } else {
                         launcher_catalog::CatalogMessage::KeyClose
                     }))),
                     _ => None,
-                },
-            );
+                });
             return Subscription::batch([base, escape]);
         }
         base
@@ -1690,6 +1702,7 @@ impl Home {
                     return Task::none();
                 }
                 self.catalog.dismiss_popovers();
+                self.restore_hub = false;
                 if show {
                     self.pending_bitcoin_import = None;
                     self.create_network_confirmed = false;
@@ -1761,6 +1774,25 @@ impl Home {
                 }
                 Task::none()
             }
+            Message::View(ViewMessage::ShowRestoreHub) => {
+                // Leaving a path for the Overview drops that path's intent;
+                // the Cube name and PIN stay as entered.
+                if self.creating_cube
+                    || !matches!(self.state, State::Cubes { .. } | State::NoCube { .. })
+                {
+                    return Task::none();
+                }
+                self.catalog.dismiss_popovers();
+                self.pending_bitcoin_import = None;
+                self.restore_hub = true;
+                if let State::Cubes { create_cube, .. } | State::NoCube { create_cube } =
+                    &mut self.state
+                {
+                    *create_cube = true;
+                }
+                self.error = None;
+                Task::none()
+            }
             Message::View(ViewMessage::ShowImportBitcoin) => {
                 self.catalog.dismiss_popovers();
                 if self.creating_cube
@@ -1775,9 +1807,19 @@ impl Home {
                     self.set_error("Import a Bitcoin wallet from the Bitcoin Cube list.");
                     return Task::none();
                 }
+                // Every entry is disabled at the limit; this refuses a queued
+                // or stale press before the user fills in a name and PIN.
+                if launcher_catalog::project(self).at_limit() {
+                    self.set_error(
+                        "Bitcoin mainnet has no free Cube slot on your plan. Upgrade, or delete \
+                         a Bitcoin mainnet Cube, to import a wallet.",
+                    );
+                    return Task::none();
+                }
                 if self.pending_bitcoin_import.is_none() {
                     self.pending_bitcoin_import = Some(Box::new(BitcoinImport::pending()));
                 }
+                self.restore_hub = false;
                 self.passkey_mode = self.default_passkey_mode();
                 match &mut self.state {
                     State::Cubes { create_cube, .. } | State::NoCube { create_cube } => {
@@ -2737,7 +2779,10 @@ impl Home {
                 self.network = network;
                 self.open_created_import_cube = None;
                 if network != ChainId::Bitcoin {
+                    // Import or restore is Bitcoin only; leaving Bitcoin
+                    // leaves it, so the next list does not reopen it.
                     self.pending_bitcoin_import = None;
+                    self.restore_hub = false;
                 }
                 self.error = None;
                 // Clear stale limit from previous network
@@ -2898,7 +2943,7 @@ impl Home {
                         }
                         self.create_network_selection_pending = false;
                     }
-                    if self.pending_bitcoin_import.is_some() {
+                    if self.showing_import_or_restore() {
                         match &mut state {
                             State::Cubes { create_cube, .. } | State::NoCube { create_cube } => {
                                 *create_cube = true
@@ -4943,7 +4988,7 @@ impl Home {
                 passkey_mode: self.passkey_mode,
                 signed_in: self.connect_account.authenticated_client().is_some(),
                 importing_bitcoin: self.pending_bitcoin_import.is_some(),
-                can_import_bitcoin: self.network == ChainId::Bitcoin,
+                can_import_bitcoin: self.can_start_bitcoin_import(),
                 submit_in_form,
             },
         )
@@ -5141,8 +5186,18 @@ impl Home {
     /// state machines. The controls below dispatch their original messages;
     /// the journey does not hold a second copy of any wallet material.
     fn create_journey_view(&self) -> Element<Message> {
+        self.create_journey_frame().map(Message::View)
+    }
+
+    /// The journey before it is mapped into Home's messages, so tests can
+    /// press its controls as the user does.
+    fn create_journey_frame(&self) -> Element<ViewMessage> {
         let backing_up = matches!(self.state, State::CreationBackup(_));
-        let selecting_network = !backing_up && !self.create_network_confirmed;
+        // Import or restore (P-Restore) shares this frame. Its import path is
+        // Bitcoin only, so it never shows the network step.
+        let restoring = self.showing_import_or_restore();
+        let hub = restoring && self.restore_hub && !backing_up;
+        let selecting_network = !backing_up && !restoring && !self.create_network_confirmed;
         let blake2b = self.network.is_blake2b();
         let light = matches!(
             self.theme_mode,
@@ -5150,7 +5205,15 @@ impl Home {
         );
         // Match the prototype's route through the installer without claiming
         // that Home owns its later steps. The fork has its own ordered path.
-        let steps: &[&str] = if blake2b {
+        // The import path after the Cube: the imported-wallet screens inside
+        // it (Source, Review, Scan) finish the import.
+        let steps: &[&str] = if restoring && self.passkey_mode {
+            &[
+                "Cube", "Passkey", "Backup", "Source", "Review", "Scan", "Done",
+            ]
+        } else if restoring {
+            &["Cube", "Backup", "Source", "Review", "Scan", "Done"]
+        } else if blake2b {
             &[
                 "Network", "PIN", "Vault", "Policy", "Keys", "Seed", "Connect", "Node", "Name",
                 "Done",
@@ -5165,7 +5228,14 @@ impl Home {
                 "Network", "Cube", "Backup", "Connect", "Vault", "Policy", "Keys", "Node", "Done",
             ]
         };
-        let active_step = if selecting_network {
+        let active_step = if restoring {
+            match (backing_up, self.passkey_mode) {
+                (true, true) => 2,
+                (true, false) => 1,
+                (false, true) if self.creating_cube => 1,
+                (false, _) => 0,
+            }
+        } else if selecting_network {
             0
         } else if backing_up {
             if blake2b {
@@ -5325,23 +5395,69 @@ impl Home {
         if launcher_coin::is_test_network(self.network) {
             identity = identity.push(create_journey_tag(self.network.label(), false));
         }
-        let header = Row::new()
-            .align_y(Alignment::Center)
-            .spacing(12)
-            .push(p2_regular("Create Cube"))
-            .push(
-                Container::new(Space::new())
-                    .width(Length::Fixed(1.0))
-                    .height(Length::Fixed(20.0))
-                    .style(|theme: &theme::Theme| iced::widget::container::Style {
-                        background: Some(iced::Background::Color(theme.colors.shell.line)),
-                        ..Default::default()
-                    }),
-            )
-            .push(identity)
-            .push(Space::new().width(Length::Fill));
+        let header_divider = || {
+            Container::new(Space::new())
+                .width(Length::Fixed(1.0))
+                .height(Length::Fixed(20.0))
+                .style(|theme: &theme::Theme| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(theme.colors.shell.line)),
+                    ..Default::default()
+                })
+        };
+        let header = if restoring {
+            Row::new()
+                .align_y(Alignment::Center)
+                .spacing(12)
+                .push(p1_bold("Import or restore"))
+                .push(header_divider())
+                .push(
+                    Row::new()
+                        .spacing(8)
+                        .align_y(Alignment::Center)
+                        .push(create_journey_coin(self.network, light, 16.0))
+                        .push(
+                            p2_regular(launcher_chrome::network_name(self.network))
+                                .style(theme::text::secondary),
+                        ),
+                )
+                .push(Space::new().width(Length::Fill))
+                .push(
+                    // Close leaves Import or restore whenever no Cube is being
+                    // made: to the Cube list, or with none to list, to the
+                    // plain Create form `ShowCreateCube(false)` falls back to.
+                    button::secondary_action(
+                        RESTORE_CLOSE_ID,
+                        Some(icon::cross_icon()),
+                        "Close",
+                        create_journey_focus,
+                    )
+                    .width(Length::Shrink)
+                    .on_press_maybe(
+                        (!backing_up && !self.creating_cube)
+                            .then_some(ViewMessage::ShowCreateCube(false)),
+                    ),
+                )
+        } else {
+            Row::new()
+                .align_y(Alignment::Center)
+                .spacing(12)
+                .push(p2_regular("Create Cube"))
+                .push(
+                    Container::new(Space::new())
+                        .width(Length::Fixed(1.0))
+                        .height(Length::Fixed(20.0))
+                        .style(|theme: &theme::Theme| iced::widget::container::Style {
+                            background: Some(iced::Background::Color(theme.colors.shell.line)),
+                            ..Default::default()
+                        }),
+                )
+                .push(identity)
+                .push(Space::new().width(Length::Fill))
+        };
 
-        let body: Element<ViewMessage> = if selecting_network {
+        let body: Element<ViewMessage> = if hub {
+            self.restore_hub_view()
+        } else if selecting_network {
             let network_row = |chain: ChainId| -> Element<ViewMessage> {
                 let available = self.chain_availability(chain).is_available();
                 let selected = chain == self.network;
@@ -5526,17 +5642,38 @@ impl Home {
                 .into()
         };
 
-        let mut region = Column::new()
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .push(Container::new(header).padding([16, 28]).width(Length::Fill))
-            .push(divider())
-            .push(
-                Container::new(progress)
-                    .padding([14, 28])
-                    .width(Length::Fill),
+        // Import or restore puts its title over the path list as well, so
+        // the header leaves this column there.
+        let (header, mut region) = if restoring {
+            (
+                Some(header),
+                Column::new().width(Length::Fill).height(Length::Fill),
             )
-            .push(divider());
+        } else {
+            (
+                None,
+                Column::new()
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .push(Container::new(header).padding([16, 28]).width(Length::Fill))
+                    .push(divider()),
+            )
+        };
+        // The Overview has no steps; its slot stays so the body below keeps
+        // its place in the tree across a switch to a path.
+        let progress: Element<ViewMessage> = if hub {
+            Space::new().width(Length::Fill).into()
+        } else {
+            Column::new()
+                .push(
+                    Container::new(progress)
+                        .padding([14, 28])
+                        .width(Length::Fill),
+                )
+                .push(divider())
+                .into()
+        };
+        region = region.push(progress);
         // Keep this child slot present for live and test networks. Inserting
         // it only for test chains rebuilds the following scrollable by index,
         // discarding its focused row and scroll offset during a switch.
@@ -5578,7 +5715,39 @@ impl Home {
                 .id(Id::new(CREATE_BODY_SCROLL_ID))
                 .height(Length::Fill),
         );
-        let region = if selecting_network {
+        let region = if hub {
+            region
+        } else if restoring && !backing_up {
+            region.push(divider()).push(
+                Container::new(
+                    Row::new().push(Space::new().width(Length::Fill)).push(
+                        button::primary_action(
+                            "tenshu.create:cube-submit",
+                            None,
+                            if self.creating_cube {
+                                "Creating…"
+                            } else {
+                                "Create Cube"
+                            },
+                            create_journey_focus,
+                        )
+                        .width(Length::Shrink)
+                        .on_press_maybe(
+                            create_cube_can_submit(
+                                &self.create_cube_name,
+                                &self.create_cube_pin,
+                                &self.create_cube_pin_confirm,
+                                self.passkey_mode,
+                                self.creating_cube,
+                            )
+                            .then_some(ViewMessage::CreateCube),
+                        ),
+                    ),
+                )
+                .padding([14, 28])
+                .width(Length::Fill),
+            )
+        } else if selecting_network {
             region.push(divider()).push(
                 Container::new(
                     Row::new().push(Space::new().width(Length::Fill)).push(
@@ -5647,22 +5816,276 @@ impl Home {
         } else {
             region
         };
+        // Import or restore: its title over a path list beside the path.
+        let region: Element<ViewMessage> = if let Some(header) = header {
+            Column::new()
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .push(Container::new(header).padding([16, 28]).width(Length::Fill))
+                .push(divider())
+                .push(
+                    Row::new()
+                        .height(Length::Fill)
+                        .push(self.restore_nav(backing_up))
+                        .push(
+                            Container::new(Space::new())
+                                .width(Length::Fixed(1.0))
+                                .height(Length::Fill)
+                                .style(|theme: &theme::Theme| iced::widget::container::Style {
+                                    background: Some(iced::Background::Color(
+                                        theme.colors.shell.line,
+                                    )),
+                                    ..Default::default()
+                                }),
+                        )
+                        .push(region),
+                )
+                .into()
+        } else {
+            region.into()
+        };
         let stage = Container::new(
             Container::new(region)
                 .style(theme::card::simple)
                 .width(Length::Fill)
-                .max_width(940),
+                .max_width(if restoring { 1120 } else { 940 }),
         )
         .padding([28, 24])
         .center_x(Length::Fill)
         .height(Length::Fill);
-        let frame: Element<ViewMessage> =
-            Container::new(Column::new().height(Length::Fill).push(top_bar).push(stage))
+        Container::new(Column::new().height(Length::Fill).push(top_bar).push(stage))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(theme::container::background)
+            .into()
+    }
+
+    /// Import Bitcoin wallet is open while Bitcoin mainnet is current and
+    /// has a free Cube slot on the plan.
+    fn can_start_bitcoin_import(&self) -> bool {
+        self.network == ChainId::Bitcoin && !launcher_catalog::project(self).at_limit()
+    }
+
+    /// Recover a Vault, where this build turns it on.
+    fn recover_vault_offered(&self) -> bool {
+        self.connect_account.is_authenticated()
+            && !self.network.is_blake2b()
+            && feature_flags::RECOVER_VAULT_ENABLED
+    }
+
+    /// Import or restore's path list (P-Restore's `nav`). A Cube being
+    /// created or backed up keeps the user on its path.
+    fn restore_nav(&self, backing_up: bool) -> Element<ViewMessage> {
+        let locked = backing_up || self.creating_cube;
+        let item = |id: &'static str, label: &'static str, current: bool, message| {
+            FocusableAction::new(Id::new(id), p2_regular(label), create_journey_focus)
                 .width(Length::Fill)
-                .height(Length::Fill)
-                .style(theme::container::background)
+                .padding([10, 12])
+                .style(move |theme, status| {
+                    let mut style = theme::button::transparent(
+                        theme,
+                        if current {
+                            iced::widget::button::Status::Active
+                        } else {
+                            status
+                        },
+                    );
+                    if current {
+                        style.background =
+                            Some(iced::Background::Color(theme.colors.shell.selected));
+                        style.text_color = theme.colors.shell.ink;
+                    }
+                    style
+                })
+                .on_press_maybe((!locked && !current).then_some(message))
+        };
+        let importing = self.pending_bitcoin_import.is_some();
+        let mut nav = Column::new()
+            .spacing(4)
+            .padding([16, 12])
+            .width(Length::Fixed(220.0))
+            .push(item(
+                RESTORE_OVERVIEW_ID,
+                "Overview",
+                self.restore_hub && !importing,
+                ViewMessage::ShowRestoreHub,
+            ))
+            .push(
+                item(
+                    RESTORE_IMPORT_ID,
+                    "Import Bitcoin wallet",
+                    importing,
+                    ViewMessage::ShowImportBitcoin,
+                )
+                .on_press_maybe(
+                    (!locked && !importing && self.can_start_bitcoin_import())
+                        .then_some(ViewMessage::ShowImportBitcoin),
+                ),
+            );
+        if self.recover_vault_offered() {
+            nav = nav.push(item(
+                RESTORE_RECOVER_VAULT_ID,
+                "Recover a Vault",
+                false,
+                ViewMessage::GoToSection(HomeSection::RecoverVault),
+            ));
+        }
+        nav.into()
+    }
+
+    /// Import or restore's Overview (P-Restore's hub): the paths, then the
+    /// Cubes on the Connect account with the restore each one offers.
+    fn restore_hub_view(&self) -> Element<ViewMessage> {
+        let rule = || -> Element<ViewMessage> {
+            Container::new(Space::new())
+                .width(Length::Fill)
+                .height(Length::Fixed(1.0))
+                .style(|theme: &theme::Theme| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(theme.colors.shell.line)),
+                    ..Default::default()
+                })
+                .into()
+        };
+        let path = |title: &'static str,
+                    line: &'static str,
+                    tag: &'static str,
+                    start: Element<'static, ViewMessage>|
+         -> Element<ViewMessage> {
+            Row::new()
+                .spacing(12)
+                .align_y(Alignment::Center)
+                .padding([12, 0])
+                .push(
+                    Column::new()
+                        .spacing(3)
+                        .width(Length::Fill)
+                        .push(p1_regular(title))
+                        .push(p2_regular(line).style(theme::text::secondary)),
+                )
+                .push(create_journey_tag(tag, false))
+                .push(start)
+                .into()
+        };
+        let projection = launcher_catalog::project(self);
+        let mut paths = Column::new().push(rule()).push(path(
+            "Import Bitcoin wallet",
+            "Bring an existing Bitcoin wallet into a new Cube.",
+            "Bitcoin only",
+            button::secondary_action(RESTORE_START_IMPORT_ID, None, "Start", create_journey_focus)
+                .width(Length::Shrink)
+                .on_press_maybe(
+                    self.can_start_bitcoin_import()
+                        .then_some(ViewMessage::ShowImportBitcoin),
+                )
+                .into(),
+        ));
+        if self.recover_vault_offered() {
+            paths = paths.push(rule()).push(path(
+                "Recover a Vault",
+                "Vaults you're a keyholder for.",
+                "Connect sign-in",
+                button::secondary_action(
+                    RESTORE_START_RECOVER_VAULT_ID,
+                    None,
+                    "Start",
+                    create_journey_focus,
+                )
+                .width(Length::Shrink)
+                .on_press(ViewMessage::GoToSection(HomeSection::RecoverVault))
+                .into(),
+            ));
+        }
+        let mut content = Column::new()
+            .spacing(16)
+            .max_width(760)
+            .push(h4_bold("Choose what to bring in"))
+            .push(paths.push(rule()));
+        if self.network == ChainId::Bitcoin && projection.at_limit() {
+            content = content.push(
+                p2_regular(format!(
+                    "Bitcoin mainnet has no free Cube slot on the {} plan. Upgrade, or delete a \
+                     Bitcoin mainnet Cube, to import a wallet.",
+                    projection.tier
+                ))
+                .style(theme::text::warning),
+            );
+        }
+        content = content.push(p1_bold("On your Connect account"));
+        if !self.connect_account.is_authenticated() {
+            return content
+                .push(
+                    p2_regular(
+                        "Sign in to Connect to restore a Cube from its Recovery Kit or with \
+                         your phone.",
+                    )
+                    .style(theme::text::secondary),
+                )
+                .push(
+                    button::secondary_action(
+                        RESTORE_SIGN_IN_ID,
+                        Some(icon::person_icon()),
+                        "Sign in to Connect",
+                        create_journey_focus,
+                    )
+                    .width(Length::Shrink)
+                    .on_press_maybe(
+                        (!self.connect_account.is_checking_session()).then_some(
+                            ViewMessage::GoToSection(HomeSection::Connect(
+                                app::menu::ConnectSubMenu::Overview,
+                            )),
+                        ),
+                    ),
+                )
                 .into();
-        frame.map(Message::View)
+        }
+        // Every Connect Cube on this network: the Launcher's search and
+        // network filter narrow its own lists, not this one.
+        let network = settings::network_to_api_string(self.network);
+        let remotes: Vec<&RemoteCube> = self
+            .remote_cubes
+            .iter()
+            .filter(|cube| !self.network.is_blake2b() && cube.network == network)
+            .collect();
+        if remotes.is_empty() {
+            return content
+                .push(
+                    p2_regular(format!(
+                        "No Cubes on your Connect account to restore on {}.",
+                        self.network.label()
+                    ))
+                    .style(theme::text::secondary),
+                )
+                .into();
+        }
+        let mut cubes = Column::new();
+        for cube in remotes {
+            let restore = launcher_catalog::remote_restore(cube);
+            let mut row = Row::new()
+                .spacing(12)
+                .align_y(Alignment::Center)
+                .padding([12, 0])
+                .push(
+                    Column::new()
+                        .spacing(3)
+                        .width(Length::Fill)
+                        .push(p1_regular(cube.name.clone()))
+                        .push(p2_regular(restore.status).style(theme::text::secondary)),
+                );
+            if let Some((message, label)) = restore.action {
+                row = row.push(
+                    button::secondary_action(
+                        Id::from(format!("tenshu.restore:remote:{}", cube.uuid)),
+                        None,
+                        label,
+                        create_journey_focus,
+                    )
+                    .width(Length::Shrink)
+                    .on_press(message),
+                );
+            }
+            cubes = cubes.push(rule()).push(row);
+        }
+        content.push(cubes.push(rule())).into()
     }
 
     /// Home's frame for every screen except the visible Launcher List: the
@@ -5982,6 +6405,13 @@ const LEGACY_CONNECT_SIGN_IN_ID: &str = "tenshu.launcher.legacy:connect:sign-in"
 const LEGACY_CONNECT_ENTRY_ID: &str = "tenshu.launcher.legacy:connect:entry";
 pub(crate) const CREATE_BODY_SCROLL_ID: &str = "tenshu.create:body";
 const CREATE_BACK_TO_NETWORKS_ID: &str = "tenshu.create:back-to-networks";
+const RESTORE_CLOSE_ID: &str = "tenshu.restore:close";
+const RESTORE_OVERVIEW_ID: &str = "tenshu.restore:nav:overview";
+const RESTORE_IMPORT_ID: &str = "tenshu.restore:nav:import";
+const RESTORE_RECOVER_VAULT_ID: &str = "tenshu.restore:nav:recover-vault";
+const RESTORE_START_IMPORT_ID: &str = "tenshu.restore:start:import";
+const RESTORE_START_RECOVER_VAULT_ID: &str = "tenshu.restore:start:recover-vault";
+const RESTORE_SIGN_IN_ID: &str = "tenshu.restore:sign-in";
 
 fn create_journey_focus(id: Id) -> ViewMessage {
     ViewMessage::Catalog(launcher_catalog::CatalogMessage::Focus(id))
@@ -7223,6 +7653,8 @@ pub enum ViewMessage {
     ConfirmCreateNetwork,
     BackToCreateNetwork,
     ShowImportBitcoin,
+    /// Import or restore's Overview: every way to bring a wallet or Cube in.
+    ShowRestoreHub,
     CubeNameEdited(String),
     CreateCube,
     PinInput(pin_input::Message),
@@ -8721,6 +9153,121 @@ mod tests {
             "rendered labels: {:?}",
             labels.0
         );
+    }
+
+    /// Import Bitcoin wallet opens Import or restore in the Create frame,
+    /// never the legacy sidebar form; its Overview lists the other paths.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn import_opens_import_or_restore_in_the_create_frame() {
+        use iced::advanced::{
+            layout,
+            renderer::Headless,
+            widget::{Id, Operation, Tree},
+            Layout,
+        };
+
+        #[derive(Default)]
+        struct Labels(Vec<String>);
+        impl Operation for Labels {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn text(&mut self, _: Option<&Id>, _: iced::Rectangle, text: &str) {
+                self.0.push(text.to_owned());
+            }
+        }
+        let renderer = <iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(14.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer");
+        let labels = |home: &Home| {
+            let mut element = home.create_journey_view();
+            let mut tree = Tree::new(element.as_widget());
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(iced::Size::ZERO, iced::Size::new(1440.0, 900.0)),
+            );
+            let mut labels = Labels::default();
+            element
+                .as_widget_mut()
+                .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
+            labels.0
+        };
+
+        let mut home = home();
+        home.state = State::NoCube { create_cube: false };
+        let _ = home.update(Message::View(ViewMessage::ShowImportBitcoin));
+        assert!(home.showing_create_journey());
+        let shown = labels(&home);
+        for label in [
+            "Import or restore",
+            "Overview",
+            "Import Bitcoin wallet",
+            "Create a Cube for your Bitcoin wallet",
+            "Source",
+            "Create Cube",
+        ] {
+            assert!(
+                shown.iter().any(|l| l == label),
+                "missing {:?}: {:?}",
+                label,
+                shown
+            );
+        }
+        // Neither the legacy sidebar nor Create's network step.
+        for label in ["Cubes", "Light Mode", "Live networks"] {
+            assert!(
+                !shown.iter().any(|l| l == label),
+                "{:?} shown: {:?}",
+                label,
+                shown
+            );
+        }
+
+        // The Overview drops the import intent and lists the paths.
+        let _ = home.update(Message::View(ViewMessage::ShowRestoreHub));
+        assert!(home.pending_bitcoin_import.is_none());
+        assert!(home.restore_hub);
+        assert!(home.showing_create_journey());
+        let shown = labels(&home);
+        for label in [
+            "Choose what to bring in",
+            "On your Connect account",
+            "Sign in to Connect to restore a Cube from its Recovery Kit or with your phone.",
+        ] {
+            assert!(
+                shown.iter().any(|l| l == label),
+                "missing {:?}: {:?}",
+                label,
+                shown
+            );
+        }
+        assert!(!shown.iter().any(|l| l == "Create Cube"));
+
+        // Back to the import path, then Close leaves both.
+        let _ = home.update(Message::View(ViewMessage::ShowImportBitcoin));
+        assert!(home.pending_bitcoin_import.is_some());
+        assert!(!home.restore_hub);
+        let _ = home.update(Message::View(ViewMessage::ShowRestoreHub));
+        let _ = home.update(Message::View(ViewMessage::ShowCreateCube(false)));
+        assert!(!home.restore_hub);
+        assert!(!home.showing_import_or_restore());
+    }
+
+    #[test]
+    fn a_full_bitcoin_plan_closes_the_import_path() {
+        let mut home = home();
+        home.state = State::NoCube { create_cube: false };
+        assert!(home.can_start_bitcoin_import());
+        home.server_cube_limit = Some(0);
+        assert!(!home.can_start_bitcoin_import());
+        home.server_cube_limit = Some(10);
+        home.network = ChainId::Testnet4;
+        assert!(!home.can_start_bitcoin_import(), "Import is Bitcoin only");
     }
 
     #[test]
