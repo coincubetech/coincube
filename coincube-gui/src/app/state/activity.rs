@@ -17,7 +17,7 @@ use crate::{
         message::Message,
         view::{
             self,
-            activity::{ActivityMessage, WalletFilter},
+            activity::{ActivityMessage, RecentScope, WalletFilter},
         },
         wallet::Wallet,
         wallets::{DomainPayment, DomainRefundableSwap, LiquidBackend, SparkBackend},
@@ -217,6 +217,18 @@ impl Activity {
             .collect()
     }
 
+    /// The rows a "Recent activity" table in `scope` lists: its newest
+    /// [`RECENT_ACTIVITY_ROWS`], read from the same rows as this page.
+    ///
+    /// [`RECENT_ACTIVITY_ROWS`]: view::activity::RECENT_ACTIVITY_ROWS
+    pub fn recent_entries(&self, scope: RecentScope) -> Vec<view::activity::Entry> {
+        self.entries()
+            .into_iter()
+            .filter(|entry| scope.includes(entry.wallet))
+            .take(view::activity::RECENT_ACTIVITY_ROWS)
+            .collect()
+    }
+
     /// No row selected: a wallet page opens without a detail pane.
     pub fn clear_selection(&mut self) {
         self.selected_id = None;
@@ -277,6 +289,22 @@ impl Activity {
             }
             WalletFilter::All | WalletFilter::Liquid => {}
         }
+        Task::batch(tasks)
+    }
+
+    /// [`Self::refresh_wallet`] for each wallet a "Recent activity" table in
+    /// `scope` reads.
+    pub fn refresh_scope(
+        &mut self,
+        scope: RecentScope,
+        daemon: Option<Arc<dyn Daemon + Sync + Send>>,
+        wallet: Option<Arc<Wallet>>,
+    ) -> Task<Message> {
+        let tasks: Vec<_> = scope
+            .sources()
+            .iter()
+            .map(|source| self.refresh_wallet(*source, daemon.clone(), wallet.clone()))
+            .collect();
         Task::batch(tasks)
     }
 
@@ -790,6 +818,14 @@ impl State for Activity {
                         wallet,
                         ..Default::default()
                     };
+                }
+                ActivityMessage::Open(id) => {
+                    // App switches to Activity; it opens unfiltered with this
+                    // row selected. The id is the row's own, not its place in
+                    // a list, so the selection holds while the page reloads.
+                    self.clear_selection();
+                    self.filters = Default::default();
+                    self.selected_id = Some(id);
                 }
             },
             _ => {}

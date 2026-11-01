@@ -8,6 +8,8 @@
 pub mod action;
 pub mod asset_row;
 pub mod balance;
+pub mod bleed;
+pub mod cards;
 pub mod chip;
 pub mod copy_field;
 pub mod disclosure;
@@ -29,6 +31,8 @@ mod gallery;
 pub use action::{chip_action, eye_action, transfer_action, ActionButton};
 pub use asset_row::asset_row;
 pub use balance::{balance, AmountVisibility, BalanceTier, BalanceValue, Figure, MASK};
+pub use bleed::{bleed, Bleed};
+pub use cards::{cards, Cards, CARD_GAP, CARD_MIN_WIDTH};
 pub use chip::{status_badge, status_chip, StatusBadge, StatusChip};
 pub use copy_field::{copy_field, CopyField};
 pub use disclosure::{disclosure, Disclosure};

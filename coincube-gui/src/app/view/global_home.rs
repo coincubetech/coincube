@@ -7,10 +7,10 @@ use coincube_ui::{
     component::{amount::*, button, form, spinner, text::*},
     font::MEDIUM,
     icon::{
-        arrow_down_up_icon, arrow_right, check_circle_icon, check_icon, clipboard_icon, clock_icon,
-        cross_icon, cube_outline_icon, dash_circle_icon, droplet_fill_icon,
-        exclamation_circle_icon, eye_icon, eye_slash_icon, key_icon, lock_icon,
-        question_circle_icon, spark_icon, usd_icon, vault_icon, warning_icon, x_circle_icon,
+        arrow_right, check_circle_icon, check_icon, clipboard_icon, clock_icon, cross_icon,
+        cube_outline_icon, dash_circle_icon, droplet_fill_icon, exclamation_circle_icon, eye_icon,
+        eye_slash_icon, key_icon, lock_icon, question_circle_icon, spark_icon, usd_icon,
+        vault_icon, warning_icon, x_circle_icon,
     },
     theme,
     widget::{action::Action, *},
@@ -2581,7 +2581,7 @@ pub fn global_home_view<'a>(
     let total_balance_masked = overview_masks.total;
 
     // Step machine:
-    //   0 — overview (wallet cards + page-level Transfer button)
+    //   0 — overview (wallet cards; Transfer is the page head's action)
     //   1 — Wallets, then Amount (and, to another Cube, Other Cube and
     //       Unlock in between): see `TransferPage`
     //   2 — Review
@@ -3211,7 +3211,7 @@ pub fn global_home_view<'a>(
         .spacing(8)
         .width(Length::Fill)
         .align_y(Alignment::Center)
-        .push(h3("Total Balance").bold())
+        .push(h3("Total balance").bold())
         .push(overview_eye(
             cube_id,
             "Total Balance",
@@ -3299,60 +3299,66 @@ pub fn global_home_view<'a>(
                     ))
                     .align_y(Alignment::Center),
             )
-            .push_maybe(spark_card)
-            .push_maybe(has_liquid.then_some(liquid_card))
-            .push(vault_card_element)
-            .push_maybe(
-                transfer_available(has_liquid, has_vault, has_spark).then(|| {
-                    // Disable Transfer while any wallet's balance hasn't been
-                    // corroborated yet. The amount-entry view and wallet picker
-                    // both consume the raw balance values to render available-
-                    // funds hints and to cap validation; opening Transfer
-                    // pre-load would surface a misleading zero / stale cap for
-                    // whichever wallet hasn't finished syncing.
-                    Container::new(
-                        landing_button(
-                            landing_control_id(cube_id, "Hub", "transfer"),
-                            "Transfer",
-                            Some(arrow_down_up_icon()),
-                            Message::FocusAction,
-                            transfer_balance_ready(
-                                total_balance_loading,
-                                has_spark,
-                                spark_balance_loaded,
-                            )
-                            .then_some(Message::Home(HomeMessage::NextStep)),
-                            |_t, _s| iced::widget::button::Style {
-                                text_color: color::ORANGE,
-                                border: iced::Border {
-                                    color: color::ORANGE,
-                                    width: 1.0,
-                                    radius: 8.0.into(),
-                                },
-                                background: Some(iced::Background::Color(
-                                    _t.colors.cards.simple.background,
-                                )),
-                                ..Default::default()
-                            },
-                        )
-                        .width(Length::Fixed(150.0)),
-                    )
-                    .width(Length::Fill)
-                    .center_x(Length::Fill)
-                }),
-            )
-            .push_maybe(
-                transfer_available(has_liquid, has_vault, has_spark)
-                    .then(|| Space::new().height(Length::Fixed(30.0))),
-            ),
+            // `.cards`: two to a row while the column fits them.
+            .push(coincube_ui::component::tenshu::cards(
+                spark_card
+                    .into_iter()
+                    .chain(has_liquid.then_some(liquid_card))
+                    .chain(std::iter::once(vault_card_element)),
+            )),
     )
-    .padding([0, 16])
     .into();
 
     (overview, transfer)
 }
 
-/// Gate for the page-level Transfer button: a transfer needs two wallets to
+/// The Overview page (`P-Overview`): its head with the Transfer action, the
+/// balances and wallet cards, then "Recent activity" (`.sec`, 36px below).
+pub fn overview_page<'a>(
+    menu: &'a Menu,
+    cache: &'a crate::app::cache::Cache,
+    transfer: Option<Element<'a, Message>>,
+    overview: Element<'a, Message>,
+    recent_activity: Option<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let mut head = crate::app::view::page_head(cache, "Overview");
+    if let Some(transfer) = transfer {
+        head = head.action(transfer);
+    }
+    let body = Column::new()
+        .spacing(36)
+        .push(overview)
+        .push_maybe(recent_activity);
+    crate::app::view::dashboard_headed(menu, cache, head, body)
+}
+
+/// The Overview head's Transfer action (`P-Overview` `.hact`), present while
+/// two wallets can move funds between them. It opens the transfer dialog
+/// (#924).
+///
+/// It stays disabled while any wallet's balance hasn't been corroborated
+/// yet. The amount-entry view and wallet picker both consume the raw balance
+/// values to render available-funds hints and to cap validation; opening
+/// Transfer pre-load would surface a misleading zero / stale cap for
+/// whichever wallet hasn't finished syncing.
+pub fn transfer_head_action<'a>(config: &GlobalViewConfig<'_>) -> Option<Element<'a, Message>> {
+    transfer_available(config.has_liquid, config.has_vault, config.has_spark).then(|| {
+        coincube_ui::component::tenshu::transfer_action(
+            landing_control_id(config.cube_id, "Hub", "transfer"),
+            Message::FocusAction,
+            transfer_balance_ready(
+                config.total_balance_loading,
+                config.has_spark,
+                config.spark_balance_loaded,
+            )
+            .then_some(Message::Home(HomeMessage::NextStep)),
+        )
+        .compact()
+        .into()
+    })
+}
+
+/// Gate for the Overview's Transfer action: a transfer needs two wallets to
 /// move funds between, so at least two of the three must be present.
 ///
 /// This used to be `has_vault || has_spark`, on the assumption that Liquid was
@@ -3385,6 +3391,16 @@ mod tests {
     /// The Overview a step renders beneath any transfer dialog.
     fn overview(config: GlobalViewConfig<'_>) -> Element<'_, Message> {
         global_home_view(config).0
+    }
+
+    /// The Overview's head as the page draws it: its title and its Transfer
+    /// action (the Cube line needs a cache, and has no controls).
+    fn overview_head(config: GlobalViewConfig<'_>) -> Element<'static, Message> {
+        let mut head = coincube_ui::component::tenshu::page_head("Overview", Message::FocusAction);
+        if let Some(transfer) = transfer_head_action(&config) {
+            head = head.action(transfer);
+        }
+        head.view(crate::app::view::page_gutter)
     }
 
     /// The dialog a transfer step (1–3) lays over the Overview.
@@ -3613,8 +3629,12 @@ mod tests {
                     appearance,
                     theme,
                 );
-                assert!(normal.contains("Total Balance"));
+                assert!(normal.contains("Total balance"));
+                assert!(!normal.contains("Total Balance"));
                 assert!(normal.contains("Wallets"));
+                // Transfer is the head's action now, not a button under the
+                // cards.
+                assert!(!normal.has_focus(landing_control_id("test-cube", "Hub", "transfer")));
                 for (wallet, control) in [
                     ("Spark", "open"),
                     ("Spark", "send-btc"),
@@ -3904,7 +3924,7 @@ mod tests {
         Space,
     }
 
-    /// Send real pointer/key events to the production Hub tree. Disabled
+    /// Send real pointer/key events to the Overview's head. Disabled
     /// Actions do not expose focus IDs, so pointer targeting uses the rendered
     /// Transfer text bounds rather than assuming a focusable Action exists.
     fn activate_transfer(
@@ -3927,9 +3947,8 @@ mod tests {
                 .unwrap()
                 .load_font(bytes);
         }
-        // The Hub's Transfer action can sit below the 900px viewport. Expose
-        // the same production tree in a tall headless viewport for activation;
-        // the separate capture still checks the real 1440×900 geometry.
+        // The capture's 953px pane at 1440×900, so the label's bounds from
+        // the capture land on the action.
         let size = Size::new(953.0, 2400.0);
         assert!(
             text_bounds.y >= 0.0 && text_bounds.y + text_bounds.height <= size.height,
@@ -4044,7 +4063,7 @@ mod tests {
             config.total_balance_loading = snapshot.total_balance_loading;
             let inspection = capture::inspect(
                 &format!("hub-transfer-{}", snapshot.name),
-                overview(config),
+                overview_head(config),
                 (1440, 900),
                 "dark",
                 theme::Theme::dark(),
@@ -4053,7 +4072,7 @@ mod tests {
                 .text
                 .iter()
                 .find_map(|(value, bounds)| (value == "Transfer").then_some(*bounds))
-                .expect("rendered Hub Transfer label");
+                .expect("rendered head Transfer label");
             let expected = matches!(
                 snapshot.name,
                 "trusted-postsync" | "trusted-refresh-error" | "no-spark"
@@ -4078,7 +4097,7 @@ mod tests {
                 config.spark_balance_loaded = snapshot.spark_balance_loaded;
                 config.spark_balance_error = snapshot.spark_balance_error;
                 config.total_balance_loading = snapshot.total_balance_loading;
-                let messages = activate_transfer(overview(config), text_bounds, trigger);
+                let messages = activate_transfer(overview_head(config), text_bounds, trigger);
                 let next_steps = messages
                     .iter()
                     .filter(|message| matches!(message, Message::Home(HomeMessage::NextStep)))
@@ -4409,6 +4428,81 @@ mod tests {
         }
     }
 
+    /// The Overview body's width in a window `window` wide: the pane beside
+    /// the side menu, then the page column inside its gutters
+    /// (`dashboard_headed`).
+    fn overview_column(window: f32) -> f32 {
+        let pane = window - crate::app::view::nav::split::sidebar_width_for_window(window);
+        coincube_ui::component::tenshu::content_frame(
+            pane,
+            coincube_ui::component::tenshu::PageWidth::Reading,
+            crate::app::view::page_gutter(pane),
+        )
+        .1
+    }
+
+    /// `.cards` at the two required window sizes: side by side in equal
+    /// columns at 1440×900, stacked at the 1024×768 minimum. Liquid is hidden
+    /// in v175, so Spark and the Vault share a row.
+    #[test]
+    fn wallet_cards_sit_side_by_side_at_1440_and_stack_at_1024() {
+        use coincube_ui::component::tenshu::{cards::two_columns, CARD_GAP};
+        let fixture = ViewFixture::new();
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            for outer in [(1024, 768), (1440, 900)] {
+                let width = overview_column(outer.0 as f32).floor();
+                let mut config = fixture.config(0, None, None);
+                config.has_liquid = false;
+                let shown = capture::inspect_wide_content(
+                    "overview-cards",
+                    overview(config),
+                    outer,
+                    appearance,
+                    theme,
+                    width as u32,
+                );
+                let at = |wallet: &str, control: &str| {
+                    let id = landing_control_id("test-cube", wallet, control);
+                    shown
+                        .focus
+                        .iter()
+                        .find(|(focus, _)| *focus == id)
+                        .unwrap_or_else(|| panic!("no {} {}", wallet, control))
+                        .1
+                };
+                let (spark, vault) = (at("Spark", "open"), at("Vault", "open"));
+                if outer.0 == 1440 {
+                    assert!(two_columns(width), "{}", width);
+                    assert_eq!(spark.y, vault.y, "one row");
+                    let column = (width - CARD_GAP) / 2.0;
+                    assert!(
+                        (vault.x - spark.x - (column + CARD_GAP)).abs() < 0.5,
+                        "equal columns: {:?} {:?} in {}",
+                        spark,
+                        vault,
+                        width
+                    );
+                    // A half-width card keeps its row's actions inside it.
+                    let receive = at("Spark", "receive-btc");
+                    let card_right = spark.x - 20.0 + column;
+                    assert!(
+                        receive.x + receive.width <= card_right - 20.0 + 0.5,
+                        "{:?} past {}",
+                        receive,
+                        card_right
+                    );
+                } else {
+                    assert!(!two_columns(width), "{}", width);
+                    assert_eq!(spark.x, vault.x, "stacked");
+                    assert!(vault.y > spark.y);
+                }
+            }
+        }
+    }
+
     #[test]
     fn overview_context_alias_and_section_controls_render() {
         use crate::app::view::shared::landing::capture;
@@ -4463,19 +4557,110 @@ mod tests {
         }
     }
 
-    /// The Overview under its pinned head, at the top and scrolled (Tenshu
-    /// v175 L3). Opt-in: `TOP_BAR_CAPTURE_DIR=<dir> cargo test -p
-    /// coincube-gui --lib page_head_capture -- --ignored`.
+    /// Activity as the Overview reads it in the `P-Overview` captures: Spark
+    /// and Vault rows across today, yesterday and an older day.
+    fn overview_activity() -> crate::app::state::activity::Activity {
+        use crate::app::state::State;
+        use chrono::Local;
+        use coincube_core::miniscript::bitcoin::{
+            absolute, hashes::Hash, transaction, Network, ScriptBuf, Transaction, TxOut,
+            WScriptHash,
+        };
+        let at = |days_ago: i64, hour: u32, minute: u32| {
+            (Local::now().date_naive() - chrono::Duration::days(days_ago))
+                .and_hms_opt(hour, minute, 0)
+                .unwrap()
+                .and_local_timezone(Local)
+                .earliest()
+                .unwrap()
+                .timestamp() as u64
+        };
+        let spark = |id: &str, time: u64, sats: i64, direction: &str, description: &str| {
+            coincube_spark_protocol::PaymentSummary {
+                id: id.into(),
+                amount_sat: sats,
+                fees_sat: 0,
+                token_amount: None,
+                token_decimals: None,
+                token_ticker: None,
+                timestamp: time,
+                status: "completed".into(),
+                direction: direction.into(),
+                method: "lightning".into(),
+                description: Some(description.into()),
+                details: Default::default(),
+            }
+        };
+        let received = |time: u64, sats: u64, n: u8| {
+            let tx = Transaction {
+                version: transaction::Version::TWO,
+                lock_time: absolute::LockTime::from_consensus(u32::from(n)),
+                input: Vec::new(),
+                output: vec![TxOut {
+                    value: Amount::from_sat(sats),
+                    script_pubkey: ScriptBuf::new_p2wsh(&WScriptHash::all_zeros()),
+                }],
+            };
+            crate::daemon::model::HistoryTransaction::new(
+                tx,
+                Some(900_000),
+                Some(time as u32),
+                Vec::new(),
+                vec![0],
+                Network::Bitcoin,
+            )
+        };
+        let cache = crate::app::cache::Cache::default();
+        let mut activity = crate::app::state::activity::Activity::new(None, None);
+        drop(activity.update(
+            None,
+            &cache,
+            crate::app::message::Message::ActivitySparkLoaded(
+                0,
+                Ok((
+                    vec![
+                        spark("p1", at(0, 14, 32), 25_053, "receive", "Received"),
+                        spark("p2", at(0, 9, 40), -4_200, "send", "Coffee"),
+                        spark("p3", at(1, 11, 5), 12_784, "receive", "Lunch split"),
+                    ],
+                    false,
+                )),
+            ),
+        ));
+        drop(activity.update(
+            None,
+            &cache,
+            crate::app::message::Message::ActivityVaultLoaded(
+                0,
+                Ok((
+                    vec![
+                        received(at(1, 21, 15), 40_000, 1),
+                        received(at(12, 8, 0), 125_000, 2),
+                    ],
+                    false,
+                )),
+            ),
+        ));
+        activity
+    }
+
+    /// `P-Overview` under its pinned head, at the top and scrolled: the
+    /// Transfer head action, the wallet cards side by side at 1440×900 and
+    /// stacked at 1024×768, then "Recent activity" (Tenshu v175 L3 and W1).
+    /// Liquid is hidden in v175. Opt-in: `TOP_BAR_CAPTURE_DIR=<dir> cargo
+    /// test -p coincube-gui --lib page_head_capture -- --ignored`.
     #[test]
     #[ignore = "writes PNG frames; needs a GPU adapter"]
     fn page_head_capture_overview() {
         use crate::app::state::preferences::BalancePrivacy;
+        use crate::app::view::activity::{recent_activity, RecentScope};
         use crate::app::view::nav::shell::capture_tests;
         let Some(directory) = capture_tests::directory() else {
             return;
         };
         let mut renderer = capture_tests::renderer();
         let fixture = ViewFixture::new();
+        let activity = overview_activity();
         let menu = Menu::Cube(crate::app::menu::CubeSubMenu::Overview);
         for (appearance, palette) in capture_tests::themes() {
             let light = appearance == "light";
@@ -4489,11 +4674,16 @@ mod tests {
                 || {
                     let mut config = fixture.config(0, None, None);
                     config.light_theme = light;
-                    crate::app::view::dashboard_headed(
+                    config.has_liquid = false;
+                    config.pending_spark_incoming = None;
+                    config.pending_vault_incoming = None;
+                    let transfer = transfer_head_action(&config);
+                    overview_page(
                         &menu,
                         &cache,
-                        crate::app::view::page_head(&cache, "Overview"),
+                        transfer,
                         overview(config),
+                        Some(recent_activity(&activity, &cache, RecentScope::Cube, None)),
                     )
                 },
             );
