@@ -29,8 +29,8 @@ use crate::{
         cache::Cache,
         menu::Menu,
         view::{
-            balance_header_card, dashboard, message::*, vault::coins, vault::psbt,
-            FiatAmountConverter,
+            balance_header_card, dashboard_headed, message::*, vault::coins, vault::psbt,
+            vault_page_head, FiatAmountConverter,
         },
         wallet::SyncStatus,
     },
@@ -62,15 +62,12 @@ pub fn spend_view<'a>(
         .input
         .iter()
         .any(|txin| txin.sequence.is_relative_lock_time());
-    dashboard(
+    dashboard_headed(
         menu,
         cache,
+        vault_page_head(cache, if is_recovery { "Recovery" } else { "Send" }),
         Column::new()
             .spacing(20)
-            .push(
-                Container::new(h3(if is_recovery { "Recovery" } else { "Send" }))
-                    .width(Length::Fill),
-            )
             .push_maybe(mcp_review.then(|| mcp_prepared_review(tx, network)))
             .push(psbt::spend_header(tx, labels_editing, bitcoin_unit))
             .push_maybe(if spend_warnings.is_empty() || saved {
@@ -524,20 +521,6 @@ pub fn create_spend_tx<'a>(
     } else {
         "Send"
     };
-    let heading = Column::new()
-        .spacing(4)
-        .push(text(title).size(H3_SIZE).font(font::SEMIBOLD))
-        .push(
-            text(if cache.cube_name.is_empty() {
-                "Vault".to_string()
-            } else {
-                format!("{} · Vault", cache.cube_name)
-            })
-            .size(P2_SIZE)
-            .style(theme::text::secondary)
-            .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
-        );
-
     let balance_context = Column::new()
         .spacing(10)
         .push(balance_header_card(
@@ -925,14 +908,14 @@ pub fn create_spend_tx<'a>(
     .width(Length::Fill)
     .style(compose_card_style);
 
-    dashboard(
+    dashboard_headed(
         menu,
         cache,
+        vault_page_head(cache, title),
         Container::new(
             Column::new()
                 .spacing(20)
                 .max_width(720)
-                .push(heading)
                 .push(balance_context)
                 .push(compose_card),
         )
@@ -1918,7 +1901,8 @@ mod tests {
                 scenario: base.clone(),
                 present: &[
                     "Send",
-                    "Synthetic Cube · Vault",
+                    // The pinned head's wallet line.
+                    "Vault · Synthetic Cube · Bitcoin mainnet",
                     "Payment details",
                     "Recipients",
                     "Fee rate (sat/vB)",
@@ -2407,7 +2391,10 @@ mod tests {
     fn selected_right_neighbour_does_not_paint_over_focused_preset_ring() {
         for (appearance, mode, theme) in themes() {
             let fixture = Fixture::new(mode, 3);
-            for outer in [COMPACT, WIDE] {
+            // The compact window's width, but tall enough that the presets
+            // sit inside the window under the pinned page head: the ring's
+            // spacing depends on the width, not on how far down they are.
+            for outer in [(COMPACT.0, TALL.1), WIDE] {
                 for (focused, selected) in [(24, 6), (6, 1)] {
                     let context = format!(
                         "{} {:?} focus {} selected {}",

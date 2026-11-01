@@ -92,7 +92,7 @@ fn network_coin<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
     .into()
 }
 
-fn short_cube_name(name: &str) -> String {
+pub(crate) fn short_cube_name(name: &str) -> String {
     // Names are persisted without a length limit and may contain line breaks.
     // Keep fixed sidebar regions to one short, predictable label.
     let mut chars = name.chars().map(|ch| {

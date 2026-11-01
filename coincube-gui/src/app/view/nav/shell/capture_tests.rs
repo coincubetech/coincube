@@ -113,6 +113,53 @@ pub(crate) fn save<M>(
             _ => panic!("{:?} is not a focusable control here: {:?}", id, path),
         }
     }
+    draw_and_save(renderer, element, tree, node, size, theme, path);
+}
+
+/// Lays `element` out at `size`, scrolls by `scroll_by` pixels with the pointer
+/// at `pointer` (as a mouse wheel does), sends the first redraw and saves the
+/// frame to `path`: a page's pinned head over a scrolled body.
+pub(crate) fn save_scrolled<M>(
+    renderer: &mut iced::Renderer,
+    mut element: Element<'_, M>,
+    size: Size,
+    theme: &theme::Theme,
+    pointer: iced::Point,
+    scroll_by: f32,
+    path: PathBuf,
+) {
+    let mut tree = Tree::new(element.as_widget());
+    let node =
+        element
+            .as_widget_mut()
+            .layout(&mut tree, renderer, &layout::Limits::new(Size::ZERO, size));
+    element.as_widget_mut().update(
+        &mut tree,
+        &iced::Event::Mouse(mouse::Event::WheelScrolled {
+            delta: mouse::ScrollDelta::Pixels {
+                x: 0.0,
+                y: -scroll_by,
+            },
+        }),
+        Layout::new(&node),
+        mouse::Cursor::Available(pointer),
+        renderer,
+        &mut iced::advanced::clipboard::Null,
+        &mut Shell::new(&mut Vec::new()),
+        &Rectangle::with_size(size),
+    );
+    draw_and_save(renderer, element, tree, node, size, theme, path);
+}
+
+fn draw_and_save<M>(
+    renderer: &mut iced::Renderer,
+    mut element: Element<'_, M>,
+    mut tree: Tree,
+    node: layout::Node,
+    size: Size,
+    theme: &theme::Theme,
+    path: PathBuf,
+) {
     let viewport = Rectangle::with_size(size);
     renderer.reset(viewport);
     element.as_widget_mut().update(
@@ -159,7 +206,7 @@ pub(crate) fn themes() -> [(&'static str, theme::Theme); 2] {
     ]
 }
 
-fn cache(light: bool, privacy: BalancePrivacy) -> Cache {
+pub(crate) fn cache(light: bool, privacy: BalancePrivacy) -> Cache {
     Cache {
         cube_name: "Everyday".into(),
         has_vault: true,
@@ -295,6 +342,40 @@ fn side_panel_capture() {
             &palette,
             Some(Id::new("tenshu.shell.nav.Spark")),
             directory.join(format!("side-panel-{appearance}-focus-spark-1024x768.png")),
+        );
+    }
+}
+
+/// Saves `page` for the page-head review (Tenshu v175 L3): at each window,
+/// once at the top and once scrolled, so the pinned head can be checked
+/// over a body that has moved under it. Files are
+/// `page-head-{name}-{appearance}-{width}x{height}-{top|scrolled}.png`.
+pub(crate) fn save_page_head_frames<'a>(
+    renderer: &mut iced::Renderer,
+    directory: &std::path::Path,
+    name: &str,
+    appearance: &str,
+    palette: &theme::Theme,
+    mut page: impl FnMut() -> Element<'a, crate::app::view::Message>,
+) {
+    for (width, height) in WINDOWS {
+        let size = Size::new(width, height);
+        let file = |state: &str| {
+            directory.join(format!(
+                "page-head-{name}-{appearance}-{width}x{height}-{state}.png"
+            ))
+        };
+        save(renderer, page(), size, palette, None, file("top"));
+        // The pointer over the body, right of the side panel and below the head.
+        let pointer = iced::Point::new(width * 0.6, height * 0.7);
+        save_scrolled(
+            renderer,
+            page(),
+            size,
+            palette,
+            pointer,
+            600.0,
+            file("scrolled"),
         );
     }
 }

@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use coincube_core::miniscript::bitcoin::Amount;
 use coincube_spark_protocol::PaymentSummary;
+use coincube_ui::component::tenshu::PageHead;
 use coincube_ui::widget::Element;
 use iced::Task;
 
@@ -91,7 +92,16 @@ impl SparkOverview {
         cache: &'a Cache,
         address: Option<Element<'a, view::Message>>,
     ) -> Element<'a, view::Message> {
-        view::dashboard(menu, cache, self.page_body(cache, address, None))
+        view::dashboard_headed(
+            menu,
+            cache,
+            Self::page_head(cache),
+            self.page_body(cache, address, None),
+        )
+    }
+
+    fn page_head<'a>(cache: &Cache) -> PageHead<'a, view::Message> {
+        view::wallet_page_head(cache, "Spark", cache.wallet_names.spark.as_deref())
     }
 
     /// The balance, "Recent activity" (from Activity, mounted by App) and
@@ -166,6 +176,7 @@ impl SparkOverview {
         let page = view::dashboard_with_detail(
             menu,
             cache,
+            move || Self::page_head(cache),
             move || self.page_body(cache, Some(address()), Some(recent_activity())),
             detail,
         );

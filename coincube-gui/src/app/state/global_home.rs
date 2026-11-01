@@ -858,7 +858,8 @@ impl State for GlobalHome {
                 locked_again: self.other_locked_again,
             },
         });
-        let content = view::dashboard(menu, cache, overview);
+        let content =
+            view::dashboard_headed(menu, cache, view::page_head(cache, "Overview"), overview);
         // A QR card or the signer can open over Review. Iced draws only the
         // root widget's overlay, so beneath one of those the transfer dialog
         // is laid out in the base instead (the upper modal already blocks the

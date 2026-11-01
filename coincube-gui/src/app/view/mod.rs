@@ -35,7 +35,12 @@ use iced::{
     Alignment, Length,
 };
 
-use coincube_ui::component::tenshu::{gutter_for_window, PageWidth};
+use coincube_ui::component::tenshu::{
+    gutter_for_window,
+    page::{PAGE_BOTTOM, PAGE_TOP},
+    page_head::BODY_TOP,
+    PageHead, PageWidth,
+};
 use coincube_ui::component::text::Text;
 use coincube_ui::{
     color,
@@ -125,6 +130,8 @@ pub fn spark_notice_banner(notice: &SparkNotice) -> Element<'_, Message> {
     page(body, PageWidth::Reading).vertical(8.0, 8.0).into()
 }
 
+/// A Cube page with no head of its own. Settings and the Vault's Tools still
+/// get theirs from the route (see [`dashboard_with_info_layout`]).
 pub fn dashboard<'a, T: Into<Element<'a, Message>>>(
     menu: &'a Menu,
     cache: &'a Cache,
@@ -138,6 +145,114 @@ pub fn dashboard<'a, T: Into<Element<'a, Message>>>(
         cache.avatar_handle.as_ref(),
         cache.lightning_address.as_deref(),
     )
+}
+
+/// A Cube page under a pinned [`page_head`]: the head stays put and only
+/// `content` scrolls (HANDOFF "v175 delta", "Page head").
+pub fn dashboard_headed<'a, T: Into<Element<'a, Message>>>(
+    menu: &'a Menu,
+    cache: &'a Cache,
+    head: PageHead<'a, Message>,
+    content: T,
+) -> Element<'a, Message> {
+    dashboard_with_info_layout(
+        menu,
+        cache,
+        Some(head),
+        content,
+        &cache.cube_name,
+        cache.avatar_handle.as_ref(),
+        cache.lightning_address.as_deref(),
+        PageWidth::Reading,
+    )
+}
+
+/// The Cube's coin, the mark before a page head's Cube line (`.idl > img`).
+pub fn cube_coin<'a>(cache: &Cache) -> Element<'a, Message> {
+    let light = matches!(
+        cache.theme_mode,
+        coincube_ui::theme::palette::ThemeMode::Light
+    );
+    iced::widget::Svg::new(iced::widget::svg::Handle::from_memory(
+        crate::home::launcher_coin::widget_source(cache.chain(), 16.0, 1.0, light).into_bytes(),
+    ))
+    .width(Length::Fixed(16.0))
+    .height(Length::Fixed(16.0))
+    .into()
+}
+
+/// "‹name› · ‹network›", the line under a page title.
+pub fn network_line(cache: &Cache, name: &str) -> String {
+    format!("{name} · {}", nav::shell::network_label(cache.chain()))
+}
+
+/// The Cube's name as the side panel shows it, or "Cube" while it has none.
+/// Names are saved without a length limit and may hold line breaks, and a
+/// pinned head doesn't scroll, so heads get the same one-line, 16-character
+/// cut.
+pub fn cube_display_name(cache: &Cache) -> String {
+    if cache.cube_name.is_empty() {
+        "Cube".to_owned()
+    } else {
+        nav::shell::short_cube_name(&cache.cube_name)
+    }
+}
+
+/// A pinned page head: `title`, then the Cube's coin and "‹Cube› · ‹network›".
+/// Add the page's actions and its back target with the [`PageHead`] builders.
+pub fn page_head<'a>(
+    cache: &Cache,
+    title: impl iced::widget::text::IntoFragment<'a>,
+) -> PageHead<'a, Message> {
+    coincube_ui::component::tenshu::page_head(title, Message::FocusAction).context(
+        cube_coin(cache),
+        network_line(cache, &cube_display_name(cache)),
+    )
+}
+
+/// A wallet page's head: "Spark · ‹nickname›" or "Vault · ‹alias›" as the
+/// side panel names it, plain "Spark" or "Vault" without a name.
+pub fn wallet_page_head<'a>(
+    cache: &Cache,
+    wallet: &str,
+    name: Option<&str>,
+) -> PageHead<'a, Message> {
+    page_head(cache, nav::shell::wallet_label(wallet, name))
+}
+
+/// The head of a page inside a wallet (Send, Receive, its activity, a
+/// transaction): `title`, then the coin and "‹wallet› · ‹Cube› · ‹network›",
+/// so the page still says which wallet it belongs to (the H-Send boards).
+pub fn wallet_sub_page_head<'a>(
+    cache: &Cache,
+    wallet: &str,
+    name: Option<&str>,
+    title: impl iced::widget::text::IntoFragment<'a>,
+) -> PageHead<'a, Message> {
+    coincube_ui::component::tenshu::page_head(title, Message::FocusAction).context(
+        cube_coin(cache),
+        format!(
+            "{} · {}",
+            nav::shell::wallet_label(wallet, name),
+            network_line(cache, &cube_display_name(cache))
+        ),
+    )
+}
+
+/// [`wallet_sub_page_head`] for a Spark page.
+pub fn spark_page_head<'a>(
+    cache: &Cache,
+    title: impl iced::widget::text::IntoFragment<'a>,
+) -> PageHead<'a, Message> {
+    wallet_sub_page_head(cache, "Spark", cache.wallet_names.spark.as_deref(), title)
+}
+
+/// [`wallet_sub_page_head`] for a Vault page.
+pub fn vault_page_head<'a>(
+    cache: &Cache,
+    title: impl iced::widget::text::IntoFragment<'a>,
+) -> PageHead<'a, Message> {
+    wallet_sub_page_head(cache, "Vault", cache.wallet_names.vault.as_deref(), title)
 }
 
 /// Activity fills the content area edge to edge (`.main`) so its header and
@@ -178,11 +293,13 @@ pub fn dashboard_activity<'a, T: Into<Element<'a, Message>>>(
 pub fn dashboard_payment<'a, T: Into<Element<'a, Message>>>(
     menu: &'a Menu,
     cache: &'a Cache,
+    head: Option<PageHead<'a, Message>>,
     content: T,
 ) -> Element<'a, Message> {
     dashboard_with_info_layout(
         menu,
         cache,
+        head,
         content,
         &cache.cube_name,
         cache.avatar_handle.as_ref(),
@@ -226,6 +343,7 @@ pub fn dashboard_with_info<'a, T: Into<Element<'a, Message>>>(
     dashboard_with_info_layout(
         menu,
         cache,
+        None,
         content,
         cube_name,
         avatar_handle,
@@ -234,15 +352,41 @@ pub fn dashboard_with_info<'a, T: Into<Element<'a, Message>>>(
     )
 }
 
+/// The pinned head over a page's scrollable, or an empty slot. The slot is
+/// always there, so a head that comes and goes (a Send that turns into its
+/// celebration) never moves the scrollable in the tree and resets its offset.
+fn head_slot<'a>(head: Option<PageHead<'a, Message>>) -> Element<'a, Message> {
+    head.map(|head| head.view(page_gutter))
+        .unwrap_or_else(|| Space::new().into())
+}
+
+/// The page body's top padding: tighter under a head (`.main .pg`).
+fn body_top(headed: bool) -> f32 {
+    if headed {
+        BODY_TOP
+    } else {
+        PAGE_TOP
+    }
+}
+
+/// `head` is the page's own; without one, Settings and the Vault's Tools
+/// take theirs from the route. Their scope chips, tabs and tool tabs stay in
+/// the body for now (plan W5, W6).
+#[allow(clippy::too_many_arguments)]
 fn dashboard_with_info_layout<'a, T: Into<Element<'a, Message>>>(
     menu: &'a Menu,
     cache: &'a Cache,
+    head: Option<PageHead<'a, Message>>,
     content: T,
     cube_name: &'a str,
     avatar_handle: Option<&'a iced::widget::image::Handle>,
     lightning_address: Option<&'a str>,
     width: PageWidth,
 ) -> Element<'a, Message> {
+    let head = head
+        .map(|head| vault::tools::with_back(menu, head))
+        .or_else(|| settings::frame::page_head(menu, cache))
+        .or_else(|| vault::tools::page_head(menu, cache));
     let body = page(
         Column::new()
             .push_maybe(settings::frame::in_content_navigation(menu, cache))
@@ -250,10 +394,12 @@ fn dashboard_with_info_layout<'a, T: Into<Element<'a, Message>>>(
             .push(content.into())
             .width(Length::Fill),
         width,
-    );
+    )
+    .vertical(body_top(head.is_some()), PAGE_BOTTOM);
     let content_column: Element<'_, Message> = Column::new()
         .push(warn(None))
         .push_maybe(cache.spark_notice.as_ref().map(spark_notice_banner))
+        .push(head_slot(head))
         .push(
             Container::new(scrollable(body).on_scroll(|w| Message::Scroll(w.absolute_offset().y)))
                 .width(Length::Fill)
@@ -278,27 +424,39 @@ const WALLET_PAGE_SCROLL_ID: &str = "tenshu.wallet.page.scroll";
 /// A reading page with Activity's detail pane (`.det`) for a selected row:
 /// beside the page at the content's right edge when both fit, else over the
 /// page from that edge. `content` and `detail` are rebuilt per layout width.
+///
+/// The pinned `head` spans the page beside the pane, not the pane itself.
 pub fn dashboard_with_detail<'a>(
     menu: &'a Menu,
     cache: &'a Cache,
+    head: impl Fn() -> PageHead<'a, Message> + 'a,
     content: impl Fn() -> Element<'a, Message> + 'a,
     detail: impl Fn() -> Option<Element<'a, Message>> + 'a,
 ) -> Element<'a, Message> {
     let body = iced::widget::responsive(move |size: iced::Size| {
-        let page_body = Container::new(
-            scrollable(page(
-                Column::new()
-                    .push_maybe(settings::frame::in_content_navigation(menu, cache))
-                    .push(content())
-                    .width(Length::Fill),
-                PageWidth::Reading,
-            ))
-            .id(iced::advanced::widget::Id::from(WALLET_PAGE_SCROLL_ID))
-            .on_scroll(|w| Message::Scroll(w.absolute_offset().y)),
-        )
-        .width(Length::Fill)
-        .style(theme::container::background)
-        .height(Length::Fill);
+        let page_body = Column::new()
+            .push(head_slot(Some(head())))
+            .push(
+                Container::new(
+                    scrollable(
+                        page(
+                            Column::new()
+                                .push_maybe(settings::frame::in_content_navigation(menu, cache))
+                                .push(content())
+                                .width(Length::Fill),
+                            PageWidth::Reading,
+                        )
+                        .vertical(BODY_TOP, PAGE_BOTTOM),
+                    )
+                    .id(iced::advanced::widget::Id::from(WALLET_PAGE_SCROLL_ID))
+                    .on_scroll(|w| Message::Scroll(w.absolute_offset().y)),
+                )
+                .width(Length::Fill)
+                .style(theme::container::background)
+                .height(Length::Fill),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill);
         // The page keeps one place in the tree, pane or not, beside or over:
         // otherwise Iced drops its scroll offset when a row is selected.
         let detail = detail();
@@ -343,6 +501,11 @@ pub fn dashboard_with_detail<'a>(
 
 /// Use the same shell for panels with their own scroll handling, such as P2P
 /// chat. `body` owns its content and warnings; the shell owns all navigation.
+///
+/// The shell adds no page head. P2P order details pins its own above its
+/// scrollable. The chats have none (plan L3 exception): each lays out its own
+/// header, message list and composer to the pane's full height, and a head
+/// above it would take that height from the messages.
 pub fn dashboard_shell<'a, T: Into<Element<'a, Message>>>(
     menu: &'a Menu,
     cache: &'a Cache,
@@ -867,6 +1030,364 @@ mod page_tests {
             let pane = window - sidebar_width_for_window(window);
             let off = (page_gutter(pane) - gutter_for_window(window)).abs();
             assert!(off <= 1.21, "window {}: off by {}", window, off);
+        }
+    }
+}
+
+#[cfg(test)]
+mod page_head_tests {
+    use super::{
+        dashboard, dashboard_headed, page_head, spark_page_head, vault_page_head, wallet_page_head,
+        Message,
+    };
+    use crate::app::cache::{Cache, WalletNames};
+    use crate::app::menu::{CubeSettingsOption, CubeSubMenu, Menu, VaultSubMenu};
+    use coincube_ui::component::tenshu::PageHead;
+    use coincube_ui::widget::{Column, Element};
+    use iced::advanced::widget::operation::{Focusable, Scrollable};
+    use iced::advanced::widget::{Id, Operation, Tree};
+    use iced::advanced::{layout, renderer::Headless, Layout};
+    use iced::{mouse, Point, Rectangle, Size, Vector};
+
+    const WINDOW: Size = Size::new(1024.0, 768.0);
+    const TITLE: &str = "A long page";
+
+    /// The text and scrollables of a laid-out page, as an [`Operation`] sees
+    /// them. Also used by the P2P order details test.
+    #[derive(Default)]
+    pub(crate) struct Probe {
+        text: Vec<(String, Rectangle)>,
+        scrollables: Vec<(Rectangle, Vector)>,
+    }
+
+    impl Operation for Probe {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+
+        fn text(&mut self, _id: Option<&Id>, bounds: Rectangle, value: &str) {
+            self.text.push((value.to_owned(), bounds));
+        }
+
+        fn focusable(&mut self, _id: Option<&Id>, _bounds: Rectangle, _: &mut dyn Focusable) {}
+
+        fn scrollable(
+            &mut self,
+            _id: Option<&Id>,
+            bounds: Rectangle,
+            _content_bounds: Rectangle,
+            translation: Vector,
+            _state: &mut dyn Scrollable,
+        ) {
+            self.scrollables.push((bounds, translation));
+        }
+    }
+
+    impl Probe {
+        pub(crate) fn text(&self, value: &str) -> Rectangle {
+            self.text
+                .iter()
+                .find(|(text, _)| text == value)
+                .unwrap_or_else(|| panic!("no {:?}", value))
+                .1
+        }
+
+        /// The scrollable that holds `inner`, and how far it has scrolled.
+        pub(crate) fn scroller_of(&self, inner: Rectangle) -> (Rectangle, Vector) {
+            *self
+                .scrollables
+                .iter()
+                .filter(|(bounds, _)| bounds.x <= inner.x && inner.x < bounds.x + bounds.width)
+                .max_by(|(a, _), (b, _)| a.width.partial_cmp(&b.width).unwrap())
+                .expect("a scrollable around the page body")
+        }
+    }
+
+    pub(crate) fn renderer() -> iced::Renderer {
+        for bytes in coincube_ui::font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(bytes);
+        }
+        iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(14.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap()
+    }
+
+    fn long_page<'a>(menu: &'a Menu, cache: &'a Cache) -> Element<'a, Message> {
+        let rows = (0..80).fold(Column::new().spacing(12), |column, row| {
+            column.push(iced::widget::text(format!("Row {}", row)).size(14))
+        });
+        dashboard_headed(menu, cache, page_head(cache, TITLE), rows)
+    }
+
+    /// Lays the page out in a 1024×768 window as a fresh view, as every frame
+    /// does, and probes it.
+    pub(crate) fn frame(
+        tree: &mut Tree,
+        renderer: &iced::Renderer,
+        element: &mut Element<'_, Message>,
+    ) -> (layout::Node, Probe) {
+        tree.diff(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            tree,
+            renderer,
+            &layout::Limits::new(Size::ZERO, WINDOW),
+        );
+        let mut probe = Probe::default();
+        element
+            .as_widget_mut()
+            .operate(tree, Layout::new(&node), renderer, &mut probe);
+        (node, probe)
+    }
+
+    /// Turns the mouse wheel `dy` pixels down the page with the cursor at
+    /// `at`, and returns the messages that publishes.
+    pub(crate) fn wheel(
+        tree: &mut Tree,
+        renderer: &iced::Renderer,
+        element: &mut Element<'_, Message>,
+        node: &layout::Node,
+        at: Point,
+        dy: f32,
+    ) -> Vec<Message> {
+        let mut messages = Vec::new();
+        element.as_widget_mut().update(
+            tree,
+            &iced::Event::Mouse(mouse::Event::WheelScrolled {
+                delta: mouse::ScrollDelta::Pixels { x: 0.0, y: -dy },
+            }),
+            Layout::new(node),
+            mouse::Cursor::Available(at),
+            renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut iced::advanced::Shell::new(&mut messages),
+            &Rectangle::with_size(WINDOW),
+        );
+        messages
+    }
+
+    #[test]
+    fn the_head_stays_put_while_a_long_page_scrolls_under_it() {
+        let renderer = renderer();
+        let cache = Cache {
+            cube_name: "Everyday".into(),
+            ..Cache::default()
+        };
+        let menu = Menu::Cube(CubeSubMenu::Overview);
+        let mut element = long_page(&menu, &cache);
+        let mut tree = Tree::new(element.as_widget());
+        let (node, before) = frame(&mut tree, &renderer, &mut element);
+        let title = before.text(TITLE);
+        let line = before.text("Everyday · Bitcoin mainnet");
+        let first_row = before.text("Row 0");
+        let (viewport, offset) = before.scroller_of(first_row);
+        assert_eq!(offset, Vector::ZERO);
+        assert!(
+            viewport.y >= line.y + line.height,
+            "only the body scrolls; the head sits above its viewport: {:?} {:?}",
+            line,
+            viewport
+        );
+
+        let messages = wheel(
+            &mut tree,
+            &renderer,
+            &mut element,
+            &node,
+            first_row.center(),
+            400.0,
+        );
+        let scrolled = messages
+            .iter()
+            .find_map(|message| match message {
+                Message::Scroll(y) => Some(*y),
+                _ => None,
+            })
+            .expect("the body reports its scroll");
+        assert!(scrolled > 0.0, "{}", scrolled);
+
+        // The next frame is a new view over the same tree.
+        let mut element = long_page(&menu, &cache);
+        let (_, after) = frame(&mut tree, &renderer, &mut element);
+        assert_eq!(after.text(TITLE), title, "the title does not move");
+        assert_eq!(
+            after.text("Everyday · Bitcoin mainnet"),
+            line,
+            "the Cube line does not move"
+        );
+        let (_, offset) = after.scroller_of(after.text("Row 0"));
+        assert_eq!(offset.y, scrolled, "the body moved by the reported offset");
+        // Content draws at its layout position less the translation.
+        let shown_first_row = after.text("Row 0").y - offset.y;
+        assert!(
+            shown_first_row < viewport.y,
+            "the first row scrolled out under the head: {} vs {:?}",
+            shown_first_row,
+            viewport
+        );
+    }
+
+    #[test]
+    fn wallet_heads_name_the_wallet_as_the_side_panel_does() {
+        let renderer = renderer();
+        let menu = Menu::Cube(CubeSubMenu::Overview);
+        let named = Cache {
+            cube_name: "Everyday".into(),
+            wallet_names: WalletNames {
+                spark: Some("Daily spending".into()),
+                vault: Some("Family savings".into()),
+            },
+            ..Cache::default()
+        };
+        // A blank name reads as no name, as in the side panel.
+        let unnamed = Cache {
+            cube_name: "Everyday".into(),
+            wallet_names: WalletNames {
+                spark: None,
+                vault: Some("  ".into()),
+            },
+            ..Cache::default()
+        };
+        type Head = fn(&Cache) -> PageHead<'_, Message>;
+        let cases: [(&Cache, Head, &str, &str); 6] = [
+            // H-Send, H-Send-Vault, H-Receive: "‹w.name› · ‹Cube› · ‹network›".
+            (
+                &named,
+                |cache| vault_page_head(cache, "Send"),
+                "Send",
+                "Vault · Family savings · Everyday · Bitcoin mainnet",
+            ),
+            (
+                &named,
+                |cache| spark_page_head(cache, "Receive"),
+                "Receive",
+                "Spark · Daily spending · Everyday · Bitcoin mainnet",
+            ),
+            (
+                &unnamed,
+                |cache| vault_page_head(cache, "Send"),
+                "Send",
+                "Vault · Everyday · Bitcoin mainnet",
+            ),
+            (
+                &unnamed,
+                |cache| spark_page_head(cache, "Receive"),
+                "Receive",
+                "Spark · Everyday · Bitcoin mainnet",
+            ),
+            // A wallet's own page is titled with its name.
+            (
+                &named,
+                |cache| wallet_page_head(cache, "Vault", cache.wallet_names.vault.as_deref()),
+                "Vault · Family savings",
+                "Everyday · Bitcoin mainnet",
+            ),
+            (
+                &named,
+                |cache| wallet_page_head(cache, "Spark", cache.wallet_names.spark.as_deref()),
+                "Spark · Daily spending",
+                "Everyday · Bitcoin mainnet",
+            ),
+        ];
+        for (cache, head, title, line) in cases {
+            let mut element = dashboard_headed(&menu, cache, head(cache), Column::new());
+            let mut tree = Tree::new(element.as_widget());
+            let (_, probe) = frame(&mut tree, &renderer, &mut element);
+            probe.text(title);
+            probe.text(line);
+        }
+    }
+
+    fn rows<'a>() -> Column<'a, Message> {
+        (0..4).fold(Column::new(), |column, row| {
+            column.push(iced::widget::text(format!("Row {}", row)))
+        })
+    }
+
+    #[test]
+    fn heads_cut_a_long_cube_name_as_the_side_panel_does() {
+        let renderer = renderer();
+        let named = |name: &str| Cache {
+            cube_name: name.into(),
+            ..Cache::default()
+        };
+        // Saved names have no length limit and may hold line breaks; the
+        // head doesn't scroll, so it shows the side panel's 16-character cut.
+        let long = named("A very long Cube name\nthat goes on and on, line after line");
+        let short = named("Everyday");
+        let overview = Menu::Cube(CubeSubMenu::Overview);
+        let settings = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::General));
+        let tools = Menu::Vault(VaultSubMenu::Recovery);
+        let send = Menu::Vault(VaultSubMenu::Send);
+        type Page = for<'a> fn(&'a Menu, &'a Cache) -> Element<'a, Message>;
+        let cases: [(&Menu, Page, &str); 4] = [
+            (
+                &overview,
+                |menu, cache| dashboard_headed(menu, cache, page_head(cache, "Overview"), rows()),
+                "A very long Cube… · Bitcoin mainnet",
+            ),
+            (
+                &settings,
+                |menu, cache| dashboard(menu, cache, rows()),
+                "Cube · A very long Cube… · Bitcoin mainnet",
+            ),
+            (
+                &tools,
+                |menu, cache| dashboard(menu, cache, rows()),
+                "A very long Cube… · Bitcoin mainnet",
+            ),
+            (
+                &send,
+                |menu, cache| dashboard_headed(menu, cache, vault_page_head(cache, "Send"), rows()),
+                "Vault · A very long Cube… · Bitcoin mainnet",
+            ),
+        ];
+        for (menu, page, line) in cases {
+            let viewport = |cache: &Cache, line: Option<&str>| {
+                let mut element = page(menu, cache);
+                let mut tree = Tree::new(element.as_widget());
+                let (_, probe) = frame(&mut tree, &renderer, &mut element);
+                if let Some(line) = line {
+                    probe.text(line);
+                }
+                probe.scroller_of(probe.text("Row 0")).0
+            };
+            // The head is as tall as it is with a short name.
+            assert_eq!(
+                viewport(&long, Some(line)).y,
+                viewport(&short, None).y,
+                "{:?}",
+                menu
+            );
+        }
+    }
+
+    #[test]
+    fn a_vault_tool_step_keeps_back_to_vault_under_its_own_title() {
+        let renderer = renderer();
+        let cache = Cache::default();
+        // Recovery's compose and review steps pass their own head on the
+        // Recovery tool route; the Tools head's Back to Vault stays.
+        for (menu, back) in [
+            (Menu::Vault(VaultSubMenu::Recovery), true),
+            (Menu::Vault(VaultSubMenu::Send), false),
+        ] {
+            let mut element =
+                dashboard_headed(&menu, &cache, vault_page_head(&cache, "Recovery"), rows());
+            let mut tree = Tree::new(element.as_widget());
+            let (_, probe) = frame(&mut tree, &renderer, &mut element);
+            probe.text("Recovery");
+            assert_eq!(
+                probe.text.iter().any(|(text, _)| text == "Back to Vault"),
+                back,
+                "{:?}",
+                menu
+            );
         }
     }
 }

@@ -269,7 +269,6 @@ impl<'a> SparkOverviewView<'a> {
         match &self.status {
             SparkStatus::Unavailable => Column::new()
                 .spacing(20)
-                .push(Container::new(h2("Spark Wallet")))
                 .push(p1_regular(
                     "Spark is not configured for this cube yet. Set up a Spark \
                      signer and restart the app to connect the bridge.",
@@ -277,12 +276,10 @@ impl<'a> SparkOverviewView<'a> {
                 .into(),
             SparkStatus::Loading => Column::new()
                 .spacing(20)
-                .push(Container::new(h2("Spark Wallet")))
                 .push(p1_regular("Connecting to the Spark bridge…"))
                 .into(),
             SparkStatus::Error(err) => Column::new()
                 .spacing(20)
-                .push(Container::new(h2("Spark Wallet")))
                 .push(p1_regular("Spark bridge error"))
                 .push(p2_regular(err.clone()))
                 .into(),
@@ -560,6 +557,123 @@ mod tests {
         view::spark::settings::lightning_address::lightning_address_confirmation,
     };
     use crate::services::coincube::LightningAddress;
+
+    /// The Spark page under its pinned head, at the top and scrolled (Tenshu
+    /// v175 L3). Opt-in: `TOP_BAR_CAPTURE_DIR=<dir> cargo test -p
+    /// coincube-gui --lib page_head_capture -- --ignored`.
+    #[test]
+    #[ignore = "writes PNG frames; needs a GPU adapter"]
+    fn page_head_capture_spark() {
+        use crate::app::menu::{Menu, SparkSubMenu};
+        use crate::app::state::preferences::BalancePrivacy;
+        use crate::app::view::nav::shell::capture_tests;
+        let Some(directory) = capture_tests::directory() else {
+            return;
+        };
+        let mut renderer = capture_tests::renderer();
+        let mut connect = ConnectCubePanel::new(
+            None,
+            "synthetic-cube".into(),
+            "Everyday".into(),
+            "bitcoin".into(),
+            false,
+        );
+        connect.lightning_address = Some(LightningAddress {
+            lightning_address: Some("sats@coincube.io".into()),
+        });
+        let snapshot = SparkBalanceSnapshot {
+            balance_sats: 25_053,
+            stable_balance: None,
+        };
+        let menu = Menu::Spark(SparkSubMenu::Overview);
+        // Enough "Recent activity" for the page to scroll under its head.
+        let payments = (0..5)
+            .map(|index: u32| coincube_spark_protocol::PaymentSummary {
+                id: format!("capture-{index}"),
+                amount_sat: 1_500 + 250 * i64::from(index),
+                fees_sat: 0,
+                token_amount: None,
+                token_decimals: None,
+                token_ticker: None,
+                timestamp: 1_760_000_000 - 3_600 * u64::from(index),
+                status: "completed".into(),
+                direction: "receive".into(),
+                method: "lightning".into(),
+                description: Some(format!("Synthetic receipt {}", index + 1)),
+                details: Default::default(),
+            })
+            .collect();
+        for (appearance, palette) in capture_tests::themes() {
+            let mut cache = capture_tests::cache(appearance == "light", BalancePrivacy::Shown);
+            cache.wallet_names.spark = Some("Daily spending".into());
+            let mut activity = crate::app::state::activity::Activity::new(None, None);
+            drop(crate::app::state::State::update(
+                &mut activity,
+                None,
+                &cache,
+                crate::app::message::Message::ActivitySparkLoaded(
+                    0,
+                    Ok((Vec::clone(&payments), false)),
+                ),
+            ));
+            let (cache, activity, connect, snapshot) = (&cache, &activity, &connect, &snapshot);
+            // As App mounts the page (`state::spark::overview`
+            // `view_with_address_overlay`, `page_body`).
+            capture_tests::save_page_head_frames(
+                &mut renderer,
+                &directory,
+                "spark",
+                appearance,
+                &palette,
+                || {
+                    view::dashboard_with_detail(
+                        &menu,
+                        cache,
+                        move || {
+                            view::wallet_page_head(
+                                cache,
+                                "Spark",
+                                cache.wallet_names.spark.as_deref(),
+                            )
+                        },
+                        move || {
+                            Column::new()
+                                .push(
+                                    synthetic_overview(
+                                        SparkStatus::Connected(snapshot.clone()),
+                                        &[],
+                                        Some(true),
+                                        None,
+                                        None,
+                                    )
+                                    .map(view::Message::SparkOverview),
+                                )
+                                .push(
+                                    iced::widget::container(
+                                        view::activity::wallet_recent_activity(
+                                            activity,
+                                            cache,
+                                            view::activity::WalletFilter::Spark,
+                                            None,
+                                        ),
+                                    )
+                                    .padding([0, 16]),
+                                )
+                                .push(spark_landing_context(
+                                    spark_landing_address(connect),
+                                    Some(true),
+                                    false,
+                                    SparkLandingAvailability::Ready,
+                                    "synthetic-cube",
+                                ))
+                                .into()
+                        },
+                        || None,
+                    )
+                },
+            );
+        }
+    }
 
     #[test]
     fn spark_landing_mounts_address_confirmation_and_stable_pending_states() {

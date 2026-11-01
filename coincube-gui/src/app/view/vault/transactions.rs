@@ -23,11 +23,11 @@ use crate::{
         cache::Cache,
         menu::{Menu, VaultSubMenu},
         view::{
-            dashboard, loading_placeholder,
+            dashboard_headed, loading_placeholder,
             message::{CreateRbfMessage, Message},
             placeholder,
             vault::label,
-            FiatAmountConverter,
+            vault_page_head, FiatAmountConverter,
         },
     },
     daemon::model::{HistoryTransaction, Txid},
@@ -134,18 +134,16 @@ pub fn transactions_view<'a>(
             .into()
     };
 
-    dashboard(
+    dashboard_headed(
         menu,
         cache,
+        vault_page_head(cache, "Activity"),
         Column::new()
             .push(
-                Row::new()
-                    .push(Container::new(h3("Activity").bold()))
-                    .push(Space::new().width(Length::Fill))
-                    .push(
-                        button::secondary(Some(icon::backup_icon()), "Export")
-                            .on_press(ImportExportMessage::Open.into()),
-                    ),
+                Row::new().push(Space::new().width(Length::Fill)).push(
+                    button::secondary(Some(icon::backup_icon()), "Export")
+                        .on_press(ImportExportMessage::Open.into()),
+                ),
             )
             .push(body)
             .align_x(Alignment::Center)
@@ -474,19 +472,22 @@ pub fn transaction_detail_view<'a>(
         .on_press(Message::Close)
         .into();
 
-    dashboard(
+    let title = if tx.is_send_to_self() {
+        "Self-transfer"
+    } else if tx.is_external() {
+        "Received Bitcoin"
+    } else {
+        "Sent Bitcoin"
+    };
+
+    // The title and the Cube line are in the page head; Back stays a body
+    // action for now (plan L3 leaves screen actions to the W PRs).
+    dashboard_headed(
         menu,
         cache,
+        vault_page_head(cache, title),
         Column::new()
             .push(back_btn)
-            .push(if tx.is_send_to_self() {
-                Container::new(h3("Self-transfer")).width(Length::Fill)
-            } else if tx.is_external() {
-                Container::new(h3("Received Bitcoin")).width(Length::Fill)
-            } else {
-                Container::new(h3("Sent Bitcoin")).width(Length::Fill)
-            })
-            .push(text("Vault · Bitcoin on-chain").size(P2_SIZE).style(theme::text::secondary))
             .push(if let Some(outpoint) = tx.is_single_payment() {
                 // if the payment is a payment of a single payment transaction then
                 // the label of the transaction is attached to the label of the payment outpoint

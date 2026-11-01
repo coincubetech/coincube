@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use coincube_core::miniscript::bitcoin::{Amount, OutPoint};
+use coincube_ui::component::tenshu::PageHead;
 use coincube_ui::widget::Element;
 use coincubed::commands::CoinStatus;
 use iced::Task;
@@ -129,6 +130,7 @@ impl VaultOverview {
         view::dashboard_with_detail(
             menu,
             cache,
+            move || Self::page_head(cache),
             move || self.page_body(cache, Some(recent_activity(unknown_history))),
             detail,
         )
@@ -172,6 +174,10 @@ impl VaultOverview {
         })
     }
 
+    fn page_head<'a>(cache: &Cache) -> PageHead<'a, view::Message> {
+        view::wallet_page_head(cache, "Vault", cache.wallet_names.vault.as_deref())
+    }
+
     fn page_body<'a>(
         &'a self,
         cache: &'a Cache,
@@ -205,8 +211,14 @@ impl State for VaultOverview {
     /// App renders this page through [`Self::view_with_recent_activity`];
     /// on its own it has no Activity rows to show.
     fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
-        self.full_page_view(menu, cache)
-            .unwrap_or_else(|| view::dashboard(menu, cache, self.page_body(cache, None)))
+        self.full_page_view(menu, cache).unwrap_or_else(|| {
+            view::dashboard_headed(
+                menu,
+                cache,
+                Self::page_head(cache),
+                self.page_body(cache, None),
+            )
+        })
     }
 
     fn update(

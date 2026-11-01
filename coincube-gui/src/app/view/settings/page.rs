@@ -292,7 +292,7 @@ pub fn lead<'a, M: 'a>(
                 .width(Length::Fill)
                 .push(status(kind, status_text))
                 .push(Space::new().height(Length::Fixed(6.0)))
-                .push(tenshu::title(title.into()))
+                .push(tenshu::heading(title.into()))
                 .push(Space::new().height(Length::Fixed(2.0)))
                 .push(muted(detail)),
         )

@@ -589,11 +589,6 @@ pub fn receive<'a>(
     processing: bool,
     generating: bool,
 ) -> Element<'a, Message> {
-    let header = Column::new()
-        .spacing(4)
-        .push(h3("Receive").bold())
-        .push(p2_regular("Vault · Bitcoin on-chain").style(theme::text::secondary));
-
     // The newest generated address is the current one; `addresses` is in
     // generation order, so it is the last entry.
     let body: Element<'a, Message> = if let Some((i, address)) =
@@ -777,10 +772,10 @@ pub fn receive<'a>(
             .on_press(Message::Menu(Menu::Cube(CubeSubMenu::Activity))),
         );
 
+    // The title and the Cube line are in the page head (`state::vault::receive`).
     Column::new()
         .width(Length::Fill)
-        .push(header)
-        .push(gap_above(
+        .push(
             Row::new()
                 .spacing(40)
                 .align_y(Alignment::Start)
@@ -791,9 +786,8 @@ pub fn receive<'a>(
                 )
                 .push(Container::new(aside).width(Length::Fixed(240.0)))
                 .wrap()
-                .vertical_spacing(20)
-                .into(),
-        ))
+                .vertical_spacing(20),
+        )
         .push(earlier.map(gap_above))
         .push(previous.map(gap_above))
         .into()

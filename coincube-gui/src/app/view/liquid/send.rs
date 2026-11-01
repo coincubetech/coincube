@@ -157,7 +157,8 @@ pub fn liquid_send_with_flow<'a>(config: LiquidSendFlowConfig<'a>) -> Element<'a
                 config.usdt_balance,
                 config.from_asset,
             );
-            let content = view::dashboard_payment(config.menu, config.cache, send_page);
+            // Liquid is hidden (plan L2); its pages keep their in-body titles.
+            let content = view::dashboard_payment(config.menu, config.cache, None, send_page);
 
             // Show picker modals if open
             if config.send_picker_open {

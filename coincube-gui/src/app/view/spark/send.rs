@@ -268,13 +268,6 @@ impl<'a> SparkSendView<'a> {
             Message::SparkSend(SparkSendMessage::History),
         ));
 
-        let network_name = match self.network {
-            Network::Bitcoin => "Bitcoin mainnet",
-            Network::Testnet => "Bitcoin testnet",
-            Network::Signet => "Bitcoin signet",
-            Network::Regtest => "Bitcoin regtest",
-            _ => "Bitcoin network",
-        };
         let balance = if self.mask_amounts {
             "••••••".to_owned()
         } else {
@@ -289,23 +282,6 @@ impl<'a> SparkSendView<'a> {
                 }
             )
         };
-        let header = Column::new()
-            .spacing(4)
-            .push(
-                iced::widget::button(
-                    text(format!("‹ Spark · {}", self.cube_name)).color(color::ORANGE),
-                )
-                .padding([2, 0])
-                .style(theme::button::transparent)
-                .on_press(Message::Menu(crate::app::menu::Menu::Spark(
-                    crate::app::menu::SparkSubMenu::Overview,
-                ))),
-            )
-            .push(h3("Send").bold())
-            .push(
-                p2_regular(format!("{} · {}", self.cube_name, network_name))
-                    .style(theme::text::secondary),
-            );
         let reviewing = matches!(
             self.phase,
             SparkSendPhase::Prepared(_) | SparkSendPhase::Sending
@@ -318,15 +294,15 @@ impl<'a> SparkSendView<'a> {
             .push(iced::widget::rule::horizontal(1))
             .push(p2_regular("Available in Spark").style(theme::text::secondary))
             .push(p1_bold(balance));
-        let page = Column::new().spacing(20).push(header).push(
-            Row::new()
-                .spacing(40)
-                .align_y(Alignment::Start)
-                .push(Container::new(content).width(Length::Fixed(680.0)))
-                .push(Container::new(aside).width(Length::Fixed(240.0)))
-                .wrap()
-                .vertical_spacing(20),
-        );
+        // The title, the Cube line and Back to Spark are in the page head
+        // (`head`).
+        let page = Row::new()
+            .spacing(40)
+            .align_y(Alignment::Start)
+            .push(Container::new(content).width(Length::Fixed(680.0)))
+            .push(Container::new(aside).width(Length::Fixed(240.0)))
+            .wrap()
+            .vertical_spacing(20);
         Container::new(Container::new(page).width(Length::Fill).max_width(960.0))
             .width(Length::Fill)
             .into()
@@ -1607,7 +1583,12 @@ mod tests {
         cache: &'a Cache,
         picker_open: bool,
     ) -> Element<'a, Message> {
-        let content = crate::app::view::dashboard_payment(menu, cache, fixture.view().render());
+        let content = crate::app::view::dashboard_payment(
+            menu,
+            cache,
+            Some(crate::app::view::spark::sub_page_head(cache, "Send")),
+            fixture.view().render(),
+        );
         if picker_open {
             return coincube_ui::widget::modal::Modal::new(
                 content,
@@ -2095,6 +2076,38 @@ mod tests {
         )
     }
 
+    /// Send under its pinned head, at the top and scrolled (Tenshu v175 L3).
+    /// Opt-in: `TOP_BAR_CAPTURE_DIR=<dir> cargo test -p coincube-gui --lib
+    /// page_head_capture -- --ignored`.
+    #[test]
+    #[ignore = "writes PNG frames; needs a GPU adapter"]
+    fn page_head_capture_send() {
+        use crate::app::view::nav::shell::capture_tests;
+        let Some(directory) = capture_tests::directory() else {
+            return;
+        };
+        let mut renderer = capture_tests::renderer();
+        let menu = spark_send_menu();
+        for (appearance, palette) in capture_tests::themes() {
+            let mut fixture = Fixture::filled(SparkSendPhase::Idle);
+            if appearance == "light" {
+                fixture.mode = ThemeMode::Light;
+            }
+            let cache = Cache {
+                cube_name: "Everyday".into(),
+                ..fixture.cache()
+            };
+            capture_tests::save_page_head_frames(
+                &mut renderer,
+                &directory,
+                "send",
+                appearance,
+                &palette,
+                || screen(&fixture, &menu, &cache, false),
+            );
+        }
+    }
+
     #[test]
     fn masked_payment_card_hides_available_balance_and_conversion_hint() {
         let mut fixture = Fixture::filled(SparkSendPhase::Idle);
@@ -2141,7 +2154,7 @@ mod tests {
                     harness.assert_no_horizontal_overflow(&label);
                     let probe = harness.probe();
                     for expected in [
-                        "‹ Spark",
+                        "Back to Spark",
                         "Send",
                         "Payment details",
                         "Available in Spark",

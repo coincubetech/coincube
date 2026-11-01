@@ -242,13 +242,6 @@ impl<'a> SparkReceiveView<'a> {
         }
 
         let wallet_name = format!("Spark · {}", self.cube_name);
-        let network_name = match self.network {
-            Network::Bitcoin => "Bitcoin mainnet",
-            Network::Testnet => "Bitcoin testnet",
-            Network::Signet => "Bitcoin signet",
-            Network::Regtest => "Bitcoin regtest",
-            _ => "Bitcoin network",
-        };
         let balance = if self.mask_amounts {
             "••••••".to_owned()
         } else {
@@ -263,21 +256,6 @@ impl<'a> SparkReceiveView<'a> {
                 }
             )
         };
-        let header = Column::new()
-            .spacing(4)
-            .push(
-                iced_button(text(format!("‹ Spark · {}", self.cube_name)).color(color::ORANGE))
-                    .padding([2, 0])
-                    .style(theme::button::transparent)
-                    .on_press(Message::Menu(crate::app::menu::Menu::Spark(
-                        crate::app::menu::SparkSubMenu::Overview,
-                    ))),
-            )
-            .push(h3("Receive").bold())
-            .push(
-                p2_regular(format!("{} · {}", self.cube_name, network_name))
-                    .style(theme::text::secondary),
-            );
         let aside = Column::new()
             .spacing(8)
             .push(p2_regular("Receiving into").style(theme::text::secondary))
@@ -294,7 +272,7 @@ impl<'a> SparkReceiveView<'a> {
         let mut content = Column::new()
             .spacing(20)
             .width(Length::Fill)
-            .push(header)
+            // The title, the Cube line and Back to Spark are in the page head.
             .push(
                 Row::new()
                     .spacing(40)
@@ -1413,10 +1391,12 @@ mod tests {
                     theme,
                     outer.0 - 248 - 48,
                 );
+                // The title, the Cube line and the back link are in the page
+                // head now, not the body.
+                for moved in ["‹ Spark", "Back to Spark", "Everyday · Bitcoin mainnet"] {
+                    assert!(!mounted.contains(moved), "{} left in the body", moved);
+                }
                 for label in [
-                    "‹ Spark",
-                    "Receive",
-                    "Everyday · Bitcoin mainnet",
                     "Payment details",
                     "Receiving into",
                     "Method",

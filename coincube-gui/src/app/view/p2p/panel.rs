@@ -2,8 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::convert::{TryFrom, TryInto};
 use std::sync::Arc;
 
-use coincube_ui::component::tenshu::PageWidth;
-use coincube_ui::component::text::Text;
+use coincube_ui::component::tenshu::{page::PAGE_BOTTOM, page_head::BODY_TOP, PageWidth};
 use coincube_ui::{
     component::{button, card, form, text::*},
     icon, theme,
@@ -4279,6 +4278,8 @@ impl State for P2PPanel {
                     // If an order is selected, show its detail view
                     // Built separately (not inside dashboard's scrollable) to avoid
                     // first-click issues when switching from the order list.
+                    // The page head is pinned above that scrollable, as the
+                    // headed dashboards pin theirs.
                     if let Some(ref selected_id) = self.selected_order {
                         if let Some(order) = self.orders.iter().find(|o| o.id == *selected_id) {
                             let take_state = if self.taking_order {
@@ -4290,27 +4291,31 @@ impl State for P2PPanel {
                             } else {
                                 None
                             };
-                            let detail_content = iced::widget::scrollable(view::page(
-                                column![
+                            let detail_content = iced::widget::scrollable(
+                                view::page(
                                     column![
-                                        h3("Order Details").bold(),
                                         p2_regular("View order information")
-                                            .style(theme::text::secondary),
+                                            .style(theme::text::secondary)
+                                            .width(Length::Fill),
+                                        container(order_detail(order, take_state))
+                                            .width(Length::Fill),
                                     ]
-                                    .spacing(8)
+                                    .spacing(16)
                                     .width(Length::Fill),
-                                    container(order_detail(order, take_state)).width(Length::Fill),
-                                ]
-                                .spacing(16)
-                                .width(Length::Fill),
-                                PageWidth::Reading,
-                            ));
+                                    PageWidth::Reading,
+                                )
+                                .vertical(BODY_TOP, PAGE_BOTTOM),
+                            );
 
                             return view::dashboard_shell(
                                 menu,
                                 cache,
                                 iced::widget::Column::new()
                                     .push(view::warn(None))
+                                    .push(
+                                        view::page_head(cache, "Order Details")
+                                            .view(view::page_gutter),
+                                    )
                                     .push(
                                         container(detail_content)
                                             .width(Length::Fill)
@@ -4323,12 +4328,11 @@ impl State for P2PPanel {
                     }
 
                     // --- Header ---
-                    let mut overview_col = column![column![
-                        h3("P2P Order Book").bold(),
-                        p2_regular("Browse and take P2P trading orders from the Mostro network")
-                            .style(theme::text::secondary),
-                    ]
-                    .spacing(8)
+                    // The title is in the page head.
+                    let mut overview_col = column![p2_regular(
+                        "Browse and take P2P trading orders from the Mostro network"
+                    )
+                    .style(theme::text::secondary)
                     .width(Length::Fill),]
                     .spacing(16);
 
@@ -4343,8 +4347,12 @@ impl State for P2PPanel {
                     overview_col = overview_col.push(self.book_view());
                     overview_col = overview_col.push(Space::new().height(Length::Fixed(40.0)));
 
-                    let overview_content: Element<'_, view::Message> =
-                        view::dashboard(menu, cache, overview_col);
+                    let overview_content: Element<'_, view::Message> = view::dashboard_headed(
+                        menu,
+                        cache,
+                        view::page_head(cache, "P2P Order Book"),
+                        overview_col,
+                    );
 
                     // Show payment invoice modal if seller took a buy order
                     if let Some((ref oid, ref inv, amt, ref qr_data)) = self.pending_payment_invoice
@@ -4460,17 +4468,14 @@ impl State for P2PPanel {
                                         .width(Length::Fill),
                                 );
                             }
-                            return view::dashboard(
+                            return view::dashboard_headed(
                                 menu,
                                 cache,
+                                view::page_head(cache, "Trade Details"),
                                 column![
-                                    column![
-                                        h3("Trade Details").bold(),
-                                        p2_regular("View trade information and take actions")
-                                            .style(theme::text::secondary),
-                                    ]
-                                    .spacing(8)
-                                    .width(Length::Fill),
+                                    p2_regular("View trade information and take actions")
+                                        .style(theme::text::secondary)
+                                        .width(Length::Fill),
                                     container(self.trade_detail_view(trade)).width(Length::Fill),
                                     Space::new().height(Length::Fixed(40.0)),
                                 ]
@@ -4482,18 +4487,14 @@ impl State for P2PPanel {
                     let filtered = self.filtered_trades();
                     let shown_count = filtered.len();
 
-                    view::dashboard(
+                    view::dashboard_headed(
                         menu,
                         cache,
+                        view::page_head(cache, "My Trades"),
                         column![
-                            // Title
-                            column![
-                                h3("My Trades").bold(),
-                                p2_regular("Your active and completed P2P trades")
-                                    .style(theme::text::secondary),
-                            ]
-                            .spacing(8)
-                            .width(Length::Fill),
+                            p2_regular("Your active and completed P2P trades")
+                                .style(theme::text::secondary)
+                                .width(Length::Fill),
                             // Trade status filter
                             container(trade_status_filter(&self.trade_filters, shown_count,))
                                 .width(Length::Fill),
@@ -4617,17 +4618,14 @@ impl State for P2PPanel {
                     }
 
                     // Default: show chat list
-                    view::dashboard(
+                    view::dashboard_headed(
                         menu,
                         cache,
+                        view::page_head(cache, "Chat"),
                         column![
-                            column![
-                                h3("Chat").bold(),
-                                p2_regular("Your P2P trade conversations")
-                                    .style(theme::text::secondary),
-                            ]
-                            .spacing(8)
-                            .width(Length::Fill),
+                            p2_regular("Your P2P trade conversations")
+                                .style(theme::text::secondary)
+                                .width(Length::Fill),
                             container(self.chat_list_view()).width(Length::Fill),
                             Space::new().height(Length::Fixed(40.0)),
                         ]
@@ -4635,19 +4633,14 @@ impl State for P2PPanel {
                     )
                 }
                 P2PSubMenu::CreateOrder => {
-                    let content: Element<'_, view::Message> = view::dashboard(
+                    let content: Element<'_, view::Message> = view::dashboard_headed(
                         menu,
                         cache,
+                        view::page_head(cache, "Create P2P Order"),
                         column![
-                            column![
-                                h3("Create P2P Order").bold(),
-                                p2_regular(
-                                    "Create a new buy or sell order for the P2P marketplace"
-                                )
-                                .style(theme::text::secondary),
-                            ]
-                            .spacing(8)
-                            .width(Length::Fill),
+                            p2_regular("Create a new buy or sell order for the P2P marketplace")
+                                .style(theme::text::secondary)
+                                .width(Length::Fill),
                             container(self.create_order_view(cache)).width(Length::Fill),
                             Space::new().height(Length::Fixed(40.0)),
                         ]
@@ -4665,17 +4658,14 @@ impl State for P2PPanel {
                         content
                     }
                 }
-                P2PSubMenu::Settings => view::dashboard(
+                P2PSubMenu::Settings => view::dashboard_headed(
                     menu,
                     cache,
+                    view::page_head(cache, "P2P Settings"),
                     column![
-                        column![
-                            h3("P2P Settings").bold(),
-                            p2_regular("Configure Mostro nodes and relays")
-                                .style(theme::text::secondary),
-                        ]
-                        .spacing(8)
-                        .width(Length::Fill),
+                        p2_regular("Configure Mostro nodes and relays")
+                            .style(theme::text::secondary)
+                            .width(Length::Fill),
                         container(self.mostro_settings_view()).width(Length::Fill),
                         Space::new().height(Length::Fixed(40.0)),
                     ]
@@ -6606,6 +6596,118 @@ mod book_filter_tests {
         panel.filter_min_rating = 0.0;
         panel.buy_sell_filter = BuySellFilter::Sell;
         assert_eq!(panel.filtered_orders()[0].id, "maker-buy-eur");
+    }
+
+    /// Order details keeps its own scrollable (the first-click fix), with the
+    /// page head pinned above it: the order scrolls, the title doesn't.
+    #[test]
+    fn order_details_scrolls_under_a_pinned_head() {
+        use crate::app::view::page_head_tests::{frame, renderer, wheel};
+        use iced::{advanced::widget::Tree, Vector};
+
+        let renderer = renderer();
+        let mut panel = P2PPanel::new(
+            None,
+            None,
+            zeroize::Zeroizing::new(String::new()),
+            Some("All".into()),
+            Network::Bitcoin,
+        );
+        panel.orders = vec![order(
+            "synthetic-detail",
+            OrderType::Sell,
+            "EUR",
+            "SEPA instant",
+        )];
+        panel.orders[0].min_amount = Some(50.0);
+        panel.orders[0].max_amount = Some(200.0);
+        panel.select_order_for_detail("synthetic-detail".into());
+        // The take form makes the order taller than the window.
+        panel.taking_order = true;
+        let cache = Cache {
+            cube_name: "Everyday".into(),
+            ..Cache::default()
+        };
+        let menu = Menu::Marketplace(MarketplaceSubMenu::P2P(P2PSubMenu::Overview));
+
+        let mut element = State::view(&panel, &menu, &cache);
+        let mut tree = Tree::new(element.as_widget());
+        let (node, before) = frame(&mut tree, &renderer, &mut element);
+        let title = before.text("Order Details");
+        let line = before.text("Everyday · Bitcoin mainnet");
+        let lead = before.text("View order information");
+        let (viewport, offset) = before.scroller_of(lead);
+        assert_eq!(offset, Vector::ZERO);
+        assert!(
+            viewport.y >= title.y + title.height && viewport.y >= line.y + line.height,
+            "the head sits above the order's viewport: {:?} {:?} {:?}",
+            title,
+            line,
+            viewport
+        );
+
+        wheel(
+            &mut tree,
+            &renderer,
+            &mut element,
+            &node,
+            lead.center(),
+            400.0,
+        );
+        // The next frame is a new view over the same tree.
+        let mut element = State::view(&panel, &menu, &cache);
+        let (_, after) = frame(&mut tree, &renderer, &mut element);
+        let (_, offset) = after.scroller_of(after.text("View order information"));
+        assert!(offset.y > 0.0, "the order scrolled: {:?}", offset);
+        assert_eq!(
+            after.text("Order Details"),
+            title,
+            "the title does not move"
+        );
+        assert_eq!(after.text("Everyday · Bitcoin mainnet"), line);
+    }
+
+    /// Order details under its pinned head, at the top and scrolled (Tenshu
+    /// v175 L3). Opt-in: `TOP_BAR_CAPTURE_DIR=<dir> cargo test -p
+    /// coincube-gui --lib page_head_capture -- --ignored`.
+    #[test]
+    #[ignore = "writes PNG frames; needs a GPU adapter"]
+    fn page_head_capture_p2p_order() {
+        use crate::app::state::preferences::BalancePrivacy;
+        use crate::app::view::nav::shell::capture_tests;
+        let Some(directory) = capture_tests::directory() else {
+            return;
+        };
+        let mut renderer = capture_tests::renderer();
+        let mut panel = P2PPanel::new(
+            None,
+            None,
+            zeroize::Zeroizing::new(String::new()),
+            Some("All".into()),
+            Network::Bitcoin,
+        );
+        panel.orders = vec![order(
+            "synthetic-detail",
+            OrderType::Sell,
+            "EUR",
+            "SEPA instant",
+        )];
+        panel.orders[0].min_amount = Some(50.0);
+        panel.orders[0].max_amount = Some(200.0);
+        panel.select_order_for_detail("synthetic-detail".into());
+        panel.taking_order = true;
+        let menu = Menu::Marketplace(MarketplaceSubMenu::P2P(P2PSubMenu::Overview));
+        for (appearance, palette) in capture_tests::themes() {
+            let cache = capture_tests::cache(appearance == "light", BalancePrivacy::Shown);
+            capture_tests::save_page_head_frames(
+                &mut renderer,
+                &directory,
+                "p2p-order",
+                appearance,
+                &palette,
+                || State::view(&panel, &menu, &cache),
+            );
+        }
     }
 
     #[test]

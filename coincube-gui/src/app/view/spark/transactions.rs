@@ -73,14 +73,12 @@ impl<'a> SparkTransactionsView<'a> {
     pub fn render(self) -> Element<'a, Message> {
         let mut content = Column::new().spacing(20).width(Length::Fill);
 
+        // The title is in the page head (`state::spark::transactions`).
         content = content.push(
-            Row::new()
-                .push(Container::new(h3("Transactions").bold()))
-                .push(Space::new().width(Length::Fill))
-                .push(
-                    button::secondary(Some(icon::backup_icon()), "Export")
-                        .on_press(ImportExportMessage::Open.into()),
-                ),
+            Row::new().push(Space::new().width(Length::Fill)).push(
+                button::secondary(Some(icon::backup_icon()), "Export")
+                    .on_press(ImportExportMessage::Open.into()),
+            ),
         );
 
         match self.status {
@@ -258,6 +256,15 @@ fn transaction_row<'a>(
     .into()
 }
 
+/// The detail page's title, shown in its page head.
+pub fn transaction_detail_title(tx: &SparkRecentTransaction) -> &'static str {
+    if tx.is_incoming {
+        "Incoming payment"
+    } else {
+        "Outgoing payment"
+    }
+}
+
 /// Render the single-payment detail pane. Consumed by
 /// `SparkTransactions` state when `selected_payment` is `Some`, and
 /// also by Overview/Send/Receive's preselect flow. Richer than the
@@ -266,6 +273,8 @@ fn transaction_row<'a>(
 /// (Lightning / On-chain Bitcoin / Spark transfer), and a Status row
 /// that reflects every `DomainPaymentStatus` variant the bridge can
 /// emit — not just Complete/Pending.
+///
+/// Its title goes in the page head ([`transaction_detail_title`]).
 pub fn transaction_detail_view<'a>(
     tx: &'a SparkRecentTransaction,
     fiat_converter: Option<FiatAmountConverter>,
@@ -273,11 +282,6 @@ pub fn transaction_detail_view<'a>(
     mask_amounts: bool,
 ) -> Element<'a, Message> {
     let is_incoming = tx.is_incoming;
-    let title = if is_incoming {
-        "Incoming payment"
-    } else {
-        "Outgoing payment"
-    };
     let sign = if is_incoming { "+" } else { "-" };
 
     // For outgoing, the headline number bundles fees so the detail
@@ -383,7 +387,6 @@ pub fn transaction_detail_view<'a>(
     Column::new()
         .spacing(20)
         .push(detail_back_button())
-        .push(Container::new(h3(title)).width(Length::Fill))
         .push(
             Row::new()
                 .spacing(16)

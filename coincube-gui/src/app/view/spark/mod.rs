@@ -22,6 +22,20 @@ pub use settings::{SparkSettingsStatus, SparkSettingsView};
 pub use sideshift_receive::spark_sideshift_receive_view;
 pub use transactions::{SparkTransactionsStatus, SparkTransactionsView};
 
+/// The pinned head of a Spark sub-page such as Send or Receive: `title`, the
+/// wallet line, then Back to Spark as the last action.
+pub fn sub_page_head<'a>(
+    cache: &crate::app::cache::Cache,
+    title: &'a str,
+) -> coincube_ui::component::tenshu::PageHead<'a, crate::app::view::Message> {
+    crate::app::view::spark_page_head(cache, title).back(
+        "Spark",
+        crate::app::view::Message::Menu(crate::app::menu::Menu::Spark(
+            crate::app::menu::SparkSubMenu::Overview,
+        )),
+    )
+}
+
 /// View-level messages for the Spark Overview panel.
 #[derive(Debug, Clone)]
 pub enum SparkOverviewMessage {

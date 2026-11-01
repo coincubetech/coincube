@@ -1,8 +1,9 @@
-//! Route-derived Settings navigation, kept inside page content.
+//! Route-derived Settings navigation: the pinned head, then the scope chips
+//! and section tabs, which stay inside page content until plan W5.
 
-use coincube_ui::component::tenshu::{self, choice_chips, segment, tabs};
+use coincube_ui::component::tenshu::{choice_chips, segment, tabs, PageHead};
 use coincube_ui::icon;
-use coincube_ui::widget::{Column, Container, Element, Row};
+use coincube_ui::widget::{Column, Element};
 use iced::widget::Space;
 use iced::Length;
 
@@ -203,40 +204,9 @@ fn scope_icon(scope: &str) -> coincube_ui::widget::Text<'static> {
     }
 }
 
-/// The network coin and "<name> · <network>" under a page title (`.idl`).
-pub(crate) fn scope_line(cache: &Cache, name: &str) -> Element<'static, Message> {
-    let network = crate::app::view::nav::shell::network_label(cache.chain());
-    let light = matches!(
-        cache.theme_mode,
-        coincube_ui::theme::palette::ThemeMode::Light
-    );
-    let coin = iced::widget::Svg::new(iced::widget::svg::Handle::from_memory(
-        crate::home::launcher_coin::widget_source(cache.chain(), 16.0, 1.0, light).into_bytes(),
-    ))
-    .width(Length::Fixed(16.0))
-    .height(Length::Fixed(16.0));
-    Row::new()
-        .spacing(6)
-        .align_y(iced::Alignment::Center)
-        .push(
-            Container::new(coin)
-                .width(Length::Fixed(18.0))
-                .height(Length::Fixed(18.0))
-                .center_x(Length::Fixed(18.0))
-                .center_y(Length::Fixed(18.0)),
-        )
-        .push(tenshu::caption(format!("{} · {}", name, network)).size(13))
-        .into()
-}
-
-/// The Settings heading, its scope line, the scope chips and the section tabs
-/// (`.ph`, `.idl`, `.scopes`, `.tabs`). The tabs keep one row at the 1024px
-/// minimum window, so there is no narrow-window substitute.
-pub fn in_content_navigation(menu: &Menu, cache: &Cache) -> Option<Element<'static, Message>> {
-    let scope = route_scope(menu)?;
-    let scopes = route_choices(menu, cache);
-    let sections = section_routes(menu, cache);
-    let scope_name = scopes
+/// The selected scope's name for the line under the title.
+fn scope_name(scope: RouteScope, scopes: &[RouteChoice]) -> String {
+    scopes
         .iter()
         .find(|choice| choice.selected)
         .map(|choice| choice.label.clone())
@@ -244,8 +214,35 @@ pub fn in_content_navigation(menu: &Menu, cache: &Cache) -> Option<Element<'stat
             RouteScope::Cube => "Cube".to_owned(),
             RouteScope::Vault => "Vault".to_owned(),
             RouteScope::Spark => "Spark".to_owned(),
-        });
-    let scope_line = scope_line(cache, &scope_name);
+        })
+}
+
+/// The Settings head (`.ph`, `.idl`): "Settings", then the scope's name and
+/// network. `None` off the Settings routes.
+pub fn page_head(menu: &Menu, cache: &Cache) -> Option<PageHead<'static, Message>> {
+    let scope = route_scope(menu)?;
+    // The Cube's name cut as the side panel cuts it: the head doesn't scroll.
+    let name = match scope {
+        RouteScope::Cube if !cache.cube_name.is_empty() => {
+            format!("Cube · {}", crate::app::view::cube_display_name(cache))
+        }
+        _ => scope_name(scope, &route_choices(menu, cache)),
+    };
+    Some(
+        coincube_ui::component::tenshu::page_head("Settings", Message::FocusAction).context(
+            crate::app::view::cube_coin(cache),
+            crate::app::view::network_line(cache, &name),
+        ),
+    )
+}
+
+/// The scope chips and the section tabs under the Settings head (`.scopes`,
+/// `.tabs`). The tabs keep one row at the 1024px minimum window, so there is
+/// no narrow-window substitute.
+pub fn in_content_navigation(menu: &Menu, cache: &Cache) -> Option<Element<'static, Message>> {
+    route_scope(menu)?;
+    let scopes = route_choices(menu, cache);
+    let sections = section_routes(menu, cache);
 
     let scope_intents: Vec<Message> = scopes.iter().map(|c| c.intent.clone()).collect();
     let chips = choice_chips(
@@ -272,10 +269,6 @@ pub fn in_content_navigation(menu: &Menu, cache: &Cache) -> Option<Element<'stat
     Some(
         Column::new()
             .width(Length::Fill)
-            .push(tenshu::title("Settings").size(24))
-            .push(Space::new().height(Length::Fixed(4.0)))
-            .push(scope_line)
-            .push(Space::new().height(Length::Fixed(20.0)))
             .push(chips)
             .push(Space::new().height(Length::Fixed(16.0)))
             .push(tab_row)

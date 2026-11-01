@@ -842,9 +842,13 @@ impl State for SparkSend {
         cache: &'a Cache,
     ) -> Element<'a, crate::app::view::Message> {
         let backend_available = self.backend.is_some();
+        // The sent celebration takes the whole page, head included.
+        let head = (!matches!(self.phase, SparkSendPhase::Sent(_)))
+            .then(|| crate::app::view::spark::sub_page_head(cache, "Send"));
         let content = crate::app::view::dashboard_payment(
             menu,
             cache,
+            head,
             SparkSendView {
                 backend_available,
                 cube_name: &cache.cube_name,
