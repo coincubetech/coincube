@@ -508,14 +508,36 @@ pub struct GlobalHome {
 }
 
 impl GlobalHome {
-    /// Follow the Liquid gate. Hiding Liquid also hides a restored
-    /// Liquid → Vault transfer at once (the view reads this flag).
     /// No Spark backend, or a synced balance. A failed fetch is not enough:
     /// one can land before the sync that a later fetch completes.
     pub(crate) fn spark_settled(&self) -> bool {
         self.spark_backend.is_none() || self.spark_balance_loaded
     }
 
+    /// Fallback poll for the Spark balance while it is still loading.
+    /// `tokio::sync::broadcast` doesn't replay events fired before iced
+    /// subscribed, so a `Synced` arriving during the bridge-init /
+    /// iced-subscribe gap would be lost — the poll guarantees we still
+    /// re-fetch every few seconds until either a `Synced` lands or the
+    /// retry cap is reached. Self-cancels the moment `spark_balance_loaded`
+    /// flips true (iced re-evaluates subscriptions on each render). Uses
+    /// `SparkLoadRetry` (not `RefreshSparkBalance`) so SDK-event-driven
+    /// refreshes don't count against the retry cap.
+    ///
+    /// The App subscribes it whichever panel is current: the Cube opening
+    /// waits on this load, and a Cube can open on another panel.
+    pub(crate) fn spark_load_poll(&self) -> Option<Subscription<Message>> {
+        (self.spark_backend.is_some()
+            && !self.spark_balance_loaded
+            && self.spark_load_retry_count < SPARK_LOAD_RETRY_CAP)
+            .then(|| {
+                iced::time::every(std::time::Duration::from_secs(3))
+                    .map(|_| Message::View(view::Message::Home(HomeMessage::SparkLoadRetry)))
+            })
+    }
+
+    /// Follow the Liquid gate. Hiding Liquid also hides a restored
+    /// Liquid → Vault transfer at once (the view reads this flag).
     pub fn set_liquid_shown(&mut self, shown: bool) {
         self.liquid_shown = shown;
     }
@@ -908,26 +930,6 @@ impl State for GlobalHome {
             // To fetch hardware wallets
             use crate::app::state::vault::psbt::Modal as PsbtModalTrait;
             subscriptions.push(sign_modal.subscription());
-        }
-
-        // Fallback poll for the Spark balance while the Home card is
-        // still in its loading state. `tokio::sync::broadcast` doesn't
-        // replay events fired before iced subscribed, so a `Synced`
-        // arriving during the bridge-init / iced-subscribe gap would
-        // be lost — the poll guarantees we still re-fetch every few
-        // seconds until either a `Synced` lands or the retry cap is
-        // reached. Self-cancels the moment `spark_balance_loaded`
-        // flips true (iced re-evaluates subscriptions on each render).
-        // Uses `SparkLoadRetry` (not `RefreshSparkBalance`) so SDK-
-        // event-driven refreshes don't count against the retry cap.
-        if self.spark_backend.is_some()
-            && !self.spark_balance_loaded
-            && self.spark_load_retry_count < SPARK_LOAD_RETRY_CAP
-        {
-            subscriptions.push(
-                iced::time::every(std::time::Duration::from_secs(3))
-                    .map(|_| Message::View(view::Message::Home(HomeMessage::SparkLoadRetry))),
-            );
         }
 
         // The other Cube's passkey ceremony is polled on the UI thread.
@@ -4543,11 +4545,16 @@ mod tests {
             home.spark_settled(),
             "a Cube with no Spark has nothing to wait for"
         );
+        assert!(home.spark_load_poll().is_none());
 
         home.spark_backend = Some(Arc::new(SparkBackend::new(Arc::new(
             crate::app::breez_spark::SparkClient::disconnected_for_test(),
         ))));
         assert!(!home.spark_settled());
+        assert!(
+            home.spark_load_poll().is_some(),
+            "the fallback poll runs while the opening waits on Spark"
+        );
         send(&mut home, HomeMessage::SparkLoadFailed);
         assert!(!home.spark_settled(), "a failed fetch can precede the sync");
         send(&mut home, HomeMessage::SparkSyncedObserved);
@@ -4559,6 +4566,7 @@ mod tests {
             },
         );
         assert!(home.spark_settled());
+        assert!(home.spark_load_poll().is_none());
     }
 
     /// A refresh blip must not throw away a balance the user already has.
