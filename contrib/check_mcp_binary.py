@@ -73,14 +73,21 @@ def check(binary, expect_proposals=False, expect_transactions=False):
                     assert receive(1)["serverInfo"]["name"] == "tenshu-mcp"
                     send({"jsonrpc": "2.0", "method": "notifications/initialized"})
                     send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-                    assert {tool["name"] for tool in receive(2)["tools"]} == {
+                    expected_tools = {
                         "tenshu_get_capabilities", "tenshu_list_wallets",
                         "tenshu_get_wallet_summary", "tenshu_get_transactions",
                         "tenshu_get_wallet_policy_summary",
-                        "tenshu_prepare_wallet_proposal", "tenshu_get_wallet_proposal",
-                        "tenshu_prepare_wallet_creation",
-                        "tenshu_prepare_transaction", "tenshu_get_prepared_transaction",
                     }
+                    if expect_proposals:
+                        expected_tools |= {
+                            "tenshu_prepare_wallet_proposal", "tenshu_get_wallet_proposal",
+                            "tenshu_prepare_wallet_creation",
+                        }
+                    if expect_transactions:
+                        expected_tools |= {
+                            "tenshu_prepare_transaction", "tenshu_get_prepared_transaction",
+                        }
+                    assert {tool["name"] for tool in receive(2)["tools"]} == expected_tools
                     send({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
                         "name": "tenshu_get_capabilities", "arguments": {}}})
                     capabilities = receive(3)["structuredContent"]
