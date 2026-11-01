@@ -1141,7 +1141,7 @@ pub(super) struct GhostText<'a> {
 
 /// The ghost's details face (G-Ghost-Details `.fc`) as it turns into place,
 /// before the live controls replace it: dashed cloud avatar, name, network,
-/// the Where and Backup facts and the primary action.
+/// the Where and Recovery facts and the primary action.
 pub(super) fn ghost_details_svg(network: ChainId, light: bool, text: GhostText<'_>) -> String {
     let palette = Palette::new(light);
     let ink = hex(palette.ink);
@@ -1171,7 +1171,7 @@ pub(super) fn ghost_details_svg(network: ChainId, light: bool, text: GhostText<'
     let backup: String = text.backup.chars().take(34).collect();
     let _ = write!(
         svg,
-        "<text x=\"28\" y=\"141\" font-size=\"13\" fill=\"{muted}\">Where</text><text x=\"104\" y=\"141\" font-size=\"14\" fill=\"{muted}\">In Connect, not on this device</text><text x=\"28\" y=\"173\" font-size=\"13\" fill=\"{muted}\">Backup</text><text x=\"104\" y=\"173\" font-size=\"14\" fill=\"{tone}\">{}</text>",
+        "<text x=\"28\" y=\"141\" font-size=\"13\" fill=\"{muted}\">Where</text><text x=\"124\" y=\"141\" font-size=\"14\" fill=\"{muted}\">In Connect, not on this device</text><text x=\"28\" y=\"173\" font-size=\"13\" fill=\"{muted}\">Recovery</text><text x=\"124\" y=\"173\" font-size=\"14\" fill=\"{tone}\">{}</text>",
         xml_text(&backup)
     );
     let primary = if text.restorable {
@@ -1236,14 +1236,14 @@ pub(super) fn details_svg(network: ChainId, light: bool, text: FaceText<'_>) -> 
     // `.pdl`: 22px rows 10px apart, 16px under the rule.
     for (y, label, value) in [
         (141, "Lock", text.lock),
-        (173, "Backup", text.backup),
-        (205, "Connect", text.connect),
+        (173, "Seed phrase", text.backup),
+        (205, "Recovery Kit", text.connect),
         (237, "Wallets", text.wallets),
     ] {
         let value: String = value.chars().take(34).collect();
         let _ = write!(
             svg,
-            "<text x=\"28\" y=\"{y}\" font-size=\"13\" fill=\"{muted}\">{label}</text><text x=\"104\" y=\"{y}\" font-size=\"14\" fill=\"{ink}\">{}</text>",
+            "<text x=\"28\" y=\"{y}\" font-size=\"13\" fill=\"{muted}\">{label}</text><text x=\"124\" y=\"{y}\" font-size=\"14\" fill=\"{ink}\">{}</text>",
             xml_text(&value)
         );
     }

@@ -960,6 +960,25 @@ impl SparkClient {
         }
     }
 
+    /// A client with no bridge behind it: every request fails at once.
+    #[cfg(test)]
+    pub(crate) fn disconnected_for_test() -> Self {
+        let (request_tx, _) = mpsc::unbounded_channel();
+        let (event_tx, _) = broadcast::channel(16);
+        SparkClient {
+            inner: Arc::new(SparkClientInner {
+                next_id: AtomicU64::new(1),
+                request_tx,
+                pending: Arc::new(Mutex::new(HashMap::new())),
+                late_outcomes: Arc::new(Mutex::new(HashMap::new())),
+                awaiting_late: Arc::new(Mutex::new(std::collections::HashSet::new())),
+                event_tx,
+                child: Mutex::new(None),
+                closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }),
+        }
+    }
+
     /// Subscribe to bridge [`Event`] frames. Each call returns a fresh
     /// `broadcast::Receiver` — each subscriber gets its own independent
     /// cursor over the buffered events. The [`iced::Subscription`]

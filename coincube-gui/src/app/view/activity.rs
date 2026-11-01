@@ -198,7 +198,10 @@ pub enum ActivityMessage {
     /// Save the selected row's label draft.
     SaveLabel,
     /// A wallet page's "View all transactions": Activity, filtered to it.
+    /// The Overview's "See all in Activity" sends `All`.
     ViewAll(WalletFilter),
+    /// An Overview row: Activity, unfiltered, with this entry selected.
+    Open(String),
     /// A wallet page's Retry: that wallet's rows only, kept on screen.
     RetryWallet(WalletFilter),
 }
@@ -1333,18 +1336,31 @@ fn columns<'a>() -> Element<'a, Message> {
     .into()
 }
 
-fn activity_row<'a>(entry: &Entry, selected: bool, masked: bool) -> Element<'a, Message> {
-    let time = (entry.timestamp != 0)
-        .then(|| DateTime::<Utc>::from_timestamp(entry.timestamp as i64, 0))
+/// `.tm` under a day heading: the local time, or a dash for a pending row.
+fn entry_time(timestamp: u64) -> String {
+    (timestamp != 0)
+        .then(|| DateTime::<Utc>::from_timestamp(timestamp as i64, 0))
         .flatten()
         .map_or_else(
             || "—".to_owned(),
             |time| time.with_timezone(&Local).format("%H:%M").to_string(),
-        );
-    entry_row(entry, selected, masked, time, 44.0, true)
+        )
 }
 
-/// One `.tr`: time, wallet (Activity only), details, amount and status.
+fn activity_row<'a>(entry: &Entry, selected: bool, masked: bool) -> Element<'a, Message> {
+    entry_row(
+        entry,
+        selected,
+        masked,
+        entry_time(entry.timestamp),
+        44.0,
+        true,
+        ActivityMessage::Select(entry.id.clone()),
+    )
+}
+
+/// One `.tr`: time, wallet, details, amount and status. A press sends
+/// `on_press`.
 fn entry_row<'a>(
     entry: &Entry,
     selected: bool,
@@ -1352,6 +1368,7 @@ fn entry_row<'a>(
     time: String,
     time_width: f32,
     with_wallet: bool,
+    on_press: ActivityMessage,
 ) -> Element<'a, Message> {
     let failed = entry.status == StatusFilter::Failed && entry.signer_status.is_none();
     let mut wallet = Row::new().spacing(8).align_y(Alignment::Center);
@@ -1428,30 +1445,43 @@ fn entry_row<'a>(
                 }
                 style
             })
-            .on_press(Message::Activity(ActivityMessage::Select(entry.id.clone()))),
+            .on_press(Message::Activity(on_press)),
         rule::horizontal(1)
     ]
     .into()
 }
 
-/// Rows a wallet page's "Recent activity" shows.
+/// Rows a "Recent activity" table shows.
 pub const RECENT_ACTIVITY_ROWS: usize = 5;
-/// `.tr .tm` on a wallet page: no day headings, so the time carries its day.
-const RECENT_TIME_WIDTH: f32 = 104.0;
 
-/// "Today 09:18", "Yesterday 11:05", "Oct 19, 21:15".
-fn recent_when(timestamp: u64, today: NaiveDate) -> String {
-    let Some(time) = (timestamp != 0)
-        .then(|| DateTime::<Utc>::from_timestamp(timestamp as i64, 0))
-        .flatten()
-        .map(|time| time.with_timezone(&Local))
-    else {
-        return "Pending".to_owned();
-    };
-    match (today - time.date_naive()).num_days() {
-        0 => time.format("Today %H:%M").to_string(),
-        1 => time.format("Yesterday %H:%M").to_string(),
-        _ => time.format("%b %-d, %H:%M").to_string(),
+/// Where a "Recent activity" table sits, which rows it lists, and what a row
+/// press does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecentScope {
+    /// The Overview: Spark and the Vault together. A row opens in Activity.
+    Cube,
+    /// A wallet page: that wallet's rows. A row opens the page's detail pane.
+    Wallet(WalletFilter),
+}
+
+impl RecentScope {
+    pub fn includes(self, wallet: WalletFilter) -> bool {
+        match self {
+            Self::Cube => matches!(wallet, WalletFilter::Spark | WalletFilter::Vault),
+            Self::Wallet(only) => wallet == only,
+        }
+    }
+
+    /// The wallets whose history the table reads, in the order their load
+    /// failures are listed.
+    pub fn sources(self) -> &'static [WalletFilter] {
+        match self {
+            Self::Cube => &[WalletFilter::Spark, WalletFilter::Vault],
+            Self::Wallet(WalletFilter::Spark) => &[WalletFilter::Spark],
+            Self::Wallet(WalletFilter::Vault) => &[WalletFilter::Vault],
+            Self::Wallet(WalletFilter::Liquid) => &[WalletFilter::Liquid],
+            Self::Wallet(WalletFilter::All) => &[],
+        }
     }
 }
 
@@ -1500,44 +1530,119 @@ fn wallet_history_state(
 fn wallet_selection(activity: &Activity, wallet: WalletFilter) -> Option<Entry> {
     let id = activity.selected_id.as_deref()?;
     activity
-        .wallet_entries(wallet)
+        .recent_entries(RecentScope::Wallet(wallet))
         .into_iter()
-        .take(RECENT_ACTIVITY_ROWS)
         .find(|entry| entry.id == id)
 }
 
-/// A wallet page's "Recent activity" (`P-Overview` Vault and Spark): its
-/// newest rows in Activity's own row, a row press opens the detail pane
-/// beside the page, and "View all transactions" opens Activity filtered to
-/// the wallet.
+/// The local day `timestamp` falls on; none for a pending row (no time yet).
+fn entry_day(timestamp: u64) -> Option<NaiveDate> {
+    (timestamp != 0)
+        .then(|| DateTime::<Utc>::from_timestamp(timestamp as i64, 0))
+        .flatten()
+        .map(|time| time.with_timezone(&Local).date_naive())
+}
+
+/// `.day` / `.dayh`: a relative day name, then the date in the muted ink.
+fn day_heading_row<'a>(day: Option<NaiveDate>, today: NaiveDate) -> Element<'a, Message> {
+    let (relative, date) = day_heading(day, today);
+    column![
+        container(
+            row![
+                words(relative, 13.0, font::SEMIBOLD, glyph::ink),
+                words(date, 13.0, font::MEDIUM, glyph::muted)
+            ]
+            .spacing(12)
+            .align_y(Alignment::Center)
+        )
+        .padding(iced::Padding {
+            top: 20.0,
+            right: 12.0,
+            bottom: 8.0,
+            left: 12.0,
+        }),
+        rule::horizontal(1)
+    ]
+    .into()
+}
+
+/// "Recent activity" (`P-Overview` `.sec` with `.acts5`): the scope's newest
+/// rows in Activity's own row, under Activity's column heads and day
+/// headings. On the Overview a row opens in Activity and "See all in
+/// Activity" opens Activity unfiltered; on a wallet page a row opens the
+/// detail pane beside the page and "View all transactions" opens Activity
+/// filtered to the wallet.
 ///
 /// `unknown_history` replaces the empty-list copy while the wallet's own
 /// history is not known yet (a Vault before its scan completes), so an
 /// empty answer never reads as "No transactions yet".
-pub fn wallet_recent_activity<'a>(
+pub fn recent_activity<'a>(
     activity: &'a Activity,
     cache: &'a Cache,
-    wallet: WalletFilter,
+    scope: RecentScope,
     unknown_history: Option<&'static str>,
 ) -> Element<'a, Message> {
     let masked = cache.balance_amounts_masked();
-    let entries = activity.wallet_entries(wallet);
-    let selected = activity.selected_id.as_deref();
-    let (loading, error) = wallet_history_state(activity, wallet);
+    let entries = activity.recent_entries(scope);
+    // Only a wallet page's rows own the detail pane.
+    let selected = match scope {
+        RecentScope::Wallet(_) => activity.selected_id.as_deref(),
+        RecentScope::Cube => None,
+    };
+    let states: Vec<_> = scope
+        .sources()
+        .iter()
+        .map(|wallet| (*wallet, wallet_history_state(activity, *wallet)))
+        .collect();
+    let loading = states.iter().any(|(_, (loading, _))| *loading);
+    let failed = states.iter().any(|(_, (_, error))| error.is_some());
     let today = Local::now().date_naive();
 
-    let mut content = Column::new()
-        .spacing(10)
-        .push(coincube_ui::component::text::h4_bold("Recent activity"));
-    if let Some((source, error)) = error {
+    let (link_id, link, view_all) = match scope {
+        RecentScope::Cube => (
+            "tenshu.recent.cube.all".to_owned(),
+            "See all in Activity",
+            WalletFilter::All,
+        ),
+        RecentScope::Wallet(wallet) => (
+            format!("tenshu.recent.{wallet}.all"),
+            "View all transactions",
+            wallet,
+        ),
+    };
+    // `.sech`: the heading, and the way into Activity on its right.
+    let mut heading = Row::new()
+        .spacing(16)
+        .align_y(Alignment::Center)
+        .push(words("Recent activity", 16.0, font::SEMIBOLD, glyph::ink).width(Length::Fill));
+    if !entries.is_empty() {
+        heading = heading.push(
+            Action::new(
+                Id::from(link_id),
+                words(link, 13.0, font::MEDIUM, glyph::accent),
+                Message::FocusAction,
+            )
+            .padding([4, 0])
+            .style(theme::button::transparent_border)
+            .on_press(Message::Activity(ActivityMessage::ViewAll(view_all))),
+        );
+    }
+    let mut content = Column::new().spacing(10).push(heading);
+    for (wallet, (_, error)) in &states {
+        let Some((source, error)) = error else {
+            continue;
+        };
+        let shown = entries.iter().any(|entry| entry.wallet == *wallet);
         content = content.push(
             row![
                 glyph::glyph(glyph::WARNING, 16.0, glyph::warn),
                 words(
-                    if entries.is_empty() {
-                        format!("{source} couldn't load")
-                    } else {
+                    // The reason shows whether or not any of the source's
+                    // rows made the table.
+                    if shown {
                         format!("Last known activity · {source} couldn't load: {error}")
+                    } else {
+                        format!("{source} couldn't load: {error}")
                     },
                     13.0,
                     font::REGULAR,
@@ -1551,19 +1656,20 @@ pub fn wallet_recent_activity<'a>(
                 )
                 .style(theme::button::secondary)
                 .padding([6, 12])
-                .on_press(Message::Activity(ActivityMessage::RetryWallet(wallet))),
+                .on_press(Message::Activity(ActivityMessage::RetryWallet(*wallet))),
             ]
             .spacing(10)
             .align_y(Alignment::Center),
         );
     }
-    let mut rows = Column::new().push(rule::horizontal(1));
+    // `.acts5`: Activity's column heads, its day headings and its rows.
+    let mut rows = Column::new().push(columns());
     if entries.is_empty() {
         let note = if let Some(note) = unknown_history {
             note
         } else if loading {
             "Loading payment history…"
-        } else if error.is_some() {
+        } else if failed {
             "No transactions to show"
         } else {
             "No transactions yet"
@@ -1576,30 +1682,31 @@ pub fn wallet_recent_activity<'a>(
             rule::horizontal(1)
         ]);
     }
-    for entry in entries.iter().take(RECENT_ACTIVITY_ROWS) {
+    let mut previous_day = None;
+    for (index, entry) in entries.iter().enumerate() {
+        let day = entry_day(entry.timestamp);
+        if index == 0 || day != previous_day {
+            rows = rows.push(day_heading_row(day, today));
+            previous_day = day;
+        }
+        let press = match scope {
+            RecentScope::Cube => ActivityMessage::Open(entry.id.clone()),
+            RecentScope::Wallet(_) => ActivityMessage::Select(entry.id.clone()),
+        };
         rows = rows.push(entry_row(
             entry,
             selected == Some(entry.id.as_str()),
             masked,
-            recent_when(entry.timestamp, today),
-            RECENT_TIME_WIDTH,
-            false,
+            entry_time(entry.timestamp),
+            44.0,
+            true,
+            press,
         ));
     }
-    content = content.push(rows);
-    if !entries.is_empty() {
-        content = content.push(
-            Action::new(
-                Id::from(format!("tenshu.recent.{wallet}.all")),
-                words("View all transactions", 13.0, font::SEMIBOLD, glyph::accent),
-                Message::FocusAction,
-            )
-            .padding([4, 0])
-            .style(theme::button::transparent_border)
-            .on_press(Message::Activity(ActivityMessage::ViewAll(wallet))),
-        );
-    }
-    content.into()
+    content
+        .push(tenshu::bleed(ROW_INSET, rows))
+        .width(Length::Fill)
+        .into()
 }
 
 /// The detail pane for a wallet page's selected row: Activity's own pane, so
@@ -1626,10 +1733,10 @@ pub fn wallet_detail_beside(width: f32) -> bool {
 /// The Vault and Spark overviews' own side padding inside the page.
 const WALLET_PAGE_INSET: f32 = 16.0;
 
-// `.tr` on a wallet page: Time 104, Details (at least 160 here), Amount 128 and
-// Status 132, 12px apart, inside the row's 12px insets.
-const RECENT_ROWS_MIN_WIDTH: f32 =
-    RECENT_TIME_WIDTH + 160.0 + 128.0 + 132.0 + 3.0 * 12.0 + 2.0 * ROW_INSET;
+// `.tr.w5` on a wallet page: Time 44, Wallet 112, Details (at least 160 here),
+// Amount 128 and Status 132, 12px apart. The row's 12px insets bleed past the
+// page's own (`.acts5 { margin: 0 -12px }`).
+const RECENT_ROWS_MIN_WIDTH: f32 = 44.0 + 112.0 + 160.0 + 128.0 + 132.0 + 4.0 * 12.0;
 
 /// `.det`: the 420px pane at the content's right edge, scrolling on its own.
 pub fn detail_column<'a>(detail: Element<'a, Message>) -> Element<'a, Message> {
@@ -2050,11 +2157,32 @@ fn render_at_width<'a>(
         })
         .collect();
     // A retained selection may be outside the current filter or the complete
-    // history window. Only a row in the visible feed may own the detail pane.
-    let selected = activity
-        .selected_id
-        .as_ref()
-        .and_then(|id| visible.iter().copied().find(|entry| &entry.id == id));
+    // history window. Only a row in the visible feed may own the detail pane,
+    // except the row an Overview row opened: it may sit past the cutoff, or
+    // be missing while a read fails. Its fresh copy wins once loaded, and the
+    // filters still apply to whichever copy is shown.
+    let selected = activity.selected_id.as_ref().and_then(|id| {
+        visible
+            .iter()
+            .copied()
+            .find(|entry| &entry.id == id)
+            .or_else(|| {
+                activity
+                    .opened
+                    .as_ref()
+                    .filter(|opened| &opened.id == id)
+                    .map(|opened| {
+                        entries
+                            .iter()
+                            .find(|entry| entry.id == opened.id)
+                            .unwrap_or(opened)
+                    })
+                    // The filters judge the copy shown, fresh or kept.
+                    .filter(|shown| activity.filters.includes(shown))
+            })
+    });
+    let selected_listed =
+        selected.is_some_and(|selected| visible.iter().any(|entry| entry.id == selected.id));
     let beside = detail_beside_list(width);
     let frame = column_frame(width, beside && selected.is_some());
     let shown = visible.len();
@@ -2186,34 +2314,21 @@ fn render_at_width<'a>(
         );
     }
     let mut selected_detail = selected.map(|entry| detail_pane(activity, entry, cache));
+    // Compact detail sits under its row; an opened row the list doesn't show
+    // has it at the top instead.
+    if !beside && !selected_listed {
+        if let Some(detail) = selected_detail.take() {
+            list = list.push(column![detail_surface(detail), rule::horizontal(1)]);
+        }
+    }
     let today = Local::now().date_naive();
     let mut previous_day = None;
     let mut first_day = true;
     for entry in visible {
         let is_selected = selected.is_some_and(|selected| selected.id == entry.id);
-        let day = (entry.timestamp != 0)
-            .then(|| DateTime::<Utc>::from_timestamp(entry.timestamp as i64, 0))
-            .flatten()
-            .map(|time| time.with_timezone(&Local).date_naive());
+        let day = entry_day(entry.timestamp);
         if first_day || day != previous_day {
-            let (relative, date) = day_heading(day, today);
-            list = list.push(column![
-                container(
-                    row![
-                        words(relative, 13.0, font::SEMIBOLD, glyph::ink),
-                        words(date, 13.0, font::MEDIUM, glyph::muted)
-                    ]
-                    .spacing(12)
-                    .align_y(Alignment::Center)
-                )
-                .padding(iced::Padding {
-                    top: 20.0,
-                    right: 12.0,
-                    bottom: 8.0,
-                    left: 12.0,
-                }),
-                rule::horizontal(1)
-            ]);
+            list = list.push(day_heading_row(day, today));
             previous_day = day;
             first_day = false;
         }
@@ -3467,7 +3582,7 @@ mod tests {
     }
 
     #[test]
-    fn wallet_recent_activity_shows_that_wallets_newest_five_rows() {
+    fn recent_activity_on_a_wallet_page_shows_that_wallets_newest_five_rows() {
         let cache = Cache {
             balance_privacy: Some(BalancePrivacyChrome {
                 privacy: BalancePrivacy::Shown,
@@ -3483,7 +3598,12 @@ mod tests {
         ] {
             let spark = mount(
                 "wallet-recent-activity-spark",
-                wallet_recent_activity(&activity, &cache, WalletFilter::Spark, None),
+                recent_activity(
+                    &activity,
+                    &cache,
+                    RecentScope::Wallet(WalletFilter::Spark),
+                    None,
+                ),
                 (1440, 900),
                 appearance,
                 theme,
@@ -3492,7 +3612,8 @@ mod tests {
             assert!(spark.contains("Recent activity"));
             assert!(spark.contains("View all transactions"));
             assert!(!spark.contains("Last transactions"));
-            // The newest five, as Activity rows without a wallet column.
+            // The newest five, as Activity rows under its column heads.
+            assert!(spark.contains("Wallet") && spark.contains("Details"));
             for n in 2..7 {
                 assert!(spark.contains(&format!("Spark receipt {n}")), "row {}", n);
                 let id = Entry::spark(spark_receipts(7).remove(n)).id;
@@ -3508,7 +3629,12 @@ mod tests {
         // The Vault page lists none of Spark's rows.
         let vault = mount(
             "wallet-recent-activity-vault-empty",
-            wallet_recent_activity(&activity, &cache, WalletFilter::Vault, None),
+            recent_activity(
+                &activity,
+                &cache,
+                RecentScope::Wallet(WalletFilter::Vault),
+                None,
+            ),
             (1440, 900),
             "dark",
             coincube_ui::theme::Theme::dark(),
@@ -3519,6 +3645,402 @@ mod tests {
         assert!(!vault.contains("View all transactions"));
     }
 
+    /// Vault payments at `times`, each its own transaction.
+    fn vault_payments_at(times: &[u32]) -> Vec<HistoryTransaction> {
+        use coincube_core::miniscript::bitcoin::{hashes::Hash, Txid};
+        times
+            .iter()
+            .enumerate()
+            .map(|(n, time)| {
+                let mut tx = outgoing_vault_payment();
+                tx.time = Some(*time);
+                tx.txid = Txid::from_byte_array([n as u8 + 1; 32]);
+                tx
+            })
+            .collect()
+    }
+
+    /// Activity holding `spark` and `vault`, as their first pages left it.
+    fn loaded(spark: Vec<PaymentSummary>, vault: Vec<HistoryTransaction>) -> Activity {
+        let cache = Cache::default();
+        let mut activity = Activity::new(None, None);
+        drop(activity.update(
+            None,
+            &cache,
+            crate::app::message::Message::ActivitySparkLoaded(0, Ok((spark, false))),
+        ));
+        drop(activity.update(
+            None,
+            &cache,
+            crate::app::message::Message::ActivityVaultLoaded(0, Ok((vault, false))),
+        ));
+        activity
+    }
+
+    /// The Overview lists the five newest rows of Spark and the Vault
+    /// together, newest first, whichever wallet each is from; a wallet page
+    /// lists only its own.
+    #[test]
+    fn overview_recent_activity_merges_spark_and_vault_newest_first() {
+        let base = 1_760_000_000;
+        // Spark at +0, +60, +120, +180 and +240; the Vault in between.
+        let activity = loaded(
+            spark_receipts(5),
+            vault_payments_at(&[base + 30, base + 150, base + 300]),
+        );
+        let merged: Vec<_> = activity
+            .recent_entries(RecentScope::Cube)
+            .into_iter()
+            .map(|entry| (entry.wallet, entry.timestamp - u64::from(base)))
+            .collect();
+        assert_eq!(
+            merged,
+            [
+                (WalletFilter::Vault, 300),
+                (WalletFilter::Spark, 240),
+                (WalletFilter::Spark, 180),
+                (WalletFilter::Vault, 150),
+                (WalletFilter::Spark, 120),
+            ]
+        );
+        let spark: Vec<_> = activity
+            .recent_entries(RecentScope::Wallet(WalletFilter::Spark))
+            .into_iter()
+            .map(|entry| entry.timestamp - u64::from(base))
+            .collect();
+        assert_eq!(spark, [240, 180, 120, 60, 0]);
+
+        // Drawn in that order, each row naming its wallet, under "See all in
+        // Activity"; a row press opens it in Activity.
+        let cache = Cache {
+            balance_privacy: Some(BalancePrivacyChrome {
+                privacy: BalancePrivacy::Shown,
+                busy: false,
+                interactive: false,
+            }),
+            ..Default::default()
+        };
+        let mounted = mount(
+            "overview-recent-activity-merged",
+            recent_activity(&activity, &cache, RecentScope::Cube, None),
+            (1440, 900),
+            "dark",
+            coincube_ui::theme::Theme::dark(),
+            1106,
+        );
+        assert!(mounted.contains("See all in Activity"));
+        assert!(!mounted.contains("View all transactions"));
+        let y = |needle: &str| {
+            mounted
+                .text
+                .iter()
+                .filter(|(value, _)| value == needle)
+                .map(|(_, bounds)| bounds.y)
+                .collect::<Vec<_>>()
+        };
+        let vault_rows = y("Sent Bitcoin");
+        assert_eq!(vault_rows.len(), 2);
+        let (s4, s3, s2) = (
+            y("Spark receipt 4")[0],
+            y("Spark receipt 3")[0],
+            y("Spark receipt 2")[0],
+        );
+        assert!(vault_rows[0] < s4 && s4 < s3 && s3 < vault_rows[1] && vault_rows[1] < s2);
+        assert!(!mounted.contains("Spark receipt 1"));
+        // The wallet column: both names under the column head, beside rows.
+        assert!(y("Vault").len() >= 2 && y("Spark").len() >= 3);
+        let entries = activity.recent_entries(RecentScope::Cube);
+        for entry in &entries {
+            assert!(mounted.has_focus(row_focus_id(&entry.id)));
+        }
+        let pressed = press(
+            recent_activity(&activity, &cache, RecentScope::Cube, None),
+            row_focus_id(&entries[1].id),
+        );
+        assert!(
+            matches!(
+                pressed.as_slice(),
+                [Message::Activity(ActivityMessage::Open(id))] if *id == entries[1].id
+            ),
+            "{:?}",
+            pressed
+        );
+        // The wallet page's row still selects in place.
+        let spark_entries = activity.recent_entries(RecentScope::Wallet(WalletFilter::Spark));
+        let pressed = press(
+            recent_activity(
+                &activity,
+                &cache,
+                RecentScope::Wallet(WalletFilter::Spark),
+                None,
+            ),
+            row_focus_id(&spark_entries[0].id),
+        );
+        assert!(
+            matches!(
+                pressed.as_slice(),
+                [Message::Activity(ActivityMessage::Select(id))] if *id == spark_entries[0].id
+            ),
+            "{:?}",
+            pressed
+        );
+    }
+
+    /// Focus the Action `id` in `content` at 1106px wide and press Enter:
+    /// the messages it sends, less its own focus intent.
+    fn press(content: Element<'_, Message>, id: Id) -> Vec<Message> {
+        use iced::advanced::{
+            layout,
+            renderer::Headless,
+            widget::{operation, operation::focusable, Operation, Tree},
+            Layout,
+        };
+        use iced::{keyboard, mouse, Event, Rectangle, Size};
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let size = Size::new(1106.0, 2000.0);
+        let mut element: Element<'_, Message> = container(content).padding([0, 24]).into();
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        let mut operation: Box<dyn Operation<()>> = Box::new(focusable::focus(id));
+        loop {
+            element.as_widget_mut().operate(
+                &mut tree,
+                Layout::new(&node),
+                &renderer,
+                &mut operation::black_box(operation.as_mut()),
+            );
+            match operation.finish() {
+                operation::Outcome::None | operation::Outcome::Some(()) => break,
+                operation::Outcome::Chain(next) => operation = next,
+            }
+        }
+        let key = keyboard::Key::Named(keyboard::key::Named::Enter);
+        let physical_key =
+            keyboard::key::Physical::Unidentified(keyboard::key::NativeCode::Unidentified);
+        let mut messages = Vec::new();
+        for event in [
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key: key.clone(),
+                modified_key: key.clone(),
+                physical_key,
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::empty(),
+                text: None,
+                repeat: false,
+            }),
+            Event::Keyboard(keyboard::Event::KeyReleased {
+                key: key.clone(),
+                modified_key: key.clone(),
+                physical_key,
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::empty(),
+            }),
+        ] {
+            element.as_widget_mut().update(
+                &mut tree,
+                &event,
+                Layout::new(&node),
+                mouse::Cursor::Unavailable,
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut iced::advanced::Shell::new(&mut messages),
+                &Rectangle::with_size(size),
+            );
+        }
+        messages.retain(|message| !matches!(message, Message::FocusAction(_)));
+        messages
+    }
+
+    /// The row an Overview row opened keeps its label through a failed read:
+    /// it reads from the kept copy, a save is attempted rather than dropped,
+    /// and a saved label reaches the copy's title.
+    #[test]
+    fn an_opened_rows_label_reads_and_saves_from_its_kept_copy() {
+        use crate::app::state::State;
+        let cache = Cache::default();
+        let mut tx = outgoing_vault_payment();
+        let key = Entry::vault(tx.clone())
+            .label_key
+            .expect("a label key")
+            .to_string();
+        tx.labels.insert(key.clone(), "Rent".into());
+        let mut activity = loaded(Vec::new(), vec![tx]);
+        let entry = activity.entries().remove(0);
+        drop(activity.update(
+            None,
+            &cache,
+            crate::app::message::Message::View(Message::Activity(ActivityMessage::Open(
+                entry.id.clone(),
+            ))),
+        ));
+        // The switch to Activity reloads, and its read fails.
+        drop(activity.reload(None, None));
+        drop(activity.update(
+            None,
+            &cache,
+            crate::app::message::Message::ActivityVaultLoaded(
+                activity.generation_for_tests(),
+                Err("daemon unavailable".into()),
+            ),
+        ));
+        assert!(activity.entries().is_empty());
+        assert_eq!(activity.stored_label(&entry), "Rent");
+
+        drop(activity.update(
+            None,
+            &cache,
+            crate::app::message::Message::View(Message::Activity(ActivityMessage::LabelEdited(
+                "Rent May".into(),
+            ))),
+        ));
+        drop(activity.update(
+            None,
+            &cache,
+            crate::app::message::Message::View(Message::Activity(ActivityMessage::SaveLabel)),
+        ));
+        assert_eq!(
+            activity.label_error_for(&entry.id),
+            Some("The Vault isn't running, so the label can't be saved yet."),
+            "attempted, not dropped"
+        );
+
+        drop(activity.update(
+            None,
+            &cache,
+            crate::app::message::Message::ActivityLabelSaved(
+                1,
+                Ok((entry.id.clone(), key, Some("Rent May".into()))),
+            ),
+        ));
+        assert_eq!(activity.stored_label(&entry), "Rent May");
+        let opened = activity.opened.as_ref().expect("still kept");
+        assert_eq!(
+            (opened.id.as_str(), opened.title.as_str()),
+            (entry.id.as_str(), "Rent May")
+        );
+    }
+
+    /// A wallet whose history failed to load names the reason whether or not
+    /// any of its rows made the table.
+    #[test]
+    fn recent_activity_names_a_failed_wallets_reason() {
+        let base = 1_760_000_000;
+        let mut activity = loaded(Vec::new(), vault_payments_at(&[base + 30]));
+        drop(activity.update(
+            None,
+            &Cache::default(),
+            crate::app::message::Message::ActivitySparkLoaded(0, Err("bridge offline".into())),
+        ));
+        let mounted = mount(
+            "overview-recent-activity-failed-source",
+            recent_activity(&activity, &Cache::default(), RecentScope::Cube, None),
+            (1440, 900),
+            "dark",
+            coincube_ui::theme::Theme::dark(),
+            1106,
+        );
+        assert!(
+            mounted
+                .text
+                .iter()
+                .any(|(value, _)| value.contains("couldn't load: bridge offline")
+                    && !value.starts_with("Last known activity")),
+            "{:?}",
+            mounted.text
+        );
+    }
+
+    /// Day headings group the Overview's rows as Activity's do: pending rows
+    /// first, then today (across both wallets), yesterday and older days,
+    /// each heading once.
+    #[test]
+    fn overview_recent_activity_groups_rows_under_day_headings() {
+        let local_noon = |days_ago: i64| {
+            let day = Local::now().date_naive() - chrono::Duration::days(days_ago);
+            day.and_hms_opt(12, 0, 0)
+                .unwrap()
+                .and_local_timezone(Local)
+                .earliest()
+                .unwrap()
+                .timestamp() as u64
+        };
+        let at = |id: &str, timestamp: u64, status: &str| PaymentSummary {
+            id: id.into(),
+            timestamp,
+            status: status.into(),
+            description: Some(format!("Row {id}")),
+            ..spark_payment()
+        };
+        let mut vault = vault_payments_at(&[(local_noon(0) - 3_600) as u32]);
+        let txid = vault[0].txid.to_string();
+        vault[0].labels.insert(txid, "Row vault".into());
+        let activity = loaded(
+            vec![
+                at("pending", 0, "pending"),
+                at("today", local_noon(0), "completed"),
+                at("yesterday", local_noon(1), "completed"),
+                at("older", local_noon(20), "completed"),
+            ],
+            vault,
+        );
+        let cache = Cache::default();
+        let mounted = mount(
+            "overview-recent-activity-days",
+            recent_activity(&activity, &cache, RecentScope::Cube, None),
+            (1440, 900),
+            "dark",
+            coincube_ui::theme::Theme::dark(),
+            1106,
+        );
+        let y = |needle: &str| {
+            let found: Vec<_> = mounted
+                .text
+                .iter()
+                .filter(|(value, _)| value == needle)
+                .map(|(_, bounds)| bounds.y)
+                .collect();
+            assert_eq!(found.len(), 1, "{needle} once: {:?}", mounted.text);
+            found[0]
+        };
+        // "Pending" is the pending row's status too: the heading is above it.
+        let pending_heading = mounted
+            .text
+            .iter()
+            .filter(|(value, _)| value == "Pending")
+            .map(|(_, bounds)| bounds.y)
+            .fold(f32::INFINITY, f32::min);
+        let order = [
+            pending_heading,
+            y("Row pending"),
+            y("Today"),
+            y("Row today"),
+            y("Row vault"),
+            y("Yesterday"),
+            y("Row yesterday"),
+            y("Earlier"),
+            y("Row older"),
+        ];
+        assert!(
+            order.windows(2).all(|pair| pair[0] < pair[1]),
+            "{:?}",
+            order
+        );
+        // The time column carries the time only; the heading has the day.
+        assert!(mounted.contains("12:00"));
+        assert!(mounted.contains("—"), "a pending row has no time yet");
+        let yesterday = Local::now().date_naive() - chrono::Duration::days(1);
+        assert!(mounted.contains(&yesterday.format("%a %-d %b %Y").to_string()));
+    }
+
     #[test]
     fn an_unknown_wallet_history_never_reads_as_no_transactions() {
         let cache = Cache::default();
@@ -3526,7 +4048,12 @@ mod tests {
         let note = "Transactions appear once the Vault's history has loaded";
         let mounted = mount(
             "wallet-recent-activity-history-unknown",
-            wallet_recent_activity(&activity, &cache, WalletFilter::Vault, Some(note)),
+            recent_activity(
+                &activity,
+                &cache,
+                RecentScope::Wallet(WalletFilter::Vault),
+                Some(note),
+            ),
             (1440, 900),
             "dark",
             coincube_ui::theme::Theme::dark(),
@@ -3545,7 +4072,12 @@ mod tests {
         let mounted = |activity: &Activity, scenario: &str| {
             mount(
                 scenario,
-                wallet_recent_activity(activity, &cache, WalletFilter::Vault, None),
+                recent_activity(
+                    activity,
+                    &cache,
+                    RecentScope::Wallet(WalletFilter::Vault),
+                    None,
+                ),
                 (1440, 900),
                 "dark",
                 coincube_ui::theme::Theme::dark(),
@@ -3576,7 +4108,7 @@ mod tests {
     }
 
     #[test]
-    fn wallet_recent_activity_hides_amounts_with_balances() {
+    fn recent_activity_hides_amounts_with_balances() {
         let cache = Cache {
             balance_privacy: Some(BalancePrivacyChrome {
                 privacy: BalancePrivacy::Hidden,
@@ -3589,7 +4121,12 @@ mod tests {
         let activity = spark_activity(&cache, 2);
         let mounted = mount(
             "wallet-recent-activity-hidden",
-            wallet_recent_activity(&activity, &cache, WalletFilter::Spark, None),
+            recent_activity(
+                &activity,
+                &cache,
+                RecentScope::Wallet(WalletFilter::Spark),
+                None,
+            ),
             (1440, 900),
             "dark",
             coincube_ui::theme::Theme::dark(),
@@ -3628,7 +4165,12 @@ mod tests {
 
         let page = mount(
             "wallet-recent-activity-selected-row",
-            wallet_recent_activity(&activity, &cache, WalletFilter::Spark, None),
+            recent_activity(
+                &activity,
+                &cache,
+                RecentScope::Wallet(WalletFilter::Spark),
+                None,
+            ),
             (1440, 900),
             "dark",
             coincube_ui::theme::Theme::dark(),
@@ -3646,15 +4188,18 @@ mod tests {
         assert!(!wallet_detail_beside(816.0));
         // 1440 window: page rows and the 420px pane side by side.
         assert!(wallet_detail_beside(1192.0));
-        // The overview's 16px insets and the rule count: at the edge the
-        // details column keeps its 160px.
-        let edge = 1100.0;
-        let details = edge
-            - SELECTED_DETAIL_WIDTH
-            - 1.0
-            - 2.0 * (super::super::page_gutter(edge) + WALLET_PAGE_INSET)
-            - (RECENT_TIME_WIDTH + 128.0 + 132.0 + 3.0 * 12.0 + 2.0 * ROW_INSET);
-        assert_eq!(wallet_detail_beside(edge), details >= 160.0);
+        // The overview's 16px insets and the rule count, and the rows' own
+        // insets bleed past them: at the edge the details column keeps its
+        // 160px.
+        for edge in [1100.0, 1150.0, 1170.0] {
+            let details = edge
+                - SELECTED_DETAIL_WIDTH
+                - 1.0
+                - 2.0 * (super::super::page_gutter(edge) + WALLET_PAGE_INSET)
+                + 2.0 * ROW_INSET
+                - (44.0 + 112.0 + 128.0 + 132.0 + 4.0 * 12.0 + 2.0 * ROW_INSET);
+            assert_eq!(wallet_detail_beside(edge), details >= 160.0, "{edge}");
+        }
     }
 
     #[test]

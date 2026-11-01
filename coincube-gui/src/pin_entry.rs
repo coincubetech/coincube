@@ -1,13 +1,13 @@
-use iced::widget::{image, Space};
-use iced::{Alignment, Length, Task};
+use iced::widget::Space;
+use iced::{Length, Task};
 
 use coincube_ui::{
     component::{
-        quote_display::{self, Quote, QuoteDisplayProps},
-        text::{p1_regular, text},
+        quote_display::{self, Quote},
+        text::p1_regular,
     },
     theme,
-    widget::{Column, Container, Element},
+    widget::{Column, Element},
 };
 
 use crate::app::settings::CubeSettings;
@@ -41,7 +41,6 @@ pub struct PinEntry {
     /// sovereign (no-Connect) enrollment.
     duress_account_id: Option<String>,
     loading_quote: Quote,
-    loading_image_handle: image::Handle,
 }
 
 pub enum PinEntrySuccess {
@@ -188,7 +187,6 @@ impl PinEntry {
             .map(|client| client.base_url.clone())
             .unwrap_or_else(crate::services::coincube_api_base_url);
         let loading_quote = quote_display::random_quote("loading");
-        let loading_image_handle = quote_display::image_handle_for_context("loading");
         Self {
             cube,
             fork_signer: Default::default(),
@@ -203,7 +201,6 @@ impl PinEntry {
             on_success,
             duress_account_id,
             loading_quote,
-            loading_image_handle,
         }
     }
 
@@ -325,6 +322,9 @@ impl PinEntry {
                 // Enter key pressed in a PIN field — trigger submit
                 self.update(Message::Submit)
             }
+            // The face stays up while the PIN is checked; its digits are
+            // already submitted.
+            Message::PinInput(_) if self.loading => Task::none(),
             Message::PinInput(msg) => {
                 self.error = None;
                 self.pin_input.update(msg).map(Message::PinInput)
@@ -543,29 +543,6 @@ impl PinEntry {
         mode: coincube_ui::theme::palette::ThemeMode,
         floor: Option<&'a crate::home::LauncherSceneContext>,
     ) -> Element<'a, Message> {
-        if self.loading {
-            // Full-screen loading with Kage quote while BreezClient loads
-            return Container::new(
-                Column::new()
-                    .width(Length::Fill)
-                    .spacing(20)
-                    .align_x(Alignment::Center)
-                    .push(Space::new().height(Length::Fill))
-                    .push(quote_display::display(&QuoteDisplayProps::new(
-                        "loading",
-                        &self.loading_quote,
-                        &self.loading_image_handle,
-                    )))
-                    .push(crate::loading::loading_indicator(None))
-                    .push(text("Loading your Cube...").style(theme::text::secondary))
-                    .push(Space::new().height(Length::Fill)),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .padding(50)
-            .into();
-        }
-
         if let Some(floor) = floor {
             crate::home::launcher_presenter::unlock_face_on_floor(
                 &self.cube,
@@ -594,7 +571,11 @@ impl PinEntry {
             .push(self.pin_input.face_view().map(Message::PinInput))
             .push(Space::new().height(Length::Fixed(6.0)))
             .push(face::face_words(
-                "Enter this Cube's PIN.",
+                if self.loading {
+                    "Checking your PIN…"
+                } else {
+                    "Enter this Cube's PIN."
+                },
                 12.0,
                 coincube_ui::font::REGULAR,
                 true,
@@ -604,18 +585,22 @@ impl PinEntry {
                 .push(Space::new().height(Length::Fixed(6.0)))
                 .push(p1_regular(error).size(12).style(theme::text::error));
         }
-        let unlock = iced::widget::button(face::face_button_label("Unlock"))
-            .height(Length::Fixed(36.0))
-            .padding([0.0, 16.0])
-            .style(face::face_primary_style)
-            .on_press_maybe(self.pin_input.is_complete().then_some(Message::Submit));
+        let unlock = iced::widget::button(face::face_button_label(if self.loading {
+            "Unlocking…"
+        } else {
+            "Unlock"
+        }))
+        .height(Length::Fixed(36.0))
+        .padding([0.0, 16.0])
+        .style(face::face_primary_style)
+        .on_press_maybe((!self.loading && self.pin_input.is_complete()).then_some(Message::Submit));
         let fields = fields
             .push(Space::new().height(Length::Fixed(20.0)))
             .push(unlock);
         let cancel = iced::widget::button(face::face_link_label("Cancel"))
             .padding([2.0, 4.0])
             .style(face::face_link_style)
-            .on_press(Message::Back);
+            .on_press_maybe((!self.loading).then_some(Message::Back));
         face::unlock_face_body(fields.into(), cancel.into())
     }
 }
@@ -640,6 +625,31 @@ mod fork_handoff_tests {
             None,
         )
     }
+    #[test]
+    fn the_unlock_face_stays_up_while_the_pin_is_checked() {
+        let mut pin = entry(crate::chain::ChainId::Bitcoin);
+        for (index, digit) in "1234".chars().enumerate() {
+            drop(
+                pin.update(Message::PinInput(pin_input::Message::DigitChanged(
+                    index,
+                    digit.to_string(),
+                ))),
+            );
+        }
+        pin.start_loading_for_test();
+        // The submitted digits cannot be edited while they are checked.
+        drop(
+            pin.update(Message::PinInput(pin_input::Message::DigitChanged(
+                0,
+                "9".to_string(),
+            ))),
+        );
+        assert_eq!(pin.pin().as_str(), "1234");
+        // The face, not a separate loading screen, is what shows.
+        drop(pin.view_with_theme(coincube_ui::theme::palette::ThemeMode::Dark));
+        assert!(pin.is_loading());
+    }
+
     #[tokio::test]
     async fn local_pin_reopen_uses_anonymous_capability_and_keeps_chain_bound_signer() {
         use httpmock::prelude::*;

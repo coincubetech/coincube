@@ -35,9 +35,12 @@ const KEY_CARD_WIDTH: f32 = 264.0;
 /// `.keybtn { height: 32px }`.
 const KEY_BUTTON_HEIGHT: f32 = 32.0;
 const ACTIVITY_MENU_WIDTH: f32 = 300.0;
-/// About the Key button's width, so the activity menu opens over its own
-/// button rather than the Key's.
+/// The Key button's width, so the menus beside it open over their own
+/// buttons rather than the Key's.
 const KEY_BUTTON_WIDTH: f32 = 72.0;
+/// The Network activity button's width, for the same reason.
+const ACTIVITY_BUTTON_WIDTH: f32 = 172.0;
+const PLAN_MENU_WIDTH: f32 = 320.0;
 
 const PERSON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round"><circle cx="12" cy="8.5" r="3.5"/><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"/></svg>"##;
 const PLUS: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>"##;
@@ -67,6 +70,10 @@ pub(super) enum Ink {
     /// Lays out like the bar's brand without drawing it, to align a menu.
     /// Text only: Iced's SVG tint ignores alpha.
     Clear,
+    /// A disabled dock action's content: the muted ink, faded like its border.
+    Faded,
+    /// A disabled primary action's content on its faded fill.
+    FadedOnAccent,
 }
 
 /// `.quiet` mutes the bar text while a Cube's face is up.
@@ -87,7 +94,21 @@ fn ink(theme: &theme::Theme, tone: Ink) -> Color {
         Ink::Warn => shell.warn,
         Ink::OnAccent => iced::color!(0x201407),
         Ink::Clear => Color::TRANSPARENT,
+        // Solid blends toward the dock's rail: Iced's SVG tint ignores alpha,
+        // and `dock_button` fades a disabled fill and border to 45%.
+        Ink::Faded => blend(shell.muted, shell.rail, 0.55),
+        Ink::FadedOnAccent => blend(iced::color!(0x201407), shell.rail, 0.55),
     }
+}
+
+/// `from` moved `toward` another colour by `amount` (0 to 1), opaque.
+fn blend(from: Color, toward: Color, amount: f32) -> Color {
+    let mix = |a: f32, b: f32| a + (b - a) * amount;
+    Color::from_rgb(
+        mix(from.r, toward.r),
+        mix(from.g, toward.g),
+        mix(from.b, toward.b),
+    )
 }
 
 /// A prototype stroke icon, tinted like `currentColor`.
@@ -493,8 +514,16 @@ fn dock_action<'a>(
     quiet: bool,
 ) -> Element<'a, ViewMessage> {
     // `.quiet .dock .btn.primary` drops the fill; every label goes muted.
+    // A disabled action fades its border (`dock_button`) and its content, so
+    // it reads as unavailable rather than as an outlined button.
     let primary = primary && !quiet;
-    let tone = if primary { Ink::OnAccent } else { body(quiet) };
+    let enabled = message.is_some();
+    let tone = match (primary, enabled) {
+        (true, true) => Ink::OnAccent,
+        (true, false) => Ink::FadedOnAccent,
+        (false, true) => body(quiet),
+        (false, false) => Ink::Faded,
+    };
     Action::new(
         id,
         Container::new(
@@ -522,8 +551,8 @@ fn small_link<'a>(id: Id, label: &'static str, message: ViewMessage) -> Element<
         .into()
 }
 
-/// `.bottom`: Create and Import on the left, Key on the right. The app's
-/// gated Recover/Split entries and the quota copy share the same 64px bar.
+/// `.bottom`: Create and Import on the left; the plan, Network activity and
+/// Key on the right. The app's gated Recover entry shares the same 64px bar.
 pub(super) fn dock<'a>(
     home: &Home,
     projection: &Projection<'_>,
@@ -557,16 +586,7 @@ pub(super) fn dock<'a>(
                 ViewMessage::GoToSection(HomeSection::RecoverVault),
             )
         });
-    let quota = text(quota_text(projection))
-        .size(12)
-        .style(|theme: &theme::Theme| text::Style {
-            color: Some(theme.colors.shell.muted),
-        })
-        .wrapping(text::Wrapping::WordOrGlyph)
-        .width(Length::Fill);
     let key = (projection.filtered_total > 0).then(|| key_button(home.catalog.key_open()));
-    let target = dock_target(home, projection)
-        .map(|caption| words(caption, 12.0, font::REGULAR, Ink::Muted));
     Container::new(
         Row::new()
             .spacing(8)
@@ -574,10 +594,9 @@ pub(super) fn dock<'a>(
             .height(Length::Fill)
             .push(create)
             .push(import)
-            .push(target)
             .push(recover)
-            .push(Space::new().width(Length::Fixed(16.0)))
-            .push(quota)
+            .push(Space::new().width(Length::Fill))
+            .push(plan_button(home, projection))
             .push(activity_button(home))
             .push(key),
     )
@@ -600,8 +619,23 @@ fn activity_option_id(source: NetworkActivitySource) -> Id {
     })
 }
 
-/// The network activity's source selector: the shown block and where it came
-/// from, or why nothing shows. A click opens the source menu above it.
+/// A 32px bar control that shows `open` while its menu is up.
+fn menu_button_style(
+    open: bool,
+) -> impl Fn(&theme::Theme, iced_button::Status) -> iced_button::Style {
+    move |theme, status| {
+        let mut style = bar_button(theme, status, false);
+        if open {
+            style.background = Some(iced::Background::Color(theme.colors.shell.panel));
+            style.border.color = theme.colors.shell.line;
+        }
+        style
+    }
+}
+
+/// "Network activity", with a dot in the shown network's edge colour once a
+/// read succeeds. The block, its source and any failure are in the menu: the
+/// sky above the Cubes already shows the block.
 fn activity_button<'a>(home: &Home) -> Option<Element<'a, ViewMessage>> {
     if !home.activity_wanted() {
         return None;
@@ -611,18 +645,8 @@ fn activity_button<'a>(home: &Home) -> Option<Element<'a, ViewMessage>> {
         home.theme_mode,
         coincube_ui::theme::palette::ThemeMode::Light
     );
-    let (label, dot) = match home.catalog.activity.current(chain) {
-        Some(Ok(snapshot)) => (
-            format!(
-                "Block {} · {}",
-                launcher_activity::block_label(snapshot.tip),
-                snapshot.via.label()
-            ),
-            Some(launcher_scene::edge(chain, light)),
-        ),
-        Some(Err(why)) => (why.label().to_string(), None),
-        None => ("Reading network activity".to_string(), None),
-    };
+    let dot = matches!(home.catalog.activity.current(chain), Some(Ok(_)))
+        .then(|| launcher_scene::edge(chain, light));
     let open = home.catalog.activity.menu;
     let dot = Container::new(Space::new())
         .width(Length::Fixed(8.0))
@@ -651,27 +675,97 @@ fn activity_button<'a>(home: &Home) -> Option<Element<'a, ViewMessage>> {
                     .spacing(8)
                     .align_y(Alignment::Center)
                     .push(dot)
-                    .push(words(label, 13.0, font::REGULAR, Ink::Muted))
+                    .push(words("Network activity", 13.0, font::REGULAR, Ink::Body))
+                    .push(Space::new().width(Length::Fill))
                     .push(glyph(CHEVRON, 14.0, Ink::Muted)),
             )
             .center_y(Length::Fill),
             focus,
         )
+        .width(Length::Fixed(ACTIVITY_BUTTON_WIDTH))
         .height(Length::Fixed(KEY_BUTTON_HEIGHT))
         .padding([0.0, 10.0])
-        .style(move |theme: &theme::Theme, status| {
-            let mut style = bar_button(theme, status, false);
-            if open {
-                style.background = Some(iced::Background::Color(theme.colors.shell.panel));
-                style.border.color = theme.colors.shell.line;
-            }
-            style
-        })
+        .style(menu_button_style(open))
         .on_press(ViewMessage::Catalog(CatalogMessage::Activity(
             ActivityMessage::Menu(!open),
         )))
         .into(),
     )
+}
+
+fn activity_network_id(blake2b: bool) -> Id {
+    Id::new(if blake2b {
+        "tenshu.launcher.activity.network.blake2b"
+    } else {
+        "tenshu.launcher.activity.network.bitcoin"
+    })
+}
+
+/// The menu's Bitcoin / Bitcoin Blake2b switch, two halves of one control.
+fn activity_networks<'a>(home: &Home) -> Element<'a, ViewMessage> {
+    let chosen = home.activity_chain().is_blake2b();
+    let half = |blake2b: bool, label: &'static str| {
+        let on = blake2b == chosen;
+        Action::new(
+            activity_network_id(blake2b),
+            Container::new(words(
+                label,
+                13.0,
+                if on { font::SEMIBOLD } else { font::REGULAR },
+                if on { Ink::Body } else { Ink::Muted },
+            ))
+            .center_x(Length::Fill)
+            .center_y(Length::Fill),
+            focus,
+        )
+        .width(Length::Fill)
+        .height(Length::Fixed(30.0))
+        .style(move |theme: &theme::Theme, status| {
+            let mut style = chip_style(on)(theme, status);
+            style.border.radius = 6.0.into();
+            style
+        })
+        .on_press(ViewMessage::Catalog(CatalogMessage::Activity(
+            ActivityMessage::Blake2b(blake2b),
+        )))
+    };
+    Row::new()
+        .spacing(6)
+        .push(half(false, "Bitcoin"))
+        .push(half(true, "Bitcoin Blake2b"))
+        .into()
+}
+
+/// What the menu says about the shown read: its block and source, or why
+/// nothing shows.
+fn activity_status(home: &Home) -> String {
+    match home.catalog.activity.current(home.activity_chain()) {
+        Some(Ok(snapshot)) => format!(
+            "Block {} · {}",
+            launcher_activity::block_label(snapshot.tip),
+            snapshot.via.label()
+        ),
+        Some(Err(why)) => why.label().to_string(),
+        None => "Reading network activity".to_string(),
+    }
+}
+
+/// A dock menu's panel: 10px radius, a line border and a deep shadow.
+fn menu_panel(theme: &theme::Theme) -> container::Style {
+    container::Style {
+        background: Some(iced::Background::Color(theme.colors.shell.panel)),
+        border: Border {
+            color: theme.colors.shell.line,
+            width: 1.0,
+            radius: 10.0.into(),
+        },
+        shadow: iced::Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
+            offset: iced::Vector::new(0.0, 18.0),
+            blur_radius: 40.0,
+        },
+        ..Default::default()
+    }
 }
 
 /// The activity source menu, above its dock button. It follows the Network
@@ -735,21 +829,28 @@ pub(super) fn activity_layer<'a>(home: &Home) -> Option<Element<'a, ViewMessage>
             background: Some(iced::Background::Color(theme.colors.shell.line)),
             ..Default::default()
         });
+    let networks = home
+        .activity_blake2b_offered()
+        .then(|| Container::new(activity_networks(home)).padding([4.0, 4.0]));
     let menu = Container::new(
         Column::new()
             .spacing(0)
             .push(
-                Container::new(words(
-                    format!(
-                        "Network activity · {}",
-                        network_menu_name(home.activity_chain())
-                    ),
-                    12.0,
-                    font::REGULAR,
-                    Ink::Muted,
-                ))
-                .padding([6.0, 10.0]),
+                Column::new()
+                    .spacing(2)
+                    .padding([6.0, 10.0])
+                    .push(words(
+                        format!(
+                            "Network activity · {}",
+                            network_menu_name(home.activity_chain())
+                        ),
+                        12.0,
+                        font::REGULAR,
+                        Ink::Muted,
+                    ))
+                    .push(words(activity_status(home), 13.0, font::REGULAR, Ink::Body)),
             )
+            .push(networks)
             .push(option(NetworkActivitySource::Automatic, "Automatic"))
             .push(option(NetworkActivitySource::LocalNode, "Local node"))
             .push(option(
@@ -769,10 +870,10 @@ pub(super) fn activity_layer<'a>(home: &Home) -> Option<Element<'a, ViewMessage>
                     .push(rule)
                     .push(
                         text(
-                            "Follows the Network filter. Automatic reads a local node that is \
-                             already running, else COINCUBE | Connect, or mempool.space for the \
-                             test networks Connect does not serve. The Launcher never starts a \
-                             node.",
+                            "Follows the Network filter, or the network picked above. Automatic \
+                             reads a local node that is already running, else COINCUBE | Connect, \
+                             or mempool.space for the test networks Connect does not serve. The \
+                             Launcher never starts a node.",
                         )
                         .size(12)
                         .style(|theme: &theme::Theme| text::Style {
@@ -789,20 +890,7 @@ pub(super) fn activity_layer<'a>(home: &Home) -> Option<Element<'a, ViewMessage>
     )
     .width(Length::Fixed(ACTIVITY_MENU_WIDTH))
     .padding(6)
-    .style(|theme: &theme::Theme| container::Style {
-        background: Some(iced::Background::Color(theme.colors.shell.panel)),
-        border: Border {
-            color: theme.colors.shell.line,
-            width: 1.0,
-            radius: 10.0.into(),
-        },
-        shadow: iced::Shadow {
-            color: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
-            offset: iced::Vector::new(0.0, 18.0),
-            blur_radius: 40.0,
-        },
-        ..Default::default()
-    });
+    .style(menu_panel);
     // `bottom: calc(100% + 8px)` of its 32px button, like the Key card.
     let button_top = (BAR_HEIGHT + KEY_BUTTON_HEIGHT) / 2.0 + 8.0;
     let placed = Container::new(iced::widget::opaque(menu))
@@ -812,7 +900,247 @@ pub(super) fn activity_layer<'a>(home: &Home) -> Option<Element<'a, ViewMessage>
         .align_y(iced::alignment::Vertical::Bottom)
         .padding(Padding {
             top: 0.0,
-            right: GUTTER + KEY_BUTTON_WIDTH + 8.0,
+            right: GUTTER + key_footprint(home),
+            bottom: button_top,
+            left: 0.0,
+        });
+    Some(
+        iced::widget::Stack::new()
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .push(mouse_area(Space::new().width(Length::Fill).height(Length::Fill)).on_press(close))
+            .push(placed)
+            .into(),
+    )
+}
+
+/// The dock's width right of the Network activity button: the Key and its
+/// gap, when the Key shows.
+fn key_footprint(home: &Home) -> f32 {
+    if launcher_catalog::project(home).filtered_total > 0 {
+        KEY_BUTTON_WIDTH + 8.0
+    } else {
+        0.0
+    }
+}
+
+pub(super) fn plan_id() -> Id {
+    Id::new("tenshu.launcher.plan")
+}
+
+/// The plan's name, with a warning mark once the current network has no free
+/// Cube slot. A click opens its per-network usage above it.
+fn plan_button<'a>(home: &Home, projection: &Projection<'_>) -> Element<'a, ViewMessage> {
+    let open = home.catalog.plan_menu;
+    let full = projection.at_limit();
+    Action::new(
+        plan_id(),
+        Container::new(
+            Row::new()
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .push(full.then(|| glyph(ATTENTION, 16.0, Ink::Warn)))
+                .push(words(
+                    format!("{} plan", projection.tier),
+                    13.0,
+                    font::REGULAR,
+                    Ink::Body,
+                ))
+                .push(glyph(CHEVRON, 14.0, Ink::Muted)),
+        )
+        .center_y(Length::Fill),
+        focus,
+    )
+    .height(Length::Fixed(KEY_BUTTON_HEIGHT))
+    .padding([0.0, 10.0])
+    .style(menu_button_style(open))
+    .on_press(ViewMessage::Catalog(CatalogMessage::PlanMenu(!open)))
+    .into()
+}
+
+/// One network's line in the plan menu: its name, then the slots in use and
+/// what the count leaves out or adds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PlanRow {
+    pub(super) network: &'static str,
+    pub(super) used: String,
+    pub(super) note: Option<String>,
+    pub(super) full: bool,
+    /// The network Create and Import act on.
+    pub(super) current: bool,
+}
+
+/// The plan's per-network limit and each network's use of it. Cubes that are
+/// registered in Connect but not on this device are called out, because they
+/// fill a slot without appearing in any list here.
+pub(super) fn plan_rows(projection: &Projection<'_>) -> Vec<PlanRow> {
+    let limit = projection.cube_limit;
+    projection
+        .usage
+        .iter()
+        .map(|usage| {
+            let network = network_name(usage.chain);
+            let Some(total) = usage.total() else {
+                // This device's share is unknown: say what Connect holds
+                // rather than print a ratio that may be short.
+                return PlanRow {
+                    network,
+                    used: "Not counted".to_string(),
+                    note: Some(if usage.remote > 0 {
+                        format!("{} in Connect; this device not counted", usage.remote)
+                    } else {
+                        "This device's Cubes could not be counted".to_string()
+                    }),
+                    full: false,
+                    current: usage.chain == projection.network,
+                };
+            };
+            PlanRow {
+                network,
+                used: format!("{total} of {limit}"),
+                note: (usage.remote > 0).then(|| format!("{} only in Connect", usage.remote)),
+                full: total >= limit,
+                current: usage.chain == projection.network,
+            }
+        })
+        .collect()
+}
+
+/// Why Create and Import are off, when the current network is full.
+fn plan_limit_note(projection: &Projection<'_>) -> Option<String> {
+    projection.at_limit().then(|| {
+        format!(
+            "Upgrade, or delete a {} Cube, to add one.",
+            network_name(projection.network),
+        )
+    })
+}
+
+/// The plan menu, above its dock button: the limit, each network's use of
+/// it, and the way to more slots.
+pub(super) fn plan_layer<'a>(
+    home: &Home,
+    projection: &Projection<'_>,
+) -> Option<Element<'a, ViewMessage>> {
+    if !home.catalog.plan_menu {
+        return None;
+    }
+    let close = ViewMessage::Catalog(CatalogMessage::PlanMenu(false));
+    let mut rows = Column::new().spacing(0);
+    for row in plan_rows(projection) {
+        let mut title = Row::new().spacing(6).align_y(Alignment::Center).push(words(
+            row.network,
+            13.0,
+            font::REGULAR,
+            Ink::Body,
+        ));
+        if row.current {
+            // Create and Import add Cubes here; the dock no longer captions it.
+            title = title.push(words("New Cubes", 12.0, font::MEDIUM, Ink::Accent));
+        }
+        let mut name = Column::new().spacing(2).width(Length::Fill).push(title);
+        if let Some(note) = row.note {
+            name = name.push(words(note, 12.0, font::REGULAR, Ink::Muted));
+        }
+        let mut used = Row::new().spacing(6).align_y(Alignment::Center).push(words(
+            row.used,
+            13.0,
+            font::MEDIUM,
+            Ink::Body,
+        ));
+        if row.full {
+            used = used.push(words("Full", 12.0, font::MEDIUM, Ink::Warn));
+        }
+        rows = rows.push(
+            Container::new(
+                Row::new()
+                    .spacing(12)
+                    .align_y(Alignment::Center)
+                    .push(name)
+                    .push(used),
+            )
+            .padding([6.0, 10.0]),
+        );
+    }
+    let rule = Container::new(Space::new())
+        .width(Length::Fill)
+        .height(Length::Fixed(1.0))
+        .style(|theme: &theme::Theme| container::Style {
+            background: Some(iced::Background::Color(theme.colors.shell.line)),
+            ..Default::default()
+        });
+    let mut foot = Column::new()
+        .padding(Padding {
+            top: 6.0,
+            right: 6.0,
+            bottom: 4.0,
+            left: 6.0,
+        })
+        .spacing(8)
+        .push(rule);
+    if let Some(note) = plan_limit_note(projection) {
+        foot = foot.push(
+            text(note)
+                .size(12)
+                .style(|theme: &theme::Theme| text::Style {
+                    color: Some(theme.colors.shell.warn),
+                })
+                .wrapping(text::Wrapping::WordOrGlyph),
+        );
+    }
+    let foot = foot.push(if home.connect_account.is_authenticated() {
+        small_link(
+            Id::new("tenshu.launcher.plan.billing"),
+            "Plan & Billing",
+            ViewMessage::GoToSection(HomeSection::Connect(
+                crate::app::menu::ConnectSubMenu::PlanBilling,
+            )),
+        )
+    } else {
+        small_link(
+            Id::new("tenshu.launcher.plan.sign-in"),
+            "Sign in to Connect to change plans",
+            ViewMessage::GoToSection(HomeSection::Connect(
+                crate::app::menu::ConnectSubMenu::Overview,
+            )),
+        )
+    });
+    let menu = Container::new(
+        Column::new()
+            .spacing(0)
+            .push(
+                Container::new(words(
+                    format!(
+                        "{} plan · {} Cubes per network",
+                        projection.tier, projection.cube_limit
+                    ),
+                    12.0,
+                    font::REGULAR,
+                    Ink::Muted,
+                ))
+                .padding([6.0, 10.0]),
+            )
+            .push(rows)
+            .push(foot),
+    )
+    .width(Length::Fixed(PLAN_MENU_WIDTH))
+    .padding(6)
+    .style(menu_panel);
+    // Over its own button: right of it sit Network activity and the Key.
+    let activity = if home.activity_wanted() {
+        ACTIVITY_BUTTON_WIDTH + 8.0
+    } else {
+        0.0
+    };
+    let button_top = (BAR_HEIGHT + KEY_BUTTON_HEIGHT) / 2.0 + 8.0;
+    let placed = Container::new(iced::widget::opaque(menu))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(iced::alignment::Horizontal::Right)
+        .align_y(iced::alignment::Vertical::Bottom)
+        .padding(Padding {
+            top: 0.0,
+            right: GUTTER + key_footprint(home) + activity,
             bottom: button_top,
             left: 0.0,
         });
@@ -840,16 +1168,10 @@ fn key_button<'a>(open: bool) -> Element<'a, ViewMessage> {
         .center_y(Length::Fill),
         focus,
     )
+    .width(Length::Fixed(KEY_BUTTON_WIDTH))
     .height(Length::Fixed(KEY_BUTTON_HEIGHT))
     .padding([0.0, 10.0])
-    .style(move |theme: &theme::Theme, status| {
-        let mut style = bar_button(theme, status, false);
-        if open {
-            style.background = Some(iced::Background::Color(theme.colors.shell.panel));
-            style.border.color = theme.colors.shell.line;
-        }
-        style
-    })
+    .style(menu_button_style(open))
     .on_press(ViewMessage::Catalog(CatalogMessage::KeyToggle));
     mouse_area(button)
         .on_enter(ViewMessage::Catalog(CatalogMessage::KeyHover(
@@ -1124,7 +1446,9 @@ pub(super) fn network_layer<'a>(
 
 /// The Key card's layer: bottom-right, 8px above the dock.
 pub(super) fn key_layer<'a>(home: &Home) -> Option<Element<'a, ViewMessage>> {
-    home.catalog.key_open().then(|| {
+    // A hover peek waits while a dock menu is open: one popover at a time.
+    let menu = home.catalog.plan_menu || home.catalog.activity.menu;
+    (home.catalog.key_open() && !menu).then(|| {
         // `bottom: calc(100% + 8px)` of the 32px button centred in the dock.
         // The 8px gap stays inside the hover area so a peek survives the
         // pointer's way up from the button to the card.
@@ -1170,10 +1494,10 @@ pub(crate) struct ChromeSnapshot {
     eye: Option<bool>,
     connect: Vec<(String, Ink, f32, bool)>,
     links: Vec<&'static str>,
-    /// The dock's "New Cubes: <network>" caption, when it shows.
-    pub(super) target: Option<String>,
-    /// The dock's per-network plan usage line.
-    pub(super) quota: String,
+    /// The dock's plan button: its label, and whether the current network is
+    /// full.
+    pub(super) plan: (String, bool),
+    activity: bool,
     key: bool,
 }
 
@@ -1231,17 +1555,10 @@ pub(super) fn snapshot(home: &Home, projection: &Projection<'_>) -> ChromeSnapsh
             .map(|chrome| chrome.privacy.masks_amounts()),
         connect,
         links,
-        target: dock_target(home, projection),
-        quota: quota_text(projection),
+        plan: (format!("{} plan", projection.tier), projection.at_limit()),
+        activity: home.activity_wanted(),
         key: projection.filtered_total > 0,
     }
-}
-
-/// Create and Import act on the current network: name it once more than one
-/// network is listed, since the filter alone may not show which.
-fn dock_target(home: &Home, projection: &Projection<'_>) -> Option<String> {
-    (projection.network_counts.len() > 1)
-        .then(|| format!("New Cubes: {}", network_name(home.network)))
 }
 
 /// P-Launcher's `countText`: this device's Cubes, then the ghosts beside
@@ -1264,50 +1581,6 @@ fn count_text(shown: usize, total: usize, in_connect: usize) -> String {
             "{shown} of {total} Cubes{connect} · {} hidden",
             total - shown
         )
-    }
-}
-
-/// The plan's per-network limit and each network's use of it. Cubes that are
-/// registered in Connect but not on this device are called out, because they
-/// fill a slot without appearing in any list here.
-fn quota_text(projection: &Projection<'_>) -> String {
-    let limit = projection.cube_limit;
-    let networks = projection
-        .usage
-        .iter()
-        .map(|usage| {
-            let name = network_name(usage.chain);
-            let Some(total) = usage.total() else {
-                // This device's share is unknown: say what Connect holds
-                // rather than print a ratio that may be short.
-                return if usage.remote > 0 {
-                    format!(
-                        "{name} {} in Connect, this device not counted",
-                        usage.remote
-                    )
-                } else {
-                    format!("{name} not counted")
-                };
-            };
-            let mut entry = format!("{name} {total}/{limit}");
-            if total >= limit {
-                entry.push_str(" full");
-            }
-            if usage.remote > 0 {
-                entry.push_str(&format!(" ({} only in Connect)", usage.remote));
-            }
-            entry
-        })
-        .collect::<Vec<_>>()
-        .join(" · ");
-    let plan = format!("{} plan: {limit} per network · {networks}", projection.tier);
-    if projection.at_limit() {
-        format!(
-            "{plan}. Upgrade, or delete a {} Cube, to add one.",
-            network_name(projection.network),
-        )
-    } else {
-        plan
     }
 }
 
@@ -1414,24 +1687,41 @@ pub(crate) fn quiet_dock<'a, M: 'a>(chrome: &ChromeSnapshot) -> Element<'a, M> {
         .height(Length::Fill)
         .push(action(PLUS, "Create Cube"))
         .push(action(IMPORT, "Import Bitcoin wallet"));
-    if let Some(target) = &chrome.target {
-        row = row.push(words(target.clone(), 12.0, font::REGULAR, Ink::Muted));
-    }
     for link in &chrome.links {
         row = row.push(
             Container::new(words(*link, 13.0, font::MEDIUM, Ink::Accent)).padding([4.0, 6.0]),
         );
     }
-    row = row.push(Space::new().width(Length::Fixed(16.0)));
-    row = row.push(
-        text(chrome.quota.clone())
-            .size(12)
-            .style(|theme: &theme::Theme| text::Style {
-                color: Some(theme.colors.shell.muted),
-            })
-            .wrapping(text::Wrapping::WordOrGlyph)
-            .width(Length::Fill),
-    );
+    row = row.push(Space::new().width(Length::Fill));
+    let resting_bar = |theme: &theme::Theme| bar_button(theme, iced_button::Status::Active, false);
+    let (plan, full) = &chrome.plan;
+    row = row.push(resting(
+        Row::new()
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .push(full.then(|| glyph(ATTENTION, 16.0, Ink::Warn)))
+            .push(words(plan.clone(), 13.0, font::REGULAR, body(quiet)))
+            .push(glyph(CHEVRON, 14.0, Ink::Muted)),
+        KEY_BUTTON_HEIGHT,
+        10.0,
+        resting_bar,
+    ));
+    if chrome.activity {
+        row = row.push(
+            Container::new(resting(
+                Row::new()
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .push(words("Network activity", 13.0, font::REGULAR, body(quiet)))
+                    .push(Space::new().width(Length::Fill))
+                    .push(glyph(CHEVRON, 14.0, Ink::Muted)),
+                KEY_BUTTON_HEIGHT,
+                10.0,
+                resting_bar,
+            ))
+            .width(Length::Fixed(ACTIVITY_BUTTON_WIDTH)),
+        );
+    }
     // `.keybtn` is outside `.quiet`'s selectors, so it keeps its ink.
     let key = chrome.key.then(|| {
         resting(

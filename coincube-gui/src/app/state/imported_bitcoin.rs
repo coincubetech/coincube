@@ -680,6 +680,50 @@ impl ImportedBitcoinPanel {
         true
     }
 
+    /// Tests: the attached policy's full scan finished at `block_height`
+    /// with `coins`, as a refresh after the daemon attests it reports.
+    #[cfg(test)]
+    pub(crate) fn complete_scan_for_tests(&mut self, block_height: i32, coins: Vec<model::Coin>) {
+        let wallet = self
+            .import
+            .active_attachment()
+            .expect("an attached policy")
+            .clone();
+        let descriptor = wallet.descriptor.clone();
+        self.import.stage = BitcoinImportStage::Ready {
+            wallet: wallet.clone(),
+        };
+        self.info = Some(model::GetInfoResult {
+            version: "test".into(),
+            network: self.chain().bitcoin_network(),
+            chain_id: Some(self.chain()),
+            block_height,
+            sync: 1.0,
+            descriptors: coincubed::commands::GetInfoDescriptors {
+                main: WalletDescriptor::Imported(descriptor.clone()),
+            },
+            imported_wallet: Some(coincubed::commands::ImportedWalletSync {
+                wallet_identity: descriptor.identity(self.chain()).unwrap().to_string(),
+                chain_id: self.chain(),
+                birthday: wallet.birthday,
+                initial_lookahead: wallet.initial_lookahead,
+                discovery_target: wallet.initial_lookahead,
+                receive_scanned: wallet.initial_lookahead,
+                change_scanned: wallet.initial_lookahead,
+                history_complete: true,
+            }),
+            rescan_progress: None,
+            refused_reorg_depth: None,
+            chain_divergence: false,
+            timestamp: 0,
+            last_poll_timestamp: Some(1),
+            history_sync: Default::default(),
+            receive_index: 0,
+            change_index: 0,
+        });
+        self.coins = Some(coincubed::commands::ListCoinsResult { coins });
+    }
+
     pub fn handles_route(&self, menu: &Menu) -> bool {
         match menu {
             Menu::Vault(VaultSubMenu::Recovery) => false,

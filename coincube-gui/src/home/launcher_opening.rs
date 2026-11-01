@@ -2,8 +2,8 @@
 //! O-Stall and O-List).
 //!
 //! After the PIN or passkey the Cube tumbles to its bottom face, the one face
-//! nothing used yet, and grows to the 700px loading face. Its edge powers on
-//! with a flicker, then breathes, brighter with each loader stage. Once the
+//! nothing used yet, and grows to the 700px loading face. Its edge glows in
+//! slowly, then breathes, faster and brighter with each loader stage. Once the
 //! Cube is ready the face rushes toward the viewer while the screen washes in
 //! the edge colour, and the App shows as the wash fades.
 //!
@@ -28,10 +28,13 @@ const CONTENT_DELAY: Duration = Duration::from_millis(500);
 const CONTENT_FADE: Duration = Duration::from_millis(700);
 /// `.lload { animation: loadin 500ms var(--spin) }`.
 const FRAME_FADE: Duration = Duration::from_millis(500);
-/// `::after { animation: ignite 1300ms linear <delay> }`.
-const IGNITE: Duration = Duration::from_millis(1300);
-/// `breatheB 1700ms ease-in-out infinite`.
-const BREATHE: Duration = Duration::from_millis(1700);
+/// The breath fades in over this long once its delay is up, so the light
+/// starts slow and soft rather than with a flicker.
+const GLOW_IN: Duration = Duration::from_millis(1600);
+/// One breath at the first stage, and at the last before Ready. Each stage
+/// in between breathes faster, so the light quickens as the load goes on.
+const BREATHE_SLOW: Duration = Duration::from_millis(2600);
+const BREATHE_FAST: Duration = Duration::from_millis(1100);
 /// `::before { transition: opacity 900ms var(--spin) }`.
 const LEVEL_FADE: Duration = Duration::from_millis(900);
 /// "Ready" holds this long at full light before the finale.
@@ -44,22 +47,12 @@ const WASH: Duration = Duration::from_millis(1700);
 const APP_AT: Duration = Duration::from_millis(900);
 /// A stage held this long offers Cancel.
 pub(crate) const STALL: Duration = Duration::from_secs(15);
+/// Waiting on Spark this long offers to go on without it, so a Spark or
+/// Breez outage never keeps a user from the rest of their Cube.
+pub(crate) const SPARK_WAIT: Duration = Duration::from_secs(8);
 
 /// `--lvl` for each stage index.
-const LEVELS: [f32; 5] = [0.35, 0.5, 0.65, 0.8, 1.0];
-
-/// `@keyframes ignite`, as (offset, opacity).
-const IGNITE_KEYS: [(f32, f32); 9] = [
-    (0.0, 0.0),
-    (0.06, 0.9),
-    (0.10, 0.05),
-    (0.18, 0.7),
-    (0.23, 0.1),
-    (0.34, 1.0),
-    (0.40, 0.35),
-    (0.55, 0.95),
-    (1.0, 0.25),
-];
+const LEVELS: [f32; 6] = [0.35, 0.5, 0.65, 0.8, 0.9, 1.0];
 
 /// `@keyframes flat`, as (offset, opacity), each segment `ease-out`.
 const WASH_KEYS: [(f32, f32); 4] = [(0.0, 0.0), (0.42, 0.92), (0.55, 0.92), (1.0, 0.0)];
@@ -74,6 +67,9 @@ pub(crate) enum Stage {
     Scanning,
     Syncing,
     AlmostThere,
+    /// The App is up and its Spark wallet has not returned a synced
+    /// balance yet.
+    Spark,
     Ready,
 }
 
@@ -85,18 +81,43 @@ impl Stage {
             Stage::Scanning => "Scanning the blockchain...",
             Stage::Syncing => "Syncing blockchain...",
             Stage::AlmostThere => "Almost there...",
+            Stage::Spark => "Loading your Spark wallet...",
             Stage::Ready => "Ready",
         }
     }
 
-    fn level(self) -> f32 {
-        LEVELS[match self {
+    fn index(self) -> usize {
+        match self {
             Stage::Connecting => 0,
             Stage::StartingDaemon | Stage::Scanning => 1,
             Stage::Syncing => 2,
             Stage::AlmostThere => 3,
-            Stage::Ready => 4,
-        }]
+            Stage::Spark => 4,
+            Stage::Ready => 5,
+        }
+    }
+
+    fn level(self) -> f32 {
+        LEVELS[self.index()]
+    }
+
+    /// How far along the breath is, 0 at the first stage to 1 at the last
+    /// before Ready: it sets the breath's speed and depth.
+    fn intensity(self) -> f32 {
+        (self.index() as f32 / 4.0).min(1.0)
+    }
+
+    /// How long this stage runs before the face offers a way out.
+    fn wait(self) -> Duration {
+        if self == Stage::Spark {
+            SPARK_WAIT
+        } else {
+            STALL
+        }
+    }
+
+    fn breath(self) -> Duration {
+        BREATHE_SLOW.mul_f32(1.0 - self.intensity()) + BREATHE_FAST.mul_f32(self.intensity())
     }
 }
 
@@ -111,6 +132,11 @@ pub(crate) struct Opening {
     stage_since: Instant,
     level_from: f32,
     level_since: Instant,
+    intensity_from: f32,
+    /// Breaths taken up to `breath_since`, at the previous stages' speeds,
+    /// so a quicker stage carries on from the same point in the breath.
+    breaths: f32,
+    breath_since: Instant,
     ready_since: Option<Instant>,
     /// An error page held the stall wait; the next stage set, even the same
     /// one after a Retry, starts it afresh.
@@ -132,6 +158,9 @@ impl Opening {
             stage_since: now,
             level_from: 0.0,
             level_since: now,
+            intensity_from: stage.intensity(),
+            breaths: 0.0,
+            breath_since: now,
             ready_since: None,
             held: false,
         };
@@ -165,6 +194,9 @@ impl Opening {
             return;
         }
         self.level_from = self.level(now);
+        self.intensity_from = self.intensity(now);
+        self.breaths = self.breaths_at(now);
+        self.breath_since = now;
         self.level_since = now;
         self.stage = stage;
         self.stage_since = now;
@@ -225,8 +257,34 @@ impl Opening {
         self.level_from + (to - self.level_from) * t
     }
 
-    /// `::after`: off until it ignites, a flicker, then the breath; full on
-    /// at Ready (`.peak`). Reduced motion has no animation, so no `::after`.
+    /// The stage's intensity, easing from the last stage's like the level.
+    fn intensity(&self, now: Instant) -> f32 {
+        let to = self.stage.intensity();
+        let t = launcher_scene::ease(
+            self.since(self.level_since, now).as_secs_f32() / LEVEL_FADE.as_secs_f32(),
+        );
+        self.intensity_from + (to - self.intensity_from) * t
+    }
+
+    /// When the breath starts: after the tumble has begun on the floor.
+    fn breath_start(&self) -> Instant {
+        self.started
+            + if self.floor.is_some() {
+                Duration::from_millis(700)
+            } else {
+                Duration::from_millis(300)
+            }
+    }
+
+    /// Breaths taken by `now`, each stage at its own speed.
+    fn breaths_at(&self, now: Instant) -> f32 {
+        let from = self.breath_since.max(self.breath_start());
+        self.breaths + self.since(from, now).as_secs_f32() / self.stage.breath().as_secs_f32()
+    }
+
+    /// `::after`: dark until the breath starts, then a slow glow in and a
+    /// breath that quickens and deepens with each stage; full on at Ready
+    /// (`.peak`). Reduced motion has no animation, so no `::after`.
     fn pulse(&self, now: Instant) -> f32 {
         if self.reduced {
             return 0.0;
@@ -234,23 +292,20 @@ impl Opening {
         if self.stage == Stage::Ready {
             return 1.0;
         }
-        let delay = if self.floor.is_some() {
-            Duration::from_millis(700)
-        } else {
-            Duration::from_millis(300)
-        };
-        let t = self.since(self.started, now);
-        if t < delay {
+        let start = self.breath_start();
+        if now <= start {
             return 0.0;
         }
-        let t = t - delay;
-        if t < IGNITE {
-            return keyframes(&IGNITE_KEYS, t.as_secs_f32() / IGNITE.as_secs_f32(), None);
-        }
-        let phase = ((t - IGNITE).as_secs_f32() / BREATHE.as_secs_f32()).fract();
-        // `breatheB { 0%,100% { .4 } 50% { 1 } }`, each half ease-in-out.
+        let glow_in =
+            launcher_scene::ease(self.since(start, now).as_secs_f32() / GLOW_IN.as_secs_f32());
+        let phase = self.breaths_at(now).fract();
+        // Low at the start of each breath, full at its middle, each half
+        // ease-in-out.
         let half = launcher_scene::bezier((phase * 2.0).min(2.0 - phase * 2.0), EASE_IN_OUT);
-        0.4 + 0.6 * half
+        let intensity = self.intensity(now);
+        let low = 0.2 + 0.2 * intensity;
+        let high = 0.6 + 0.4 * intensity;
+        glow_in * (low + (high - low) * half)
     }
 
     pub(super) fn glow(&self, color: [u8; 3], now: Instant) -> Glow {
@@ -261,9 +316,10 @@ impl Opening {
         }
     }
 
-    /// Cancel is offered once one stage has run past [`STALL`].
+    /// A way out is offered once one stage has run past its wait: Cancel
+    /// after [`STALL`], or going on without Spark after [`SPARK_WAIT`].
     pub fn stalled(&self, now: Instant) -> bool {
-        self.stage != Stage::Ready && self.since(self.stage_since, now) >= STALL
+        self.stage != Stage::Ready && self.since(self.stage_since, now) >= self.stage.wait()
     }
 
     /// Time into the finale, once Ready has held for its beat.
@@ -371,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn the_cube_tumbles_then_its_content_fades_in_and_its_edge_ignites() {
+    fn the_cube_tumbles_then_its_content_fades_in_and_its_edge_glows_in_slowly() {
         let t0 = Instant::now();
         let opening = Opening::new(Some(floor()), false, Stage::Connecting, t0);
         assert_eq!(opening.tumble(t0), 0.0);
@@ -379,16 +435,25 @@ mod tests {
         assert!(opening.content(t0 + ms(900)) > 0.0 && opening.content(t0 + ms(900)) < 1.0);
         assert!((opening.tumble(t0 + TUMBLE) - 1.0).abs() < 1e-6);
         assert!((opening.content(t0 + ms(1200)) - 1.0).abs() < 1e-6);
-        // `::after` waits 700ms, flickers to .9 by 6% of its 1300ms, then breathes.
-        assert_eq!(opening.pulse(t0 + ms(600)), 0.0);
-        assert!((opening.pulse(t0 + ms(700 + 78)) - 0.9).abs() < 1e-3);
-        let breaths: Vec<f32> = (0..34)
-            .map(|i| opening.pulse(t0 + ms(2000 + i * 50)))
+        // `::after` waits 700ms, then glows in with no flicker: it only
+        // rises over its first 400ms.
+        assert_eq!(opening.pulse(t0 + ms(700)), 0.0);
+        let first: Vec<f32> = (1..=40)
+            .map(|i| opening.pulse(t0 + ms(700 + i * 10)))
+            .collect();
+        assert!(
+            first.windows(2).all(|pair| pair[1] >= pair[0]) && first[0] < 0.01 && first[39] < 0.25,
+            "{:?}",
+            first
+        );
+        // Then it breathes softly at the first stage: never dark, never full.
+        let breaths: Vec<f32> = (0..60)
+            .map(|i| opening.pulse(t0 + ms(2400 + i * 50)))
             .collect();
         assert!(breaths
             .iter()
-            .all(|p| (0.4 - 1e-4..=1.0 + 1e-4).contains(p)));
-        assert!(breaths.iter().any(|p| *p > 0.99), "{:?}", breaths);
+            .all(|p| (0.2 - 1e-4..=0.6 + 1e-4).contains(p)));
+        assert!(breaths.iter().any(|p| *p > 0.59), "{:?}", breaths);
         // `::before` eases from 0 to the first stage's level.
         assert!((opening.level(t0 + ms(2000)) - 0.35).abs() < 1e-6);
     }
@@ -457,7 +522,8 @@ mod tests {
         let mut opening = Opening::new(None, false, Stage::Connecting, t0);
         assert_eq!(opening.tumble(t0), 1.0);
         assert!((opening.content(t0 + FRAME_FADE) - 1.0).abs() < 1e-6);
-        assert!((opening.pulse(t0 + ms(300 + 78)) - 0.9).abs() < 1e-3);
+        assert_eq!(opening.pulse(t0 + ms(300)), 0.0);
+        assert!(opening.pulse(t0 + ms(1000)) > 0.0);
         opening.set_stage(Stage::Ready, t0 + ms(4000));
         assert!(opening.shows_app(t0 + ms(4000)) && opening.done(t0 + ms(4000)));
         assert_eq!(opening.wash(t0 + ms(5000)), 0.0);
@@ -493,6 +559,27 @@ mod tests {
     }
 
     #[test]
+    fn waiting_on_spark_offers_to_go_on_without_it_sooner_than_cancel() {
+        let t0 = Instant::now();
+        let mut opening = Opening::new(Some(floor()), false, Stage::AlmostThere, t0);
+        let spark = t0 + ms(2000);
+        opening.set_stage(Stage::Spark, spark);
+        assert!(SPARK_WAIT < STALL);
+        assert!(!opening.stalled(spark + SPARK_WAIT - ms(1)));
+        assert!(opening.stalled(spark + SPARK_WAIT));
+        assert!(
+            !opening.shows_app(spark + ms(60_000)),
+            "the face waits for Spark"
+        );
+        assert!(
+            opening.level(spark + LEVEL_FADE) > Stage::AlmostThere.level(),
+            "Spark is the brightest stage before Ready"
+        );
+        opening.set_stage(Stage::Ready, spark + ms(9000));
+        assert!(!opening.stalled(spark + ms(9000)));
+    }
+
+    #[test]
     fn a_retry_after_ready_starts_the_stages_over() {
         let t0 = Instant::now();
         let mut opening = Opening::new(Some(floor()), false, Stage::AlmostThere, t0);
@@ -500,5 +587,60 @@ mod tests {
         opening.set_stage(Stage::Connecting, t0 + ms(200));
         assert!(!opening.shows_app(t0 + ms(10_000)));
         assert_eq!(opening.wash(t0 + ms(1500)), 0.0);
+    }
+
+    /// The time between the first two rises of the breath through its middle
+    /// after `from`.
+    fn breath_period(opening: &Opening, from: Instant) -> Duration {
+        let samples: Vec<(Instant, f32)> = (0..800)
+            .map(|i| {
+                let at = from + ms(i * 10);
+                (at, opening.pulse(at))
+            })
+            .collect();
+        let (low, high) = samples
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(lo, hi), (_, p)| {
+                (lo.min(*p), hi.max(*p))
+            });
+        let middle = (low + high) / 2.0;
+        let rises: Vec<Instant> = samples
+            .windows(2)
+            .filter(|w| w[0].1 < middle && w[1].1 >= middle)
+            .map(|w| w[1].0)
+            .collect();
+        rises[1] - rises[0]
+    }
+
+    #[test]
+    fn the_breath_quickens_and_deepens_as_the_load_goes_on() {
+        let t0 = Instant::now();
+        let mut opening = Opening::new(Some(floor()), false, Stage::Connecting, t0);
+        let slow = breath_period(&opening, t0 + ms(3000));
+        let soft = (0..300)
+            .map(|i| opening.pulse(t0 + ms(3000 + i * 10)))
+            .fold(0.0_f32, f32::max);
+
+        let at = t0 + ms(12_000);
+        let before = opening.pulse(at);
+        opening.set_stage(Stage::AlmostThere, at);
+        assert!(
+            (opening.pulse(at) - before).abs() < 1e-3,
+            "the breath carries on from where it was"
+        );
+        let settled = at + LEVEL_FADE;
+        let fast = breath_period(&opening, settled);
+        let bright = (0..200)
+            .map(|i| opening.pulse(settled + ms(i * 10)))
+            .fold(0.0_f32, f32::max);
+
+        assert!(slow > ms(2500) && slow < ms(2700), "{:?}", slow);
+        // Three of the four steps toward the fastest breath, Spark's.
+        assert!(fast > ms(1400) && fast < ms(1550), "{:?}", fast);
+        assert!(bright > soft + 0.25, "{} vs {}", bright, soft);
+
+        opening.set_stage(Stage::Spark, t0 + ms(30_000));
+        let fastest = breath_period(&opening, t0 + ms(30_000) + LEVEL_FADE);
+        assert!(fastest > ms(1000) && fastest < ms(1200), "{:?}", fastest);
     }
 }

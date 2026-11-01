@@ -233,6 +233,7 @@ impl CatalogState {
     pub(super) fn dismiss_popovers(&mut self) {
         self.key = KeyCard::default();
         self.network_menu = false;
+        self.plan_menu = false;
     }
 
     pub(super) fn key_open(&self) -> bool {
@@ -255,6 +256,8 @@ pub(super) struct CatalogState {
     pub(super) key: KeyCard,
     /// The top bar's network menu is open.
     pub(super) network_menu: bool,
+    /// The dock's plan menu is open.
+    pub(super) plan_menu: bool,
     /// Which networks' Cubes the Launcher shows (P-Launcher's chips and
     /// Network menu). Presentation only; it never changes a Cube's network.
     pub(super) filter: NetworkFilter,
@@ -563,6 +566,8 @@ pub enum CatalogMessage {
     KeyClose,
     /// Opens or closes the top bar's network menu.
     NetworkMenu(bool),
+    /// Opens or closes the dock's plan menu.
+    PlanMenu(bool),
     /// All / Live / Test networks, or one network from the menu.
     Filter(NetworkFilter),
     ClearSelection,
@@ -784,7 +789,12 @@ impl Home {
                 Task::none()
             }
             CatalogMessage::KeyToggle => {
+                // One dock popover at a time.
                 self.catalog.key.click();
+                if self.catalog.key_open() {
+                    self.catalog.plan_menu = false;
+                    self.catalog.activity.menu = false;
+                }
                 Task::none()
             }
             CatalogMessage::KeyClose => {
@@ -793,6 +803,15 @@ impl Home {
             }
             CatalogMessage::NetworkMenu(open) => {
                 self.catalog.network_menu = open;
+                Task::none()
+            }
+            CatalogMessage::PlanMenu(open) => {
+                // One dock menu at a time.
+                self.catalog.plan_menu = open;
+                if open {
+                    self.catalog.activity.menu = false;
+                    self.catalog.key = KeyCard::default();
+                }
                 Task::none()
             }
             CatalogMessage::Filter(filter) => {
@@ -1032,6 +1051,11 @@ impl Home {
         if project(self).filtered_total == 0 {
             self.catalog.key = KeyCard::default();
         }
+        // A Bitcoin Blake2b activity choice lapses when the menu stops
+        // offering it, so it cannot return unseen when Blake2b is listed again.
+        if !self.activity_blake2b_offered() {
+            self.catalog.activity.blake2b = false;
+        }
         let pages = floor_pages(project(self).floor_len(), self.catalog.page_size());
         self.catalog.page = self.catalog.page.min(pages - 1);
         if let Some(key) = &self.catalog.selected {
@@ -1071,35 +1095,29 @@ pub(super) enum Tone {
     Warn,
 }
 
-/// The local Cube's Connect caption. Same states and copy as the former list
-/// card's tooltip, now visible text.
-pub(super) fn connect_caption(
+/// The local Cube's Recovery Kit line: whether Connect holds its encrypted
+/// Kit. The tones are the former Connect caption's, which also tint the
+/// avatar; a registration refusal still reads as the server's reason.
+pub(super) fn recovery_kit_caption(
     cube: &CubeSettings,
     signed_in: bool,
     sync_error: Option<String>,
 ) -> (Tone, String) {
     match cube.connect_state() {
-        CubeConnectState::BackedUp => (
-            Tone::Good,
-            "Backed up to Connect — recovery kit ready".to_string(),
-        ),
+        CubeConnectState::BackedUp => (Tone::Good, "On Connect".to_string()),
         CubeConnectState::Registered => (
             Tone::Muted,
             if cube.has_imported_bitcoin() && cube.has_recovery_kit() {
-                "Registered to Connect — Recovery Kit needs updating for imported wallet"
-                    .to_string()
+                "Needs updating for imported wallet".to_string()
             } else {
-                "Registered to Connect — no recovery kit".to_string()
+                "None yet".to_string()
             },
         ),
         CubeConnectState::Sovereign if signed_in => match sync_error {
             Some(reason) => (Tone::Warn, reason),
-            None => (
-                Tone::Muted,
-                "Not yet synced to Connect. It will sync automatically in a moment.".to_string(),
-            ),
+            None => (Tone::Muted, "None yet — syncing to Connect".to_string()),
         },
-        CubeConnectState::Sovereign => (Tone::Warn, "Sovereign — local only".to_string()),
+        CubeConnectState::Sovereign => (Tone::Warn, "None — local only".to_string()),
     }
 }
 
@@ -1518,7 +1536,7 @@ pub(super) fn project(home: &Home) -> Projection<'_> {
                 hidden += 1;
                 continue;
             }
-            let connect = connect_caption(cube, signed_in, home.cube_sync_hint(cube));
+            let connect = recovery_kit_caption(cube, signed_in, home.cube_sync_hint(cube));
             let sync_warning = (signed_in && connect.0 == Tone::Warn)
                 .then(|| connect.1.lines().next().unwrap_or_default().to_string());
             locals.push(LocalRow {
@@ -1718,7 +1736,7 @@ fn muted(theme: &theme::Theme) -> iced::widget::text::Style {
     }
 }
 
-/// The Launcher presenter's Backup line, in the List's tones.
+/// The Launcher presenter's Seed phrase line, in the List's tones.
 fn backup_caption(cube: &CubeSettings) -> (Tone, &'static str) {
     let (text, tone) = super::launcher_presenter::backup(cube);
     let tone = match tone {
@@ -1951,7 +1969,7 @@ fn details_panel<'a>(row: &LocalRow<'_>) -> Element<'a, ViewMessage> {
                     .into(),
             ))
             .push(detail_line(
-                "Backup",
+                "Seed phrase",
                 p2_regular(backup).style(tone_style(backup_tone)).into(),
             ))
             .push(detail_line(
@@ -1961,7 +1979,7 @@ fn details_panel<'a>(row: &LocalRow<'_>) -> Element<'a, ViewMessage> {
                     .into(),
             ))
             .push(detail_line(
-                "Connect",
+                "Recovery Kit",
                 p2_regular(caption)
                     .style(tone_style(tone))
                     .wrapping(Wrapping::WordOrGlyph)
@@ -2050,7 +2068,7 @@ fn table_heading<'a>() -> Element<'a, ViewMessage> {
                 .width(Length::Fixed(WALLETS_WIDTH)),
         )
         .push(
-            p2_regular("Backup")
+            p2_regular("Seed phrase")
                 .style(muted)
                 .width(Length::Fixed(BACKUP_WIDTH)),
         )
@@ -2116,6 +2134,7 @@ pub(super) fn launcher_view(home: &Home) -> Element<'_, ViewMessage> {
             .push(screen)
             .push(super::launcher_chrome::key_layer(home))
             .push(super::launcher_chrome::activity_layer(home))
+            .push(super::launcher_chrome::plan_layer(home, &projection))
             .push(super::launcher_chrome::network_layer(home, &projection)),
     )
     .width(Length::Fill)
@@ -2915,7 +2934,7 @@ mod tests {
         cube.master_signer_fingerprint = Some([1, 2, 3, 4].into());
         // Matches the open Cube's "Backup not confirmed" warning.
         assert_eq!(backup_caption(cube), (Tone::Warn, "Not confirmed"));
-        // A Recovery Kit is shown on the Connect line, not here.
+        // A Recovery Kit is shown on the Recovery Kit line, not here.
         cube.recovery_kit_password_backed_up = true;
         assert_eq!(backup_caption(cube), (Tone::Warn, "Not confirmed"));
         cube.backed_up = true;
@@ -3537,7 +3556,8 @@ mod tests {
     /// The limit is per network and counts Cubes registered from other
     /// devices: five here plus two only in Connect fill a 7-Cube Bitcoin
     /// mainnet, while Testnet4's three stay well under it. The dock names
-    /// every network's count instead of one bare ratio.
+    /// the plan; its menu gives every network's count instead of one bare
+    /// ratio.
     #[test]
     fn plan_usage_is_shown_per_network_and_counts_remote_cubes() {
         let mut home = home_with(&[
@@ -3581,15 +3601,34 @@ mod tests {
         );
         assert!(projection.at_limit());
         // The narrowest window the app allows, with every dock control the
-        // multi-network state brings (the "New Cubes" caption among them).
+        // multi-network state brings. The dock names the plan alone.
         for (scenario, window) in [("plan-usage", WIDE), ("plan-usage-1024", (1024, 768))] {
             let tree = home_tree(scenario, &home, window, "dark", theme::Theme::dark());
-            assert!(tree.contains("Estate plan: 7 per network"));
-            assert!(tree.contains("Bitcoin mainnet 7/7 full (2 only in Connect)"));
-            assert!(tree
-                .contains("Testnet4 3/7. Upgrade, or delete a Bitcoin mainnet Cube, to add one."));
-            assert!(tree.contains("New Cubes: Bitcoin mainnet"));
+            assert!(tree.contains("Estate plan"));
+            assert!(!tree.contains("per network"));
+            assert!(!tree.contains("New Cubes"));
             assert!(!tree.has(&create_id()));
+            assert!(!tree.has(&import_id()));
+        }
+        // Its menu holds each network's use of the limit.
+        home.catalog.plan_menu = true;
+        for (scenario, window) in [
+            ("plan-usage-menu", WIDE),
+            ("plan-usage-menu-1024", (1024, 768)),
+        ] {
+            let tree = home_tree(scenario, &home, window, "dark", theme::Theme::dark());
+            for line in [
+                "Estate plan · 7 Cubes per network",
+                "Bitcoin mainnet",
+                "7 of 7",
+                "Full",
+                "2 only in Connect",
+                "Testnet4",
+                "3 of 7",
+                "Upgrade, or delete a Bitcoin mainnet Cube, to add one.",
+            ] {
+                assert!(tree.contains(line), "missing {:?}", line);
+            }
         }
 
         // Developer mode off lists Bitcoin alone, but a Signet Cube held only
@@ -3613,8 +3652,8 @@ mod tests {
             "dark",
             theme::Theme::dark(),
         );
-        assert!(tree.contains("Signet 1 in Connect, this device not counted"));
-        assert!(!tree.contains("Signet 1/7"));
+        assert!(tree.contains("1 in Connect; this device not counted"));
+        assert!(!tree.contains("1 of 7"));
         home.remote_cubes.pop();
 
         // A Cube going elsewhere frees the slot; the line stays as a quota.
@@ -3622,9 +3661,12 @@ mod tests {
         let projection = project(&home);
         assert!(!projection.at_limit());
         let tree = home_tree("plan-usage-free", &home, WIDE, "dark", theme::Theme::dark());
-        assert!(!tree.contains("full"));
-        assert!(tree.contains("Bitcoin mainnet 6/7 (1 only in Connect)"));
+        assert!(!tree.contains("Full"));
+        assert!(!tree.contains("Upgrade"));
+        assert!(tree.contains("6 of 7"));
+        assert!(tree.contains("1 only in Connect"));
         assert!(tree.has(&create_id()));
+        assert!(tree.has(&import_id()));
     }
 
     /// Switching network makes it current before its list is read (and keeps
@@ -3664,9 +3706,12 @@ mod tests {
             .find(|u| u.chain == ChainId::Testnet4)
             .expect("the current network is always listed");
         assert_eq!(current.local, None);
+        home.catalog.plan_menu = true;
         let tree = home_tree("pending-switch", &home, WIDE, "dark", theme::Theme::dark());
-        assert!(tree.contains("Testnet4 not counted"));
-        assert!(tree.contains("Bitcoin mainnet 7/7 full"));
+        assert!(tree.contains("Not counted"));
+        assert!(tree.contains("This device's Cubes could not be counted"));
+        assert!(tree.contains("7 of 7"));
+        assert!(tree.contains("Full"));
         assert!(!tree.contains("delete a Bitcoin Testnet4 Cube"));
         assert!(!tree.contains("Upgrade, or delete"));
         let summary = home.cube_limit_summary(ChainId::Testnet4);
@@ -3691,7 +3736,18 @@ mod tests {
         );
         assert!(!tree.has(&create_id()));
         assert!(!tree.has(&import_id()));
-        assert!(tree.contains("Bitcoin mainnet 2/2 full"));
+        assert!(tree.has(&super::super::launcher_chrome::plan_id()));
+        // The plan's menu says why.
+        home.catalog.plan_menu = true;
+        let tree = home_tree(
+            "r05b-limit-menu",
+            &home,
+            (1024, 768),
+            "light",
+            theme::Theme::light(),
+        );
+        assert!(tree.contains("2 of 2"));
+        assert!(tree.contains("Full"));
         assert!(tree.contains("Upgrade, or delete a Bitcoin mainnet Cube, to add one."));
 
         // Import is offered only where the flow exists.
@@ -3989,6 +4045,7 @@ mod tests {
             open_id(&key("b")),
             create_id(),
             import_id(),
+            super::super::launcher_chrome::plan_id(),
             key_id(),
         ];
         let mut forward = Vec::new();
@@ -5125,9 +5182,9 @@ mod tests {
         assert_eq!(home.filter_target(NetworkFilter::Test), None);
         assert_eq!(home.filter_target(NetworkFilter::All), None);
         home.network = ChainId::Bitcoin;
-        // The dock names the network Create and Import use.
+        // The dock no longer captions the network: the filter keeps it shown.
         let tree = home_tree("dock-target", &home, WIDE, "dark", theme::Theme::dark());
-        assert!(tree.contains("New Cubes: Bitcoin mainnet"));
+        assert!(!tree.contains("New Cubes"));
     }
 
     /// Developer mode on Testnet4 with its two Cubes checked, Signet's read
@@ -5446,14 +5503,16 @@ mod tests {
     }
 
     #[test]
-    fn the_pin_screen_snapshot_keeps_the_new_cubes_caption() {
+    fn the_pin_screen_snapshot_keeps_the_plan_button() {
         let home = all_networks();
         let chrome = super::super::launcher_chrome::snapshot(&home, &project(&home));
-        assert_eq!(chrome.target.as_deref(), Some("New Cubes: Bitcoin mainnet"));
-        let mut one = home_with(&[("a", "Alpha")]);
-        one.catalog.mode = LauncherMode::Cubes;
-        let chrome = super::super::launcher_chrome::snapshot(&one, &project(&one));
-        assert_eq!(chrome.target, None, "one listed network needs no caption");
+        assert_eq!(
+            chrome.plan,
+            (
+                format!("{} plan", home.account_tier.display_name()),
+                project(&home).at_limit()
+            )
+        );
     }
 
     #[test]
@@ -5692,8 +5751,10 @@ mod tests {
 
             let (mut limited, theme) = themed(rows(2), appearance);
             limited.server_cube_limit = Some(2);
+            limited.catalog.plan_menu = true;
             let tree = home_tree("r05b-plan-limit", &limited, compact, appearance, theme);
-            assert!(tree.contains("Bitcoin mainnet 2/2 full"));
+            assert!(tree.contains("2 of 2"));
+            assert!(tree.contains("Full"));
             assert!(!tree.has(&create_id()));
 
             let (mut refused, theme) = themed(rows(3), appearance);
@@ -6230,5 +6291,160 @@ mod tests {
             message,
             ViewMessage::Catalog(CatalogMessage::ClearSelection)
         )));
+    }
+
+    /// Presses `target` in the Create journey with the keyboard, as a user
+    /// does: focus, then Enter. A disabled control is not focusable, so it
+    /// yields nothing.
+    fn press_in_journey(home: &Home, target: &'static str) -> Vec<ViewMessage> {
+        use iced::advanced::widget::operation::focusable;
+        let target = Id::new(target);
+        let mut mounted = mount_window(home.create_journey_frame(), 1440.0, 900.0);
+        mounted.operate(focusable::focus::<()>(target.clone()));
+        if mounted.focused() != Some(target) {
+            return Vec::new();
+        }
+        let none = iced::mouse::Cursor::Unavailable;
+        let mut messages = mounted.send(enter(true), none);
+        messages.extend(mounted.send(enter(false), none));
+        messages
+            .into_iter()
+            .filter(|message| !matches!(message, ViewMessage::Catalog(CatalogMessage::Focus(_))))
+            .collect()
+    }
+
+    /// A first-run device has no Cube list to go back to; Close still
+    /// leaves Import or restore, for the plain Create form.
+    #[test]
+    fn close_leaves_import_or_restore_on_a_device_with_no_cubes() {
+        let mut home = home_with(&[]);
+        home.state = State::NoCube { create_cube: true };
+        let _ = home.update(Message::View(ViewMessage::ShowImportBitcoin));
+        assert!(home.showing_import_or_restore());
+        let pressed = press_in_journey(&home, super::super::RESTORE_CLOSE_ID);
+        assert!(
+            matches!(pressed.as_slice(), [ViewMessage::ShowCreateCube(false)]),
+            "{:?}",
+            pressed
+        );
+        for message in pressed {
+            let _ = home.update(Message::View(message));
+        }
+        assert!(!home.showing_import_or_restore());
+        assert!(home.pending_bitcoin_import.is_none());
+        assert!(home.showing_create_journey(), "the plain Create form");
+
+        // From the Overview too.
+        let _ = home.update(Message::View(ViewMessage::ShowRestoreHub));
+        let pressed = press_in_journey(&home, super::super::RESTORE_CLOSE_ID);
+        assert!(matches!(
+            pressed.as_slice(),
+            [ViewMessage::ShowCreateCube(false)]
+        ));
+    }
+
+    /// With no free Bitcoin slot, no Import entry can be pressed and the
+    /// handler refuses a stale press before any name or PIN is typed.
+    #[test]
+    fn every_import_entry_closes_when_bitcoin_is_full() {
+        let mut home = home_with(&[("a", "Alpha"), ("b", "Beta")]);
+        home.server_cube_limit = Some(2);
+        assert!(project(&home).at_limit());
+        // The dock.
+        let tree = home_tree(
+            "import-full-dock",
+            &home,
+            WIDE,
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(!tree.has(&import_id()));
+        // The handler, and so the Create form's own Import button, which
+        // takes the same predicate.
+        let _ = home.update(Message::View(ViewMessage::ShowImportBitcoin));
+        assert!(home.pending_bitcoin_import.is_none());
+        assert!(!home.can_start_bitcoin_import());
+        // The Overview's Start and its path list.
+        let _ = home.update(Message::View(ViewMessage::ShowRestoreHub));
+        assert!(home.restore_hub);
+        assert!(press_in_journey(&home, super::super::RESTORE_START_IMPORT_ID).is_empty());
+        assert!(press_in_journey(&home, super::super::RESTORE_IMPORT_ID).is_empty());
+
+        // A free slot opens them again.
+        home.server_cube_limit = Some(3);
+        assert!(matches!(
+            press_in_journey(&home, super::super::RESTORE_START_IMPORT_ID).as_slice(),
+            [ViewMessage::ShowImportBitcoin]
+        ));
+    }
+
+    /// The Overview lists every Connect Cube on the network, whatever the
+    /// Launcher's search says.
+    #[test]
+    fn the_overview_lists_connect_cubes_whatever_the_search() {
+        let mut home = home_with(&[("a", "Alpha")]);
+        crate::home::tests::enable_btcb2(&mut home);
+        home.remote_cubes = vec![remote("r1", "Elsewhere", true, true, false, false)];
+        catalog(&mut home, CatalogMessage::Query("zzz".to_string()));
+        assert!(project(&home).remotes.is_empty());
+        let _ = home.update(Message::View(ViewMessage::ShowRestoreHub));
+        let pressed = press_in_journey(&home, "tenshu.restore:remote:r1");
+        assert!(
+            matches!(
+                pressed.as_slice(),
+                [ViewMessage::RestoreFromRecoveryKit(uuid)] if uuid == "r1"
+            ),
+            "{:?}",
+            pressed
+        );
+    }
+
+    #[test]
+    fn leaving_bitcoin_leaves_import_or_restore() {
+        let mut home = all_networks();
+        let _ = home.update(Message::View(ViewMessage::ShowRestoreHub));
+        assert!(home.restore_hub);
+        let _ = home.update(Message::View(ViewMessage::SelectNetwork(ChainId::Testnet4)));
+        assert!(!home.restore_hub);
+        assert!(!home.showing_import_or_restore());
+    }
+
+    /// The plan menu, the activity menu and the Key card: one at a time.
+    #[test]
+    fn dock_popovers_open_one_at_a_time() {
+        use super::super::launcher_activity::ActivityMessage;
+        let mut home = home_with(&[("a", "Alpha")]);
+        catalog(&mut home, CatalogMessage::PlanMenu(true));
+        catalog(&mut home, CatalogMessage::KeyToggle);
+        assert!(home.catalog.key_open());
+        assert!(!home.catalog.plan_menu);
+        catalog(&mut home, CatalogMessage::PlanMenu(true));
+        assert!(!home.catalog.key_open());
+        catalog(&mut home, CatalogMessage::KeyToggle);
+        catalog(
+            &mut home,
+            CatalogMessage::Activity(ActivityMessage::Menu(true)),
+        );
+        assert!(!home.catalog.key_open());
+        assert!(!home.catalog.plan_menu);
+        // A hover peek waits while a menu is up.
+        catalog(&mut home, CatalogMessage::KeyHover(KeyPart::Button, true));
+        assert!(super::super::launcher_chrome::key_layer(&home).is_none());
+    }
+
+    /// The plan menu marks the network Create and Import act on, now that
+    /// the dock no longer captions it.
+    #[test]
+    fn the_plan_menu_marks_the_network_new_cubes_go_to() {
+        let mut home = all_networks();
+        home.network = ChainId::Testnet4;
+        let projection = project(&home);
+        let rows = super::super::launcher_chrome::plan_rows(&projection);
+        let current: Vec<_> = rows.iter().filter(|row| row.current).collect();
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].network, "Bitcoin Testnet4");
+        home.catalog.plan_menu = true;
+        let tree = home_tree("plan-current", &home, WIDE, "dark", theme::Theme::dark());
+        assert!(tree.contains("New Cubes"));
     }
 }

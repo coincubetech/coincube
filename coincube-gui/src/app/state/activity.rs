@@ -17,7 +17,7 @@ use crate::{
         message::Message,
         view::{
             self,
-            activity::{ActivityMessage, WalletFilter},
+            activity::{ActivityMessage, RecentScope, WalletFilter},
         },
         wallet::Wallet,
         wallets::{DomainPayment, DomainRefundableSwap, LiquidBackend, SparkBackend},
@@ -60,6 +60,13 @@ pub struct Activity {
     refundables: Vec<DomainRefundableSwap>,
     pub filters: view::activity::Filters,
     pub selected_id: Option<String>,
+    /// The row an Overview row opened ([`ActivityMessage::Open`]), as the
+    /// Overview listed it. While it is still the selected row it owns the
+    /// detail pane even when Activity doesn't list it: the Overview lists the
+    /// newest rows without [`Self::complete_through`]'s cutoff, and the
+    /// reload on entry clears the rows, so a failed read would otherwise
+    /// leave nothing to show. A fresh copy of the row wins once it loads.
+    pub opened: Option<view::activity::Entry>,
     pub vault_loading: bool,
     pub psbt_loading: bool,
     pub spark_loading: bool,
@@ -114,6 +121,7 @@ impl Activity {
             refundables: Vec::new(),
             filters: Default::default(),
             selected_id: None,
+            opened: None,
             vault_loading: false,
             psbt_loading: false,
             spark_loading: false,
@@ -217,9 +225,22 @@ impl Activity {
             .collect()
     }
 
+    /// The rows a "Recent activity" table in `scope` lists: its newest
+    /// [`RECENT_ACTIVITY_ROWS`], read from the same rows as this page.
+    ///
+    /// [`RECENT_ACTIVITY_ROWS`]: view::activity::RECENT_ACTIVITY_ROWS
+    pub fn recent_entries(&self, scope: RecentScope) -> Vec<view::activity::Entry> {
+        self.entries()
+            .into_iter()
+            .filter(|entry| scope.includes(entry.wallet))
+            .take(view::activity::RECENT_ACTIVITY_ROWS)
+            .collect()
+    }
+
     /// No row selected: a wallet page opens without a detail pane.
     pub fn clear_selection(&mut self) {
         self.selected_id = None;
+        self.opened = None;
         self.details_open = None;
         self.label_draft = None;
     }
@@ -280,24 +301,55 @@ impl Activity {
         Task::batch(tasks)
     }
 
+    /// [`Self::refresh_wallet`] for each wallet a "Recent activity" table in
+    /// `scope` reads.
+    pub fn refresh_scope(
+        &mut self,
+        scope: RecentScope,
+        daemon: Option<Arc<dyn Daemon + Sync + Send>>,
+        wallet: Option<Arc<Wallet>>,
+    ) -> Task<Message> {
+        let tasks: Vec<_> = scope
+            .sources()
+            .iter()
+            .map(|source| self.refresh_wallet(*source, daemon.clone(), wallet.clone()))
+            .collect();
+        Task::batch(tasks)
+    }
+
     /// The label `entry` edits, read from the entry's own row: other rows
     /// can carry the same key (a spend loads its inputs' outpoint labels).
     pub fn stored_label(&self, entry: &view::activity::Entry) -> &str {
         let Some(key) = entry.label_key.as_ref().map(ToString::to_string) else {
             return "";
         };
+        // The row an Overview row opened is read from its kept copy while
+        // the loaded rows lack it (a failed read).
+        let opened = self.opened.as_ref().map(|opened| &opened.target);
         let labels = match &entry.target {
             ActivityTarget::Vault(tx) => self
                 .vault
                 .iter()
                 .find(|row| row.txid == tx.txid)
-                .map(|row| &row.labels),
+                .map(|row| &row.labels)
+                .or(match opened {
+                    Some(ActivityTarget::Vault(row)) if row.txid == tx.txid => Some(&row.labels),
+                    _ => None,
+                }),
             ActivityTarget::Psbt(tx) => {
                 let txid = tx.psbt.unsigned_tx.compute_txid();
                 self.psbts
                     .iter()
                     .find(|row| row.psbt.unsigned_tx.compute_txid() == txid)
                     .map(|row| &row.labels)
+                    .or(match opened {
+                        Some(ActivityTarget::Psbt(row))
+                            if row.psbt.unsigned_tx.compute_txid() == txid =>
+                        {
+                            Some(&row.labels)
+                        }
+                        _ => None,
+                    })
             }
             _ => None,
         };
@@ -317,6 +369,18 @@ impl Activity {
                     .strip_prefix(&txid)
                     .is_some_and(|rest| rest.starts_with(':'))
         };
+        // The opened row's kept copy follows too, so its pane and title do.
+        let opened = self
+            .opened
+            .as_mut()
+            .and_then(|opened| match &mut opened.target {
+                ActivityTarget::Vault(tx) => Some((tx.txid.to_string(), &mut tx.labels)),
+                ActivityTarget::Psbt(tx) => Some((
+                    tx.psbt.unsigned_tx.compute_txid().to_string(),
+                    &mut tx.labels,
+                )),
+                _ => None,
+            });
         let rows = self
             .vault
             .iter_mut()
@@ -326,7 +390,8 @@ impl Activity {
                     tx.psbt.unsigned_tx.compute_txid().to_string(),
                     &mut tx.labels,
                 )
-            }));
+            }))
+            .chain(opened);
         for (txid, labels) in rows {
             if !owns(txid) && !labels.contains_key(key) {
                 continue;
@@ -335,6 +400,17 @@ impl Activity {
                 Some(label) => labels.insert(key.to_owned(), label.to_owned()),
                 None => labels.remove(key),
             };
+        }
+        if let Some(opened) = self.opened.as_mut() {
+            let rebuilt = match &opened.target {
+                ActivityTarget::Vault(tx) => Some(view::activity::Entry::vault(tx.clone())),
+                ActivityTarget::Psbt(tx) => Some(view::activity::Entry::psbt(tx.clone())),
+                _ => None,
+            };
+            if let Some(mut rebuilt) = rebuilt {
+                rebuilt.id = std::mem::take(&mut opened.id);
+                *opened = rebuilt;
+            }
         }
     }
 
@@ -345,10 +421,12 @@ impl Activity {
         if self.label_saving_for(&entry_id) {
             return Task::none();
         }
+        // The opened row's kept copy saves too while the loaded rows lack it.
         let Some(entry) = self
             .entries()
             .into_iter()
             .find(|entry| entry.id == entry_id)
+            .or_else(|| self.opened.clone().filter(|opened| opened.id == entry_id))
         else {
             self.label_draft = None;
             return Task::none();
@@ -755,6 +833,7 @@ impl State for Activity {
                     {
                         self.label_draft = None;
                     }
+                    self.opened = None;
                     self.selected_id = Some(id);
                 }
                 ActivityMessage::ToggleDetails(open) => {
@@ -770,6 +849,7 @@ impl State for Activity {
                 ActivityMessage::CloseDetail => {
                     self.details_open = None;
                     self.label_draft = None;
+                    self.opened = None;
                     let selected = self.selected_id.take();
                     return selected.map_or_else(Task::none, |id| {
                         iced::widget::operation::focus(view::activity::row_focus_id(&id))
@@ -790,6 +870,18 @@ impl State for Activity {
                         wallet,
                         ..Default::default()
                     };
+                }
+                ActivityMessage::Open(id) => {
+                    // App switches to Activity; it opens unfiltered with this
+                    // row selected. The id is the row's own, not its place in
+                    // a list, so the selection holds while the page reloads.
+                    // App keeps the row as the Overview listed it
+                    // (`Self::opened`), read before the reload cleared it.
+                    let opened = self.entries().into_iter().find(|entry| entry.id == id);
+                    self.clear_selection();
+                    self.filters = Default::default();
+                    self.opened = opened;
+                    self.selected_id = Some(id);
                 }
             },
             _ => {}

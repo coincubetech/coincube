@@ -60,6 +60,9 @@ const AVATAR_WIDTH: f32 = 44.0;
 const NETWORK_WIDTH: f32 = 145.0;
 const WALLETS_WIDTH: f32 = 160.0;
 const BACKUP_WIDTH: f32 = 145.0;
+/// The face's term column; the details snapshot sets its values at the same
+/// x (28px margin + this + the 12px gap).
+pub(super) const FACE_TERM_WIDTH: f32 = 84.0;
 const ACTION_WIDTH: f32 = 72.0;
 const CELL_GAP: f32 = 14.0;
 
@@ -220,7 +223,7 @@ pub(super) fn local_wallets(
 
 /// Matches the Cube's own "Backup not confirmed" warning: `backed_up` is set
 /// once the user confirms the seed phrase backup. The Recovery Kit is a
-/// Connect fact and shows on the Connect line. A Cube with no recorded master
+/// Connect fact and shows on the Recovery Kit line. A Cube with no recorded master
 /// seed (created before it was tracked, or elsewhere) may hold no seed on
 /// this device at all, so its status is unknown rather than a warning.
 pub(super) fn backup_mark(cube: &crate::app::settings::CubeSettings) -> BackupMark {
@@ -397,7 +400,7 @@ fn detail_line<'a>(
     Row::new()
         .spacing(16)
         .width(Length::Fill)
-        .push(tenshu::caption(label).width(Length::Fixed(72.0)))
+        .push(tenshu::caption(label).width(Length::Fixed(88.0)))
         .push(value)
         .into()
 }
@@ -436,7 +439,7 @@ fn details<'a>(row: &launcher_catalog::LocalRow<'_>, light: bool) -> Element<'a,
             tenshu::body(lock_state(row.open)).into(),
         ))
         .push(detail_line(
-            "Backup",
+            "Seed phrase",
             tenshu::body(backup_text)
                 .style(text_tone(backup_tone))
                 .into(),
@@ -452,7 +455,7 @@ fn details<'a>(row: &launcher_catalog::LocalRow<'_>, light: bool) -> Element<'a,
             tenshu::body(row.wallets.clone()).into(),
         ))
         .push(detail_line(
-            "Connect",
+            "Recovery Kit",
             tenshu::body(row.connect.1.clone())
                 .wrapping(Wrapping::WordOrGlyph)
                 .into(),
@@ -523,14 +526,15 @@ pub(crate) fn face_words<'a>(
         })
 }
 
-/// `.pdl div`: a 64px muted term, 12px gap, then the value on a 22px line.
+/// `.pdl div`: an 84px muted term, wide enough for "Recovery Kit", a 12px
+/// gap, then the value on a 22px line.
 fn face_fact<'a>(label: &'static str, value: Element<'a, ViewMessage>) -> Element<'a, ViewMessage> {
     Row::new()
         .spacing(12)
         .width(Length::Fill)
         .push(
             Container::new(face_words(label, 13.0, coincube_ui::font::REGULAR, true))
-                .width(Length::Fixed(64.0))
+                .width(Length::Fixed(FACE_TERM_WIDTH))
                 .height(Length::Fixed(22.0))
                 .center_y(Length::Fixed(22.0)),
         )
@@ -718,13 +722,13 @@ fn floor_details<'a>(
             face_words(lock_state(row.open), 14.0, font::REGULAR, false).into(),
         ))
         .push(face_fact(
-            "Backup",
+            "Seed phrase",
             face_words(backup_text, 14.0, font::REGULAR, false)
                 .style(text_tone(backup_tone))
                 .into(),
         ))
         .push(face_fact(
-            "Connect",
+            "Recovery Kit",
             face_words(row.connect.1.clone(), 14.0, font::REGULAR, false).into(),
         ))
         .push(face_fact(
@@ -831,7 +835,7 @@ fn ghost_avatar<'a, M: 'a>(size: f32) -> Element<'a, M> {
         .into()
 }
 
-/// The Backup fact on a ghost's face, and the note under the facts.
+/// The Recovery fact on a ghost's face, and the note under the facts.
 fn ghost_copy(cube: &super::RemoteCube) -> (&'static str, tenshu::Tone, &'static str) {
     let restore = launcher_catalog::remote_restore(cube);
     match restore.action {
@@ -876,7 +880,7 @@ fn ghost_details<'a>(
             face_words("In Connect, not on this device", 14.0, font::REGULAR, true).into(),
         ))
         .push(face_fact(
-            "Backup",
+            "Recovery",
             face_words(backup_text, 14.0, font::REGULAR, false)
                 .style(text_tone(backup_tone))
                 .into(),
@@ -1109,7 +1113,7 @@ fn table_header<'a>() -> Element<'a, ViewMessage> {
         .push(tenshu::caption("Cube").width(Length::Fill))
         .push(tenshu::caption("Network").width(Length::Fixed(NETWORK_WIDTH)))
         .push(tenshu::caption("Wallets").width(Length::Fixed(WALLETS_WIDTH)))
-        .push(tenshu::caption("Backup").width(Length::Fixed(BACKUP_WIDTH)))
+        .push(tenshu::caption("Seed phrase").width(Length::Fixed(BACKUP_WIDTH)))
         .push(Space::new().width(Length::Fixed(ACTION_WIDTH)))
         .into()
 }
@@ -2253,13 +2257,15 @@ pub(crate) fn unlock_turn_with_floor_controls<'a, M: 'a + 'static>(
 }
 
 /// What the loading face says: its heading, the loader's quote, the stage
-/// line and, once a stage has held past the wait, Cancel.
+/// line and, once a stage has held past the wait, Cancel (or, waiting on
+/// Spark, going on without it).
 pub(crate) struct OpeningFace<'a, M> {
     pub cube: &'a crate::app::settings::CubeSettings,
     pub quote: &'a Quote,
     pub stage: super::launcher_opening::Stage,
     pub stalled: bool,
     pub cancel: fn() -> M,
+    pub without_spark: fn() -> M,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2368,27 +2374,29 @@ fn opening_content<'a, M: 'a>(
             .line_height(iced::widget::text::LineHeight::Absolute(22.0.into())),
         );
     if face.stalled {
+        let (note, label, action) = if face.stage == super::launcher_opening::Stage::Spark {
+            (
+                "Spark is taking longer than usual.",
+                "Continue without Spark",
+                face.without_spark,
+            )
+        } else {
+            ("Taking longer than usual.", "Cancel", face.cancel)
+        };
         body = body.push(Space::new().height(Length::Fixed(18.0))).push(
             Row::new()
                 .spacing(4)
                 .align_y(Alignment::Center)
-                .push(opening_words(
-                    "Taking longer than usual.",
-                    13.0,
-                    font::REGULAR,
-                    Tone::Muted,
-                    alpha,
-                ))
+                .push(opening_words(note, 13.0, font::REGULAR, Tone::Muted, alpha))
                 .push({
                     // A button's message must be `Clone`; the caller's need
-                    // not be, so the press maps through `cancel`.
-                    let cancel = face.cancel;
-                    let press: Element<'a, ()> = iced::widget::button(face_link_label("Cancel"))
+                    // not be, so the press maps through `action`.
+                    let press: Element<'a, ()> = iced::widget::button(face_link_label(label))
                         .padding([2.0, 4.0])
                         .style(face_link_style)
                         .on_press(())
                         .into();
-                    press.map(move |()| cancel())
+                    press.map(move |()| action())
                 }),
         );
     }
@@ -2633,7 +2641,7 @@ mod tests {
             page: 0,
             selected_slot: 0,
             backup: "Not confirmed",
-            connect: "Sovereign — local only".into(),
+            connect: "None — local only".into(),
             wallets: "Spark".into(),
             peers: vec![
                 launcher_catalog::LauncherScenePeer {
@@ -3743,7 +3751,8 @@ mod tests {
         ] {
             assert!(browsing.contains(fact), "missing {:?}", fact);
         }
-        // The dock names the block and its source; its menu offers the others.
+        // The dock names the control; its menu gives the block and its
+        // source, and offers the others.
         let launcher = |home: &Home, name: &str| {
             capture::inspect_filled(
                 name,
@@ -3765,7 +3774,8 @@ mod tests {
             (1440, 900),
         );
         assert!(light.contains("NEXT HALVING"));
-        assert!(dock.contains("Block 968,412 · COINCUBE | Connect"));
+        assert!(dock.contains("Network activity"));
+        assert!(!dock.contains("Block 968,412"));
         assert!(!dock.contains("Turn off in App preferences"));
         // The narrowest window still fits the selector beside the limit text.
         let narrow = capture::inspect_filled(
@@ -3776,12 +3786,13 @@ mod tests {
             theme::Theme::dark(),
             (1024, 768),
         );
-        assert!(narrow.contains("Block 968,412 · COINCUBE | Connect"));
+        assert!(narrow.contains("Network activity"));
         assert!(narrow.contains("Key"));
         let _ = home.update_catalog(CatalogMessage::Activity(ActivityMessage::Menu(true)));
         let menu = launcher(&home, "launcher-activity-menu");
         for item in [
             "Network activity · Bitcoin mainnet",
+            "Block 968,412 · COINCUBE | Connect",
             "Automatic",
             "Local node",
             "Turn off in App preferences",
@@ -3825,6 +3836,53 @@ mod tests {
             .current(ChainId::BitcoinBlake2b)
             .is_none());
         assert!(home.catalog.activity.current(ChainId::Bitcoin).is_some());
+    }
+
+    #[test]
+    fn the_activity_menu_switches_between_bitcoin_and_blake2b() {
+        use super::super::launcher_activity::{sample_snapshot, ActivityMessage};
+        use super::super::launcher_catalog::NetworkFilter;
+        let menu = |home: &Home, name: &str| {
+            capture::inspect_filled(
+                name,
+                super::super::launcher_catalog::launcher_view(home),
+                (1440, 900),
+                "dark",
+                theme::Theme::dark(),
+                (1440, 900),
+            )
+        };
+        let mut home = home_with_floor(4);
+        home.catalog
+            .activity
+            .show_for_test(ChainId::Bitcoin, Ok(sample_snapshot()));
+        let _ = home.update_catalog(CatalogMessage::Activity(ActivityMessage::Menu(true)));
+        // Without Bitcoin Blake2b there is nothing to switch to.
+        assert!(!home.activity_blake2b_offered());
+        assert!(!menu(&home, "launcher-activity-no-b2b").contains("Bitcoin Blake2b"));
+        let _ = home.update_catalog(CatalogMessage::Activity(ActivityMessage::Blake2b(true)));
+        assert_eq!(home.activity_chain(), ChainId::Bitcoin);
+
+        // Listed: the menu offers both, and the choice moves the activity.
+        home.displayed_networks = vec![ChainId::Bitcoin, ChainId::BitcoinBlake2b];
+        assert!(home.activity_blake2b_offered());
+        assert!(menu(&home, "launcher-activity-b2b").contains("Bitcoin Blake2b"));
+        let _ = home.update_catalog(CatalogMessage::Activity(ActivityMessage::Blake2b(true)));
+        assert_eq!(home.activity_chain(), ChainId::BitcoinBlake2b);
+        assert!(menu(&home, "launcher-activity-b2b-on")
+            .contains("Network activity · Bitcoin Blake2b mainnet"));
+        let _ = home.update_catalog(CatalogMessage::Activity(ActivityMessage::Blake2b(false)));
+        assert_eq!(home.activity_chain(), ChainId::Bitcoin);
+
+        // A filter naming one network wins, and the switch steps aside.
+        let _ = home.update_catalog(CatalogMessage::Activity(ActivityMessage::Blake2b(true)));
+        home.catalog.filter = NetworkFilter::Network(ChainId::Bitcoin);
+        assert!(!home.activity_blake2b_offered());
+        assert_eq!(home.activity_chain(), ChainId::Bitcoin);
+        // Withdrawn Bitcoin Blake2b falls back to Bitcoin.
+        home.catalog.filter = NetworkFilter::All;
+        home.displayed_networks = vec![ChainId::Bitcoin];
+        assert_eq!(home.activity_chain(), ChainId::Bitcoin);
     }
 
     #[test]

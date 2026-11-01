@@ -3478,6 +3478,12 @@ impl App {
                 .global_home
                 .reload(Some(daemon.clone()), Some(wallet.clone())),
         );
+        // The Overview opens first; its "Recent activity" reads Activity.
+        tasks.push(panels.activity.refresh_scope(
+            view::activity::RecentScope::Cube,
+            Some(daemon.clone()),
+            Some(wallet.clone()),
+        ));
         tasks.push(panels.connect.ensure_session_check());
         let (connect_auth_arc, connect_email) = match connect_auth {
             Some((a, e)) => (Some(a), Some(e)),
@@ -3723,6 +3729,10 @@ impl App {
         let cmd = iced::Task::batch([
             panels.connect.ensure_session_check(),
             panels.global_home.reload(None, None),
+            // The Overview opens first; its "Recent activity" reads Activity.
+            panels
+                .activity
+                .refresh_scope(view::activity::RecentScope::Cube, None, None),
             Task::done(Message::ImportedBitcoin(Box::new(
                 state::imported_bitcoin::ImportEvent::Start,
             ))),
@@ -4560,6 +4570,12 @@ impl App {
         &self.datadir
     }
 
+    /// Whether the Spark wallet has settled: it returned a synced balance,
+    /// or this Cube has none. The opening waits on it.
+    pub fn spark_settled(&self) -> bool {
+        self.panels.global_home.spark_settled()
+    }
+
     pub fn cube_settings(&self) -> &settings::CubeSettings {
         &self.cube_settings
     }
@@ -4820,9 +4836,8 @@ impl App {
         let shown = self
             .panels
             .activity
-            .wallet_entries(wallet)
+            .recent_entries(view::activity::RecentScope::Wallet(wallet))
             .into_iter()
-            .take(view::activity::RECENT_ACTIVITY_ROWS)
             .any(|entry| entry.id == selected);
         if !shown {
             self.panels.activity.clear_selection();
@@ -5139,13 +5154,15 @@ impl App {
         }
         self.panels.current = menu.clone();
 
-        // A wallet page re-reads its rows on entry: a failed read then shows
-        // with its Retry even if the page's own reload fails. Spark's rows
-        // also follow each later page reload (`SparkOverviewMessage::DataLoaded`).
-        let recent = wallet_page(&menu).map_or_else(Task::none, |wallet| {
+        // A page with "Recent activity" re-reads its rows on entry: a failed
+        // read then shows with its Retry even if the page's own reload fails.
+        // Spark's page also follows each later page reload
+        // (`SparkOverviewMessage::DataLoaded`), and the Overview follows
+        // Spark's payment events and the Vault's coins (`overview_activity_*`).
+        let recent = recent_scope(&menu).map_or_else(Task::none, |scope| {
             self.panels
                 .activity
-                .refresh_wallet(wallet, self.daemon.clone(), self.wallet.clone())
+                .refresh_scope(scope, self.daemon.clone(), self.wallet.clone())
         });
 
         // Call reload with optional daemon/wallet
@@ -5239,6 +5256,7 @@ impl App {
             .unwrap_or(&self.panels.global_home)
             .subscription();
         subscriptions.push(current_subscription);
+        subscriptions.extend(self.panels.global_home.spark_load_poll());
 
         if let Some(imported) = self.panels.imported_bitcoin.as_ref() {
             if !imported.handles_route(&self.panels.current) {
@@ -6096,6 +6114,7 @@ impl App {
             return Task::none();
         };
         let was_ready = self.panels.global_home.imported_balance.is_some();
+        let before = self.cache.daemon_cache.clone();
         let ready = panel.sync_cache(&mut self.cache);
         if !ready {
             self.cache.daemon_cache.coins.clear();
@@ -6131,6 +6150,21 @@ impl App {
         }
         if ready {
             tasks.push(Task::done(Message::CacheUpdated));
+            // The imported runtime never sends `UpdateDaemonCache`: the
+            // Overview's Vault rows follow it here, once its history is in
+            // and whenever a refresh can have changed it.
+            if matches!(self.panels.current, Menu::Cube(menu::CubeSubMenu::Overview))
+                && (first_load
+                    || !was_ready
+                    || runtime_changed
+                    || overview_activity_vault_changed(&before, &self.cache.daemon_cache))
+            {
+                tasks.push(self.panels.activity.refresh_wallet(
+                    view::activity::WalletFilter::Vault,
+                    Some(daemon.clone()),
+                    Some(wallet.clone()),
+                ));
+            }
             if first_load || !was_ready || runtime_changed {
                 if let Some(overview) = self.panels.vault_overview.as_mut() {
                     tasks.push(overview.reload(Some(daemon.clone()), Some(wallet.clone())));
@@ -8029,7 +8063,26 @@ impl App {
                         } else {
                             None
                         };
+                        let vault_changed = overview_activity_vault_changed(
+                            &self.cache.daemon_cache,
+                            &daemon_cache,
+                        );
                         self.cache.daemon_cache = daemon_cache;
+                        // The Vault page's rows follow its own reload
+                        // (`Message::Payments`).
+                        let recent = if vault_changed
+                            && matches!(
+                                self.panels.current,
+                                Menu::Cube(menu::CubeSubMenu::Overview)
+                            ) {
+                            self.panels.activity.refresh_wallet(
+                                view::activity::WalletFilter::Vault,
+                                self.daemon.clone(),
+                                self.wallet.clone(),
+                            )
+                        } else {
+                            Task::none()
+                        };
                         // Fire-and-forget recovery heartbeat after the sync's
                         // fresh tip lands (Estate Notifications — PR 2). Batched
                         // alongside the normal cache cascade so it never delays
@@ -8048,6 +8101,7 @@ impl App {
                             splits,
                             unswept,
                             retire_obligation.unwrap_or_else(Task::none),
+                            recent,
                             Task::done(Message::CacheUpdated),
                         ]);
                     }
@@ -8673,6 +8727,31 @@ impl App {
                     filter,
                     self.set_current_panel(Menu::Cube(menu::CubeSubMenu::Activity)),
                 ]);
+            }
+            Message::View(view::Message::Activity(view::activity::ActivityMessage::Open(id))) => {
+                // An Overview row: Activity opens unfiltered on it. Selected
+                // after the switch, so leaving a page can't clear it. The row
+                // as the Overview listed it is read first: the switch's reload
+                // clears Activity's rows, and its pane shows that copy until
+                // (or unless) the read brings a fresh one.
+                let opened = self
+                    .panels
+                    .activity
+                    .recent_entries(view::activity::RecentScope::Cube)
+                    .into_iter()
+                    .find(|entry| entry.id == id);
+                let load = self.set_current_panel(Menu::Cube(menu::CubeSubMenu::Activity));
+                let select = self.panels.activity.update(
+                    self.daemon.clone(),
+                    &self.cache,
+                    Message::View(view::Message::Activity(
+                        view::activity::ActivityMessage::Open(id.clone()),
+                    )),
+                );
+                if self.panels.activity.selected_id.as_deref() == Some(id.as_str()) {
+                    self.panels.activity.opened = opened;
+                }
+                return Task::batch([load, select]);
             }
             msg @ Message::View(view::Message::Activity(_)) => {
                 return self
@@ -9566,6 +9645,16 @@ impl App {
                         | SparkEvent::PaymentFailed { .. }
                 ) {
                     tasks.push(self.panels.spark_transactions.reload(None, None));
+                }
+                // The Spark page's rows follow its own reload (`DataLoaded`).
+                if matches!(self.panels.current, Menu::Cube(menu::CubeSubMenu::Overview))
+                    && overview_activity_spark_event(&event)
+                {
+                    tasks.push(self.panels.activity.refresh_wallet(
+                        view::activity::WalletFilter::Spark,
+                        None,
+                        None,
+                    ));
                 }
 
                 match event {
@@ -10727,10 +10816,10 @@ impl App {
                 &self.cache,
                 address,
                 move || {
-                    view::activity::wallet_recent_activity(
+                    view::activity::recent_activity(
                         activity,
                         cache,
-                        view::activity::WalletFilter::Spark,
+                        view::activity::RecentScope::Wallet(view::activity::WalletFilter::Spark),
                         None,
                     )
                 },
@@ -10758,10 +10847,10 @@ impl App {
                 &self.panels.current,
                 cache,
                 move |unknown_history| {
-                    view::activity::wallet_recent_activity(
+                    view::activity::recent_activity(
                         activity,
                         cache,
-                        view::activity::WalletFilter::Vault,
+                        view::activity::RecentScope::Wallet(view::activity::WalletFilter::Vault),
                         unknown_history,
                     )
                 },
@@ -10772,6 +10861,26 @@ impl App {
                         view::activity::WalletFilter::Vault,
                     )
                 },
+            )
+        } else if matches!(self.panels.current, Menu::Cube(menu::CubeSubMenu::Overview)) {
+            // The Overview's "Recent activity" is Activity's rows, Spark and
+            // the Vault together; a row opens in Activity. Until the Vault's
+            // history is known, an empty table says so, as the Vault page does.
+            let (activity, cache) = (&self.panels.activity, &self.cache);
+            let unknown_history = self
+                .panels
+                .vault_overview
+                .as_ref()
+                .and_then(|vault| vault.unknown_history_note());
+            self.panels.global_home.view_with_recent_activity(
+                &self.panels.current,
+                cache,
+                Some(view::activity::recent_activity(
+                    activity,
+                    cache,
+                    view::activity::RecentScope::Cube,
+                    unknown_history,
+                )),
             )
         } else if let Some(content) = self.connect_settings_content() {
             // Connect-dependent settings sub-pages (Spark → Settings →
@@ -11183,6 +11292,56 @@ fn wallet_page(menu: &Menu) -> Option<view::activity::WalletFilter> {
     }
 }
 
+/// The "Recent activity" a route shows, if any: the Overview's, or a wallet
+/// page's.
+fn recent_scope(menu: &Menu) -> Option<view::activity::RecentScope> {
+    match menu {
+        Menu::Cube(menu::CubeSubMenu::Overview) => Some(view::activity::RecentScope::Cube),
+        _ => wallet_page(menu).map(view::activity::RecentScope::Wallet),
+    }
+}
+
+/// Whether a Spark event can change Spark's newest payment rows: a payment's
+/// state, a claimed deposit, or the first sync of the session's payments.
+fn overview_activity_spark_event(event: &coincube_spark_protocol::Event) -> bool {
+    use coincube_spark_protocol::Event as SparkEvent;
+    matches!(
+        event,
+        SparkEvent::Synced
+            | SparkEvent::DepositsChanged
+            | SparkEvent::PaymentSucceeded { .. }
+            | SparkEvent::PaymentPending { .. }
+            | SparkEvent::PaymentFailed { .. }
+    )
+}
+
+/// Whether a daemon poll can have changed the Vault's newest history rows:
+/// a coin arrived, confirmed, was spent or its spend confirmed, a block
+/// arrived, or a full scan or rescan finished. The cached coins hold only
+/// unspent ones, so a spend with no change output leaves them as they were
+/// when it confirms; the new block is the only sign of that. A scan can
+/// likewise find only spent history at the same tip; its completion is the
+/// only sign of that. The Overview re-reads the Vault's history then, rather
+/// than on every poll.
+fn overview_activity_vault_changed(before: &DaemonCache, after: &DaemonCache) -> bool {
+    let state = |coins: &[crate::daemon::model::Coin]| {
+        coins
+            .iter()
+            .map(|coin| {
+                (
+                    coin.outpoint,
+                    coin.block_height,
+                    coin.spend_info.map(|spend| (spend.txid, spend.height)),
+                )
+            })
+            .collect::<HashSet<_>>()
+    };
+    before.blockheight != after.blockheight
+        || before.history_sync.full_scan_completed_at != after.history_sync.full_scan_completed_at
+        || (before.rescan_progress.is_some() && after.rescan_progress.is_none())
+        || state(&before.coins) != state(&after.coins)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -11229,13 +11388,18 @@ pub(crate) mod tests {
         ))
     }
 
-    #[test]
-    fn imported_policy_loads_as_the_existing_vault_wallet() {
+    /// An App opened on a wallet-less Cube whose imported Vault policy is
+    /// attached and syncing: its runtime daemon (unstarted) and attachment.
+    fn imported_vault_app(
+        root: &std::path::Path,
+    ) -> (
+        App,
+        Arc<dyn Daemon + Send + Sync>,
+        settings::ImportedWalletAttachment,
+    ) {
         use coincube_core::{chain::ChainId, wallet_descriptor::ImportedWalletDescriptor};
         use coincubed::config::{BitcoinBackend, BitcoinConfig, ElectrumConfig};
-        let root =
-            std::env::temp_dir().join(format!("imported-vault-app-{}", uuid::Uuid::new_v4()));
-        let datadir = CoincubeDirectory::new(root.clone());
+        let datadir = CoincubeDirectory::new(root.to_path_buf());
         let descriptor = ImportedWalletDescriptor::parse(
             "wpkh([6cb116eb/84h/0h/0h]xpub6C6c6ShFaUMjohRwYGnrDr5kbrnUjBeGh5U8BPAjtZnZ2D7WpRidu2SUNpBVfmMaw8TpDA7quYNW4iNwGYaq9iAwp5fzHLCXJwTqe76WpmF/<0;1>/*)",
             None, ChainId::Bitcoin,
@@ -11269,7 +11433,7 @@ pub(crate) mod tests {
         daemon_config.import_initial_lookahead = Some(20);
         let daemon: Arc<dyn Daemon + Send + Sync> =
             Arc::new(EmbeddedDaemon::unstarted_for_test(daemon_config, None));
-        let (mut app, startup) = App::new_inner(
+        let (app, startup) = App::new_inner(
             Cache {
                 network: bitcoin::Network::Bitcoin,
                 fiat_chain: ChainId::Bitcoin,
@@ -11287,6 +11451,14 @@ pub(crate) mod tests {
             None,
         );
         drop(startup);
+        (app, daemon, attachment)
+    }
+
+    #[test]
+    fn imported_policy_loads_as_the_existing_vault_wallet() {
+        let root =
+            std::env::temp_dir().join(format!("imported-vault-app-{}", uuid::Uuid::new_v4()));
+        let (mut app, daemon, attachment) = imported_vault_app(&root);
         assert!(app.wallet.as_ref().unwrap().is_imported());
         assert!(Arc::ptr_eq(app.daemon.as_ref().unwrap(), &daemon));
         assert!(app.panels.vault_overview.is_some());
@@ -11347,6 +11519,60 @@ pub(crate) mod tests {
         assert!(app.authenticated_coincube_client().is_some());
         assert!(app.panels.connect.account.bitcoin_blake2b_enabled());
         assert!(app.claim_connect_session().is_none());
+    }
+
+    /// The imported runtime never sends `UpdateDaemonCache`, so the Overview's
+    /// Vault rows follow its adoption: once the scan completes, then on each
+    /// refresh that moves a coin or a block, never while the scan runs, for
+    /// an unchanged snapshot, or on another page.
+    #[test]
+    fn the_overview_follows_the_imported_vaults_history() {
+        let _guard = crate::app::session::test_guard();
+        let root =
+            std::env::temp_dir().join(format!("imported-vault-overview-{}", uuid::Uuid::new_v4()));
+        let (mut app, _daemon, _) = imported_vault_app(&root);
+        app.panels.current = Menu::Cube(menu::CubeSubMenu::Overview);
+        let settle = |app: &mut App| {
+            let generation = app.panels.activity.generation_for_tests();
+            drop(app.update(Message::ActivityVaultLoaded(
+                generation,
+                Ok((Vec::new(), false)),
+            )));
+            assert!(!app.panels.activity.vault_loading);
+        };
+        let scanned = |app: &mut App, block_height: i32| {
+            app.panels
+                .imported_bitcoin
+                .as_mut()
+                .unwrap()
+                .complete_scan_for_tests(block_height, Vec::new());
+            drop(app.adopt_imported_runtime());
+        };
+        settle(&mut app);
+
+        drop(app.adopt_imported_runtime());
+        assert!(
+            !app.panels.activity.vault_loading,
+            "the scan is still running"
+        );
+
+        scanned(&mut app, 100);
+        assert!(app.panels.activity.vault_loading, "the history is in");
+        settle(&mut app);
+
+        scanned(&mut app, 100);
+        assert!(!app.panels.activity.vault_loading, "nothing changed");
+
+        scanned(&mut app, 101);
+        assert!(app.panels.activity.vault_loading, "a block arrived");
+        settle(&mut app);
+
+        app.panels.current = Menu::Cube(menu::CubeSubMenu::Settings(
+            menu::CubeSettingsOption::General,
+        ));
+        scanned(&mut app, 102);
+        assert!(!app.panels.activity.vault_loading, "another page");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -16887,6 +17113,16 @@ mod wallet_recent_activity_tests {
         let (mut app, _) = super::shell_tests::bitcoin_app(&root);
 
         app.panels.current = Menu::Cube(menu::CubeSubMenu::Overview);
+        // The Overview's own first read (`App::new`) lands first.
+        assert!(
+            app.panels.activity.vault_loading,
+            "the Overview reads on open"
+        );
+        let generation = app.panels.activity.generation_for_tests();
+        drop(app.update(Message::ActivityVaultLoaded(
+            generation,
+            Ok((Vec::new(), false)),
+        )));
         drop(app.update(Message::Payments(Ok(Vec::new()))));
         assert!(!app.panels.activity.vault_loading, "off the Vault page");
 
@@ -16933,6 +17169,448 @@ mod wallet_recent_activity_tests {
                 .len(),
             1
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An Overview row opens Activity unfiltered with that row selected, by
+    /// the row's own id: a filter or a selection left from an earlier visit
+    /// can't hide it or open another row, and the selection holds while
+    /// Activity reloads.
+    #[test]
+    fn an_overview_row_opens_activity_unfiltered_on_that_row() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("recent-open-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
+        app.panels.current = Menu::Cube(menu::CubeSubMenu::Overview);
+        let at = |n: u64, id: &str| coincube_spark_protocol::PaymentSummary {
+            timestamp: 1_760_000_000 + n,
+            description: Some(format!("Receipt {id}")),
+            ..receipt(id)
+        };
+        let rows = || vec![at(3, "newest"), at(2, "chosen"), at(1, "older")];
+        let generation = app.panels.activity.generation_for_tests();
+        drop(app.update(Message::ActivitySparkLoaded(
+            generation,
+            Ok((rows(), false)),
+        )));
+        let entries = app
+            .panels
+            .activity
+            .recent_entries(view::activity::RecentScope::Cube);
+        let chosen = entries[1].id.clone();
+        let stale = entries[0].id.clone();
+        // Left from an earlier Activity visit.
+        app.panels.activity.filters.wallet = view::activity::WalletFilter::Vault;
+        app.panels.activity.filters.search = "rent".into();
+        app.panels.activity.selected_id = Some(stale.clone());
+
+        drop(app.update(Message::View(view::Message::Activity(
+            view::activity::ActivityMessage::Open(chosen.clone()),
+        ))));
+        assert_eq!(app.panels.current, Menu::Cube(menu::CubeSubMenu::Activity));
+        let filters = &app.panels.activity.filters;
+        assert_eq!(filters.wallet, view::activity::WalletFilter::All);
+        assert!(filters.search.is_empty() && filters.date_range.is_empty());
+        assert_eq!(filters.direction, view::activity::DirectionFilter::All);
+        assert_eq!(filters.status, view::activity::StatusFilter::All);
+        assert_eq!(
+            app.panels.activity.selected_id.as_deref(),
+            Some(chosen.as_str())
+        );
+        // Activity reloads on entry; once its rows land, in another order,
+        // the pane is the chosen row's.
+        let generation = app.panels.activity.generation_for_tests();
+        let mut reordered = rows();
+        reordered.reverse();
+        drop(app.update(Message::ActivitySparkLoaded(
+            generation,
+            Ok((reordered, false)),
+        )));
+        assert_eq!(
+            app.panels.activity.selected_id.as_deref(),
+            Some(chosen.as_str())
+        );
+        let page = view::shared::landing::capture::inspect_filled(
+            "overview-open-in-activity",
+            view::activity::render(&app.panels.activity, &app.cache),
+            (1440, 900),
+            "dark",
+            coincube_ui::theme::Theme::dark(),
+            (1192, 835),
+        );
+        assert!(page.has_focus(iced::advanced::widget::Id::from(
+            view::activity::DETAIL_CLOSE_ID
+        )));
+        let title_count =
+            |title: &str| page.text.iter().filter(|(value, _)| value == title).count();
+        assert_eq!(title_count("Receipt chosen"), 2, "its row and its pane");
+        assert_eq!(title_count("Receipt newest"), 1, "its row only");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A row the Overview opens keeps its detail pane when Activity's own
+    /// read fails: the switch's reload clears the rows, so the pane shows the
+    /// row as the Overview listed it, beside the list and in the compact
+    /// layout alike.
+    #[test]
+    fn an_overview_row_keeps_its_pane_when_activitys_read_fails() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("recent-failed-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
+        app.panels.current = Menu::Cube(menu::CubeSubMenu::Overview);
+        let at = |n: u64, id: &str| coincube_spark_protocol::PaymentSummary {
+            timestamp: 1_760_000_000 + n,
+            description: Some(format!("Receipt {id}")),
+            ..receipt(id)
+        };
+        let generation = app.panels.activity.generation_for_tests();
+        drop(app.update(Message::ActivitySparkLoaded(
+            generation,
+            Ok((vec![at(2, "chosen"), at(1, "older")], false)),
+        )));
+        let chosen = app
+            .panels
+            .activity
+            .recent_entries(view::activity::RecentScope::Cube)
+            .into_iter()
+            .find(|entry| entry.title == "Receipt chosen")
+            .unwrap()
+            .id;
+        drop(app.update(Message::View(view::Message::Activity(
+            view::activity::ActivityMessage::Open(chosen.clone()),
+        ))));
+        let generation = app.panels.activity.generation_for_tests();
+        drop(app.update(Message::ActivitySparkLoaded(
+            generation,
+            Err("bridge offline".into()),
+        )));
+        assert!(app.panels.activity.entries().is_empty(), "the read failed");
+        for (outer, pane) in [((1440, 900), (1192, 835)), ((1024, 768), (816, 703))] {
+            let page = view::shared::landing::capture::inspect_filled(
+                "overview-open-failed-read",
+                view::activity::render(&app.panels.activity, &app.cache),
+                outer,
+                "dark",
+                coincube_ui::theme::Theme::dark(),
+                pane,
+            );
+            let titles = page
+                .text
+                .iter()
+                .filter(|(value, _)| value == "Receipt chosen")
+                .count();
+            assert_eq!(titles, 1, "its pane at {:?}", outer);
+            assert!(page.has_focus(iced::advanced::widget::Id::from(
+                view::activity::DETAIL_CLOSE_ID
+            )));
+        }
+        // Once a read succeeds the fresh row takes over.
+        drop(app.update(Message::View(view::Message::Activity(
+            view::activity::ActivityMessage::Retry,
+        ))));
+        let generation = app.panels.activity.generation_for_tests();
+        drop(app.update(Message::ActivitySparkLoaded(
+            generation,
+            Ok((vec![at(2, "chosen"), at(1, "older")], false)),
+        )));
+        assert_eq!(
+            app.panels.activity.selected_id.as_deref(),
+            Some(chosen.as_str())
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// While the Vault's history is unknown (its first full scan still
+    /// running), the Overview's empty "Recent activity" says so, as the Vault
+    /// page does, instead of "No transactions yet"; once known, it doesn't.
+    #[test]
+    fn the_overview_never_reads_an_unknown_vault_history_as_empty() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("recent-unknown-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
+        app.panels.current = Menu::Cube(menu::CubeSubMenu::Overview);
+        let generation = app.panels.activity.generation_for_tests();
+        drop(app.update(Message::ActivityVaultLoaded(
+            generation,
+            Ok((Vec::new(), false)),
+        )));
+        drop(app.update(Message::ActivitySparkLoaded(
+            generation,
+            Ok((Vec::new(), false)),
+        )));
+        let note = "Transactions appear once the Vault's history has loaded";
+        let page = |app: &App| {
+            crate::app::view::shared::landing::capture::inspect(
+                "overview-recent-unknown",
+                app.view(),
+                (1440, 900),
+                "dark",
+                coincube_ui::theme::Theme::dark(),
+            )
+        };
+        let wallet = app.wallet.clone().unwrap();
+        for (sync, unknown) in [
+            (
+                SyncStatus::WalletFullScan {
+                    progress: Some(0.4),
+                },
+                true,
+            ),
+            (SyncStatus::Synced, false),
+        ] {
+            app.panels.vault_overview =
+                Some(VaultOverview::new(wallet.clone(), &[], sync, 0, false));
+            let shown = page(&app);
+            assert!(shown.contains("Recent activity"));
+            assert_eq!(shown.contains(note), unknown);
+            assert_eq!(shown.contains("No transactions yet"), !unknown);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The filters judge the copy of an opened row that the pane shows: a
+    /// row opened while pending that completes during the reload shows no
+    /// pane under the Pending filter, which hides its row.
+    #[test]
+    fn an_opened_rows_pane_follows_the_filters_on_its_fresh_copy() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("recent-filter-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
+        app.panels.current = Menu::Cube(menu::CubeSubMenu::Overview);
+        let row = |status: &str| coincube_spark_protocol::PaymentSummary {
+            timestamp: 1_760_000_000,
+            status: status.into(),
+            description: Some("Receipt chosen".into()),
+            ..receipt("chosen")
+        };
+        let generation = app.panels.activity.generation_for_tests();
+        drop(app.update(Message::ActivitySparkLoaded(
+            generation,
+            Ok((vec![row("pending")], false)),
+        )));
+        let chosen = app
+            .panels
+            .activity
+            .recent_entries(view::activity::RecentScope::Cube)[0]
+            .id
+            .clone();
+        drop(app.update(Message::View(view::Message::Activity(
+            view::activity::ActivityMessage::Open(chosen),
+        ))));
+        let generation = app.panels.activity.generation_for_tests();
+        drop(app.update(Message::ActivitySparkLoaded(
+            generation,
+            Ok((vec![row("completed")], false)),
+        )));
+        let titles = |app: &App| {
+            view::shared::landing::capture::inspect_filled(
+                "overview-open-filtered",
+                view::activity::render(&app.panels.activity, &app.cache),
+                (1440, 900),
+                "dark",
+                coincube_ui::theme::Theme::dark(),
+                (1192, 835),
+            )
+            .text
+            .iter()
+            .filter(|(value, _)| value == "Receipt chosen")
+            .count()
+        };
+        assert_eq!(titles(&app), 2, "its row and its pane");
+        drop(app.update(Message::View(view::Message::Activity(
+            view::activity::ActivityMessage::Status(view::activity::StatusFilter::Pending),
+        ))));
+        assert_eq!(titles(&app), 0, "neither under Pending");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A row the Overview opens gets Activity's detail pane even when it sits
+    /// past the complete-history cutoff, which hides it from Activity's own
+    /// list: here Spark's whole first page shares one timestamp and more pages
+    /// remain. A row picked on Activity itself gets no such exception.
+    #[test]
+    fn an_overview_row_past_the_history_cutoff_still_opens_in_activity() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("recent-cutoff-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
+        app.panels.current = Menu::Cube(menu::CubeSubMenu::Overview);
+        let at = |id: &str| coincube_spark_protocol::PaymentSummary {
+            timestamp: 1_760_000_000,
+            description: Some(format!("Receipt {id}")),
+            ..receipt(id)
+        };
+        let rows = || vec![at("chosen"), at("other")];
+        let load = |app: &mut App| {
+            let generation = app.panels.activity.generation_for_tests();
+            drop(app.update(Message::ActivitySparkLoaded(generation, Ok((rows(), true)))));
+        };
+        load(&mut app);
+        let entries = app
+            .panels
+            .activity
+            .recent_entries(view::activity::RecentScope::Cube);
+        let id = |title: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.title == title)
+                .unwrap()
+                .id
+                .clone()
+        };
+        let (chosen, other) = (id("Receipt chosen"), id("Receipt other"));
+
+        drop(app.update(Message::View(view::Message::Activity(
+            view::activity::ActivityMessage::Open(chosen.clone()),
+        ))));
+        load(&mut app);
+        assert_eq!(app.panels.activity.complete_through(), Some(1_760_000_000));
+        // Beside the list at 1440, under its place at the 1024 minimum.
+        let count_at = |app: &App, title: &str, outer: (u32, u32), pane: (u32, u32)| {
+            view::shared::landing::capture::inspect_filled(
+                "overview-open-past-cutoff",
+                view::activity::render(&app.panels.activity, &app.cache),
+                outer,
+                "dark",
+                coincube_ui::theme::Theme::dark(),
+                pane,
+            )
+            .text
+            .iter()
+            .filter(|(value, _)| value == title)
+            .count()
+        };
+        let count = |app: &App, title: &str| count_at(app, title, (1440, 900), (1192, 835));
+        assert_eq!(count(&app, "Receipt chosen"), 1, "its pane, not a row");
+        assert_eq!(count(&app, "Receipt other"), 0);
+        assert_eq!(
+            count_at(&app, "Receipt chosen", (1024, 768), (816, 703)),
+            1,
+            "compact: its pane, at the top"
+        );
+
+        // Picked on Activity, a row past the cutoff owns no pane.
+        drop(app.update(Message::View(view::Message::Activity(
+            view::activity::ActivityMessage::Select(other),
+        ))));
+        assert_eq!(count(&app, "Receipt other"), 0);
+        assert_eq!(count(&app, "Receipt chosen"), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The Overview reads Activity's Spark and Vault rows when it opens, when
+    /// a Spark event can change Spark's payments, and when a poll moves the
+    /// Vault's coins; never because it was drawn again, and never for a
+    /// Spark or Vault change while another page is open.
+    #[test]
+    fn the_overview_reads_its_activity_on_entry_and_wallet_changes_only() {
+        use coincube_spark_protocol::Event as SparkEvent;
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("recent-overview-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
+        let settle_vault = |app: &mut App| {
+            let generation = app.panels.activity.generation_for_tests();
+            drop(app.update(Message::ActivityVaultLoaded(
+                generation,
+                Ok((Vec::new(), false)),
+            )));
+            assert!(!app.panels.activity.vault_loading);
+        };
+        let spark_event = |app: &mut App, event: SparkEvent| {
+            drop(app.update(Message::SparkEvent(
+                crate::app::breez_spark::SparkClientEvent(event),
+            )));
+        };
+        // `App::new` opens the Overview and reads both.
+        assert_eq!(app.panels.current, Menu::Cube(menu::CubeSubMenu::Overview));
+        assert!(app.panels.activity.vault_loading);
+        let opened = app.panels.activity.spark_refresh_requests;
+        assert!(opened > 0);
+        settle_vault(&mut app);
+
+        // Drawn again and again: nothing is read.
+        drop(app.view());
+        drop(app.view());
+        assert!(!app.panels.activity.vault_loading);
+        assert_eq!(app.panels.activity.spark_refresh_requests, opened);
+
+        // Opened again from another page: both again.
+        drop(
+            app.set_current_panel(Menu::Cube(menu::CubeSubMenu::Settings(
+                menu::CubeSettingsOption::General,
+            ))),
+        );
+        let away = app.panels.activity.spark_refresh_requests;
+        drop(app.set_current_panel(Menu::Cube(menu::CubeSubMenu::Overview)));
+        assert_eq!(app.panels.activity.spark_refresh_requests, away + 1);
+        assert!(app.panels.activity.vault_loading);
+        settle_vault(&mut app);
+
+        // Spark payment events re-read Spark; others don't.
+        let before = app.panels.activity.spark_refresh_requests;
+        spark_event(
+            &mut app,
+            SparkEvent::PaymentSucceeded {
+                id: "pay-1".into(),
+                amount_sat: 1_000,
+                bolt11: None,
+            },
+        );
+        assert_eq!(app.panels.activity.spark_refresh_requests, before + 1);
+        spark_event(&mut app, SparkEvent::LightningAddressChanged { info: None });
+        assert_eq!(app.panels.activity.spark_refresh_requests, before + 1);
+        assert!(
+            !app.panels.activity.vault_loading,
+            "Spark events read Spark"
+        );
+
+        // A poll that moves the Vault's coins re-reads the Vault; an
+        // unchanged poll doesn't.
+        let mut poll = app.cache.daemon_cache.clone();
+        drop(app.update(Message::UpdateDaemonCache(Ok(poll.clone()))));
+        assert!(!app.panels.activity.vault_loading, "nothing moved");
+        poll.coins
+            .push(vault_payment().coins.into_values().next().unwrap());
+        drop(app.update(Message::UpdateDaemonCache(Ok(poll.clone()))));
+        assert!(app.panels.activity.vault_loading, "a coin arrived");
+        settle_vault(&mut app);
+        // A block with the coins unchanged re-reads too: the cache holds
+        // unspent coins only, so a spend with no change output confirms
+        // without moving them.
+        poll.blockheight += 1;
+        drop(app.update(Message::UpdateDaemonCache(Ok(poll.clone()))));
+        assert!(app.panels.activity.vault_loading, "a block arrived");
+        settle_vault(&mut app);
+        // A scan can find only spent history at the same tip: its end re-reads.
+        poll.rescan_progress = Some(0.5);
+        drop(app.update(Message::UpdateDaemonCache(Ok(poll.clone()))));
+        assert!(!app.panels.activity.vault_loading, "a rescan is running");
+        poll.rescan_progress = None;
+        drop(app.update(Message::UpdateDaemonCache(Ok(poll.clone()))));
+        assert!(app.panels.activity.vault_loading, "the rescan finished");
+        settle_vault(&mut app);
+        poll.history_sync.full_scan_completed_at = Some(1_760_000_000);
+        drop(app.update(Message::UpdateDaemonCache(Ok(poll.clone()))));
+        assert!(app.panels.activity.vault_loading, "a full scan finished");
+        settle_vault(&mut app);
+
+        // On another page neither reads the Overview's rows.
+        drop(
+            app.set_current_panel(Menu::Cube(menu::CubeSubMenu::Settings(
+                menu::CubeSettingsOption::General,
+            ))),
+        );
+        let before = app.panels.activity.spark_refresh_requests;
+        spark_event(
+            &mut app,
+            SparkEvent::PaymentPending {
+                id: "pay-2".into(),
+                amount_sat: 1_000,
+            },
+        );
+        assert_eq!(app.panels.activity.spark_refresh_requests, before);
+        poll.coins.clear();
+        drop(app.update(Message::UpdateDaemonCache(Ok(poll))));
+        assert!(!app.panels.activity.vault_loading);
         let _ = std::fs::remove_dir_all(&root);
     }
 
