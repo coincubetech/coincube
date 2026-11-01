@@ -540,6 +540,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     if: github.repository == 'coincubetech/coincube'
+    outputs:
+      version: ${{ steps.version.outputs.version }}
 
     steps:
       - name: Checkout
@@ -549,10 +551,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Set Coincube version from Cargo
+        id: version
         run: |
           sudo apt-get update && sudo apt-get install -y jq
           version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="coincube-gui") | .version')
           echo "COINCUBE_VERSION=$version" >> $GITHUB_ENV
+          echo "version=$version" >> $GITHUB_OUTPUT
 
       - name: Download release artifacts
         uses: robinraju/release-downloader@v1
@@ -596,3 +600,36 @@ jobs:
           file_glob: true
           tag: ${{ github.ref }}
           overwrite: true
+
+  verify_release:
+    name: Verify published release signature and assets
+    needs: checksums
+    if: github.repository == 'coincubetech/coincube' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Download published release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir artifacts
+      - name: Verify GPG signature and every artifact checksum
+        env:
+          RELEASE_VERSION: ${{ needs.checksums.outputs.version }}
+        run: |
+          set -euo pipefail
+          expected_fingerprint=ED4D0D710103D6252854681367F9701BF0D2DAF4
+          actual_fingerprint=$(gpg --batch --show-keys --with-colons docs/security/coincube-release-public.asc \
+            | awk -F: '$1 == "fpr" { print $10; exit }')
+          test "$actual_fingerprint" = "$expected_fingerprint"
+          export GNUPGHOME="$RUNNER_TEMP/coincube-release-gnupg"
+          mkdir -m 700 "$GNUPGHOME"
+          gpg --batch --import docs/security/coincube-release-public.asc
+          gpg --batch --verify \
+            "artifacts/SHA256SUMS-${RELEASE_VERSION}.txt.asc" \
+            "artifacts/SHA256SUMS-${RELEASE_VERSION}.txt"
+          python3 contrib/release/verify-release-assets.py artifacts "$RELEASE_VERSION"
