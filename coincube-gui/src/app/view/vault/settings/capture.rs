@@ -596,13 +596,22 @@ async fn mounted_settings_pair_route_accepts_vault_and_denies_imported_wallet() 
             .expect("mounted Pair settings choice")
             .1;
         let pair_center = pair_bounds.center();
-        // The shell's vertical scrollable is the content viewport. The head
-        // sits above it on the same column, so the choice can't scroll away.
+        // The content viewport is the wide scrollable in Pair's column that
+        // starts nearest below it: the pinned head sits directly above it,
+        // so the choice can't scroll away. Any other scrollable (a narrower
+        // one, one in another column, or one above Pair) can't stand in.
+        let pair_bottom = pair_bounds.y + pair_bounds.height;
         let content_scroll = labels
             .1
             .iter()
-            .find(|bounds| bounds.width > 500.0)
-            .expect("mounted settings content viewport");
+            .filter(|bounds| {
+                bounds.width > 500.0
+                    && pair_center.x >= bounds.x
+                    && pair_center.x <= bounds.x + bounds.width
+                    && bounds.y >= pair_bottom
+            })
+            .min_by(|a, b| a.y.total_cmp(&b.y))
+            .expect("a settings content viewport below the pinned Pair choice");
         assert!(
             pair_bounds.x >= crate::app::view::nav::shell::FULL_WIDTH
                 && pair_bounds.x >= content_scroll.x
