@@ -12,8 +12,9 @@
 pub mod envelope;
 pub mod error;
 pub mod imported;
-// The password-v3 codec is staged before the trusted server checkpoint and
-// restore transaction consume it; no UI path may admit its keys yet.
+pub(crate) mod imported_checkpoint;
+// The password-v3 checkpoint client is staged before the atomic restore
+// transaction consumes it; no UI path may admit its keys yet.
 #[allow(dead_code)]
 pub(crate) mod imported_key_v3;
 pub mod keyholder;
