@@ -7832,6 +7832,9 @@ struct DeleteCubeModal {
     /// The PIN was accepted, and the delete waits for a daemon this Cube left
     /// stopping when it was locked.
     waiting_for_stop: bool,
+    /// That daemon outlasted the wait, so nothing was deleted. Delete can be
+    /// pressed again.
+    stop_refused: bool,
 }
 
 /// Modal for deleting a remote-only cube (exists on server, not locally).
@@ -8066,6 +8069,7 @@ impl DeleteCubeModal {
             pin_input: pin_input::PinInput::new(),
             pin_error: None,
             waiting_for_stop: false,
+            stop_refused: false,
         };
         if let Some(wallet) = &wallet_settings {
             if let Some(auth) = &wallet.remote_backend_auth {
@@ -8120,6 +8124,12 @@ impl DeleteCubeModal {
     /// The confirmed delete, once the PIN is accepted and no daemon of this
     /// Cube is still stopping.
     fn delete(&mut self) -> Task<Message> {
+        // Never remove a directory a daemon may still write to, and never wait
+        // for one here on the UI thread.
+        if crate::daemon::stopping::any_stopping(&self.daemon_directories()) {
+            self.stop_refused = true;
+            return Task::none();
+        }
         self.warning = None;
 
         // Pairing is identifying authorization material. Remove it
@@ -8144,9 +8154,13 @@ impl DeleteCubeModal {
                     &self.cube,
                 ))
             {
-                self.warning = Some(DeleteError::Settings(settings::SettingsError::WritingFile(
-                    error,
-                )));
+                if error == crate::daemon::stopping::STILL_STOPPING {
+                    self.stop_refused = true;
+                } else {
+                    self.warning = Some(DeleteError::Settings(
+                        settings::SettingsError::WritingFile(error),
+                    ));
+                }
                 return Task::none();
             }
             self.deleted = true;
@@ -8163,7 +8177,11 @@ impl DeleteCubeModal {
                 wallet_settings,
                 self.delete_liana_connect,
             )) {
-                self.warning = Some(e);
+                if matches!(e, DeleteError::DaemonStopping) {
+                    self.stop_refused = true;
+                } else {
+                    self.warning = Some(e);
+                }
                 return Task::none();
             }
         }
@@ -8248,13 +8266,18 @@ impl DeleteCubeModal {
                 // Deleting a Cube right after locking it: its daemon may still
                 // be stopping in the directories removed below. Wait for that in
                 // a task, not in `delete_wallet` on the UI thread.
+                self.stop_refused = false;
                 let directories = self.daemon_directories();
                 if crate::daemon::stopping::any_stopping(&directories) {
                     self.waiting_for_stop = true;
                     return Task::perform(
                         async move {
+                            // A wait that runs out is caught by `delete`,
+                            // which refuses while the stop is registered.
                             for dir in directories {
-                                crate::daemon::stopping::wait_for_async(dir).await;
+                                if !crate::daemon::stopping::wait_for_async(dir).await {
+                                    break;
+                                }
                             }
                         },
                         move |_| {
@@ -8397,6 +8420,14 @@ impl DeleteCubeModal {
             }
         }
 
+        if self.stop_refused {
+            col = col.push(
+                Container::new(
+                    p1_regular(crate::daemon::stopping::STILL_STOPPING).style(theme::text::warning),
+                )
+                .center_x(Length::Fill),
+            );
+        }
         if self.waiting_for_stop {
             col = col.push(
                 Container::new(
@@ -11352,7 +11383,7 @@ mod tests {
         let _ = modal.view();
 
         release.send(()).unwrap();
-        crate::daemon::stopping::wait_for(&wallet_dir);
+        assert!(crate::daemon::stopping::wait_for(&wallet_dir));
         assert!(!crate::daemon::stopping::any_stopping(
             std::slice::from_ref(&wallet_dir)
         ));
@@ -11364,6 +11395,79 @@ mod tests {
             !wallet_dir.exists(),
             "the delete ran once the daemon stopped"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A daemon that outlasts the wait: the delete is refused, the files
+    /// stay, the modal says why, and Delete can be pressed again.
+    #[test]
+    fn a_delete_refuses_when_the_daemon_outlasts_the_wait() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let root = std::env::temp_dir().join(format!("delete-outlast-{}", uuid::Uuid::new_v4()));
+        let datadir = CoincubeDirectory::new(root.clone());
+        let network_dir = datadir.network_directory(Network::Bitcoin);
+        let wallet = WalletSettings {
+            name: "Coincube-kt6ht0kt".to_string(),
+            alias: None,
+            descriptor_checksum: "kt6ht0kt".to_string(),
+            pinned_at: Some(1_720_000_000),
+            keys: Vec::new(),
+            hardware_wallets: Vec::new(),
+            remote_backend_auth: None,
+            start_internal_bitcoind: Some(false),
+            pending_rescan: None,
+            keychain_keys_recorded: false,
+        };
+        let wallet_dir = network_dir
+            .coincubed_data_directory(&wallet.wallet_id())
+            .path()
+            .to_path_buf();
+        std::fs::create_dir_all(&wallet_dir).unwrap();
+        std::fs::write(wallet_dir.join("coincubed.sqlite3"), b"synthetic").unwrap();
+        let cube = cube("local-a", "Local A", Network::Bitcoin);
+        let mut modal = DeleteCubeModal::new(
+            cube.clone(),
+            network_dir,
+            root.clone(),
+            Some(wallet),
+            Some(false),
+            false,
+        );
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        crate::daemon::stopping::run_in_background(Some(wallet_dir.clone()), move || {
+            released.recv().unwrap();
+        });
+        let _ = modal.update(Message::View(ViewMessage::DeleteCube(
+            DeleteCubeMessage::Confirm(cube.id.clone()),
+        )));
+        assert!(modal.waiting_for_stop);
+
+        // The task's wait ran out with the stop still registered.
+        let started = std::time::Instant::now();
+        let _ = modal.update(Message::View(ViewMessage::DeleteCube(
+            DeleteCubeMessage::DaemonStopped(cube.id.clone()),
+        )));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert!(!modal.waiting_for_stop);
+        assert!(modal.stop_refused);
+        assert!(!modal.deleted);
+        assert!(modal.warning.is_none(), "Delete stays available to retry");
+        assert!(wallet_dir.join("coincubed.sqlite3").is_file());
+        let _ = modal.view();
+
+        // Once the stop has finished, pressing Delete again deletes.
+        release.send(()).unwrap();
+        assert!(crate::daemon::stopping::wait_for(&wallet_dir));
+        let _ = modal.update(Message::View(ViewMessage::DeleteCube(
+            DeleteCubeMessage::Confirm(cube.id.clone()),
+        )));
+        assert!(!modal.stop_refused);
+        assert!(!wallet_dir.exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 

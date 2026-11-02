@@ -7,7 +7,9 @@
 //! instead. Until that stop returns the daemon still holds its data directory
 //! (`daemon.lock` and the database), so whatever next starts or deletes that
 //! directory calls [`wait_for`] first, and the process calls [`wait_for_all`]
-//! before it exits.
+//! before it exits. A wait that runs out leaves the directory alone and says
+//! so ([`STILL_STOPPING`]): Windows has no `daemon.lock`, so nothing else
+//! would keep a second daemon or a delete out of it.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -17,11 +19,14 @@ use tracing::{error, info, warn};
 
 use super::Daemon;
 
-/// How long a start or delete waits for a stopping daemon before going ahead
-/// anyway. Past it, on Unix, the daemon's own `daemon.lock` refuses a second
-/// start with a clear error, which beats an endless spinner. Windows has no
-/// `daemon.lock`, so there this wait is the only guard.
-const WAIT_LIMIT: Duration = Duration::from_secs(120);
+/// How long a start or delete waits for a stopping daemon before refusing
+/// with [`STILL_STOPPING`], which beats an endless spinner. Windows has no
+/// `daemon.lock`, so this refusal is the only guard there.
+pub(crate) const WAIT_LIMIT: Duration = Duration::from_secs(120);
+
+/// Why a start or delete refused: its directory's daemon is still stopping.
+pub const STILL_STOPPING: &str =
+    "This Cube's wallet is still finishing locking. Nothing was changed; try again in a moment.";
 
 /// Data directories whose daemon is still stopping, one entry per daemon.
 /// `None` is a daemon without a known directory; only [`wait_for_all`] waits
@@ -127,26 +132,45 @@ pub fn any_stopping(dirs: &[PathBuf]) -> bool {
     dirs.iter().any(|dir| is_stopping(&pending, Some(dir)))
 }
 
-/// Block until a daemon still stopping for `dir` has released it.
-pub fn wait_for(dir: &Path) {
-    if !wait(Some(dir), WAIT_LIMIT) {
+/// Block until a daemon still stopping for `dir` has released it, up to
+/// [`WAIT_LIMIT`]. Returns `false` when it is still stopping: the caller must
+/// then leave the directory alone.
+#[must_use]
+pub fn wait_for(dir: &Path) -> bool {
+    wait_for_within(dir, WAIT_LIMIT)
+}
+
+pub(crate) fn wait_for_within(dir: &Path, limit: Duration) -> bool {
+    let stopped = wait(Some(dir), limit);
+    if !stopped {
         warn!(
-            "A daemon for {} is still stopping after {:?}; going ahead",
+            "A daemon for {} is still stopping after {:?}; leaving it alone",
             dir.display(),
-            WAIT_LIMIT
+            limit
         );
     }
+    stopped
 }
 
 /// [`wait_for`] without blocking an async executor thread.
-pub async fn wait_for_async(dir: PathBuf) {
+#[must_use]
+pub async fn wait_for_async(dir: PathBuf) -> bool {
+    wait_for_async_within(dir, WAIT_LIMIT).await
+}
+
+pub(crate) async fn wait_for_async_within(dir: PathBuf, limit: Duration) -> bool {
     let pending = {
         let pending = stopping().0.lock().unwrap_or_else(|e| e.into_inner());
         is_stopping(&pending, Some(&dir))
     };
-    if pending {
-        if let Err(e) = tokio::task::spawn_blocking(move || wait_for(&dir)).await {
+    if !pending {
+        return true;
+    }
+    match tokio::task::spawn_blocking(move || wait_for_within(&dir, limit)).await {
+        Ok(stopped) => stopped,
+        Err(e) => {
             error!("Waiting for a stopping daemon failed: {}", e);
+            false
         }
     }
 }
@@ -236,12 +260,34 @@ mod tests {
 
         let (ran, then_ran) = mpsc::channel();
         stop_in_background(daemon, move || ran.send(()).unwrap());
-        wait_for(dir.path());
+        assert!(wait_for(dir.path()));
         then_ran
             .try_recv()
             .expect("`then` follows the daemon stop and precedes the release");
         assert!(dir.try_lock().is_ok(), "a reopen can take the lock");
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A stop that outlives the wait is reported, not waved through: the
+    /// caller must leave the directory alone.
+    #[test]
+    fn a_wait_that_runs_out_reports_the_daemon_still_stopping() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let dir = unique_dir("stopping-timeout");
+        let (release, released) = mpsc::channel::<()>();
+        run_in_background(Some(dir.clone()), move || released.recv().unwrap());
+        assert!(!wait_for_within(&dir, Duration::from_millis(50)));
+        assert!(!runtime.block_on(wait_for_async_within(
+            dir.clone(),
+            Duration::from_millis(50)
+        )));
+        assert!(any_stopping(std::slice::from_ref(&dir)));
+        release.send(()).unwrap();
+        assert!(wait_for_within(&dir, Duration::from_secs(5)));
+        assert!(runtime.block_on(wait_for_async_within(dir, Duration::ZERO)));
     }
 
     #[test]
@@ -275,7 +321,7 @@ mod tests {
             release.send(()).unwrap();
         });
         let started = Instant::now();
-        runtime.block_on(wait_for_async(dir.clone()));
+        assert!(runtime.block_on(wait_for_async(dir.clone())));
         assert!(started.elapsed() >= Duration::from_millis(100));
         assert!(wait(Some(&dir), Duration::ZERO));
         releaser.join().unwrap();

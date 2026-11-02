@@ -107,6 +107,14 @@ pub async fn remove_cube_import(
     directory: &NetworkDirectory,
     expected: &CubeSettings,
 ) -> Result<(), String> {
+    remove_cube_import_within(directory, expected, crate::daemon::stopping::WAIT_LIMIT).await
+}
+
+async fn remove_cube_import_within(
+    directory: &NetworkDirectory,
+    expected: &CubeSettings,
+    stop_limit: std::time::Duration,
+) -> Result<(), String> {
     let intent = expected
         .bitcoin_import
         .as_ref()
@@ -236,8 +244,11 @@ pub async fn remove_cube_import(
     }
     // Deleting a Cube right after locking it: the imported wallet's daemon may
     // still be stopping in its directory (see `crate::daemon::stopping`).
+    // If it outlasts the wait, remove nothing.
     for dir in [Some(stage.clone()), destination.clone()].iter().flatten() {
-        crate::daemon::stopping::wait_for_async(dir.clone()).await;
+        if !crate::daemon::stopping::wait_for_async_within(dir.clone(), stop_limit).await {
+            return Err(crate::daemon::stopping::STILL_STOPPING.to_string());
+        }
     }
     if let Some(attachment) = expected_attachment {
         crate::services::imported_keys::LocalKeyRepository::new(directory, expected, attachment)?
@@ -474,6 +485,30 @@ mod tests {
         release.send(()).unwrap();
         removal.await.unwrap();
         assert!(!destination.exists());
+    }
+
+    /// A stop that outlasts the wait leaves every file and the Cube in place.
+    #[tokio::test]
+    async fn removal_refuses_while_the_daemon_is_still_stopping() {
+        let mut f = Fixture::new().await;
+        f.install().await;
+        let destination = f.destination();
+        let journal = journal_path(&f.directory, f.operation_id());
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        crate::daemon::stopping::run_in_background(Some(destination.clone()), move || {
+            released.recv().unwrap();
+        });
+        let error =
+            remove_cube_import_within(&f.directory, &f.cube, std::time::Duration::from_millis(50))
+                .await
+                .unwrap_err();
+        assert_eq!(error, crate::daemon::stopping::STILL_STOPPING);
+        assert!(destination.join("coincubed.sqlite3").is_file());
+        assert!(journal.is_file());
+        let saved = Settings::from_file(&f.directory).unwrap();
+        assert!(saved.cubes.iter().any(|cube| cube.id == f.cube.id));
+        release.send(()).unwrap();
+        assert!(crate::daemon::stopping::wait_for(&destination));
     }
 
     #[tokio::test]

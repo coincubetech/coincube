@@ -49,10 +49,21 @@ fn map_spend_command_error(error: CommandError) -> DaemonError {
 }
 
 // A Cube locked moments ago may still be stopping its daemon in the
-// background, holding this directory's `daemon.lock`.
-fn wait_for_previous_daemon(config: &Config) {
-    if let Some(dir) = config.data_directory() {
-        super::stopping::wait_for(dir.path());
+// background, holding this directory. Refuse rather than start a second
+// daemon on it: Windows has no `daemon.lock` to stop that.
+fn wait_for_previous_daemon(config: &Config) -> Result<(), DaemonError> {
+    wait_for_previous_daemon_within(config, super::stopping::WAIT_LIMIT)
+}
+
+fn wait_for_previous_daemon_within(
+    config: &Config,
+    limit: std::time::Duration,
+) -> Result<(), DaemonError> {
+    match config.data_directory() {
+        Some(dir) if !super::stopping::wait_for_within(dir.path(), limit) => Err(
+            DaemonError::Unexpected(super::stopping::STILL_STOPPING.to_string()),
+        ),
+        _ => Ok(()),
     }
 }
 
@@ -103,7 +114,7 @@ impl EmbeddedDaemon {
     }
 
     pub fn start(config: Config) -> Result<EmbeddedDaemon, DaemonError> {
-        wait_for_previous_daemon(&config);
+        wait_for_previous_daemon(&config)?;
         let handle =
             DaemonHandle::start_default(config.clone(), false).map_err(DaemonError::Start)?;
         Ok(Self {
@@ -116,7 +127,7 @@ impl EmbeddedDaemon {
     /// Local fork startup trusts the selected consensus-validating node and
     /// requires its exact-chain RPC admission before wallet/database writes.
     pub fn start_local_fork(config: Config) -> Result<Self, DaemonError> {
-        wait_for_previous_daemon(&config);
+        wait_for_previous_daemon(&config)?;
         let handle =
             DaemonHandle::start_with_local_node(config.clone()).map_err(DaemonError::Start)?;
         Ok(Self {
@@ -184,8 +195,15 @@ impl EmbeddedDaemon {
         // The GUI owns the syncing companion; the authenticated daemon retains
         // its narrow Connect-only capability and never starts a pending node.
         config.pending_bitcoind = None;
+        if let Some(dir) = config.data_directory() {
+            if !super::stopping::wait_for_async(dir.path().to_path_buf()).await {
+                session.invalidate();
+                return Err(DaemonError::Unexpected(
+                    super::stopping::STILL_STOPPING.to_string(),
+                ));
+            }
+        }
         let result = tokio::task::spawn_blocking(move || {
-            wait_for_previous_daemon(&config);
             DaemonHandle::start_with_connect(config, backend, false)
                 .map(|handle| PendingConnectDaemon(Some(handle)))
         })
@@ -578,6 +596,29 @@ mod anchor_startup_tests {
     const DESCRIPTOR: &str = "tr([abcdef01]xpub6Eze7yAT3Y1wGrnzedCNVYDXUqa9NmHVWck5emBaTbXtURbe1NWZbK9bsz1TiVE7Cz341PMTfYgFw1KdLWdzcM1UMFTcdQfCYhhXZ2HJvTW/<0;1>/*,and_v(v:pk([abcdef01]xpub688Hn4wScQAAiYJLPg9yH27hUpfZAUnmJejRQBCiwfP5PEDzjWMNW1wChcninxr5gyavFqbbDjdV1aK5USJz8NDVjUy7FRQaaqqXHh5SbXe/<0;1>/*),older(52560)))#0mt7e93c";
     fn config(endpoint: &str, dir: &std::path::Path) -> Config {
         toml::from_str(&format!("main_descriptor = \"{}\"\ndata_directory = '{}'\n[bitcoin_config]\nnetwork = 'bitcoin-blake2b'\n[esplora_config]\naddr = '{}'\n", DESCRIPTOR, dir.display(), endpoint)).unwrap()
+    }
+
+    /// A start on a directory whose daemon is still stopping after a lock is
+    /// refused, not started beside it: Windows has no `daemon.lock` to stop a
+    /// second daemon.
+    #[test]
+    fn a_start_refuses_while_the_previous_daemon_is_still_stopping() {
+        let dir = std::env::temp_dir().join(format!("start-refuse-{}", uuid::Uuid::new_v4()));
+        let config = config("http://127.0.0.1:9", &dir);
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        crate::daemon::stopping::run_in_background(Some(dir.clone()), move || {
+            released.recv().unwrap();
+        });
+        match wait_for_previous_daemon_within(&config, std::time::Duration::from_millis(50)) {
+            Err(DaemonError::Unexpected(message)) => {
+                assert_eq!(message, crate::daemon::stopping::STILL_STOPPING)
+            }
+            other => panic!("{}", format!("expected a refusal, got {:?}", other.err())),
+        }
+        release.send(()).unwrap();
+        assert!(
+            wait_for_previous_daemon_within(&config, std::time::Duration::from_secs(5)).is_ok()
+        );
     }
     fn client(server: &MockServer) -> CoincubeClient {
         let mut client = CoincubeClient::new();

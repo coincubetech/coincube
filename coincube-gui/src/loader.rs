@@ -1612,7 +1612,11 @@ async fn start_bitcoind_and_daemon_with_import_auth(
     // Reopening a Cube right after locking it: let the previous daemon finish
     // stopping before anything here touches its directory or node.
     if let Some(dir) = found.data_directory() {
-        crate::daemon::stopping::wait_for_async(dir.path().to_path_buf()).await;
+        if !crate::daemon::stopping::wait_for_async(dir.path().to_path_buf()).await {
+            return Err(Error::Daemon(DaemonError::Unexpected(
+                crate::daemon::stopping::STILL_STOPPING.to_string(),
+            )));
+        }
     }
     // Promote pre-fallback vaults: rewrite `daemon.toml` so the
     // Connect URL moves to `fallback_addr` and `mempool.space`
