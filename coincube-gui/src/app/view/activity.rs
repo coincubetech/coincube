@@ -5,7 +5,7 @@
 use chrono::{DateTime, Local, NaiveDate, Utc};
 use coincube_spark_protocol::PaymentSummary;
 use coincube_ui::{
-    component::tenshu::{self, FieldSize, PageWidth},
+    component::tenshu::{self, page_head, FieldSize, PageWidth},
     font, theme,
     widget::{action::Action, Column, Element, Row},
 };
@@ -1242,7 +1242,9 @@ fn header<'a>(
 ) -> Element<'a, Message> {
     let count = activity.filters.count();
     let title = column![
-        words("Activity", 22.0, font::SEMIBOLD, glyph::ink),
+        words("Activity", 22.0, font::SEMIBOLD, glyph::ink).line_height(
+            iced::widget::text::LineHeight::Relative(page_head::TITLE_LINE_HEIGHT)
+        ),
         row![
             network_coin(cache),
             words(
@@ -1301,10 +1303,11 @@ fn header<'a>(
             .align_y(Alignment::End)
             .into()
     };
-    // `.phd`: the page's 28px top, on the page column like every Cube page.
+    // Laid out like the shared page head (`.phead`) so the title sits where
+    // it does on every other Cube page.
     container(body)
         .padding(iced::Padding {
-            top: 28.0,
+            top: page_head::HEAD_TOP,
             right: frame.right,
             bottom: 0.0,
             left: frame.left,
@@ -2634,6 +2637,48 @@ mod tests {
         assert!(needed(1192.0) <= 1192.0);
         assert!(!detail_beside_list(1100.0));
         assert!(needed(1100.0) > 1100.0);
+    }
+
+    #[test]
+    fn activity_title_sits_where_every_page_head_puts_it() {
+        let cache = Cache::default();
+        let activity = Activity::new(None, None);
+        let line = |inspection: &capture::Inspection, value: &str| {
+            inspection
+                .text
+                .iter()
+                .find_map(|(text, bounds)| (text == value).then_some(*bounds))
+                .unwrap_or_else(|| panic!("rendered {:?}", value))
+        };
+        let activity_page = mount(
+            "activity-head-matches-page-head",
+            render_at_width(&activity, &cache, 1192.0),
+            (1440, 900),
+            "dark",
+            coincube_ui::theme::Theme::dark(),
+            1192,
+        );
+        let cube_line = activity_page
+            .text
+            .iter()
+            .find(|(text, _)| text.contains(" · "))
+            .expect("rendered Cube line")
+            .clone();
+        let shared = mount(
+            "shared-page-head",
+            tenshu::page_head("Overview", Message::FocusAction)
+                .context(Space::new(), cube_line.0.clone())
+                .view(super::super::page_gutter),
+            (1440, 900),
+            "dark",
+            coincube_ui::theme::Theme::dark(),
+            1192,
+        );
+        let (activity_title, overview_title) =
+            (line(&activity_page, "Activity"), line(&shared, "Overview"));
+        assert_eq!(activity_title.y, overview_title.y);
+        assert_eq!(activity_title.height, overview_title.height);
+        assert_eq!(cube_line.1.y, line(&shared, &cube_line.0).y);
     }
 
     #[test]

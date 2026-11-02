@@ -1070,6 +1070,9 @@ fn transfer_dialog<'a>(
         .max_width(820)
         .style(dialog_style),
     )
+    // The card's Fill width makes this wrapper fill the modal too, so the
+    // modal's own centering has nothing to move: center the card here.
+    .center_x(Length::Fill)
     .padding(24)
     .into()
 }
@@ -4224,6 +4227,35 @@ mod tests {
                 shown_picker.contains(balance),
                 "shown picker balance {}",
                 balance
+            );
+        }
+    }
+
+    #[test]
+    fn transfer_dialog_is_centered_horizontally() {
+        let fixture = ViewFixture::new();
+        // The dialog is a modal over the whole window, not the page column.
+        for (width, height) in [(1024, 768), (1440, 900)] {
+            let inspection = capture::inspect_full_window(
+                "transfer-dialog-centered",
+                transfer_dialog_for(fixture.config(1, Some(TransferDirection::SparkToVault), None)),
+                (width, height),
+                "dark",
+                theme::Theme::dark(),
+            );
+            let title = inspection
+                .text
+                .iter()
+                .find_map(|(value, bounds)| (value == "Transfer").then_some(*bounds))
+                .expect("rendered dialog title");
+            // The 820-wide card sits mid-window; its title starts 28 inside it.
+            let expected = (width as f32 - 820.0) / 2.0 + 28.0;
+            assert!(
+                (title.x - expected).abs() < 1.0,
+                "{}: title at x={}, expected {}",
+                width,
+                title.x,
+                expected
             );
         }
     }

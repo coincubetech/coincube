@@ -162,11 +162,7 @@ fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
         Some(RouteScope::Vault) => [
             (SettingsOption::Wallet, "Wallet & signers", "wallet"),
             (SettingsOption::Node, "Node", "node"),
-            (
-                SettingsOption::LocalSigning,
-"Pair with Keychain",
-                "pair",
-            ),
+            (SettingsOption::LocalSigning, "Keychain", "pair"),
             (SettingsOption::Connections, "Connections", "connections"),
             (SettingsOption::ImportExport, "Data & exports", "data"),
         ]
@@ -174,6 +170,16 @@ fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
         .copied()
         .filter(|(section, _, _)| {
             !cache.has_imported_bitcoin || *section != SettingsOption::ImportExport
+        })
+        // A Vault without a Keychain key can never pair a phone, so it has
+        // no Keychain tab, except while that tab is the one open.
+        .filter(|(section, _, _)| {
+            *section != SettingsOption::LocalSigning
+                || !cache.vault_lacks_keychain_key
+                || matches!(
+                    menu,
+                    Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::LocalSigning)))
+                )
         })
         .map(|(section, label, id)| RouteChoice {
             id: match id {
@@ -318,10 +324,32 @@ mod tests {
         assert!(scopes(&cache).contains(&RouteScope::Vault));
         assert!(section_routes(&menu, &cache)
             .iter()
-            .any(|choice| choice.label.contains("Pair with Keychain") && !choice.enabled));
+            .any(|choice| choice.label == "Keychain" && !choice.enabled));
         assert!(!section_routes(&menu, &cache)
             .iter()
             .any(|choice| choice.label == "Data & exports"));
+    }
+
+    #[test]
+    fn a_vault_without_a_keychain_key_has_no_keychain_tab() {
+        let labels = |menu: &Menu, cache: &Cache| -> Vec<String> {
+            section_routes(menu, cache)
+                .into_iter()
+                .map(|choice| choice.label)
+                .collect()
+        };
+        let node = Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::Node)));
+        let mut cache = spark_cache();
+        assert!(labels(&node, &cache).contains(&"Keychain".to_owned()));
+
+        cache.vault_lacks_keychain_key = true;
+        assert!(!labels(&node, &cache).contains(&"Keychain".to_owned()));
+        // Still listed while it is the tab open, so the row doesn't vanish
+        // from under the reader when a Keychain lookup finds nothing.
+        let open = Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::LocalSigning)));
+        assert!(section_routes(&open, &cache)
+            .iter()
+            .any(|choice| choice.label == "Keychain" && choice.selected));
     }
 
     #[test]
@@ -432,7 +460,7 @@ mod tests {
             [
                 "Wallet & signers",
                 "Node",
-                "Pair with Keychain",
+                "Keychain",
                 "Connections",
                 "Data & exports"
             ]
