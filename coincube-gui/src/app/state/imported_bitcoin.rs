@@ -5247,8 +5247,8 @@ mod tests {
         assert!(keys.ready());
         assert_eq!(keys.provided(), 2);
         let summary = keys.summary();
-        assert!(summary.contains("2 of 3 provided"), "{summary}");
-        assert!(summary.contains("1 signs elsewhere"), "{summary}");
+        assert!(summary.contains("2 of 3 provided"), "{}", summary);
+        assert!(summary.contains("1 signs elsewhere"), "{}", summary);
         // A signer left unsettled still blocks Review.
         keys.slots[2].source = KeySource::Words;
         keys.slots[2].status = keys::KeyStatus::Missing;
@@ -5392,7 +5392,7 @@ mod tests {
             "abandon ability able about above absent absorb abstract absurd abuse access accident";
         let message = ImportMessage::KeyWordsEdited(0, SecretInput::new(secret.into()));
         let debug = format!("{:?}", message);
-        assert!(!debug.contains("abandon"), "{debug}");
+        assert!(!debug.contains("abandon"), "{}", debug);
         let passphrase = ImportMessage::KeyPassphraseEdited(0, SecretInput::new("hunter2".into()));
         assert!(!format!("{:?}", passphrase).contains("hunter2"));
     }
