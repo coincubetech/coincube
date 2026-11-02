@@ -3,6 +3,10 @@ name: Coincube Release Workflow
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 on:
   push:
     tags:
@@ -36,9 +40,9 @@ env:
 
 jobs:
   release:
-    name: Build & Release
+    name: Build & Stage
     # Manual dispatch is allowed for a tag, but a branch build must never
-    # publish assets without the tag-bound verification job below.
+    # publish assets without the tag-bound verification jobs below.
     if: github.repository == 'coincubetech/coincube' && startsWith(github.ref, 'refs/tags/')
     runs-on: ${{ matrix.os }}
     # LTO release build + codesign/notarize; a healthy leg is well under this.
@@ -121,14 +125,6 @@ jobs:
             target
             coincube-spark-bridge/target
 
-      - name: Create GitHub Release
-        uses: ncipollo/release-action@v1
-        with:
-          makeLatest: true
-          name: Coincube v${{ env.COINCUBE_VERSION }}
-          body: Installers for Windows, macOS and Linux
-          allowUpdates: true
-
       - name: Generate Icons for Installers
         if: matrix.platform != 'linux'
         run: |
@@ -186,14 +182,14 @@ jobs:
             || { echo "bridge did not answer the shutdown handshake"; cat bridge-stderr.txt; exit 1; }
           rm -f bridge-stderr.txt
 
-      - name: Upload Linux archive
+      - name: Stage Linux archive
         if: matrix.platform == 'linux'
-        uses: svenstaro/upload-release-action@v2
+        uses: actions/upload-artifact@v6
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: tenshu-${{ env.COINCUBE_VERSION }}-${{ matrix.target }}.tar.gz
-          tag: ${{ github.ref }}
-          overwrite: true
+          name: release-${{ matrix.target }}
+          path: tenshu-${{ env.COINCUBE_VERSION }}-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          compression-level: 0
 
       # --------------------------------------------------
       # Windows
@@ -262,14 +258,14 @@ jobs:
           Write-Host $out
           if ($out -notmatch '"kind":"shutdown"') { Write-Host "bridge did not answer the shutdown handshake"; exit 1 }
 
-      - name: Upload Windows MSI
+      - name: Stage Windows MSI
         if: matrix.platform == 'windows'
-        uses: svenstaro/upload-release-action@v2
+        uses: actions/upload-artifact@v6
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: target/wix/tenshu-${{ env.COINCUBE_VERSION }}-${{ matrix.target }}.msi
-          tag: ${{ github.ref }}
-          overwrite: true
+          name: release-${{ matrix.target }}
+          path: target/wix/tenshu-${{ env.COINCUBE_VERSION }}-${{ matrix.target }}.msi
+          if-no-files-found: error
+          compression-level: 0
 
       # --------------------------------------------------
       # macOS (arm64 + x64)
@@ -529,14 +525,14 @@ jobs:
             "tenshu-${{ env.COINCUBE_VERSION }}-${{ matrix.target }}.dmg" \
             Tenshu.app
 
-      - name: Upload macOS DMG
+      - name: Stage macOS DMG
         if: matrix.platform == 'macos'
-        uses: svenstaro/upload-release-action@v2
+        uses: actions/upload-artifact@v6
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: tenshu-${{ env.COINCUBE_VERSION }}-${{ matrix.target }}.dmg
-          tag: ${{ github.ref }}
-          overwrite: true
+          name: release-${{ matrix.target }}
+          path: tenshu-${{ env.COINCUBE_VERSION }}-${{ matrix.target }}.dmg
+          if-no-files-found: error
+          compression-level: 0
 
       - name: Cleanup secrets
         if: matrix.platform == 'macos' && always()
@@ -548,7 +544,7 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: github.repository == 'coincubetech/coincube'
+    if: github.repository == 'coincubetech/coincube' && startsWith(github.ref, 'refs/tags/')
     outputs:
       version: ${{ steps.version.outputs.version }}
 
@@ -567,18 +563,17 @@ jobs:
           echo "COINCUBE_VERSION=$version" >> $GITHUB_ENV
           echo "version=$version" >> $GITHUB_OUTPUT
 
-      - name: Download release artifacts
-        uses: robinraju/release-downloader@v1
+      - name: Download staged platform artifacts
+        uses: actions/download-artifact@v6
         with:
-          tag: ${{ github.ref_name }}
-          fileName: "*"
-          out-file-path: "artifacts"
+          pattern: release-*
+          path: artifacts
+          merge-multiple: true
 
       - name: Generate checksums file
         run: |
           cd artifacts
-          # Exclude checksum and signature files from being checksummed
-          find . -type f ! -name '*SHA256SUMS*' ! -name '*.asc' ! -name '*.sig' -exec sha256sum {} \; | sed 's|\./||' > ../SHA256SUMS-${{ env.COINCUBE_VERSION }}.txt
+          find . -maxdepth 1 -type f -name 'tenshu-*' -printf '%f\0' | sort -z | xargs -0 -r sha256sum > SHA256SUMS-${{ env.COINCUBE_VERSION }}.txt
           cd ..
 
       - name: Import GPG signing key
@@ -597,22 +592,79 @@ jobs:
             --pinentry-mode loopback \
             --passphrase "${GPG_PASSPHRASE}" \
             --detach-sign --armor \
-            SHA256SUMS-${{ env.COINCUBE_VERSION }}.txt
+            artifacts/SHA256SUMS-${{ env.COINCUBE_VERSION }}.txt
         env:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
 
-      - name: Upload checksums and signature
-        uses: svenstaro/upload-release-action@v2
+      - name: Verify complete staged bundle
+        run: python3 contrib/release/verify-release-assets.py artifacts "$COINCUBE_VERSION"
+
+      - name: Stage signed release bundle
+        uses: actions/upload-artifact@v6
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: SHA256SUMS-${{ env.COINCUBE_VERSION }}.txt*
-          file_glob: true
-          tag: ${{ github.ref }}
-          overwrite: true
+          name: signed-release-bundle
+          path: artifacts/*
+          if-no-files-found: error
+          compression-level: 0
+
+  publish_release:
+    name: Verify draft and publish complete release
+    needs: checksums
+    if: github.repository == 'coincubetech/coincube' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Download signed release bundle
+        uses: actions/download-artifact@v6
+        with:
+          name: signed-release-bundle
+          path: artifacts
+      - name: Verify signature and complete bundle before upload
+        env:
+          RELEASE_VERSION: ${{ needs.checksums.outputs.version }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF_NAME" = "v$RELEASE_VERSION"
+          expected_fingerprint=ED4D0D710103D6252854681367F9701BF0D2DAF4
+          actual_fingerprint=$(gpg --batch --show-keys --with-colons docs/security/coincube-release-public.asc \
+            | awk -F: '$1 == "fpr" { print $10; exit }')
+          test "$actual_fingerprint" = "$expected_fingerprint"
+          export GNUPGHOME="$RUNNER_TEMP/coincube-release-gnupg"
+          mkdir -m 700 "$GNUPGHOME"
+          gpg --batch --import docs/security/coincube-release-public.asc
+          gpg --batch --verify "artifacts/SHA256SUMS-${RELEASE_VERSION}.txt.asc" "artifacts/SHA256SUMS-${RELEASE_VERSION}.txt"
+          python3 contrib/release/verify-release-assets.py artifacts "$RELEASE_VERSION"
+      - name: Create draft release with complete bundle
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ needs.checksums.outputs.version }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" artifacts/* --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --draft --title "Coincube v$RELEASE_VERSION" \
+            --notes "Installers for Windows, macOS and Linux"
+      - name: Verify assets downloaded from draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ needs.checksums.outputs.version }}
+        run: |
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir draft-assets
+          gpg --batch --homedir "$RUNNER_TEMP/coincube-release-gnupg" --verify \
+            "draft-assets/SHA256SUMS-${RELEASE_VERSION}.txt.asc" \
+            "draft-assets/SHA256SUMS-${RELEASE_VERSION}.txt"
+          python3 contrib/release/verify-release-assets.py draft-assets "$RELEASE_VERSION"
+      - name: Publish verified release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest
 
   verify_release:
     name: Verify published release signature and assets
-    needs: checksums
+    needs: [checksums, publish_release]
     if: github.repository == 'coincubetech/coincube' && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     timeout-minutes: 20
