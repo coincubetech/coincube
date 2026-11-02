@@ -7,10 +7,10 @@ use coincube_ui::{
     component::{amount::*, button, form, spinner, text::*},
     font::MEDIUM,
     icon::{
-        arrow_right, check_circle_icon, check_icon, clipboard_icon, clock_icon, cross_icon,
-        cube_outline_icon, dash_circle_icon, droplet_fill_icon, exclamation_circle_icon, eye_icon,
-        eye_slash_icon, key_icon, lock_icon, question_circle_icon, spark_icon, usd_icon,
-        vault_icon, warning_icon, x_circle_icon,
+        arrow_right, check_circle_icon, clipboard_icon, clock_icon, cross_icon, cube_outline_icon,
+        dash_circle_icon, droplet_fill_icon, exclamation_circle_icon, eye_icon, eye_slash_icon,
+        key_icon, lock_icon, question_circle_icon, spark_icon, usd_icon, vault_icon, warning_icon,
+        x_circle_icon,
     },
     theme,
     widget::{action::Action, *},
@@ -874,70 +874,20 @@ fn overview_eye<'a>(
     .into()
 }
 
-/// P-Transfer's `.stepper`: one row of numbered steps above a rule. The
-/// current step has an accent disc and ink label, finished steps a check in
-/// the "good" colour; `active == labels.len()` marks every step finished.
+/// P-Transfer's steps on the head rule (`.phead .stepper`): the shared
+/// [`steps`](coincube_ui::component::tenshu::steps) row, its underline on the
+/// rule that closes the dialog's head. Finished steps take the "good"
+/// colour; `active == labels.len()` marks every step finished.
 fn transfer_steps<'a>(labels: &[&'static str], active: usize) -> Element<'a, Message> {
-    let mut steps = Row::new().spacing(4).width(Length::Fill);
-    for (index, label) in labels.iter().enumerate() {
-        let current = index == active;
-        let done = index < active;
-        let marker: Element<'a, Message> = if done {
-            check_icon()
-                .size(12)
-                .style(|t: &theme::Theme| iced::widget::text::Style {
-                    color: Some(t.colors.shell.good),
-                })
-                .into()
-        } else {
-            text((index + 1).to_string())
-                .size(12)
-                .bold()
-                .style(move |t: &theme::Theme| iced::widget::text::Style {
-                    color: Some(if current {
-                        theme::tenshu::ON_ACCENT
-                    } else {
-                        t.colors.shell.ink
-                    }),
-                })
-                .into()
-        };
-        let marker = Container::new(marker)
-            .center_x(Length::Fixed(22.0))
-            .center_y(Length::Fixed(22.0))
-            .style(move |t: &theme::Theme| iced::widget::container::Style {
-                background: current.then_some(iced::Background::Color(t.colors.shell.accent)),
-                border: iced::Border {
-                    color: if current {
-                        t.colors.shell.accent
-                    } else if done {
-                        t.colors.shell.good
-                    } else {
-                        t.colors.shell.line
-                    },
-                    width: 1.0,
-                    radius: 11.0.into(),
-                },
-                ..Default::default()
-            });
-        let title = if current {
-            text(*label).size(13).bold()
-        } else {
-            text(*label).size(13).style(theme::text::secondary)
-        };
-        steps = steps.push(
-            Row::new()
-                .spacing(8)
-                .align_y(Alignment::Center)
-                .width(Length::FillPortion(1))
-                .push(marker)
-                .push(title),
-        );
-    }
     Column::new()
-        .spacing(16)
-        .push(steps)
-        .push(iced::widget::rule::horizontal(1))
+        .push(coincube_ui::component::tenshu::steps(labels, active))
+        .push(iced::widget::rule::horizontal(1).style(|t: &theme::Theme| {
+            iced::widget::rule::Style {
+                color: t.colors.shell.line,
+                ..theme::rule::default(t)
+            }
+        }))
+        .width(Length::Fill)
         .into()
 }
 

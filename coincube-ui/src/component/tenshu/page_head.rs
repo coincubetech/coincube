@@ -134,6 +134,11 @@ impl<'a, M: Clone + 'static> PageHead<'a, M> {
         self
     }
 
+    /// Whether a row of tabs or steps already sits on the rule.
+    pub fn has_rule(&self) -> bool {
+        self.rule.is_some()
+    }
+
     /// The head on the page column, with its rule across the whole pane.
     /// `gutter` is the same mapping the page body uses (see [`page`]).
     pub fn view(self, gutter: fn(f32) -> f32) -> Element<'a, M> {
