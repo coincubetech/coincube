@@ -45,6 +45,8 @@ pub(crate) struct ImportedKeyKitV3 {
     pub wallet_id: String,
     pub policy_hash: String,
     pub inventory_generation: u64,
+    /// Connect publication epoch, separate from the source device inventory.
+    pub checkpoint_generation: u64,
     pub local_keys: Vec<KitKey>,
 }
 
@@ -66,6 +68,7 @@ struct WireRef<'a> {
     wallet_id: &'a str,
     policy_hash: &'a str,
     inventory_generation: u64,
+    checkpoint_generation: u64,
     local_keys: Vec<WireKeyRef<'a>>,
 }
 
@@ -85,6 +88,7 @@ struct WireOwned<'a> {
     wallet_id: String,
     policy_hash: String,
     inventory_generation: u64,
+    checkpoint_generation: u64,
     #[serde(borrow)]
     local_keys: Vec<WireKeyOwned<'a>>,
 }
@@ -126,6 +130,7 @@ impl ImportedKeyKitV3 {
             || self.operation_id.is_nil()
             || self.public.import_operation_id != Some(self.operation_id)
             || self.inventory_generation == 0
+            || self.checkpoint_generation == 0
             || self.local_keys.is_empty()
             || self.local_keys.len() > MAX_LOCAL_KEYS
         {
@@ -205,6 +210,7 @@ impl ImportedKeyKitV3 {
             wallet_id: &self.wallet_id,
             policy_hash: &self.policy_hash,
             inventory_generation: self.inventory_generation,
+            checkpoint_generation: self.checkpoint_generation,
             local_keys: keys,
         };
         serde_json::to_writer(BoundedSecretWriter(&mut bytes), &wire)
@@ -243,6 +249,7 @@ impl ImportedKeyKitV3 {
             wallet_id: wire.wallet_id,
             policy_hash: wire.policy_hash,
             inventory_generation: wire.inventory_generation,
+            checkpoint_generation: wire.checkpoint_generation,
             local_keys: keys,
         };
         kit.validate()?;
@@ -359,7 +366,7 @@ fn decode_json_hex4(bytes: &[u8], start: usize, end: usize) -> Option<u16> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::io::Write;
 
     use coincube_core::{
@@ -380,7 +387,7 @@ mod tests {
         },
     };
 
-    fn sample() -> ImportedKeyKitV3 {
+    pub(crate) fn sample() -> ImportedKeyKitV3 {
         let words = bip39::Mnemonic::from_entropy(&[19u8; 16])
             .unwrap()
             .to_string();
@@ -424,7 +431,8 @@ mod tests {
             policy_hash: hex::encode(
                 sha256::Hash::hash(policy.descriptor().as_bytes()).to_byte_array(),
             ),
-            inventory_generation: 1,
+            inventory_generation: 3,
+            checkpoint_generation: 1,
             local_keys: vec![KitKey {
                 record: LocalKeyRecord {
                     record_id: Uuid::new_v4(),
@@ -507,6 +515,23 @@ mod tests {
         assert!(kit.validate().is_err());
         kit = sample();
         kit.operation_id = Uuid::new_v4();
+        assert!(kit.validate().is_err());
+    }
+
+    #[test]
+    fn password_v3_requires_distinct_nonzero_checkpoint_generation() {
+        let mut kit = sample();
+        assert_ne!(kit.inventory_generation, kit.checkpoint_generation);
+        let plaintext = kit.encode_password_plaintext().unwrap();
+        // Earlier staged v3 was never exposed to users. Missing authenticated
+        // publication epoch must fail closed instead of guessing from inventory.
+        let legacy = Zeroizing::new(
+            String::from_utf8(plaintext.to_vec())
+                .unwrap()
+                .replace(",\"checkpoint_generation\":1", ""),
+        );
+        assert!(ImportedKeyKitV3::decode_password_plaintext(legacy.as_bytes(), "42").is_err());
+        kit.checkpoint_generation = 0;
         assert!(kit.validate().is_err());
     }
 
