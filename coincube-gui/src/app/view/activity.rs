@@ -527,10 +527,16 @@ impl Entry {
             Some(conversion) => {
                 use coincube_spark_protocol::SwapStatus;
                 let to_usdb = payment.token_amount.is_some();
+                // Only a completed conversion is "Converted": one still
+                // settling, or one that failed, says so, as the Swap
+                // screen's result does.
                 let title = match conversion.status {
                     SwapStatus::RefundNeeded | SwapStatus::Refunded => "Swap refund",
-                    _ if to_usdb => "Converted to USDB",
-                    _ => "Converted to bitcoin",
+                    SwapStatus::Failed => "Conversion didn't go through",
+                    SwapStatus::Pending if to_usdb => "Converting to USDB",
+                    SwapStatus::Pending => "Converting to bitcoin",
+                    SwapStatus::Completed if to_usdb => "Converted to USDB",
+                    SwapStatus::Completed => "Converted to bitcoin",
                 };
                 let status = match conversion.status {
                     SwapStatus::Completed => StatusFilter::Confirmed,
@@ -2579,8 +2585,29 @@ mod tests {
         ));
         assert_eq!(to_usdb.title, "Converted to USDB");
 
+        // Only a completed conversion reads "Converted".
         let pending = Entry::spark(conversion_row(None, SwapStatus::Pending, "receive"));
         assert_eq!(pending.status, StatusFilter::Pending);
+        assert_eq!(pending.title, "Converting to bitcoin");
+        let pending_usdb = Entry::spark(conversion_row(
+            Some(12_400_000),
+            SwapStatus::Pending,
+            "receive",
+        ));
+        assert_eq!(pending_usdb.title, "Converting to USDB");
+        let failed = Entry::spark(conversion_row(None, SwapStatus::Failed, "receive"));
+        assert_eq!(
+            (
+                failed.title.as_str(),
+                failed.status,
+                failed.status_label.as_str()
+            ),
+            (
+                "Conversion didn't go through",
+                StatusFilter::Failed,
+                "Failed"
+            )
+        );
         let refunding = Entry::spark(conversion_row(None, SwapStatus::RefundNeeded, "receive"));
         assert_eq!(
             (refunding.title.as_str(), refunding.status_label.as_str()),
