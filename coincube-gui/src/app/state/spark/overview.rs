@@ -105,7 +105,7 @@ impl SparkOverview {
     }
 
     fn page_head<'a>(cache: &Cache) -> PageHead<'a, view::Message> {
-        head_actions(&cache.cube_id, crate::feature_flags::SPARK_SWAP)
+        head_actions(&cache.cube_id, super::swap::swap_available(cache.network))
             .into_iter()
             .fold(
                 view::wallet_page_head(cache, "Spark", cache.wallet_names.spark.as_deref()),
@@ -390,8 +390,13 @@ fn head_actions<'a>(
         .into();
         (label, button)
     };
-    // S3u routes the Swap action to its screen.
-    let swap = swap_enabled.then(|| action("Swap BTC ⇄ USDB", "swap", None));
+    let swap = swap_enabled.then(|| {
+        action(
+            "Swap BTC ⇄ USDB",
+            "swap",
+            Some(view::Message::Menu(Menu::Spark(SparkSubMenu::Swap))),
+        )
+    });
     let settings = action(
         "Wallet settings",
         "wallet-settings",
@@ -561,24 +566,48 @@ fn parse_method(raw: &str) -> SparkPaymentMethod {
 
 #[cfg(test)]
 mod tests {
-    /// Swap stays hidden until S3 turns its flag on; Wallet settings opens
-    /// Settings › Spark › Balances & conversion.
+    /// Swap shows on mainnet only and opens the Swap screen; Wallet settings
+    /// opens Settings › Spark › Balances & conversion.
     #[test]
-    fn spark_head_actions_hide_swap_until_s3_and_open_wallet_settings() {
+    fn spark_head_actions_offer_swap_on_mainnet_and_open_wallet_settings() {
         use crate::app::view::shared::landing::{capture, landing_control_id};
+        use coincube_core::miniscript::bitcoin::Network;
         let labels = |swap| {
             head_actions("cube", swap)
                 .into_iter()
                 .map(|(label, _)| label)
                 .collect::<Vec<_>>()
         };
-        // The page head passes the flag, still off before S3u.
-        assert_eq!(
-            labels(crate::feature_flags::SPARK_SWAP),
-            ["Wallet settings"]
-        );
         assert_eq!(labels(false), ["Wallet settings"]);
         assert_eq!(labels(true), ["Swap BTC ⇄ USDB", "Wallet settings"]);
+        // The page head asks for the Cube's network.
+        for (network, swap) in [(Network::Bitcoin, true), (Network::Regtest, false)] {
+            let cache = Cache {
+                network,
+                ..Cache::default()
+            };
+            let probe = capture::inspect(
+                "spark-head-swap",
+                SparkOverview::page_head_for_tests(&cache).view(view::page_gutter),
+                (1440, 900),
+                "dark",
+                coincube_ui::theme::Theme::dark(),
+            );
+            assert_eq!(probe.contains("Swap BTC ⇄ USDB"), swap, "{:?}", network);
+        }
+        for pointer in [false, true] {
+            let (_, swap) = head_actions("cube", true).remove(0);
+            let emitted = capture::activate(
+                swap,
+                landing_control_id("cube", "Spark", "swap"),
+                (1024, 768),
+                pointer,
+            );
+            assert!(emitted.iter().any(|message| matches!(
+                message,
+                view::Message::Menu(Menu::Spark(SparkSubMenu::Swap))
+            )));
+        }
 
         for pointer in [false, true] {
             let (_, settings) = head_actions("cube", false).pop().expect("Wallet settings");

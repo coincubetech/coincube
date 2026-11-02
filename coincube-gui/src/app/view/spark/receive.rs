@@ -317,14 +317,39 @@ fn bitcoin_kind_target(stablecoin: bool, method: SparkReceiveMethod) -> SparkRec
 
 /// "Payments arrive as bitcoin" (master I4): Spark receives bitcoin only, and
 /// USDB appears only after a conversion. Where conversions run (mainnet), the
-/// note says how to hold US Dollar instead and links to Wallet settings.
+/// note says how to hold US Dollar instead: swap afterwards, or turn the
+/// setting on in Wallet settings (P-Receive).
 pub(crate) const ARRIVAL_NOTE: &str = "Payments arrive as bitcoin.";
 pub(crate) const ARRIVAL_NOTE_USD: &str =
-    "To hold them in US Dollar, turn on Stable Balance in Wallet settings.";
+    "To hold them in US Dollar, swap to USDB afterwards or turn on Stable Balance in Wallet \
+     settings.";
 const WALLET_SETTINGS_ID: &str = "tenshu.spark.receive.wallet-settings";
+const SWAP_ID: &str = "tenshu.spark.receive.swap";
+
+fn note_link<'a>(
+    id: &'static str,
+    label: &'static str,
+    menu: crate::app::menu::Menu,
+) -> Element<'a, Message> {
+    coincube_ui::widget::action::Action::new(
+        iced::advanced::widget::Id::new(id),
+        p2_regular(label),
+        Message::FocusAction,
+    )
+    .padding([4, 0])
+    .style(|theme: &theme::Theme, status| {
+        let mut style = theme::button::link(theme, status);
+        style.text_color = theme.colors.shell.accent_ink;
+        style
+    })
+    .on_press(Message::Menu(menu))
+    .into()
+}
 
 fn arrival_note<'a>(network: Network) -> Element<'a, Message> {
-    let usd = network == Network::Bitcoin;
+    use crate::app::menu::{Menu, SparkSettingsOption, SparkSubMenu};
+    // Conversions, and so USDB, exist where Swap does.
+    let usd = crate::app::state::spark::swap::swap_available(network);
     Column::new()
         .spacing(2)
         .push(
@@ -336,22 +361,18 @@ fn arrival_note<'a>(network: Network) -> Element<'a, Message> {
             .style(theme::text::secondary),
         )
         .push_maybe(usd.then(|| {
-            coincube_ui::widget::action::Action::new(
-                iced::advanced::widget::Id::new(WALLET_SETTINGS_ID),
-                p2_regular("Wallet settings"),
-                Message::FocusAction,
-            )
-            .padding([4, 0])
-            .style(|theme: &theme::Theme, status| {
-                let mut style = theme::button::link(theme, status);
-                style.text_color = theme.colors.shell.accent_ink;
-                style
-            })
-            .on_press(Message::Menu(crate::app::menu::Menu::Spark(
-                crate::app::menu::SparkSubMenu::Settings(Some(
-                    crate::app::menu::SparkSettingsOption::General,
-                )),
-            )))
+            Row::new()
+                .spacing(16)
+                .push(note_link(
+                    SWAP_ID,
+                    "Swap to USDB",
+                    Menu::Spark(SparkSubMenu::Swap),
+                ))
+                .push(note_link(
+                    WALLET_SETTINGS_ID,
+                    "Wallet settings",
+                    Menu::Spark(SparkSubMenu::Settings(Some(SparkSettingsOption::General))),
+                ))
         }))
         .into()
 }
@@ -1223,6 +1244,18 @@ mod tests {
                 ))
             ))
         )));
+        let messages = capture::activate(
+            arrival_note(Network::Bitcoin),
+            iced::advanced::widget::Id::new(SWAP_ID),
+            (1024, 768),
+            true,
+        );
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            Message::Menu(crate::app::menu::Menu::Spark(
+                crate::app::menu::SparkSubMenu::Swap
+            ))
+        )));
         for network in [Network::Testnet, Network::Signet, Network::Regtest] {
             let note = capture::inspect(
                 "spark-receive-note-test-network",
@@ -1232,7 +1265,11 @@ mod tests {
                 theme::Theme::dark(),
             );
             assert!(note.contains(ARRIVAL_NOTE));
-            assert!(!note.contains("US Dollar") && !note.contains("Wallet settings"));
+            assert!(
+                !note.contains("US Dollar")
+                    && !note.contains("Wallet settings")
+                    && !note.contains("Swap to USDB")
+            );
         }
     }
 

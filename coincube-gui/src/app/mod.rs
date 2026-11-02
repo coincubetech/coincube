@@ -125,6 +125,8 @@ struct Panels {
     /// Phase 4d follow-ups.
     spark_send: state::SparkSend,
     spark_receive: state::SparkReceive,
+    /// Swap BTC ⇄ USDB (S3).
+    spark_swap: state::spark::swap::SparkSwap,
     /// Phase 4b ships real Transactions + Settings panels — they use
     /// `list_payments` / `get_info` which the bridge already exposes, so
     /// they ship ahead of the write-path flows.
@@ -284,6 +286,7 @@ impl Panels {
             spark_overview: state::SparkOverview::new(spark_backend.clone()),
             spark_send: state::SparkSend::new(spark_backend.clone()),
             spark_receive: state::SparkReceive::new(spark_backend.clone()),
+            spark_swap: state::spark::swap::SparkSwap::new(spark_backend.clone()),
             spark_transactions: state::SparkTransactions::new(spark_backend.clone()),
             spark_settings: state::SparkSettings::new(spark_backend.clone()),
             global_settings: GeneralSettingsState::from_directory(
@@ -405,6 +408,7 @@ impl Panels {
             spark_overview: state::SparkOverview::new(spark_backend.clone()),
             spark_send: state::SparkSend::new(spark_backend.clone()),
             spark_receive: state::SparkReceive::new(spark_backend.clone()),
+            spark_swap: state::spark::swap::SparkSwap::new(spark_backend.clone()),
             spark_transactions: state::SparkTransactions::new(spark_backend.clone()),
             spark_settings: state::SparkSettings::new(spark_backend.clone()),
             global_settings: GeneralSettingsState::from_directory(
@@ -651,6 +655,7 @@ impl Panels {
                 }
                 crate::app::menu::SparkSubMenu::Send => Some(&self.spark_send as &dyn State),
                 crate::app::menu::SparkSubMenu::Receive => Some(&self.spark_receive as &dyn State),
+                crate::app::menu::SparkSubMenu::Swap => Some(&self.spark_swap as &dyn State),
                 crate::app::menu::SparkSubMenu::Transactions(_) => {
                     Some(&self.spark_transactions as &dyn State)
                 }
@@ -748,6 +753,9 @@ impl Panels {
                 }
                 crate::app::menu::SparkSubMenu::Receive => {
                     Some(&mut self.spark_receive as &mut dyn State)
+                }
+                crate::app::menu::SparkSubMenu::Swap => {
+                    Some(&mut self.spark_swap as &mut dyn State)
                 }
                 crate::app::menu::SparkSubMenu::Transactions(_) => {
                     Some(&mut self.spark_transactions as &mut dyn State)
