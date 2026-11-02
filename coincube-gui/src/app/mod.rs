@@ -979,6 +979,9 @@ pub struct App {
     /// The latest nickname requested while a write was running, written once
     /// that write lands.
     spark_nickname_queued: Option<Option<String>>,
+    /// Closes when the running nickname write ends (or its task is dropped),
+    /// so a write the tab starts as it replaces this App can follow it.
+    spark_nickname_running: Option<tokio::sync::watch::Receiver<()>>,
     received_celebration_amount: String,
     received_celebration_context: String,
     received_celebration_quote: coincube_ui::component::quote_display::Quote,
@@ -3589,6 +3592,7 @@ impl App {
             spark_stable_balance_reconciled: false,
             spark_nickname_in_flight: None,
             spark_nickname_queued: None,
+            spark_nickname_running: None,
             received_celebration_amount: String::new(),
             received_celebration_context: "transaction-received".to_string(),
             received_celebration_quote: coincube_ui::component::quote_display::random_quote(
@@ -3797,6 +3801,7 @@ impl App {
                 spark_stable_balance_reconciled: false,
                 spark_nickname_in_flight: None,
                 spark_nickname_queued: None,
+                spark_nickname_running: None,
                 received_celebration_amount: String::new(),
                 received_celebration_context: "transaction-received".to_string(),
                 received_celebration_quote: coincube_ui::component::quote_display::random_quote(
@@ -9453,6 +9458,7 @@ impl App {
             Message::SparkNicknameSaved { cube_id, .. } if cube_id != self.cube_settings.id => {}
             Message::SparkNicknameSaved { result, .. } => {
                 self.spark_nickname_in_flight = None;
+                self.spark_nickname_running = None;
                 let mut tasks = Vec::new();
                 match result {
                     Ok(nickname) => {
@@ -10619,11 +10625,15 @@ impl App {
     /// answers. Callers start one only while none is running.
     fn start_spark_nickname_write(&mut self, nickname: Option<String>) -> Task<Message> {
         self.spark_nickname_in_flight = Some(nickname.clone());
+        let (running, ended) = tokio::sync::watch::channel(());
+        self.spark_nickname_running = Some(ended);
         let cube_id = self.cube_settings.id.clone();
         let write = SparkNicknameWrite {
             network_dir: self.datadir.network_directory(self.cube_settings.network),
             cube_id: cube_id.clone(),
             nickname,
+            after: None,
+            running: Some(running),
         };
         Task::perform(write.run(), move |result| Message::SparkNicknameSaved {
             cube_id: cube_id.clone(),
@@ -10634,9 +10644,10 @@ impl App {
     /// The Spark nickname write this App still owes when the tab replaces it
     /// (Lock Cube, Set up Vault): a name typed on Balances & conversion and
     /// not yet requested, else one queued behind a running write. A running
-    /// write finishes on its own. The tab starts this without waiting for
-    /// it, so the field's "saved when you leave" holds without delaying the
-    /// lock.
+    /// write finishes on its own, and this one waits for it to end before
+    /// writing, however the two tasks are scheduled. The tab starts this
+    /// without waiting for it, so the field's "saved when you leave" holds
+    /// without delaying the lock.
     pub fn spark_nickname_flush(&self) -> Option<SparkNicknameWrite> {
         let on_balances = matches!(
             self.panels.current,
@@ -10657,6 +10668,8 @@ impl App {
             network_dir: self.datadir.network_directory(self.cube_settings.network),
             cube_id: self.cube_settings.id.clone(),
             nickname,
+            after: self.spark_nickname_running.clone(),
+            running: None,
         })
     }
 
@@ -11373,23 +11386,31 @@ pub struct SparkNicknameWrite {
     network_dir: crate::dir::NetworkDirectory,
     cube_id: String,
     nickname: Option<String>,
+    /// The write this one must follow: it ends when that write's `running`
+    /// closes.
+    after: Option<tokio::sync::watch::Receiver<()>>,
+    /// Closed when this write ends, or when its task is dropped unrun.
+    running: Option<tokio::sync::watch::Sender<()>>,
 }
 
 impl SparkNicknameWrite {
-    /// Writes in the order they start, across Apps: the settings file's own
-    /// lock doesn't order writers, and a write the tab starts as it replaces
-    /// an App must land after that App's running write.
+    /// Writes after the write it follows has ended: the settings file's own
+    /// lock doesn't order writers, and neither does the order their tasks
+    /// are polled in.
     pub async fn run(self) -> Result<Option<String>, String> {
-        static WRITES: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-        let _turn = WRITES
-            .get_or_init(|| tokio::sync::Mutex::new(()))
-            .lock()
-            .await;
         let Self {
             network_dir,
             cube_id,
             nickname,
+            after,
+            running,
         } = self;
+        if let Some(mut after) = after {
+            // `changed` fails once the sender is gone: that write has ended.
+            while after.changed().await.is_ok() {}
+        }
+        // Held until this write has landed.
+        let _running = running;
         let saved = nickname.clone();
         settings::update_settings_file(&network_dir, move |mut s| {
             if let Some(c) = s.cubes.iter_mut().find(|c| c.id == cube_id) {
@@ -16534,6 +16555,59 @@ mod settings_navigation_integration_tests {
         }
         assert_eq!(app.cube_settings.spark_alias.as_deref(), Some("B"));
         assert_eq!(side_panel_spark_row(&app), ["Spark · B"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A write the tab starts as it replaces the App lands after the App's
+    /// running write, however the two tasks are polled: here the teardown
+    /// write runs first, before the running write's task has started. And if
+    /// that task is dropped unrun, the teardown write doesn't wait forever.
+    #[test]
+    fn the_teardown_nickname_write_follows_the_running_one() {
+        use iced_runtime::futures::futures::StreamExt;
+        let _guard = crate::app::session::test_guard();
+        let root =
+            std::env::temp_dir().join(format!("spark-nickname-teardown-{}", uuid::Uuid::new_v4()));
+        let mut app = nickname_app(&root);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let submit = |app: &mut App, name: &str| {
+            app.update(nickname(view::SparkSettingsMessage::NicknameSubmitted(
+                name.into(),
+            )))
+        };
+
+        // A is submitted but its task hasn't run; B queues behind it.
+        let a = submit(&mut app, "A");
+        drop(submit(&mut app, "B"));
+        let teardown = app.spark_nickname_flush().expect("B is owed");
+        runtime.block_on(async {
+            let teardown = tokio::spawn(teardown.run());
+            // The teardown write is polled first, and waits.
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            assert!(!teardown.is_finished(), "it waits for A");
+            iced_runtime::task::into_stream(a)
+                .unwrap()
+                .for_each(|_| async {})
+                .await;
+            assert_eq!(teardown.await.unwrap(), Ok(Some("B".into())));
+        });
+        assert_eq!(saved_spark_alias(&app).as_deref(), Some("B"), "B after A");
+
+        // A running write whose task is dropped unrun releases its follower.
+        let mut app = nickname_app(&root.join("dropped"));
+        let a = submit(&mut app, "A");
+        drop(submit(&mut app, "B"));
+        let teardown = app.spark_nickname_flush().expect("B is owed");
+        drop(a);
+        let written = runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(10), teardown.run()).await
+        });
+        assert_eq!(written, Ok(Ok(Some("B".into()))));
         let _ = std::fs::remove_dir_all(root);
     }
 
