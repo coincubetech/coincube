@@ -100,12 +100,22 @@ impl SparkOverview {
         )
     }
 
+    #[cfg(test)]
+    pub fn page_head_for_tests<'a>(cache: &Cache) -> PageHead<'a, view::Message> {
+        Self::page_head(cache)
+    }
+
     fn page_head<'a>(cache: &Cache) -> PageHead<'a, view::Message> {
-        view::wallet_page_head(cache, "Spark", cache.wallet_names.spark.as_deref())
+        head_actions(&cache.cube_id, crate::feature_flags::SPARK_SWAP)
+            .into_iter()
+            .fold(
+                view::wallet_page_head(cache, "Spark", cache.wallet_names.spark.as_deref()),
+                |head, (_, action)| head.action(action),
+            )
     }
 
     /// The balance, "Recent activity" (from Activity, mounted by App) and
-    /// the landing's address and Stable Balance context.
+    /// the landing's address.
     pub fn page_body<'a>(
         &'a self,
         cache: &'a Cache,
@@ -136,7 +146,6 @@ impl SparkOverview {
             fiat_converter,
             bitcoin_unit: cache.bitcoin_unit,
             show_direction_badges: cache.show_direction_badges,
-            stable_balance_active: self.stable_balance_active,
             btc_usd_price: cache.btc_usd_price,
             display_mode: cache.display_mode,
             mask_amounts: cache.balance_amounts_masked(),
@@ -151,13 +160,7 @@ impl SparkOverview {
             content = content.push(iced::widget::container(recent).padding([0, 16]));
         }
         if let Some(address) = address.filter(|_| self.backend.is_some()) {
-            content = content.push(view::spark::overview::spark_landing_context(
-                address,
-                self.stable_balance_active,
-                self.stable_balance_saving,
-                self.landing_availability(),
-                &cache.cube_id,
-            ));
+            content = content.push(view::spark::overview::spark_landing_context(address));
         }
         content.into()
     }
@@ -368,6 +371,38 @@ impl State for SparkOverview {
     }
 }
 
+/// The Spark page's head actions, labelled: **Swap BTC ⇄ USDB** once
+/// `swap_enabled` (S3), then **Wallet settings**, which opens Settings ›
+/// Spark › Balances & conversion.
+fn head_actions<'a>(
+    cube_id: &str,
+    swap_enabled: bool,
+) -> Vec<(&'static str, Element<'a, view::Message>)> {
+    use coincube_ui::component::tenshu::{ActionButton, ActionKind};
+    let action = |label: &'static str, control: &str, on_press: Option<view::Message>| {
+        let button: Element<'a, view::Message> = ActionButton::new(
+            view::shared::landing::landing_control_id(cube_id, "Spark", control),
+            label,
+            ActionKind::Secondary,
+            view::Message::FocusAction,
+        )
+        .on_press_maybe(on_press)
+        .compact()
+        .into();
+        (label, button)
+    };
+    // S3u routes the Swap action to its screen.
+    let swap = swap_enabled.then(|| action("Swap BTC ⇄ USDB", "swap", None));
+    let settings = action(
+        "Wallet settings",
+        "wallet-settings",
+        Some(view::Message::Menu(Menu::Spark(SparkSubMenu::Settings(
+            Some(crate::app::menu::SparkSettingsOption::General),
+        )))),
+    );
+    swap.into_iter().chain(std::iter::once(settings)).collect()
+}
+
 fn landing_availability(
     backend_available: bool,
     loading: bool,
@@ -527,6 +562,42 @@ fn parse_method(raw: &str) -> SparkPaymentMethod {
 
 #[cfg(test)]
 mod tests {
+    /// Swap stays hidden until S3 turns its flag on; Wallet settings opens
+    /// Settings › Spark › Balances & conversion.
+    #[test]
+    fn spark_head_actions_hide_swap_until_s3_and_open_wallet_settings() {
+        use crate::app::view::shared::landing::{capture, landing_control_id};
+        let labels = |swap| {
+            head_actions("cube", swap)
+                .into_iter()
+                .map(|(label, _)| label)
+                .collect::<Vec<_>>()
+        };
+        // The page head passes the flag, still off before S3u.
+        assert_eq!(
+            labels(crate::feature_flags::SPARK_SWAP),
+            ["Wallet settings"]
+        );
+        assert_eq!(labels(false), ["Wallet settings"]);
+        assert_eq!(labels(true), ["Swap BTC ⇄ USDB", "Wallet settings"]);
+
+        for pointer in [false, true] {
+            let (_, settings) = head_actions("cube", false).pop().expect("Wallet settings");
+            let emitted = capture::activate(
+                settings,
+                landing_control_id("cube", "Spark", "wallet-settings"),
+                (1024, 768),
+                pointer,
+            );
+            assert!(emitted.iter().any(|message| matches!(
+                message,
+                view::Message::Menu(Menu::Spark(SparkSubMenu::Settings(Some(
+                    crate::app::menu::SparkSettingsOption::General
+                ))))
+            )));
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -790,14 +861,6 @@ mod tests {
         panel.loading = true;
         let refreshing = availability_with_backend(&panel);
         assert_eq!(refreshing, SparkLandingAvailability::Refreshing);
-        assert_eq!(
-            view::spark::overview::stable_balance_status_text(
-                refreshing,
-                panel.stable_balance_active,
-                false
-            ),
-            Some("Refreshing…"),
-        );
         let _ = panel.update(
             None,
             &Cache::default(),
@@ -809,14 +872,6 @@ mod tests {
         assert_eq!(panel.stable_balance_active, Some(false));
         let unavailable = availability_with_backend(&panel);
         assert_eq!(unavailable, SparkLandingAvailability::Unavailable);
-        assert_eq!(
-            view::spark::overview::stable_balance_status_text(
-                unavailable,
-                panel.stable_balance_active,
-                false
-            ),
-            Some("Spark is unavailable"),
-        );
 
         // A settings reply can arrive after the failed info refresh; it
         // cannot make the stale snapshot actionable again.

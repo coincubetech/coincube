@@ -13511,7 +13511,9 @@ pub(crate) mod tests {
         // Enrollment cannot become a fresh oracle after Cube A's ordinary
         // unlock counter has imposed a delay, even for its real PIN.
         let mut throttle = crate::services::unlock::throttle::ThrottleState::load(root.path());
-        for _ in 0..5 {
+        // Twelve failures reach the 300s cap. Five gave 4s, which the
+        // seed-decrypting check below can outlast on a loaded machine.
+        for _ in 0..12 {
             throttle.record_failure(root.path(), "cube-a");
         }
         assert!(duress_pin_collision_check_blocking(root.path(), "1234")
@@ -13580,7 +13582,9 @@ pub(crate) mod tests {
             DURESS_STEP_UP_BAD_PIN_MSG
         );
         let mut throttle = crate::services::unlock::throttle::ThrottleState::load(root.path());
-        for _ in 0..5 {
+        // Twelve failures reach the 300s cap. Five gave 4s, which the
+        // seed-decrypting check below can outlast on a loaded machine.
+        for _ in 0..12 {
             throttle.record_failure(root.path(), "cube-a");
         }
         assert!(verify_regular_cube_pin_blocking(root.path(), "1234")
