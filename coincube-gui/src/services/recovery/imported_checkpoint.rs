@@ -152,6 +152,15 @@ impl VerifiedDownload {
         (self.cube_id, self.checkpoint, self.kit)
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_test(cube_id: u64, checkpoint: Checkpoint, kit: ImportedKeyKitV3) -> Self {
+        Self {
+            cube_id,
+            checkpoint,
+            kit,
+        }
+    }
+
     /// Must be called again at the future admission boundary. This only
     /// observes server state; it cannot make later local use atomic with it.
     pub async fn recheck(&self, client: &CoincubeClient) -> Result<(), ImportedCheckpointError> {
