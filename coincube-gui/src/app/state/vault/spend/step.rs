@@ -174,6 +174,9 @@ pub struct DefineSpend {
     /// Will be `true` if coins for spend were manually selected by user.
     /// Otherwise, will be `false` (including for self-send & recovery).
     is_user_coin_selection: bool,
+    /// Choose coins was pressed: the coin list is open even though the
+    /// draft still picks the coins.
+    coins_shown: bool,
     is_valid: bool,
     is_duplicate: bool,
 
@@ -263,6 +266,7 @@ impl DefineSpend {
             // For recovery, send max to the (single) recipient.
             send_max_to_recipient: recovery_timelock.map(|_| 0),
             is_user_coin_selection: false,
+            coins_shown: false,
             is_valid: false,
             is_duplicate: false,
             feerate: form::Value::default(),
@@ -842,6 +846,11 @@ impl Step for DefineSpend {
                 self.invalidate_preparation();
             }
             Message::View(view::Message::CreateSpend(msg)) => {
+                // Opening the coin list changes nothing the draft depends on.
+                if let view::CreateSpendMessage::ChooseCoins = msg {
+                    self.coins_shown = true;
+                    return Task::none();
+                }
                 if let view::CreateSpendMessage::FeeEstimated { request, .. } = &msg {
                     if self.loading_fee_estimate.is_none()
                         || *request != self.fee_estimate_request
@@ -1321,6 +1330,7 @@ impl Step for DefineSpend {
             self.selected_feerate_target,
             self.custom_feerate_shown(),
             self.threshold(),
+            self.coin_list_shown(),
             self.generating,
             self.bitcoin_unit,
             max_under_dust,
@@ -1346,6 +1356,16 @@ impl DefineSpend {
             self.feerate.valid = false;
         }
         self.warning = None;
+    }
+
+    /// The coin list is open: Choose coins was pressed, the user already
+    /// picked coins, or the spend has no automatic selection (a self-transfer
+    /// or a recovery spends the coins chosen for it).
+    pub(crate) fn coin_list_shown(&self) -> bool {
+        self.coins_shown
+            || self.is_user_coin_selection
+            || self.recipients.is_empty()
+            || self.recovery_timelock.is_some()
     }
 
     pub(crate) fn custom_feerate_shown(&self) -> bool {
@@ -2561,6 +2581,34 @@ mod tests {
         assert!(associate_recipients(&recipients, &prepared_outputs(&[1_000, 2_000])).is_none());
         assert!(associate_recipients(&[bip21_recipient(1_001)], &psbt).is_none());
         assert!(associate_recipients(&[], &psbt).unwrap().is_empty());
+    }
+
+    /// Choose coins opens the list without touching the draft; picking a
+    /// coin keeps it open, and Clear goes back to the automatic selection.
+    #[tokio::test]
+    async fn choose_coins_opens_the_list_and_clear_closes_it() {
+        let daemon = Arc::new(crate::daemon::client::Coincubed::new(
+            crate::utils::mock::Daemon::new(vec![]).run(),
+        ));
+        let mut state = branta_form();
+        let send = |state: &mut DefineSpend, message: view::CreateSpendMessage| {
+            state.update(
+                daemon.clone(),
+                &Cache::default(),
+                Message::View(view::Message::CreateSpend(message)),
+            )
+        };
+        assert!(!state.coin_list_shown());
+        let preparation = state.preparation_id;
+        let task = send(&mut state, view::CreateSpendMessage::ChooseCoins);
+        assert_eq!(task.units(), 0, "nothing to redraft");
+        assert!(state.coin_list_shown());
+        assert_eq!(state.preparation_id, preparation, "the draft is untouched");
+
+        drop(send(&mut state, view::CreateSpendMessage::Clear));
+        assert!(!state.coin_list_shown());
+        drop(send(&mut state, view::CreateSpendMessage::SelectCoin(0)));
+        assert!(state.coin_list_shown(), "a chosen coin keeps the list open");
     }
 
     /// Fee segments map to rates: a preset fetches its block target's

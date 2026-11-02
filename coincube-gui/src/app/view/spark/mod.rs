@@ -36,6 +36,128 @@ pub fn sub_page_head<'a>(
     )
 }
 
+/// The flow on Spark Send's head rule.
+pub const SEND_STEPS: [&str; 3] = ["Details", "Review", "Sent"];
+
+/// What a Spark Send or Receive side panel lists (`.aside`): each balance in
+/// its own unit, then their total in the display fiat.
+#[derive(Clone, Copy)]
+pub struct SparkBalances<'a> {
+    /// The bitcoin balance alone, without USDB.
+    pub btc_sats: u64,
+    pub stable: Option<&'a coincube_spark_protocol::StableBalanceSnapshot>,
+    pub fiat_converter: Option<crate::app::view::FiatAmountConverter>,
+    /// The dedicated BTC/USD quote. USDB counts toward the total only at it.
+    pub btc_usd_price: Option<f64>,
+    pub bitcoin_unit: coincube_ui::component::amount::BitcoinDisplayUnit,
+    pub masked: bool,
+}
+
+impl<'a> SparkBalances<'a> {
+    pub fn new(
+        cache: &crate::app::cache::Cache,
+        btc_sats: u64,
+        stable: Option<&'a coincube_spark_protocol::StableBalanceSnapshot>,
+    ) -> Self {
+        Self {
+            btc_sats,
+            stable,
+            fiat_converter: cache
+                .fiat_price
+                .as_ref()
+                .and_then(|p| std::convert::TryInto::try_into(p).ok()),
+            btc_usd_price: crate::app::state::spark::reference_btc_usd_price(cache),
+            bitcoin_unit: cache.bitcoin_unit,
+            masked: cache.balance_amounts_masked(),
+        }
+    }
+
+    /// The rows as (label, figure, unit), then the total, if it can be
+    /// valued: without a fiat price, or with USDB but no BTC/USD quote, there
+    /// is none.
+    pub fn rows(&self) -> (Vec<(&'static str, String, String)>, Option<String>) {
+        use crate::app::breez_spark::assets::{format_token_display, stable_token_as_sats};
+        use coincube_ui::component::amount::DisplayAmount;
+        let usdb_units = self.stable.map_or(0, |sb| sb.balance);
+        let mask = |figure: String| {
+            if self.masked {
+                coincube_ui::component::tenshu::MASK.to_owned()
+            } else {
+                figure
+            }
+        };
+        let rows = overview::spark_assets(self.btc_sats, usdb_units)
+            .into_iter()
+            .map(|asset| match asset {
+                overview::SparkAsset::Bitcoin => (
+                    "Bitcoin",
+                    mask(
+                        coincube_core::miniscript::bitcoin::Amount::from_sat(self.btc_sats)
+                            .to_formatted_string_with_unit(self.bitcoin_unit),
+                    ),
+                    self.bitcoin_unit.label().to_owned(),
+                ),
+                overview::SparkAsset::UsDollar => (
+                    "US Dollar",
+                    mask(format_token_display(
+                        usdb_units,
+                        self.stable.map_or(0, |sb| sb.decimals),
+                    )),
+                    "USDB".to_owned(),
+                ),
+            })
+            .collect();
+        let price = self.btc_usd_price.filter(|p| *p > 0.0 && p.is_finite());
+        let total = self
+            .fiat_converter
+            .filter(|_| usdb_units == 0 || price.is_some())
+            .map(|converter| {
+                let usdb_sats = self
+                    .stable
+                    .map_or(0, |sb| stable_token_as_sats(sb.balance, sb.decimals, price));
+                let fiat = converter.convert(coincube_core::miniscript::bitcoin::Amount::from_sat(
+                    self.btc_sats.saturating_add(usdb_sats),
+                ));
+                mask(format!(
+                    "{} {}",
+                    fiat.to_formatted_string(),
+                    fiat.currency()
+                ))
+            });
+        (rows, total)
+    }
+
+    /// "Available in Spark", the balances and their total.
+    pub fn view<'b>(&self) -> coincube_ui::widget::Element<'b, crate::app::view::Message> {
+        use coincube_ui::component::tenshu::text::{body, caption, label};
+        use coincube_ui::widget::{Column, Container, Row};
+        use iced::Length;
+        let (rows, total) = self.rows();
+        let row = |name: String, figure: String, unit: String| {
+            Row::new()
+                .spacing(12)
+                .align_y(iced::Alignment::Center)
+                .push(Container::new(body(name)).width(Length::Fill))
+                .push(label(figure))
+                .push(caption(unit))
+        };
+        let mut column = Column::new()
+            .spacing(10)
+            .push(caption("Available in Spark").size(13));
+        for (name, figure, unit) in rows {
+            column = column.push(row(name.to_owned(), figure, unit));
+        }
+        if let Some(total) = total {
+            column = column.push(iced::widget::rule::horizontal(1)).push(row(
+                "Total".to_owned(),
+                total,
+                String::new(),
+            ));
+        }
+        column.into()
+    }
+}
+
 /// View-level messages for the Spark Overview panel.
 #[derive(Debug, Clone)]
 pub enum SparkOverviewMessage {
@@ -317,4 +439,85 @@ pub enum SparkReceiveMessage {
     /// toast naming the rail that was copied — the same pattern Vault
     /// and Liquid Receive use.
     CopyPaymentRequest(String),
+}
+
+#[cfg(test)]
+mod balances_tests {
+    use super::SparkBalances;
+    use crate::app::cache::FiatPriceRequest;
+    use crate::app::view::FiatAmountConverter;
+    use crate::services::fiat::{Currency, PriceSource};
+    use coincube_spark_protocol::StableBalanceSnapshot;
+    use coincube_ui::component::amount::BitcoinDisplayUnit;
+
+    fn usdb(dollars: u64) -> StableBalanceSnapshot {
+        StableBalanceSnapshot {
+            balance: dollars * 1_000_000,
+            decimals: 6,
+            ticker: "USDB".into(),
+        }
+    }
+
+    fn balances(
+        btc_sats: u64,
+        stable: Option<&StableBalanceSnapshot>,
+        btc_usd_price: Option<f64>,
+    ) -> SparkBalances<'_> {
+        SparkBalances {
+            btc_sats,
+            stable,
+            fiat_converter: FiatAmountConverter::new(
+                50_000.0,
+                None,
+                FiatPriceRequest::new(PriceSource::Coincube, Currency::USD),
+            )
+            .ok(),
+            btc_usd_price,
+            bitcoin_unit: BitcoinDisplayUnit::Sats,
+            masked: false,
+        }
+    }
+
+    fn names(rows: &[(&'static str, String, String)]) -> Vec<&'static str> {
+        rows.iter().map(|(name, _, _)| *name).collect()
+    }
+
+    #[test]
+    fn the_side_panel_lists_each_balance_in_its_unit_then_the_total() {
+        let stable = usdb(100);
+        let (rows, total) = balances(200_000, Some(&stable), Some(50_000.0)).rows();
+        assert_eq!(names(&rows), ["Bitcoin", "US Dollar"]);
+        assert_eq!(rows[0].2, "SATS");
+        assert_eq!((rows[1].1.as_str(), rows[1].2.as_str()), ("100.00", "USDB"));
+        // 200,000 sats is $100 at $50,000, plus $100 of USDB.
+        assert_eq!(total.as_deref(), Some("200.00 USD"));
+
+        // Bitcoin alone: no US Dollar row, and the total is the bitcoin.
+        let (rows, total) = balances(200_000, None, None).rows();
+        assert_eq!(names(&rows), ["Bitcoin"]);
+        assert_eq!(total.as_deref(), Some("100.00 USD"));
+
+        // USDB alone: only its row.
+        let (rows, _) = balances(0, Some(&stable), Some(50_000.0)).rows();
+        assert_eq!(names(&rows), ["US Dollar"]);
+    }
+
+    #[test]
+    fn usdb_without_a_btc_usd_quote_leaves_the_total_out() {
+        let stable = usdb(100);
+        let (rows, total) = balances(200_000, Some(&stable), None).rows();
+        assert_eq!(names(&rows), ["Bitcoin", "US Dollar"]);
+        assert_eq!(total, None);
+    }
+
+    #[test]
+    fn hidden_amounts_mask_every_figure() {
+        let stable = usdb(100);
+        let mut hidden = balances(200_000, Some(&stable), Some(50_000.0));
+        hidden.masked = true;
+        let (rows, total) = hidden.rows();
+        let mask = coincube_ui::component::tenshu::MASK;
+        assert!(rows.iter().all(|(_, figure, _)| figure == mask));
+        assert_eq!(total.as_deref(), Some(mask));
+    }
 }

@@ -34,7 +34,7 @@ use crate::{
         },
         wallet::SyncStatus,
     },
-    daemon::model::{remaining_sequence, Coin, SpendTx},
+    daemon::model::{remaining_sequence, Coin, SpendStatus, SpendTx},
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -65,7 +65,11 @@ pub fn spend_view<'a>(
     dashboard_headed(
         menu,
         cache,
-        super::sub_page_head(cache, if is_recovery { "Recovery" } else { "Send" }),
+        send_head(
+            cache,
+            if is_recovery { "Recovery" } else { "Send" },
+            review_step(saved, &tx.status),
+        ),
         Column::new()
             .spacing(20)
             .push_maybe(mcp_review.then(|| mcp_prepared_review(tx, network)))
@@ -172,6 +176,12 @@ const ADD_RECIPIENT_ID: &str = "tenshu.vault.send.add-recipient";
 const BACK_ID: &str = "tenshu.vault.send.back";
 const CLEAR_ID: &str = "tenshu.vault.send.clear";
 const PREPARE_ID: &str = "tenshu.vault.send.prepare";
+const CHOOSE_COINS_ID: &str = "tenshu.vault.send.choose-coins";
+
+/// What the collapsed Coins section says. Automatic selection keeps the fee
+/// and the change low (branch and bound over the confirmed coins); it does
+/// not order coins by their recovery dates, so the copy doesn't claim to.
+pub(crate) const AUTOMATIC_COINS: &str = "Automatic: Tenshu picks the coins for this payment.";
 
 /// Fee presets in display order, each with the block target whose estimate it
 /// fetches. The target, never the label or position, is the preset's identity.
@@ -213,6 +223,29 @@ pub(crate) fn threshold_footer(threshold: usize, keys: usize) -> Option<String> 
             threshold, keys
         )
     })
+}
+
+/// The flow on Vault Send's head rule (the H-Send-Vault board).
+pub const SEND_STEPS: [&str; 4] = ["Details", "Review", "Sign", "Sent"];
+
+/// Where a built transaction stands on [`SEND_STEPS`]: Review until it is
+/// saved, Sign while it waits for signatures, Sent once it is broadcast.
+pub(crate) fn review_step(saved: bool, status: &SpendStatus) -> usize {
+    match status {
+        SpendStatus::Broadcast | SpendStatus::Spent => 3,
+        SpendStatus::Pending | SpendStatus::Deprecated if saved => 2,
+        SpendStatus::Pending | SpendStatus::Deprecated => 1,
+    }
+}
+
+/// A Vault Send head with its steps on the rule.
+fn send_head<'a>(
+    cache: &Cache,
+    title: &'a str,
+    step: usize,
+) -> coincube_ui::component::tenshu::PageHead<'a, Message> {
+    super::sub_page_head(cache, title)
+        .rule(coincube_ui::component::tenshu::steps(&SEND_STEPS, step))
 }
 
 /// Always-visible review for an MCP-origin construction. Read the actual loaded
@@ -495,6 +528,7 @@ pub fn create_spend_tx<'a>(
     selected_feerate_target: Option<usize>,
     custom_feerate: bool,
     threshold: Option<(usize, usize)>,
+    coins_shown: bool,
     generating: bool,
     bitcoin_unit: BitcoinDisplayUnit,
     max_under_dust: bool,
@@ -791,6 +825,27 @@ pub fn create_spend_tx<'a>(
                 .wrap()
         }));
 
+    // Until the user chooses coins, the draft picks them: the section says
+    // so and offers Choose coins, which opens the list below.
+    let automatic_coins = Column::new()
+        .spacing(10)
+        .push(
+            Row::new()
+                .spacing(12)
+                .align_y(Alignment::Center)
+                .push(section_label("Coins").width(Length::Fill))
+                .push(quiet_action(
+                    CHOOSE_COINS_ID,
+                    None,
+                    "Choose coins",
+                    Message::CreateSpend(CreateSpendMessage::ChooseCoins),
+                )),
+        )
+        .push(
+            text(AUTOMATIC_COINS)
+                .size(P2_SIZE)
+                .style(theme::text::secondary),
+        );
     let coins_section = Column::new()
         .spacing(10)
         .push(
@@ -958,7 +1013,11 @@ pub fn create_spend_tx<'a>(
             .push(compose_divider())
             .push(compose_section(fee_section))
             .push(compose_divider())
-            .push(compose_section(coins_section))
+            .push(if coins_shown {
+                compose_section(coins_section)
+            } else {
+                compose_section(automatic_coins)
+            })
             .push(compose_divider())
             .push(footer),
     )
@@ -968,7 +1027,7 @@ pub fn create_spend_tx<'a>(
     dashboard_headed(
         menu,
         cache,
-        super::sub_page_head(cache, title),
+        send_head(cache, title, 0),
         Container::new(
             Column::new()
                 .spacing(20)
@@ -1391,6 +1450,8 @@ mod tests {
         selected: Option<usize>,
         custom: bool,
         threshold: Option<(usize, usize)>,
+        /// The coin list is open (Choose coins, or a selection already made).
+        coins_shown: bool,
         generating: bool,
         max_under_dust: bool,
         coins_selected: bool,
@@ -1418,6 +1479,7 @@ mod tests {
                 selected: None,
                 custom: false,
                 threshold: None,
+                coins_shown: true,
                 generating: false,
                 max_under_dust: false,
                 coins_selected: true,
@@ -1486,6 +1548,7 @@ mod tests {
             s.selected,
             fee_is_custom(s),
             s.threshold,
+            s.coins_shown,
             s.generating,
             s.unit,
             s.max_under_dust,
@@ -2397,6 +2460,54 @@ mod tests {
                 shown,
                 "{threshold:?}"
             );
+        }
+    }
+
+    /// Until coins are chosen the section says the draft picks them, and
+    /// Choose coins opens the existing list.
+    #[test]
+    fn choose_coins_opens_the_inline_coin_list() {
+        let fixture = Fixture::new(ThemeMode::Dark, 3);
+        let automatic = Scenario {
+            coins_shown: false,
+            ..Scenario::valid_send()
+        };
+        let mut harness = Harness::new(compose(&fixture, &automatic), TALL);
+        let probe = harness.probe();
+        assert!(probe.contains(AUTOMATIC_COINS));
+        assert!(!probe.contains("Coin selection"));
+        let messages = harness.click(&Id::new(CHOOSE_COINS_ID));
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [
+                    Message::FocusAction(_),
+                    Message::CreateSpend(CreateSpendMessage::ChooseCoins)
+                ]
+            ),
+            "{:?}",
+            messages
+        );
+
+        let probe = Harness::new(compose(&fixture, &Scenario::valid_send()), TALL).probe();
+        assert!(probe.contains("Coin selection"));
+        assert!(!probe.contains(AUTOMATIC_COINS));
+        assert!(!probe
+            .focus
+            .iter()
+            .any(|entry| entry.id == Some(Id::new(CHOOSE_COINS_ID))));
+    }
+
+    #[test]
+    fn vault_send_steps_follow_the_transaction() {
+        assert_eq!(review_step(false, &SpendStatus::Pending), 1);
+        assert_eq!(review_step(true, &SpendStatus::Pending), 2);
+        assert_eq!(review_step(true, &SpendStatus::Broadcast), 3);
+        assert_eq!(review_step(true, &SpendStatus::Spent), 3);
+        let fixture = Fixture::new(ThemeMode::Dark, 3);
+        let probe = Harness::new(compose(&fixture, &Scenario::valid_send()), TALL).probe();
+        for label in SEND_STEPS {
+            assert!(probe.contains(label), "{}", label);
         }
     }
 
