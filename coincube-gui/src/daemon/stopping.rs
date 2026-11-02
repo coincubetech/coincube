@@ -18,8 +18,9 @@ use tracing::{error, info, warn};
 use super::Daemon;
 
 /// How long a start or delete waits for a stopping daemon before going ahead
-/// anyway. Past it the daemon's own `daemon.lock` refuses a second start with
-/// a clear error, which beats an endless spinner.
+/// anyway. Past it, on Unix, the daemon's own `daemon.lock` refuses a second
+/// start with a clear error, which beats an endless spinner. Windows has no
+/// `daemon.lock`, so there this wait is the only guard.
 const WAIT_LIMIT: Duration = Duration::from_secs(120);
 
 /// Data directories whose daemon is still stopping, one entry per daemon.
@@ -62,7 +63,7 @@ pub fn stop_in_background(
     });
 }
 
-fn run_in_background(dir: Option<PathBuf>, stop: impl FnOnce() + Send + 'static) {
+pub(crate) fn run_in_background(dir: Option<PathBuf>, stop: impl FnOnce() + Send + 'static) {
     // Deregisters even if `stop` panics, so no waiter is stranded.
     struct Stopped(Option<PathBuf>);
     impl Drop for Stopped {
@@ -186,7 +187,9 @@ mod tests {
 
     /// The real lifecycle behind a lock and a reopen: a running embedded
     /// daemon holds its directory's `daemon.lock`, and once `wait_for` returns
-    /// the next start can take it.
+    /// the next start can take it. Unix only: `DataDirectory::try_lock` takes
+    /// no lock on other platforms.
+    #[cfg(unix)]
     #[test]
     fn waiting_for_a_background_stop_frees_the_daemon_lock() {
         use coincube_core::{

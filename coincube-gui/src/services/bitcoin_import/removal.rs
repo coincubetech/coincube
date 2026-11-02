@@ -234,6 +234,11 @@ pub async fn remove_cube_import(
             return Err("Another Cube still references this wallet; no files were removed.".into());
         }
     }
+    // Deleting a Cube right after locking it: the imported wallet's daemon may
+    // still be stopping in its directory (see `crate::daemon::stopping`).
+    for dir in [Some(stage.clone()), destination.clone()].iter().flatten() {
+        crate::daemon::stopping::wait_for_async(dir.clone()).await;
+    }
     if let Some(attachment) = expected_attachment {
         crate::services::imported_keys::LocalKeyRepository::new(directory, expected, attachment)?
             .remove_operation_storage()?;
@@ -444,6 +449,31 @@ mod tests {
         assert!(!journal.exists());
         assert_eq!(fs::read(unrelated).unwrap(), b"unrelated");
         remove_cube_import(&f.directory, &f.cube).await.unwrap();
+    }
+
+    /// Deleting a Cube right after locking it: its imported daemon may still
+    /// be stopping in the wallet directory, so removal waits for that stop.
+    #[tokio::test]
+    async fn removal_waits_for_a_daemon_still_stopping_in_the_wallet_directory() {
+        let mut f = Fixture::new().await;
+        f.install().await;
+        let destination = f.destination();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        crate::daemon::stopping::run_in_background(Some(destination.clone()), move || {
+            released.recv().unwrap();
+        });
+        let removal = remove_cube_import(&f.directory, &f.cube);
+        tokio::pin!(removal);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(300), &mut removal)
+                .await
+                .is_err(),
+            "removal must wait for the stopping daemon"
+        );
+        assert!(destination.join("coincubed.sqlite3").is_file());
+        release.send(()).unwrap();
+        removal.await.unwrap();
+        assert!(!destination.exists());
     }
 
     #[tokio::test]
