@@ -321,7 +321,7 @@ fn bitcoin_kind_target(stablecoin: bool, method: SparkReceiveMethod) -> SparkRec
 /// setting on in Wallet settings (P-Receive).
 pub(crate) const ARRIVAL_NOTE: &str = "Payments arrive as bitcoin.";
 pub(crate) const ARRIVAL_NOTE_USD: &str =
-    "To hold them in US Dollar, swap to USDB afterwards or turn on Stable Balance in Wallet \
+    "To hold them in US Dollar, swap to USDB afterwards or turn on auto-convert in Wallet \
      settings.";
 const WALLET_SETTINGS_ID: &str = "tenshu.spark.receive.wallet-settings";
 const SWAP_ID: &str = "tenshu.spark.receive.swap";

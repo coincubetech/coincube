@@ -1,9 +1,11 @@
 //! Spark Settings: the Balances & conversion and Connections tabs.
 //!
 //! Balances & conversion holds:
-//! - A "Stable Balance" toggle (Phase 6) — enables or disables the
-//!   Spark SDK's USD-pegged balance feature via
-//!   `update_user_settings(stable_balance_active_label)`.
+//! - Auto-convert (plan S2). Since S2b the bridge drives it and SDK Stable
+//!   Balance stays off; the switch still saves through `set_stable_balance`,
+//!   the bridge's legacy alias of `set_auto_convert`, so the App's per-Cube
+//!   preference record keeps working. `get_auto_convert` adds the breaker
+//!   and the post-swap hold, and settles the switch after a failed save.
 //! - The Spark nickname (master plan §3 decision 6), which the App saves
 //!   to this Cube's settings as [`CubeSettings::spark_alias`].
 //!
@@ -48,6 +50,10 @@ pub struct SparkSettings {
     stable_balance_saving: bool,
     /// A Spark nickname typed but not saved yet. `None` shows the saved one.
     nickname_input: Option<String>,
+    /// The bridge's auto-convert state, once read.
+    auto_convert: Option<coincube_spark_protocol::AutoConvertState>,
+    /// "Turn off auto-convert?" is open.
+    confirm_off: bool,
 }
 
 impl SparkSettings {
@@ -63,7 +69,28 @@ impl SparkSettings {
             stable_balance_active: None,
             stable_balance_saving: false,
             nickname_input: None,
+            auto_convert: None,
+            confirm_off: false,
         }
+    }
+
+    fn fetch_auto_convert(&self) -> Task<Message> {
+        let Some(backend) = self.backend.clone() else {
+            return Task::none();
+        };
+        Task::perform(
+            async move { backend.client().get_auto_convert().await.ok() },
+            |state| {
+                Message::View(crate::app::view::Message::SparkSettings(
+                    crate::app::view::SparkSettingsMessage::AutoConvertLoaded(state),
+                ))
+            },
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn confirm_off_for_tests(&self) -> bool {
+        self.confirm_off
     }
 }
 
@@ -107,6 +134,8 @@ impl State for SparkSettings {
             status: self.status.clone(),
             stable_balance_active: self.stable_balance_active,
             stable_balance_saving: self.stable_balance_saving,
+            auto_convert: self.auto_convert.clone(),
+            swap_available: crate::app::state::spark::swap::swap_available(cache.network),
         };
         let content = if matches!(
             menu,
@@ -125,7 +154,18 @@ impl State for SparkSettings {
                 ))
                 .into()
         };
-        crate::app::view::dashboard(menu, cache, content)
+        let page = crate::app::view::dashboard(menu, cache, content);
+        if self.confirm_off {
+            return coincube_ui::widget::modal::Modal::new(
+                page,
+                crate::app::view::spark::settings::turn_off_dialog(),
+            )
+            .on_blur(Some(crate::app::view::Message::SparkSettings(
+                crate::app::view::SparkSettingsMessage::AutoConvertOffCancelled,
+            )))
+            .into();
+        }
+        page
     }
 
     fn reload(
@@ -175,7 +215,7 @@ impl State for SparkSettings {
                 }
             },
         );
-        Task::batch(vec![info_task, settings_task])
+        Task::batch(vec![info_task, settings_task, self.fetch_auto_convert()])
     }
 
     fn update(
@@ -195,7 +235,26 @@ impl State for SparkSettings {
                 crate::app::view::SparkSettingsMessage::UserSettingsLoaded(settings) => {
                     self.stable_balance_active = Some(settings.stable_balance_active);
                 }
+                crate::app::view::SparkSettingsMessage::AutoConvertLoaded(state) => {
+                    if let Some(state) = state {
+                        // The bridge's answer is the switch's truth, unless a
+                        // save is out (its own answer settles it).
+                        if !self.stable_balance_saving {
+                            self.stable_balance_active = Some(state.enabled);
+                        }
+                        self.auto_convert = Some(state);
+                    }
+                }
+                crate::app::view::SparkSettingsMessage::AutoConvertOffRequested => {
+                    if self.stable_balance_active == Some(true) && !self.stable_balance_saving {
+                        self.confirm_off = true;
+                    }
+                }
+                crate::app::view::SparkSettingsMessage::AutoConvertOffCancelled => {
+                    self.confirm_off = false;
+                }
                 crate::app::view::SparkSettingsMessage::StableBalanceToggled(enabled) => {
+                    self.confirm_off = false;
                     let Some(backend) = self.backend.clone() else {
                         return Task::none();
                     };
@@ -234,6 +293,9 @@ impl State for SparkSettings {
                             self.status = SparkSettingsStatus::Error(err);
                         }
                     }
+                    // A lost answer leaves the switch unknown, and turning it
+                    // on resets the breaker: read the bridge's state either way.
+                    return self.fetch_auto_convert();
                 }
                 crate::app::view::SparkSettingsMessage::NicknameEdited(input) => {
                     self.nickname_input = Some(input);
@@ -259,6 +321,69 @@ impl State for SparkSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The off question opens only for a switch that is on and idle, and
+    /// Keep or the turn-off itself closes it.
+    #[test]
+    fn turning_auto_convert_off_asks_first() {
+        let mut panel = SparkSettings::new(None);
+        update(&mut panel, SparkSettingsMessage::AutoConvertOffRequested);
+        assert!(
+            !panel.confirm_off_for_tests(),
+            "not before the switch is read"
+        );
+        panel.stable_balance_active = Some(true);
+        update(&mut panel, SparkSettingsMessage::AutoConvertOffRequested);
+        assert!(panel.confirm_off_for_tests());
+        update(&mut panel, SparkSettingsMessage::AutoConvertOffCancelled);
+        assert!(!panel.confirm_off_for_tests());
+        assert_eq!(
+            panel.stable_balance_active,
+            Some(true),
+            "Keep changes nothing"
+        );
+        update(&mut panel, SparkSettingsMessage::AutoConvertOffRequested);
+        update(
+            &mut panel,
+            SparkSettingsMessage::StableBalanceToggled(false),
+        );
+        assert!(!panel.confirm_off_for_tests());
+        panel.stable_balance_saving = true;
+        update(&mut panel, SparkSettingsMessage::AutoConvertOffRequested);
+        assert!(!panel.confirm_off_for_tests(), "not while a save is out");
+    }
+
+    /// `get_auto_convert` settles the switch, except while a save is out.
+    #[test]
+    fn the_bridges_auto_convert_state_settles_the_switch() {
+        use coincube_spark_protocol::{AutoConvertBreaker, AutoConvertState};
+        let state = |enabled| AutoConvertState {
+            enabled,
+            breaker: AutoConvertBreaker::Ready,
+            held_after_swap: false,
+        };
+        let mut panel = SparkSettings::new(None);
+        update(
+            &mut panel,
+            SparkSettingsMessage::AutoConvertLoaded(Some(state(true))),
+        );
+        assert_eq!(panel.stable_balance_active, Some(true));
+        panel.stable_balance_saving = true;
+        update(
+            &mut panel,
+            SparkSettingsMessage::AutoConvertLoaded(Some(state(false))),
+        );
+        assert_eq!(
+            panel.stable_balance_active,
+            Some(true),
+            "the save's answer settles it"
+        );
+        update(&mut panel, SparkSettingsMessage::AutoConvertLoaded(None));
+        assert!(
+            panel.auto_convert.is_some(),
+            "an unread state keeps the last one"
+        );
+    }
     use crate::app::state::State;
     use crate::app::view::{Message as ViewMessage, SparkSettingsMessage};
 
