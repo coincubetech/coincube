@@ -130,6 +130,8 @@ pub struct RecoveryKitRestoreStep {
     preselect_uuid: Option<String>,
     client: CoincubeClient,
     phase: Phase,
+    /// Where the last error was raised, for Import or restore's stepper.
+    error_stage: crate::installer::RestoreStage,
     // Transient UI inputs held outside Phase so typing during an
     // async transition (unlikely but possible) doesn't crash.
     email: form::Value<String>,
@@ -160,6 +162,7 @@ impl RecoveryKitRestoreStep {
             preselect_uuid,
             client: CoincubeClient::new(),
             phase: Phase::Email,
+            error_stage: crate::installer::RestoreStage::SignIn,
             email: form::Value {
                 valid: false,
                 ..form::Value::default()
@@ -180,7 +183,23 @@ impl RecoveryKitRestoreStep {
         self.scope
     }
 
+    /// The current phase's stage; an error stays on the stage that raised it.
+    fn stage(&self) -> crate::installer::RestoreStage {
+        use crate::installer::RestoreStage;
+        match &self.phase {
+            Phase::Email | Phase::OtpEntry => RestoreStage::SignIn,
+            Phase::LoadingCubes | Phase::CubePicker { .. } => RestoreStage::Cube,
+            Phase::PasswordEntry { .. } | Phase::Decrypting { .. } | Phase::Ready { .. } => {
+                RestoreStage::Password
+            }
+            Phase::Error { .. } => self.error_stage,
+        }
+    }
+
     fn set_phase(&mut self, phase: Phase) {
+        if matches!(phase, Phase::Error { .. }) {
+            self.error_stage = self.stage();
+        }
         self.phase = phase;
         self.error = None;
     }
@@ -633,6 +652,10 @@ impl From<RecoveryKitRestoreStep> for Box<dyn Step> {
 }
 
 impl Step for RecoveryKitRestoreStep {
+    fn restore_stage(&self) -> Option<crate::installer::RestoreStage> {
+        Some(self.stage())
+    }
+
     /// Pick up an already-authenticated Connect session from
     /// `Context` the first time this step becomes active.
     ///
@@ -1275,6 +1298,39 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// Import or restore's stepper keeps an error on the stage that raised
+    /// it: a failed Cube list is not a Password error.
+    #[test]
+    fn an_error_keeps_the_stage_that_raised_it() {
+        use crate::installer::RestoreStage;
+        let mut step = RecoveryKitRestoreStep::new(RestoreScope::Full, "mainnet".into(), None);
+        assert_eq!(step.restore_stage(), Some(RestoreStage::SignIn));
+        step.phase = Phase::LoadingCubes;
+        let mut hws = HardwareWallets::new(
+            crate::dir::CoincubeDirectory::new("/synthetic/recovery-stage".into()),
+            Network::Bitcoin,
+        );
+        let _ = step.update(
+            &mut hws,
+            Message::RecoveryKitRestore(RecoveryKitRestoreMsg::CubesLoaded(Err(
+                "synthetic outage".into(),
+            ))),
+        );
+        assert!(matches!(step.phase, Phase::Error { .. }));
+        assert_eq!(step.restore_stage(), Some(RestoreStage::Cube));
+        // A lone Cube whose kit lacks the seed also fails at Cube.
+        step.phase = Phase::LoadingCubes;
+        let _ = step.update(
+            &mut hws,
+            Message::RecoveryKitRestore(RecoveryKitRestoreMsg::CubesLoaded(Ok((
+                vec![candidate("No seed", false)],
+                "session@example.com".into(),
+            )))),
+        );
+        assert!(matches!(step.phase, Phase::Error { .. }));
+        assert_eq!(step.restore_stage(), Some(RestoreStage::Cube));
     }
 
     // --- `cube_passes_filter`: the network × preselect matrix that

@@ -21,7 +21,7 @@ use super::{
 };
 use crate::{app::settings::CubeSettings, chain::ChainId, dir::CoincubeDirectory};
 
-fn renderer() -> Option<iced::Renderer> {
+pub(crate) fn renderer() -> Option<iced::Renderer> {
     for bytes in font::load() {
         iced::advanced::graphics::text::font_system()
             .write()
@@ -35,7 +35,7 @@ fn renderer() -> Option<iced::Renderer> {
     ))
 }
 
-fn save<M>(
+pub(crate) fn save<M>(
     renderer: &mut iced::Renderer,
     element: Element<'_, M>,
     size: Size,

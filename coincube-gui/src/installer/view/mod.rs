@@ -1928,6 +1928,28 @@ pub fn install<'a>(
     warning: Option<&'a String>,
     connect_vault_caption: Option<String>,
 ) -> Element<'a, Message> {
+    install_titled(
+        "Finalize installation",
+        progress,
+        email,
+        generating,
+        installed,
+        warning,
+        connect_vault_caption,
+    )
+}
+
+/// [`install`] under another title, for a step that waits on something
+/// other than the final write.
+pub fn install_titled<'a>(
+    title: &'static str,
+    progress: (usize, usize),
+    email: Option<&'a str>,
+    generating: bool,
+    installed: bool,
+    warning: Option<&'a String>,
+    connect_vault_caption: Option<String>,
+) -> Element<'a, Message> {
     let prev_msg = if !generating && warning.is_some() {
         Some(Message::Previous)
     } else {
@@ -1936,7 +1958,7 @@ pub fn install<'a>(
     layout(
         progress,
         email,
-        "Finalize installation",
+        title,
         Column::new()
             .push(warning.map(|e| card::invalid(text(e))))
             .push(if generating {
@@ -2676,6 +2698,35 @@ pub fn wallet_alias<'a>(
     )
 }
 
+thread_local! {
+    /// The path title Import or restore shows while it frames a step.
+    static FRAMED: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+/// True while Import or restore frames the step being drawn.
+fn framed() -> bool {
+    FRAMED.with(|framed| framed.get().is_some())
+}
+
+/// While held, [`layout`] leaves out the installer's own Back, title and
+/// progress row: Import or restore draws its frame and stepper around the
+/// step instead. Views are built synchronously on one thread, so the flag
+/// covers exactly the step being drawn.
+pub(super) struct FramedGuard;
+
+impl FramedGuard {
+    pub(super) fn enter(path_title: &'static str) -> Self {
+        FRAMED.with(|framed| framed.set(Some(path_title)));
+        Self
+    }
+}
+
+impl Drop for FramedGuard {
+    fn drop(&mut self) {
+        FRAMED.with(|framed| framed.set(None));
+    }
+}
+
 pub(super) fn layout<'a>(
     progress: (usize, usize),
     email: Option<&'a str>,
@@ -2684,6 +2735,23 @@ pub(super) fn layout<'a>(
     padding_left: bool,
     previous_message: Option<Message>,
 ) -> Element<'a, Message> {
+    if let Some(path_title) = FRAMED.with(|framed| framed.get()) {
+        let mut back = button::secondary(Some(icon::previous_icon()), "Back").width(Length::Shrink);
+        if let Some(message) = previous_message {
+            back = back.on_press(message);
+        }
+        // The frame already heads the page with the path's title.
+        return Column::new()
+            .spacing(24)
+            .max_width(800)
+            .push(email.map(|email| {
+                p2_regular(format!("Signed in as {email}")).style(theme::text::secondary)
+            }))
+            .push((title != path_title).then(|| h3(title)))
+            .push(content)
+            .push(back)
+            .into();
+    }
     let mut prev_button =
         button::secondary(Some(icon::previous_icon()), "Back").width(Length::Fixed(150.0));
     if let Some(msg) = previous_message {
@@ -2825,13 +2893,17 @@ pub fn recovery_kit_restore<'a>(
                 .width(Length::FillPortion(1)),
         );
     }
+    // Import or restore's own stepper replaces the eyebrow and sub-stepper.
+    let framed = framed();
     let mut content: Column<'a, Message> = Column::new()
         .spacing(16)
         .width(Length::Fill)
         .max_width(780)
-        .push(p2_regular(format!("{flow_label} · {stage_label}")).style(theme::text::secondary))
+        .push((!framed).then(|| {
+            p2_regular(format!("{flow_label} · {stage_label}")).style(theme::text::secondary)
+        }))
         .push(h4_bold(step_title))
-        .push(stepper)
+        .push((!framed).then_some(stepper))
         .push(p2_regular(step_detail).style(theme::text::secondary));
 
     if let Some(e) = error {
