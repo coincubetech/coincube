@@ -612,6 +612,14 @@ async fn mounted_settings_pair_route_accepts_vault_and_denies_imported_wallet() 
             })
             .min_by(|a, b| a.y.total_cmp(&b.y))
             .expect("a settings content viewport below the pinned Pair choice");
+        // Pair is in the head, not inside any scrollable: tabs moved back
+        // into the body would sit in one.
+        assert!(
+            !labels.1.iter().any(|bounds| bounds.contains(pair_center)),
+            "Pair settings choice is inside a scrollable: {:?} in {:?}",
+            pair_bounds,
+            labels.1
+        );
         assert!(
             pair_bounds.x >= crate::app::view::nav::shell::FULL_WIDTH
                 && pair_bounds.x >= content_scroll.x

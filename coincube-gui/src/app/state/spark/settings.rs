@@ -4,7 +4,7 @@
 //! - A "Stable Balance" toggle (Phase 6) — enables or disables the
 //!   Spark SDK's USD-pegged balance feature via
 //!   `update_user_settings(stable_balance_active_label)`.
-//! - The Spark nickname (master plan §3 decision 2), which the App saves
+//! - The Spark nickname (master plan §3 decision 6), which the App saves
 //!   to this Cube's settings as [`CubeSettings::spark_alias`].
 //!
 //! Connections shows whether the last `get_info` round-trip to the
@@ -67,8 +67,11 @@ impl SparkSettings {
     }
 }
 
-/// Whether a typed Spark nickname is short enough to save. The limit is the
-/// Vault alias's, so both wallets' names follow one rule.
+/// Whether a typed Spark nickname is short enough to save: fewer than
+/// [`WALLET_ALIAS_MAXIMUM_LENGTH`] characters once trimmed. The Vault alias
+/// uses the same number (from the Connect API module) but counts bytes,
+/// untrimmed; the Spark nickname stays on this device and counts what the
+/// user sees.
 pub fn nickname_fits(input: &str) -> bool {
     input.trim().chars().count() < WALLET_ALIAS_MAXIMUM_LENGTH
 }

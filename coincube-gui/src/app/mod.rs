@@ -9430,6 +9430,7 @@ impl App {
                 }
                 let network_dir = self.datadir.network_directory(self.cube_settings.network);
                 let cube_id = self.cube_settings.id.clone();
+                let saved_for = cube_id.clone();
                 return Task::perform(
                     async move {
                         let saved = nickname.clone();
@@ -9443,10 +9444,16 @@ impl App {
                         .map(|_| nickname)
                         .map_err(|e| e.to_string())
                     },
-                    Message::SparkNicknameSaved,
+                    move |result| Message::SparkNicknameSaved {
+                        cube_id: saved_for.clone(),
+                        result,
+                    },
                 );
             }
-            Message::SparkNicknameSaved(result) => {
+            // Another Cube's save (the tab moved on while it was written)
+            // changes nothing here: its file write already happened.
+            Message::SparkNicknameSaved { cube_id, .. } if cube_id != self.cube_settings.id => {}
+            Message::SparkNicknameSaved { result, .. } => {
                 let nickname = match result {
                     Ok(nickname) => nickname,
                     Err(e) => {
@@ -16402,7 +16409,7 @@ mod settings_navigation_integration_tests {
         let saved = outputs(app.update(submitted.into_iter().next().unwrap()));
         assert!(matches!(
             saved.as_slice(),
-            [Message::SparkNicknameSaved(Ok(Some(name)))] if name == "Daily spending"
+            [Message::SparkNicknameSaved { result: Ok(Some(name)), .. }] if name == "Daily spending"
         ));
         // Typed and written, but the App hasn't taken the result yet.
         assert_eq!(side_panel_spark_row(&app), ["Spark"]);
@@ -16453,6 +16460,15 @@ mod settings_navigation_integration_tests {
         .is_empty());
         assert!(outputs(app.save_pending_spark_nickname(&connections)).is_empty());
         assert_eq!(saved_spark_alias(&app), None);
+
+        // A save for another Cube (the tab moved on while it was written)
+        // changes nothing in this App.
+        drop(app.update(Message::SparkNicknameSaved {
+            cube_id: format!("{}-other", app.cube_settings.id),
+            result: Ok(Some("Elsewhere".into())),
+        }));
+        assert_eq!(app.cube_settings.spark_alias, None);
+        assert_eq!(side_panel_spark_row(&app), ["Spark"]);
         let _ = std::fs::remove_dir_all(root);
     }
 }

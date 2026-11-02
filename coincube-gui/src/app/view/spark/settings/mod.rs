@@ -63,7 +63,7 @@ pub struct SparkSettingsView {
 pub const STABLE_BALANCE_ID: &str = "tenshu.settings.spark.stable-balance";
 pub const NICKNAME_ID: &str = "tenshu.settings.spark.nickname";
 
-/// The Spark nickname (master plan §3 decision 2): the side panel's
+/// The Spark nickname (master plan §3 decision 6): the side panel's
 /// "Spark · ‹nickname›". `input` is a name typed but not saved yet, `saved`
 /// the Cube's. Return saves it, and so does leaving the tab.
 pub fn nickname_group<'a>(input: Option<&'a str>, saved: Option<&'a str>) -> Element<'a, Message> {
