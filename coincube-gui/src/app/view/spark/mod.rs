@@ -45,7 +45,7 @@ pub const SEND_STEPS: [&str; 3] = ["Details", "Review", "Sent"];
 pub struct SparkBalances<'a> {
     /// The bitcoin balance alone, without USDB.
     pub btc_sats: u64,
-    pub stable: Option<&'a coincube_spark_protocol::StableBalanceSnapshot>,
+    pub stable: Option<&'a coincube_spark_protocol::UsdbBalanceSnapshot>,
     pub fiat_converter: Option<crate::app::view::FiatAmountConverter>,
     /// The dedicated BTC/USD quote. USDB counts toward the total only at it.
     pub btc_usd_price: Option<f64>,
@@ -57,7 +57,7 @@ impl<'a> SparkBalances<'a> {
     pub fn new(
         cache: &crate::app::cache::Cache,
         btc_sats: u64,
-        stable: Option<&'a coincube_spark_protocol::StableBalanceSnapshot>,
+        stable: Option<&'a coincube_spark_protocol::UsdbBalanceSnapshot>,
     ) -> Self {
         Self {
             btc_sats,
@@ -76,7 +76,9 @@ impl<'a> SparkBalances<'a> {
     /// valued: without a fiat price, or with USDB but no BTC/USD quote, there
     /// is none.
     pub fn rows(&self) -> (Vec<(&'static str, String, String)>, Option<String>) {
-        use crate::app::breez_spark::assets::{format_token_display, stable_token_as_sats};
+        use crate::app::breez_spark::assets::{
+            format_token_display_u128, stable_token_as_sats_u128,
+        };
         use coincube_ui::component::amount::DisplayAmount;
         let usdb_units = self.stable.map_or(0, |sb| sb.balance);
         let mask = |figure: String| {
@@ -99,7 +101,7 @@ impl<'a> SparkBalances<'a> {
                 ),
                 overview::SparkAsset::UsDollar => (
                     "US Dollar",
-                    mask(format_token_display(
+                    mask(format_token_display_u128(
                         usdb_units,
                         self.stable.map_or(0, |sb| sb.decimals),
                     )),
@@ -112,9 +114,9 @@ impl<'a> SparkBalances<'a> {
             .fiat_converter
             .filter(|_| usdb_units == 0 || price.is_some())
             .map(|converter| {
-                let usdb_sats = self
-                    .stable
-                    .map_or(0, |sb| stable_token_as_sats(sb.balance, sb.decimals, price));
+                let usdb_sats = self.stable.map_or(0, |sb| {
+                    stable_token_as_sats_u128(sb.balance, sb.decimals, price)
+                });
                 let fiat = converter.convert(coincube_core::miniscript::bitcoin::Amount::from_sat(
                     self.btc_sats.saturating_add(usdb_sats),
                 ));
@@ -164,9 +166,9 @@ pub enum SparkOverviewMessage {
     /// Bridge returned `get_info` + `list_payments` success.
     DataLoaded {
         balance: coincube_core::miniscript::bitcoin::Amount,
-        /// USDB holding from `get_info`, when present. Folded into
-        /// the unified portfolio total alongside the BTC balance.
-        stable_balance: Option<coincube_spark_protocol::StableBalanceSnapshot>,
+        /// The validated USDB holding from `get_info` (`usdb_holding`), when
+        /// there is one.
+        usdb_balance: Option<coincube_spark_protocol::UsdbBalanceSnapshot>,
         recent_payments: Vec<coincube_spark_protocol::PaymentSummary>,
     },
     /// Bridge returned an error response.
@@ -282,7 +284,7 @@ pub enum SparkSendMessage {
     /// The Spark wallet balance for the YOU SEND card — BTC sats plus the Stable
     /// Balance snapshot, folded into a unified total by the handler. `None` when
     /// the `get_info` fetch failed; the card keeps its last value.
-    BalanceLoaded(Option<(u64, Option<coincube_spark_protocol::StableBalanceSnapshot>)>),
+    BalanceLoaded(Option<(u64, Option<coincube_spark_protocol::UsdbBalanceSnapshot>)>),
     /// A `list_payments` RPC completed — used to populate the Last
     /// Transactions section under the Send form.
     PaymentsLoaded(Vec<coincube_spark_protocol::PaymentSummary>),
@@ -423,7 +425,7 @@ pub enum SparkReceiveMessage {
     /// The Spark wallet balance for the YOU RECEIVE card — BTC sats plus the
     /// Stable Balance snapshot, folded into a unified total by the handler.
     /// `None` when `get_info` failed; the card keeps its last value.
-    BalanceLoaded(Option<(u64, Option<coincube_spark_protocol::StableBalanceSnapshot>)>),
+    BalanceLoaded(Option<(u64, Option<coincube_spark_protocol::UsdbBalanceSnapshot>)>),
     /// A `list_payments` RPC completed — used to populate the Last
     /// Transactions section under the Receive form.
     PaymentsLoaded(Vec<coincube_spark_protocol::PaymentSummary>),
@@ -447,12 +449,13 @@ mod balances_tests {
     use crate::app::cache::FiatPriceRequest;
     use crate::app::view::FiatAmountConverter;
     use crate::services::fiat::{Currency, PriceSource};
-    use coincube_spark_protocol::StableBalanceSnapshot;
+    use coincube_spark_protocol::UsdbBalanceSnapshot;
     use coincube_ui::component::amount::BitcoinDisplayUnit;
 
-    fn usdb(dollars: u64) -> StableBalanceSnapshot {
-        StableBalanceSnapshot {
-            balance: dollars * 1_000_000,
+    fn usdb(dollars: u64) -> UsdbBalanceSnapshot {
+        UsdbBalanceSnapshot {
+            token_identifier: "btkn1synthetic".into(),
+            balance: u128::from(dollars) * 1_000_000,
             decimals: 6,
             ticker: "USDB".into(),
         }
@@ -460,7 +463,7 @@ mod balances_tests {
 
     fn balances(
         btc_sats: u64,
-        stable: Option<&StableBalanceSnapshot>,
+        stable: Option<&UsdbBalanceSnapshot>,
         btc_usd_price: Option<f64>,
     ) -> SparkBalances<'_> {
         SparkBalances {

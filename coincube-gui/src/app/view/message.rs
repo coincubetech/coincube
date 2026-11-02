@@ -2390,7 +2390,7 @@ pub enum HomeMessage {
     /// 0 even though the wallet still has spendable value).
     SparkBalanceUpdated {
         btc: Amount,
-        stable_balance: Option<coincube_spark_protocol::StableBalanceSnapshot>,
+        usdb_balance: Option<coincube_spark_protocol::UsdbBalanceSnapshot>,
     },
     /// Open the wallet-picker popup on the amount screen, editing the named side.
     OpenWalletPicker(PickerSide),

@@ -87,7 +87,7 @@ pub struct SparkReceive {
     balance_sats: u64,
     /// The bitcoin balance alone and the USDB holding, for the side panel.
     btc_balance_sats: u64,
-    stable_balance: Option<coincube_spark_protocol::StableBalanceSnapshot>,
+    usdb_balance: Option<coincube_spark_protocol::UsdbBalanceSnapshot>,
     /// The "receive from another network" (SideShift → BTC) sub-flow, when the
     /// user has entered it. While `Some`, it owns the panel: view, update and
     /// subscription all delegate to it. Mirrors how the Liquid Receive panel
@@ -157,7 +157,7 @@ impl SparkReceive {
             backend,
             balance_sats: 0,
             btc_balance_sats: 0,
-            stable_balance: None,
+            usdb_balance: None,
             sideshift_flow: None,
             method: SparkReceiveMethod::Bolt11,
             sender_picker_open: false,
@@ -282,7 +282,7 @@ impl State for SparkReceive {
                 balances: crate::app::view::spark::SparkBalances::new(
                     cache,
                     self.btc_balance_sats,
-                    self.stable_balance.as_ref(),
+                    self.usdb_balance.as_ref(),
                 ),
                 bitcoin_unit: cache.bitcoin_unit,
                 show_direction_badges: cache.show_direction_badges,
@@ -792,7 +792,7 @@ impl State for SparkReceive {
                     self.balance_sats =
                         super::unified_spark_balance_sats(btc_sats, stable.as_ref(), cache);
                     self.btc_balance_sats = btc_sats;
-                    self.stable_balance = stable;
+                    self.usdb_balance = stable;
                 }
                 Task::none()
             }
@@ -946,7 +946,7 @@ mod tests {
     use crate::app::state::State;
     use crate::app::view::{Message as ViewMessage, SparkReceiveMessage};
     use coincube_core::miniscript::bitcoin::Network;
-    use coincube_spark_protocol::{PaymentSummary, StableBalanceSnapshot};
+    use coincube_spark_protocol::{PaymentSummary, UsdbBalanceSnapshot};
 
     fn receive_ok(payment_request: &str) -> ReceivePaymentOk {
         ReceivePaymentOk {
@@ -982,9 +982,10 @@ mod tests {
         }
     }
 
-    fn stable_balance(balance: u64, decimals: u32) -> StableBalanceSnapshot {
-        StableBalanceSnapshot {
-            balance,
+    fn usdb_balance(balance: u64, decimals: u32) -> UsdbBalanceSnapshot {
+        UsdbBalanceSnapshot {
+            token_identifier: "btkn1synthetic".into(),
+            balance: balance.into(),
             decimals,
             ticker: "USDB".to_string(),
         }
@@ -1479,7 +1480,8 @@ mod tests {
     #[test]
     fn balance_loaded_keeps_bitcoin_and_usdb_apart_for_the_side_panel() {
         let mut panel = SparkReceive::new(None);
-        let usdb = StableBalanceSnapshot {
+        let usdb = UsdbBalanceSnapshot {
+            token_identifier: "btkn1synthetic".into(),
             balance: 5_000_000,
             decimals: 6,
             ticker: "USDB".into(),
@@ -1489,10 +1491,7 @@ mod tests {
             SparkReceiveMessage::BalanceLoaded(Some((123, Some(usdb.clone())))),
         );
         assert_eq!(panel.btc_balance_sats, 123);
-        assert_eq!(
-            panel.stable_balance.map(|sb| sb.balance),
-            Some(usdb.balance)
-        );
+        assert_eq!(panel.usdb_balance.map(|sb| sb.balance), Some(usdb.balance));
     }
 
     /// H-Receive: Bitcoin / Stablecoin (cross-chain) is a head action. With
@@ -1537,7 +1536,7 @@ mod tests {
         update_with_cache(
             &mut panel,
             &cache,
-            SparkReceiveMessage::BalanceLoaded(Some((123, Some(stable_balance(2_500_000, 6))))),
+            SparkReceiveMessage::BalanceLoaded(Some((123, Some(usdb_balance(2_500_000, 6))))),
         );
 
         assert_eq!(panel.balance_sats, 5_123);

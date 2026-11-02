@@ -1417,7 +1417,7 @@ mod tests {
         countdown: Option<cross_chain::QuoteCountdown>,
         quote: Quote,
         image: iced::widget::image::Handle,
-        stable: Option<coincube_spark_protocol::StableBalanceSnapshot>,
+        stable: Option<coincube_spark_protocol::UsdbBalanceSnapshot>,
     }
 
     impl Fixture {
@@ -2128,7 +2128,8 @@ mod tests {
     #[test]
     fn the_side_panel_lists_bitcoin_and_us_dollar() {
         let mut fixture = Fixture::filled(SparkSendPhase::Idle);
-        fixture.stable = Some(coincube_spark_protocol::StableBalanceSnapshot {
+        fixture.stable = Some(coincube_spark_protocol::UsdbBalanceSnapshot {
+            token_identifier: "btkn1synthetic".into(),
             balance: 12_400_000,
             decimals: 6,
             ticker: "USDB".into(),

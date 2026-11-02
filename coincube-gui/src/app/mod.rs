@@ -18261,7 +18261,7 @@ mod wallet_recent_activity_tests {
         drop(app.update(Message::View(view::Message::SparkOverview(
             view::SparkOverviewMessage::DataLoaded {
                 balance: coincube_core::miniscript::bitcoin::Amount::from_sat(42),
-                stable_balance: None,
+                usdb_balance: None,
                 recent_payments: Vec::new(),
             },
         ))));
@@ -18270,7 +18270,7 @@ mod wallet_recent_activity_tests {
         drop(app.update(Message::View(view::Message::SparkOverview(
             view::SparkOverviewMessage::DataLoaded {
                 balance: coincube_core::miniscript::bitcoin::Amount::from_sat(42),
-                stable_balance: None,
+                usdb_balance: None,
                 recent_payments: Vec::new(),
             },
         ))));

@@ -22,7 +22,7 @@ pub use transactions::SparkTransactions;
 
 use std::sync::Arc;
 
-use coincube_spark_protocol::{PaymentSummary, StableBalanceSnapshot};
+use coincube_spark_protocol::{PaymentSummary, UsdbBalanceSnapshot};
 use iced::Task;
 
 use crate::app::cache::Cache;
@@ -52,23 +52,24 @@ pub(crate) fn fetch_payments_task(
 }
 
 /// Fetch the Spark wallet balance via `get_info`, for the two-card
-/// "YOU SEND / YOU RECEIVE" balance line: the BTC balance plus the Stable
-/// Balance snapshot, which the caller folds into a unified sats total with
+/// "YOU SEND / YOU RECEIVE" balance line: the BTC balance plus the validated
+/// USDB holding (`usdb_holding`), which the caller folds into a sats total with
 /// [`unified_spark_balance_sats`]. Best-effort UI polish — an error resolves to
 /// `None` so the caller keeps its last value rather than surfacing a failure.
 pub(crate) fn fetch_balance_task(
     backend: Option<Arc<SparkBackend>>,
-    on_result: impl FnOnce(Option<(u64, Option<StableBalanceSnapshot>)>) -> Message + Send + 'static,
+    on_result: impl FnOnce(Option<(u64, Option<UsdbBalanceSnapshot>)>) -> Message + Send + 'static,
 ) -> Task<Message> {
     let Some(backend) = backend else {
         return Task::none();
     };
     Task::perform(async move { backend.get_info().await }, move |result| {
-        on_result(
-            result
-                .ok()
-                .map(|info| (info.balance_sats, info.stable_balance)),
-        )
+        on_result(result.ok().map(|info| {
+            (
+                info.balance_sats,
+                crate::app::breez_spark::assets::usdb_holding(&info),
+            )
+        }))
     })
 }
 
@@ -79,13 +80,13 @@ pub(crate) fn fetch_balance_task(
 /// reading would understate a funded wallet.
 pub(crate) fn unified_spark_balance_sats(
     btc_sats: u64,
-    stable: Option<&StableBalanceSnapshot>,
+    stable: Option<&UsdbBalanceSnapshot>,
     cache: &Cache,
 ) -> u64 {
     let reference_price = reference_btc_usd_price(cache);
     let usdb_as_sats = stable
         .map(|sb| {
-            crate::app::breez_spark::assets::stable_token_as_sats(
+            crate::app::breez_spark::assets::stable_token_as_sats_u128(
                 sb.balance,
                 sb.decimals,
                 reference_price,
@@ -109,11 +110,12 @@ pub(crate) fn reference_btc_usd_price(cache: &Cache) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coincube_spark_protocol::StableBalanceSnapshot;
+    use coincube_spark_protocol::UsdbBalanceSnapshot;
 
-    fn stable_balance(balance: u64, decimals: u32) -> StableBalanceSnapshot {
-        StableBalanceSnapshot {
-            balance,
+    fn usdb_balance(balance: u64, decimals: u32) -> UsdbBalanceSnapshot {
+        UsdbBalanceSnapshot {
+            token_identifier: "btkn1synthetic".into(),
+            balance: balance.into(),
             decimals,
             ticker: "USDB".to_string(),
         }
@@ -131,7 +133,7 @@ mod tests {
     #[test]
     fn unified_spark_balance_uses_btc_balance_without_reference_price() {
         let cache = Cache::default();
-        let stable = stable_balance(2_500_000, 6);
+        let stable = usdb_balance(2_500_000, 6);
 
         assert_eq!(
             unified_spark_balance_sats(42_000, Some(&stable), &cache),
@@ -145,7 +147,7 @@ mod tests {
             btc_usd_price: Some(50_000.0),
             ..Cache::default()
         };
-        let stable = stable_balance(2_500_000, 6);
+        let stable = usdb_balance(2_500_000, 6);
 
         assert_eq!(
             unified_spark_balance_sats(123, Some(&stable), &cache),
@@ -159,7 +161,7 @@ mod tests {
             btc_usd_price: Some(100_000.0),
             ..Cache::default()
         };
-        let stable = stable_balance(1_000_000, 6);
+        let stable = usdb_balance(1_000_000, 6);
 
         assert_eq!(
             unified_spark_balance_sats(u64::MAX - 2, Some(&stable), &cache),
