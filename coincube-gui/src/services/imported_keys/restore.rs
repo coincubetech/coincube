@@ -5,7 +5,11 @@
 use super::*;
 use crate::services::{
     coincube::{imported_checkpoint::Checkpoint, CoincubeClient, CubeResponse},
-    recovery::{imported_checkpoint::VerifiedDownload, imported_key_v3::ImportedKeyKitV3},
+    recovery::{
+        imported_checkpoint::VerifiedDownload,
+        imported_key_v3::ImportedKeyKitV3,
+        imported_restore_v3::{clear_intent, lock_restore_intent, read_intent, RestoreIntent},
+    },
 };
 
 /// No signed PSBT escapes until both current server authority and the exact
@@ -107,7 +111,28 @@ impl LocalKeyRepository<'_> {
         if !is_current() {
             return Err("Imported restore release was cancelled.".into());
         }
-        let expected = self.current_restored_binding()?;
+        let path = restore_intent_path(self.directory, self.operation_id);
+        let _operation_lock = lock_restore_intent(&path)?;
+        let intent = read_intent(&path)?;
+        let no_key_inventory = self.no_key_inventory()?;
+        let expected = {
+            let restored = if no_key_inventory {
+                None
+            } else {
+                let lock = self.lock()?;
+                self.read_manifest_recoverable(&lock)?.restored
+            };
+            restored.or_else(|| {
+                intent.as_ref().map(|intent| RestoredCheckpoint {
+                    cube_id: intent.cube_id,
+                    generation: intent.checkpoint_generation,
+                    commitment: intent.checkpoint_commitment.clone(),
+                    source_inventory_generation: intent.source_inventory_generation,
+                    ready: false,
+                })
+            })
+        }
+        .ok_or("No restored checkpoint or durable restore intent to release.")?;
         let cube = client
             .get_imported_checkpoint_cube(expected.cube_id)
             .await
@@ -119,6 +144,14 @@ impl LocalKeyRepository<'_> {
         if !is_current() {
             return Err("Imported restore release was cancelled.".into());
         }
+        if no_key_inventory {
+            let intent = intent
+                .as_ref()
+                .ok_or("No durable restore intent to release.")?;
+            return self.release_intent_without_inventory_locked(
+                &expected, intent, &cube, &remote, &path, is_current,
+            );
+        }
         let credential = self.check_active()?;
         let lock = self.lock()?;
         let manifest = self.read_manifest_recoverable(&lock)?;
@@ -126,12 +159,87 @@ impl LocalKeyRepository<'_> {
         self.release_restored_locked(
             manifest,
             &expected,
+            intent.as_ref(),
             &cube,
             &remote,
             &credential,
             &device,
             || is_current() && self.check_active().is_ok(),
-        )
+        )?;
+        if let Some(intent) = &intent {
+            if !is_current() || self.check_active().is_err() {
+                return Err("Imported restore release was cancelled.".into());
+            }
+            clear_intent(&path, intent)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn release_intent_without_inventory_locked(
+        &self,
+        expected: &RestoredCheckpoint,
+        intent: &RestoreIntent,
+        cube: &CubeResponse,
+        remote: &Checkpoint,
+        path: &Path,
+        is_current: impl Fn() -> bool,
+    ) -> Result<(), String> {
+        if !is_current() || !self.no_key_inventory()? {
+            return Err("Imported key inventory appeared during release.".into());
+        }
+        self.validate_release_proof(expected, Some(intent), cube, remote)?;
+        self.check_active()?;
+        if !is_current() {
+            return Err("Imported restore release was cancelled.".into());
+        }
+        clear_intent(path, intent)
+    }
+
+    fn no_key_inventory(&self) -> Result<bool, String> {
+        match fs::symlink_metadata(self.root()) {
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Ok(_) => return Ok(false),
+            Err(_) => return Err("Cannot inspect imported key inventory.".into()),
+        }
+        match anchor::load(&self.anchor_scope())? {
+            None => Ok(true),
+            Some(_) => Err("Imported key anchor exists without its inventory.".into()),
+        }
+    }
+
+    fn validate_release_proof(
+        &self,
+        expected: &RestoredCheckpoint,
+        intent: Option<&RestoreIntent>,
+        cube: &CubeResponse,
+        remote: &Checkpoint,
+    ) -> Result<(), String> {
+        remote
+            .validate()
+            .map_err(|_| "Invalid restored checkpoint revocation proof.")?;
+        if cube.id != expected.cube_id
+            || cube.uuid != self.cube.id
+            || cube.network != self.cube.network.api_str()
+            || cube.status != "active"
+            || remote.active
+            || remote.generation <= expected.generation
+        {
+            return Err("Restored checkpoint has no later inactive owner-scoped epoch.".into());
+        }
+        if let Some(intent) = intent {
+            if intent.version != 1
+                || intent.cube_id != expected.cube_id
+                || intent.cube_uuid != self.cube.id
+                || intent.operation_id != self.operation_id
+                || intent.wallet_id != self.attachment.wallet_id.to_string()
+                || intent.source_inventory_generation != expected.source_inventory_generation
+                || intent.checkpoint_generation != expected.generation
+                || intent.checkpoint_commitment != expected.commitment
+            {
+                return Err("Durable restored intent differs from the owner or binding.".into());
+            }
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -139,6 +247,7 @@ impl LocalKeyRepository<'_> {
         &self,
         manifest: Manifest,
         expected: &RestoredCheckpoint,
+        intent: Option<&RestoreIntent>,
         cube: &CubeResponse,
         remote: &Checkpoint,
         credential: &str,
@@ -148,20 +257,19 @@ impl LocalKeyRepository<'_> {
         if !is_current() {
             return Err("Imported restore release was cancelled.".into());
         }
-        remote
-            .validate()
-            .map_err(|_| "Invalid restored checkpoint revocation proof.")?;
-        if manifest.restored.as_ref() != Some(expected)
-            || !expected.ready
-            || manifest.checkpoint.is_some()
-            || cube.id != expected.cube_id
-            || cube.uuid != self.cube.id
-            || cube.network != self.cube.network.api_str()
-            || cube.status != "active"
-            || remote.active
-            || remote.generation <= expected.generation
-        {
-            return Err("Restored checkpoint has no later inactive owner-scoped epoch.".into());
+        self.validate_release_proof(expected, intent, cube, remote)?;
+        if manifest.checkpoint.is_some() {
+            return Err("Restored inventory has an unrelated publication checkpoint.".into());
+        }
+        match manifest.restored.as_ref() {
+            Some(binding) if binding == expected && (binding.ready || intent.is_some()) => {}
+            None if manifest.records.is_empty() && intent.is_some() => {
+                // A previous attempt committed the empty anchor, then crashed
+                // before removing the intent. The authenticated empty manifest
+                // and the same remote proof make clearing it retry-safe.
+                return Ok(());
+            }
+            _ => return Err("Restored signer state differs from its revocation proof.".into()),
         }
         self.verify_records(&manifest, credential, device)?;
         self.check_active()?;

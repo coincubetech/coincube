@@ -170,6 +170,37 @@ pub(super) fn load(scope: &Scope) -> Result<Option<Anchor>, String> {
     }
 }
 
+/// An interrupted first provision may precede the public attachment, so its
+/// policy hash is unavailable. Check the device-only account keyed only by
+/// Cube, chain and operation; absence is required before treating disk files
+/// as an unanchored empty inventory. Never decode it as signer authority.
+pub(in crate::services) fn absent_for_operation(
+    cube_id: &str,
+    chain: &str,
+    operation_id: Uuid,
+) -> Result<bool, String> {
+    let account = account(&Scope {
+        cube_id: cube_id.to_owned(),
+        chain: chain.to_owned(),
+        operation_id,
+        wallet_id: String::new(),
+        policy_hash: [0; 32],
+    })?;
+    #[cfg(test)]
+    {
+        Ok(tests::store_load(&account)?.is_none())
+    }
+    #[cfg(all(not(test), target_os = "macos"))]
+    {
+        Ok(apple::load(&service(), &account)?.is_none())
+    }
+    #[cfg(all(not(test), not(target_os = "macos")))]
+    {
+        let _ = account;
+        Err("Imported local-key anchor requires a verified device keystore adapter on this platform.".into())
+    }
+}
+
 pub(super) fn create(anchor: &Anchor) -> Result<(), String> {
     let account = account(&anchor.scope)?;
     let value = anchor.encode()?;

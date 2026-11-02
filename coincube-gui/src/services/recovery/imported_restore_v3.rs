@@ -18,9 +18,13 @@ use crate::{
     dir::NetworkDirectory,
     services::{
         bitcoin_import::{self, RestoredKitSource},
-        coincube::CoincubeClient,
+        coincube::{imported_checkpoint::Checkpoint, CoincubeClient, CubeResponse},
         duress::DuressLocalState,
-        imported_keys::{restore::restore_intent_path, LocalKeyRecord, LocalKeyRepository},
+        imported_inventory_anchor as anchor,
+        imported_keys::{
+            restore::restore_intent_path, retire_proven_empty_unanchored, LocalKeyRecord,
+            LocalKeyRepository,
+        },
     },
 };
 
@@ -31,16 +35,16 @@ use super::{
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RestoreIntent {
-    version: u8,
-    cube_id: u64,
-    cube_uuid: String,
-    operation_id: Uuid,
-    wallet_id: String,
-    public_digest: String,
-    source_inventory_generation: u64,
-    checkpoint_generation: u64,
-    checkpoint_commitment: String,
+pub(crate) struct RestoreIntent {
+    pub(crate) version: u8,
+    pub(crate) cube_id: u64,
+    pub(crate) cube_uuid: String,
+    pub(crate) operation_id: Uuid,
+    pub(crate) wallet_id: String,
+    pub(crate) public_digest: String,
+    pub(crate) source_inventory_generation: u64,
+    pub(crate) checkpoint_generation: u64,
+    pub(crate) checkpoint_commitment: String,
 }
 
 /// A point-in-time result, never a durable signing grant. Every use of a
@@ -71,6 +75,12 @@ impl RestoreAdmissionReceipt {
 }
 
 fn preflight(directory: &NetworkDirectory, download: &VerifiedDownload) -> Result<(), String> {
+    // An unsupported keystore is not an absent anchor: without an adapter the
+    // durable intent could be neither admitted nor released, so refuse before
+    // the caller writes it.
+    if !anchor::supported() {
+        return Err("Imported key restore is unavailable on this platform.".into());
+    }
     let kit = download.kit();
     kit.validate()?;
     let chain = kit.public.wallet.descriptor.chain();
@@ -198,7 +208,7 @@ fn write_intent(path: &Path, intent: &RestoreIntent) -> Result<(), String> {
     Ok(())
 }
 
-fn lock_restore_intent(path: &Path) -> Result<fs::File, String> {
+pub(crate) fn lock_restore_intent(path: &Path) -> Result<fs::File, String> {
     let parent = path.parent().ok_or("Missing imported restore directory.")?;
     crate::dir::create_directory(parent)
         .map_err(|_| "Cannot create imported restore directory.")?;
@@ -225,7 +235,28 @@ fn lock_restore_intent(path: &Path) -> Result<fs::File, String> {
     Ok(file)
 }
 
-fn clear_intent(path: &Path, intent: &RestoreIntent) -> Result<(), String> {
+pub(crate) fn read_intent(path: &Path) -> Result<Option<RestoreIntent>, String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("Cannot inspect imported restore intent.".into()),
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 4096 {
+        return Err("Unsafe imported restore intent.".into());
+    }
+    let bytes = fs::read(path).map_err(|_| "Cannot read imported restore intent.")?;
+    let intent: RestoreIntent =
+        serde_json::from_slice(&bytes).map_err(|_| "Invalid imported restore intent.")?;
+    if intent.version != 1
+        || serde_json::to_vec(&intent).map_err(|_| "Cannot encode imported restore intent.")?
+            != bytes
+    {
+        return Err("Invalid imported restore intent.".into());
+    }
+    Ok(Some(intent))
+}
+
+pub(crate) fn clear_intent(path: &Path, intent: &RestoreIntent) -> Result<(), String> {
     let expected =
         serde_json::to_vec(intent).map_err(|_| "Cannot encode imported restore intent.")?;
     let metadata = fs::symlink_metadata(path).map_err(|_| "Cannot inspect restore intent.")?;
@@ -240,6 +271,111 @@ fn clear_intent(path: &Path, intent: &RestoreIntent) -> Result<(), String> {
     fs::File::open(parent)
         .and_then(|dir| dir.sync_all())
         .map_err(|_| "Cannot sync completed restore intent.".into())
+}
+
+fn release_owner_network(
+    directory: &NetworkDirectory,
+    intent: &RestoreIntent,
+) -> Result<String, String> {
+    let settings = Settings::from_file(directory).map_err(|_| "Cannot inspect restore Cube.")?;
+    let mut cubes = settings
+        .cubes
+        .iter()
+        .filter(|cube| cube.id == intent.cube_uuid);
+    let cube = cubes.next().ok_or("The restore Cube does not exist.")?;
+    if cubes.next().is_some()
+        || directory.path().file_name() != Some(std::ffi::OsStr::new(cube.network.dir_name()))
+        || cube.bitcoin_import.as_ref().is_some_and(|import| {
+            import.operation_id != intent.operation_id
+                || import
+                    .attachment()
+                    .is_some_and(|attachment| attachment.wallet_id.to_string() != intent.wallet_id)
+        })
+    {
+        return Err("The restore Cube or import operation changed.".into());
+    }
+    if app::session::current_cube_id().as_deref() != Some(&cube.id)
+        || app::session::seed_file_password(cube).is_none()
+    {
+        return Err("Unlock the exact restore Cube before release.".into());
+    }
+    let root = directory.path().parent().ok_or("Missing Cube data root.")?;
+    let duress = DuressLocalState::load(root).map_err(|_| "Cannot check Duress Mode.")?;
+    if duress.enrolled || duress.arming || duress.active {
+        return Err("Imported keys are unavailable during Duress Mode.".into());
+    }
+    Ok(cube.network.api_str().into())
+}
+
+/// Reconcile only an intent whose operation never acquired a device anchor.
+/// The caller holds its operation lock. No Kit plaintext or public attachment
+/// is required, and no signing key is admitted from the intent file.
+pub(crate) fn release_proven_empty_intent_locked(
+    directory: &NetworkDirectory,
+    path: &Path,
+    intent: &RestoreIntent,
+    cube: &CubeResponse,
+    remote: &Checkpoint,
+    is_current: impl Fn() -> bool,
+) -> Result<(), String> {
+    if !is_current() || intent.operation_id.is_nil() || intent.cube_id == 0 {
+        return Err("Imported restore release was cancelled or invalid.".into());
+    }
+    let network = release_owner_network(directory, intent)?;
+    remote
+        .validate()
+        .map_err(|_| "Invalid restored checkpoint revocation proof.")?;
+    if cube.id != intent.cube_id
+        || cube.uuid != intent.cube_uuid
+        || cube.network != network
+        || cube.status != "active"
+        || remote.active
+        || remote.generation <= intent.checkpoint_generation
+    {
+        return Err("Restore intent has no later inactive owner-scoped epoch.".into());
+    }
+    retire_proven_empty_unanchored(
+        directory,
+        &intent.cube_uuid,
+        &network,
+        intent.operation_id,
+        &intent.wallet_id,
+    )?;
+    if !is_current() || release_owner_network(directory, intent)? != network {
+        return Err("Imported restore release changed before intent clearance.".into());
+    }
+    clear_intent(path, intent)
+}
+
+/// Owner-scoped cleanup for a revoked v3 restore that stopped before an
+/// attachment or first device anchor existed. The current Connect tombstone
+/// must be strictly later than the durable intent's source generation.
+pub async fn release_revoked_password_v3_intent(
+    directory: &NetworkDirectory,
+    client: &CoincubeClient,
+    cube_uuid: &str,
+    operation_id: Uuid,
+    is_current: impl Fn() -> bool,
+) -> Result<(), String> {
+    if !is_current() || operation_id.is_nil() {
+        return Err("Imported restore release was cancelled or invalid.".into());
+    }
+    let path = restore_intent_path(directory, operation_id);
+    let _operation_lock = lock_restore_intent(&path)?;
+    let intent = read_intent(&path)?.ok_or("No durable imported restore intent to release.")?;
+    if intent.operation_id != operation_id || intent.cube_uuid != cube_uuid {
+        return Err("Restore intent belongs to another Cube or operation.".into());
+    }
+    release_owner_network(directory, &intent)?;
+    let cube = client
+        .get_imported_checkpoint_cube(intent.cube_id)
+        .await
+        .map_err(|_| "Cannot verify restored Cube owner for release.")?;
+    let remote = client
+        .get_imported_checkpoint(intent.cube_id)
+        .await
+        .map_err(|_| "Cannot verify restored checkpoint revocation.")?;
+    release_proven_empty_intent_locked(directory, &path, &intent, &cube, &remote, is_current)
 }
 
 pub(crate) async fn restore_verified_password_kit(
