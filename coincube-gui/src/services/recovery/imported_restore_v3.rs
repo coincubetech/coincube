@@ -31,16 +31,16 @@ use super::{
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RestoreIntent {
-    version: u8,
-    cube_id: u64,
-    cube_uuid: String,
-    operation_id: Uuid,
-    wallet_id: String,
-    public_digest: String,
-    source_inventory_generation: u64,
-    checkpoint_generation: u64,
-    checkpoint_commitment: String,
+pub(crate) struct RestoreIntent {
+    pub(crate) version: u8,
+    pub(crate) cube_id: u64,
+    pub(crate) cube_uuid: String,
+    pub(crate) operation_id: Uuid,
+    pub(crate) wallet_id: String,
+    pub(crate) public_digest: String,
+    pub(crate) source_inventory_generation: u64,
+    pub(crate) checkpoint_generation: u64,
+    pub(crate) checkpoint_commitment: String,
 }
 
 /// A point-in-time result, never a durable signing grant. Every use of a
@@ -198,7 +198,7 @@ fn write_intent(path: &Path, intent: &RestoreIntent) -> Result<(), String> {
     Ok(())
 }
 
-fn lock_restore_intent(path: &Path) -> Result<fs::File, String> {
+pub(crate) fn lock_restore_intent(path: &Path) -> Result<fs::File, String> {
     let parent = path.parent().ok_or("Missing imported restore directory.")?;
     crate::dir::create_directory(parent)
         .map_err(|_| "Cannot create imported restore directory.")?;
@@ -225,7 +225,28 @@ fn lock_restore_intent(path: &Path) -> Result<fs::File, String> {
     Ok(file)
 }
 
-fn clear_intent(path: &Path, intent: &RestoreIntent) -> Result<(), String> {
+pub(crate) fn read_intent(path: &Path) -> Result<Option<RestoreIntent>, String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("Cannot inspect imported restore intent.".into()),
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 4096 {
+        return Err("Unsafe imported restore intent.".into());
+    }
+    let bytes = fs::read(path).map_err(|_| "Cannot read imported restore intent.")?;
+    let intent: RestoreIntent =
+        serde_json::from_slice(&bytes).map_err(|_| "Invalid imported restore intent.")?;
+    if intent.version != 1
+        || serde_json::to_vec(&intent).map_err(|_| "Cannot encode imported restore intent.")?
+            != bytes
+    {
+        return Err("Invalid imported restore intent.".into());
+    }
+    Ok(Some(intent))
+}
+
+pub(crate) fn clear_intent(path: &Path, intent: &RestoreIntent) -> Result<(), String> {
     let expected =
         serde_json::to_vec(intent).map_err(|_| "Cannot encode imported restore intent.")?;
     let metadata = fs::symlink_metadata(path).map_err(|_| "Cannot inspect restore intent.")?;

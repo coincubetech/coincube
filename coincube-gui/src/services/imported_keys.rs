@@ -4044,9 +4044,10 @@ mod tests {
         .unwrap()
     }
 
-    fn checkpoint_test_ready_restored(
+    fn checkpoint_test_restored(
         fixture: &Fixture,
         device: &coincube_core::seed_crypt::DeviceSecret,
+        ready: bool,
     ) -> (LocalKeyRecord, RestoredCheckpoint) {
         use crate::services::{
             coincube::imported_checkpoint::Checkpoint,
@@ -4094,20 +4095,29 @@ mod tests {
             commitment: binding.commitment.clone(),
             active: true,
         };
-        repository
-            .finish_restored_batch_locked(
-                repository.read_manifest().unwrap(),
-                42,
-                &remote,
-                7,
-                "synthetic unlock",
-                device,
-                || true,
-            )
-            .unwrap();
-        let mut ready = binding;
-        ready.ready = true;
-        (record, ready)
+        if ready {
+            repository
+                .finish_restored_batch_locked(
+                    repository.read_manifest().unwrap(),
+                    42,
+                    &remote,
+                    7,
+                    "synthetic unlock",
+                    device,
+                    || true,
+                )
+                .unwrap();
+        }
+        let mut binding = binding;
+        binding.ready = ready;
+        (record, binding)
+    }
+
+    fn checkpoint_test_ready_restored(
+        fixture: &Fixture,
+        device: &coincube_core::seed_crypt::DeviceSecret,
+    ) -> (LocalKeyRecord, RestoredCheckpoint) {
+        checkpoint_test_restored(fixture, device, true)
     }
 
     fn checkpoint_test_admit(fixture: &Fixture, device: &coincube_core::seed_crypt::DeviceSecret) {
@@ -4986,6 +4996,7 @@ mod tests {
                 .release_restored_locked(
                     ready.clone(),
                     &binding,
+                    None,
                     &cube,
                     &active_newer,
                     "synthetic unlock",
@@ -5002,6 +5013,7 @@ mod tests {
                 .release_restored_locked(
                     ready.clone(),
                     &binding,
+                    None,
                     &cube,
                     &inactive_equal,
                     "synthetic unlock",
@@ -5018,6 +5030,7 @@ mod tests {
                 .release_restored_locked(
                     ready.clone(),
                     &binding,
+                    None,
                     &cube,
                     &inactive_older,
                     "synthetic unlock",
@@ -5036,6 +5049,7 @@ mod tests {
                 .release_restored_locked(
                     ready.clone(),
                     &binding,
+                    None,
                     &wrong_owner,
                     &tombstone,
                     "synthetic unlock",
@@ -5049,6 +5063,7 @@ mod tests {
                 .release_restored_locked(
                     ready.clone(),
                     &binding,
+                    None,
                     &wrong_network,
                     &tombstone,
                     "synthetic unlock",
@@ -5070,6 +5085,7 @@ mod tests {
                     .release_restored_locked(
                         ready,
                         &binding,
+                        None,
                         &cube,
                         &tombstone,
                         "synthetic unlock",
@@ -5088,6 +5104,7 @@ mod tests {
                     .release_restored_locked(
                         ready,
                         &binding,
+                        None,
                         &cube,
                         &tombstone,
                         "synthetic unlock",
@@ -5112,5 +5129,236 @@ mod tests {
             assert!(repository.is_removed().unwrap());
             app::session::close();
         }
+    }
+
+    #[test]
+    fn interrupted_restore_tombstone_retires_staged_keys_and_clears_intent_on_retry() {
+        use crate::services::{
+            coincube::imported_checkpoint::Checkpoint,
+            recovery::{
+                imported_descriptor_blob_fingerprint,
+                imported_restore_v3::{
+                    clear_intent, lock_restore_intent, read_intent, RestoreIntent,
+                },
+            },
+        };
+        let _session_guard = app::session::test_guard();
+        for ready in [false, true] {
+            for crash_after_pending in [false, true] {
+                let fixture = Fixture::new();
+                fixture.save_cube(fixture.cube.clone());
+                app::session::open(
+                    fixture.cube.id.clone(),
+                    Zeroizing::new("synthetic PIN".into()),
+                );
+                let repository = fixture.repository();
+                let device = Zeroizing::new([96u8; 32]);
+                let (record, binding) = checkpoint_test_restored(&fixture, &device, ready);
+                let digest =
+                    imported_descriptor_blob_fingerprint(&checkpoint_test_public(&fixture))
+                        .unwrap();
+                let intent = RestoreIntent {
+                    version: 1,
+                    cube_id: binding.cube_id,
+                    cube_uuid: fixture.cube.id.clone(),
+                    operation_id: repository.operation_id,
+                    wallet_id: fixture.attachment.wallet_id.to_string(),
+                    // A changed public wallet cannot make revoked keys
+                    // permanently undeletable; only the anchored binding
+                    // grants signer identity in this cleanup path.
+                    public_digest: if ready {
+                        "c".repeat(64)
+                    } else {
+                        digest.clone()
+                    },
+                    source_inventory_generation: binding.source_inventory_generation,
+                    checkpoint_generation: binding.generation,
+                    checkpoint_commitment: binding.commitment.clone(),
+                };
+                let path =
+                    restore::restore_intent_path(repository.directory, repository.operation_id);
+                let _operation_lock = lock_restore_intent(&path).unwrap();
+                fs::write(&path, serde_json::to_vec(&intent).unwrap()).unwrap();
+                assert_eq!(read_intent(&path).unwrap(), Some(intent.clone()));
+                assert!(repository.remove_operation_storage().is_err());
+                assert!(repository
+                    .with_key(record.record_id, record.revision, None, || true, |_| Ok(()))
+                    .is_err());
+
+                let cube = checkpoint_test_scope(&fixture);
+                let active = Checkpoint {
+                    generation: binding.generation + 1,
+                    commitment: "b".repeat(64),
+                    active: true,
+                };
+                let tombstone = Checkpoint {
+                    generation: binding.generation + 1,
+                    commitment: "b".repeat(64),
+                    active: false,
+                };
+                let old = Checkpoint {
+                    generation: binding.generation,
+                    commitment: "b".repeat(64),
+                    active: false,
+                };
+                for denied in [&active, &old] {
+                    assert!(repository
+                        .release_restored_locked(
+                            repository.read_manifest().unwrap(),
+                            &binding,
+                            Some(&intent),
+                            &cube,
+                            denied,
+                            "synthetic unlock",
+                            &device,
+                            || true,
+                        )
+                        .is_err());
+                }
+                let mut wrong_intent = intent.clone();
+                wrong_intent.wallet_id = "other-wallet".into();
+                assert!(repository
+                    .release_restored_locked(
+                        repository.read_manifest().unwrap(),
+                        &binding,
+                        Some(&wrong_intent),
+                        &cube,
+                        &tombstone,
+                        "synthetic unlock",
+                        &device,
+                        || true,
+                    )
+                    .is_err());
+
+                if crash_after_pending {
+                    anchor::tests::inject_update_fault(
+                        &repository.anchor_scope(),
+                        anchor::tests::UpdateFault::AfterWriteReadbackError,
+                    );
+                }
+                let outcome = repository.release_restored_locked(
+                    repository.read_manifest().unwrap(),
+                    &binding,
+                    Some(&intent),
+                    &cube,
+                    &tombstone,
+                    "synthetic unlock",
+                    &device,
+                    || true,
+                );
+                if crash_after_pending {
+                    assert!(outcome.is_err());
+                    let pending = anchor::load(&repository.anchor_scope()).unwrap().unwrap();
+                    assert!(matches!(pending.state, AnchorState::Pending { .. }));
+                    repository
+                        .recover_pending_with(pending, "synthetic unlock", &device)
+                        .unwrap();
+                } else {
+                    outcome.unwrap();
+                }
+                let empty = repository.read_manifest().unwrap();
+                assert!(empty.records.is_empty());
+                assert!(empty.restored.is_none());
+                assert!(!repository.root().join(record.file_name()).exists());
+                assert!(
+                    path.exists(),
+                    "intent survives until explicit reconciliation"
+                );
+                repository
+                    .release_restored_locked(
+                        empty,
+                        &binding,
+                        Some(&intent),
+                        &cube,
+                        &tombstone,
+                        "synthetic unlock",
+                        &device,
+                        || true,
+                    )
+                    .unwrap();
+                clear_intent(&path, &intent).unwrap();
+                assert!(!path.exists());
+                repository.remove_operation_storage().unwrap();
+                assert!(repository.is_removed().unwrap());
+                app::session::close();
+            }
+        }
+    }
+
+    #[test]
+    fn intent_only_revocation_clears_before_any_key_inventory_exists() {
+        use crate::services::{
+            coincube::imported_checkpoint::Checkpoint,
+            recovery::imported_restore_v3::{lock_restore_intent, read_intent, RestoreIntent},
+        };
+        let _session_guard = app::session::test_guard();
+        let mut fixture = Fixture::new();
+        fixture.cube.bitcoin_import.as_mut().unwrap().operation_id = Uuid::new_v4();
+        fixture.save_cube(fixture.cube.clone());
+        app::session::open(
+            fixture.cube.id.clone(),
+            Zeroizing::new("synthetic PIN".into()),
+        );
+        let repository = fixture.repository();
+        assert!(!repository.root().exists());
+        assert!(anchor::load(&repository.anchor_scope()).unwrap().is_none());
+        let binding = RestoredCheckpoint {
+            cube_id: 42,
+            generation: 3,
+            commitment: "a".repeat(64),
+            source_inventory_generation: 7,
+            ready: false,
+        };
+        let intent = RestoreIntent {
+            version: 1,
+            cube_id: 42,
+            cube_uuid: fixture.cube.id.clone(),
+            operation_id: repository.operation_id,
+            wallet_id: fixture.attachment.wallet_id.to_string(),
+            public_digest: "c".repeat(64),
+            source_inventory_generation: 7,
+            checkpoint_generation: 3,
+            checkpoint_commitment: binding.commitment.clone(),
+        };
+        let path = restore::restore_intent_path(repository.directory, repository.operation_id);
+        let _operation_lock = lock_restore_intent(&path).unwrap();
+        fs::write(&path, serde_json::to_vec(&intent).unwrap()).unwrap();
+        assert_eq!(read_intent(&path).unwrap(), Some(intent.clone()));
+        let cube = checkpoint_test_scope(&fixture);
+        let active = Checkpoint {
+            generation: 4,
+            commitment: "b".repeat(64),
+            active: true,
+        };
+        assert!(repository
+            .release_intent_without_inventory_locked(
+                &binding,
+                &intent,
+                &cube,
+                &active,
+                &path,
+                || true
+            )
+            .is_err());
+        let tombstone = Checkpoint {
+            generation: 4,
+            commitment: "b".repeat(64),
+            active: false,
+        };
+        repository
+            .release_intent_without_inventory_locked(
+                &binding,
+                &intent,
+                &cube,
+                &tombstone,
+                &path,
+                || true,
+            )
+            .unwrap();
+        assert!(!path.exists());
+        assert!(!repository.root().exists());
+        repository.remove_operation_storage().unwrap();
+        assert!(repository.is_removed().unwrap());
+        app::session::close();
     }
 }
