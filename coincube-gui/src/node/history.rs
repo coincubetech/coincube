@@ -638,6 +638,10 @@ pub struct Recovery {
     /// `MAX_TRANSIENT_FAILURES`, then pauses.
     #[serde(default)]
     pub transient_failures: u32,
+    /// The requested range's start while `plan` has narrowed `start`; a
+    /// rewind scans from here.
+    #[serde(default)]
+    pub full_start: Option<u32>,
 }
 
 /// What a set of coins needs scanned so the local wallet agrees with Connect.
@@ -695,6 +699,7 @@ impl Recovery {
             planned: 0,
             fallback: None,
             transient_failures: 0,
+            full_start: None,
         })
     }
 
@@ -706,13 +711,22 @@ impl Recovery {
         self.tail = Some(tail);
         self.planned = self.blocks.len() as u32;
         self.fallback = fallback;
+        self.full_start.get_or_insert(self.start);
         self.start = self.blocks.first().copied().unwrap_or(tail);
         self.next = self.start;
         self.download_next = self.start;
     }
 
-    /// Drop any single-block plan and scan every block from `start` again.
+    /// The start of the range the user asked for, before any `plan`.
+    pub fn range_start(&self) -> u32 {
+        self.full_start.unwrap_or(self.start)
+    }
+
+    /// Drop any single-block plan and scan every block of the requested
+    /// range again.
     pub fn rewind(&mut self, reason: Option<String>) {
+        self.start = self.range_start();
+        self.full_start = None;
         self.next = self.start;
         self.download_next = self.start;
         self.db_replayed = false;
@@ -735,6 +749,9 @@ impl Recovery {
             || self.download_next > self.target.saturating_add(1)
             || !self.blocks.windows(2).all(|w| w[0] < w[1])
             || self.blocks.len() as u64 > u64::from(self.planned)
+            || self
+                .full_start
+                .is_some_and(|full| self.tail.is_none() || full > self.start)
             || match self.tail {
                 None => !self.blocks.is_empty(),
                 Some(tail) => {
@@ -845,7 +862,7 @@ pub async fn bootstrap_step(
         let info=rpc.check_chain(network).await?;
         if info["automatic_pruning"].as_bool()!=Some(false) || info["pruned"].as_bool()!=Some(true) {return Err("Restart the managed node with recovery pruning controls".into());}
         let anchor=rpc.block_hash(job.target).await?;
-        if anchor!=job.target_hash {job.rewind(Some(chain_changed(job.start)));job.target_hash=anchor;}
+        if anchor!=job.target_hash {job.rewind(Some(chain_changed(job.range_start())));job.target_hash=anchor;}
         let end=job.download_next.saturating_add(BATCH_BLOCKS-1).min(job.target);
         for height in job.download_next..=end {
             if fs4::available_space(dir).map_err(|e|e.to_string())?<MIN_FREE_BYTES {return Err("Free more disk space to download the blocks needed to load this wallet, then resume".into());}
@@ -894,7 +911,7 @@ pub async fn recover_step(
             // Every previously scanned block may be on the old branch. Rewind
             // the entire requested range; stale checkpoints cannot authorize a
             // switch. Keep the user's range and preserve wallet records.
-            recovery.rewind(Some(chain_changed(recovery.start)));
+            recovery.rewind(Some(chain_changed(recovery.range_start())));
             recovery.target_hash=rpc.block_hash(recovery.target).await?;
             recovery.phase=Phase::Downloading;
             write_json(path,&recovery)?;
@@ -1708,6 +1725,10 @@ mod tests {
         // 70 and 90 sit inside the tail, which scans them anyway.
         assert_eq!(job.blocks, vec![5, 40]);
         assert_eq!((job.start, job.next, job.tail), (5, 5, Some(69)));
+        assert_eq!(job.full_start, Some(0));
+        job.full_start = Some(6);
+        assert!(job.validate(&binding()).is_err(), "full start above start");
+        job.full_start = Some(0);
         assert!(job.validate(&binding()).is_ok());
         assert_eq!(job.block_counts(), (0, 2 + 32));
         job.blocks.remove(0);
@@ -1722,10 +1743,17 @@ mod tests {
         job.next = 69;
         assert!(job.validate(&binding()).is_ok());
         assert_eq!(job.block_counts(), (2, 34));
+        // A rewind scans the whole requested range, not just from the first
+        // queued block.
         job.rewind(Some("why".into()));
-        assert_eq!((job.next, job.tail, job.planned), (5, None, 0));
+        assert_eq!(
+            (job.start, job.next, job.tail, job.planned),
+            (0, 0, None, 0)
+        );
+        assert_eq!(job.full_start, None);
         assert_eq!(job.fallback.as_deref(), Some("why"));
-        assert_eq!(job.block_counts(), (0, 96));
+        assert_eq!(job.block_counts(), (0, 101));
+        assert!(job.validate(&binding()).is_ok());
         // A plan with nothing to fetch scans only its tail.
         let mut job = Recovery::new(binding(), 0, 100, genesis().block_hash()).unwrap();
         job.plan(BTreeSet::new(), 69, None);

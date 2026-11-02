@@ -1818,10 +1818,15 @@ pub fn node_backend_status<'a>(
         }
         status_block = Some(block);
     } else if can_switch_to_bitcoind || active_backend == "Local Node" {
-        status_block = Some(Column::new().push(page::status(
+        let mut block = Column::new().spacing(6).push(page::status(
             page::Status::Busy,
             "Waiting for the local node to report sync progress…",
-        )));
+        ));
+        // A starting node's log is most useful before it reports progress.
+        if let Some(log) = pending_bitcoind_log.filter(|_| show_log) {
+            block = block.push(coincube_ui::component::tenshu::mono(log).size(12));
+        }
+        status_block = Some(block);
     }
 
     let in_use = match active_backend {
@@ -3636,8 +3641,8 @@ mod tests {
                 progress.map(|_| (blocks, 900000)),
                 ibd,
                 None,
-                None,
-                false,
+                Some("Loading block index…"),
+                true,
                 false,
                 pending,
                 recovery,
@@ -3662,6 +3667,8 @@ mod tests {
                 "missing {expected}: {:?}",
                 labels.0
             );
+            // An open node log shows whether or not the node reported progress.
+            assert!(labels.0.iter().any(|text| text == "Loading block index…"));
             if progress.is_some() {
                 let expected_blocks = format!(
                     "Verified blocks: {blocks} / 900000 known headers · {} blocks remaining",
