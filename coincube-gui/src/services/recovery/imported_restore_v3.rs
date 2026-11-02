@@ -20,6 +20,7 @@ use crate::{
         bitcoin_import::{self, RestoredKitSource},
         coincube::{imported_checkpoint::Checkpoint, CoincubeClient, CubeResponse},
         duress::DuressLocalState,
+        imported_inventory_anchor as anchor,
         imported_keys::{
             restore::restore_intent_path, retire_proven_empty_unanchored, LocalKeyRecord,
             LocalKeyRepository,
@@ -74,6 +75,12 @@ impl RestoreAdmissionReceipt {
 }
 
 fn preflight(directory: &NetworkDirectory, download: &VerifiedDownload) -> Result<(), String> {
+    // An unsupported keystore is not an absent anchor: without an adapter the
+    // durable intent could be neither admitted nor released, so refuse before
+    // the caller writes it.
+    if !anchor::supported() {
+        return Err("Imported key restore is unavailable on this platform.".into());
+    }
     let kit = download.kit();
     kit.validate()?;
     let chain = kit.public.wallet.descriptor.chain();
