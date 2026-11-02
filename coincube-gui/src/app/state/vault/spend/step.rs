@@ -24,6 +24,7 @@ use coincubed::commands::ListCoinsEntry;
 use iced::{Subscription, Task};
 
 static PREPARATION_ID: AtomicU64 = AtomicU64::new(1);
+static FEE_ESTIMATE_ID: AtomicU64 = AtomicU64::new(1);
 const TAMPER_WARNING: &str = "This payment request’s address does not match its verification data. Do not send. Return and replace the payment request.";
 
 use coincube_ui::{
@@ -191,6 +192,10 @@ pub struct DefineSpend {
     amount_left_to_select: Option<Amount>,
     feerate: form::Value<String>,
     loading_fee_estimate: Option<usize>,
+    /// Identity of the preset fetch `loading_fee_estimate` waits for. An
+    /// estimate carrying any other identity, or arriving once nothing is
+    /// loading, was replaced by Custom, a typed rate or another preset.
+    fee_estimate_request: u64,
     /// Block target (1/6/24) of the preset whose estimate currently fills the
     /// feerate field, so the matching Fast/Normal/Slow button can render as
     /// selected. Cleared when the user types a feerate manually.
@@ -269,6 +274,7 @@ impl DefineSpend {
             warning: None,
             is_first_step,
             loading_fee_estimate: None,
+            fee_estimate_request: 0,
             balance,
             unconfirmed_balance,
             sync_status,
@@ -836,6 +842,13 @@ impl Step for DefineSpend {
                 self.invalidate_preparation();
             }
             Message::View(view::Message::CreateSpend(msg)) => {
+                if let view::CreateSpendMessage::FeeEstimated { request, .. } = &msg {
+                    if self.loading_fee_estimate.is_none()
+                        || *request != self.fee_estimate_request
+                    {
+                        return Task::none();
+                    }
+                }
                 if !matches!(msg, view::CreateSpendMessage::Generate) {
                     self.invalidate_preparation();
                 }
@@ -896,24 +909,11 @@ impl Step for DefineSpend {
                         );
                     }
                     view::CreateSpendMessage::FeerateEdited(s) => {
-                        if let Ok(value) = s.parse::<u64>() {
-                            self.feerate.value = s;
-                            self.feerate.valid = value != 0 && value <= MAX_FEERATE;
-                        } else if s.is_empty() {
-                            self.feerate.value = "".to_string();
-                            self.feerate.valid = true;
-                        } else {
-                            self.feerate.valid = false;
-                        }
-                        self.warning = None;
-                        // A FeerateEdited arriving while a preset fetch is in
-                        // flight is that fetch's result — keep the preset
-                        // highlighted. A manual edit (no fetch pending) has
-                        // `loading_fee_estimate == None`, clearing the selection.
-                        if self.loading_fee_estimate.is_none() {
-                            self.custom_feerate_value = Some(self.feerate.value.clone());
-                        }
-                        self.selected_feerate_target = self.loading_fee_estimate;
+                        // A typed rate: no preset is selected, and a preset
+                        // fetch still in flight is dropped when it lands.
+                        self.set_feerate(s);
+                        self.custom_feerate_value = Some(self.feerate.value.clone());
+                        self.selected_feerate_target = None;
                         self.loading_fee_estimate = None;
                         // A feerate change must re-run coin selection: it
                         // changes the fee and therefore `amount_left_to_select`
@@ -946,9 +946,30 @@ impl Step for DefineSpend {
                         }
                         return Task::none();
                     }
+                    view::CreateSpendMessage::FeeEstimated { feerate, .. } => {
+                        // The pending preset's estimate (stale ones returned
+                        // above): it fills the field and stays selected.
+                        self.selected_feerate_target = self.loading_fee_estimate.take();
+                        match feerate {
+                            Some(fee) => {
+                                self.set_feerate(fee.to_string());
+                                // Falls through to the redraft, as a typed
+                                // rate does.
+                            }
+                            None => {
+                                self.selected_feerate_target = None;
+                                let err: Error = SpendCreationError::FeeEstimationFailed.into();
+                                let err_msg = crate::user_error::report(&err);
+                                self.warning = Some(err);
+                                return Task::done(Message::View(view::Message::ShowError(err_msg)));
+                            }
+                        }
+                    }
                     view::CreateSpendMessage::FetchFeeEstimate(block_target) => {
                         self.custom_feerate = false;
                         self.loading_fee_estimate = Some(block_target);
+                        self.fee_estimate_request = FEE_ESTIMATE_ID.fetch_add(1, AtomicOrdering::Relaxed);
+                        let request = self.fee_estimate_request;
                         return Task::perform(
                             async move {
                                 let fee_estimator = FeeEstimator::new();
@@ -960,15 +981,13 @@ impl Step for DefineSpend {
 
                                 feerate
                             },
-                            |feerate| match feerate {
-                                Ok(fee) => Message::View(view::Message::CreateSpend(
-                                    CreateSpendMessage::FeerateEdited(fee.to_string()),
-                                )),
-                                Err(_) => Message::View(view::Message::CreateSpend(
-                                    CreateSpendMessage::SessionError(
-                                        SpendCreationError::FeeEstimationFailed,
-                                    ),
-                                )),
+                            move |feerate| {
+                                Message::View(view::Message::CreateSpend(
+                                    CreateSpendMessage::FeeEstimated {
+                                        request,
+                                        feerate: feerate.ok(),
+                                    },
+                                ))
                             },
                         );
                     }
@@ -1316,6 +1335,19 @@ impl Step for DefineSpend {
 impl DefineSpend {
     /// Whether the fee field shows: Custom chosen, or no preset filling it
     /// (a rate typed before any preset).
+    fn set_feerate(&mut self, s: String) {
+        if let Ok(value) = s.parse::<u64>() {
+            self.feerate.value = s;
+            self.feerate.valid = value != 0 && value <= MAX_FEERATE;
+        } else if s.is_empty() {
+            self.feerate.value = "".to_string();
+            self.feerate.valid = true;
+        } else {
+            self.feerate.valid = false;
+        }
+        self.warning = None;
+    }
+
     pub(crate) fn custom_feerate_shown(&self) -> bool {
         self.custom_feerate
             || (self.selected_feerate_target.is_none() && self.loading_fee_estimate.is_none())
@@ -2561,9 +2593,13 @@ mod tests {
             view::CreateSpendMessage::FetchFeeEstimate(6),
         ));
         assert_eq!(state.loading_fee_estimate, Some(6));
+        let normal = state.fee_estimate_request;
         drop(send(
             &mut state,
-            view::CreateSpendMessage::FeerateEdited("4".into()),
+            view::CreateSpendMessage::FeeEstimated {
+                request: normal,
+                feerate: Some(4),
+            },
         ));
         assert_eq!(state.selected_feerate_target, Some(6));
         assert_eq!(state.feerate.value, "4");
@@ -2598,19 +2634,93 @@ mod tests {
         assert_eq!(state.feerate.value, "12");
         assert!(state.custom_feerate_shown(), "still Custom after restoring");
 
-        // A preset fetch in flight when Custom is chosen doesn't land on it.
+        // A preset fetch in flight when Custom is chosen doesn't land on it:
+        // its estimate, delivered late, leaves the rate, the stored custom
+        // rate and the selection alone, and a late failure raises nothing.
         drop(send(
             &mut state,
             view::CreateSpendMessage::FetchFeeEstimate(1),
         ));
+        let fast = state.fee_estimate_request;
         drop(send(&mut state, view::CreateSpendMessage::CustomFeerate));
         assert_eq!(state.loading_fee_estimate, None);
-        drop(send(
-            &mut state,
-            view::CreateSpendMessage::FeerateEdited("30".into()),
-        ));
+        assert!(
+            send(
+                &mut state,
+                view::CreateSpendMessage::FeeEstimated {
+                    request: fast,
+                    feerate: Some(30),
+                },
+            )
+            .units()
+                == 0
+        );
+        assert_eq!(state.feerate.value, "12");
+        assert_eq!(state.custom_feerate_value.as_deref(), Some("12"));
         assert_eq!(state.selected_feerate_target, None);
         assert!(state.custom_feerate_shown());
+        drop(send(
+            &mut state,
+            view::CreateSpendMessage::FeeEstimated {
+                request: fast,
+                feerate: None,
+            },
+        ));
+        assert!(state.warning.is_none());
+
+        // Normal, then Fast before Normal's estimate returns: Normal's late
+        // estimate is dropped, and Fast's fills the field as Fast.
+        drop(send(
+            &mut state,
+            view::CreateSpendMessage::FetchFeeEstimate(6),
+        ));
+        let normal = state.fee_estimate_request;
+        drop(send(
+            &mut state,
+            view::CreateSpendMessage::FetchFeeEstimate(1),
+        ));
+        let fast = state.fee_estimate_request;
+        assert_ne!(normal, fast);
+        drop(send(
+            &mut state,
+            view::CreateSpendMessage::FeeEstimated {
+                request: normal,
+                feerate: Some(5),
+            },
+        ));
+        assert_eq!(state.loading_fee_estimate, Some(1));
+        assert_eq!(state.feerate.value, "12");
+        drop(send(
+            &mut state,
+            view::CreateSpendMessage::FeeEstimated {
+                request: fast,
+                feerate: Some(40),
+            },
+        ));
+        assert_eq!(state.selected_feerate_target, Some(1));
+        assert_eq!(state.feerate.value, "40");
+        assert_eq!(state.custom_feerate_value.as_deref(), Some("12"));
+
+        // A typed rate also drops a fetch still in flight.
+        drop(send(
+            &mut state,
+            view::CreateSpendMessage::FetchFeeEstimate(24),
+        ));
+        let slow = state.fee_estimate_request;
+        drop(send(&mut state, view::CreateSpendMessage::CustomFeerate));
+        drop(send(
+            &mut state,
+            view::CreateSpendMessage::FeerateEdited("9".into()),
+        ));
+        drop(send(
+            &mut state,
+            view::CreateSpendMessage::FeeEstimated {
+                request: slow,
+                feerate: Some(2),
+            },
+        ));
+        assert_eq!(state.feerate.value, "9");
+        assert_eq!(state.selected_feerate_target, None);
     }
 
     #[tokio::test]
