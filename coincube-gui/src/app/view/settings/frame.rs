@@ -1,11 +1,9 @@
-//! Route-derived Settings navigation: the pinned head, then the scope chips
-//! and section tabs, which stay inside page content until plan W5.
+//! Route-derived Settings navigation, all in the pinned head (`H-Settings`):
+//! the scope switch among the head's actions and the section tabs on its
+//! rule.
 
-use coincube_ui::component::tenshu::{choice_chips, segment, tabs, PageHead};
+use coincube_ui::component::tenshu::{segment, segmented, tabs, PageHead, SegmentSize};
 use coincube_ui::icon;
-use coincube_ui::widget::{Column, Element};
-use iced::widget::Space;
-use iced::Length;
 
 use crate::app::cache::Cache;
 use crate::app::features;
@@ -14,12 +12,50 @@ use crate::app::menu::{
     VaultSubMenu,
 };
 use crate::app::view::message::Message;
+use crate::app::view::nav::shell::wallet_label;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RouteScope {
     Cube,
     Vault,
     Spark,
+}
+
+impl RouteScope {
+    fn id(self) -> &'static str {
+        match self {
+            RouteScope::Cube => "tenshu.settings.route.scope.cube",
+            RouteScope::Vault => "tenshu.settings.route.scope.vault",
+            RouteScope::Spark => "tenshu.settings.route.scope.spark",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            RouteScope::Cube => "Cube",
+            RouteScope::Vault => "Vault",
+            RouteScope::Spark => "Spark",
+        }
+    }
+
+    fn icon(self) -> coincube_ui::widget::Text<'static> {
+        match self {
+            RouteScope::Cube => icon::cube_icon(),
+            RouteScope::Vault => icon::vault_icon(),
+            RouteScope::Spark => icon::spark_icon(),
+        }
+    }
+
+    /// The scope's first tab.
+    fn landing(self) -> Menu {
+        match self {
+            RouteScope::Cube => Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::General)),
+            RouteScope::Vault => Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::Wallet))),
+            RouteScope::Spark => {
+                Menu::Spark(SparkSubMenu::Settings(Some(SparkSettingsOption::General)))
+            }
+        }
+    }
 }
 
 fn route_scope(menu: &Menu) -> Option<RouteScope> {
@@ -31,56 +67,48 @@ fn route_scope(menu: &Menu) -> Option<RouteScope> {
     }
 }
 
+/// The scopes this Cube has, in the switch's order.
+fn scopes(cache: &Cache) -> Vec<RouteScope> {
+    let mut scopes = vec![RouteScope::Cube];
+    if cache.has_vault || cache.has_imported_bitcoin {
+        scopes.push(RouteScope::Vault);
+    }
+    if features::spark(cache.chain()).is_available() {
+        scopes.push(RouteScope::Spark);
+    }
+    scopes
+}
+
 #[derive(Clone)]
 struct RouteChoice {
     id: &'static str,
     label: String,
-    intent: Message,
+    route: Menu,
     selected: bool,
     enabled: bool,
 }
 
-fn route_choices(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
-    let scope = match route_scope(menu) {
-        Some(scope) => scope,
-        None => return Vec::new(),
-    };
-    let mut choices = vec![RouteChoice {
-        id: "tenshu.settings.route.scope.cube",
-        label: if cache.cube_name.is_empty() {
-            "Cube".to_owned()
-        } else {
-            format!("Cube · {}", cache.cube_name)
-        },
-        intent: Message::Menu(Menu::Cube(CubeSubMenu::Settings(
-            CubeSettingsOption::General,
-        ))),
-        selected: scope == RouteScope::Cube,
-        enabled: true,
-    }];
-    if cache.has_vault || cache.has_imported_bitcoin {
-        choices.push(RouteChoice {
-            id: "tenshu.settings.route.scope.vault",
-            label: "Vault".to_owned(),
-            intent: Message::Menu(Menu::Vault(VaultSubMenu::Settings(Some(
-                SettingsOption::Wallet,
-            )))),
-            selected: scope == RouteScope::Vault,
-            enabled: true,
-        });
+/// Where choosing `target` in the scope switch goes from `menu`: the tab of
+/// the same name when `target` has one (Data & exports is in Cube and Vault,
+/// Connections in Vault and Spark), else `target`'s first tab. Choosing the
+/// current scope stays on the current tab.
+fn scope_route(menu: &Menu, target: RouteScope, cache: &Cache) -> Menu {
+    if route_scope(menu) == Some(target) {
+        return menu.clone();
     }
-    if features::spark(cache.chain()).is_available() {
-        choices.push(RouteChoice {
-            id: "tenshu.settings.route.scope.spark",
-            label: "Spark".to_owned(),
-            intent: Message::Menu(Menu::Spark(SparkSubMenu::Settings(Some(
-                SparkSettingsOption::General,
-            )))),
-            selected: scope == RouteScope::Spark,
-            enabled: true,
-        });
-    }
-    choices
+    let current = section_routes(menu, cache)
+        .into_iter()
+        .find(|tab| tab.selected)
+        .map(|tab| tab.label);
+    let landing = target.landing();
+    current
+        .and_then(|label| {
+            section_routes(&landing, cache)
+                .into_iter()
+                .find(|tab| tab.label == label && tab.enabled)
+        })
+        .map(|tab| tab.route)
+        .unwrap_or(landing)
 }
 
 fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
@@ -121,7 +149,7 @@ fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
                         _ => "tenshu.settings.route.cube.members",
                     },
                     label: label.to_owned(),
-                    intent: Message::Menu(Menu::Cube(CubeSubMenu::Settings(section))),
+                    route: Menu::Cube(CubeSubMenu::Settings(section)),
                     // The avatar flow belongs to Cube identity on Display.
                     selected: matches!(menu, Menu::Cube(CubeSubMenu::Settings(current))
                         if *current == section
@@ -156,7 +184,7 @@ fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
                 _ => "tenshu.settings.route.vault.data",
             },
             label: label.to_owned(),
-            intent: Message::Menu(Menu::Vault(VaultSubMenu::Settings(Some(section)))),
+            route: Menu::Vault(VaultSubMenu::Settings(Some(section))),
             selected: matches!(menu, Menu::Vault(VaultSubMenu::Settings(Some(current))) if *current == section)
                 || (section == SettingsOption::Wallet
                     && matches!(menu, Menu::Vault(VaultSubMenu::Settings(None)))),
@@ -164,26 +192,30 @@ fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
         })
         .collect(),
         Some(RouteScope::Spark) => [
-            (SparkSettingsOption::General, "Spark", "general"),
-            (SparkSettingsOption::Connections, "Connections", "connections"),
+            (
+                SparkSettingsOption::General,
+                "Balances & conversion",
+                "tenshu.settings.route.spark.balances",
+            ),
+            (
+                SparkSettingsOption::LightningAddress,
+                "Lightning address",
+                "tenshu.settings.route.spark.lightning-address",
+            ),
+            (
+                SparkSettingsOption::Connections,
+                "Connections",
+                "tenshu.settings.route.spark.connections",
+            ),
         ]
         .iter()
         .copied()
         .map(|(section, label, id)| RouteChoice {
-            id: if id == "general" {
-                "tenshu.settings.route.spark.general"
-            } else {
-                "tenshu.settings.route.spark.connections"
-            },
+            id,
             label: label.to_owned(),
-            intent: Message::Menu(Menu::Spark(SparkSubMenu::Settings(Some(section)))),
-            // Lightning Address lives on the Spark tab.
+            route: Menu::Spark(SparkSubMenu::Settings(Some(section))),
             selected: match menu {
-                Menu::Spark(SparkSubMenu::Settings(Some(current))) => {
-                    *current == section
-                        || (section == SparkSettingsOption::General
-                            && *current == SparkSettingsOption::LightningAddress)
-                }
+                Menu::Spark(SparkSubMenu::Settings(Some(current))) => *current == section,
                 Menu::Spark(SparkSubMenu::Settings(None)) => {
                     section == SparkSettingsOption::General
                 }
@@ -196,89 +228,84 @@ fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
     }
 }
 
-fn scope_icon(scope: &str) -> coincube_ui::widget::Text<'static> {
-    match scope {
-        "tenshu.settings.route.scope.vault" => icon::vault_icon(),
-        "tenshu.settings.route.scope.spark" => icon::spark_icon(),
-        _ => icon::cube_icon(),
-    }
+/// The line under the title (`.idl`): the scope, the wallet's nickname when
+/// it has one, the Cube's name and the network, as in "Spark · Daily
+/// spending · Everyday · Bitcoin mainnet". Names get the side panel's
+/// one-line cut, because the head doesn't scroll.
+fn head_line(scope: RouteScope, cache: &Cache) -> String {
+    let wallet = match scope {
+        RouteScope::Cube => RouteScope::Cube.label().to_owned(),
+        RouteScope::Vault => wallet_label("Vault", cache.wallet_names.vault.as_deref()),
+        RouteScope::Spark => wallet_label("Spark", cache.wallet_names.spark.as_deref()),
+    };
+    let name = if cache.cube_name.is_empty() {
+        wallet
+    } else {
+        format!("{wallet} · {}", crate::app::view::cube_display_name(cache))
+    };
+    crate::app::view::network_line(cache, &name)
 }
 
-/// The selected scope's name for the line under the title.
-fn scope_name(scope: RouteScope, scopes: &[RouteChoice]) -> String {
-    scopes
-        .iter()
-        .find(|choice| choice.selected)
-        .map(|choice| choice.label.clone())
-        .unwrap_or_else(|| match scope {
-            RouteScope::Cube => "Cube".to_owned(),
-            RouteScope::Vault => "Vault".to_owned(),
-            RouteScope::Spark => "Spark".to_owned(),
-        })
-}
-
-/// The Settings head (`.ph`, `.idl`): "Settings", then the scope's name and
-/// network. `None` off the Settings routes.
+/// The Settings head: "Settings" and its scope line, the scope switch on the
+/// right, and the scope's section tabs on the rule. `None` off the Settings
+/// routes. The tabs keep one row at the 1024px minimum window, so there is
+/// no narrow-window substitute.
 pub fn page_head(menu: &Menu, cache: &Cache) -> Option<PageHead<'static, Message>> {
     let scope = route_scope(menu)?;
-    // The Cube's name cut as the side panel cuts it: the head doesn't scroll.
-    let name = match scope {
-        RouteScope::Cube if !cache.cube_name.is_empty() => {
-            format!("Cube · {}", crate::app::view::cube_display_name(cache))
-        }
-        _ => scope_name(scope, &route_choices(menu, cache)),
-    };
-    Some(
-        coincube_ui::component::tenshu::page_head("Settings", Message::FocusAction).context(
-            crate::app::view::cube_coin(cache),
-            crate::app::view::network_line(cache, &name),
-        ),
-    )
-}
+    let mut head = coincube_ui::component::tenshu::page_head("Settings", Message::FocusAction)
+        .context(crate::app::view::cube_coin(cache), head_line(scope, cache));
 
-/// The scope chips and the section tabs under the Settings head (`.scopes`,
-/// `.tabs`). The tabs keep one row at the 1024px minimum window, so there is
-/// no narrow-window substitute.
-pub fn in_content_navigation(menu: &Menu, cache: &Cache) -> Option<Element<'static, Message>> {
-    route_scope(menu)?;
-    let scopes = route_choices(menu, cache);
+    // A switch with one scope isn't a choice, so a Cube with neither a Vault
+    // nor Spark shows none (master plan: segmented controls only for real
+    // choices).
+    let scopes = scopes(cache);
+    if scopes.len() > 1 {
+        let routes: Vec<Menu> = scopes
+            .iter()
+            .map(|target| scope_route(menu, *target, cache))
+            .collect();
+        head = head.action(
+            segmented(
+                scopes.iter().enumerate().map(|(index, target)| {
+                    segment(target.id(), index, target.label()).icon(target.icon())
+                }),
+                scopes.iter().position(|target| *target == scope),
+                Message::FocusAction,
+            )
+            .size(SegmentSize::Compact)
+            .plain()
+            .on_select(move |index| Message::Menu(routes[index].clone())),
+        );
+    }
+
     let sections = section_routes(menu, cache);
-
-    let scope_intents: Vec<Message> = scopes.iter().map(|c| c.intent.clone()).collect();
-    let chips = choice_chips(
-        scopes.iter().enumerate().map(|(index, choice)| {
-            segment(choice.id, index, choice.label.clone())
-                .icon(scope_icon(choice.id))
-                .enabled(choice.enabled)
-        }),
-        scopes.iter().position(|choice| choice.selected),
-        Message::FocusAction,
-    )
-    .on_select(move |index| scope_intents[index].clone());
-
-    let section_intents: Vec<Message> = sections.iter().map(|c| c.intent.clone()).collect();
-    let tab_row = tabs(
-        sections.iter().enumerate().map(|(index, choice)| {
-            segment(choice.id, index, choice.label.clone()).enabled(choice.enabled)
-        }),
-        sections.iter().position(|choice| choice.selected),
-        Message::FocusAction,
-    )
-    .on_select(move |index| section_intents[index].clone());
-
+    let section_routes: Vec<Menu> = sections.iter().map(|tab| tab.route.clone()).collect();
     Some(
-        Column::new()
-            .width(Length::Fill)
-            .push(chips)
-            .push(Space::new().height(Length::Fixed(16.0)))
-            .push(tab_row)
-            .into(),
+        head.rule(
+            tabs(
+                sections.iter().enumerate().map(|(index, tab)| {
+                    segment(tab.id, index, tab.label.clone()).enabled(tab.enabled)
+                }),
+                sections.iter().position(|tab| tab.selected),
+                Message::FocusAction,
+            )
+            .on_select(move |index| Message::Menu(section_routes[index].clone())),
+        ),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Bitcoin mainnet Cube with a Vault, so all three scopes show.
+    fn spark_cache() -> Cache {
+        Cache {
+            has_vault: true,
+            fiat_chain: crate::chain::ChainId::Bitcoin,
+            ..Cache::default()
+        }
+    }
 
     #[test]
     fn imported_bitcoin_keeps_vault_scope_and_disables_phone_pairing() {
@@ -288,9 +315,7 @@ mod tests {
             ..Cache::default()
         };
         let menu = Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::Wallet)));
-        assert!(route_choices(&menu, &cache)
-            .iter()
-            .any(|choice| choice.label == "Vault" && choice.enabled));
+        assert!(scopes(&cache).contains(&RouteScope::Vault));
         assert!(section_routes(&menu, &cache)
             .iter()
             .any(|choice| choice.label.contains("Pair with Keychain") && !choice.enabled));
@@ -332,12 +357,7 @@ mod tests {
                 && choice.label == "AI access"
                 && choice.enabled
                 && !choice.selected
-                && matches!(
-                    choice.intent,
-                    Message::Menu(Menu::Cube(CubeSubMenu::Settings(
-                        CubeSettingsOption::AiAccess
-                    )))
-                )
+                && choice.route == Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::AiAccess))
         }));
 
         let ai_menu = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::AiAccess));
@@ -354,12 +374,8 @@ mod tests {
             choice.label == "Data & exports"
                 && choice.selected
                 && choice.enabled
-                && matches!(
-                    choice.intent,
-                    Message::Menu(Menu::Cube(CubeSubMenu::Settings(
-                        CubeSettingsOption::DataExports
-                    )))
-                )
+                && choice.route
+                    == Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::DataExports))
         }));
         let backup = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Recovery));
         assert!(section_routes(&backup, &Cache::default())
@@ -375,18 +391,14 @@ mod tests {
             (CubeSettingsOption::Stats, "Download stats"),
         ] {
             let menu = Menu::Cube(CubeSubMenu::Settings(current));
-            let scopes = route_choices(&menu, &cache);
-            assert!(!scopes.iter().any(|choice| choice.label == "This device"));
-            assert!(scopes
-                .iter()
-                .any(|choice| choice.label == "Cube" && choice.selected));
+            assert_eq!(route_scope(&menu), Some(RouteScope::Cube));
 
             let sections = section_routes(&menu, &cache);
             assert!(sections.iter().any(|choice| {
                 choice.label == label
                     && choice.selected
                     && choice.enabled
-                    && matches!(choice.intent, Message::Menu(Menu::Cube(CubeSubMenu::Settings(route))) if route == current)
+                    && choice.route == Menu::Cube(CubeSubMenu::Settings(current))
             }));
             assert!(sections
                 .iter()
@@ -394,19 +406,193 @@ mod tests {
         }
     }
 
+    /// One tab set per scope, in head order.
     #[test]
-    fn scope_uses_the_open_cubes_name_without_adding_device_scope() {
+    fn each_scope_has_its_tab_set() {
+        let cache = spark_cache();
+        let labels = |menu: Menu| -> Vec<String> {
+            section_routes(&menu, &cache)
+                .into_iter()
+                .map(|tab| tab.label)
+                .collect()
+        };
+        let mut cube = vec![
+            "Display & appearance",
+            "Backup & protection",
+            "Payment checks",
+            "AI access",
+            "Data & exports",
+        ];
+        if crate::feature_flags::CUBE_MEMBERS_UI_ENABLED {
+            cube.push("Members");
+        }
+        assert_eq!(labels(RouteScope::Cube.landing()), cube);
+        assert_eq!(
+            labels(RouteScope::Vault.landing()),
+            [
+                "Wallet & signers",
+                "Node",
+                "Pair with Keychain",
+                "Connections",
+                "Data & exports"
+            ]
+        );
+        assert_eq!(
+            labels(RouteScope::Spark.landing()),
+            ["Balances & conversion", "Lightning address", "Connections"]
+        );
+    }
+
+    #[test]
+    fn lightning_address_is_its_own_spark_tab() {
+        let cache = spark_cache();
+        for (menu, selected) in [
+            (
+                Menu::Spark(SparkSubMenu::Settings(None)),
+                "Balances & conversion",
+            ),
+            (
+                Menu::Spark(SparkSubMenu::Settings(Some(SparkSettingsOption::General))),
+                "Balances & conversion",
+            ),
+            (
+                Menu::Spark(SparkSubMenu::Settings(Some(
+                    SparkSettingsOption::LightningAddress,
+                ))),
+                "Lightning address",
+            ),
+            (
+                Menu::Spark(SparkSubMenu::Settings(Some(
+                    SparkSettingsOption::Connections,
+                ))),
+                "Connections",
+            ),
+        ] {
+            let current: Vec<String> = section_routes(&menu, &cache)
+                .into_iter()
+                .filter(|tab| tab.selected)
+                .map(|tab| tab.label)
+                .collect();
+            assert_eq!(current, [selected], "{menu:?}");
+        }
+    }
+
+    /// Switching scope keeps the tab when the other scope has it, else opens
+    /// that scope's first tab.
+    #[test]
+    fn switching_scope_keeps_a_shared_tab_else_opens_the_first() {
+        let cache = spark_cache();
+        let vault_connections =
+            Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::Connections)));
+        let spark_connections = Menu::Spark(SparkSubMenu::Settings(Some(
+            SparkSettingsOption::Connections,
+        )));
+        let cube_data = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::DataExports));
+        let vault_data = Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::ImportExport)));
+
+        assert_eq!(
+            scope_route(&vault_connections, RouteScope::Spark, &cache),
+            spark_connections
+        );
+        assert_eq!(
+            scope_route(&spark_connections, RouteScope::Vault, &cache),
+            vault_connections
+        );
+        assert_eq!(
+            scope_route(&cube_data, RouteScope::Vault, &cache),
+            vault_data
+        );
+        assert_eq!(
+            scope_route(&vault_data, RouteScope::Cube, &cache),
+            cube_data
+        );
+        // No Connections tab in Cube, and no Data & exports in Spark.
+        assert_eq!(
+            scope_route(&spark_connections, RouteScope::Cube, &cache),
+            RouteScope::Cube.landing()
+        );
+        assert_eq!(
+            scope_route(&vault_data, RouteScope::Spark, &cache),
+            RouteScope::Spark.landing()
+        );
+        // The bare Spark route is Balances & conversion, which Vault lacks.
+        assert_eq!(
+            scope_route(
+                &Menu::Spark(SparkSubMenu::Settings(None)),
+                RouteScope::Vault,
+                &cache
+            ),
+            RouteScope::Vault.landing()
+        );
+        // The current scope stays where it is.
+        assert_eq!(
+            scope_route(&vault_data, RouteScope::Vault, &cache),
+            vault_data
+        );
+    }
+
+    /// An imported-bitcoin Vault has no Data & exports, so Cube's opens the
+    /// Vault's first tab.
+    #[test]
+    fn switching_to_a_scope_without_the_tab_opens_its_first() {
         let cache = Cache {
-            cube_name: "Everyday".to_owned(),
+            has_vault: false,
+            has_imported_bitcoin: true,
             ..Cache::default()
         };
-        let choices = route_choices(
-            &Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::General)),
-            &cache,
+        let cube_data = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::DataExports));
+        assert_eq!(
+            scope_route(&cube_data, RouteScope::Vault, &cache),
+            RouteScope::Vault.landing()
         );
-        assert!(choices
-            .iter()
-            .any(|choice| choice.label == "Cube · Everyday" && choice.selected));
-        assert!(!choices.iter().any(|choice| choice.label == "This device"));
+    }
+
+    #[test]
+    fn head_line_names_the_scope_nickname_cube_and_network() {
+        let mut cache = Cache {
+            cube_name: "Everyday".to_owned(),
+            ..spark_cache()
+        };
+        assert_eq!(
+            head_line(RouteScope::Cube, &cache),
+            "Cube · Everyday · Bitcoin mainnet"
+        );
+        assert_eq!(
+            head_line(RouteScope::Spark, &cache),
+            "Spark · Everyday · Bitcoin mainnet"
+        );
+        cache.wallet_names.spark = Some("Daily spending".to_owned());
+        cache.wallet_names.vault = Some("Family savings".to_owned());
+        assert_eq!(
+            head_line(RouteScope::Spark, &cache),
+            "Spark · Daily spending · Everyday · Bitcoin mainnet"
+        );
+        assert_eq!(
+            head_line(RouteScope::Vault, &cache),
+            "Vault · Family savings · Everyday · Bitcoin mainnet"
+        );
+        // A Cube without a name leaves it out rather than repeating "Cube".
+        cache.cube_name.clear();
+        assert_eq!(
+            head_line(RouteScope::Cube, &cache),
+            "Cube · Bitcoin mainnet"
+        );
+        assert_eq!(
+            head_line(RouteScope::Vault, &cache),
+            "Vault · Family savings · Bitcoin mainnet"
+        );
+    }
+
+    #[test]
+    fn a_cube_with_one_scope_has_no_switch() {
+        let cache = Cache {
+            fiat_chain: crate::chain::ChainId::Signet,
+            ..Cache::default()
+        };
+        assert_eq!(scopes(&cache), [RouteScope::Cube]);
+        assert_eq!(
+            scopes(&spark_cache()),
+            [RouteScope::Cube, RouteScope::Vault, RouteScope::Spark]
+        );
     }
 }

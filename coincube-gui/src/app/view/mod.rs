@@ -369,9 +369,32 @@ fn body_top(headed: bool) -> f32 {
     }
 }
 
+/// A full-page replacement for the route's own page: the received-payment
+/// celebration, or the placeholder for a feature this network lacks. It has
+/// no head, and takes none of the route's chrome either (Settings' scope
+/// switch and tabs, the Vault's Tools head and tabs): those belong to the
+/// page it replaces.
+pub fn replacement_page<'a, T: Into<Element<'a, Message>>>(
+    menu: &'a Menu,
+    cache: &'a Cache,
+    content: T,
+) -> Element<'a, Message> {
+    dashboard_layout(
+        menu,
+        cache,
+        None,
+        false,
+        content,
+        &cache.cube_name,
+        cache.avatar_handle.as_ref(),
+        cache.lightning_address.as_deref(),
+        PageWidth::Reading,
+    )
+}
+
 /// `head` is the page's own; without one, Settings and the Vault's Tools
-/// take theirs from the route. Their scope chips, tabs and tool tabs stay in
-/// the body for now (plan W5, W6).
+/// take theirs from the route. Settings carries its scope switch and tabs in
+/// the head; the Tools tabs stay in the body for now (plan W6).
 #[allow(clippy::too_many_arguments)]
 fn dashboard_with_info_layout<'a, T: Into<Element<'a, Message>>>(
     menu: &'a Menu,
@@ -383,14 +406,47 @@ fn dashboard_with_info_layout<'a, T: Into<Element<'a, Message>>>(
     lightning_address: Option<&'a str>,
     width: PageWidth,
 ) -> Element<'a, Message> {
-    let head = head
-        .map(|head| vault::tools::with_back(menu, head))
-        .or_else(|| settings::frame::page_head(menu, cache))
-        .or_else(|| vault::tools::page_head(menu, cache));
+    dashboard_layout(
+        menu,
+        cache,
+        head,
+        true,
+        content,
+        cube_name,
+        avatar_handle,
+        lightning_address,
+        width,
+    )
+}
+
+/// A Cube page under `head`, and with the route's chrome when `route_chrome`
+/// (see [`dashboard_with_info_layout`] and [`replacement_page`]).
+#[allow(clippy::too_many_arguments)]
+fn dashboard_layout<'a, T: Into<Element<'a, Message>>>(
+    menu: &'a Menu,
+    cache: &'a Cache,
+    head: Option<PageHead<'a, Message>>,
+    route_chrome: bool,
+    content: T,
+    cube_name: &'a str,
+    avatar_handle: Option<&'a iced::widget::image::Handle>,
+    lightning_address: Option<&'a str>,
+    width: PageWidth,
+) -> Element<'a, Message> {
+    let head = if route_chrome {
+        head.map(|head| vault::tools::with_back(menu, head))
+            .or_else(|| settings::frame::page_head(menu, cache))
+            .or_else(|| vault::tools::page_head(menu, cache))
+    } else {
+        head
+    };
     let body = page(
         Column::new()
-            .push_maybe(settings::frame::in_content_navigation(menu, cache))
-            .push_maybe(vault::tools::in_content_navigation(menu, cache))
+            .push_maybe(
+                route_chrome
+                    .then(|| vault::tools::in_content_navigation(menu, cache))
+                    .flatten(),
+            )
             .push(content.into())
             .width(Length::Fill),
         width,
@@ -440,10 +496,7 @@ pub fn dashboard_with_detail<'a>(
                 Container::new(
                     scrollable(
                         page(
-                            Column::new()
-                                .push_maybe(settings::frame::in_content_navigation(menu, cache))
-                                .push(content())
-                                .width(Length::Fill),
+                            Column::new().push(content()).width(Length::Fill),
                             PageWidth::Reading,
                         )
                         .vertical(BODY_TOP, PAGE_BOTTOM),

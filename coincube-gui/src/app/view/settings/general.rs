@@ -461,7 +461,8 @@ fn recovery_section<'a>(
     if let Some(ra) = recovery_alerts {
         path_rows.push(recovery_alerts_row(ra, cache.has_vault));
         if ra.managing && cache.has_vault && ra.entitled && !ra.no_vault && ra.status.is_some() {
-            alerts_controls = Some(recovery_alerts_card(ra));
+            let spark = crate::app::features::spark(cache.chain()).is_available();
+            alerts_controls = Some(recovery_alerts_card(ra, spark));
         }
     }
     let mut path = Column::new()
@@ -595,7 +596,8 @@ fn unregistered_cube_action(cache: &cache::Cache) -> Option<(&'static str, Messa
 /// the **What keyholders can recover** escrow selector (Estate-gated). The
 /// keyholder list lives under the alerts toggle (it's who alerts notify). See
 /// `PLAN-recovery-alerts-cleanup.md` PR 2.
-fn recovery_alerts_card<'a>(ra: &'a RecoveryAlerts) -> Element<'a, Message> {
+/// `spark`: whether this Cube's network has Spark, for the Full Cube copy.
+fn recovery_alerts_card<'a>(ra: &'a RecoveryAlerts, spark: bool) -> Element<'a, Message> {
     let alerts_on = ra.alerts_on();
     let busy = ra.submitting;
     let mut body = Column::new().spacing(0).width(Length::Fill);
@@ -719,7 +721,7 @@ fn recovery_alerts_card<'a>(ra: &'a RecoveryAlerts) -> Element<'a, Message> {
     // ── Control 2: the escrow selector (what keyholders can recover) ───────
     body = body.push(
         page::row("What keyholders can recover")
-            .line(escrow_selector(ra, alerts_on, busy))
+            .line(escrow_selector(ra, alerts_on, busy, spark))
             .top(),
     );
 
@@ -744,6 +746,7 @@ fn escrow_selector<'a>(
     ra: &'a RecoveryAlerts,
     alerts_on: bool,
     busy: bool,
+    spark: bool,
 ) -> Element<'a, Message> {
     // Locked affordance when the account can't escrow a recovery kit.
     if !ra.escrow_entitled {
@@ -807,7 +810,7 @@ fn escrow_selector<'a>(
         .spacing(6)
         .push(Space::new().height(Length::Fixed(4.0)))
         .push(selector)
-        .push(Container::new(text(escrow_copy(display_tier)).size(13)).max_width(560));
+        .push(Container::new(text(escrow_copy(display_tier, spark)).size(13)).max_width(560));
 
     // Auto-enable disclosure: picking a kit while alerts are off turns them on.
     if !alerts_on {
@@ -875,8 +878,9 @@ fn escrow_selector<'a>(
 /// Plain-language trade-off for each escrow tier (no euphemisms — the
 /// self-custody trust model demands it; see the ECIES decision record).
 /// Everything is encrypted to the keyholders' own keys: COINCUBE can read
-/// neither the descriptor nor the seed.
-fn escrow_copy(tier: Option<EscrowTier>) -> &'static str {
+/// neither the descriptor nor the seed. `spark`: whether this Cube's network
+/// has Spark, so Full Cube names only the wallets a restore can bring back.
+fn escrow_copy(tier: Option<EscrowTier>, spark: bool) -> &'static str {
     match tier {
         // Escrow is on, but an older API doesn't report which tier — state that
         // honestly rather than assert (and possibly mis-state) descriptor-only
@@ -896,9 +900,15 @@ fn escrow_copy(tier: Option<EscrowTier>) -> &'static str {
              window opens, a keyholder recovers the watch-only Vault and sweeps the funds. The \
              seed is never escrowed."
         }
-        Some(EscrowTier::FullCube) => {
+        Some(EscrowTier::FullCube) if spark => {
             "Full Cube: seals this Cube's seed AND descriptor to each keyholder's own key. A \
              keyholder can restore the entire Cube — Spark and Vault. COINCUBE can never \
+             read either; only the keyholder's key can. You'll re-confirm your PIN to include the \
+             seed."
+        }
+        Some(EscrowTier::FullCube) => {
+            "Full Cube: seals this Cube's seed AND descriptor to each keyholder's own key. A \
+             keyholder can restore the entire Cube, including its Vault. COINCUBE can never \
              read either; only the keyholder's key can. You'll re-confirm your PIN to include the \
              seed."
         }
@@ -2650,15 +2660,29 @@ mod tests {
     /// copy when Liquid reopens.
     #[test]
     fn escrow_copy_names_no_liquid_wallet() {
-        assert!(escrow_copy(Some(EscrowTier::FullCube))
+        assert!(escrow_copy(Some(EscrowTier::FullCube), true)
             .contains("restore the entire Cube — Spark and Vault."));
-        for tier in [
-            None,
-            Some(EscrowTier::Off),
-            Some(EscrowTier::VaultOnly),
-            Some(EscrowTier::FullCube),
-        ] {
-            assert!(!escrow_copy(tier).contains("Liquid"), "{:?}", tier);
+        for spark in [true, false] {
+            for tier in [
+                None,
+                Some(EscrowTier::Off),
+                Some(EscrowTier::VaultOnly),
+                Some(EscrowTier::FullCube),
+            ] {
+                assert!(!escrow_copy(tier, spark).contains("Liquid"), "{:?}", tier);
+            }
+        }
+    }
+
+    /// Spark exists only where `features::spark` says so (Bitcoin and
+    /// Regtest), so Full Cube elsewhere promises only the Vault.
+    #[test]
+    fn full_cube_escrow_copy_names_spark_only_where_spark_exists() {
+        let elsewhere = escrow_copy(Some(EscrowTier::FullCube), false);
+        assert!(!elsewhere.contains("Spark"), "{}", elsewhere);
+        assert!(elsewhere.contains("restore the entire Cube, including its Vault."));
+        for tier in [None, Some(EscrowTier::Off), Some(EscrowTier::VaultOnly)] {
+            assert_eq!(escrow_copy(tier, true), escrow_copy(tier, false));
         }
     }
 }

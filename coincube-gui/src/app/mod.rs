@@ -972,6 +972,16 @@ pub struct App {
     /// (on the first Spark `Synced`), so later sync ticks don't repeat it.
     /// See [`reconcile_stable_balance`] for what the reconcile decides.
     spark_stable_balance_reconciled: bool,
+    /// The Spark nickname being written now (`Some(None)`: back to plain
+    /// "Spark"). One write runs at a time, so a later request can't land
+    /// before an earlier one.
+    spark_nickname_in_flight: Option<Option<String>>,
+    /// The latest nickname requested while a write was running, written once
+    /// that write lands.
+    spark_nickname_queued: Option<Option<String>>,
+    /// Closes when the running nickname write ends (or its task is dropped),
+    /// so a write the tab starts as it replaces this App can follow it.
+    spark_nickname_running: Option<tokio::sync::watch::Receiver<()>>,
     received_celebration_amount: String,
     received_celebration_context: String,
     received_celebration_quote: coincube_ui::component::quote_display::Quote,
@@ -3580,6 +3590,9 @@ impl App {
             show_received_celebration: false,
             show_recovery_alerts_prompt: false,
             spark_stable_balance_reconciled: false,
+            spark_nickname_in_flight: None,
+            spark_nickname_queued: None,
+            spark_nickname_running: None,
             received_celebration_amount: String::new(),
             received_celebration_context: "transaction-received".to_string(),
             received_celebration_quote: coincube_ui::component::quote_display::random_quote(
@@ -3786,6 +3799,9 @@ impl App {
                 show_received_celebration: false,
                 show_recovery_alerts_prompt: false,
                 spark_stable_balance_reconciled: false,
+                spark_nickname_in_flight: None,
+                spark_nickname_queued: None,
+                spark_nickname_running: None,
                 received_celebration_amount: String::new(),
                 received_celebration_context: "transaction-received".to_string(),
                 received_celebration_quote: coincube_ui::component::quote_display::random_quote(
@@ -8694,7 +8710,8 @@ impl App {
                     .unwrap_or_else(Task::none);
                 self.cache.cube_switcher_open = false;
                 self.cache.cube_lock_confirmation = false;
-                return Task::batch([close_task, self.set_current_panel(menu)]);
+                let nickname_task = self.save_pending_spark_nickname(&menu);
+                return Task::batch([close_task, nickname_task, self.set_current_panel(menu)]);
             }
             // Activity's own results and intents reach it from any route: the
             // Vault and Spark pages show its rows and its detail pane.
@@ -9407,6 +9424,77 @@ impl App {
                         view::SparkSettingsMessage::StableBalanceToggled(enabled),
                     )),
                 );
+            }
+            // Spark's nickname, from Settings › Spark › Balances & conversion.
+            // It lives on this device's Cube settings (Spark has no wallet
+            // settings of its own) and isn't sent to Connect.
+            Message::View(view::Message::SparkSettings(
+                view::SparkSettingsMessage::NicknameSubmitted(input),
+            )) => {
+                if !state::spark::settings::nickname_fits(&input) {
+                    return Task::none();
+                }
+                let nickname = state::spark::settings::saved_nickname(&input);
+                // A write is running: this request waits for it, so the
+                // latest request is the one that lands, even one going back
+                // to the saved name.
+                if self.spark_nickname_in_flight.is_some() {
+                    self.spark_nickname_queued = Some(nickname);
+                    return Task::none();
+                }
+                if nickname == self.cube_settings.spark_alias {
+                    return self.panels.spark_settings.update(
+                        self.daemon.clone(),
+                        &self.cache,
+                        Message::View(view::Message::SparkSettings(
+                            view::SparkSettingsMessage::NicknameSaved(nickname),
+                        )),
+                    );
+                }
+                return self.start_spark_nickname_write(nickname);
+            }
+            // Another Cube's save (the tab moved on while it was written)
+            // changes nothing here: its file write already happened.
+            Message::SparkNicknameSaved { cube_id, .. } if cube_id != self.cube_settings.id => {}
+            Message::SparkNicknameSaved { result, .. } => {
+                self.spark_nickname_in_flight = None;
+                self.spark_nickname_running = None;
+                let mut tasks = Vec::new();
+                match result {
+                    Ok(nickname) => {
+                        // The side panel's name follows:
+                        // `sync_panel_derived_cache_fields` rebuilds
+                        // `cache.wallet_names` from the Cube settings after
+                        // this message, before the next view.
+                        self.cube_settings.spark_alias = nickname.clone();
+                        tasks.push(self.panels.spark_settings.update(
+                            self.daemon.clone(),
+                            &self.cache,
+                            Message::View(view::Message::SparkSettings(
+                                view::SparkSettingsMessage::NicknameSaved(nickname),
+                            )),
+                        ));
+                    }
+                    Err(e) => tasks.push(Task::done(Message::View(view::Message::ShowError(
+                        format!("Couldn't save the Spark nickname: {}", e),
+                    )))),
+                }
+                // A request made while this write ran is written now, after
+                // it, unless it is what is saved.
+                if let Some(next) = self.spark_nickname_queued.take() {
+                    if next == self.cube_settings.spark_alias {
+                        tasks.push(self.panels.spark_settings.update(
+                            self.daemon.clone(),
+                            &self.cache,
+                            Message::View(view::Message::SparkSettings(
+                                view::SparkSettingsMessage::NicknameSaved(next),
+                            )),
+                        ));
+                    } else {
+                        tasks.push(self.start_spark_nickname_write(next));
+                    }
+                }
+                return Task::batch(tasks);
             }
             Message::View(view::Message::SparkSettings(
                 view::SparkSettingsMessage::StableBalanceSaved(Err(err)),
@@ -10497,6 +10585,94 @@ impl App {
         )
     }
 
+    /// Leaving Spark's Balances & conversion for `next` saves a nickname
+    /// that was typed but not submitted, as Return does (the Cube name does
+    /// the same on Display & appearance).
+    fn save_pending_spark_nickname(&self, next: &Menu) -> Task<Message> {
+        let on_balances = |route: &Menu| {
+            matches!(
+                route,
+                Menu::Spark(menu::SparkSubMenu::Settings(
+                    None | Some(menu::SparkSettingsOption::General)
+                ))
+            )
+        };
+        if !on_balances(&self.panels.current) || on_balances(next) {
+            return Task::none();
+        }
+        match self
+            .panels
+            .spark_settings
+            .pending_nickname(self.latest_spark_nickname().as_deref())
+        {
+            Some(input) => Task::done(Message::View(view::Message::SparkSettings(
+                view::SparkSettingsMessage::NicknameSubmitted(input),
+            ))),
+            None => Task::none(),
+        }
+    }
+
+    /// The Spark nickname as last requested: queued, else being written, else
+    /// saved.
+    fn latest_spark_nickname(&self) -> Option<String> {
+        self.spark_nickname_queued
+            .clone()
+            .or_else(|| self.spark_nickname_in_flight.clone())
+            .unwrap_or_else(|| self.cube_settings.spark_alias.clone())
+    }
+
+    /// Write `nickname` to this Cube's settings; [`Message::SparkNicknameSaved`]
+    /// answers. Callers start one only while none is running.
+    fn start_spark_nickname_write(&mut self, nickname: Option<String>) -> Task<Message> {
+        self.spark_nickname_in_flight = Some(nickname.clone());
+        let (running, ended) = tokio::sync::watch::channel(());
+        self.spark_nickname_running = Some(ended);
+        let cube_id = self.cube_settings.id.clone();
+        let write = SparkNicknameWrite {
+            network_dir: self.datadir.network_directory(self.cube_settings.network),
+            cube_id: cube_id.clone(),
+            nickname,
+            after: None,
+            running: Some(running),
+        };
+        Task::perform(write.run(), move |result| Message::SparkNicknameSaved {
+            cube_id: cube_id.clone(),
+            result,
+        })
+    }
+
+    /// The Spark nickname write this App still owes when the tab replaces it
+    /// (Lock Cube, Set up Vault): a name typed on Balances & conversion and
+    /// not yet requested, else one queued behind a running write. A running
+    /// write finishes on its own, and this one waits for it to end before
+    /// writing, however the two tasks are scheduled. The tab starts this
+    /// without waiting for it, so the field's "saved when you leave" holds
+    /// without delaying the lock.
+    pub fn spark_nickname_flush(&self) -> Option<SparkNicknameWrite> {
+        let on_balances = matches!(
+            self.panels.current,
+            Menu::Spark(menu::SparkSubMenu::Settings(
+                None | Some(menu::SparkSettingsOption::General)
+            ))
+        );
+        let typed = on_balances
+            .then(|| {
+                self.panels
+                    .spark_settings
+                    .pending_nickname(self.latest_spark_nickname().as_deref())
+            })
+            .flatten()
+            .map(|input| state::spark::settings::saved_nickname(&input));
+        let nickname = typed.or_else(|| self.spark_nickname_queued.clone())?;
+        Some(SparkNicknameWrite {
+            network_dir: self.datadir.network_directory(self.cube_settings.network),
+            cube_id: self.cube_settings.id.clone(),
+            nickname,
+            after: self.spark_nickname_running.clone(),
+            running: None,
+        })
+    }
+
     /// Render content for a settings sub-page that needs both its
     /// owning panel and the ConnectCubePanel (Spark → Settings →
     /// Lightning Address, Cube → Settings → Avatar / Members). Returns
@@ -10523,12 +10699,11 @@ impl App {
             Menu::Vault(menu::VaultSubMenu::Settings(Some(menu::SettingsOption::Connections))) => {
                 Some(view::vault::settings::connections(&self.cache))
             }
-            // The Spark tab: Stable Balance, then Lightning Address.
-            Menu::Spark(menu::SparkSubMenu::Settings(
-                None
-                | Some(menu::SparkSettingsOption::General)
-                | Some(menu::SparkSettingsOption::LightningAddress),
-            )) => {
+            // Spark's Lightning address tab. Balances & conversion and
+            // Connections are the Spark Settings panel's own view.
+            Menu::Spark(menu::SparkSubMenu::Settings(Some(
+                menu::SparkSettingsOption::LightningAddress,
+            ))) => {
                 let address = if authenticated {
                     view::spark::settings::lightning_address::lightning_address_ux(
                         &self.panels.connect.cube,
@@ -10537,17 +10712,11 @@ impl App {
                 } else {
                     sign_in_prompt::sign_in_prompt("claim a Lightning Address")
                 };
-                Some(
-                    iced::widget::Column::new()
-                        .width(iced::Length::Fill)
-                        .push(self.panels.spark_settings.spark_content())
-                        .push(view::settings::page::group(
-                            "Lightning Address",
-                            None,
-                            address,
-                        ))
-                        .into(),
-                )
+                Some(view::settings::page::group(
+                    "Lightning address",
+                    None,
+                    address,
+                ))
             }
             // The avatar flow opens inline under Cube identity on Display &
             // appearance, rather than replacing the page.
@@ -10663,7 +10832,7 @@ impl App {
     pub fn view(&self) -> Element<'_, Message> {
         let view = if self.show_received_celebration {
             // Global celebration overlay takes precedence over the normal panel view.
-            view::dashboard(
+            view::replacement_page(
                 &self.panels.current,
                 &self.cache,
                 self.received_celebration_view(),
@@ -10697,8 +10866,9 @@ impl App {
             // before `connect_settings_content` so a gated route that also
             // happens to be a Connect-settings page (e.g. Spark → Settings →
             // Lightning Address on a network where Spark is unavailable)
-            // shows the placeholder instead of the live Connect UI.
-            view::dashboard(
+            // shows the placeholder instead of the live Connect UI. The
+            // route's Settings head and tabs would only lead to more of it.
+            view::replacement_page(
                 &self.panels.current,
                 &self.cache,
                 view::feature_unavailable_panel(reason),
@@ -11208,6 +11378,49 @@ fn wallet_page(menu: &Menu) -> Option<view::activity::WalletFilter> {
         Menu::Vault(menu::VaultSubMenu::Overview) => Some(view::activity::WalletFilter::Vault),
         Menu::Spark(menu::SparkSubMenu::Overview) => Some(view::activity::WalletFilter::Spark),
         _ => None,
+    }
+}
+
+/// One write of a Spark nickname (`None`: plain "Spark") to a Cube's settings.
+pub struct SparkNicknameWrite {
+    network_dir: crate::dir::NetworkDirectory,
+    cube_id: String,
+    nickname: Option<String>,
+    /// The write this one must follow: it ends when that write's `running`
+    /// closes.
+    after: Option<tokio::sync::watch::Receiver<()>>,
+    /// Closed when this write ends, or when its task is dropped unrun.
+    running: Option<tokio::sync::watch::Sender<()>>,
+}
+
+impl SparkNicknameWrite {
+    /// Writes after the write it follows has ended: the settings file's own
+    /// lock doesn't order writers, and neither does the order their tasks
+    /// are polled in.
+    pub async fn run(self) -> Result<Option<String>, String> {
+        let Self {
+            network_dir,
+            cube_id,
+            nickname,
+            after,
+            running,
+        } = self;
+        if let Some(mut after) = after {
+            // `changed` fails once the sender is gone: that write has ended.
+            while after.changed().await.is_ok() {}
+        }
+        // Held until this write has landed.
+        let _running = running;
+        let saved = nickname.clone();
+        settings::update_settings_file(&network_dir, move |mut s| {
+            if let Some(c) = s.cubes.iter_mut().find(|c| c.id == cube_id) {
+                c.spark_alias = saved;
+            }
+            Some(s)
+        })
+        .await
+        .map(|_| nickname)
+        .map_err(|e| e.to_string())
     }
 }
 
@@ -16157,6 +16370,422 @@ mod settings_navigation_integration_tests {
         assert!(mounted.contains("Identity and policy"));
         assert!(mounted.contains("Signers"));
         assert!(!mounted.contains("Open Wallet & signers to review"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A full-page replacement on a Settings route (the received-payment
+    /// celebration, the unavailable placeholder) shows neither the Settings
+    /// head nor its tabs.
+    #[test]
+    fn replacement_pages_on_settings_routes_take_no_route_chrome() {
+        let cache = Cache {
+            has_vault: true,
+            cube_name: "Everyday".into(),
+            ..Cache::default()
+        };
+        let menu = Menu::Spark(menu::SparkSubMenu::Settings(Some(
+            menu::SparkSettingsOption::Connections,
+        )));
+        let routed = capture::inspect(
+            "settings-route-page",
+            view::dashboard(&menu, &cache, iced::widget::text("Page body")),
+            (1024, 768),
+            "dark",
+            ui_theme::Theme::dark(),
+        );
+        assert!(routed.contains("Page body"));
+        assert!(routed.contains("Spark · Everyday · Bitcoin mainnet"));
+        assert!(routed.contains("Balances & conversion"));
+        assert!(routed.contains("Lightning address"));
+
+        let replaced = capture::inspect(
+            "settings-route-replacement",
+            view::replacement_page(&menu, &cache, iced::widget::text("Page body")),
+            (1024, 768),
+            "dark",
+            ui_theme::Theme::dark(),
+        );
+        assert!(replaced.contains("Page body"));
+        assert!(!replaced.contains("Spark · Everyday · Bitcoin mainnet"));
+        assert!(!replaced.contains("Balances & conversion"));
+        assert!(!replaced.contains("Lightning address"));
+    }
+
+    /// Every message a task produces, in order.
+    fn outputs(task: Task<Message>) -> Vec<Message> {
+        use iced_runtime::futures::futures::StreamExt;
+        let Some(stream) = iced_runtime::task::into_stream(task) else {
+            return Vec::new();
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(
+                stream
+                    .filter_map(|action| async move {
+                        match action {
+                            iced_runtime::Action::Output(message) => Some(message),
+                            _ => None,
+                        }
+                    })
+                    .collect(),
+            )
+    }
+
+    fn saved_spark_alias(app: &App) -> Option<String> {
+        let network_dir = app.datadir.network_directory(app.cube_settings.network);
+        settings::Settings::from_file(&network_dir)
+            .unwrap()
+            .cubes
+            .into_iter()
+            .find(|cube| cube.id == app.cube_settings.id)
+            .expect("the Cube is in its settings file")
+            .spark_alias
+    }
+
+    fn nickname(message: view::SparkSettingsMessage) -> Message {
+        Message::View(view::Message::SparkSettings(message))
+    }
+
+    /// The texts drawn inside the side panel's Spark row of the App's own
+    /// view, so neither the Settings head line nor the cache can stand in.
+    fn side_panel_spark_row(app: &App) -> Vec<String> {
+        let page = capture::inspect_wide_content(
+            "spark-nickname-side-panel",
+            app.view(),
+            (1440, 900),
+            "dark",
+            ui_theme::Theme::dark(),
+            1440,
+        );
+        let (_, row) = page
+            .focus
+            .iter()
+            .find(|(id, _)| *id == iced::advanced::widget::Id::new("tenshu.shell.nav.Spark"))
+            .expect("the side panel has a Spark row");
+        page.text
+            .iter()
+            .filter(|(_, bounds)| row.contains(bounds.center()))
+            .map(|(value, _)| value.clone())
+            .collect()
+    }
+
+    /// An App on Spark's Balances & conversion with its Cube in the settings
+    /// file, as a saved Cube is.
+    fn nickname_app(root: &std::path::Path) -> App {
+        let (mut app, _) = super::shell_tests::bitcoin_app(root);
+        let network_dir = app.datadir.network_directory(app.cube_settings.network);
+        let cube = app.cube_settings.clone();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(settings::update_settings_file(
+                &network_dir,
+                move |mut s| {
+                    s.cubes.push(cube);
+                    Some(s)
+                },
+            ))
+            .unwrap();
+        drop(
+            app.set_current_panel(Menu::Spark(menu::SparkSubMenu::Settings(Some(
+                menu::SparkSettingsOption::General,
+            )))),
+        );
+        app
+    }
+
+    /// Submissions made while a nickname write runs wait for it, so the
+    /// latest one is what is saved and shown: A then B, and a new name then
+    /// back to the saved one.
+    #[test]
+    fn overlapping_spark_nickname_saves_land_in_request_order() {
+        let _guard = crate::app::session::test_guard();
+        let root =
+            std::env::temp_dir().join(format!("spark-nickname-order-{}", uuid::Uuid::new_v4()));
+        let mut app = nickname_app(&root);
+        let submit = |app: &mut App, name: &str| {
+            outputs(
+                app.update(nickname(view::SparkSettingsMessage::NicknameSubmitted(
+                    name.into(),
+                ))),
+            )
+        };
+
+        // A, then B while A is being written: B starts no write of its own.
+        let a = submit(&mut app, "A");
+        assert!(
+            matches!(a.as_slice(), [Message::SparkNicknameSaved { result: Ok(Some(n)), .. }] if n == "A")
+        );
+        assert!(submit(&mut app, "B").is_empty(), "B waits for A");
+        // A lands; B is written after it, and B is what stays.
+        let b = outputs(app.update(a.into_iter().next().unwrap()));
+        assert_eq!(app.cube_settings.spark_alias.as_deref(), Some("A"));
+        let b: Vec<Message> = b
+            .into_iter()
+            .filter(|m| matches!(m, Message::SparkNicknameSaved { .. }))
+            .collect();
+        assert!(
+            matches!(b.as_slice(), [Message::SparkNicknameSaved { result: Ok(Some(n)), .. }] if n == "B")
+        );
+        for message in b {
+            drop(app.update(message));
+        }
+        assert_eq!(app.cube_settings.spark_alias.as_deref(), Some("B"));
+        assert_eq!(saved_spark_alias(&app).as_deref(), Some("B"));
+        assert_eq!(side_panel_spark_row(&app), ["Spark · B"]);
+
+        // "New", then back to "B" before New lands: B is not skipped as
+        // already saved, and is written after New.
+        let new = submit(&mut app, "New");
+        assert!(submit(&mut app, "B").is_empty(), "B waits for New");
+        let back: Vec<Message> = outputs(app.update(new.into_iter().next().unwrap()))
+            .into_iter()
+            .filter(|m| matches!(m, Message::SparkNicknameSaved { .. }))
+            .collect();
+        assert_eq!(
+            saved_spark_alias(&app).as_deref(),
+            Some("B"),
+            "written after New"
+        );
+        for message in back {
+            drop(app.update(message));
+        }
+        assert_eq!(app.cube_settings.spark_alias.as_deref(), Some("B"));
+        assert_eq!(side_panel_spark_row(&app), ["Spark · B"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A write the tab starts as it replaces the App lands after the App's
+    /// running write, however the two tasks are polled: here the teardown
+    /// write runs first, before the running write's task has started. And if
+    /// that task is dropped unrun, the teardown write doesn't wait forever.
+    #[test]
+    fn the_teardown_nickname_write_follows_the_running_one() {
+        use iced_runtime::futures::futures::StreamExt;
+        let _guard = crate::app::session::test_guard();
+        let root =
+            std::env::temp_dir().join(format!("spark-nickname-teardown-{}", uuid::Uuid::new_v4()));
+        let mut app = nickname_app(&root);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let submit = |app: &mut App, name: &str| {
+            app.update(nickname(view::SparkSettingsMessage::NicknameSubmitted(
+                name.into(),
+            )))
+        };
+
+        // A is submitted but its task hasn't run; B queues behind it.
+        let a = submit(&mut app, "A");
+        drop(submit(&mut app, "B"));
+        let teardown = app.spark_nickname_flush().expect("B is owed");
+        runtime.block_on(async {
+            let teardown = tokio::spawn(teardown.run());
+            // The teardown write is polled first, and waits.
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            assert!(!teardown.is_finished(), "it waits for A");
+            iced_runtime::task::into_stream(a)
+                .unwrap()
+                .for_each(|_| async {})
+                .await;
+            assert_eq!(teardown.await.unwrap(), Ok(Some("B".into())));
+        });
+        assert_eq!(saved_spark_alias(&app).as_deref(), Some("B"), "B after A");
+
+        // A running write whose task is dropped unrun releases its follower.
+        let mut app = nickname_app(&root.join("dropped"));
+        let a = submit(&mut app, "A");
+        drop(submit(&mut app, "B"));
+        let teardown = app.spark_nickname_flush().expect("B is owed");
+        drop(a);
+        let written = runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(10), teardown.run()).await
+        });
+        assert_eq!(written, Ok(Ok(Some("B".into()))));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// What the App still owes when the tab replaces it: a typed name on
+    /// Balances & conversion, else one queued behind a running write, and
+    /// nothing once both are written or off that tab.
+    #[test]
+    fn the_spark_nickname_flush_is_the_typed_name_else_the_queued_one() {
+        let _guard = crate::app::session::test_guard();
+        let root =
+            std::env::temp_dir().join(format!("spark-nickname-flush-{}", uuid::Uuid::new_v4()));
+        let mut app = nickname_app(&root);
+        assert!(app.spark_nickname_flush().is_none());
+
+        drop(
+            app.update(nickname(view::SparkSettingsMessage::NicknameEdited(
+                "Daily".into(),
+            ))),
+        );
+        let write = app.spark_nickname_flush().expect("the typed name");
+        let written = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(write.run());
+        assert_eq!(written, Ok(Some("Daily".into())));
+        assert_eq!(saved_spark_alias(&app).as_deref(), Some("Daily"));
+
+        // Off the tab, a typed name is the leave-tab save's, not the flush's.
+        drop(
+            app.set_current_panel(Menu::Spark(menu::SparkSubMenu::Settings(Some(
+                menu::SparkSettingsOption::Connections,
+            )))),
+        );
+        assert!(app.spark_nickname_flush().is_none());
+
+        // A request queued behind a running write is owed too.
+        let running = outputs(
+            app.update(nickname(view::SparkSettingsMessage::NicknameSubmitted(
+                "One".into(),
+            ))),
+        );
+        drop(
+            app.update(nickname(view::SparkSettingsMessage::NicknameSubmitted(
+                "Two".into(),
+            ))),
+        );
+        assert!(matches!(
+            app.spark_nickname_flush().map(|w| w.nickname),
+            Some(Some(n)) if n == "Two"
+        ));
+        drop(running);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_spark_nickname_left_unsubmitted_is_saved_and_names_the_side_panel() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("spark-nickname-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
+        let network_dir = app.datadir.network_directory(app.cube_settings.network);
+        let cube = app.cube_settings.clone();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(settings::update_settings_file(
+                &network_dir,
+                move |mut s| {
+                    s.cubes.push(cube);
+                    Some(s)
+                },
+            ))
+            .unwrap();
+        let balances = Menu::Spark(menu::SparkSubMenu::Settings(Some(
+            menu::SparkSettingsOption::General,
+        )));
+        let connections = Menu::Spark(menu::SparkSubMenu::Settings(Some(
+            menu::SparkSettingsOption::Connections,
+        )));
+        drop(app.set_current_panel(balances.clone()));
+        drop(
+            app.update(nickname(view::SparkSettingsMessage::NicknameEdited(
+                " Daily spending ".into(),
+            ))),
+        );
+
+        // Staying on the tab (its bare route included) saves nothing yet.
+        assert!(outputs(app.save_pending_spark_nickname(&balances)).is_empty());
+        assert!(outputs(
+            app.save_pending_spark_nickname(&Menu::Spark(menu::SparkSubMenu::Settings(None)))
+        )
+        .is_empty());
+
+        // Leaving it for another tab submits the typed name, which the App
+        // writes to this Cube's settings and shows in the side panel.
+        let submitted: Vec<Message> =
+            outputs(app.update(Message::View(view::Message::Menu(connections.clone()))))
+                .into_iter()
+                .filter(|message| {
+                    matches!(
+                        message,
+                        Message::View(view::Message::SparkSettings(
+                            view::SparkSettingsMessage::NicknameSubmitted(_)
+                        ))
+                    )
+                })
+                .collect();
+        assert_eq!(app.panels.current, connections);
+        assert!(matches!(
+            submitted.as_slice(),
+            [Message::View(view::Message::SparkSettings(
+                view::SparkSettingsMessage::NicknameSubmitted(name)
+            ))] if name == " Daily spending "
+        ));
+        let saved = outputs(app.update(submitted.into_iter().next().unwrap()));
+        assert!(matches!(
+            saved.as_slice(),
+            [Message::SparkNicknameSaved { result: Ok(Some(name)), .. }] if name == "Daily spending"
+        ));
+        // Typed and written, but the App hasn't taken the result yet.
+        assert_eq!(side_panel_spark_row(&app), ["Spark"]);
+        for message in saved {
+            drop(app.update(message));
+        }
+        // The next frame after the save names the wallet.
+        assert_eq!(side_panel_spark_row(&app), ["Spark · Daily spending"]);
+        assert_eq!(
+            app.cube_settings.spark_alias.as_deref(),
+            Some("Daily spending")
+        );
+        assert_eq!(saved_spark_alias(&app).as_deref(), Some("Daily spending"));
+        // Saved, so leaving again has nothing to submit.
+        drop(app.set_current_panel(balances.clone()));
+        assert!(outputs(app.save_pending_spark_nickname(&connections)).is_empty());
+
+        // An empty field goes back to plain "Spark".
+        drop(
+            app.update(nickname(view::SparkSettingsMessage::NicknameEdited(
+                String::new(),
+            ))),
+        );
+        let saved = outputs(
+            app.update(nickname(view::SparkSettingsMessage::NicknameSubmitted(
+                String::new(),
+            ))),
+        );
+        for message in saved {
+            drop(app.update(message));
+        }
+        assert_eq!(side_panel_spark_row(&app), ["Spark"]);
+        assert_eq!(app.cube_settings.spark_alias, None);
+        assert_eq!(saved_spark_alias(&app), None);
+
+        // One too long to save is left in the field, unsaved.
+        let long = "a".repeat(64);
+        drop(
+            app.update(nickname(view::SparkSettingsMessage::NicknameEdited(
+                long.clone(),
+            ))),
+        );
+        assert!(outputs(
+            app.update(nickname(view::SparkSettingsMessage::NicknameSubmitted(
+                long
+            )))
+        )
+        .is_empty());
+        assert!(outputs(app.save_pending_spark_nickname(&connections)).is_empty());
+        assert_eq!(saved_spark_alias(&app), None);
+
+        // A save for another Cube (the tab moved on while it was written)
+        // changes nothing in this App.
+        drop(app.update(Message::SparkNicknameSaved {
+            cube_id: format!("{}-other", app.cube_settings.id),
+            result: Ok(Some("Elsewhere".into())),
+        }));
+        assert_eq!(app.cube_settings.spark_alias, None);
+        assert_eq!(side_panel_spark_row(&app), ["Spark"]);
         let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -115,9 +115,10 @@ pub enum SparkSubMenu {
 /// form false sibling relationships.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SparkSettingsOption {
-    /// Stable Balance toggle + Bridge status diagnostics.
+    /// Balances & conversion: the Stable Balance toggle and the Spark
+    /// nickname.
     General,
-    /// Lightning Address claim / manage page. Shown on the Spark tab.
+    /// Lightning address claim / manage page, on its own tab.
     LightningAddress,
     /// Connect account, Cube service session and Spark bridge health.
     Connections,

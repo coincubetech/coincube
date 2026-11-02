@@ -1,15 +1,17 @@
 //! View renderer for [`crate::app::state::spark::settings::SparkSettings`].
 //!
-//! Renders the General sub-page:
+//! Renders the Balances & conversion tab:
 //! - A "Stable Balance" toggle card (USD-pegging feature) with a
 //!   clear on/off status line and a toggle button. Disabled while
 //!   the bridge is unavailable or an `update_user_settings` RPC
 //!   is in flight.
-//! - A small "Bridge status" diagnostic card showing whether the
-//!   Spark bridge subprocess is reachable (`get_info` round-trip
-//!   successful on the last reload).
+//! - The Spark nickname field.
 //!
-//! The Lightning Address sub-page lives in [`lightning_address`] and
+//! and the Connections tab, whose "Spark bridge" row shows whether the
+//! Spark bridge subprocess is reachable (`get_info` round-trip
+//! successful on the last reload).
+//!
+//! The Lightning address tab lives in [`lightning_address`] and
 //! is rendered by `App::view` directly so it can pass a borrow of the
 //! `ConnectCubePanel` into the form (the `State::view` trait signature
 //! doesn't reach Connect state).
@@ -18,13 +20,14 @@ pub mod lightning_address;
 
 use coincube_ui::{
     color,
-    component::tenshu::toggle,
-    widget::{Column, Element, Row},
+    component::tenshu::{text_field, toggle, FieldSize},
+    widget::{Column, Container, Element, Row},
 };
 use iced::widget::Space;
 use iced::{Alignment, Length};
 
 use crate::app::cache::Cache;
+use crate::app::state::spark::settings::nickname_fits;
 use crate::app::view::settings::page;
 use crate::app::view::{Message, SparkSettingsMessage};
 use crate::app::ConnectionStatus;
@@ -58,11 +61,41 @@ pub struct SparkSettingsView {
 }
 
 pub const STABLE_BALANCE_ID: &str = "tenshu.settings.spark.stable-balance";
+pub const NICKNAME_ID: &str = "tenshu.settings.spark.nickname";
+
+/// The Spark nickname (master plan §3 decision 6): the side panel's
+/// "Spark · ‹nickname›". `input` is a name typed but not saved yet, `saved`
+/// the Cube's. Return saves it, and so does leaving the tab.
+pub fn nickname_group<'a>(input: Option<&'a str>, saved: Option<&'a str>) -> Element<'a, Message> {
+    let value = input.or(saved).unwrap_or_default();
+    let row = page::row("Nickname")
+        .description(
+            "Shown in the side panel as “Spark · nickname”. Leave it empty to show “Spark”. \
+             Saved when you press Return or leave this tab.",
+        )
+        .control(
+            Container::new(
+                text_field(NICKNAME_ID, "Spark nickname", value, Message::FocusAction)
+                    .hide_label()
+                    .size(FieldSize::Compact)
+                    .width(Length::Fixed(280.0))
+                    .placeholder("Spark")
+                    .error_maybe((!nickname_fits(value)).then_some("Use fewer than 64 characters."))
+                    .on_input(|value| {
+                        Message::SparkSettings(SparkSettingsMessage::NicknameEdited(value))
+                    })
+                    .on_submit(Message::SparkSettings(
+                        SparkSettingsMessage::NicknameSubmitted(value.to_owned()),
+                    )),
+            )
+            .width(Length::Fixed(280.0)),
+        );
+    page::group("Spark identity", None, page::rows([row.into()]))
+}
 
 impl SparkSettingsView {
-    /// The Spark tab's Stable Balance group. The App adds the Lightning
-    /// Address group beneath it, because that form needs `ConnectCubePanel`,
-    /// which the `State::view` signature can't reach.
+    /// The Stable Balance group on Balances & conversion. The panel adds
+    /// the nickname beneath it.
     pub fn render<'a>(self) -> Element<'a, Message> {
         if matches!(self.status, SparkSettingsStatus::Unavailable) {
             return page::group(
@@ -266,6 +299,51 @@ fn bridge_status_copy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Settings › Spark › Balances & conversion under the Settings head: the
+    /// scope switch, the Spark tabs and the nickname (Tenshu v175 W5).
+    /// Opt-in: `TOP_BAR_CAPTURE_DIR=<dir> cargo test -p coincube-gui --lib
+    /// page_head_capture -- --ignored`.
+    #[test]
+    #[ignore = "writes PNG frames; needs a GPU adapter"]
+    fn page_head_capture_settings_spark() {
+        use crate::app::menu::{Menu, SparkSettingsOption, SparkSubMenu};
+        use crate::app::state::preferences::BalancePrivacy;
+        use crate::app::view::nav::shell::capture_tests;
+        let Some(directory) = capture_tests::directory() else {
+            return;
+        };
+        let mut renderer = capture_tests::renderer();
+        let menu = Menu::Spark(SparkSubMenu::Settings(Some(SparkSettingsOption::General)));
+        for (appearance, palette) in capture_tests::themes() {
+            let mut cache = capture_tests::cache(appearance == "light", BalancePrivacy::Shown);
+            cache.wallet_names.spark = Some("Daily spending".into());
+            capture_tests::save_page_head_frames(
+                &mut renderer,
+                &directory,
+                "settings-spark",
+                appearance,
+                &palette,
+                || {
+                    crate::app::view::dashboard(
+                        &menu,
+                        &cache,
+                        Column::new()
+                            .width(Length::Fill)
+                            .push(
+                                SparkSettingsView {
+                                    status: SparkSettingsStatus::Connected,
+                                    stable_balance_active: Some(false),
+                                    stable_balance_saving: false,
+                                }
+                                .render(),
+                            )
+                            .push(nickname_group(None, cache.wallet_names.spark.as_deref())),
+                    )
+                },
+            );
+        }
+    }
 
     #[test]
     fn stable_balance_toggle_state_only_enables_when_loaded_available_and_idle() {
