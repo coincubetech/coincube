@@ -47,7 +47,9 @@ observation, not an atomic admission/signing capability or a persistent grant.
 ## Transport behavior
 
 All four methods use the existing authenticated Connect client and its stable
-device identity headers. Successful and 403 bodies are read with a 512 KiB cap.
+device identity headers through the existing ten-second anchor transport, which
+refuses redirects. A redirected endpoint cannot forward the ciphertext body or
+supply an authoritative checkpoint response. Successful and 403 bodies are read with a 512 KiB cap.
 Errors retain neither response bodies nor request URLs. The specific 403 code
 `DEVICE_BOUND_SESSION_REQUIRED` yields `DeviceSignInRequired` with actionable
 on-device sign-in text; it does not classify an otherwise valid session as dead.

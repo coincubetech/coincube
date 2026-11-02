@@ -126,7 +126,13 @@ impl CoincubeClient {
             "{}/api/v1/connect/cubes/{cube_id}/recovery-kit/imported-checkpoint{suffix}",
             self.base_url
         );
-        let mut request = self.client.request(method, url);
+        // An anchor response must originate at the configured API. Following
+        // redirects can disclose the opaque PUT body/device identity and make
+        // another origin's status appear authenticated.
+        let transport = self
+            .anchor_transport()
+            .map_err(|_| CheckpointError::Unavailable)?;
+        let mut request = transport.request(method, url);
         if let Some(body) = body {
             request = request.json(&body);
         }
@@ -142,6 +148,7 @@ impl CoincubeClient {
             });
         }
         match status {
+            300..=399 => return Err(CheckpointError::InvalidResponse),
             401 => return Err(CheckpointError::SignInRequired),
             404 => return Err(CheckpointError::NotFound),
             409 => return Err(CheckpointError::Conflict),
@@ -342,6 +349,46 @@ mod tests {
                 .unwrap_err(),
             CheckpointError::InvalidResponse
         );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_redirects_cannot_forward_ciphertext_or_supply_authority() {
+        let sink = MockServer::start();
+        let forwarded = sink.mock(|_when, then| {
+            then.status(200).json_body(json!({"success": true, "data": {"generation": 1, "commitment": "a".repeat(64), "active": true}}));
+        });
+        for status in [301, 302, 303, 307, 308] {
+            let server = MockServer::start();
+            let redirected = server.mock(|_when, then| {
+                then.status(status)
+                    .header("Location", sink.url("/untrusted"));
+            });
+            let client = client(&server);
+            assert_eq!(
+                client
+                    .put_imported_checkpoint(42, 0, "private opaque ciphertext")
+                    .await
+                    .unwrap_err(),
+                CheckpointError::InvalidResponse
+            );
+            assert_eq!(
+                client.get_imported_checkpoint(42).await.unwrap_err(),
+                CheckpointError::InvalidResponse
+            );
+            assert_eq!(
+                client
+                    .get_imported_checkpoint_ciphertext(42)
+                    .await
+                    .unwrap_err(),
+                CheckpointError::InvalidResponse
+            );
+            assert_eq!(
+                client.delete_imported_checkpoint(42, 1).await.unwrap_err(),
+                CheckpointError::InvalidResponse
+            );
+            redirected.assert_hits(4);
+        }
+        forwarded.assert_hits(0);
     }
 
     #[tokio::test]
