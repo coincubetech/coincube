@@ -85,6 +85,9 @@ pub struct SparkReceive {
     /// on the YOU RECEIVE card. Refreshed on reload via `get_info`; `0` until
     /// the first fetch.
     balance_sats: u64,
+    /// The bitcoin balance alone and the USDB holding, for the side panel.
+    btc_balance_sats: u64,
+    stable_balance: Option<coincube_spark_protocol::StableBalanceSnapshot>,
     /// The "receive from another network" (SideShift → BTC) sub-flow, when the
     /// user has entered it. While `Some`, it owns the panel: view, update and
     /// subscription all delegate to it. Mirrors how the Liquid Receive panel
@@ -153,6 +156,8 @@ impl SparkReceive {
         Self {
             backend,
             balance_sats: 0,
+            btc_balance_sats: 0,
+            stable_balance: None,
             sideshift_flow: None,
             method: SparkReceiveMethod::Bolt11,
             sender_picker_open: false,
@@ -237,8 +242,15 @@ impl State for SparkReceive {
             None => (None, None),
         };
         // The received celebration takes the whole page, head included.
-        let head = (!matches!(self.phase, SparkReceivePhase::Received { .. }))
-            .then(|| crate::app::view::spark::sub_page_head(cache, "Receive"));
+        let head = (!matches!(self.phase, SparkReceivePhase::Received { .. })).then(|| {
+            crate::app::view::spark::sub_page_head(cache, "Receive").action(
+                crate::app::view::spark::receive::head_action(
+                    cross_network_selected.is_some(),
+                    self.method,
+                    cache.network,
+                ),
+            )
+        });
         let content = crate::app::view::dashboard_payment(
             menu,
             cache,
@@ -267,6 +279,11 @@ impl State for SparkReceive {
                 received_image_handle: &self.received_image_handle,
                 recent_transactions: &self.recent_transactions,
                 balance_sats: self.balance_sats,
+                balances: crate::app::view::spark::SparkBalances::new(
+                    cache,
+                    self.btc_balance_sats,
+                    self.stable_balance.as_ref(),
+                ),
                 bitcoin_unit: cache.bitcoin_unit,
                 show_direction_badges: cache.show_direction_badges,
                 mask_amounts: cache.balance_amounts_masked(),
@@ -774,6 +791,8 @@ impl State for SparkReceive {
                 if let Some((btc_sats, stable)) = balance {
                     self.balance_sats =
                         super::unified_spark_balance_sats(btc_sats, stable.as_ref(), cache);
+                    self.btc_balance_sats = btc_sats;
+                    self.stable_balance = stable;
                 }
                 Task::none()
             }
@@ -1453,6 +1472,58 @@ mod tests {
 
         update(&mut panel, SparkReceiveMessage::BalanceLoaded(None));
         assert_eq!(panel.balance_sats, 123);
+    }
+
+    /// The side panel lists bitcoin and USDB apart, so the panel keeps both
+    /// as loaded rather than only their unified sum.
+    #[test]
+    fn balance_loaded_keeps_bitcoin_and_usdb_apart_for_the_side_panel() {
+        let mut panel = SparkReceive::new(None);
+        let usdb = StableBalanceSnapshot {
+            balance: 5_000_000,
+            decimals: 6,
+            ticker: "USDB".into(),
+        };
+        update(
+            &mut panel,
+            SparkReceiveMessage::BalanceLoaded(Some((123, Some(usdb.clone())))),
+        );
+        assert_eq!(panel.btc_balance_sats, 123);
+        assert_eq!(
+            panel.stable_balance.map(|sb| sb.balance),
+            Some(usdb.balance)
+        );
+    }
+
+    /// H-Receive: Bitcoin / Stablecoin (cross-chain) is a head action. With
+    /// no backend the body has no controls, so the choice can only be there.
+    #[test]
+    fn the_receive_kind_choice_is_a_head_action() {
+        let panel = SparkReceive::new(None);
+        let cache = Cache {
+            network: Network::Bitcoin,
+            ..Cache::default()
+        };
+        let menu = Menu::Spark(crate::app::menu::SparkSubMenu::Receive);
+        let probe = crate::app::view::shared::landing::capture::inspect(
+            "spark-receive-head-kind",
+            panel.view(&menu, &cache),
+            (1440, 900),
+            "dark",
+            coincube_ui::theme::Theme::dark(),
+        );
+        assert!(probe.contains("Back to Spark"));
+        assert!(probe.contains("Stablecoin (cross-chain)"));
+        for id in [
+            "spark-receive-kind-bitcoin",
+            "spark-receive-kind-stablecoin",
+        ] {
+            assert!(
+                probe.has_focus(iced::advanced::widget::Id::new(id)),
+                "{} in the head",
+                id
+            );
+        }
     }
 
     #[test]

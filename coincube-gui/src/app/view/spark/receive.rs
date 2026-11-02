@@ -2,11 +2,11 @@
 
 use std::collections::HashMap;
 
-use coincube_core::miniscript::bitcoin::{Amount, Network};
+use coincube_core::miniscript::bitcoin::Network;
 use coincube_ui::{
     color,
     component::{
-        amount::{BitcoinDisplayUnit, DisplayAmount},
+        amount::BitcoinDisplayUnit,
         button,
         tenshu::{segment, segmented},
         text::*,
@@ -14,7 +14,7 @@ use coincube_ui::{
     icon,
     image::{asset_network_logo, network_logo, usdt_network_logo},
     theme,
-    widget::{Column, Container, Element, Row},
+    widget::{Column, ColumnExt, Container, Element, Row},
 };
 use iced::{
     widget::{button as iced_button, container, qr_code, scrollable, text_input, QRCode, Space},
@@ -65,6 +65,8 @@ pub struct SparkReceiveView<'a> {
     pub recent_transactions: &'a [SparkRecentTransaction],
     /// Unified balance (sats: BTC + Stable Balance), shown on the YOU RECEIVE card.
     pub balance_sats: u64,
+    /// The side panel's balances, each in its own unit.
+    pub balances: crate::app::view::spark::SparkBalances<'a>,
     pub bitcoin_unit: BitcoinDisplayUnit,
     pub show_direction_badges: bool,
     pub mask_amounts: bool,
@@ -109,17 +111,18 @@ impl<'a> SparkReceiveView<'a> {
             );
         }
 
+        // The Bitcoin / Stablecoin choice is in the page head (`head_action`).
         let mut form = Column::new().spacing(0).push(
             Container::new(
-                Row::new()
-                    .spacing(12)
-                    .align_y(Alignment::Center)
-                    .push(h4_bold("Payment details").width(Length::Fill))
-                    .push(receive_kind_selector(
-                        self.cross_network_selected.is_some(),
-                        self.method,
-                        self.network,
-                    )),
+                Column::new()
+                    .spacing(8)
+                    .push(h4_bold("Payment details"))
+                    .push(arrival_note(self.network))
+                    .push_maybe((!supported_on(self.network)).then(|| {
+                        p2_regular("Stablecoin deposits require Bitcoin mainnet.")
+                            .small()
+                            .style(theme::text::secondary)
+                    })),
             )
             .padding([16, 24]),
         );
@@ -241,26 +244,9 @@ impl<'a> SparkReceiveView<'a> {
             }
         }
 
-        let wallet_name = format!("Spark · {}", self.cube_name);
-        let balance = if self.mask_amounts {
-            "••••••".to_owned()
-        } else {
-            format!(
-                "{} {}",
-                Amount::from_sat(self.balance_sats)
-                    .to_formatted_string_with_unit(self.bitcoin_unit),
-                if matches!(self.bitcoin_unit, BitcoinDisplayUnit::BTC) {
-                    "BTC"
-                } else {
-                    "SATS"
-                }
-            )
-        };
         let aside = Column::new()
-            .spacing(8)
-            .push(p2_regular("Receiving into").style(theme::text::secondary))
-            .push(p1_bold(wallet_name))
-            .push(p2_bold(balance))
+            .spacing(12)
+            .push(self.balances.view())
             .push(iced::widget::rule::horizontal(1))
             .push(
                 button::transparent_border(None, "See all in Activity").on_press(Message::Menu(
@@ -329,16 +315,64 @@ fn bitcoin_kind_target(stablecoin: bool, method: SparkReceiveMethod) -> SparkRec
     }
 }
 
-fn receive_kind_selector(
+/// "Payments arrive as bitcoin" (master I4): Spark receives bitcoin only, and
+/// USDB appears only after a conversion. Where conversions run (mainnet), the
+/// note says how to hold US Dollar instead and links to Wallet settings.
+pub(crate) const ARRIVAL_NOTE: &str = "Payments arrive as bitcoin.";
+pub(crate) const ARRIVAL_NOTE_USD: &str =
+    "To hold them in US Dollar, turn on Stable Balance in Wallet settings.";
+const WALLET_SETTINGS_ID: &str = "tenshu.spark.receive.wallet-settings";
+
+fn arrival_note<'a>(network: Network) -> Element<'a, Message> {
+    let usd = network == Network::Bitcoin;
+    Column::new()
+        .spacing(2)
+        .push(
+            p2_regular(if usd {
+                format!("{} {}", ARRIVAL_NOTE, ARRIVAL_NOTE_USD)
+            } else {
+                ARRIVAL_NOTE.to_owned()
+            })
+            .style(theme::text::secondary),
+        )
+        .push_maybe(usd.then(|| {
+            coincube_ui::widget::action::Action::new(
+                iced::advanced::widget::Id::new(WALLET_SETTINGS_ID),
+                p2_regular("Wallet settings"),
+                Message::FocusAction,
+            )
+            .padding([4, 0])
+            .style(|theme: &theme::Theme, status| {
+                let mut style = theme::button::link(theme, status);
+                style.text_color = theme.colors.shell.accent_ink;
+                style
+            })
+            .on_press(Message::Menu(crate::app::menu::Menu::Spark(
+                crate::app::menu::SparkSubMenu::Settings(Some(
+                    crate::app::menu::SparkSettingsOption::General,
+                )),
+            )))
+        }))
+        .into()
+}
+
+/// The Bitcoin / Stablecoin (cross-chain) choice among the head's actions
+/// (the H-Receive board). Stablecoin is disabled off mainnet; the body says
+/// why.
+pub fn head_action(
     stablecoin: bool,
     method: SparkReceiveMethod,
     network: Network,
 ) -> Element<'static, Message> {
-    let selector = segmented(
+    segmented(
         [
             segment("spark-receive-kind-bitcoin", false, "Bitcoin"),
-            segment("spark-receive-kind-stablecoin", true, "Stablecoin")
-                .enabled(supported_on(network)),
+            segment(
+                "spark-receive-kind-stablecoin",
+                true,
+                "Stablecoin (cross-chain)",
+            )
+            .enabled(supported_on(network)),
         ],
         Some(stablecoin),
         Message::FocusAction,
@@ -351,16 +385,8 @@ fn receive_kind_selector(
                 stablecoin, method,
             )))
         }
-    });
-    let mut selector = Column::new().spacing(4).push(selector);
-    if !supported_on(network) {
-        selector = selector.push(
-            p2_regular("Stablecoin deposits require Bitcoin mainnet.")
-                .small()
-                .style(theme::text::secondary),
-        );
-    }
-    selector.into()
+    })
+    .into()
 }
 
 fn bitcoin_method_selector(current: SparkReceiveMethod) -> Element<'static, Message> {
@@ -1163,12 +1189,51 @@ mod tests {
 
         let regtest = capture::inspect(
             "spark-receive-regtest",
-            receive_kind_selector(false, SparkReceiveMethod::Bolt11, Network::Regtest),
+            head_action(false, SparkReceiveMethod::Bolt11, Network::Regtest),
             (1024, 768),
             "light",
             theme::Theme::light(),
         );
-        assert!(regtest.contains("Stablecoin deposits require Bitcoin mainnet"));
+        assert!(regtest.contains("Stablecoin (cross-chain)"));
+    }
+
+    /// Master I4: Receive never implies native stablecoin receive. Off
+    /// mainnet, where no conversion runs, the note stops at bitcoin.
+    #[test]
+    fn the_arrival_note_says_payments_arrive_as_bitcoin() {
+        let mainnet = capture::inspect(
+            "spark-receive-note-mainnet",
+            arrival_note(Network::Bitcoin),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(mainnet.contains(ARRIVAL_NOTE) && mainnet.contains(ARRIVAL_NOTE_USD));
+        let messages = capture::activate(
+            arrival_note(Network::Bitcoin),
+            iced::advanced::widget::Id::new(WALLET_SETTINGS_ID),
+            (1024, 768),
+            true,
+        );
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            Message::Menu(crate::app::menu::Menu::Spark(
+                crate::app::menu::SparkSubMenu::Settings(Some(
+                    crate::app::menu::SparkSettingsOption::General
+                ))
+            ))
+        )));
+        for network in [Network::Testnet, Network::Signet, Network::Regtest] {
+            let note = capture::inspect(
+                "spark-receive-note-test-network",
+                arrival_note(network),
+                (1024, 768),
+                "dark",
+                theme::Theme::dark(),
+            );
+            assert!(note.contains(ARRIVAL_NOTE));
+            assert!(!note.contains("US Dollar") && !note.contains("Wallet settings"));
+        }
     }
 
     #[test]
@@ -1186,7 +1251,7 @@ mod tests {
             SparkReceiveMethod::Bolt11,
         );
         let messages = capture::activate(
-            receive_kind_selector(false, SparkReceiveMethod::OnchainBitcoin, Network::Bitcoin),
+            head_action(false, SparkReceiveMethod::OnchainBitcoin, Network::Bitcoin),
             iced::advanced::widget::Id::new("spark-receive-kind-bitcoin"),
             (1024, 768),
             false,
@@ -1379,6 +1444,14 @@ mod tests {
                         received_image_handle: &image,
                         recent_transactions: &transactions,
                         balance_sats: 42_000,
+                        balances: crate::app::view::spark::SparkBalances {
+                            btc_sats: 42_000,
+                            stable: None,
+                            fiat_converter: None,
+                            btc_usd_price: None,
+                            bitcoin_unit: BitcoinDisplayUnit::Sats,
+                            masked: false,
+                        },
                         bitcoin_unit: BitcoinDisplayUnit::Sats,
                         show_direction_badges: false,
                         mask_amounts: false,
@@ -1398,7 +1471,9 @@ mod tests {
                 }
                 for label in [
                     "Payment details",
-                    "Receiving into",
+                    "Payments arrive as bitcoin.",
+                    "Wallet settings",
+                    "Available in Spark",
                     "Method",
                     "Bitcoin address · deposit",
                 ] {
@@ -1410,9 +1485,19 @@ mod tests {
                         outer
                     );
                 }
+                // The Bitcoin / Stablecoin choice moved into the head.
                 for id in [
                     "spark-receive-kind-bitcoin",
                     "spark-receive-kind-stablecoin",
+                ] {
+                    assert!(
+                        !mounted.has_focus(iced::advanced::widget::Id::new(id)),
+                        "{} left in the body",
+                        id
+                    );
+                }
+                for id in [
+                    WALLET_SETTINGS_ID,
                     "spark-receive-method-lightning",
                     "spark-receive-method-lightning-address",
                     "spark-receive-method-spark",
@@ -1534,6 +1619,14 @@ mod tests {
                     received_image_handle: &image,
                     recent_transactions: &transactions,
                     balance_sats: 0,
+                    balances: crate::app::view::spark::SparkBalances {
+                        btc_sats: 0,
+                        stable: None,
+                        fiat_converter: None,
+                        btc_usd_price: None,
+                        bitcoin_unit: BitcoinDisplayUnit::Sats,
+                        masked: cache.balance_amounts_masked(),
+                    },
                     bitcoin_unit: BitcoinDisplayUnit::Sats,
                     show_direction_badges: false,
                     mask_amounts: cache.balance_amounts_masked(),
