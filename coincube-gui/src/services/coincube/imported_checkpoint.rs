@@ -62,7 +62,12 @@ pub(crate) enum CheckpointError {
     NotFound,
     Conflict,
     Locked,
-    RateLimited { retry_after: Duration },
+    TrustedDeviceDelay {
+        available_at: Option<chrono::DateTime<chrono::Utc>>,
+    },
+    RateLimited {
+        retry_after: Duration,
+    },
     Unavailable,
     InvalidResponse,
     InvalidRequest,
@@ -77,6 +82,7 @@ impl fmt::Display for CheckpointError {
             Self::NotFound => "The imported Recovery Kit is unavailable.",
             Self::Conflict => "The Recovery Kit checkpoint changed; reload its status.",
             Self::Locked => "Recovery Kit access is locked.",
+            Self::TrustedDeviceDelay { .. } => "Recovery Kit download is delayed on this device.",
             Self::RateLimited { .. } => "Recovery Kit access is rate limited; try again later.",
             Self::Unavailable => "Cannot verify the current Recovery Kit checkpoint.",
             Self::InvalidResponse => "The Recovery Kit checkpoint response is invalid.",
@@ -147,12 +153,28 @@ impl CoincubeClient {
                 retry_after: parse_retry_after(response.headers()),
             });
         }
+        if status == 423 {
+            // The server uses 423 for both duress and a new device's wait.
+            // Retain the legacy envelope's dated delay, but never retain its
+            // message/body. Opaque, truncated, or oversized locks stay neutral.
+            let locked = match bounded_body(response).await {
+                Ok(bytes) => std::str::from_utf8(&bytes)
+                    .ok()
+                    .map(super::DownloadError::from_locked_body),
+                Err(_) => None,
+            };
+            return Err(match locked {
+                Some(super::DownloadError::TrustedDeviceDelay { available_at }) => {
+                    CheckpointError::TrustedDeviceDelay { available_at }
+                }
+                _ => CheckpointError::Locked,
+            });
+        }
         match status {
             300..=399 => return Err(CheckpointError::InvalidResponse),
             401 => return Err(CheckpointError::SignInRequired),
             404 => return Err(CheckpointError::NotFound),
             409 => return Err(CheckpointError::Conflict),
-            423 => return Err(CheckpointError::Locked),
             408 | 500..=599 => return Err(CheckpointError::Unavailable),
             _ => {}
         }
@@ -311,6 +333,31 @@ mod tests {
                 .get_imported_checkpoint_ciphertext(42)
                 .await
                 .unwrap_err();
+            assert_eq!(error, expected);
+            assert!(!format!("{error:?} {error}").contains("private server text"));
+        }
+    }
+
+    #[tokio::test]
+    async fn checkpoint_locked_response_preserves_trusted_device_wait_and_neutral_fallback() {
+        let available_at = "2026-11-03T14:00:00Z";
+        let dated = CheckpointError::TrustedDeviceDelay {
+            available_at: Some(available_at.parse().unwrap()),
+        };
+        for (body, expected) in [
+            (json!({"success": false, "error": {"code": "TRUSTED_DEVICE_DELAY", "message": "private server text"}, "data": {"available_at": available_at}}).to_string(), dated),
+            (json!({"error": {"code": "TRUSTED_DEVICE_DELAY"}}).to_string(), CheckpointError::TrustedDeviceDelay { available_at: None }),
+            (json!({"error": {"code": "DURESS_LOCKED"}, "data": {"available_at": available_at}}).to_string(), CheckpointError::Locked),
+            (json!({"error": {"code": "TRUSTED_DEVICE_DELAY"}, "data": {"available_at": "malformed"}}).to_string(), CheckpointError::Locked),
+            ("not JSON private server text".into(), CheckpointError::Locked),
+            (json!({"error": {"code": "TRUSTED_DEVICE_DELAY", "message": "x".repeat(MAX_RESPONSE_BYTES)}, "data": {"available_at": available_at}}).to_string(), CheckpointError::Locked),
+        ] {
+            let server = MockServer::start();
+            server.mock(|when, then| {
+                when.method(MockMethod::GET);
+                then.status(423).body(body);
+            });
+            let error = client(&server).get_imported_checkpoint_ciphertext(42).await.unwrap_err();
             assert_eq!(error, expected);
             assert!(!format!("{error:?} {error}").contains("private server text"));
         }

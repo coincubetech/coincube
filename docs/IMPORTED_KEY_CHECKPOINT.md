@@ -49,11 +49,15 @@ observation, not an atomic admission/signing capability or a persistent grant.
 All four methods use the existing authenticated Connect client and its stable
 device identity headers through the existing ten-second anchor transport, which
 refuses redirects. A redirected endpoint cannot forward the ciphertext body or
-supply an authoritative checkpoint response. Successful and 403 bodies are read with a 512 KiB cap.
+supply an authoritative checkpoint response. Successful, 403, and 423 bodies are
+read with a 512 KiB cap.
 Errors retain neither response bodies nor request URLs. The specific 403 code
 `DEVICE_BOUND_SESSION_REQUIRED` yields `DeviceSignInRequired` with actionable
 on-device sign-in text; it does not classify an otherwise valid session as dead.
-401, other 403s, 404, 409, 423, and 429 remain distinct; Retry-After is preserved.
+401, other 403s, 404, 409, and 429 remain distinct; Retry-After is preserved.
+A bounded 423 body with `TRUSTED_DEVICE_DELAY` retains its optional
+`data.available_at` timestamp. Duress and malformed or oversized 423 bodies
+remain the neutral `Locked` fallback; no raw server message is retained.
 DELETE uses CAS and validates the resulting tombstone epoch. As with PUT, an
 uncertain DELETE result must be reconciled by current status before another
 mutation; the transport never retries it automatically.
