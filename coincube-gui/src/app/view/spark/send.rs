@@ -677,8 +677,22 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
                     .push(h4_bold("Preview"))
                     .push(kv_row("Method", ok.method.clone()))
                     .push(kv_row("Paid from", pay_from_label(paid_from).to_owned()))
+                    // The conversion funding the send, with its own fee and
+                    // the price cap that stops it, as Swap's Review shows them.
                     .push_maybe(conversion.map(|quote| {
                         kv_row("Conversion", conversion_line(quote, usdb_decimals))
+                    }))
+                    .push_maybe(conversion.map(|quote| {
+                        kv_row(
+                            "Conversion fee",
+                            crate::app::view::spark::swap::quote_fee_line(quote, usdb_decimals),
+                        )
+                    }))
+                    .push_maybe(conversion.map(|quote| {
+                        kv_row(
+                            "Max price change",
+                            crate::app::view::spark::swap::price_change(quote.max_slippage_bps),
+                        )
                     }))
                     .push(kv_row("Amount", format!("{} sats", ok.amount_sat)))
                     .push(kv_row("Fee", format!("{} sats", ok.fee_sat)))
@@ -2436,6 +2450,20 @@ mod tests {
         let probe = harness.probe();
         assert!(probe.contains("Paid from"));
         assert!(probe.contains("12.40 USDB → 15,003 sats"));
+        // The conversion's own fee and cap, not just the bitcoin send fee.
+        assert!(probe.contains("Conversion fee"));
+        assert!(probe.contains("0.01 USDB (0.10%)"));
+        assert!(probe.contains("Max price change") && probe.contains("0.5%"));
+
+        // Paying from bitcoin with a USDB shortfall shows the same rows.
+        drop(probe);
+        drop(harness);
+        review.pay_from = WalletAsset::Bitcoin;
+        let cache = review.cache();
+        let mut harness = Harness::new(screen(&review, &menu, &cache, false), FULL_HEIGHT);
+        let probe = harness.probe();
+        assert!(probe.contains("12.40 USDB → 15,003 sats"));
+        assert!(probe.contains("Conversion fee") && probe.contains("Max price change"));
     }
 
     #[test]
