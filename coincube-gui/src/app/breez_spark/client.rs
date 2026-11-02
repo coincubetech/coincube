@@ -2339,7 +2339,8 @@ mod p0_contract_tests {
             .expect_err("undisclosed")
             .contains("token leg without a conversion"));
 
-        let mutations: [(&str, fn(&mut PrepareSendFromOk)); 9] = [
+        type Mutation = (&'static str, fn(&mut PrepareSendFromOk));
+        let mutations: [Mutation; 9] = [
             ("token payment from Bitcoin", |ok| ok.pay_from = Bitcoin),
             ("with a conversion", |ok| {
                 ok.conversion = Some(Box::new(quote(Usdb)))
