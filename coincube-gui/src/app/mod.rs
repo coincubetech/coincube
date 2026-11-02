@@ -7246,9 +7246,11 @@ impl App {
                 self.node_history_request_epoch = self.node_history_request_epoch.wrapping_add(1);
                 let request_epoch = self.node_history_request_epoch;
                 self.node_history_in_progress = true;
-                self.cache.node_history.busy = true;
-                self.cache.node_history.error = None;
+                // A background poll keeps the panel as it is: flipping `busy`
+                // and clearing the error every five seconds made it flash.
                 if !matches!(action, node_history::Action::Poll) {
+                    self.cache.node_history.busy = true;
+                    self.cache.node_history.error = None;
                     self.node_history_epoch = self.node_history_epoch.wrapping_add(1);
                     self.cache.local_switch_history = None;
                 }
@@ -16897,6 +16899,43 @@ mod local_node_sync_tests {
             Some(node_history::Action::Cancel)
         ));
         assert!(app.cache.node_history.cancel_queued);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn background_history_poll_leaves_the_panel_state_alone() {
+        let root = std::env::temp_dir().join(format!("history-poll-{}", uuid::Uuid::new_v4()));
+        let _guard = crate::app::session::test_guard();
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
+        let config = node(8333);
+        let mut daemon_config = app.daemon.as_ref().unwrap().config().unwrap().clone();
+        daemon_config.pending_bitcoind = Some(config.clone());
+        app.daemon = Some(Arc::new(EmbeddedDaemon::unstarted_for_test(
+            daemon_config,
+            None,
+        )));
+        app.internal_bitcoind = Some(Bitcoind::for_test(
+            config,
+            &app.cache.datadir_path,
+            app.cache.network,
+        ));
+        let error = Some("Cannot reach local node for getblockhash".to_string());
+        app.cache.node_history.error = error.clone();
+
+        drop(app.update(Message::NodeHistory(node_history::Action::Poll)));
+        assert!(app.node_history_in_progress, "the poll must still run");
+        assert!(!app.cache.node_history.busy);
+        assert_eq!(app.cache.node_history.error, error);
+
+        // A user action still disables the controls and clears the error.
+        app.node_history_in_progress = false;
+        drop(app.update(Message::NodeHistory(node_history::Action::Pause)));
+        assert!(app.cache.node_history.busy);
+        assert!(app.cache.node_history.error.is_none());
+        drop(app);
+        assert!(crate::node::bitcoind::wait_for_managed_node_cleanup(
+            std::time::Duration::from_secs(120)
+        ));
         let _ = std::fs::remove_dir_all(root);
     }
 

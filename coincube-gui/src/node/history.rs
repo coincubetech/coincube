@@ -5,7 +5,7 @@
 //! Automatic pruning must be disabled before fetching any missing block.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     convert::TryFrom,
     fs::File,
     path::{Path, PathBuf},
@@ -29,6 +29,28 @@ use serde_json::{json, Value};
 const RESPONSE_LIMIT: usize = 10 * 1024 * 1024;
 pub const BATCH_BLOCKS: u32 = 32;
 const MIN_FREE_BYTES: u64 = 512 * 1024 * 1024;
+/// About a minute of 5-second polls. A node busy with a rescan or a peer
+/// download can miss one RPC deadline without anything being wrong.
+pub const MAX_TRANSIENT_FAILURES: u32 = 12;
+const UNREACHABLE: &str = "Cannot reach local node for ";
+
+fn chain_changed(start: u32) -> String {
+    format!("The chain changed during recovery, so Tenshu scans every block from {start}.")
+}
+
+/// Keep running through a missed RPC deadline; pause on anything else, or
+/// once the node has been unreachable for too long. Returns whether to pause.
+fn absorb_transient(job: &mut Recovery, error: &str) -> bool {
+    if error.starts_with(UNREACHABLE) && job.transient_failures < MAX_TRANSIENT_FAILURES {
+        job.transient_failures += 1;
+        job.last_error = Some(format!("{error}. Retrying…"));
+        return false;
+    }
+    job.transient_failures = 0;
+    job.phase = Phase::Paused;
+    job.last_error = Some(error.to_string());
+    true
+}
 
 /// A transport/RPC failure never means that a transaction or block is absent.
 #[derive(Debug, Clone)]
@@ -430,6 +452,73 @@ pub fn verify_proof(raw: &[u8], txid: Txid, block: BlockHash) -> Result<MerkleBl
     Ok(proof)
 }
 
+fn providers(config: &EsploraConfig) -> impl Iterator<Item = (&String, Option<&String>)> {
+    IntoIterator::into_iter([
+        Some((&config.addr, config.token.as_ref())),
+        config
+            .fallback_addr
+            .as_ref()
+            .map(|a| (a, config.fallback_token.as_ref())),
+        config
+            .secondary_fallback_addr
+            .as_ref()
+            .map(|a| (a, config.secondary_fallback_token.as_ref())),
+    ])
+    .flatten()
+}
+
+/// Ask Connect/Esplora which confirmed block spent `outpoint`. The caller
+/// checks the block hash against the local chain, and the final
+/// reconciliation proves the spend; a wrong answer only costs a scan.
+pub async fn fetch_outspend(
+    config: &EsploraConfig,
+    outpoint: OutPoint,
+) -> Result<Option<(u32, BlockHash)>, String> {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+    for (base, token) in providers(config) {
+        let mut request = client.get(format!(
+            "{}/tx/{}/outspend/{}",
+            base.trim_end_matches('/'),
+            outpoint.txid,
+            outpoint.vout
+        ));
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        let Ok(response) = request.send().await else {
+            continue;
+        };
+        if !response.status().is_success() {
+            continue;
+        }
+        let Ok(raw) = bounded_body(response, 64 * 1024).await else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<Value>(&raw) else {
+            continue;
+        };
+        if value["spent"].as_bool() != Some(true)
+            || value["status"]["confirmed"].as_bool() != Some(true)
+        {
+            return Ok(None);
+        }
+        let height = value["status"]["block_height"]
+            .as_u64()
+            .and_then(|h| u32::try_from(h).ok());
+        let hash = value["status"]["block_hash"]
+            .as_str()
+            .and_then(|h| h.parse::<BlockHash>().ok());
+        if let (Some(height), Some(hash)) = (height, hash) {
+            return Ok(Some((height, hash)));
+        }
+    }
+    Err("No configured Connect/Esplora provider said which transaction spent this coin".into())
+}
+
 pub async fn fetch_proof(
     config: &EsploraConfig,
     txid: Txid,
@@ -440,18 +529,7 @@ pub async fn fetch_proof(
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|e| e.to_string())?;
-    let providers = [
-        Some((&config.addr, config.token.as_ref())),
-        config
-            .fallback_addr
-            .as_ref()
-            .map(|a| (a, config.fallback_token.as_ref())),
-        config
-            .secondary_fallback_addr
-            .as_ref()
-            .map(|a| (a, config.secondary_fallback_token.as_ref())),
-    ];
-    for (base, token) in IntoIterator::into_iter(providers).flatten() {
+    for (base, token) in providers(config) {
         let mut request = client.get(format!(
             "{}/tx/{txid}/merkleblock-proof",
             base.trim_end_matches('/')
@@ -531,6 +609,50 @@ pub struct Recovery {
     pub import_requested: bool,
     #[serde(default)]
     pub db_replayed: bool,
+    /// Single blocks still to fetch and scan, ascending and below `tail`.
+    /// While any remain, `next` is the first so pruning keeps every one.
+    #[serde(default)]
+    pub blocks: Vec<u32>,
+    /// Start of the contiguous range scanned after `blocks`. `None` is a
+    /// plain range scan from `start`.
+    #[serde(default)]
+    pub tail: Option<u32>,
+    /// How many single blocks were planned, for progress.
+    #[serde(default)]
+    pub planned: u32,
+    /// Why this recovery scans a long contiguous range instead of single
+    /// blocks, shown to the user.
+    #[serde(default)]
+    pub fallback: Option<String>,
+    /// Consecutive node-unreachable steps. The job keeps running until
+    /// `MAX_TRANSIENT_FAILURES`, then pauses.
+    #[serde(default)]
+    pub transient_failures: u32,
+}
+
+/// What a set of coins needs scanned so the local wallet agrees with Connect.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ScanPlan {
+    /// Blocks that each hold a transaction the wallet is missing.
+    pub blocks: BTreeSet<u32>,
+    /// A height from which every block must be scanned, and why.
+    pub floor: Option<(u32, String)>,
+}
+
+impl ScanPlan {
+    pub fn earliest(&self) -> Option<u32> {
+        self.blocks
+            .first()
+            .copied()
+            .into_iter()
+            .chain(self.floor.as_ref().map(|(height, _)| *height))
+            .min()
+    }
+    fn lower_floor(&mut self, height: u32, reason: String) {
+        if self.floor.as_ref().is_none_or(|(floor, _)| height < *floor) {
+            self.floor = Some((height, reason));
+        }
+    }
 }
 
 impl Recovery {
@@ -558,7 +680,38 @@ impl Recovery {
             wallet_ready: false,
             import_requested: false,
             db_replayed: false,
+            blocks: Vec::new(),
+            tail: None,
+            planned: 0,
+            fallback: None,
+            transient_failures: 0,
         })
+    }
+
+    /// Replace the range with single blocks plus a contiguous tail. Blocks at
+    /// or above the tail are covered by it. `tail` must not exceed `target`.
+    pub fn plan(&mut self, blocks: BTreeSet<u32>, tail: u32, fallback: Option<String>) {
+        let tail = tail.min(self.target);
+        self.blocks = blocks.into_iter().filter(|h| *h < tail).collect();
+        self.tail = Some(tail);
+        self.planned = self.blocks.len() as u32;
+        self.fallback = fallback;
+        self.start = self.blocks.first().copied().unwrap_or(tail);
+        self.next = self.start;
+        self.download_next = self.start;
+    }
+
+    /// Drop any single-block plan and scan every block from `start` again.
+    pub fn rewind(&mut self, reason: Option<String>) {
+        self.next = self.start;
+        self.download_next = self.start;
+        self.db_replayed = false;
+        if self.tail.is_some() {
+            self.blocks.clear();
+            self.tail = None;
+            self.planned = 0;
+            self.fallback = reason;
+        }
     }
     pub fn validate(&self, binding: &Binding) -> Result<(), String> {
         if self.version != 1
@@ -570,6 +723,18 @@ impl Recovery {
             || (self.phase == Phase::Complete && self.next != self.target + 1)
             || self.download_next < self.start
             || self.download_next > self.target.saturating_add(1)
+            || !self.blocks.windows(2).all(|w| w[0] < w[1])
+            || self.blocks.len() as u64 > u64::from(self.planned)
+            || match self.tail {
+                None => !self.blocks.is_empty(),
+                Some(tail) => {
+                    tail < self.start
+                        || tail > self.target
+                        || self.blocks.first().is_some_and(|h| *h != self.next)
+                        || self.blocks.iter().any(|h| *h < self.start || *h >= tail)
+                        || (self.blocks.is_empty() && self.next < tail)
+                }
+            }
         {
             return Err(
                 "Recovery progress belongs to a different wallet/node or is invalid".into(),
@@ -578,7 +743,28 @@ impl Recovery {
         Ok(())
     }
     pub fn progress(&self) -> f32 {
-        (self.next - self.start) as f32 / (self.target - self.start + 1) as f32
+        let (done, total) = self.block_counts();
+        done as f32 / total as f32
+    }
+
+    /// Blocks scanned and blocks to scan in all, counting single blocks and
+    /// the contiguous tail alike.
+    pub fn block_counts(&self) -> (u32, u32) {
+        match self.tail {
+            None => (self.next - self.start, self.target - self.start + 1),
+            Some(tail) => {
+                let singles_done = self.planned - self.blocks.len() as u32;
+                let tail_done = if self.blocks.is_empty() {
+                    self.next - tail
+                } else {
+                    0
+                };
+                (
+                    singles_done + tail_done,
+                    self.planned + (self.target - tail + 1),
+                )
+            }
+        }
     }
 }
 
@@ -648,7 +834,7 @@ pub async fn bootstrap_step(
         let info=rpc.check_chain(network).await?;
         if info["automatic_pruning"].as_bool()!=Some(false) || info["pruned"].as_bool()!=Some(true) {return Err("Restart the managed node with recovery pruning controls".into());}
         let anchor=rpc.block_hash(job.target).await?;
-        if anchor!=job.target_hash {job.download_next=job.start;job.next=job.start;job.target_hash=anchor;job.db_replayed=false;}
+        if anchor!=job.target_hash {job.rewind(Some(chain_changed(job.start)));job.target_hash=anchor;}
         let end=job.download_next.saturating_add(BATCH_BLOCKS-1).min(job.target);
         for height in job.download_next..=end {
             if fs4::available_space(dir).map_err(|e|e.to_string())?<MIN_FREE_BYTES {return Err("Free more disk space to download the blocks needed to load this wallet, then resume".into());}
@@ -664,10 +850,13 @@ pub async fn bootstrap_step(
         Ok(())
     }.await;
     if let Err(error) = result {
-        job.phase = Phase::Paused;
-        job.last_error = Some(error.clone());
+        let paused = absorb_transient(&mut job, &error);
         write_json(path, &job)?;
-        return Err(error);
+        return if paused { Err(error) } else { Ok(job) };
+    }
+    if job.transient_failures > 0 {
+        job.transient_failures = 0;
+        job.last_error = None;
     }
     write_json(path, &job)?;
     Ok(job)
@@ -692,8 +881,7 @@ pub async fn recover_step(
             // Every previously scanned block may be on the old branch. Rewind
             // the entire requested range; stale checkpoints cannot authorize a
             // switch. Keep the user's range and preserve wallet records.
-            recovery.next=recovery.start;
-            recovery.db_replayed=false;
+            recovery.rewind(Some(chain_changed(recovery.start)));
             recovery.target_hash=rpc.block_hash(recovery.target).await?;
             recovery.phase=Phase::Downloading;
             write_json(path,&recovery)?;
@@ -705,6 +893,9 @@ pub async fn recover_step(
         let wallet = rpc.call(true,"getwalletinfo",json!([])).await.map_err(|e|e.to_string())?;
         if wallet["scanning"].is_object() { return Ok(()); }
         if wallet["scanning"].as_bool()!=Some(false) { return Err("Cannot determine local wallet scan status".into()); }
+        if !recovery.blocks.is_empty() {
+            return single_blocks_step(rpc, directory, path, &mut recovery).await;
+        }
         let end=recovery.next.saturating_add(BATCH_BLOCKS-1).min(recovery.target);
         recovery.phase=Phase::Downloading;
         write_json(path,&recovery)?;
@@ -735,14 +926,69 @@ pub async fn recover_step(
         Ok(())
     }.await;
     if let Err(error) = result {
-        recovery.phase = Phase::Paused;
-        recovery.last_error = Some(error.clone());
+        let paused = absorb_transient(&mut recovery, &error);
         write_json(path, &recovery)?;
-        return Err(error);
+        return if paused { Err(error) } else { Ok(recovery) };
     }
     recovery.last_error = None;
+    recovery.transient_failures = 0;
     write_json(path, &recovery)?;
     Ok(recovery)
+}
+
+/// Fetch and scan queued single blocks, one at a time, in height order so a
+/// funding transaction is in the wallet before the block that spends it. Each
+/// scanned block is persisted before the next, so an interruption repeats at
+/// most one block.
+async fn single_blocks_step(
+    rpc: &NodeRpc,
+    directory: &Path,
+    path: &Path,
+    recovery: &mut Recovery,
+) -> Result<(), String> {
+    let tail = recovery.tail.ok_or("Recovery block queue has no tail")?;
+    for _ in 0..BATCH_BLOCKS {
+        let Some(&height) = recovery.blocks.first() else {
+            break;
+        };
+        if fs4::available_space(directory).map_err(|e| e.to_string())? < MIN_FREE_BYTES {
+            return Err(
+                "Not enough free disk space to recover more blocks; free space and resume".into(),
+            );
+        }
+        recovery.phase = Phase::Downloading;
+        write_json(path, recovery)?;
+        let hash = rpc.block_hash(height).await?;
+        if !rpc.fetch_block(hash, recovery.fetch_attempts).await? {
+            recovery.fetch_attempts += 1;
+            if recovery.fetch_attempts >= 8 {
+                return Err("An archival peer did not supply the requested block; retry recovery after checking node connectivity".into());
+            }
+            return Ok(());
+        }
+        recovery.phase = Phase::Scanning;
+        write_json(path, recovery)?;
+        let scanned = rpc
+            .call(true, "rescanblockchain", json!([height, height]))
+            .await
+            .map_err(|e| e.to_string())?;
+        if scanned["start_height"].as_u64() != Some(u64::from(height))
+            || scanned["stop_height"].as_u64() != Some(u64::from(height))
+        {
+            return Err(
+                "The wallet did not finish scanning the requested block; resume recovery".into(),
+            );
+        }
+        if rpc.block_hash(height).await? != hash {
+            return Err("The chain changed during recovery; resume to scan the new branch".into());
+        }
+        recovery.blocks.remove(0);
+        recovery.next = recovery.blocks.first().copied().unwrap_or(tail);
+        recovery.fetch_attempts = 0;
+        recovery.phase = Phase::Downloading;
+        write_json(path, recovery)?;
+    }
+    Ok(())
 }
 
 /// Import known confirmed transactions in chain order. Unsupported imports
@@ -798,11 +1044,25 @@ pub async fn import_transactions(
 
 /// Proofs do not establish unspentness. A vanished output requires a scan to
 /// find its spender, unless the known spender is already recorded locally.
+/// Returns the earliest height that still needs scanning.
 pub async fn reconcile_coins(
     rpc: &NodeRpc,
     coins: &[coincubed::commands::ListCoinsEntry],
 ) -> Result<Option<u32>, String> {
-    let mut earliest = None;
+    Ok(plan_coin_scans(rpc, coins, None).await?.earliest())
+}
+
+/// Work out which blocks to scan so the local wallet holds every coin and
+/// spend Connect reports. A coin points at the block of its missing funding
+/// or spending transaction. With `outspends`, a spender Connect's wallet view
+/// lacks is looked up there; a spender that stays unknown, or a pending one,
+/// needs every block from the coin's own height.
+pub async fn plan_coin_scans(
+    rpc: &NodeRpc,
+    coins: &[coincubed::commands::ListCoinsEntry],
+    outspends: Option<&EsploraConfig>,
+) -> Result<ScanPlan, String> {
+    let mut plan = ScanPlan::default();
     for coin in coins {
         let height = coin
             .block_height
@@ -841,44 +1101,71 @@ pub async fn reconcile_coins(
         }
         let height = height.expect("unconfirmed handled above");
         let funding = rpc.transaction_at(coin.outpoint.txid, Some(height)).await?;
-        let mut needs_scan = funding.is_none();
+        if funding.is_none() {
+            plan.blocks.insert(height);
+        }
         let OutPoint { txid, vout } = coin.outpoint;
         let unspent = rpc
             .call(false, "gettxout", json!([txid.to_string(), vout, true]))
             .await
             .map_err(|e| e.to_string())?;
         if let Some(spend) = coin.spend_info {
-            let spender = rpc
-                .transaction_at(spend.txid, spend.height.and_then(|h| u32::try_from(h).ok()))
-                .await?;
-            needs_scan |= spender.is_none_or(|tx| {
+            let spend_height = spend.height.and_then(|h| u32::try_from(h).ok());
+            let spender = rpc.transaction_at(spend.txid, spend_height).await?;
+            let missing = spender.is_none_or(|tx| {
                 !tx.input
                     .iter()
                     .any(|input| input.previous_output == coin.outpoint)
             }) || !unspent.is_null();
+            if missing {
+                match spend_height {
+                    Some(spent_at) => {
+                        plan.blocks.insert(spent_at);
+                    }
+                    None => plan.lower_floor(
+                        height,
+                        format!("A pending spend of a coin from block {height} is not in the local wallet yet, so Tenshu scans every block from {height}."),
+                    ),
+                }
+            }
+        } else if unspent.is_null() {
+            let found = match outspends {
+                Some(source) => match fetch_outspend(source, coin.outpoint).await {
+                    Ok(Some((spent_at, block))) if spent_at >= height => {
+                        (rpc.block_hash(spent_at).await? == block).then_some(spent_at)
+                    }
+                    _ => None,
+                },
+                None => None,
+            };
+            match found {
+                Some(spent_at) => {
+                    plan.blocks.insert(spent_at);
+                }
+                None => plan.lower_floor(
+                    height,
+                    format!("Connect could not say which transaction spent a coin from block {height}, so Tenshu scans every block from {height}."),
+                ),
+            }
         } else {
-            needs_scan |= unspent.is_null();
-            if !unspent.is_null() {
-                let output = funding.as_ref().and_then(|tx| tx.output.get(vout as usize));
-                let script = unspent["scriptPubKey"]["hex"]
-                    .as_str()
-                    .ok_or("Invalid unspent output script")?;
-                let amount = unspent["value"]
-                    .as_f64()
-                    .and_then(|value| bitcoin::Amount::from_btc(value).ok())
-                    .ok_or("Invalid unspent output amount")?;
-                needs_scan |= output.is_none_or(|output| {
-                    output.value != amount
-                        || output.script_pubkey.to_hex_string() != script
-                        || amount != coin.amount
-                });
+            let output = funding.as_ref().and_then(|tx| tx.output.get(vout as usize));
+            let script = unspent["scriptPubKey"]["hex"]
+                .as_str()
+                .ok_or("Invalid unspent output script")?;
+            let amount = unspent["value"]
+                .as_f64()
+                .and_then(|value| bitcoin::Amount::from_btc(value).ok())
+                .ok_or("Invalid unspent output amount")?;
+            if output.is_none_or(|output| {
+                output.value != amount
+                    || output.script_pubkey.to_hex_string() != script
+                    || amount != coin.amount
+            }) {
+                plan.blocks.insert(height);
             }
         }
-        if needs_scan {
-            earliest = Some(earliest.map_or(height, |h: u32| h.min(height)));
-        }
     }
-    Ok(earliest)
+    Ok(plan)
 }
 
 #[cfg(test)]
@@ -1325,6 +1612,244 @@ mod tests {
                 assert!(!result.unwrap());
             } else {
                 assert!(result.is_err());
+            }
+        }
+    }
+
+    fn coin(spend: Option<(Txid, Option<i32>)>) -> coincubed::commands::ListCoinsEntry {
+        let funding = genesis().txdata[0].clone();
+        coincubed::commands::ListCoinsEntry {
+            amount: funding.output[0].value,
+            outpoint: OutPoint {
+                txid: funding.compute_txid(),
+                vout: 0,
+            },
+            address: bitcoin::Address::p2wsh(&bitcoin::ScriptBuf::new(), Network::Regtest),
+            block_height: Some(0),
+            derivation_index: bitcoin::bip32::ChildNumber::from_normal_idx(0).unwrap(),
+            spend_info: spend
+                .map(|(txid, height)| coincubed::commands::LCSpendInfo { txid, height }),
+            is_immature: false,
+            is_change: false,
+            is_from_self: false,
+        }
+    }
+
+    /// The funding transaction is in the wallet at height 0 and the node
+    /// reports its output spent; any other wallet lookup is unknown.
+    async fn spent_coin_node(server: &MockServer) {
+        let funding = genesis().txdata[0].clone();
+        let txid = funding.compute_txid();
+        response(
+            server,
+            "getblockhash",
+            json!(genesis().block_hash().to_string()),
+        )
+        .await;
+        response(server, "gettxout", Value::Null).await;
+        server.mock_async(|when,then| {
+            when.method(POST).json_body_partial(json!({"method":"gettransaction","params":[txid.to_string(),true]}).to_string());
+            then.status(200).json_body(json!({"id":"history","result":{"txid":txid.to_string(),"hex":serialize_hex(&funding),"confirmations":1,"blockhash":genesis().block_hash().to_string()}}));
+        }).await;
+        server.mock_async(|when,then| {
+            when.method(POST).json_body_partial(r#"{"method":"gettransaction"}"#);
+            then.status(500).json_body(json!({"id":"history","error":{"code":-5,"message":"Invalid or non-wallet transaction id"}}));
+        }).await;
+    }
+
+    #[test]
+    fn planned_blocks_keep_next_at_the_lowest_unscanned_height() {
+        let mut job = Recovery::new(binding(), 0, 100, genesis().block_hash()).unwrap();
+        job.plan(BTreeSet::from([5, 40, 70, 90]), 69, None);
+        // 70 and 90 sit inside the tail, which scans them anyway.
+        assert_eq!(job.blocks, vec![5, 40]);
+        assert_eq!((job.start, job.next, job.tail), (5, 5, Some(69)));
+        assert!(job.validate(&binding()).is_ok());
+        assert_eq!(job.block_counts(), (0, 2 + 32));
+        job.blocks.remove(0);
+        job.next = 40;
+        assert_eq!(job.block_counts(), (1, 34));
+        // `next` must name the first queued block.
+        job.next = 41;
+        assert!(job.validate(&binding()).is_err());
+        job.next = 40;
+        job.blocks.clear();
+        assert!(job.validate(&binding()).is_err(), "tail not reached yet");
+        job.next = 69;
+        assert!(job.validate(&binding()).is_ok());
+        assert_eq!(job.block_counts(), (2, 34));
+        job.rewind(Some("why".into()));
+        assert_eq!((job.next, job.tail, job.planned), (5, None, 0));
+        assert_eq!(job.fallback.as_deref(), Some("why"));
+        assert_eq!(job.block_counts(), (0, 96));
+        // A plan with nothing to fetch scans only its tail.
+        let mut job = Recovery::new(binding(), 0, 100, genesis().block_hash()).unwrap();
+        job.plan(BTreeSet::new(), 69, None);
+        assert_eq!((job.start, job.next), (69, 69));
+        assert!(job.validate(&binding()).is_ok());
+    }
+
+    #[test]
+    fn a_missed_node_deadline_keeps_running_until_the_retry_budget_ends() {
+        let mut job = Recovery::new(binding(), 0, 100, genesis().block_hash()).unwrap();
+        let unreachable = format!("{UNREACHABLE}getblockhash");
+        for attempt in 1..=MAX_TRANSIENT_FAILURES {
+            assert!(!absorb_transient(&mut job, &unreachable));
+            assert_eq!(job.phase, Phase::Downloading);
+            assert_eq!(job.transient_failures, attempt);
+        }
+        assert!(absorb_transient(&mut job, &unreachable));
+        assert_eq!(job.phase, Phase::Paused);
+        assert_eq!(job.transient_failures, 0);
+        let mut job = Recovery::new(binding(), 0, 100, genesis().block_hash()).unwrap();
+        assert!(absorb_transient(&mut job, "Not enough free disk space"));
+        assert_eq!(job.phase, Phase::Paused);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_node_does_not_pause_recovery() {
+        // httpmock pools its servers, so a dropped one can still answer; a
+        // closed listener's port refuses the connection.
+        let address = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let rpc = NodeRpc::new(
+            &BitcoindConfig {
+                addr: address,
+                rpc_auth: coincubed::config::BitcoindRpcAuth::UserPass(
+                    "fixture".into(),
+                    "fixture".into(),
+                ),
+            },
+            "history-fixture",
+            crate::chain::ChainId::from(Network::Regtest),
+        )
+        .await
+        .unwrap();
+        let dir = directory();
+        let path = recovery_path(&dir, "fixture");
+        write_json(
+            &path,
+            &Recovery::new(binding(), 0, 0, genesis().block_hash()).unwrap(),
+        )
+        .unwrap();
+        let job = recover_step(&rpc, Network::Regtest, &binding(), &path)
+            .await
+            .unwrap();
+        assert_eq!(job.phase, Phase::Downloading);
+        assert_eq!(job.transient_failures, 1);
+        assert!(job.last_error.unwrap().contains("Retrying"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn queued_blocks_are_scanned_one_by_one_before_the_tail() {
+        let server = MockServer::start_async().await;
+        base(&server, false).await;
+        let mut scans = vec![];
+        for (params, start, stop) in [("[5,5]", 5, 5), ("[9,9]", 9, 9), ("[20]", 20, 20)] {
+            scans.push(
+                server
+                    .mock_async(|when, then| {
+                        when.method(POST)
+                            .json_body_partial(r#"{"method":"rescanblockchain"}"#)
+                            .body_contains(format!("\"params\":{params}"));
+                        then.status(200).json_body(
+                            json!({"id":"history","result":{"start_height":start,"stop_height":stop}}),
+                        );
+                    })
+                    .await,
+            );
+        }
+        let dir = directory();
+        let path = recovery_path(&dir, "fixture");
+        let mut job = Recovery::new(binding(), 0, 20, genesis().block_hash()).unwrap();
+        job.plan(BTreeSet::from([5, 9]), 20, None);
+        write_json(&path, &job).unwrap();
+        let rpc = rpc(&server).await;
+        let job = recover_step(&rpc, Network::Regtest, &binding(), &path)
+            .await
+            .unwrap();
+        assert!(job.blocks.is_empty());
+        assert_eq!((job.next, job.phase.clone()), (20, Phase::Downloading));
+        assert_eq!(job.block_counts(), (2, 3));
+        let job = recover_step(&rpc, Network::Regtest, &binding(), &path)
+            .await
+            .unwrap();
+        assert_eq!(job.phase, Phase::Reconciling);
+        assert_eq!(job.progress(), 1.0);
+        for scan in scans {
+            scan.assert_hits_async(1).await;
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_known_spend_needs_only_its_own_block() {
+        let server = MockServer::start_async().await;
+        spent_coin_node(&server).await;
+        let spender = Txid::from_byte_array([7; 32]);
+        let plan = plan_coin_scans(&rpc(&server).await, &[coin(Some((spender, Some(7))))], None)
+            .await
+            .unwrap();
+        assert_eq!(plan.blocks, BTreeSet::from([7]));
+        assert_eq!(plan.floor, None);
+        // A pending spend cannot be fetched as a block.
+        let plan = plan_coin_scans(&rpc(&server).await, &[coin(Some((spender, None)))], None)
+            .await
+            .unwrap();
+        assert!(plan.blocks.is_empty());
+        assert_eq!(plan.floor.map(|(height, _)| height), Some(0));
+    }
+
+    #[tokio::test]
+    async fn an_unknown_spender_is_looked_up_before_scanning_every_block() {
+        let funding = genesis().txdata[0].compute_txid();
+        let path = format!("/tx/{funding}/outspend/0");
+        for (status, body, expected) in [
+            (
+                200,
+                json!({"spent":true,"txid":Txid::from_byte_array([7;32]).to_string(),"vin":0,"status":{"confirmed":true,"block_height":7,"block_hash":genesis().block_hash().to_string()}}),
+                Some(7),
+            ),
+            (
+                200,
+                json!({"spent":true,"status":{"confirmed":true,"block_height":7,"block_hash":BlockHash::from_byte_array([42;32]).to_string()}}),
+                None,
+            ),
+            (
+                200,
+                json!({"spent":true,"status":{"confirmed":false}}),
+                None,
+            ),
+            (404, json!({}), None),
+        ] {
+            let server = MockServer::start_async().await;
+            spent_coin_node(&server).await;
+            let esplora = MockServer::start_async().await;
+            esplora
+                .mock_async(|when, then| {
+                    when.method(GET).path(&path);
+                    then.status(status).json_body(body.clone());
+                })
+                .await;
+            let config: EsploraConfig =
+                serde_json::from_value(json!({"addr":esplora.base_url()})).unwrap();
+            let plan = plan_coin_scans(&rpc(&server).await, &[coin(None)], Some(&config))
+                .await
+                .unwrap();
+            match expected {
+                Some(height) => {
+                    assert_eq!(plan.blocks, BTreeSet::from([height]));
+                    assert_eq!(plan.floor, None);
+                }
+                None => {
+                    assert!(plan.blocks.is_empty());
+                    let (height, reason) = plan.floor.unwrap();
+                    assert_eq!(height, 0);
+                    assert!(reason.contains("every block from 0"));
+                }
             }
         }
     }

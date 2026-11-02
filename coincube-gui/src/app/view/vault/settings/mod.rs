@@ -2553,14 +2553,23 @@ pub fn wallet_history_section<'a>(
             Phase::Complete => "Recovery scan complete",
             Phase::Cancelled => "Recovery cancelled",
         };
+        // A planned import counts the single blocks it fetches plus its
+        // short tail; a range scan counts every block between its ends.
+        let blocks = if job.tail.is_some() {
+            let (done, total) = job.block_counts();
+            format!("{done} of {total} blocks")
+        } else {
+            format!("blocks {}–{}", job.start, job.target)
+        };
         content = content
             .push(text(format!(
-                "{label}: blocks {}–{} · {:.1}% scanned",
-                job.start,
-                job.target,
+                "{label}: {blocks} · {:.1}% scanned",
                 job.progress() * 100.0
             )))
             .push(ProgressBar::new(0.0..=1.0, job.progress()));
+        if let Some(reason) = &job.fallback {
+            content = content.push(text(reason).size(12).style(theme::text::secondary));
+        }
         if !status.cancel_queued
             && matches!(
                 job.phase,
