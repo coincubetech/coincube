@@ -2376,7 +2376,13 @@ impl VaultHistoryProbe {
                     .await
                     .ok()?;
                 rpc.check_chain(self.chain.bitcoin_network()).await.ok()?;
-                match crate::node::history::reconcile_coins(&rpc, &coins).await {
+                match crate::node::history::reconcile_coins(
+                    &rpc,
+                    &coins,
+                    crate::node::history::outspend_source(&config),
+                )
+                .await
+                {
                     Ok(None) => Some(local_switch::VaultHistory::TrackedLocally),
                     Ok(Some(_)) => Some(history),
                     Err(_) => None,

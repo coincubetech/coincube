@@ -17,7 +17,8 @@ The Node settings panel exposes three related operations:
   just the spend's block; when Connect's wallet view lacks the spender of an
   output the node reports spent, Tenshu asks the Esplora
   `/tx/:txid/outspend/:vout` endpoint and accepts its block only if the hash
-  matches the local active chain. Queued blocks are fetched and scanned one at a
+  matches the local active chain. The final check asks again and accepts the
+  coin once the local wallet holds that spender. Queued blocks are fetched and scanned one at a
   time in height order, followed by a scan of the last 32 blocks. Only a pending
   spend, or a spender that stays unknown, scans every block from the coin's
   height, and the panel says why. Tokens are sent only to their configured

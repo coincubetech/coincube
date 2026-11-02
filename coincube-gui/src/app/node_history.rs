@@ -330,11 +330,8 @@ impl Context {
             rpc.prepare_wallet(&wallet_path, vault, range).await?;
             job.wallet_ready = true;
             if job.import_requested {
-                let source = match config.bitcoin_backend.as_ref() {
-                    Some(BitcoinBackend::Esplora(source)) => Some(source),
-                    _ => config.fallback_esplora.as_ref(),
-                }
-                .ok_or("No Connect/Esplora source is configured for transaction proofs")?;
+                let source = history::outspend_source(config)
+                    .ok_or("No Connect/Esplora source is configured for transaction proofs")?;
                 let txids: BTreeSet<_> = coins
                     .iter()
                     .flat_map(|coin| {
@@ -459,7 +456,10 @@ impl Context {
                 .await
                 .map_err(|e| e.to_string())?
                 .coins;
-            status.reconciled = history::reconcile_coins(&rpc, &coins).await?.is_none();
+            status.reconciled =
+                history::reconcile_coins(&rpc, &coins, history::outspend_source(config))
+                    .await?
+                    .is_none();
             if !status.reconciled {
                 status.error=Some("The scan finished, but Connect and the local wallet still disagree about transaction/spend history. Sync Connect, then import or recover again before switching.".into());
                 let mut saved: Recovery =

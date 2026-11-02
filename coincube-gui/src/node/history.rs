@@ -467,13 +467,22 @@ fn providers(config: &EsploraConfig) -> impl Iterator<Item = (&String, Option<&S
     .flatten()
 }
 
-/// Ask Connect/Esplora which confirmed block spent `outpoint`. The caller
-/// checks the block hash against the local chain, and the final
-/// reconciliation proves the spend; a wrong answer only costs a scan.
+/// The Connect/Esplora source the wallet engine uses, else its fallback.
+pub fn outspend_source(config: &coincubed::config::Config) -> Option<&EsploraConfig> {
+    match config.bitcoin_backend.as_ref() {
+        Some(coincubed::config::BitcoinBackend::Esplora(source)) => Some(source),
+        _ => config.fallback_esplora.as_ref(),
+    }
+}
+
+/// Ask Connect/Esplora which confirmed transaction and block spent
+/// `outpoint`. The caller checks the block hash against the local chain, and
+/// only the local wallet's copy of the spender proves the spend; a wrong
+/// answer only costs a scan.
 pub async fn fetch_outspend(
     config: &EsploraConfig,
     outpoint: OutPoint,
-) -> Result<Option<(u32, BlockHash)>, String> {
+) -> Result<Option<(Txid, u32, BlockHash)>, String> {
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(20))
@@ -506,14 +515,15 @@ pub async fn fetch_outspend(
         {
             return Ok(None);
         }
+        let spender = value["txid"].as_str().and_then(|t| t.parse::<Txid>().ok());
         let height = value["status"]["block_height"]
             .as_u64()
             .and_then(|h| u32::try_from(h).ok());
         let hash = value["status"]["block_hash"]
             .as_str()
             .and_then(|h| h.parse::<BlockHash>().ok());
-        if let (Some(height), Some(hash)) = (height, hash) {
-            return Ok(Some((height, hash)));
+        if let (Some(spender), Some(height), Some(hash)) = (spender, height, hash) {
+            return Ok(Some((spender, height, hash)));
         }
     }
     Err("No configured Connect/Esplora provider said which transaction spent this coin".into())
@@ -1053,13 +1063,15 @@ pub async fn import_transactions(
 }
 
 /// Proofs do not establish unspentness. A vanished output requires a scan to
-/// find its spender, unless the known spender is already recorded locally.
+/// find its spender, unless the spender (known to Connect's wallet view, or
+/// named by `outspends`) is already recorded locally.
 /// Returns the earliest height that still needs scanning.
 pub async fn reconcile_coins(
     rpc: &NodeRpc,
     coins: &[coincubed::commands::ListCoinsEntry],
+    outspends: Option<&EsploraConfig>,
 ) -> Result<Option<u32>, String> {
-    Ok(plan_coin_scans(rpc, coins, None).await?.earliest())
+    Ok(plan_coin_scans(rpc, coins, outspends).await?.earliest())
 }
 
 /// Work out which blocks to scan so the local wallet holds every coin and
@@ -1139,14 +1151,26 @@ pub async fn plan_coin_scans(
                 }
             }
         } else if unspent.is_null() {
+            // `Some(None)`: the local wallet already holds the named spender.
             let found = match outspends {
                 Some(source) => match fetch_outspend(source, coin.outpoint).await {
                     // The provider's height can be past the local tip or wrong;
                     // either way the coin falls back to a full scan. A node that
                     // missed its deadline is retried instead.
-                    Ok(Some((spent_at, block))) if spent_at >= height => {
+                    Ok(Some((spender, spent_at, block))) if spent_at >= height => {
                         match rpc.block_hash(spent_at).await {
-                            Ok(local) => (local == block).then_some(spent_at),
+                            Ok(local) if local == block => {
+                                let recorded = rpc
+                                    .transaction_at(spender, Some(spent_at))
+                                    .await?
+                                    .is_some_and(|tx| {
+                                        tx.input
+                                            .iter()
+                                            .any(|input| input.previous_output == coin.outpoint)
+                                    });
+                                Some((!recorded).then_some(spent_at))
+                            }
+                            Ok(_) => None,
                             Err(e) if e.starts_with(UNREACHABLE) => return Err(e),
                             Err(_) => None,
                         }
@@ -1156,9 +1180,10 @@ pub async fn plan_coin_scans(
                 None => None,
             };
             match found {
-                Some(spent_at) => {
+                Some(Some(spent_at)) => {
                     plan.blocks.insert(spent_at);
                 }
+                Some(None) => {}
                 None => plan.lower_floor(
                     height,
                     format!("Connect could not say which transaction spent a coin from block {height}, so Tenshu scans every block from {height}."),
@@ -1472,7 +1497,9 @@ mod tests {
                 is_from_self: false,
             };
             assert_eq!(
-                reconcile_coins(&rpc(&server).await, &[coin]).await.unwrap(),
+                reconcile_coins(&rpc(&server).await, &[coin], None)
+                    .await
+                    .unwrap(),
                 Some(0)
             );
         }
@@ -1809,7 +1836,7 @@ mod tests {
         esplora
             .mock_async(|when, then| {
                 when.method(GET).path(format!("/tx/{funding}/outspend/0"));
-                then.status(200).json_body(json!({"spent":true,"status":{"confirmed":true,"block_height":7,"block_hash":genesis().block_hash().to_string()}}));
+                then.status(200).json_body(json!({"spent":true,"txid":Txid::from_byte_array([7;32]).to_string(),"vin":0,"status":{"confirmed":true,"block_height":7,"block_hash":genesis().block_hash().to_string()}}));
             })
             .await;
         let config: EsploraConfig =
@@ -1840,7 +1867,7 @@ mod tests {
         esplora
             .mock_async(|when, then| {
                 when.method(GET).path(format!("/tx/{funding}/outspend/0"));
-                then.status(200).json_body(json!({"spent":true,"status":{"confirmed":true,"block_height":7,"block_hash":genesis().block_hash().to_string()}}));
+                then.status(200).json_body(json!({"spent":true,"txid":Txid::from_byte_array([7;32]).to_string(),"vin":0,"status":{"confirmed":true,"block_height":7,"block_hash":genesis().block_hash().to_string()}}));
             })
             .await;
         let config: EsploraConfig =
@@ -1849,6 +1876,57 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.starts_with(UNREACHABLE), "{}", error);
+    }
+
+    #[tokio::test]
+    async fn a_scanned_spender_connect_does_not_know_reconciles() {
+        let funding = genesis().txdata[0].compute_txid();
+        let spender = bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: OutPoint {
+                    txid: funding,
+                    vout: 0,
+                },
+                ..Default::default()
+            }],
+            output: vec![],
+        };
+        let spendid = spender.compute_txid();
+        let esplora = MockServer::start_async().await;
+        esplora
+            .mock_async(|when, then| {
+                when.method(GET).path(format!("/tx/{funding}/outspend/0"));
+                then.status(200).json_body(json!({"spent":true,"txid":spendid.to_string(),"vin":0,"status":{"confirmed":true,"block_height":7,"block_hash":genesis().block_hash().to_string()}}));
+            })
+            .await;
+        let config: EsploraConfig =
+            serde_json::from_value(json!({"addr":esplora.base_url()})).unwrap();
+        for scanned in [false, true] {
+            let server = MockServer::start_async().await;
+            if scanned {
+                // Registered first, so it wins over the unknown-transaction mock.
+                server.mock_async(|when,then| {
+                    when.method(POST).json_body_partial(json!({"method":"gettransaction","params":[spendid.to_string(),true]}).to_string());
+                    then.status(200).json_body(json!({"id":"history","result":{"txid":spendid.to_string(),"hex":serialize_hex(&spender),"confirmations":1,"blockhash":genesis().block_hash().to_string()}}));
+                }).await;
+            }
+            spent_coin_node(&server).await;
+            let rpc = rpc(&server).await;
+            // Before the scan the spend's block is queued; after it, Connect
+            // still has no spender, but the local wallet proves the spend.
+            assert_eq!(
+                reconcile_coins(&rpc, &[coin(None)], Some(&config))
+                    .await
+                    .unwrap(),
+                (!scanned).then_some(7)
+            );
+            assert_eq!(
+                reconcile_coins(&rpc, &[coin(None)], None).await.unwrap(),
+                Some(0)
+            );
+        }
     }
 
     #[tokio::test]
