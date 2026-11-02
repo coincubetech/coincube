@@ -1690,6 +1690,13 @@ impl<'a> LocalKeyRepository<'a> {
         if !is_current() {
             return Err("Imported signing was cancelled.".into());
         }
+        match fs::symlink_metadata(restore::restore_intent_path(
+            self.directory,
+            self.operation_id,
+        )) {
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            _ => return Err("Finish the imported key restore before signing.".into()),
+        }
         let credential = self.check_active()?;
         let lock = self.lock()?;
         let manifest = self.read_manifest_recoverable(&lock)?;
@@ -4842,5 +4849,19 @@ mod tests {
             "rolled-back manifest must not authorize old keys"
         );
         app::session::close();
+    }
+
+    #[test]
+    fn durable_restore_intent_denies_legacy_signer_before_key_read() {
+        let fixture = Fixture::new();
+        let repository = fixture.repository();
+        let intent = restore::restore_intent_path(repository.directory, repository.operation_id);
+        fs::create_dir_all(intent.parent().unwrap()).unwrap();
+        fs::write(&intent, b"pending restore").unwrap();
+        write_replace(&repository.root().join(MANIFEST), b"invalid manifest").unwrap();
+        let error = repository
+            .with_key(Uuid::new_v4(), Uuid::new_v4(), None, || true, |_| Ok(()))
+            .unwrap_err();
+        assert_eq!(error, "Finish the imported key restore before signing.");
     }
 }

@@ -122,14 +122,30 @@ fn preflight(directory: &NetworkDirectory, download: &VerifiedDownload) -> Resul
     if wallet_count > 1 || (wallet_count == 1 && existing.is_none()) {
         return Err("An existing wallet conflicts with this restore.".into());
     }
-    let key_root = directory
-        .path()
-        .join("imported-local-keys")
-        .join(kit.operation_id.to_string());
-    if fs::symlink_metadata(&key_root).is_ok() && existing.is_none() {
+    if conflicting_key_root(directory, kit.operation_id, existing.is_some())? {
         return Err("Existing imported key state conflicts with this restore.".into());
     }
     Ok(())
+}
+
+fn conflicting_key_root(
+    directory: &NetworkDirectory,
+    operation_id: Uuid,
+    existing_import: bool,
+) -> Result<bool, String> {
+    let key_root = directory
+        .path()
+        .join("imported-local-keys")
+        .join(operation_id.to_string());
+    let prior_key_root = match fs::symlink_metadata(&key_root) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => return Err("Cannot inspect existing imported key state.".into()),
+    };
+    Ok(prior_key_root
+        && (!existing_import
+            || !fs::symlink_metadata(restore_intent_path(directory, operation_id))
+                .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())))
 }
 
 fn write_intent(path: &Path, intent: &RestoreIntent) -> Result<(), String> {
@@ -390,6 +406,26 @@ mod tests {
         assert!(write_intent(&path, &other).is_err());
         clear_intent(&path, &intent).unwrap();
         assert!(!path.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn existing_same_operation_key_root_requires_durable_restore_intent() {
+        let root = std::env::temp_dir().join(format!("imported-restore-keys-{}", Uuid::new_v4()));
+        let directory = NetworkDirectory::new(root.join("regtest"));
+        directory.init().unwrap();
+        let operation_id = Uuid::new_v4();
+        let key_root = directory
+            .path()
+            .join("imported-local-keys")
+            .join(operation_id.to_string());
+        fs::create_dir_all(&key_root).unwrap();
+        assert!(conflicting_key_root(&directory, operation_id, true).unwrap());
+        let intent = restore_intent_path(&directory, operation_id);
+        fs::create_dir_all(intent.parent().unwrap()).unwrap();
+        fs::write(&intent, b"pending").unwrap();
+        assert!(!conflicting_key_root(&directory, operation_id, true).unwrap());
+        assert!(conflicting_key_root(&directory, operation_id, false).unwrap());
         fs::remove_dir_all(root).unwrap();
     }
 }
