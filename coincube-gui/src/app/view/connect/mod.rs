@@ -2241,18 +2241,19 @@ fn plan_selection_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectA
             container(card_col.padding(20).spacing(8))
                 .style(move |t| container::Style {
                     background: Some(iced::Background::Color(t.colors.cards.simple.background)),
+                    // Every card is outlined in its tier colour: full
+                    // strength on the current plan, softened on the others.
+                    // A hairline theme border vanished on the dark card.
                     border: iced::Border {
                         color: if is_current {
                             badge_color
-                        } else if is_estate {
+                        } else {
                             iced::Color {
                                 a: 0.45,
-                                ..color::INFO_BLUE
+                                ..badge_color
                             }
-                        } else {
-                            t.colors.cards.simple.border.unwrap_or(color::GREY_5)
                         },
-                        width: if is_current || is_estate { 1.0 } else { 0.2 },
+                        width: 1.0,
                         radius: 16.0.into(),
                     },
                     ..Default::default()
