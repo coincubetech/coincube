@@ -70,16 +70,111 @@ impl LocalKeyRepository<'_> {
         }
         let lock = self.lock()?;
         let manifest = self.read_manifest_recoverable(&lock)?;
+        let device = self.device(false)?;
+        let credential = self.check_active()?;
+        self.verified_restored_binding(&manifest, &credential, &device, || {})
+    }
+
+    pub(super) fn verified_restored_binding(
+        &self,
+        manifest: &Manifest,
+        credential: &str,
+        device: &coincube_core::seed_crypt::DeviceSecret,
+        after_verification: impl FnOnce(),
+    ) -> Result<RestoredCheckpoint, String> {
         let binding = manifest
             .restored
             .as_ref()
             .filter(|binding| binding.ready)
             .cloned()
             .ok_or("Restored signer inventory is not ready.")?;
-        let device = self.device(false)?;
-        let credential = self.check_active()?;
-        self.verify_records(&manifest, &credential, &device)?;
+        self.verify_records(manifest, credential, device)?;
+        after_verification();
+        self.check_active()?;
         Ok(binding)
+    }
+
+    /// Release a restored signer set only after observing a strictly later
+    /// inactive server epoch for its exact owner Cube. All restored records
+    /// retire with the binding in one anchored transition, so the legacy
+    /// offline signer cannot inherit them after release. This performs no
+    /// remote mutation; the caller must revoke the checkpoint first.
+    pub(crate) async fn release_restored_after_revocation(
+        &self,
+        client: &CoincubeClient,
+        is_current: impl Fn() -> bool,
+    ) -> Result<(), String> {
+        if !is_current() {
+            return Err("Imported restore release was cancelled.".into());
+        }
+        let expected = self.current_restored_binding()?;
+        let cube = client
+            .get_imported_checkpoint_cube(expected.cube_id)
+            .await
+            .map_err(|_| "Cannot verify restored Cube owner for release.")?;
+        let remote = client
+            .get_imported_checkpoint(expected.cube_id)
+            .await
+            .map_err(|_| "Cannot verify restored checkpoint revocation.")?;
+        if !is_current() {
+            return Err("Imported restore release was cancelled.".into());
+        }
+        let credential = self.check_active()?;
+        let lock = self.lock()?;
+        let manifest = self.read_manifest_recoverable(&lock)?;
+        let device = self.device(false)?;
+        self.release_restored_locked(
+            manifest,
+            &expected,
+            &cube,
+            &remote,
+            &credential,
+            &device,
+            || is_current() && self.check_active().is_ok(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn release_restored_locked(
+        &self,
+        manifest: Manifest,
+        expected: &RestoredCheckpoint,
+        cube: &CubeResponse,
+        remote: &Checkpoint,
+        credential: &str,
+        device: &coincube_core::seed_crypt::DeviceSecret,
+        is_current: impl Fn() -> bool,
+    ) -> Result<(), String> {
+        if !is_current() {
+            return Err("Imported restore release was cancelled.".into());
+        }
+        remote
+            .validate()
+            .map_err(|_| "Invalid restored checkpoint revocation proof.")?;
+        if manifest.restored.as_ref() != Some(expected)
+            || !expected.ready
+            || manifest.checkpoint.is_some()
+            || cube.id != expected.cube_id
+            || cube.uuid != self.cube.id
+            || cube.network != self.cube.network.api_str()
+            || cube.status != "active"
+            || remote.active
+            || remote.generation <= expected.generation
+        {
+            return Err("Restored checkpoint has no later inactive owner-scoped epoch.".into());
+        }
+        self.verify_records(&manifest, credential, device)?;
+        self.check_active()?;
+        if !is_current() {
+            return Err("Imported restore release was cancelled.".into());
+        }
+        let next = self.manifest(vec![]);
+        self.publish_manifest(&manifest, &next, credential, device, &is_current)?;
+        self.check_active()?;
+        if !is_current() {
+            return Err("Imported restore release was cancelled.".into());
+        }
+        Ok(())
     }
 
     async fn check_remote_binding(
