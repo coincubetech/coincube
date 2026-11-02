@@ -21,10 +21,10 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use breez_sdk_spark::{
-    CheckLightningAddressRequest, ClaimDepositRequest, ConversionEstimate, ConversionOptions,
-    ConversionType, CrossChainAddressDetails, CrossChainAddressFamily, CrossChainRouteFilter,
-    CrossChainRoutePair, EventListener, GetInfoRequest, GetInfoResponse, InputType,
-    LightningAddressInfo as SdkLightningAddressInfo, ListPaymentsRequest,
+    AmountAdjustmentReason, CheckLightningAddressRequest, ClaimDepositRequest, ConversionEstimate,
+    ConversionOptions, ConversionType, CrossChainAddressDetails, CrossChainAddressFamily,
+    CrossChainRouteFilter, CrossChainRoutePair, EventListener, GetInfoRequest, GetInfoResponse,
+    InputType, LightningAddressInfo as SdkLightningAddressInfo, ListPaymentsRequest,
     ListUnclaimedDepositsRequest, LnurlPayRequest, MaxFee, OnchainConfirmationSpeed,
     PaymentDetails, PaymentRequest, PrepareLnurlPayRequest, PrepareLnurlPayResponse,
     PrepareSendPaymentRequest, PrepareSendPaymentResponse, ReceivePaymentMethod,
@@ -32,14 +32,15 @@ use breez_sdk_spark::{
     SendPaymentMethod, SendPaymentOptions, SendPaymentRequest, SparkAsset, TokenBalance,
 };
 use coincube_spark_protocol::{
-    AutoConvertState, CheckLightningAddressAvailableOk, ClaimDepositOk, DepositInfo, ErrorKind,
-    Event as ProtocolEvent, Frame, GetConversionLimitsParams, GetInfoOk, GetLightningAddressOk,
-    GetUserSettingsOk, LightningAddressInfo as ProtocolLightningAddressInfo, ListPaymentsOk,
-    ListUnclaimedDepositsOk, Method, OkPayload, ParseInputKind, ParseInputOk, PaymentDetailSummary,
-    PaymentSummary, PrepareSendOk, PrepareSwapOk, PrepareSwapParams, ReceivePaymentOk,
-    RegisterLightningAddressOk, Request, Response, SendPaymentOk, SetAutoConvertParams,
-    SetStableBalanceParams, StableBalanceSnapshot, SwapOk, SwapParams, UsdbBalanceSnapshot,
-    CONVERSION_MAX_SLIPPAGE_BPS,
+    AmountAdjustment, AssetAmount, AutoConvertState, CheckLightningAddressAvailableOk,
+    ClaimDepositOk, ConversionQuote, DepositInfo, ErrorKind, Event as ProtocolEvent, Frame,
+    GetConversionLimitsParams, GetInfoOk, GetLightningAddressOk, GetUserSettingsOk,
+    LightningAddressInfo as ProtocolLightningAddressInfo, ListPaymentsOk, ListUnclaimedDepositsOk,
+    Method, OkPayload, ParseInputKind, ParseInputOk, PaymentDetailSummary, PaymentSummary,
+    PrepareLnurlPayFromParams, PrepareSendFromOk, PrepareSendFromParams, PrepareSendOk,
+    PrepareSwapOk, PrepareSwapParams, ReceivePaymentOk, RegisterLightningAddressOk, Request,
+    Response, SendPaymentOk, SetAutoConvertParams, SetStableBalanceParams, StableBalanceSnapshot,
+    SwapOk, SwapParams, UsdbBalanceSnapshot, WalletAsset, CONVERSION_MAX_SLIPPAGE_BPS,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, OnceCell, RwLock};
@@ -292,10 +293,9 @@ async fn handle_request(request: Request, state: Arc<ServerState>) -> Response {
         }
         Method::PrepareSwap(params) => handle_prepare_swap(id, params, state).await,
         Method::Swap(params) => handle_swap(id, params, state).await,
-        // Wire contract only (#950 P0). Each method refuses, without touching
-        // the SDK, until the PR that implements it.
-        Method::PrepareSendFrom(_) | Method::PrepareLnurlPayFrom(_) => {
-            not_implemented(id, "pay-from", "S4b")
+        Method::PrepareSendFrom(params) => handle_prepare_send_from(id, params, state).await,
+        Method::PrepareLnurlPayFrom(params) => {
+            handle_prepare_lnurl_pay_from(id, params, state).await
         }
         Method::Shutdown => {
             // Handled inline in the read loop — this branch exists so the
@@ -308,14 +308,6 @@ async fn handle_request(request: Request, state: Arc<ServerState>) -> Response {
 /// The answer to a method the protocol defines but this bridge doesn't
 /// implement yet. `BadRequest` because an older gui can't parse a new
 /// [`ErrorKind`] — its reader stops on an unparseable line.
-fn not_implemented(id: u64, feature: &str, lands_in: &str) -> Response {
-    Response::err(
-        id,
-        ErrorKind::BadRequest,
-        format!("{feature} is not implemented in this bridge yet (lands in {lands_in})"),
-    )
-}
-
 async fn handle_init(
     id: u64,
     params: coincube_spark_protocol::InitParams,
@@ -839,10 +831,14 @@ fn detail_summary(details: Option<&PaymentDetails>) -> PaymentDetailSummary {
 /// The balance read forces a sync: a stale cache that under-reports the holding
 /// would reject a send that would have worked, which is the worse mistake of the
 /// two. It only runs on the rare prepare that actually carries a conversion.
+///
+/// `pay_from` picks the copy: paying from bitcoin, the conversion only made
+/// up a shortfall; paying from USDB, it is the whole payment.
 async fn unfundable_conversion_error(
     id: u64,
     sdk: &SdkHandle,
     estimate: Option<&ConversionEstimate>,
+    pay_from: WalletAsset,
 ) -> Option<Response> {
     let estimate = estimate?;
     let ConversionType::ToBitcoin {
@@ -890,10 +886,15 @@ async fn unfundable_conversion_error(
     Some(Response::err(
         id,
         ErrorKind::BadRequest,
-        "Not enough bitcoin in this Spark wallet to cover the amount and its fee. \
-         The wallet tried to make up the difference by converting USDB back to \
-         bitcoin, but the USDB holding is too small to cover it. Send a smaller \
-         amount or top up the Spark bitcoin balance.",
+        match pay_from {
+            WalletAsset::Bitcoin => {
+                "Not enough bitcoin in this Spark wallet to cover the amount and its fee. \
+                 The wallet tried to make up the difference by converting USDB back to \
+                 bitcoin, but the USDB holding is too small to cover it. Send a smaller \
+                 amount or top up the Spark bitcoin balance."
+            }
+            WalletAsset::Usdb => NOT_ENOUGH_USDB,
+        },
     ))
 }
 
@@ -955,17 +956,129 @@ fn conversion_for_shortfall(
     }
     Some(UsdbShortfall {
         balance_sats,
-        conversion: ConversionOptions {
-            conversion_type: ConversionType::ToBitcoin {
-                from_token_identifier: sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER.to_string(),
-            },
-            // The cap the gui shows, on every conversion the bridge asks for.
-            max_slippage_bps: Some(CONVERSION_MAX_SLIPPAGE_BPS),
-            // SDK default: 30 s to see the converted sats.
-            completion_timeout_secs: None,
-        },
+        conversion: usdb_to_bitcoin_conversion(),
     })
 }
+
+/// A USDB → bitcoin conversion funding a sats send. Attached to a send, the
+/// SDK converts toward the whole `amount + fee` (`MinAmountOut`, in
+/// `sdk/payments/conversion.rs` at the pin), not the shortfall: the
+/// shortfall fallback attaches it only when bitcoin falls short, and paying
+/// from USDB always attaches it.
+fn usdb_to_bitcoin_conversion() -> ConversionOptions {
+    ConversionOptions {
+        conversion_type: ConversionType::ToBitcoin {
+            from_token_identifier: sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER.to_string(),
+        },
+        // The cap the gui shows, on every conversion the bridge asks for.
+        max_slippage_bps: Some(CONVERSION_MAX_SLIPPAGE_BPS),
+        // SDK default: 30 s to see the converted sats.
+        completion_timeout_secs: None,
+    }
+}
+
+/// Prepare a sats send funded from `pay_from`: from bitcoin, with the USDB
+/// shortfall fallback ([`prepare_with_usdb_fallback`], whose arguments these
+/// are); from USDB, with [`usdb_to_bitcoin_conversion`] attached to the only
+/// prepare, so the whole payment is converted.
+async fn prepare_funded<P, F, Fut, S, SFut>(
+    pay_from: WalletAsset,
+    known_amount_sat: Option<u64>,
+    prepare: F,
+    shortfall_conversion: S,
+    needed_sats: impl Fn(&P) -> u64,
+    has_conversion: impl Fn(&P) -> bool,
+) -> Result<P, PrepareError>
+where
+    F: Fn(Option<ConversionOptions>) -> Fut,
+    Fut: std::future::Future<Output = Result<P, breez_sdk_spark::SdkError>>,
+    S: Fn(u64) -> SFut,
+    SFut: std::future::Future<Output = Result<Option<UsdbShortfall>, breez_sdk_spark::SdkError>>,
+{
+    match pay_from {
+        WalletAsset::Bitcoin => {
+            prepare_with_usdb_fallback(
+                known_amount_sat,
+                prepare,
+                shortfall_conversion,
+                needed_sats,
+                has_conversion,
+            )
+            .await
+        }
+        WalletAsset::Usdb => prepare(Some(usdb_to_bitcoin_conversion()))
+            .await
+            .map_err(PrepareError::PayFromUsdb),
+    }
+}
+
+/// The quote for the conversion funding a send, for Review. `None` when the
+/// prepare carries no conversion. Refuses any conversion other than the one
+/// the bridge attaches ([`usdb_to_bitcoin_conversion`]): the gui shows its
+/// cap and its direction.
+fn send_conversion_quote(
+    estimate: Option<&ConversionEstimate>,
+) -> Result<Option<Box<ConversionQuote>>, String> {
+    let Some(estimate) = estimate else {
+        return Ok(None);
+    };
+    let expected = usdb_to_bitcoin_conversion();
+    if estimate.options.conversion_type != expected.conversion_type
+        || estimate.options.max_slippage_bps != expected.max_slippage_bps
+    {
+        return Err(format!(
+            "prepare returned an unexpected token-conversion leg: {:?}",
+            estimate.options
+        ));
+    }
+    let usdb = |amount| AssetAmount {
+        asset: WalletAsset::Usdb,
+        amount,
+    };
+    Ok(Some(Box::new(ConversionQuote {
+        amount_in: usdb(estimate.amount_in),
+        amount_out: AssetAmount {
+            asset: WalletAsset::Bitcoin,
+            amount: estimate.amount_out,
+        },
+        // The SDK denominates the fee in the asset converted out of.
+        fee: usdb(estimate.fee),
+        amount_adjustment: estimate
+            .amount_adjustment
+            .as_ref()
+            .map(|reason| match reason {
+                AmountAdjustmentReason::FlooredToMinLimit => AmountAdjustment::FlooredToMinLimit,
+                AmountAdjustmentReason::IncreasedToAvoidDust => {
+                    AmountAdjustment::IncreasedToAvoidDust
+                }
+            }),
+        max_slippage_bps: CONVERSION_MAX_SLIPPAGE_BPS,
+    })))
+}
+
+/// Why a prepare paid from a balance can't be offered, past what the SDK
+/// itself refuses: a token leg other than the conversion (paying a token
+/// invoice spends that token, which neither balance describes), and, paying
+/// from USDB, no conversion at all.
+fn pay_from_refusal(
+    pay_from: WalletAsset,
+    token_identifier: Option<&str>,
+    has_conversion: bool,
+) -> Option<(ErrorKind, &'static str)> {
+    if token_identifier.is_some() {
+        return Some((ErrorKind::BadRequest, TOKEN_INVOICE_REFUSAL));
+    }
+    (pay_from == WalletAsset::Usdb && !has_conversion).then_some((
+        ErrorKind::Sdk,
+        "the SDK prepared no USDB conversion for a payment from USDB",
+    ))
+}
+
+const NOT_ENOUGH_USDB: &str = "Not enough USDB in this Spark wallet to cover the amount and its \
+     fee. Send a smaller amount or pay from Bitcoin.";
+
+const TOKEN_INVOICE_REFUSAL: &str = "This invoice asks to be paid in a token, which can't be paid \
+     from Bitcoin or US Dollar.";
 
 /// Whether an SDK prepare error is the wallet saying the *bitcoin* balance
 /// can't cover the send. Two shapes: `SdkError::InsufficientFunds` from the
@@ -1001,6 +1114,9 @@ enum PrepareError {
         balance_sats: u64,
         source: breez_sdk_spark::SdkError,
     },
+    /// Paying from USDB, the prepare with the conversion failed: an SDK
+    /// error, or the AMM refusing the swap.
+    PayFromUsdb(breez_sdk_spark::SdkError),
 }
 
 impl PrepareError {
@@ -1025,6 +1141,20 @@ impl PrepareError {
                      less than {available} sats, leaving room for the fee, or try again later.",
                     conversion_failure_reason(&source.to_string()),
                     available = with_thousands(balance_sats),
+                ),
+            ),
+            // The SDK checks the USDB holding before it quotes
+            // (`ensure_token_balance_covers` at the pin).
+            PrepareError::PayFromUsdb(breez_sdk_spark::SdkError::InsufficientFunds {
+                token_identifier: Some(_),
+            }) => Response::err(id, ErrorKind::BadRequest, NOT_ENOUGH_USDB),
+            PrepareError::PayFromUsdb(source) => Response::err(
+                id,
+                ErrorKind::BadRequest,
+                format!(
+                    "Converting USDB to bitcoin to pay this failed: {}. Pay from Bitcoin, or \
+                     try again later.",
+                    conversion_failure_reason(&source.to_string()),
                 ),
             ),
         }
@@ -1128,14 +1258,67 @@ async fn handle_prepare_send(
     params: coincube_spark_protocol::PrepareSendParams,
     state: Arc<ServerState>,
 ) -> Response {
+    match prepare_send(id, params.input, params.amount_sat, None, &state).await {
+        Ok((prepare, _)) => Response::ok(id, OkPayload::PrepareSend(prepare)),
+        Err(response) => response,
+    }
+}
+
+async fn handle_prepare_send_from(
+    id: u64,
+    params: PrepareSendFromParams,
+    state: Arc<ServerState>,
+) -> Response {
+    let pay_from = params.pay_from;
+    let Some(sdk) = state.sdk.read().await.clone() else {
+        return Response::err(
+            id,
+            ErrorKind::NotConnected,
+            "init must succeed before prepare_send_from",
+        );
+    };
+    // Refuse a token invoice before preparing anything. A failed parse is
+    // left to the prepare, and a token leg it returns is refused there too
+    // (`pay_from_refusal`), which also covers a BIP-21 URI carrying one.
+    if let Ok(InputType::SparkInvoice(details)) = sdk.sdk.parse(params.input.trim()).await {
+        if details.token_identifier.is_some() {
+            return Response::err(id, ErrorKind::BadRequest, TOKEN_INVOICE_REFUSAL);
+        }
+    }
+    match prepare_send(id, params.input, params.amount_sat, Some(pay_from), &state).await {
+        Ok((prepare, conversion)) => Response::ok(
+            id,
+            OkPayload::PrepareSendFrom(PrepareSendFromOk {
+                prepare,
+                pay_from,
+                conversion,
+            }),
+        ),
+        Err(response) => response,
+    }
+}
+
+/// [`Method::PrepareSend`] (`pay_from: None`) and [`Method::PrepareSendFrom`]:
+/// the preview, and the quote for the conversion funding it, if any.
+/// `pay_from: None` pays from bitcoin and passes a token leg through, as
+/// before pay-from existed; with a balance named, a token leg other than
+/// the conversion is refused ([`pay_from_refusal`]).
+async fn prepare_send(
+    id: u64,
+    input: String,
+    amount_sat: Option<u64>,
+    pay_from_param: Option<WalletAsset>,
+    state: &ServerState,
+) -> Result<(PrepareSendOk, Option<Box<ConversionQuote>>), Response> {
+    let pay_from = pay_from_param.unwrap_or(WalletAsset::Bitcoin);
     let sdk = match state.sdk.read().await.clone() {
         Some(s) => s,
         None => {
-            return Response::err(
+            return Err(Response::err(
                 id,
                 ErrorKind::NotConnected,
                 "init must succeed before prepare_send",
-            );
+            ));
         }
     };
 
@@ -1143,11 +1326,11 @@ async fn handle_prepare_send(
     // regular send path now has to say explicitly that it's handing over raw
     // user input for the SDK to classify (bolt11 / spark address / BIP-21 / …).
     // The cross-chain path uses the other variant — see `prepare_cross_chain`.
-    let input = params.input;
-    let amount = params.amount_sat.map(|a| a as u128);
+    let amount = amount_sat.map(|a| a as u128);
     let speed = selected_onchain_speed();
-    let prepared = prepare_with_usdb_fallback(
-        params.amount_sat,
+    let prepared = prepare_funded(
+        pay_from,
+        amount_sat,
         |conversion_options| {
             sdk.sdk.prepare_send_payment(PrepareSendPaymentRequest {
                 payment_request: PaymentRequest::Input {
@@ -1172,11 +1355,32 @@ async fn handle_prepare_send(
             // A token→BTC conversion may be attached here by the fallback
             // above. Fail now, in the user's terms, if the wallet can't fund
             // it — see `unfundable_conversion_error`.
-            if let Some(response) =
-                unfundable_conversion_error(id, &sdk, prepare.conversion_estimate.as_ref()).await
+            if let Some(response) = unfundable_conversion_error(
+                id,
+                &sdk,
+                prepare.conversion_estimate.as_ref(),
+                pay_from,
+            )
+            .await
             {
-                return response;
+                return Err(response);
             }
+            if let Some((kind, reason)) = pay_from_param.and_then(|pay_from| {
+                pay_from_refusal(
+                    pay_from,
+                    prepare.token_identifier.as_deref(),
+                    prepare.conversion_estimate.is_some(),
+                )
+            }) {
+                return Err(Response::err(id, kind, reason));
+            }
+            // Only a pay-from preview carries the quote; a plain one is
+            // unchanged.
+            let conversion = match pay_from_param {
+                Some(_) => send_conversion_quote(prepare.conversion_estimate.as_ref())
+                    .map_err(|e| Response::err(id, ErrorKind::Sdk, e))?,
+                None => None,
+            };
 
             // Extract display-friendly fields before stashing the full
             // struct. `amount` + method-specific fees are u128 in the
@@ -1202,9 +1406,8 @@ async fn handle_prepare_send(
                 .await
                 .insert(handle.clone(), (Instant::now(), prepare));
 
-            Response::ok(
-                id,
-                OkPayload::PrepareSend(PrepareSendOk {
+            Ok((
+                PrepareSendOk {
                     handle,
                     amount_sat,
                     fee_sat,
@@ -1213,10 +1416,11 @@ async fn handle_prepare_send(
                     // from `prepare_cross_chain`.
                     cross_chain: None,
                     has_token_leg: Some(has_token_leg),
-                }),
-            )
+                },
+                conversion,
+            ))
         }
-        Err(e) => e.into_response(id, "prepare_send"),
+        Err(e) => Err(e.into_response(id, "prepare_send")),
     }
 }
 
@@ -1600,9 +1804,13 @@ async fn handle_prepare_cross_chain(
             // (`ensure_token_balance_covers` at the pin); this re-reads the
             // balance synced, with the copy the other send paths use.
             if shortfall.is_some() {
-                if let Some(response) =
-                    unfundable_conversion_error(id, &sdk, prepare.conversion_estimate.as_ref())
-                        .await
+                if let Some(response) = unfundable_conversion_error(
+                    id,
+                    &sdk,
+                    prepare.conversion_estimate.as_ref(),
+                    WalletAsset::Bitcoin,
+                )
+                .await
                 {
                     return response;
                 }
@@ -2137,14 +2345,53 @@ async fn handle_prepare_lnurl_pay(
     params: coincube_spark_protocol::PrepareLnurlPayParams,
     state: Arc<ServerState>,
 ) -> Response {
+    let (input, amount_sat, comment) = (params.input, params.amount_sat, params.comment);
+    match prepare_lnurl_pay(id, input, amount_sat, comment, None, &state).await {
+        Ok((prepare, _)) => Response::ok(id, OkPayload::PrepareSend(prepare)),
+        Err(response) => response,
+    }
+}
+
+async fn handle_prepare_lnurl_pay_from(
+    id: u64,
+    params: PrepareLnurlPayFromParams,
+    state: Arc<ServerState>,
+) -> Response {
+    let pay_from = params.pay_from;
+    let (input, amount_sat, comment) = (params.input, params.amount_sat, params.comment);
+    match prepare_lnurl_pay(id, input, amount_sat, comment, Some(pay_from), &state).await {
+        Ok((prepare, conversion)) => Response::ok(
+            id,
+            OkPayload::PrepareSendFrom(PrepareSendFromOk {
+                prepare,
+                pay_from,
+                conversion,
+            }),
+        ),
+        Err(response) => response,
+    }
+}
+
+/// [`Method::PrepareLnurlPay`] (`pay_from: None`) and
+/// [`Method::PrepareLnurlPayFrom`], as [`prepare_send`] is for the regular
+/// send.
+async fn prepare_lnurl_pay(
+    id: u64,
+    input: String,
+    amount_sat: u64,
+    comment: Option<String>,
+    pay_from_param: Option<WalletAsset>,
+    state: &ServerState,
+) -> Result<(PrepareSendOk, Option<Box<ConversionQuote>>), Response> {
+    let pay_from = pay_from_param.unwrap_or(WalletAsset::Bitcoin);
     let sdk = match state.sdk.read().await.clone() {
         Some(s) => s,
         None => {
-            return Response::err(
+            return Err(Response::err(
                 id,
                 ErrorKind::NotConnected,
                 "init must succeed before prepare_lnurl_pay",
-            );
+            ));
         }
     };
 
@@ -2153,30 +2400,34 @@ async fn handle_prepare_lnurl_pay(
     // call and pass it back, but that would tie the protocol to the
     // SDK's internal types. Re-parsing is cheap — it's a local
     // regex/bech32 decode on a string we already know to be valid.
-    let pay_request = match sdk.sdk.parse(&params.input).await {
+    let pay_request = match sdk.sdk.parse(&input).await {
         Ok(InputType::LnurlPay(details)) => details,
         Ok(InputType::LightningAddress(addr)) => addr.pay_request,
         Ok(other) => {
-            return Response::err(
+            return Err(Response::err(
                 id,
                 ErrorKind::BadRequest,
                 format!(
                     "prepare_lnurl_pay called with non-LNURL input (parsed as {:?})",
                     std::mem::discriminant(&other)
                 ),
-            );
+            ));
         }
         Err(e) => {
-            return Response::err(id, ErrorKind::Sdk, format!("parse_input failed: {e}"));
+            return Err(Response::err(
+                id,
+                ErrorKind::Sdk,
+                format!("parse_input failed: {e}"),
+            ));
         }
     };
 
-    let comment = params.comment;
-    let prepared = prepare_with_usdb_fallback(
-        Some(params.amount_sat),
+    let prepared = prepare_funded(
+        pay_from,
+        Some(amount_sat),
         |conversion_options| {
             sdk.sdk.prepare_lnurl_pay(PrepareLnurlPayRequest {
-                amount: params.amount_sat as u128,
+                amount: amount_sat as u128,
                 pay_request: pay_request.clone(),
                 comment: comment.clone(),
                 validate_success_action_url: None,
@@ -2199,11 +2450,27 @@ async fn handle_prepare_lnurl_pay(
             // second failure mode the check also heads off: `execute_lnurl_send`
             // forwards the idempotency key, and the SDK rejects a key on a
             // payment with a token leg outright.
-            if let Some(response) =
-                unfundable_conversion_error(id, &sdk, prepare.conversion_estimate.as_ref()).await
+            if let Some(response) = unfundable_conversion_error(
+                id,
+                &sdk,
+                prepare.conversion_estimate.as_ref(),
+                pay_from,
+            )
+            .await
             {
-                return response;
+                return Err(response);
             }
+            // LNURL has no token leg but the conversion.
+            if let Some((kind, reason)) = pay_from_param.and_then(|pay_from| {
+                pay_from_refusal(pay_from, None, prepare.conversion_estimate.is_some())
+            }) {
+                return Err(Response::err(id, kind, reason));
+            }
+            let conversion = match pay_from_param {
+                Some(_) => send_conversion_quote(prepare.conversion_estimate.as_ref())
+                    .map_err(|e| Response::err(id, ErrorKind::Sdk, e))?,
+                None => None,
+            };
 
             // Preview fields come straight out of the SDK's
             // `PrepareLnurlPayResponse` — it already exposes top-level
@@ -2221,9 +2488,8 @@ async fn handle_prepare_lnurl_pay(
                 .await
                 .insert(handle.clone(), (Instant::now(), prepare));
 
-            Response::ok(
-                id,
-                OkPayload::PrepareSend(PrepareSendOk {
+            Ok((
+                PrepareSendOk {
                     handle,
                     amount_sat,
                     fee_sat,
@@ -2231,10 +2497,11 @@ async fn handle_prepare_lnurl_pay(
                     // LNURL-pay is a Lightning send; never cross-chain.
                     cross_chain: None,
                     has_token_leg: Some(has_token_leg),
-                }),
-            )
+                },
+                conversion,
+            ))
         }
-        Err(e) => e.into_response(id, "prepare_lnurl_pay"),
+        Err(e) => Err(e.into_response(id, "prepare_lnurl_pay")),
     }
 }
 
@@ -3087,6 +3354,219 @@ mod usdb_fallback_tests {
         conversion_for_shortfall(11_254, 1, 200_000).expect("short with usdb converts")
     }
 
+    /// A fake prepare that funds the send only as `funds` says, recording the
+    /// conversion each call asked for.
+    struct FundedPrepare {
+        bitcoin_covers: bool,
+        usdb_covers: bool,
+        asked: std::cell::RefCell<Vec<Option<ConversionOptions>>>,
+    }
+
+    impl FundedPrepare {
+        fn call(
+            &self,
+            conversion: Option<ConversionOptions>,
+        ) -> impl std::future::Future<Output = Result<(bool, u64), SdkError>> + '_ {
+            self.asked.borrow_mut().push(conversion.clone());
+            let out = match conversion {
+                Some(_) if self.usdb_covers => Ok((true, 20_000)),
+                Some(_) => Err(SdkError::InsufficientFunds {
+                    token_identifier: Some(sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER.into()),
+                }),
+                None if self.bitcoin_covers => Ok((false, 20_000)),
+                None => Err(SdkError::InsufficientFunds {
+                    token_identifier: None,
+                }),
+            };
+            async move { out }
+        }
+    }
+
+    /// The coverage matrix (USDB enough / short; bitcoin enough / short).
+    /// Paying from USDB attaches the full conversion to the only prepare,
+    /// whatever bitcoin holds, and never reads balances for a shortfall.
+    /// Paying from bitcoin converts only to cover a shortfall.
+    #[tokio::test]
+    async fn pay_from_decides_full_or_shortfall_conversion() {
+        for bitcoin_covers in [true, false] {
+            for usdb_covers in [true, false] {
+                let fake = FundedPrepare {
+                    bitcoin_covers,
+                    usdb_covers,
+                    asked: Default::default(),
+                };
+                let shortfall_checked = Cell::new(false);
+                let result = prepare_funded(
+                    WalletAsset::Usdb,
+                    Some(20_000),
+                    |c| fake.call(c),
+                    |_| {
+                        shortfall_checked.set(true);
+                        async { Ok(Some(usdb())) }
+                    },
+                    |p| p.1,
+                    |p| p.0,
+                )
+                .await;
+                assert_eq!(
+                    *fake.asked.borrow(),
+                    vec![Some(usdb_to_bitcoin_conversion())],
+                    "from USDB: one prepare, with the full conversion \
+                     (bitcoin covers: {bitcoin_covers}, USDB covers: {usdb_covers})"
+                );
+                assert!(!shortfall_checked.get());
+                if usdb_covers {
+                    assert_eq!(result.unwrap(), (true, 20_000));
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(PrepareError::PayFromUsdb(SdkError::InsufficientFunds {
+                            token_identifier: Some(_)
+                        }))
+                    ));
+                }
+
+                let fake = FundedPrepare {
+                    bitcoin_covers,
+                    usdb_covers,
+                    asked: Default::default(),
+                };
+                let result = prepare_funded(
+                    WalletAsset::Bitcoin,
+                    Some(20_000),
+                    |c| fake.call(c),
+                    |needed| async move {
+                        let balance = if bitcoin_covers { 50_000 } else { 12_000 };
+                        Ok(conversion_for_shortfall(balance, 5_000_000, needed))
+                    },
+                    |p| p.1,
+                    |p| p.0,
+                )
+                .await;
+                let asked = fake.asked.borrow().clone();
+                if bitcoin_covers {
+                    assert_eq!(asked, vec![None], "from bitcoin, covered: no conversion");
+                    assert_eq!(result.unwrap(), (false, 20_000));
+                } else {
+                    assert_eq!(
+                        asked,
+                        vec![None, Some(usdb_to_bitcoin_conversion())],
+                        "from bitcoin, short: the shortfall conversion"
+                    );
+                    assert_eq!(result.is_ok(), usdb_covers);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_send_conversion_is_usdb_to_bitcoin_at_the_cap() {
+        let options = usdb_to_bitcoin_conversion();
+        assert_eq!(options.max_slippage_bps, Some(50));
+        assert!(matches!(
+            options.conversion_type,
+            ConversionType::ToBitcoin { ref from_token_identifier }
+                if from_token_identifier == sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER
+        ));
+        assert_eq!(
+            conversion_for_shortfall(11_254, 1, 200_000).map(|s| s.conversion),
+            Some(options)
+        );
+    }
+
+    fn estimate(options: ConversionOptions) -> ConversionEstimate {
+        ConversionEstimate {
+            options,
+            amount_in: 12_400_000,
+            amount_out: 15_003,
+            fee: 62_000,
+            amount_adjustment: Some(AmountAdjustmentReason::IncreasedToAvoidDust),
+        }
+    }
+
+    #[test]
+    fn a_send_conversion_quote_names_usdb_in_and_bitcoin_out() {
+        assert_eq!(send_conversion_quote(None), Ok(None));
+        let quote = send_conversion_quote(Some(&estimate(usdb_to_bitcoin_conversion())))
+            .unwrap()
+            .expect("a quote");
+        assert_eq!(
+            *quote,
+            ConversionQuote {
+                amount_in: AssetAmount {
+                    asset: WalletAsset::Usdb,
+                    amount: 12_400_000
+                },
+                amount_out: AssetAmount {
+                    asset: WalletAsset::Bitcoin,
+                    amount: 15_003
+                },
+                fee: AssetAmount {
+                    asset: WalletAsset::Usdb,
+                    amount: 62_000
+                },
+                amount_adjustment: Some(AmountAdjustment::IncreasedToAvoidDust),
+                max_slippage_bps: 50,
+            }
+        );
+
+        // Not the conversion the bridge attaches: refused, not shown.
+        let mut other_cap = usdb_to_bitcoin_conversion();
+        other_cap.max_slippage_bps = None;
+        assert!(send_conversion_quote(Some(&estimate(other_cap))).is_err());
+        let mut from_bitcoin = usdb_to_bitcoin_conversion();
+        from_bitcoin.conversion_type = ConversionType::FromBitcoin;
+        assert!(send_conversion_quote(Some(&estimate(from_bitcoin))).is_err());
+    }
+
+    #[test]
+    fn a_pay_from_preview_refuses_token_legs_and_a_usdb_payment_without_conversion() {
+        let token = Some("btkn1other");
+        for pay_from in [WalletAsset::Bitcoin, WalletAsset::Usdb] {
+            for has_conversion in [false, true] {
+                assert_eq!(
+                    pay_from_refusal(pay_from, token, has_conversion),
+                    Some((ErrorKind::BadRequest, TOKEN_INVOICE_REFUSAL))
+                );
+            }
+        }
+        assert!(matches!(
+            pay_from_refusal(WalletAsset::Usdb, None, false),
+            Some((ErrorKind::Sdk, _))
+        ));
+        assert_eq!(pay_from_refusal(WalletAsset::Usdb, None, true), None);
+        assert_eq!(pay_from_refusal(WalletAsset::Bitcoin, None, false), None);
+        assert_eq!(pay_from_refusal(WalletAsset::Bitcoin, None, true), None);
+    }
+
+    #[test]
+    fn a_failed_usdb_payment_says_what_to_do() {
+        let short = PrepareError::PayFromUsdb(SdkError::InsufficientFunds {
+            token_identifier: Some(sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER.into()),
+        })
+        .into_response(7, "prepare_send");
+        let coincube_spark_protocol::ResponseResult::Err(err) = short.result else {
+            panic!("an error");
+        };
+        assert_eq!(err.kind, ErrorKind::BadRequest);
+        assert_eq!(err.message, NOT_ENOUGH_USDB);
+
+        let amm = PrepareError::PayFromUsdb(SdkError::Generic(
+            r#"Error: {"errorCode":"FSAG-4201","message":"AMM has insufficient liquidity"}"#.into(),
+        ))
+        .into_response(7, "prepare_send");
+        let coincube_spark_protocol::ResponseResult::Err(err) = amm.result else {
+            panic!("an error");
+        };
+        assert_eq!(err.kind, ErrorKind::BadRequest);
+        assert!(
+            err.message.contains("AMM has insufficient liquidity")
+                && err.message.contains("Pay from Bitcoin"),
+            "{}",
+            err.message
+        );
+    }
+
     #[tokio::test]
     async fn prepare_already_carrying_a_conversion_is_returned_untouched() {
         let fake = FakePrepare {
@@ -3747,11 +4227,10 @@ mod p0_stub_tests {
         }
     }
 
-    /// Every method P0 adds refuses before the SDK is consulted. The state
-    /// here has no SDK, so a handler that looked for one would answer
-    /// `NotConnected`, as `list_payments` does.
+    /// The pay-from methods (S4b) need init, as `list_payments` does: the
+    /// state here has no SDK. Nothing is emitted or held for a later send.
     #[tokio::test]
-    async fn p0_methods_refuse_without_touching_the_sdk() {
+    async fn pay_from_methods_need_init() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let state = Arc::new(ServerState::new(tx));
 
@@ -3765,34 +4244,22 @@ mod p0_stub_tests {
         .await;
         assert_eq!(control.kind, ErrorKind::NotConnected);
 
-        for (method, lands_in) in [
-            (
-                Method::PrepareSendFrom(PrepareSendFromParams {
-                    input: "lnbc1".into(),
-                    amount_sat: Some(15_000),
-                    pay_from: WalletAsset::Usdb,
-                }),
-                "S4b",
-            ),
-            (
-                Method::PrepareLnurlPayFrom(PrepareLnurlPayFromParams {
-                    input: "shop@example.test".into(),
-                    amount_sat: 15_000,
-                    comment: None,
-                    pay_from: WalletAsset::Bitcoin,
-                }),
-                "S4b",
-            ),
+        for method in [
+            Method::PrepareSendFrom(PrepareSendFromParams {
+                input: "lnbc1".into(),
+                amount_sat: Some(15_000),
+                pay_from: WalletAsset::Usdb,
+            }),
+            Method::PrepareLnurlPayFrom(PrepareLnurlPayFromParams {
+                input: "shop@example.test".into(),
+                amount_sat: 15_000,
+                comment: None,
+                pay_from: WalletAsset::Bitcoin,
+            }),
         ] {
             let label = format!("{method:?}");
             let err = answer(&state, method).await;
-            assert_eq!(err.kind, ErrorKind::BadRequest, "{label}");
-            assert!(
-                err.message.contains("not implemented in this bridge yet")
-                    && err.message.contains(lands_in),
-                "{label}: {}",
-                err.message
-            );
+            assert_eq!(err.kind, ErrorKind::NotConnected, "{label}");
         }
 
         // Nothing was emitted, and nothing was stored for a later send.

@@ -270,6 +270,69 @@ pub enum UserFlow {
     },
 }
 
+/// The Import or restore paths that run through the installer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestorePath {
+    /// Restore from Cube Recovery Kit.
+    Kit,
+    /// Recover with phone (the owner's Keychain).
+    Phone,
+}
+
+/// Where a restore step sits on its path's stepper. Steps with none are
+/// Connect, node and finalize, which the design sums up as Finish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreStage {
+    SignIn,
+    Cube,
+    Password,
+    Approve,
+    Pin,
+}
+
+impl RestorePath {
+    fn of(flow: &UserFlow) -> Option<Self> {
+        match flow {
+            UserFlow::RestoreFromRecoveryKit { .. } => Some(Self::Kit),
+            UserFlow::RecoverOwnCubeWithPhone {
+                full_cube: true, ..
+            } => Some(Self::Phone),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            Self::Kit => "Restore from Cube Recovery Kit",
+            Self::Phone => "Recover with phone",
+        }
+    }
+
+    pub(crate) fn steps(self) -> &'static [&'static str] {
+        match self {
+            Self::Kit => &["Sign in", "Cube", "Password", "PIN", "Finish"],
+            Self::Phone => &["Approve", "PIN", "Finish"],
+        }
+    }
+
+    /// The stepper index for a step's stage; Finish when it has none.
+    fn index(self, stage: Option<RestoreStage>) -> usize {
+        let label = match stage {
+            Some(RestoreStage::SignIn) => "Sign in",
+            Some(RestoreStage::Cube) => "Cube",
+            Some(RestoreStage::Password) => "Password",
+            Some(RestoreStage::Approve) => "Approve",
+            Some(RestoreStage::Pin) => "PIN",
+            None => "Finish",
+        };
+        let steps = self.steps();
+        steps
+            .iter()
+            .position(|step| *step == label)
+            .unwrap_or(steps.len() - 1)
+    }
+}
+
 /// What a claim needs to put the user back in the Cube they started from.
 ///
 /// Deliberately **not** `Clone`: it owns `Arc`s to the source Cube's live SDK
@@ -301,6 +364,8 @@ pub struct Installer {
     pub(crate) proposal_failure: Option<String>,
     current: usize,
     steps: Vec<Box<dyn Step>>,
+    /// A Cube restore drawn in Import or restore (P-Restore), and its chain.
+    restore: Option<(RestorePath, crate::chain::ChainId)>,
     hws: HardwareWallets,
     signer: Arc<Mutex<Signer>>,
     fork_install_task: Option<iced::task::Handle>,
@@ -681,7 +746,9 @@ impl Installer {
             });
         let context = context;
 
+        let restore = RestorePath::of(&user_flow).map(|path| (path, chain));
         let mut installer = Installer {
+            restore,
             navigation_error: None,
             claim_target_saved: false,
             network,
@@ -1330,15 +1397,7 @@ impl Installer {
                 iced::widget::button("Return to launcher").on_press_maybe(self.proposal_finished.then_some(Message::BackToApp(self.network)))
             ].spacing(16).padding(24).into();
         }
-        let content = self
-            .steps
-            .get(self.current)
-            .expect("There is always a step")
-            .view(
-                &self.hws,
-                self.progress(),
-                self.context.remote_backend.user_email(),
-            );
+        let content = self.step_view();
 
         let content = if let Some(error) = &self.navigation_error {
             #[cfg(feature = "mcp-proposals")]
@@ -1368,11 +1427,116 @@ impl Installer {
             content
         };
 
+        let content = if let Some((path, chain)) = self.restore {
+            self.restore_frame(path, chain, content)
+        } else {
+            content
+        };
+
         if self.network != Network::Bitcoin {
             Column::with_children(vec![network_banner(self.network).into(), content]).into()
         } else {
             content
         }
+    }
+
+    /// The step's view, without the installer's own title row when
+    /// Import or restore draws the frame around it.
+    fn step_view(&self) -> Element<Message> {
+        let step = self
+            .steps
+            .get(self.current)
+            .expect("There is always a step");
+        let _framed = self
+            .restore
+            .map(|(path, _)| view::FramedGuard::enter(path.title()));
+        step.view(
+            &self.hws,
+            self.progress(),
+            self.context.remote_backend.user_email(),
+        )
+    }
+
+    /// Import or restore (P-Restore) around a Recovery Kit or phone restore:
+    /// the Launcher's header, path list and stepper over the installer step.
+    fn restore_frame<'a>(
+        &'a self,
+        path: RestorePath,
+        chain: crate::chain::ChainId,
+        content: Element<'a, Message>,
+    ) -> Element<'a, Message> {
+        use crate::home::restore_frame;
+        use coincube_ui::{
+            component::{button, text::*},
+            icon, theme,
+            widget::{Button, Container, Row},
+        };
+        use iced::{Alignment, Length};
+
+        let stage = self
+            .steps
+            .get(self.current)
+            .and_then(|step| step.restore_stage());
+        let active = path.index(stage);
+        // Close leaves before anything is written; Finish's steps write the
+        // Cube and keep their own buttons.
+        let close = button::secondary(Some(icon::cross_icon()), "Close")
+            .width(Length::Shrink)
+            .on_press_maybe(stage.is_some().then_some(Message::BackToApp(self.network)));
+        let header = restore_frame::header(
+            chain,
+            restore_frame::network_name(chain),
+            false,
+            Some(close.into()),
+        );
+        let nav_item = |label: &'static str, current: bool| {
+            Button::new(p2_regular(label))
+                .width(Length::Fill)
+                .padding([10, 12])
+                .style(restore_frame::nav_style(current))
+        };
+        let nav = restore_frame::nav()
+            .push(nav_item("Overview", false))
+            .push(nav_item("Import Bitcoin wallet", false))
+            .push(nav_item("Recovery Kit", path == RestorePath::Kit))
+            .push(nav_item("Recover with phone", path == RestorePath::Phone));
+        let region = Column::new().width(Length::Fill).height(Length::Fill).push(
+            iced::widget::scrollable(
+                Column::new()
+                    .spacing(20)
+                    .padding([24, 28])
+                    .push(h2(path.title()))
+                    .push(restore_frame::stepper(path.steps(), active))
+                    .push(content),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill),
+        );
+        let top_bar = Container::new(
+            Row::new()
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .push(icon::cube_outline_icon())
+                .push(p2_regular("Tenshu")),
+        )
+        .center_y(Length::Fixed(64.0))
+        .padding([0, 24])
+        .width(Length::Fill)
+        .style(theme::container::shell_rail);
+        let stage = Container::new(
+            Container::new(restore_frame::split(header, nav.into(), region.into()))
+                .style(theme::card::simple)
+                .width(Length::Fill)
+                .max_width(1120),
+        )
+        .padding([28, 24])
+        .center_x(Length::Fill)
+        .height(Length::Fill);
+        Container::new(Column::new().height(Length::Fill).push(top_bar).push(stage))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(theme::container::background)
+            .into()
     }
 }
 
@@ -3430,3 +3594,123 @@ mod connect_activation_tests;
 
 #[cfg(test)]
 mod claim_target_tests;
+
+#[cfg(test)]
+mod restore_frame_tests {
+    use super::*;
+    use crate::home::restore_frame::rendered_labels;
+
+    fn installer(flow: UserFlow) -> Installer {
+        let root = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("restore-frame-{}", uuid::Uuid::new_v4())),
+        );
+        Installer::new(
+            root,
+            bitcoin::Network::Bitcoin,
+            None,
+            flow,
+            false,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .expect("a Bitcoin fixture installer")
+        .0
+    }
+
+    fn has(shown: &[String], label: &str) -> bool {
+        shown.iter().any(|text| text == label)
+    }
+
+    #[tokio::test]
+    async fn a_recovery_kit_restore_runs_in_import_or_restore() {
+        let kit = installer(UserFlow::RestoreFromRecoveryKit { cube_uuid: None });
+        let shown = rendered_labels(kit.view()).await;
+        for label in [
+            "Import or restore",
+            "Bitcoin mainnet",
+            "Recovery Kit",
+            "Recover with phone",
+            "Restore from Cube Recovery Kit",
+            "Sign in",
+            "Cube",
+            "Password",
+            "PIN",
+            "Finish",
+            "Close",
+        ] {
+            assert!(has(&shown, label), "missing {:?} in {:?}", label, shown);
+        }
+        // The installer's own "n | total" progress row stays out.
+        assert!(
+            !shown.iter().any(|text| text.contains(" | ")),
+            "{:?}",
+            shown
+        );
+
+        // Every other flow keeps the installer's layout, including after a
+        // framed view on the same thread.
+        let create = installer(UserFlow::CreateWallet);
+        let shown = rendered_labels(create.view()).await;
+        assert!(!has(&shown, "Import or restore"), "{:?}", shown);
+        assert!(shown.iter().any(|text| text.contains(" | ")), "{:?}", shown);
+    }
+
+    /// Opt-in frames: `LAUNCHER_CAPTURE_DIR=<dir> cargo test -p coincube-gui
+    /// --lib restore_paths_capture -- --ignored`.
+    #[test]
+    #[ignore]
+    fn restore_paths_capture() {
+        use crate::home::launcher_capture::{renderer, save};
+        let Ok(directory) = std::env::var("LAUNCHER_CAPTURE_DIR") else {
+            return;
+        };
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut renderer = renderer().expect("wgpu headless renderer");
+        let size = iced::Size::new(1440.0, 900.0);
+        let kit = installer(UserFlow::RestoreFromRecoveryKit { cube_uuid: None });
+        let phone = installer(UserFlow::RecoverOwnCubeWithPhone {
+            cube_id: 7,
+            full_cube: true,
+        });
+        for (name, installer) in [("kit", &kit), ("phone", &phone)] {
+            save(
+                &mut renderer,
+                installer.view(),
+                size,
+                &coincube_ui::theme::Theme::dark(),
+                directory.join(format!("restore-{name}-dark.png")),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_phone_recovery_runs_in_import_or_restore() {
+        let phone = installer(UserFlow::RecoverOwnCubeWithPhone {
+            cube_id: 7,
+            full_cube: true,
+        });
+        let shown = rendered_labels(phone.view()).await;
+        for label in [
+            "Import or restore",
+            "Recover with phone",
+            "Approve",
+            "PIN",
+            "Finish",
+        ] {
+            assert!(has(&shown, label), "missing {:?} in {:?}", label, shown);
+        }
+        assert!(!has(&shown, "Password"), "{:?}", shown);
+
+        // A descriptor-only phone recovery is not a Cube restore.
+        let vault = installer(UserFlow::RecoverOwnCubeWithPhone {
+            cube_id: 7,
+            full_cube: false,
+        });
+        let shown = rendered_labels(vault.view()).await;
+        assert!(!has(&shown, "Import or restore"), "{:?}", shown);
+    }
+}

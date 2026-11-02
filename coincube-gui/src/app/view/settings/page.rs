@@ -225,16 +225,21 @@ pub enum Status {
     Busy,
 }
 
-/// A status line (`.st`): glyph and 13px medium text in the status colour.
-pub fn status<'a, M: 'a>(kind: Status, text: impl Into<Cow<'a, str>>) -> Element<'a, M> {
-    let (glyph, tone) = match kind {
+/// A status's glyph and the tone its glyph and text take.
+pub fn status_glyph(kind: Status) -> (Text<'static>, Tone) {
+    match kind {
         Status::Ok => (icon::check_circle_icon(), Tone::Good),
         Status::Warn => (icon::exclamation_circle_icon(), Tone::Warn),
         Status::Bad => (icon::x_circle_icon(), Tone::Bad),
         Status::Unknown => (icon::question_circle_icon(), Tone::Muted),
         Status::Off => (icon::dash_circle_icon(), Tone::Muted),
         Status::Busy => (icon::dot_icon(), Tone::Muted),
-    };
+    }
+}
+
+/// A status line (`.st`): glyph and 13px medium text in the status colour.
+pub fn status<'a, M: 'a>(kind: Status, text: impl Into<Cow<'a, str>>) -> Element<'a, M> {
+    let (glyph, tone) = status_glyph(kind);
     let style = move |t: &theme::Theme| theme::tenshu::text::tone(t, tone);
     Row::new()
         .spacing(6)

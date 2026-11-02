@@ -342,8 +342,9 @@ pub enum Method {
     /// `pay_from` field and prepare a bitcoin send instead.
     ///
     /// Refuses a Spark invoice that requests a token, with
-    /// [`ErrorKind::BadRequest`] and before preparing anything (S4b implements
-    /// the refusal). Paying one spends that token directly, which neither
+    /// [`ErrorKind::BadRequest`] and before preparing anything (and refuses
+    /// a token leg the prepare returns, as from a BIP-21 URI carrying such an
+    /// invoice). Paying one spends that token directly, which neither
     /// `pay_from` describes. So every token leg this method prepares is a
     /// conversion; see [`PrepareSendFromOk::conversion`].
     PrepareSendFrom(PrepareSendFromParams),

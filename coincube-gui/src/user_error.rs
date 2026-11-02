@@ -258,9 +258,9 @@ fn lan_keychain_error(error: &Error, connect_available: bool) -> UserError {
             "This Keychain needs to be paired again",
             if connect_available {
                 "Send the request through COINCUBE | Connect instead, or pair the phone again \
-                 in Settings > Pair with Keychain."
+                 in Settings > Keychain."
             } else {
-                "Pair the phone again in Settings > Pair with Keychain."
+                "Pair the phone again in Settings > Keychain."
             },
             CC_HW_LAN_REPAIR,
             false,
@@ -834,7 +834,7 @@ mod tests {
         assert!(u
             .guidance
             .starts_with("Send the request through COINCUBE | Connect"));
-        assert!(u.guidance.contains("Pair with Keychain"), "{}", u.guidance);
+        assert!(u.guidance.contains("Settings > Keychain"), "{}", u.guidance);
 
         let u = lan_keychain_error(&stale, false);
         assert!(

@@ -594,7 +594,7 @@ async fn mounted_settings_pair_route_accepts_vault_and_denies_imported_wallet() 
         let pair_bounds = labels
             .0
             .iter()
-            .find(|(label, _)| label.starts_with("Pair with Keychain"))
+            .find(|(label, _)| label == "Keychain")
             .expect("mounted Pair settings choice")
             .1;
         let pair_center = pair_bounds.center();
@@ -815,7 +815,7 @@ async fn actual_vault_settings_capture_matrix() {
                         .expect("imported wallet settings rail");
                     let pair = items
                         .iter()
-                        .find(|item| item.label == "Pair with Keychain")
+                        .find(|item| item.label == "Keychain")
                         .expect("imported Pair nav item");
                     let reason = pair
                         .disabled_reason
