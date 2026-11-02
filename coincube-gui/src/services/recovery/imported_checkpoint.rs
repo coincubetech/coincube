@@ -136,6 +136,22 @@ impl fmt::Debug for VerifiedDownload {
 }
 
 impl VerifiedDownload {
+    pub(crate) fn kit(&self) -> &ImportedKeyKitV3 {
+        &self.kit
+    }
+
+    pub(crate) fn checkpoint(&self) -> &Checkpoint {
+        &self.checkpoint
+    }
+
+    pub(crate) fn cube_id(&self) -> u64 {
+        self.cube_id
+    }
+
+    pub(crate) fn into_parts(self) -> (u64, Checkpoint, ImportedKeyKitV3) {
+        (self.cube_id, self.checkpoint, self.kit)
+    }
+
     /// Must be called again at the future admission boundary. This only
     /// observes server state; it cannot make later local use atomic with it.
     pub async fn recheck(&self, client: &CoincubeClient) -> Result<(), ImportedCheckpointError> {

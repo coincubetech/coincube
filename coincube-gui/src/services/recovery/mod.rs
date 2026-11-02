@@ -13,6 +13,7 @@ pub mod envelope;
 pub mod error;
 pub mod imported;
 pub(crate) mod imported_checkpoint;
+pub mod imported_restore_v3;
 // The password-v3 checkpoint client is staged before the atomic restore
 // transaction consumes it; no UI path may admit its keys yet.
 #[allow(dead_code)]
