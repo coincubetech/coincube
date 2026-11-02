@@ -1984,30 +1984,45 @@ pub(crate) fn unlock_turn_with_controls<'a, M: 'a>(
 /// existing widgets and messages stay inside `controls`; this only supplies
 /// the Launcher stage around them.
 pub(crate) fn unlock_face<'a, M: 'a>(
-    cube: &crate::app::settings::CubeSettings,
+    cube: &'a crate::app::settings::CubeSettings,
     mode: coincube_ui::theme::palette::ThemeMode,
-    controls: Element<'a, M>,
+    controls: impl Fn() -> Element<'a, M> + 'a,
 ) -> Element<'a, M> {
     // The tab hands off to the established PIN/passkey state immediately.
-    // Render that state's live widgets on the second (270°) square face.
+    // Render that state's live widgets on the second (270°) square face,
+    // placed where `lone_cube` draws it: at the scene's target, not the
+    // window's center, and at the face's own size.
     Stack::new()
         .width(Length::Fill)
         .height(Length::Fill)
         .push(lone_cube(cube, mode, launcher_scene::Pose::unlock(1.0)))
         .push(
-            Container::new(unlock_controls(cube, controls))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center_x(Length::Fill)
-                .center_y(Length::Fill),
+            responsive(move |size: Size| {
+                let layout = launcher_scene::Layout::new(size.width, size.height);
+                let face = layout.face();
+                let (_, target_y) = layout.target();
+                Column::new()
+                    .width(Length::Fill)
+                    .push(Space::new().height(Length::Fixed(target_y - face / 2.0)))
+                    .push(
+                        Container::new(unlock_controls(cube, controls(), face))
+                            .width(Length::Fill)
+                            .center_x(Length::Fill),
+                    )
+                    .into()
+            })
+            .width(Length::Fill)
+            .height(Length::Fill),
         )
         .into()
 }
 
-/// The live PIN or passkey controls laid out inside the 420px unlock face.
+/// The live PIN or passkey controls laid out inside the unlock face, `side`
+/// square: the size the scene draws that face at.
 fn unlock_controls<'a, M: 'a>(
     cube: &crate::app::settings::CubeSettings,
     controls: Element<'a, M>,
+    side: f32,
 ) -> Element<'a, M> {
     // `.pn`: "Open <name>" at 20px semibold, then ` · <network>` muted.
     let heading = Row::new()
@@ -2024,8 +2039,8 @@ fn unlock_controls<'a, M: 'a>(
             true,
         ));
     Container::new(Column::new().push(heading).push(controls))
-        .width(Length::Fixed(launcher_scene::FACE_SIZE))
-        .height(Length::Fixed(launcher_scene::FACE_SIZE))
+        .width(Length::Fixed(side))
+        .height(Length::Fixed(side))
         .padding(28)
         .into()
 }
@@ -2045,7 +2060,7 @@ fn unlock_floor_stage<'a, M: 'a + 'static>(
             let (_, target_y) = layout.target();
             Some((
                 target_y - face / 2.0,
-                iced::widget::opaque(unlock_controls(cube, controls)),
+                iced::widget::opaque(unlock_controls(cube, controls, face)),
             ))
         }
         _ => None,
@@ -3508,6 +3523,91 @@ mod tests {
     }
 
     #[test]
+    fn pin_face_controls_stay_inside_the_drawn_face_at_every_window_height() {
+        let cube = crate::app::settings::CubeSettings::new_with_raw_id(
+            "family".into(),
+            "Family".into(),
+            ChainId::Bitcoin,
+        );
+        let context = floor_context(&cube);
+        let entry = crate::pin_entry::PinEntry::new(
+            cube.clone(),
+            PathBuf::new(),
+            crate::pin_entry::PinEntrySuccess::LoadApp {
+                datadir: crate::dir::CoincubeDirectory::new(Default::default()),
+                config: crate::app::Config::new(false),
+                network: cube.network.bitcoin_network(),
+                internal_bitcoind: None,
+                backup: None,
+                wallet_settings: None,
+                connect_client: None,
+            },
+            None,
+        );
+        let mode = coincube_ui::theme::palette::ThemeMode::Light;
+        let bounds = |mounted: &capture::Inspection, needle: &str| {
+            mounted
+                .text
+                .iter()
+                .find_map(|(value, bounds)| (value == needle).then_some(*bounds))
+                .unwrap_or_else(|| panic!("missing {:?}", needle))
+        };
+        // A locked Cube reopens without the Launcher behind it; the floor
+        // variant stands over the Launcher body between its two bars.
+        for size in [(1024, 768), (1300, 1316), (1440, 900), (1920, 1200)] {
+            for on_floor in [false, true] {
+                let (w, h) = (size.0 as f32, size.1 as f32);
+                let (layout, offset) = if on_floor {
+                    (
+                        floor_stage_layout(Size::new(w, h)),
+                        launcher_chrome::BAR_HEIGHT + 1.0,
+                    )
+                } else {
+                    (launcher_scene::Layout::new(w, h), 0.0)
+                };
+                let face = layout.face();
+                let (target_x, target_y) = layout.target();
+                let top = offset + target_y - face / 2.0;
+                let left = target_x - face / 2.0;
+                // Laid out at the window's own height: a scroll's unbounded
+                // height would hide where the stage puts the face.
+                let mounted = capture::inspect_filled(
+                    "unlock-pin-face-fit",
+                    entry.view_with_theme_and_floor(mode, on_floor.then_some(&context)),
+                    size,
+                    "light",
+                    theme::Theme::light(),
+                    size,
+                );
+                let heading = bounds(&mounted, "Open Family");
+                let cancel = bounds(&mounted, "Cancel");
+                let at = format!("{:?} floor={}", size, on_floor);
+                assert!(
+                    (heading.y - top - 28.0).abs() < 1.0,
+                    "{}: heading at {} for a face from {}",
+                    at,
+                    heading.y,
+                    top
+                );
+                assert!(
+                    (heading.x - left - 28.0).abs() < 1.0,
+                    "{}: heading at x {} for a face from {}",
+                    at,
+                    heading.x,
+                    left
+                );
+                assert!(
+                    cancel.y + cancel.height <= top + face - 28.0 + 1.0,
+                    "{}: Cancel ends at {} past the face's padding at {}",
+                    at,
+                    cancel.y + cancel.height,
+                    top + face - 28.0
+                );
+            }
+        }
+    }
+
+    #[test]
     fn unlock_cube_keeps_network_and_persisted_face_marks_in_both_themes() {
         use launcher_scene::{rest_face_svg, Face};
         let mut cube = crate::app::settings::CubeSettings::new_with_raw_id(
@@ -3562,10 +3662,9 @@ mod tests {
                 theme::Theme::light(),
             ),
         ] {
-            let controls: Element<'_, ViewMessage> = tenshu::body("Unlock controls").into();
-            let mounted = capture::inspect_full_window(
+            let mounted = capture::inspect_full_window::<ViewMessage>(
                 "v113-unlock-face-identity",
-                unlock_face(&cube, mode, controls),
+                unlock_face(&cube, mode, || tenshu::body("Unlock controls").into()),
                 (1024, 768),
                 appearance,
                 palette,

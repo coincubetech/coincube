@@ -551,7 +551,9 @@ impl PinEntry {
                 move || self.unlock_controls(),
             )
         } else {
-            crate::home::launcher_presenter::unlock_face(&self.cube, mode, self.unlock_controls())
+            crate::home::launcher_presenter::unlock_face(&self.cube, mode, move || {
+                self.unlock_controls()
+            })
         }
     }
 
