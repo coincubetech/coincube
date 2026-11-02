@@ -394,7 +394,6 @@ fn wallet_card<'a>(
                         )
                         .width(Length::Fixed(90.0)),
                     )
-                    .push(Space::new().width(Length::Fixed(8.0)))
                     .push(
                         landing_button(
                             landing_control_id(cube_id, title, "receive-btc"),
@@ -4496,6 +4495,31 @@ mod tests {
                         vault,
                         width
                     );
+                    // Both cards keep Send and Receive on their BTC line at
+                    // the fixture's balances, as their actions are the same
+                    // width.
+                    for wallet in ["Spark", "Vault"].iter().copied() {
+                        let send = at(wallet, "send-btc");
+                        let card_left = at(wallet, "open").x - 20.0;
+                        let btc = shown
+                            .text
+                            .iter()
+                            .find(|(value, bounds)| {
+                                value == "BTC"
+                                    && bounds.x >= card_left
+                                    && bounds.x < card_left + column
+                            })
+                            .unwrap_or_else(|| panic!("no BTC label in {}", wallet))
+                            .1;
+                        assert!(
+                            (send.center().y - btc.center().y).abs() < 2.0,
+                            "{} ({}): Send {:?} off the BTC line {:?}",
+                            wallet,
+                            appearance,
+                            send,
+                            btc
+                        );
+                    }
                     // A half-width card keeps its row's actions inside it.
                     let receive = at("Spark", "receive-btc");
                     let card_right = spark.x - 20.0 + column;
